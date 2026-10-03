@@ -6,6 +6,184 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+<!-- Scope trim to a trusted core, 2026-10 (branch feature/bloat-removal, OpenSpec
+     scope-trim-trusted-core). Ships as 3.0.0; removals have no deprecation window because
+     Hearth has no production users yet (see VERSIONING.md). -->
+
+**Next after 3.0.0.** The server is in a feature freeze (see `CONTRIBUTING.md`). Two OpenSpec
+changes are open: `sdk-standard-libraries` (the four SDKs verify tokens through standard JOSE
+libraries, admin clients generated from OpenAPI, one conformance harness for all SDKs) and
+`trusted-core-confidence` (external OIDC conformance, entry-point invariant tests, mutation
+testing, an external pentest). Hearth is not yet production-ready until the second one is done.
+
+### Added
+- **REST routes for every admin operation that was gRPC-only**, ahead of the public gRPC API's
+  removal: organization CRUD (`GET`/`POST /admin/organizations`, `GET`/`PATCH`/`DELETE
+  /admin/organizations/{id}`), extra org roles (`GET`/`POST
+  /admin/organizations/{id}/members/{user_id}/roles`, `DELETE …/roles/{role_name}`), group role
+  assignment (`POST /admin/groups/{id}/roles`; unassign with `DELETE /admin/assignments/{id}`),
+  role members (`GET /admin/roles/{id}/members`), direct user permissions (`GET`/`POST
+  /admin/users/{id}/permissions`, `DELETE /admin/users/{id}/permissions/{permission}`), the
+  permission registry (`GET /admin/permissions`) and audit chain verification (`POST
+  /admin/audit/verify`). All require `hearth.realm.admin`. They are stricter than the gRPC
+  handlers were: suspending an organization passes the admin privilege ceiling like deleting it,
+  an organization `slug` cannot be changed (`400` instead of silently ignored), `granted_by` is
+  always the caller, and an `org_id` that does not exist answers `404`. Direct permission grants
+  and revocations are now audited.
+
+- **`dpop_bound_access_tokens` client metadata (RFC 9449 §5.2).** A client with the flag set
+  gets tokens only against a `DPoP` proof, on every grant (authorization code, refresh, client
+  credentials, JWT bearer, device code); without one the token request answers
+  `invalid_dpop_proof`. Set it in `hearth.yaml` (`applications.<id>.dpop_bound_access_tokens`),
+  in dynamic registration (echoed in the response), or through the admin API; the client record
+  returns it. This replaces the FAPI profile as the way to require sender-constrained tokens.
+
+- **Organization MFA requirement.** An organization has an `mfa_required` setting (YAML
+  `realms.<name>.organizations.<slug>.config.mfa_required`, the admin API's `mfa_required` on
+  `POST`/`PATCH /admin/organizations`, and a checkbox in the console). When `true`, its members
+  need a passkey, a TOTP code or a recovery code to sign in, even where the realm does not
+  require MFA. It can only tighten: `false` never removes a realm requirement. It defaults to
+  `false`, also for organizations SCIM creates.
+- **`mfa_requirement_changed` audit event** — written whenever a realm's or an organization's
+  MFA requirement changes, by reconcile, by startup or by an admin, with the old and new values.
+- **`/admin/bootstrap` returns `totp_secret` and `admin_totp_secret`** (dev only, first call
+  only): bootstrap enrols TOTP for `admin@dev.local` and `admin@hearth.test`, because both of
+  their realms now require MFA. Add each secret to an authenticator app to sign in.
+
+### Removed
+- **BREAKING: Hearth no longer acts as a SAML Identity Provider.** The routes
+  `/ui/realms/{realm}/saml/metadata`, `/saml/sso` (GET and POST), `/saml/sso/init` and
+  `/saml/slo-idp` (GET and POST) are gone and answer `404`, and the
+  `realms.<name>.saml_service_providers` config key is removed. Hearth remains a SAML
+  **service provider** for federation with a corporate IdP (`realms.<name>.federation`);
+  connect applications to Hearth over OpenID Connect. The `UnknownSp` SAML error is gone with
+  the SP registry.
+- **BREAKING: the public gRPC API is removed.** The gRPC listener, its services
+  (`IdentityAdminService`, `ApplicationAdminService`, `RbacAdminService`, `AuditService`,
+  `OAuthService`) and gRPC health/reflection are gone, with the config keys
+  `server.grpc_port`, `server.grpc_bind_address`, `server.grpc_allow_plaintext` and
+  `security.grpc`, and the `hearth serve --allow-reflection-in-prod` flag. A configuration that
+  still sets one of those keys refuses to start and points at the REST admin API, which now
+  covers every former gRPC operation (see **Added**). The `--dev` loopback check and the
+  load-test unthrottle gate now consider only the HTTP bind. Cluster nodes still talk to each
+  other over the internal Raft peer transport (`cluster.peer_address`); that is not a public API.
+  The `proto/` message definitions stay as the schema of the REST API.
+- **BREAKING: SMS one-time codes are removed.** The `sms:` config block (`log`, `twilio`,
+  `awssns`), the `HEARTH_SMS_OTP_HMAC_KEY` variable, `sms` as an `mfa_methods` value, the
+  `ENROLL_PHONE_OTP` required action, `/ui/sms-challenge`, the `/required-action/ENROLL_PHONE_OTP`
+  pages, the console's "Remove phone" action, user phone numbers, the realm-config fields
+  `sms_otp_expiry_seconds` / `sms_otp_max_attempts`, the error codes `HEARTH_INVALID_SMS_OTP` /
+  `HEARTH_SMS_RESEND_LIMIT_EXCEEDED` and the SMS caps of the outbound volume shield and the
+  cross-realm aggregation cap are gone. Second factors are TOTP (with recovery codes), passkeys
+  and security keys, and email OTP.
+- **BREAKING: risk scoring, adaptive MFA and device fingerprinting are removed.** MFA is a
+  policy (`mfa_required`), never a score. Gone: `security.risk_scorer`, the refresh-token
+  User-Agent/ASN drift check that fed it, per-realm `adaptive_mfa`, device-fingerprint records
+  and their TTL sweeper (with the metrics `hearth_dfp_sweeper_evicted_total` and
+  `hearth_dfp_keys_active`), and `DELETE /admin/users/{id}/device-fingerprints`. Refresh tokens
+  keep their DPoP-key and confidential-client binding. The email OTP key is now always derived
+  from the process cookie secret, like the login cookie it belongs to.
+- **BREAKING: the last of the ROPC password grant is gone.** Both token endpoints already
+  refused `grant_type=password` (HEA-1862); the engine's `password_grant_token` and
+  `PasswordGrantRequest`, kept only for tests, are now removed too. Registering or updating a
+  client with `password` in `grant_types` is refused (`400`; `invalid_client_metadata` on
+  `POST /register`) instead of storing a grant no endpoint serves.
+- **BREAKING: the step-up MFA grant is removed.** Both token endpoints now answer
+  `grant_type=urn:hearth:params:grant-type:step-up-mfa` with `unsupported_grant_type`. Like ROPC
+  it took the user's password at the token endpoint, and it could not use passkeys; without ROPC
+  nothing sent a client to it. A user proves a second factor in a browser ceremony (login, the
+  authorization endpoint or device approval). Gone with it: the `username`, `password` and
+  `mfa_code` token-request fields and the `HEARTH_STEP_UP_CHALLENGE_REQUIRED` and
+  `HEARTH_ENROLL_MFA_REQUIRED` error codes.
+- **BREAKING: JARM and the FAPI 2.0 profile are removed.** Gone: the realm `fapi_profile`
+  (`baseline`/`advanced`), the application `profile: fapi2`, every FAPI-only rule (PAR, PKCE and
+  JAR made mandatory, `private_key_jwt`-only realms, RS256 refused, the single-string assertion
+  `aud`), the JARM response modes (`query.jwt`, `fragment.jwt`, `jwt` now answer
+  `unsupported_response_mode`), the client `authorization_signed_response_alg`, the discovery
+  fields `fapi_profile` and `authorization_signing_alg_values_supported`, and the
+  `fapi_violation` error. PAR, JAR, PKCE, `private_key_jwt` and DPoP stay, for every client. The
+  removed config keys stop startup and point at `dpop_bound_access_tokens`.
+- **BREAKING: LDAP and the abuse extras are removed.** The LDAP connector (never wired to config
+  or login) and its CI job are gone; directory users come in through SCIM, federation or the
+  offline importers. Also gone: IP reputation (`security.ip_reputation`, Spamhaus DROP and
+  MaxMind ASN), the signal-provider block (`security.providers`: bot signals and the
+  disposable-email check at registration), and the A-17 login tarpit (`security.tarpit`). Each
+  removed key stops startup with a named error. The rate limits, lockout backoff, request
+  shaper, distributed-attack detector, tenant CIDR policy, CAPTCHA challenge and outbound caps
+  stay.
+- **The embedded (library) deployment mode is no longer promised.** It was never built; the
+  vision and spec documents no longer describe it. Hearth ships only as a server.
+- **BREAKING: the Kotlin, Rust and Node.js SDKs are removed.** Hearth supports four SDKs:
+  TypeScript (`@hearth-auth/sdk`), Go, Python and PHP. The Node.js SDK's features (Express and
+  Fastify middleware, Next.js helpers, the server-side OAuth flows) moved into
+  `@hearth-auth/sdk`; see `### Changed`. `@hearth-auth/node` and the crates.io `hearth-sdk`
+  get no further releases, and the Kotlin SDK was never published. Their CI jobs, publish
+  workflows and guides are gone.
+
+### Security
+- **`GET /admin/users/{id}/effective-permissions?org_id=` no longer reports a suspended
+  organization's permissions.** The REST handler passed `org_id` straight to the resolver, so an
+  administrator was shown org-scoped authority that tokens never carried; it now applies the
+  same active-organization rule as token issuance and `/v1/me/permissions` (which now uses the
+  engine's rule instead of its own copy).
+- **SAML SP: strict signature placement.** The Assertion Consumer Service now refuses, before
+  verifying any signature, a response with a `<ds:Signature>` anywhere except directly under the
+  root `<samlp:Response>` or the `<saml:Assertion>` (one each). A stray signature inside
+  `<samlp:Status>`, for example, used to be ignored; it is now an error. Responses that sign the
+  Response, the Assertion, or both are unaffected. The SP suite now also runs the eight published
+  XML signature-wrapping variants (XSW1–XSW8).
+
+### Fixed
+- The TOTP step of the login page refused the first code with `422` ("Your session has
+  expired"): its form did not carry the CSRF token. It now does.
+- A password sign-in by an account whose email is not verified, in a realm that requires MFA,
+  went on to forced TOTP enrolment and then failed with `500`. It now gets the
+  "verify your email" page right after the password.
+- The realm-scoped token endpoint (`/realms/{realm}/token`) answered an unknown `grant_type`
+  with `{"error":"unsupported grant_type: <value>"}`, echoing the caller's input and not using
+  the RFC 6749 §5.2 code. It now answers `unsupported_grant_type` with
+  `HEARTH_UNSUPPORTED_GRANT_TYPE`, exactly like the global `/token`.
+
+### Changed
+- **BREAKING: the pre-token webhook fails closed by default.** A webhook with no `on_error`
+  now stops token issuance when it fails or times out (`pre_token_webhook_failed`, `502`).
+  Set `on_error: fail_open` to issue the token without the extra claims instead.
+- **BREAKING: MFA is required by default.** A realm with no `auth.mfa_required` (and no global
+  value) now requires a second factor, in `serve --dev` too. Set `auth.mfa_required: false` to
+  opt out; the server then logs a `WARN` at startup naming every such realm, and the admin
+  console shows a warning on the realm. The system realm (the admin console) always requires
+  MFA. A first sign-in without a factor is sent to enrol one.
+- **BREAKING: email OTP and magic links no longer satisfy MFA.** Only a passkey, a TOTP code or
+  a recovery code does. After a password and an email OTP, a realm that requires MFA sends the
+  user on to enrol a passkey or TOTP. Where MFA is optional, email OTP still works as a second
+  step. A realm that requires MFA must offer `totp` or `webauthn` in `mfa_methods`; one that
+  offers only `email_otp` stops startup.
+- **BREAKING: one MFA resolver.** Every MFA decision (browser login, `/authorize`, device
+  approval, and the session behind every grant) combines the realm, organization, client and
+  role requirements with OR. `mfa_required_roles` now binds at session creation too, not only in the browser.
+- **BREAKING: a configuration key of a removed feature now stops startup with a named
+  error.** Instead of serde's generic "unknown field", the message names the key, the removed
+  feature, the release that removed it (3.0.0) and what to use instead. The check runs in every
+  loader, `serve --dev` included. Keys covered: `realms.<name>.saml_service_providers`, the
+  gRPC keys, `sms`, `security.risk_scorer` and the four SMS shield caps.
+- Backups no longer contain `saml_service_providers.ndjson`; an archive that does is refused as
+  containing an unrecognized member.
+- **BREAKING (SDK): `@hearth-auth/sdk` absorbs the Node.js SDK.** One TypeScript package now
+  serves the browser and Node.js:
+  - `HearthClient` gains `exchangeCode`, `refreshTokens`, `beginLogin`/`completeLogin`,
+    `userinfo`, `mePermissions`, `svSnapshot`, `svDelta` and `invalidateCache`.
+    `mePermissions`, `svSnapshot` and `svDelta` send `X-Realm-ID`, so they need `realmId`.
+  - Express `hearthMiddleware` and `hearthFastifyHook` take a `HearthClient` and a `mode`, and
+    put the claims on `req.hearthClaims`. A token with pending required actions gets `401`.
+  - Next.js helpers: `@hearth-auth/sdk/nextjs` (`withHearthAuth`, `getHearthClaims`) and
+    `@hearth-auth/sdk/nextjs/edge` (`hearthEdgeMiddleware`). `next` and `react` are optional
+    peer dependencies.
+  - `Claims` gains `requiredActions()`, `raw()` and `notBefore()`. Every token failure extends
+    the new `TokenVerificationError`. `IntrospectionClient` throws `IntrospectionError`.
+  - Coming from `@hearth-auth/node`: `VerifiedToken` is `Claims`, `getHearthToken` is
+    `getHearthClaims`, and `generatePkce` is replaced by the existing PKCE helpers
+    (`generateCodeVerifier`, `generateCodeChallenge`).
+
 <!-- GA audit round 3 follow-ups, 2026-09-30 (branch feature/ga-sweep-4-2026-09-29). -->
 
 ### Security

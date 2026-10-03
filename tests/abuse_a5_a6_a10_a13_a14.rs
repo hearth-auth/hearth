@@ -361,7 +361,7 @@ fn a5_custom_reserved_slug_rejected() {
 /// must be completely absent from the routing table (router-level 404, empty body).
 #[tokio::test]
 async fn a6_bootstrap_returns_404_in_production_mode() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness creation");
 
@@ -405,7 +405,7 @@ async fn a6_bootstrap_returns_404_in_production_mode() {
 #[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn a6_bootstrap_returns_200_in_dev_mode() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness creation");
 
@@ -529,7 +529,7 @@ fn a14_allow_unsafe_ttl_bypasses_both_caps() {
 /// `complete_webauthn_registration` must return `AttestationPolicyViolation`.
 #[tokio::test]
 async fn a13_aaguid_not_in_allowlist_is_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
 
@@ -620,7 +620,7 @@ async fn a13_aaguid_not_in_allowlist_is_rejected() {
 /// `complete_webauthn_registration` must return `AttestationPolicyViolation`.
 #[tokio::test]
 async fn a13_none_attestation_rejected_when_not_allowed() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
 

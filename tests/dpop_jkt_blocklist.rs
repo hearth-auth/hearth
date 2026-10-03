@@ -71,7 +71,7 @@ async fn issue_dpop_bound_token(
 /// A DPoP-bound token is rejected after its `cnf.jkt` is blocked.
 #[tokio::test]
 async fn block_dpop_jkt_rejects_bound_token() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm_id = h
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -109,7 +109,7 @@ async fn block_dpop_jkt_rejects_bound_token() {
 /// Unblocking a JKT restores token validity.
 #[tokio::test]
 async fn unblock_dpop_jkt_restores_validity() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm_id = h
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -141,7 +141,7 @@ async fn unblock_dpop_jkt_restores_validity() {
 /// Tokens without a `cnf.jkt` claim are unaffected by the blocklist.
 #[tokio::test]
 async fn non_dpop_token_unaffected_by_blocklist() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm_id = h
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -195,7 +195,7 @@ async fn non_dpop_token_unaffected_by_blocklist() {
 /// Blocking an already-blocked JKT is idempotent.
 #[tokio::test]
 async fn block_dpop_jkt_is_idempotent() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm_id = h
         .identity()
         .create_realm(&CreateRealmRequest {

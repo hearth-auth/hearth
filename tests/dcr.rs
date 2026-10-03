@@ -11,10 +11,7 @@ use std::sync::Arc;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use hearth::identity::{
-    CleartextPassword, CreateRealmRequest, CreateUserRequest, DcrPolicy, PasswordGrantRequest,
-    RealmConfig,
-};
+use hearth::identity::{CreateRealmRequest, CreateUserRequest, DcrPolicy, RealmConfig};
 use hearth::protocol::http::{router, AppState};
 use tower::ServiceExt as _;
 
@@ -46,7 +43,7 @@ fn open_dcr_realm_config() -> RealmConfig {
 
 #[tokio::test]
 async fn dcr_creates_client_with_server_secret() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -100,7 +97,7 @@ async fn dcr_creates_client_with_server_secret() {
 #[tokio::test]
 async fn dcr_secret_is_generated_and_stored_in_the_fast_format() {
     use base64::Engine as _;
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -153,7 +150,7 @@ async fn dcr_secret_is_generated_and_stored_in_the_fast_format() {
 
 #[tokio::test]
 async fn dcr_rejected_when_disabled() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -193,7 +190,7 @@ async fn dcr_rejected_when_disabled() {
 
 #[tokio::test]
 async fn dcr_sets_third_party_trust_and_consent() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -247,7 +244,7 @@ async fn dcr_sets_third_party_trust_and_consent() {
 
 #[tokio::test]
 async fn dcr_generates_unique_slug_with_random_suffix() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -303,7 +300,7 @@ async fn dcr_generates_unique_slug_with_random_suffix() {
 
 #[tokio::test]
 async fn dcr_echoes_grant_types_with_engine_defaults() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -352,7 +349,7 @@ async fn dcr_echoes_grant_types_with_engine_defaults() {
 
 #[tokio::test]
 async fn dcr_validates_client_name() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -390,7 +387,7 @@ async fn dcr_validates_client_name() {
 
 #[tokio::test]
 async fn dcr_requires_x_realm_id() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
 
     let app = build_app(&h).await;
 
@@ -421,7 +418,7 @@ async fn dcr_requires_x_realm_id() {
 
 #[tokio::test]
 async fn dcr_unknown_realm_returns_404() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
 
     let app = build_app(&h).await;
 
@@ -449,7 +446,7 @@ async fn dcr_unknown_realm_returns_404() {
 /// POST /register must be rejected with 401. Encodes the OAUTH-03 fix.
 #[tokio::test]
 async fn dcr_authenticated_policy_rejects_anonymous() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -495,7 +492,7 @@ async fn dcr_authenticated_policy_rejects_anonymous() {
 /// `tests/ga_dcr_initial_access.rs`), so the user here holds that role.
 #[tokio::test]
 async fn dcr_authenticated_policy_accepts_valid_token() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -539,33 +536,7 @@ async fn dcr_authenticated_policy_accepts_valid_token() {
             },
         )
         .expect("assign hearth.clients.admin");
-    h.identity()
-        .set_password(
-            &realm_id,
-            user.id(),
-            &CleartextPassword::from_string("HearthDcr123!".to_string()),
-        )
-        .expect("set password");
-
-    let token_resp = tokio::task::spawn_blocking({
-        let identity = h.identity_arc();
-        let realm_id = realm_id.clone();
-        move || {
-            identity.password_grant_token(
-                &realm_id,
-                &PasswordGrantRequest {
-                    email: "dcr-test@example.com".to_string(),
-                    password: "HearthDcr123!".to_string(),
-                    scope: None,
-                    client_ip: None,
-                    user_agent: None,
-                },
-            )
-        }
-    })
-    .await
-    .expect("spawn_blocking")
-    .expect("password_grant_token");
+    let token_resp = common::user_token_pair(h.identity(), &realm_id, user.id());
 
     let app = build_app(&h).await;
 

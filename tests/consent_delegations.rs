@@ -139,7 +139,7 @@ fn build_subject_jwt(
 /// RFC 8693 token exchange → delegation grant appears in list.
 #[tokio::test]
 async fn delegation_grant_persisted_after_exchange() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
@@ -197,7 +197,7 @@ async fn delegation_grant_persisted_after_exchange() {
 /// cache; `validate_token` must reject it on the session path.
 #[tokio::test]
 async fn revoked_delegation_rejects_previously_issued_obo_token() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
@@ -275,7 +275,7 @@ async fn revoked_delegation_is_inactive_on_introspect_and_decide() {
     use hearth::identity::{DecidePermissionRequest, TokenIntrospectionRequest};
     use hearth::rbac::{AssignRoleRequest, CreateRoleRequest, Permission, Scope, Subject};
 
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
@@ -414,7 +414,7 @@ async fn revoked_delegation_is_inactive_on_introspect_and_decide() {
 /// Revocation of another user's grant returns DelegationGrantNotFound.
 #[tokio::test]
 async fn revoke_other_users_delegation_is_not_found() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
@@ -465,7 +465,7 @@ async fn revoke_other_users_delegation_is_not_found() {
 /// Revocation idempotency — revoking twice is safe.
 #[tokio::test]
 async fn revoke_delegation_is_idempotent() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
@@ -538,7 +538,7 @@ async fn revoke_delegation_is_idempotent() {
 /// Empty sub returns empty list without error.
 #[tokio::test]
 async fn list_delegation_grants_empty_for_new_user() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();

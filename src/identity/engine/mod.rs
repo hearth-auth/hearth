@@ -22,7 +22,6 @@ use crate::identity::claims_config::{
     resolve_claims_for_target, ClaimEvaluationContext, ClaimTarget,
 };
 use crate::identity::credentials::{self, CleartextPassword, CredentialConfig, StoredCredential};
-use crate::identity::device_fp::{DeviceFingerprintOutcome, DeviceFingerprintStore};
 use crate::identity::error::IdentityError;
 use crate::identity::federation::saml::SamlError;
 use crate::identity::keys;
@@ -549,8 +548,6 @@ impl Default for IdentityConfig {
 struct HeldSecondFactors {
     /// An enabled TOTP enrolment.
     totp: bool,
-    /// A verified phone number on a realm that offers `sms`.
-    sms: bool,
     /// An email-OTP enrolment on a realm that offers `email_otp`.
     email_otp: bool,
     /// A registered passkey on a realm that offers `webauthn`.
@@ -560,12 +557,17 @@ struct HeldSecondFactors {
 impl HeldSecondFactors {
     /// Whether the user holds any second factor at all.
     fn any(self) -> bool {
-        self.totp || self.sms || self.email_otp || self.webauthn
+        self.totp || self.email_otp || self.webauthn
     }
 
     /// Whether the user holds a factor other than a passkey.
     fn any_besides_webauthn(self) -> bool {
-        self.totp || self.sms || self.email_otp
+        self.totp || self.email_otp
+    }
+
+    /// Whether the user holds a factor other than email OTP.
+    fn any_besides_email_otp(self) -> bool {
+        self.totp || self.webauthn
     }
 }
 
@@ -925,11 +927,6 @@ pub struct EmbeddedIdentityEngine {
     /// Injectable via `with_approval_transport` so tests capture deliveries
     /// in-process without a real HTTP server.
     approval_client: Arc<crate::identity::approval_notifier::ApprovalWebhookClient>,
-    /// Device fingerprint store for adaptive (risk-based) MFA.
-    ///
-    /// Holds HMAC-SHA256 digests of `(user_id, ip/24, user_agent)` with expiry
-    /// timestamps. Shared across all realms — storage is realm-scoped internally.
-    device_fp: Arc<DeviceFingerprintStore>,
     /// Session-version store for the `sv` claim (HEA-930).
     ///
     /// Provides bump, delta-feed, and snapshot operations on the `ssv:` key
@@ -1373,6 +1370,45 @@ impl EmbeddedIdentityEngine {
     /// a warning on failure. Returns `Err(AuditFailure)` for destructive
     /// actions (`FailOperation` policy) so the caller knows the audit
     /// trail has a gap.
+    /// Records [`AuditAction::MfaRequirementChanged`] when `realm`'s MFA
+    /// requirement differs from `previous` — the realm-update half of the
+    /// audit the spec `mfa-policy` asks for.
+    fn audit_realm_mfa_change(
+        &self,
+        realm_id: &RealmId,
+        audit_ctx: Option<&AuditContext>,
+        previous: bool,
+        realm: &Realm,
+    ) -> Result<(), IdentityError> {
+        let now = crate::identity::realm_requires_mfa(realm.config());
+        if now == previous {
+            return Ok(());
+        }
+        self.record_mfa_requirement_changed(realm_id, audit_ctx.map(|c| &c.actor), previous, now)
+    }
+
+    /// Records [`AuditAction::MfaRequirementChanged`] for a realm whose MFA
+    /// requirement went from `old` to `new` (spec `mfa-policy`).
+    fn record_mfa_requirement_changed(
+        &self,
+        realm_id: &RealmId,
+        actor: Option<&crate::audit::Actor>,
+        old: bool,
+        new: bool,
+    ) -> Result<(), IdentityError> {
+        let ctx = AuditContext {
+            actor: actor.cloned().unwrap_or(crate::audit::Actor::System),
+            metadata: Some(serde_json::json!({ "old": old, "new": new })),
+        };
+        self.record_audit(
+            realm_id,
+            Some(&ctx),
+            AuditAction::MfaRequirementChanged,
+            "realm",
+            &realm_id.as_uuid().to_string(),
+        )
+    }
+
     fn record_audit(
         &self,
         realm_id: &RealmId,
@@ -1454,7 +1490,6 @@ impl EmbeddedIdentityEngine {
         // paths refuse unenveloped material (audit 2026-08-28 §4.15#7).
         Self::enroll_store_in_key_encryption(&storage, kek)?;
         let signing_key = Arc::new(Self::load_or_persist_global_signing_key(&storage, kek)?);
-        let device_fp = Arc::new(DeviceFingerprintStore::new(Arc::clone(&storage)));
         let sv_store = Arc::new(SessionVersionStore::new(
             Arc::clone(&storage),
             Arc::clone(&clock),
@@ -1529,7 +1564,6 @@ impl EmbeddedIdentityEngine {
             approval_client: Arc::new(
                 crate::identity::approval_notifier::ApprovalWebhookClient::new(),
             ),
-            device_fp,
             sv_store,
             session_cache: Arc::clone(&caches.sessions),
             session_cache_gen: Arc::clone(&caches.session_gen),
@@ -1886,7 +1920,6 @@ impl EmbeddedIdentityEngine {
         audit: Arc<dyn AuditEngine>,
     ) -> Self {
         let dummy_hash = credentials::compute_dummy_hash(&config.credential);
-        let device_fp = Arc::new(DeviceFingerprintStore::new(Arc::clone(&storage)));
         let sv_store = Arc::new(SessionVersionStore::new(
             Arc::clone(&storage),
             Arc::clone(&clock),
@@ -1961,7 +1994,6 @@ impl EmbeddedIdentityEngine {
             approval_client: Arc::new(
                 crate::identity::approval_notifier::ApprovalWebhookClient::new(),
             ),
-            device_fp,
             sv_store,
             session_cache: Arc::clone(&caches.sessions),
             session_cache_gen: Arc::clone(&caches.session_gen),
@@ -2675,7 +2707,7 @@ impl EmbeddedIdentityEngine {
         now_unix_ts: u64,
         limit_err: IdentityError,
     ) -> Result<(), IdentityError> {
-        use crate::identity::sms::otp::StoredResendCount;
+        use crate::identity::otp::StoredResendCount;
 
         let current = match self
             .storage
@@ -2814,7 +2846,6 @@ impl EmbeddedIdentityEngine {
         };
         Ok(HeldSecondFactors {
             totp,
-            sms: offers("sms") && user.phone_verified(),
             email_otp: offers("email_otp") && user.email_otp_enabled(),
             webauthn,
         })
@@ -3993,22 +4024,14 @@ impl EmbeddedIdentityEngine {
             return Err(IdentityError::TokenRevoked);
         }
 
-        // FAPI 2.0: DPoP sender-constrained tokens are mandatory on the refresh
-        // path, mirroring the gate at exchange_authorization_code (§5.3.3).
-        // Check both per-client profile AND realm-level fapi_profile so that
-        // standard-profile clients in a Baseline/Advanced realm cannot bypass
-        // the sender-constraint requirement on refresh (mirrors HEA-1022 fix).
-        // A clientless family (step-up-MFA grant, first-party session
-        // tokens) is governed by the realm profile alone. Only a family with
-        // a client was checked, so such refresh tokens rotated without a
-        // proof in a FAPI realm.
-        if family.client_id.is_none() {
-            self.require_fapi_sender_constraint(realm_id, None, dpop_jkt)?;
-        }
+        // A client registered with `dpop_bound_access_tokens` refreshes only
+        // with a DPoP proof (checked below). A clientless family has no
+        // registration to require one; its DPoP binding, if any, is enforced
+        // above by `bound_jkt`.
         if let Some(ref client_id) = family.client_id {
             // Fail closed when the owning client no longer exists. Skipping
             // this arm on a missing client stripped the confidential-client
-            // authentication and FAPI DPoP gates below, so a deleted client's
+            // authentication and DPoP gates below, so a deleted client's
             // refresh tokens kept rotating with LESS authentication than
             // before the deletion (audit 2026-08-28 §4.16#3).
             let Some(client) = self.get_client(realm_id, client_id)? else {
@@ -4023,7 +4046,7 @@ impl EmbeddedIdentityEngine {
             if !client.allows_refresh_token() {
                 return Err(IdentityError::UnsupportedGrantType);
             }
-            self.require_fapi_sender_constraint(realm_id, Some(&client), dpop_jkt)?;
+            Self::require_dpop_for_bound_client(Some(&client), dpop_jkt)?;
 
             // O1 (HEA-1755): confidential-client refresh binding.
             //
@@ -4108,55 +4131,6 @@ impl EmbeddedIdentityEngine {
         if let Some(ref required_jkt) = family.bound_jkt {
             if dpop_jkt != Some(required_jkt.as_str()) {
                 return Err(IdentityError::DPopBindingMismatch);
-            }
-        }
-
-        // A-49: detect refresh-context drift (UA hash / ASN change) and score.
-        // Fail-open: no bind_ctx or no stored hash → skip check.
-        if let Some(ctx) = bind_ctx {
-            let current_ua_hash = ctx
-                .user_agent
-                .as_deref()
-                .map(|ua| Self::sha256_hex(ua.as_bytes()));
-
-            let ua_changed = match (&current_ua_hash, &family.ua_hash) {
-                (Some(cur), Some(stored)) => cur != stored,
-                _ => false,
-            };
-            let asn_changed = match (ctx.asn, family.bound_asn) {
-                (Some(cur), Some(stored)) => cur != stored,
-                _ => false,
-            };
-
-            if ua_changed || asn_changed {
-                use crate::identity::risk::{
-                    DefaultRiskScorer, RiskContext, RiskScorer, RiskSignal,
-                };
-                let realm_risk_cfg = self
-                    .get_realm(realm_id)?
-                    .ok_or(IdentityError::RealmNotFound)?
-                    .config()
-                    .risk_scorer_config
-                    .clone()
-                    .unwrap_or_default();
-                let scorer = DefaultRiskScorer::new(realm_risk_cfg);
-                let risk_ctx = RiskContext {
-                    signals: vec![RiskSignal::RefreshContextDelta {
-                        ua_changed,
-                        asn_changed,
-                    }],
-                };
-                if scorer.score(&risk_ctx).step_up_required {
-                    return Err(IdentityError::StepUpChallengeRequired);
-                }
-            }
-
-            // Record UA hash on first refresh so subsequent exchanges can compare.
-            if family.ua_hash.is_none() {
-                family.ua_hash = current_ua_hash;
-            }
-            if family.bound_asn.is_none() {
-                family.bound_asn = ctx.asn;
             }
         }
 
@@ -5857,15 +5831,7 @@ impl EmbeddedIdentityEngine {
         Ok(())
     }
 
-    fn build_discovery_document(
-        &self,
-        issuer: &str,
-        realm_config: Option<&crate::identity::types::RealmConfig>,
-    ) -> OidcDiscoveryDocument {
-        let fapi_profile = realm_config.and_then(|c| c.fapi_profile).map(|p| match p {
-            crate::identity::types::FapiProfile::Baseline => "baseline".to_string(),
-            crate::identity::types::FapiProfile::Advanced => "advanced".to_string(),
-        });
+    fn build_discovery_document(&self, issuer: &str) -> OidcDiscoveryDocument {
         OidcDiscoveryDocument {
             issuer: issuer.to_string(),
             authorization_endpoint: format!("{issuer}/authorize"),
@@ -5873,13 +5839,7 @@ impl EmbeddedIdentityEngine {
             jwks_uri: format!("{issuer}/.well-known/jwks.json"),
             userinfo_endpoint: format!("{issuer}/userinfo"),
             response_types_supported: vec!["code".to_string()],
-            response_modes_supported: vec![
-                "query".to_string(),
-                "fragment".to_string(),
-                "query.jwt".to_string(),
-                "fragment.jwt".to_string(),
-                "jwt".to_string(),
-            ],
+            response_modes_supported: vec!["query".to_string(), "fragment".to_string()],
             subject_types_supported: vec!["public".to_string()],
             // OIDC Discovery 1.0 §3: RS256 MUST be listed. It signs ID tokens
             // only, for clients that registered it (task 26.55); every other
@@ -5949,8 +5909,6 @@ impl EmbeddedIdentityEngine {
                 "ES256".to_string(),
                 "EdDSA".to_string(),
             ],
-            authorization_signing_alg_values_supported: vec!["EdDSA".to_string()],
-            fapi_profile,
         }
     }
 
@@ -6828,16 +6786,6 @@ impl EmbeddedIdentityEngine {
             user.set_required_actions(actions);
         }
 
-        // 4c. Apply phone_number change if requested.
-        if let Some(ref phone) = request.phone_number {
-            user.set_phone_number(phone.clone());
-        }
-
-        // 4d. Apply phone_verified change if requested.
-        if let Some(verified) = request.phone_verified {
-            user.set_phone_verified(verified);
-        }
-
         // 4e. Apply email_otp_enabled change if requested.
         if let Some(enabled) = request.email_otp_enabled {
             user.set_email_otp_enabled(enabled);
@@ -7165,7 +7113,7 @@ impl EmbeddedIdentityEngine {
         Ok(found_any)
     }
 
-    /// Removes the user's federation and SCIM links, device fingerprints, RBAC
+    /// Removes the user's federation and SCIM links, RBAC
     /// rows and owned agents.
     ///
     /// Part of [`cascade_user_rows`]; see it for the `bool` contract.
@@ -7231,12 +7179,6 @@ impl EmbeddedIdentityEngine {
                 .delete(realm_id, &scim_fwd_key)
                 .map_err(Self::storage_err)?;
         }
-
-        // 11. Cascade: delete all device fingerprints (GDPR Art. 17, AC-11).
-        //     Failures here must not block the deletion — fingerprints are
-        //     advisory risk signals, not authoritative data.  The UserDeleted
-        //     audit event already records that erasure happened.
-        let _ = self.device_fp.delete_all_for_user(realm_id, user_id);
 
         // 12. Cascade: purge RBAC role assignments and group memberships.
         self.rbac
@@ -7418,10 +7360,10 @@ impl EmbeddedIdentityEngine {
         client.set_post_logout_redirect_uris(request.post_logout_redirect_uris.clone());
         client.set_cors_origins(request.cors_origins.clone());
         client.set_access_token_authorization(request.access_token_authorization);
-        client.set_mfa_required(request.mfa_required);
-        // Credentials and the security profile, validated as a registration
-        // validates them and set in this same write, so the client is never
-        // stored weaker than requested — not even between two writes.
+        client.set_mfa_required(request.mfa_required); // mfa-resolver-ok: a write
+                                                       // Credentials and the security profile, validated as a registration
+                                                       // validates them and set in this same write, so the client is never
+                                                       // stored weaker than requested — not even between two writes.
         if let Some(key) = request.assertion_public_key.as_deref() {
             Self::check_assertion_public_key(key)?;
         }
@@ -7440,35 +7382,13 @@ impl EmbeddedIdentityEngine {
             });
         }
         client.set_jwks_uri(request.jwks_uri.clone());
-        if let Some(alg) = request.authorization_signed_response_alg.as_deref() {
-            if alg != "EdDSA" {
-                return Err(IdentityError::InvalidInput {
-                    reason: format!(
-                        "unsupported authorization_signed_response_alg '{alg}'; supported: EdDSA"
-                    ),
-                });
-            }
-        }
-        client.set_authorization_signed_response_alg(
-            request.authorization_signed_response_alg.clone(),
-        );
-        client.set_profile(request.profile);
-        Self::check_fapi2_client_keys(&client)?;
+        client.set_dpop_bound_access_tokens(request.dpop_bound_access_tokens);
         // ID-token signing algorithm (task 26.55), parsed as a registration
-        // parses it (`import_client` then provisions the RSA key), but not
-        // refused under a REALM's
-        // FAPI 2.0 profile: an import records the algorithm the source held
-        // rather than choosing one. A realm that turned `fapi_profile` on after
-        // an RS256 client registered still holds that client, so its backup
-        // carries it, and a restore must not drop it. FAPI still governs what
-        // is issued: `id_token_signer` refuses the client's ID-token grants
-        // while FAPI applies to it. A backup restore installs the archived RSA
-        // key first, so an RS256 client finds that key rather than minting a
-        // new one. A client whose OWN profile is FAPI 2.0 can never hold RS256
-        // (registration and update refuse it, §5.4.1), so that is refused.
+        // parses it (`import_client` then provisions the RSA key). A backup
+        // restore installs the archived RSA key first, so an RS256 client finds
+        // that key rather than minting a new one.
         client.set_id_token_signed_response_alg(Self::parse_client_id_token_alg(
             request.id_token_signed_response_alg.as_deref(),
-            request.profile.is_fapi2(),
         )?);
         Ok(client)
     }
@@ -7612,6 +7532,7 @@ impl EmbeddedIdentityEngine {
     /// attributes the `RealmUpdated` event; on a status change its metadata
     /// gains `previous_status` and `status`. Returns the status the realm had
     /// before the update, and the updated realm.
+    #[allow(clippy::too_many_lines)] // one read-modify-write under the realm-ops lock
     fn update_realm_impl(
         &self,
         realm_id: &RealmId,
@@ -7653,6 +7574,7 @@ impl EmbeddedIdentityEngine {
         }
         precondition(&realm)?;
         let previous_status = realm.status();
+        let previous_mfa = crate::identity::realm_requires_mfa(realm.config());
 
         let now = self.clock.now();
         let old_name = realm.name().to_string();
@@ -7746,6 +7668,7 @@ impl EmbeddedIdentityEngine {
             "realm",
             &realm_id.as_uuid().to_string(),
         )?;
+        self.audit_realm_mfa_change(realm_id, audit_ctx, previous_mfa, &realm)?;
 
         // When suspending or archiving a realm, revoke all active sessions so
         // existing tokens backed by those sessions fail immediately on the
@@ -7972,6 +7895,56 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     ) -> Result<Realm, IdentityError> {
         self.update_realm_impl(realm_id, request, "update_realm", None, |_| Ok(()))
             .map(|(_, realm)| realm)
+    }
+
+    fn effective_mfa_requirement(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        client_id: Option<&ClientId>,
+    ) -> Result<bool, IdentityError> {
+        let realm = self
+            .get_realm(realm_id)?
+            .ok_or(IdentityError::RealmNotFound)?;
+        if crate::identity::realm_requires_mfa(realm.config()) {
+            return Ok(true);
+        }
+        if let Some(client_id) = client_id {
+            let client = self.get_client(realm_id, client_id)?;
+            // mfa-resolver-ok: the resolver's client input
+            if client.is_some_and(|c| c.mfa_required() == Some(true)) {
+                return Ok(true);
+            }
+        }
+        if self.org_requires_mfa(realm_id, user_id)? {
+            return Ok(true);
+        }
+        self.role_requires_mfa(realm_id, user_id, realm.config())
+    }
+
+    fn apply_system_realm_mfa_required(&self, required: bool) -> Result<bool, IdentityError> {
+        let _ops_guard = self.realm_ops_lock.lock().expect("realm ops lock");
+        let sys_realm = keys::system_realm_id();
+        let mut realm = self
+            .get_realm(&sys_realm)?
+            .ok_or(IdentityError::RealmNotFound)?;
+        // mfa-resolver-ok: compares the stored value before a write
+        if realm.config().mfa_required == Some(required) {
+            return Ok(false);
+        }
+        let previous = crate::identity::realm_requires_mfa(realm.config());
+        let mut config = realm.config().clone();
+        config.mfa_required = Some(required);
+        realm.set_config(config);
+        realm.set_updated_at(self.clock.now());
+        let realm_bytes = Self::serialize_realm(&realm)?;
+        self.storage
+            .put(&sys_realm, &keys::encode_realm_id(&sys_realm), &realm_bytes)
+            .map_err(Self::storage_err)?;
+        if previous != required {
+            self.record_mfa_requirement_changed(&sys_realm, None, previous, required)?;
+        }
+        Ok(true)
     }
 
     fn set_realm_suspended(
@@ -8618,17 +8591,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // (audit 2026-08-28 §4.20#5).
         self.require_active_realm(realm_id)?;
         self.delete_user_impl(realm_id, user_id, None)
-    }
-
-    fn delete_user_device_fingerprints(
-        &self,
-        realm_id: &RealmId,
-        user_id: &UserId,
-    ) -> Result<usize, IdentityError> {
-        // Archival is a freeze: refuse mutations on a non-active realm
-        // (audit 2026-08-28 §4.20#5).
-        self.require_active_realm(realm_id)?;
-        self.device_fp.delete_all_for_user(realm_id, user_id)
     }
 
     fn create_user_attributed(
@@ -9514,7 +9476,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // path, which already uses `get_signing_key_or_default`.
         let realm_signing_key = self.get_signing_key_or_default(realm_id);
         // Every refresh token belongs to a grant family, so rotation and
-        // reuse detection apply to ROPC, step-up-MFA, device-grant and
+        // reuse detection apply to step-up-MFA, device-grant and
         // password-reset refreshes exactly as they do to the
         // authorization-code grant. `refresh_tokens` refuses a token that
         // carries no `fid`, so omitting the family here does not degrade to a
@@ -9566,8 +9528,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             client_id: ctx.client_id.clone(),
             resources: ctx.resource.iter().cloned().collect(),
             amr_values: Vec::new(),
-            ua_hash: None,
-            bound_asn: None,
             // RFC 9449 §5: the refresh path refuses a proof by any other key.
             bound_jkt: ctx.dpop_jkt.clone(),
         };
@@ -9901,7 +9861,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             // This used to fall through to `refresh_session` + `issue_tokens`,
             // which minted a brand-new pair without consuming the presented
             // token. That branch had no rotation, no reuse detection and none
-            // of the client-authentication, FAPI DPoP or consent gates
+            // of the client-authentication, DPoP or consent gates
             // `rotate_grant_family` applies, so a family-less refresh token
             // replayed forever and could never raise a theft event
             // (audit 2026-08-28 §4.16#6).
@@ -10032,22 +9992,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     }
 
     // ===== OAuth 2.0 Extended (Step 22) =====
-
-    fn password_grant_token(
-        &self,
-        realm_id: &RealmId,
-        request: &crate::identity::oidc::PasswordGrantRequest,
-    ) -> Result<crate::identity::oidc::PasswordGrantResponse, IdentityError> {
-        self.password_grant_token_inner(realm_id, request)
-    }
-
-    fn step_up_mfa_grant_token(
-        &self,
-        realm_id: &RealmId,
-        request: &crate::identity::oidc::StepUpMfaGrantRequest,
-    ) -> Result<crate::identity::oidc::PasswordGrantResponse, IdentityError> {
-        self.step_up_mfa_grant_token_inner(realm_id, request)
-    }
 
     #[tracing::instrument(
         level = "info",
@@ -12345,13 +12289,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // (audit 2026-08-28 §4.20#5).
         self.require_active_realm(realm_id)?;
         // The YAML-managed gate for credentials and the security profile,
-        // enforced here so REST, gRPC and the console share it. Reconcile
+        // enforced here so REST and the console share it. Reconcile
         // treats `hearth.yaml` as authoritative for these fields: a key added
         // at runtime would be removed at the next restart or SIGHUP, and on a
         // secretless client that makes it public.
         let touches_credentials = request.jwks.is_some()
             || request.assertion_public_key.is_some()
-            || request.profile.is_some();
+            || request.dpop_bound_access_tokens.is_some();
         if touches_credentials {
             if let Some(client) = self.get_client(realm_id, client_id)? {
                 if client.is_yaml_managed() {
@@ -12505,17 +12449,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.take_pending_authorization_inner(realm_id, ticket)
     }
 
-    fn sign_jarm_error_jwt(
-        &self,
-        realm_id: &RealmId,
-        client_id: &str,
-        error: &str,
-        error_description: &str,
-        state_param: &str,
-    ) -> Result<String, IdentityError> {
-        self.sign_jarm_error_jwt_inner(realm_id, client_id, error, error_description, state_param)
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn issue_authorization_code(
         &self,
@@ -12531,7 +12464,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         amr_values: Vec<String>,
         response_mode: Option<crate::identity::oidc::ResponseMode>,
         jar_request: Option<String>,
-        via_par: bool,
     ) -> Result<AuthorizationResponse, IdentityError> {
         self.issue_authorization_code_inner(
             realm_id,
@@ -12546,7 +12478,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             amr_values,
             response_mode,
             jar_request,
-            via_par,
         )
     }
 
@@ -13083,6 +13014,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         if let Some(status) = request.status {
             org.set_status(status);
         }
+        let previous_mfa = org.config().mfa_required; // mfa-resolver-ok: audit
         if let Some(ref config) = request.config {
             org.set_config(config.clone());
         }
@@ -13117,6 +13049,20 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             "org",
             &org_id.as_uuid().to_string(),
         )?;
+        let mfa = org.config().mfa_required; // mfa-resolver-ok: audit
+        if mfa != previous_mfa {
+            let ctx = AuditContext {
+                actor: crate::audit::Actor::System,
+                metadata: Some(serde_json::json!({ "old": previous_mfa, "new": mfa })),
+            };
+            self.record_audit(
+                realm_id,
+                Some(&ctx),
+                AuditAction::MfaRequirementChanged,
+                "organization",
+                &org_id.as_uuid().to_string(),
+            )?;
+        }
 
         Ok(org)
     }
@@ -13730,64 +13676,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Ok(ImportOutcome::Skipped);
         }
         let bytes = serde_json::to_vec(webhook).map_err(|e| IdentityError::Serialization {
-            reason: e.to_string(),
-        })?;
-        self.storage
-            .put(realm_id, &key, &bytes)
-            .map_err(Self::storage_err)?;
-        Ok(if exists {
-            ImportOutcome::Overwritten
-        } else {
-            ImportOutcome::Created
-        })
-    }
-
-    fn export_all_saml_service_providers(
-        &self,
-        realm_id: &RealmId,
-    ) -> Result<Vec<crate::identity::federation::saml::SamlServiceProvider>, IdentityError> {
-        let prefix = keys::saml_sp_scan_prefix();
-        let end = keys::prefix_end(&prefix);
-        let entries = self
-            .storage
-            .scan(realm_id, &prefix, &end)
-            .map_err(Self::storage_err)?;
-        let mut out = Vec::with_capacity(entries.len());
-        for entry in entries {
-            if let Ok(sp) = serde_json::from_slice::<
-                crate::identity::federation::saml::SamlServiceProvider,
-            >(&entry.value)
-            {
-                out.push(sp);
-            }
-        }
-        Ok(out)
-    }
-
-    fn import_saml_service_provider(
-        &self,
-        realm_id: &RealmId,
-        sp: &crate::identity::federation::saml::SamlServiceProvider,
-        overwrite: bool,
-    ) -> Result<ImportOutcome, IdentityError> {
-        // The live API never creates this in the system realm, so a restore
-        // must not either (the `create_*` twin refuses it, or it has none that
-        // can reach the system realm).
-        if keys::is_system_realm(realm_id) {
-            return Err(IdentityError::SystemRealmProtected {
-                operation: "import_saml_service_provider",
-            });
-        }
-        let key = keys::encode_saml_sp_key(&sp.sp_key);
-        let exists = self
-            .storage
-            .get(realm_id, &key)
-            .map_err(Self::storage_err)?
-            .is_some();
-        if exists && !overwrite {
-            return Ok(ImportOutcome::Skipped);
-        }
-        let bytes = serde_json::to_vec(sp).map_err(|e| IdentityError::Serialization {
             reason: e.to_string(),
         })?;
         self.storage
@@ -16692,17 +16580,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(stats)
     }
 
-    fn sweep_expired_fingerprints(
-        &self,
-        realm_id: &RealmId,
-        now_secs: i64,
-    ) -> Result<(u64, u64), IdentityError> {
-        let stats =
-            crate::identity::cleanup::sweep_fingerprints(realm_id, self.storage.as_ref(), now_secs)
-                .map_err(|e| IdentityError::Storage(Box::new(e)))?;
-        Ok((stats.evicted, stats.active))
-    }
-
     fn flush_approval_webhook_outbox(&self, realm_id: &RealmId) -> (u64, u64) {
         self.flush_approval_webhook_outbox_inner(realm_id)
     }
@@ -16777,89 +16654,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             cache.insert(key_str, arc.clone());
         }
         Ok(arc)
-    }
-
-    fn register_saml_sp(
-        &self,
-        realm_id: &RealmId,
-        sp: &crate::identity::federation::saml::SamlServiceProvider,
-    ) -> Result<(), IdentityError> {
-        // Archival is a freeze: refuse mutations on a non-active realm
-        // (audit 2026-08-28 §4.20#5).
-        self.require_active_realm(realm_id)?;
-        let key = keys::encode_saml_sp_key(&sp.sp_key);
-        let bytes = serde_json::to_vec(sp).map_err(|e| IdentityError::Serialization {
-            reason: e.to_string(),
-        })?;
-        self.storage
-            .put(realm_id, &key, &bytes)
-            .map_err(Self::storage_err)
-    }
-
-    fn get_saml_sp_by_entity_id(
-        &self,
-        realm_id: &RealmId,
-        entity_id: &str,
-    ) -> Result<Option<crate::identity::federation::saml::SamlServiceProvider>, IdentityError> {
-        for sp in self.list_saml_sps(realm_id)? {
-            if sp.entity_id == entity_id {
-                return Ok(Some(sp));
-            }
-        }
-        Ok(None)
-    }
-
-    fn get_saml_sp_by_key(
-        &self,
-        realm_id: &RealmId,
-        sp_key: &str,
-    ) -> Result<Option<crate::identity::federation::saml::SamlServiceProvider>, IdentityError> {
-        let key = keys::encode_saml_sp_key(sp_key);
-        match self
-            .storage
-            .get(realm_id, &key)
-            .map_err(Self::storage_err)?
-        {
-            Some(bytes) => {
-                let sp =
-                    serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
-                        reason: e.to_string(),
-                    })?;
-                Ok(Some(sp))
-            }
-            None => Ok(None),
-        }
-    }
-
-    fn list_saml_sps(
-        &self,
-        realm_id: &RealmId,
-    ) -> Result<Vec<crate::identity::federation::saml::SamlServiceProvider>, IdentityError> {
-        let prefix = keys::saml_sp_scan_prefix();
-        let end = keys::prefix_end(&prefix);
-        let entries = self
-            .storage
-            .scan(realm_id, &prefix, &end)
-            .map_err(Self::storage_err)?;
-        let mut out = Vec::with_capacity(entries.len());
-        for entry in &entries {
-            let sp: crate::identity::federation::saml::SamlServiceProvider =
-                serde_json::from_slice(&entry.value).map_err(|e| IdentityError::Serialization {
-                    reason: e.to_string(),
-                })?;
-            out.push(sp);
-        }
-        Ok(out)
-    }
-
-    fn delete_saml_sp(&self, realm_id: &RealmId, sp_key: &str) -> Result<(), IdentityError> {
-        // Archival is a freeze: refuse mutations on a non-active realm
-        // (audit 2026-08-28 §4.20#5).
-        self.require_active_realm(realm_id)?;
-        let key = keys::encode_saml_sp_key(sp_key);
-        self.storage
-            .delete(realm_id, &key)
-            .map_err(Self::storage_err)
     }
 
     fn put_saml_state(
@@ -16957,43 +16751,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         } else {
             Err(IdentityError::Saml(SamlError::Replay))
         }
-    }
-
-    fn record_saml_sp_session(
-        &self,
-        realm_id: &RealmId,
-        registration: &crate::identity::federation::saml::SamlSessionRegistration,
-    ) -> Result<(), IdentityError> {
-        let key = keys::encode_saml_sp_session(&registration.session_id, &registration.sp_key);
-        let bytes = serde_json::to_vec(registration).map_err(|e| IdentityError::Serialization {
-            reason: e.to_string(),
-        })?;
-        self.storage
-            .put(realm_id, &key, &bytes)
-            .map_err(Self::storage_err)
-    }
-
-    fn list_saml_sp_sessions(
-        &self,
-        realm_id: &RealmId,
-        session_id: &SessionId,
-    ) -> Result<Vec<crate::identity::federation::saml::SamlSessionRegistration>, IdentityError>
-    {
-        let prefix = keys::encode_saml_sp_session_prefix(session_id);
-        let end = keys::prefix_end(&prefix);
-        let entries = self
-            .storage
-            .scan(realm_id, &prefix, &end)
-            .map_err(Self::storage_err)?;
-        let mut out = Vec::with_capacity(entries.len());
-        for entry in &entries {
-            let reg: crate::identity::federation::saml::SamlSessionRegistration =
-                serde_json::from_slice(&entry.value).map_err(|e| IdentityError::Serialization {
-                    reason: e.to_string(),
-                })?;
-            out.push(reg);
-        }
-        Ok(out)
     }
 
     fn is_storage_healthy(&self) -> bool {
@@ -17245,251 +17002,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.initiate_logout_inner(realm_id, request)
     }
 
-    fn check_device_fingerprint(
-        &self,
-        realm_id: &RealmId,
-        user_id: &UserId,
-        ip: &str,
-        user_agent: &str,
-    ) -> Result<DeviceFingerprintOutcome, IdentityError> {
-        // Load realm config to check if adaptive MFA is enabled.
-        let realm = self
-            .get_realm(realm_id)?
-            .ok_or(IdentityError::RealmNotFound)?;
-        let cfg = &realm.config().adaptive_mfa;
-
-        if !cfg.enabled {
-            return Ok(DeviceFingerprintOutcome::Skipped);
-        }
-        // Fail-secure (BLK-2): enabled=true with empty or short HMAC secret is a
-        // misconfiguration that must surface as an error — silently skipping would issue
-        // tokens without the intended fingerprint gate (fail-open).
-        // NIST SP 800-107 recommends HMAC keys ≥ hash output length (32 bytes for SHA-256).
-        if cfg.fingerprint_hmac_secret.expose_secret().len() < 32 {
-            return Err(IdentityError::Internal {
-                reason: format!(
-                    "adaptive_mfa.enabled=true but fingerprint_hmac_secret is too short ({} bytes, minimum 32)",
-                    cfg.fingerprint_hmac_secret.expose_secret().len()
-                ),
-            });
-        }
-
-        let hmac = crate::identity::device_fp::DeviceFingerprintStore::derive_hmac(
-            cfg.fingerprint_hmac_secret.expose_secret(),
-            user_id,
-            ip,
-            user_agent,
-        );
-
-        match self.device_fp.check_and_refresh(
-            realm_id,
-            user_id,
-            &hmac,
-            cfg.recognition_window_days,
-        )? {
-            crate::identity::device_fp::FingerprintResult::Recognised => {
-                Ok(DeviceFingerprintOutcome::Recognised)
-            }
-            crate::identity::device_fp::FingerprintResult::Unrecognised => {
-                // Emit step-up audit event (LogOnly — login continues with challenge).
-                let metadata = Some(serde_json::json!({
-                    "user_id": user_id.as_uuid().to_string(),
-                    "reason": "unrecognised_device"
-                }));
-                let ctx = AuditContext {
-                    actor: Actor::User(user_id.clone()),
-                    metadata,
-                };
-                if let Err(e) = self.record_audit(
-                    realm_id,
-                    Some(&ctx),
-                    AuditAction::StepUpMfaTriggered,
-                    "user",
-                    &user_id.as_uuid().to_string(),
-                ) {
-                    tracing::warn!(error = %e, "StepUpMfaTriggered audit write failed — event lost");
-                }
-
-                // AC-6 vs AC-8: check whether user has an enrolled MFA factor.
-                let has_mfa = self.mfa_enabled(realm_id, user_id).unwrap_or(false)
-                    || self
-                        .list_webauthn_credentials(realm_id, user_id)
-                        .map(|creds| !creds.is_empty())
-                        .unwrap_or(false);
-
-                if has_mfa {
-                    Ok(DeviceFingerprintOutcome::StepUpRequired)
-                } else {
-                    Ok(DeviceFingerprintOutcome::EnrollMfaRequired)
-                }
-            }
-        }
-    }
-
-    fn record_device_fingerprint(
-        &self,
-        realm_id: &RealmId,
-        user_id: &UserId,
-        ip: &str,
-        user_agent: &str,
-    ) -> Result<(), IdentityError> {
-        let realm = self
-            .get_realm(realm_id)?
-            .ok_or(IdentityError::RealmNotFound)?;
-        let cfg = &realm.config().adaptive_mfa;
-        if !cfg.enabled {
-            return Ok(());
-        }
-        // Misconfiguration guard: skip recording silently when secret is empty.
-        if cfg.fingerprint_hmac_secret.expose_secret().is_empty() {
-            return Ok(());
-        }
-        let hmac = crate::identity::device_fp::DeviceFingerprintStore::derive_hmac(
-            cfg.fingerprint_hmac_secret.expose_secret(),
-            user_id,
-            ip,
-            user_agent,
-        );
-        self.device_fp
-            .record(realm_id, user_id, &hmac, cfg.recognition_window_days)
-    }
-
-    fn issue_sms_otp(
-        &self,
-        realm_id: &RealmId,
-        phone: &str,
-        otp_hmac_key_bytes: &[u8],
-        sender: &dyn crate::identity::sms::SmsSender,
-        now_unix_ts: u64,
-    ) -> Result<String, IdentityError> {
-        use crate::identity::sms::otp as otp_mod;
-
-        // 0. The realm must offer SMS as a factor (audit 2026-08-28 §4.18#10).
-        self.require_mfa_method(realm_id, "sms")?;
-
-        // 1. Per-phone resend throttle check.
-        let resend_suffix = otp_mod::phone_resend_key_suffix(phone);
-        let resend_key = keys::encode_sms_resend_count(&resend_suffix);
-        self.count_otp_resend(
-            realm_id,
-            &resend_key,
-            now_unix_ts,
-            IdentityError::SmsResendLimitExceeded,
-        )?;
-
-        // 2. Look up per-realm OTP config, falling back to module defaults.
-        use crate::identity::sms::otp::{OTP_EXPIRY_SECS, OTP_MAX_ATTEMPTS};
-        let (expiry_secs, max_attempts) = match self.get_realm(realm_id) {
-            Ok(Some(realm)) => {
-                let cfg = realm.config();
-                (
-                    cfg.sms_otp_expiry_seconds.unwrap_or(OTP_EXPIRY_SECS),
-                    cfg.sms_otp_max_attempts.unwrap_or(OTP_MAX_ATTEMPTS),
-                )
-            }
-            _ => (OTP_EXPIRY_SECS, OTP_MAX_ATTEMPTS),
-        };
-
-        // 3. Generate nonce + OTP, persist, send.
-        self.do_issue_sms_otp_inner(
-            realm_id,
-            phone,
-            otp_hmac_key_bytes,
-            sender,
-            now_unix_ts,
-            expiry_secs,
-            max_attempts,
-        )
-    }
-
-    fn verify_sms_otp(
-        &self,
-        realm_id: &RealmId,
-        nonce: &str,
-        phone: &str,
-        candidate_code: &str,
-        otp_hmac_key_bytes: &[u8],
-        now_unix_ts: u64,
-    ) -> Result<(), IdentityError> {
-        use crate::identity::sms::otp::StoredOtp;
-
-        self.require_mfa_method(realm_id, "sms")?;
-        let otp_key = keys::encode_sms_pending_otp(nonce);
-
-        // 0. Single-use under concurrency: hold the per-nonce lock across the
-        //    load → verify → delete window (audit 2026-08-28 §4.18#4).
-        let redemption_lock =
-            self.otp_redemption_lock(&Self::pending_otp_lock_key(realm_id, "sms", nonce));
-        // INVARIANT: sync window only — no `.await` between here and return.
-        let _redemption_guard = redemption_lock
-            .lock()
-            .expect("otp redemption lock poisoned");
-
-        // 1. Load the OTP record.
-        let bytes = self
-            .storage
-            .get(realm_id, &otp_key)
-            .map_err(Self::storage_err)?
-            .ok_or(IdentityError::InvalidSmsOtp)?;
-
-        let stored: StoredOtp =
-            serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
-                reason: e.to_string(),
-            })?;
-
-        // 2. Check expiry (delete stale record and fail vaguely).
-        if stored.is_expired(now_unix_ts) {
-            let _ = self.storage.delete(realm_id, &otp_key);
-            return Err(IdentityError::InvalidSmsOtp);
-        }
-
-        // 3-4. Spend one guess of the code's budget BEFORE checking it. The
-        //    budget is replicated guess slots, not a count in the record: a
-        //    node whose read of the record was stale wrote back a count that
-        //    had not seen the other nodes' guesses, so every node granted the
-        //    full budget (G6). Exhausted: delete the record and fail vaguely.
-        let Some(slot) = self.claim_guess_slot(
-            realm_id,
-            &keys::encode_guess_slot_prefix("sms-otp", nonce),
-            stored.max_attempts,
-            Self::otp_expiry(&stored),
-        )?
-        else {
-            let _ = self.storage.delete(realm_id, &otp_key);
-            return Err(IdentityError::InvalidSmsOtp);
-        };
-
-        // 5. Constant-time HMAC verification, bound to the expected phone.
-        let result = stored.verify(candidate_code, phone, otp_hmac_key_bytes);
-
-        match result {
-            Ok(()) => {
-                // 6a. Claim the code's single use, then delete the record.
-                //     The lock above is node-local and the record read is
-                //     local, so across a cluster only the replicated claim
-                //     can refuse the same code at a second node (G4).
-                if !self.claim_single_use(
-                    realm_id,
-                    &keys::encode_consumed_otp("sms", nonce),
-                    Self::otp_expiry(&stored),
-                )? {
-                    return Err(IdentityError::InvalidSmsOtp);
-                }
-                self.storage
-                    .delete(realm_id, &otp_key)
-                    .map_err(Self::storage_err)?;
-                Ok(())
-            }
-            Err(e) => {
-                // 6b. If that was the last guess, delete the record.
-                if slot >= stored.max_attempts {
-                    let _ = self.storage.delete(realm_id, &otp_key);
-                }
-                Err(e)
-            }
-        }
-    }
-
     fn issue_email_otp(
         &self,
         realm_id: &RealmId,
@@ -17499,9 +17011,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_branding: Option<&crate::identity::email::EmailBranding>,
         now_unix_ts: u64,
     ) -> Result<String, IdentityError> {
-        use crate::identity::sms::otp::{
-            self as otp_mod, StoredOtp, OTP_EXPIRY_SECS, OTP_MAX_ATTEMPTS,
-        };
+        use crate::identity::otp::{self as otp_mod, StoredOtp, OTP_EXPIRY_SECS, OTP_MAX_ATTEMPTS};
 
         // The realm must offer email OTP (audit 2026-08-28 §4.18#10).
         self.require_mfa_method(realm_id, "email_otp")?;
@@ -17510,7 +17020,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // (GA audit M12). Without it every render of the login challenge
         // mailed a fresh code, each good for five guesses: an unbounded
         // guessing budget, and a flood of the victim's inbox.
-        let resend_suffix = otp_mod::phone_resend_key_suffix(&email.to_ascii_lowercase());
+        let resend_suffix = otp_mod::recipient_resend_key_suffix(&email.to_ascii_lowercase());
         self.count_otp_resend(
             realm_id,
             &keys::encode_email_resend_count(&resend_suffix),
@@ -17572,7 +17082,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         otp_hmac_key_bytes: &[u8],
         now_unix_ts: u64,
     ) -> Result<(), IdentityError> {
-        use crate::identity::sms::otp::StoredOtp;
+        use crate::identity::otp::StoredOtp;
 
         self.require_mfa_method(realm_id, "email_otp")?;
         let otp_key = keys::encode_email_pending_otp(nonce);
@@ -18775,57 +18285,7 @@ impl EmbeddedIdentityEngine {
 }
 
 /// Generates and stores a new OTP then dispatches the SMS.
-impl EmbeddedIdentityEngine {
-    fn do_issue_sms_otp_inner(
-        &self,
-        realm_id: &RealmId,
-        phone: &str,
-        otp_hmac_key_bytes: &[u8],
-        sender: &dyn crate::identity::sms::SmsSender,
-        now_unix_ts: u64,
-        expiry_secs: u64,
-        max_attempts: u32,
-    ) -> Result<String, IdentityError> {
-        use crate::identity::sms::otp::{self as otp_mod, StoredOtp};
-        use crate::identity::sms::SmsMessage;
-
-        let rng = ring::rand::SystemRandom::new();
-        let nonce = otp_mod::generate_otp_nonce(&rng)?;
-        let expiry_unix_ts = now_unix_ts.saturating_add(expiry_secs);
-        let (digits, stored) = StoredOtp::create(
-            &rng,
-            otp_hmac_key_bytes,
-            phone,
-            expiry_unix_ts,
-            max_attempts,
-        )?;
-
-        let otp_key = keys::encode_sms_pending_otp(&nonce);
-        let otp_bytes = serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
-            reason: e.to_string(),
-        })?;
-        self.storage
-            .put(realm_id, &otp_key, &otp_bytes)
-            .map_err(Self::storage_err)?;
-
-        sender
-            .send(&SmsMessage {
-                to: phone.to_string(),
-                body: format!("Your verification code is: {}", digits.as_str()),
-            })
-            // The transport's text can name the recipient; the reason is
-            // logged, so the number is masked in it (GA audit L21).
-            .map_err(|e| IdentityError::Internal {
-                reason: format!(
-                    "SMS delivery failed: {}",
-                    e.to_string()
-                        .replace(phone, &crate::identity::sms::mask_phone(phone))
-                ),
-            })?;
-
-        Ok(nonce)
-    }
-}
+impl EmbeddedIdentityEngine {}
 
 /// Classifies a PHC-formatted hash string into a [`PasswordAlgorithm`].
 ///
@@ -18933,7 +18393,7 @@ impl EmbeddedIdentityEngine {
 
         // The realm's `cidr_policy` binds every path that ends in a session,
         // not only the web password form that used to be its one reader
-        // (GA audit M13): the step-up grant, magic links, passkeys,
+        // (GA audit M13): magic links, passkeys,
         // federation and SAML all authenticate too.
         self.check_realm_network_policy(realm_id, context.ip_address.as_deref())?;
 
@@ -18958,20 +18418,14 @@ impl EmbeddedIdentityEngine {
             // strength of the enrolment alone. The caller now states what this
             // ceremony proved; `MfaProof::None` is the default, so a path that says
             // nothing is refused.
-            if !context.mfa_proof.satisfies_mfa_required() {
-                if let Ok(Some(realm)) = self.get_realm(realm_id) {
-                    // HSEC-004 (revised): MFA defaults to opt-in for all realms. Operators
-                    // enable it explicitly via `mfa_required: true` in hearth.yaml after
-                    // enrolling a second factor. Defaulting to `true` for the system realm
-                    // made fresh installs unbootable (no MFA enrollment path exists before
-                    // the first admin session). The production hard-error in main.rs already
-                    // blocks `mfa_required: false` from being set explicitly; a startup
-                    // warning nudges operators who leave it `null` to enable it once enrolled.
-                    let mfa_default = false;
-                    if realm.config().mfa_required.unwrap_or(mfa_default) {
-                        return Err(IdentityError::MfaRequired);
-                    }
-                }
+            //
+            // One resolver decides (spec `mfa-policy`): the realm, the user's
+            // organizations and roles. A client's own requirement is checked
+            // where the client is known — the authorize and device gates.
+            if !context.mfa_proof.satisfies_mfa_required()
+                && self.effective_mfa_requirement(realm_id, user_id, None)?
+            {
+                return Err(IdentityError::MfaRequired);
             }
 
             // Enforce `webauthn_required` on factor **use** too (audit 2026-08-28
@@ -19018,6 +18472,16 @@ impl EmbeddedIdentityEngine {
                 crate::identity::MfaProof::Proved | crate::identity::MfaProof::ProvedWebAuthn => {}
                 crate::identity::MfaProof::None => {
                     if self.held_second_factors(realm_id, user_id)?.any() {
+                        return Err(IdentityError::MfaRequired);
+                    }
+                }
+                // An email OTP proved the email-OTP factor; it still owes any
+                // other factor the user enrolled.
+                crate::identity::MfaProof::EmailOtp => {
+                    if self
+                        .held_second_factors(realm_id, user_id)?
+                        .any_besides_email_otp()
+                    {
                         return Err(IdentityError::MfaRequired);
                     }
                 }
@@ -19534,7 +18998,7 @@ mod tests {
 
     /// Every spelling of a resource reads the one consent record (G6).
     mod authorize_resource_consent;
-    /// Under FAPI 2.0 an assertion's `aud` is the issuer as a single string.
+    /// A client assertion's `aud` must name the realm's issuer.
     mod client_assertion_audience;
     /// `private_key_jwt` assertion-JTI replay markers carry an expiry and are swept.
     mod client_assertion_jti;
@@ -19546,8 +19010,6 @@ mod tests {
     mod control_epoch;
     /// Control-cache reloads: lock-free validation, retries, ordering, coverage.
     mod control_reload;
-    /// A FAPI 2.0 client is never public and always holds verifiable keys.
-    mod fapi2_client_keys;
     /// Login abuse resistance: realm-cost dummy verify, breach check before
     /// registration writes, single-use required-action tokens (GA audit).
     mod ga_login_hardening;
@@ -20977,9 +20439,10 @@ mod tests {
     // the unknown / public arms must match THAT — an Argon2id dummy there
     // would both reveal existence and keep the amplification on random ids.
 
-    /// Registers a confidential client whose secret the CALLER chose (the gRPC
-    /// shape). Unknown entropy, so it is stored as Argon2id — the same cost
-    /// class as a legacy pre-fast-hash secret.
+    /// Registers a confidential client whose secret the CALLER chose
+    /// (`RegisterClientRequest::client_secret`). Unknown entropy, so it is
+    /// stored as Argon2id — the same cost class as a legacy pre-fast-hash
+    /// secret.
     fn register_confidential_client(
         engine: &EmbeddedIdentityEngine,
         realm: &RealmId,
@@ -22568,7 +22031,6 @@ mod tests {
                     amr_values: Vec::new(),
                     response_mode: None,
                     request: None,
-                    via_par: false,
                 },
             )
             .expect("authorize should succeed");
@@ -22605,7 +22067,6 @@ mod tests {
                     amr_values: Vec::new(),
                     response_mode: None,
                     request: None,
-                    via_par: false,
                 },
             )
             .expect("authorize");
@@ -22670,7 +22131,6 @@ mod tests {
                     amr_values: Vec::new(),
                     response_mode: None,
                     request: None,
-                    via_par: false,
                 },
             )
             .expect("authorize");
@@ -22735,7 +22195,6 @@ mod tests {
                     amr_values: Vec::new(),
                     response_mode: None,
                     request: None,
-                    via_par: false,
                 },
             )
             .expect("authorize");
@@ -22815,7 +22274,6 @@ mod tests {
                     amr_values: Vec::new(),
                     response_mode: None,
                     request: None,
-                    via_par: false,
                 },
             )
             .expect("authorize");
@@ -22881,7 +22339,6 @@ mod tests {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         );
         assert!(
@@ -22916,7 +22373,6 @@ mod tests {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         );
         assert!(
@@ -23537,7 +22993,6 @@ mod tests {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         );
         assert!(result.is_ok(), "first use of nonce should succeed");
@@ -23559,7 +23014,6 @@ mod tests {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         );
         assert!(
@@ -23584,7 +23038,6 @@ mod tests {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         );
         assert!(result.is_ok(), "different nonce should succeed");
@@ -23613,7 +23066,6 @@ mod tests {
             amr_values: Vec::new(),
             response_mode: None,
             request: None,
-            via_par: false,
         };
 
         // Use the nonce at t=0.
@@ -23674,7 +23126,6 @@ mod tests {
             amr_values: Vec::new(),
             response_mode: None,
             request: None,
-            via_par: false,
         };
 
         // Client A burns the nonce.
@@ -23732,7 +23183,6 @@ mod tests {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             };
             assert!(engine.authorize(&realm, &req).is_ok());
         }
@@ -23761,7 +23211,6 @@ mod tests {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             };
             assert!(engine.authorize(&realm, &req).is_ok());
         }
@@ -26258,59 +25707,6 @@ mod tests {
         );
     }
 
-    // ===== Delete cascades to device fingerprints (GDPR Art.17 / AC-11) =====
-
-    #[test]
-    fn delete_user_cascades_device_fingerprints() {
-        let (_dir, engine, _clock) = setup_engine();
-        let realm = create_test_realm(&engine);
-        let user = create_test_user(&engine, &realm);
-
-        // Record two fingerprints for the user.
-        let secret = "test-secret-at-least-32-bytes-long!!";
-        let hmac1 = DeviceFingerprintStore::derive_hmac(secret, user.id(), "10.0.1.1", "UA/1");
-        let hmac2 = DeviceFingerprintStore::derive_hmac(secret, user.id(), "10.0.2.1", "UA/1");
-        engine
-            .device_fp
-            .record(&realm, user.id(), &hmac1, 30)
-            .expect("record fp1");
-        engine
-            .device_fp
-            .record(&realm, user.id(), &hmac2, 30)
-            .expect("record fp2");
-
-        // Confirm both are recognised before deletion.
-        assert_eq!(
-            engine
-                .device_fp
-                .check_and_refresh(&realm, user.id(), &hmac1, 30)
-                .expect("check1"),
-            crate::identity::device_fp::FingerprintResult::Recognised,
-            "fp1 must be recognised before delete"
-        );
-
-        // Delete the user — cascade must erase both fingerprints.
-        engine.delete_user(&realm, user.id()).expect("delete user");
-
-        // Both fingerprints must now be gone.
-        assert_eq!(
-            engine
-                .device_fp
-                .check_and_refresh(&realm, user.id(), &hmac1, 30)
-                .expect("check1-after"),
-            crate::identity::device_fp::FingerprintResult::Unrecognised,
-            "fp1 must be erased after delete_user"
-        );
-        assert_eq!(
-            engine
-                .device_fp
-                .check_and_refresh(&realm, user.id(), &hmac2, 30)
-                .expect("check2-after"),
-            crate::identity::device_fp::FingerprintResult::Unrecognised,
-            "fp2 must be erased after delete_user"
-        );
-    }
-
     // consent_records_are_realm_isolated moved to tests/identity_oauth.rs (HEA-1131)
 
     // ===== SCIM externalId tests =====
@@ -26603,7 +25999,6 @@ mod tests {
                     amr_values: Vec::new(),
                     response_mode: None,
                     request: None,
-                    via_par: false,
                 },
             )
             .expect("authorize");
@@ -27172,7 +26567,6 @@ mod tests {
                     amr_values: Vec::new(),
                     response_mode: None,
                     request: None,
-                    via_par: false,
                 },
             )
             .expect_err("must reject public client with no PKCE");
@@ -27208,7 +26602,6 @@ mod tests {
                     amr_values: Vec::new(),
                     response_mode: None,
                     request: None,
-                    via_par: false,
                 },
             )
             .expect_err("must reject challenge without S256 method");
@@ -27256,7 +26649,6 @@ mod tests {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         );
         assert!(
@@ -27390,7 +26782,6 @@ mod tests {
                     amr_values: Vec::new(),
                     response_mode: None,
                     request: None,
-                    via_par: false,
                 },
             )
             .expect_err("invalid scope chars must be rejected");
@@ -27425,7 +26816,6 @@ mod tests {
                     amr_values: Vec::new(),
                     response_mode: None,
                     request: None,
-                    via_par: false,
                 },
             )
             .expect("authorize must succeed");
@@ -27582,77 +26972,6 @@ mod tests {
         assert!(
             matches!(err, IdentityError::RateLimited),
             "expected RateLimited after MFA lockout, got: {err:?}"
-        );
-    }
-
-    /// NEW-LOW-1: a failed MFA code in step_up_mfa_grant_token must increment
-    /// the IP login attempt counter so the IP-level rate limiter can act.
-    ///
-    /// Strategy: pre-seed the IP counter to (ip_max_attempts - 1) via the public
-    /// helper, then make one bad step-up request. If the step-up handler records
-    /// the attempt, the counter tips over and `check_ip_login_rate_limit` returns
-    /// `RateLimited`. If the handler does NOT record it, the counter stays below
-    /// the threshold and the check still returns `Ok`.
-    #[test]
-    #[allow(clippy::cast_sign_loss)]
-    fn step_up_mfa_bad_code_records_ip_attempt() {
-        let (_dir, engine, clock) = setup_engine();
-        let realm = create_test_realm(&engine);
-        let user = create_test_user(&engine, &realm);
-
-        // Enroll and activate TOTP.
-        let pw = CleartextPassword::from_string("valid-password1".to_string());
-        engine
-            .set_password(&realm, user.id(), &pw)
-            .expect("set password");
-
-        let enrollment = engine.enroll_totp(&realm, user.id()).expect("enroll");
-        let secret_bytes = data_encoding::BASE32_NOPAD
-            .decode(enrollment.secret_base32.as_bytes())
-            .expect("decode");
-        let now_secs = (clock.now().as_micros() / 1_000_000) as u64;
-        let code0 = crate::identity::totp::compute_totp(&secret_bytes, now_secs / 30);
-        engine
-            .verify_totp_enrollment(&realm, user.id(), &code0)
-            .expect("activate");
-
-        let test_ip = "10.0.0.1";
-
-        // Pre-seed the IP counter to (ip_max_attempts - 1).
-        let ip_max = engine.config.rate_limit.ip_max_attempts;
-        for _ in 0..(ip_max - 1) {
-            engine.record_ip_login_attempt(&realm, test_ip);
-        }
-        engine
-            .check_ip_login_rate_limit(&realm, test_ip)
-            .expect("IP should not yet be rate-limited");
-
-        // Submit one step-up request with a wrong MFA code.
-        let request = crate::identity::oidc::StepUpMfaGrantRequest {
-            email: user.email().to_string(),
-            password: "valid-password1".to_string(),
-            mfa_code: "000000".to_string(),
-            scope: None,
-            client_ip: Some(test_ip.to_string()),
-            user_agent: None,
-            dpop_jkt: None,
-        };
-        let err = engine
-            .step_up_mfa_grant_token(&realm, &request)
-            .expect_err("should fail on bad MFA code");
-        assert!(
-            matches!(
-                err,
-                IdentityError::InvalidMfaCode | IdentityError::RateLimited
-            ),
-            "unexpected error: {err:?}"
-        );
-
-        // The step-up handler must have pushed the counter over the threshold.
-        let ip_rate_result = engine.check_ip_login_rate_limit(&realm, test_ip);
-        assert!(
-            matches!(ip_rate_result, Err(IdentityError::RateLimited)),
-            "IP should be rate-limited after step-up MFA failure, got: {ip_rate_result:?}"
         );
     }
 

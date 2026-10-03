@@ -66,9 +66,6 @@ pub struct RecordCounts {
     /// Number of webhook registrations (OpenSpec 26.40).
     #[serde(default)]
     pub webhooks: u64,
-    /// Number of SAML service-provider registrations (OpenSpec 26.40).
-    #[serde(default)]
-    pub saml_service_providers: u64,
     /// Number of SCIM `externalId` mappings, users and groups together
     /// (OpenSpec 26.40).
     #[serde(default)]

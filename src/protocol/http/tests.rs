@@ -599,6 +599,65 @@ async fn dev_probe_user_returns_user_id_for_known_email() {
     );
 }
 
+/// The seed endpoints mint a session for a user who ran no ceremony at all.
+/// Every realm requires MFA by default (3.0.0), so a seed that states no
+/// proof is refused, and the load-test seeder can build no token corpus.
+/// They state `MfaProof::Proved`, as `/admin/bootstrap` does: the endpoint is
+/// dev-only and already more powerful than any second factor.
+#[cfg(feature = "dev-endpoints")]
+#[tokio::test]
+async fn dev_seed_token_and_session_work_in_a_realm_that_requires_mfa() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state_dev(temp_dir.path());
+    let realm = state
+        .identity
+        .create_realm(&crate::identity::CreateRealmRequest {
+            name: "seed-mfa-realm".to_string(),
+            // The bootstrap dev realm sets the same policy.
+            config: Some(crate::identity::RealmConfig {
+                mfa_required: Some(true),
+                ..Default::default()
+            }),
+        })
+        .expect("create realm");
+    let user = state
+        .identity
+        .create_user(
+            realm.id(),
+            &crate::identity::CreateUserRequest {
+                email: "seed@seed.test".to_string(),
+                display_name: "Seed User".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("create user");
+    assert!(
+        state
+            .identity
+            .effective_mfa_requirement(realm.id(), user.id(), None)
+            .expect("mfa requirement"),
+        "precondition: the default realm policy requires MFA"
+    );
+
+    for path in ["/dev/seed-token", "/dev/seed-session"] {
+        let resp = router(Arc::clone(&state))
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .header("x-realm-id", realm.id().as_uuid().to_string())
+                    .body(axum::body::Body::from(
+                        serde_json::json!({"user_id": user.id().as_uuid().to_string()}).to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::CREATED, "{path}");
+    }
+}
+
 /// HEA-2143: an unknown email still returns 200 (the C8 latency sweep depends
 /// on found/not-found being indistinguishable in status), with a null id.
 #[cfg(feature = "dev-endpoints")]
@@ -885,43 +944,27 @@ async fn host_allowlist_empty_allows_any_host() {
     );
 }
 
-/// PAR with a signed JAR JWT in the request body is accepted under FAPI Advanced.
+/// PAR with a signed JAR JWT in the request body is accepted.
 ///
 /// Regression for HEA-1019: `HttpParRequest` was missing the `request` field,
-/// so the JAR was silently dropped and Advanced realms always rejected with
-/// `FapiViolation`.  This test exercises the full HTTP deserialisation path and
-/// MUST return 201 with the fix applied.
+/// so the JAR was silently dropped. This test exercises the full HTTP
+/// deserialisation path and MUST return 201 with the fix applied.
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
-async fn par_jar_accepted_under_fapi_advanced() {
-    use crate::identity::{
-        CreateRealmRequest, FapiProfile, RegisterClientRequest, UpdateRealmRequest,
-    };
+async fn par_accepts_a_signed_request_object() {
+    use crate::identity::{CreateRealmRequest, RegisterClientRequest};
     use base64::Engine as _;
 
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let state = test_state(temp_dir.path());
 
-    // Create an Advanced FAPI realm.
     let realm_rec = state
         .identity
         .create_realm(&CreateRealmRequest {
-            name: format!("fapi-adv-jar-{}", uuid::Uuid::new_v4()),
+            name: format!("par-jar-{}", uuid::Uuid::new_v4()),
             config: None,
         })
         .expect("create realm");
-    let mut config = realm_rec.config().clone();
-    config.fapi_profile = Some(FapiProfile::Advanced);
-    state
-        .identity
-        .update_realm(
-            realm_rec.id(),
-            &UpdateRealmRequest {
-                config: Some(config),
-                ..Default::default()
-            },
-        )
-        .expect("set FAPI Advanced");
 
     // Generate Ed25519 key pair and register a JARM-capable JWKS client.
     let rng = ring::rand::SystemRandom::new();
@@ -941,13 +984,12 @@ async fn par_jar_accepted_under_fapi_advanced() {
         .register_client(
             realm_rec.id(),
             &RegisterClientRequest {
-                client_name: "FAPI-A JAR HTTP Client".to_string(),
+                client_name: "JAR HTTP Client".to_string(),
                 redirect_uris: vec!["https://app.example.com/callback".to_string()],
                 client_secret: None,
                 grant_types: vec!["authorization_code".to_string()],
                 require_consent: false,
                 jwks: Some(jwks),
-                authorization_signed_response_alg: Some("EdDSA".to_string()),
                 ..Default::default()
             },
         )
@@ -1002,7 +1044,7 @@ async fn par_jar_accepted_under_fapi_advanced() {
         "nonce": "hea1019-nonce",
         "request": jar_jwt,
         "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
-        "client_assertion": advanced_realm_client_assertion(
+        "client_assertion": jwks_client_assertion(
             pkcs8.as_ref(), "hea1019", client.client_id(), &issuer
         ),
     }))
@@ -1024,7 +1066,7 @@ async fn par_jar_accepted_under_fapi_advanced() {
     assert_eq!(
         resp.status(),
         StatusCode::CREATED,
-        "JAR in HTTP PAR body must be accepted under FAPI Advanced (HEA-1019 regression)"
+        "JAR in HTTP PAR body must be accepted (HEA-1019 regression)"
     );
     let resp_body = axum::body::to_bytes(resp.into_body(), 4_096)
         .await
@@ -1040,7 +1082,7 @@ async fn par_jar_accepted_under_fapi_advanced() {
 ///
 /// A pushed request had no `prompt` field, so a `request_uri` authorization
 /// could never ask for `prompt=none` (silent authentication) or
-/// `prompt=consent` — and PAR is the only way in on a FAPI 2.0 realm.
+/// `prompt=consent`.
 #[tokio::test]
 async fn par_endpoint_stores_the_pushed_prompt() {
     use crate::identity::{CreateRealmRequest, RegisterClientRequest};
@@ -1100,9 +1142,8 @@ async fn par_endpoint_stores_the_pushed_prompt() {
 }
 
 /// A `private_key_jwt` client assertion (RFC 7523 §2.2) signed with an
-/// Ed25519 key from the client's JWKS (`kid`), for a FAPI 2.0 Advanced realm,
-/// which authenticates clients with nothing else (OIDC.md §2.1.2 item 6).
-fn advanced_realm_client_assertion(
+/// Ed25519 key from the client's JWKS (`kid`).
+fn jwks_client_assertion(
     pkcs8: &[u8],
     kid: &str,
     client: &crate::core::ClientId,
@@ -1129,112 +1170,6 @@ fn advanced_realm_client_assertion(
         .expect("pair")
         .sign(input.as_bytes());
     format!("{input}.{}", b64.encode(sig.as_ref()))
-}
-
-/// PAR without a JAR JWT is rejected under FAPI Advanced.
-///
-/// Counterpart to `par_jar_accepted_under_fapi_advanced`: confirms the
-/// negative case still returns 400 / `invalid_request` when the `request`
-/// field is absent.
-#[tokio::test]
-async fn par_without_jar_rejected_under_fapi_advanced() {
-    use base64::Engine as _;
-
-    use crate::identity::{
-        CreateRealmRequest, FapiProfile, RegisterClientRequest, UpdateRealmRequest,
-    };
-
-    let temp_dir = tempfile::tempdir().expect("tempdir");
-    let state = test_state(temp_dir.path());
-
-    let realm_rec = state
-        .identity
-        .create_realm(&CreateRealmRequest {
-            name: format!("fapi-adv-nojar-{}", uuid::Uuid::new_v4()),
-            config: None,
-        })
-        .expect("create realm");
-    let mut config = realm_rec.config().clone();
-    config.fapi_profile = Some(FapiProfile::Advanced);
-    state
-        .identity
-        .update_realm(
-            realm_rec.id(),
-            &UpdateRealmRequest {
-                config: Some(config),
-                ..Default::default()
-            },
-        )
-        .expect("set FAPI Advanced");
-
-    // An Advanced realm authenticates clients with private_key_jwt only, so
-    // the client holds a JWKS key and authenticates with it; the refusal
-    // below is then the JAR rule's.
-    let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
-        .expect("keygen");
-    let pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("pair");
-    let x = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode(ring::signature::KeyPair::public_key(&pair).as_ref());
-    let client = state
-        .identity
-        .register_client(
-            realm_rec.id(),
-            &RegisterClientRequest {
-                client_name: "FAPI-A No-JAR Client".to_string(),
-                redirect_uris: vec!["https://app.example.com/callback".to_string()],
-                grant_types: vec!["authorization_code".to_string()],
-                require_consent: false,
-                jwks: Some(format!(
-                    r#"{{"keys":[{{"kty":"OKP","crv":"Ed25519","alg":"EdDSA","kid":"nojar","x":"{x}"}}]}}"#
-                )),
-                ..Default::default()
-            },
-        )
-        .expect("register client");
-    let issuer = format!("https://hearth.local/realms/{}", realm_rec.name());
-
-    let body = serde_json::to_vec(&serde_json::json!({
-        "client_id": client.client_id().as_uuid().to_string(),
-        "redirect_uri": "https://app.example.com/callback",
-        "scope": "openid",
-        "state": "par-state",
-        "response_type": "code",
-        "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
-        "code_challenge_method": "S256",
-        "nonce": "test-nonce",
-        "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
-        "client_assertion": advanced_realm_client_assertion(
-            pkcs8.as_ref(), "nojar", client.client_id(), &issuer
-        ),
-    }))
-    .expect("body json");
-
-    let app = router(state);
-    let resp = app
-        .oneshot(
-            axum::http::Request::builder()
-                .method("POST")
-                .uri(format!("/realms/{}/as/par", realm_rec.name()))
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(body))
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-
-    assert_eq!(
-        resp.status(),
-        StatusCode::BAD_REQUEST,
-        "PAR without JAR must be rejected (FapiViolation) under FAPI Advanced"
-    );
-    let resp_body = axum::body::to_bytes(resp.into_body(), 4_096)
-        .await
-        .expect("body bytes");
-    let json: serde_json::Value = serde_json::from_slice(&resp_body).expect("json");
-    assert_eq!(
-        json["error"], "invalid_request",
-        "error must be invalid_request for FAPI violation"
-    );
 }
 
 /// HEA-2117: POST /authorize must accept a request that omits `user_id` from the
@@ -2217,12 +2152,16 @@ async fn admin_surface_fixture() -> AdminSurfaceFixture {
             },
         )
         .expect("assign narrow role");
+    // The bootstrap dev realm requires MFA; the sub-admin proved TOTP.
     let narrow_session = state
         .identity
         .create_session(
             &realm_id,
             &narrow_uid,
-            &crate::identity::SessionContext::default(),
+            &crate::identity::SessionContext {
+                mfa_proof: crate::identity::MfaProof::Proved,
+                ..Default::default()
+            },
         )
         .expect("narrow session");
     let narrow_tokens = state
@@ -3509,12 +3448,12 @@ async fn a_kdf_shed_rest_response_carries_the_rate_limited_error_code() {
 
 /// The admin registration surfaces (`POST /admin/applications`, `POST
 /// /clients`) and `PATCH /admin/applications/{id}` accept `jwks` (the RFC 7591
-/// object or a JSON string holding one) and `profile`, as the FAPI 2.0 guide
-/// documents. They used to refuse or drop both, so an operator had no REST
-/// path to a `private_key_jwt` client.
+/// object or a JSON string holding one) and `dpop_bound_access_tokens`. They
+/// used to refuse or drop `jwks`, so an operator had no REST path to a
+/// `private_key_jwt` client.
 #[cfg(feature = "dev-endpoints")]
 #[tokio::test]
-async fn admin_registration_accepts_jwks_and_profile() {
+async fn admin_registration_accepts_jwks_and_the_dpop_flag() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let state = test_state_dev(temp_dir.path());
     let (realm_id, token) = bootstrap_dev(&state).await;
@@ -3571,37 +3510,25 @@ async fn admin_registration_accepts_jwks_and_profile() {
             "POST",
             uri.to_string(),
             serde_json::json!({
-                "client_name": "FAPI RP",
+                "client_name": "Key RP",
                 "redirect_uris": ["https://rp.example.com/cb"],
                 "grant_types": ["authorization_code"],
                 "response_types": ["code"],
-                "profile": "fapi2",
+                "dpop_bound_access_tokens": true,
                 "jwks": jwks_value,
             }),
         )
         .await;
         assert_eq!(status, StatusCode::CREATED, "{uri}: {body}");
         let client = stored(body["client_id"].as_str().expect("client_id"));
-        assert!(client.profile().is_fapi2(), "{uri}: profile stored");
+        assert!(client.dpop_bound_access_tokens(), "{uri}: DPoP flag stored");
         assert!(
             client.jwks().is_some_and(|j| j.contains("admin-k1")),
             "{uri}: jwks stored"
         );
     }
 
-    // A FAPI 2.0 registration without keys is refused, not stored public.
-    let (status, body) = send(
-        "POST",
-        "/admin/applications".to_string(),
-        serde_json::json!({
-            "client_name": "keyless", "redirect_uris": ["https://rp.example.com/cb"],
-            "profile": "fapi2",
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "keyless fapi2: {body}");
-
-    // PATCH: a standard client becomes FAPI 2.0 by adding its keys.
+    // PATCH: a client gains keys and the DPoP requirement.
     let (status, body) = send(
         "POST",
         "/admin/applications".to_string(),
@@ -3613,12 +3540,12 @@ async fn admin_registration_accepts_jwks_and_profile() {
     let (status, body) = send(
         "PATCH",
         format!("/admin/applications/{id}"),
-        serde_json::json!({"profile": "fapi2", "jwks": jwks}),
+        serde_json::json!({"dpop_bound_access_tokens": true, "jwks": jwks}),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "patch profile + jwks: {body}");
+    assert_eq!(status, StatusCode::OK, "patch DPoP flag + jwks: {body}");
     let client = stored(&id);
-    assert!(client.profile().is_fapi2());
+    assert!(client.dpop_bound_access_tokens());
     assert!(client.jwks().is_some());
 }
 
@@ -3859,4 +3786,157 @@ async fn a_cluster_outage_answers_503_with_retry_after_and_a_stable_code() {
             "mode {mode}: internal detail leaked: {body}"
         );
     }
+}
+
+/// A realm user who is a member of a fresh organization, with `docs.read`
+/// granted realm-wide and `docs.write` granted inside the organization.
+#[cfg(feature = "dev-endpoints")]
+fn member_with_realm_and_org_grants(
+    state: &AppState,
+    realm_id: &RealmId,
+) -> (crate::core::UserId, crate::core::OrganizationId) {
+    use crate::identity::{CreateOrganizationRequest, CreateUserRequest, OrganizationRole};
+    use crate::rbac::{Permission, Scope, UserPermissionGrant};
+
+    let user = state
+        .identity
+        .create_user(
+            realm_id,
+            &CreateUserRequest {
+                email: "member@suspension.test".into(),
+                display_name: "member".into(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("user")
+        .id()
+        .clone();
+    let org = state
+        .identity
+        .create_organization(
+            realm_id,
+            &CreateOrganizationRequest {
+                name: "acme".into(),
+                slug: "acme-suspension".into(),
+                description: None,
+                config: None,
+                attributes: Default::default(),
+            },
+        )
+        .expect("org")
+        .id()
+        .clone();
+    state
+        .identity
+        .add_member(realm_id, &org, &user, OrganizationRole::Member)
+        .expect("member");
+    for (perm, scope) in [
+        ("docs.read", Scope::Realm),
+        (
+            "docs.write",
+            Scope::Org {
+                org_id: org.clone(),
+            },
+        ),
+    ] {
+        state
+            .rbac
+            .grant_user_permission(
+                realm_id,
+                &UserPermissionGrant {
+                    realm_id: realm_id.clone(),
+                    user_id: user.clone(),
+                    permission: Permission::new(perm).expect("perm"),
+                    scope,
+                    granted_at: crate::core::Timestamp::from_micros(0),
+                    granted_by: None,
+                },
+            )
+            .expect("grant");
+    }
+    (user, org)
+}
+
+/// scope-trim-trusted-core, group 5 (ported from the deleted
+/// `grpc_org_suspension.rs`): a suspended organization grants nothing, so
+/// `GET /admin/users/{id}/effective-permissions?org_id=` must not report its
+/// org-scoped permissions — while realm-scoped ones stay. The REST handler
+/// passed `org_id` straight to the resolver; gRPC filtered it through
+/// `IdentityEngine::active_org_context`.
+#[cfg(feature = "dev-endpoints")]
+#[tokio::test]
+async fn effective_permissions_drop_a_suspended_orgs_grants() {
+    use crate::identity::{OrganizationStatus, UpdateOrganizationRequest};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = test_state_dev(tmp.path());
+    let (realm, token) = bootstrap_dev(&state).await;
+    let realm_id = RealmId::new(realm.parse().expect("realm uuid"));
+    let (user, org) = member_with_realm_and_org_grants(&state, &realm_id);
+    let permissions = |state: Arc<AppState>| {
+        let uri = format!(
+            "/admin/users/{}/effective-permissions?org_id={}",
+            user.as_uuid(),
+            org.as_uuid()
+        );
+        let token = token.clone();
+        let realm = realm.clone();
+        async move {
+            let resp = router(state)
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(uri)
+                        .header("authorization", format!("Bearer {token}"))
+                        .header("x-realm-id", realm)
+                        .body(axum::body::Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(resp.status(), StatusCode::OK);
+            let b = axum::body::to_bytes(resp.into_body(), 64_000)
+                .await
+                .expect("body");
+            let v: serde_json::Value = serde_json::from_slice(&b).expect("json");
+            v["permissions"]
+                .as_array()
+                .expect("permissions")
+                .iter()
+                .filter_map(|p| p.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        }
+    };
+
+    let active = permissions(Arc::clone(&state)).await;
+    assert!(
+        active.contains(&"docs.write".to_string()),
+        "control: {active:?}"
+    );
+    assert!(
+        active.contains(&"docs.read".to_string()),
+        "control: {active:?}"
+    );
+
+    state
+        .identity
+        .update_organization(
+            &realm_id,
+            &org,
+            &UpdateOrganizationRequest {
+                status: Some(OrganizationStatus::Suspended),
+                ..UpdateOrganizationRequest::default()
+            },
+        )
+        .expect("suspend");
+    let suspended = permissions(Arc::clone(&state)).await;
+    assert!(
+        !suspended.contains(&"docs.write".to_string()),
+        "a suspended org must not grant: {suspended:?}"
+    );
+    assert!(
+        suspended.contains(&"docs.read".to_string()),
+        "realm-scoped grants survive: {suspended:?}"
+    );
 }

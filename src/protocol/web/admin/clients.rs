@@ -215,25 +215,11 @@ fn audit_app_event(
 // ID-token signing algorithm (task 26.55)
 // ---------------------------------------------------------------------------
 
-/// Whether FAPI 2.0 applies to a client of `realm` with `profile`, which makes
-/// the engine refuse RS256 ID tokens for it: FAPI 2.0 Security Profile §5.4.1
-/// permits only PS256, ES256 and EdDSA.
-///
-/// The forms use this only to stop offering RS256. The engine makes the
-/// decision itself, with the same test, and the handlers render its
-/// [`IdentityError::FapiViolation`] as a form error, so a form that still
-/// offers RS256 gets a readable refusal.
-fn fapi_forbids_rs256(realm: &Realm, profile: crate::identity::ClientProfile) -> bool {
-    profile.is_fapi2() || realm.config().fapi_profile.is_some()
-}
-
 /// The ID-token algorithm an edit-form post changes a client to, if any.
 ///
 /// The edit form always posts the radio's value, so getting the stored value
-/// back is no change, just as an omitted field is none on the REST and gRPC
-/// updates. Forwarding it anyway would re-validate a choice nobody made: an
-/// RS256 client whose realm has since turned on a `fapi_profile` could not be
-/// saved at all, even for an unrelated field. An empty value (no radio posted,
+/// back is no change, just as an omitted field is none on the REST update.
+/// Forwarding it anyway would re-validate a choice nobody made. An empty value (no radio posted,
 /// as when the selected one is disabled) is no change either. `stored` is
 /// `None` when the client could not be read; the value is then forwarded and
 /// the engine answers for the client.
@@ -271,8 +257,6 @@ struct AppNewTemplate {
     form_access_token_authorization: String,
     /// `"EdDSA"` or `"RS256"` — the client's ID-token signing algorithm.
     form_id_token_signed_response_alg: String,
-    /// The realm has a `fapi_profile`, so RS256 is not offered.
-    fapi_forbids_rs256: bool,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -306,8 +290,6 @@ impl AppNewTemplate {
             form_access_token_authorization: "embedded".to_string(),
             // Hearth's administrative default; RS256 is opt-in (task 26.55).
             form_id_token_signed_response_alg: "EdDSA".to_string(),
-            // The console registers standard-profile clients only.
-            fapi_forbids_rs256: fapi_forbids_rs256(realm, crate::identity::ClientProfile::Standard),
             chrome: true,
             active: "applications",
             user_email: Some(session.user_email.clone()),
@@ -447,10 +429,9 @@ fn parse_app_create_form(form: &AppCreateForm) -> RegisterClientRequest {
         cors_origins: Vec::new(),
         jwks: None,
         jwks_uri: None,
-        authorization_signed_response_alg: None,
         id_token_signed_response_alg: (!form.id_token_signed_response_alg.is_empty())
             .then(|| form.id_token_signed_response_alg.clone()),
-        profile: crate::identity::ClientProfile::Standard,
+        dpop_bound_access_tokens: false,
         mfa_required: None,
     }
 }
@@ -493,9 +474,8 @@ pub async fn admin_app_create_submit(
             ))
             .into_response()
         }
-        // A FAPI refusal (RS256 in a realm with a `fapi_profile`, task 26.55)
-        // is the operator's to fix, like any invalid input: say why.
-        Err(IdentityError::InvalidInput { reason } | IdentityError::FapiViolation { reason }) => {
+        // Invalid input is the operator's to fix: say why.
+        Err(IdentityError::InvalidInput { reason }) => {
             let mut tpl = AppNewTemplate::blank(&target.0, &session, &state);
             tpl.error = Some(reason);
             tpl.form_client_name = form.client_name.clone();
@@ -550,13 +530,6 @@ struct AppEditTemplate {
     form_access_token_authorization: String,
     /// `"EdDSA"` or `"RS256"` — the client's ID-token signing algorithm.
     form_id_token_signed_response_alg: String,
-    /// FAPI 2.0 applies to the client (its profile or its realm's), so RS256
-    /// is not offered.
-    fapi_forbids_rs256: bool,
-    /// The client is stored as RS256 although FAPI 2.0 applies — its realm
-    /// turned a `fapi_profile` on after it registered — so the engine refuses
-    /// the grants that would issue it an ID token.
-    id_token_grants_refused: bool,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -606,9 +579,6 @@ impl AppEditTemplate {
         }
         .to_string();
         let id_token_alg = app.id_token_signed_response_alg();
-        let fapi_forbids_rs256 = fapi_forbids_rs256(realm, app.profile());
-        let id_token_grants_refused =
-            fapi_forbids_rs256 && id_token_alg == crate::identity::IdTokenSigningAlg::Rs256;
 
         Self {
             app,
@@ -627,8 +597,6 @@ impl AppEditTemplate {
             form_client_logo_url: client_logo_url,
             form_access_token_authorization: access_token_authorization_mode,
             form_id_token_signed_response_alg: id_token_alg.as_str().to_string(),
-            fapi_forbids_rs256,
-            id_token_grants_refused,
             chrome: true,
             active: "applications",
             user_email: Some(session.user_email.clone()),
@@ -850,14 +818,13 @@ pub async fn admin_app_edit_submit(
         status: None,
         assertion_public_key: None,
         access_token_authorization,
-        authorization_signed_response_alg: None,
         id_token_signed_response_alg: changed_id_token_alg(
             &form.id_token_signed_response_alg,
             existing
                 .as_ref()
                 .map(OAuthClient::id_token_signed_response_alg),
         ),
-        profile: None,
+        dpop_bound_access_tokens: None,
         jwks: None,
         mfa_required: None,
     };
@@ -877,9 +844,8 @@ pub async fn admin_app_edit_submit(
         Err(IdentityError::InvalidClient) => {
             super::handlers_common::not_found("Application not found")
         }
-        // A FAPI refusal (RS256 where FAPI 2.0 applies, task 26.55) is the
-        // operator's to fix, like any invalid input: say why.
-        Err(IdentityError::InvalidInput { reason } | IdentityError::FapiViolation { reason }) => {
+        // Invalid input is the operator's to fix: say why.
+        Err(IdentityError::InvalidInput { reason }) => {
             match state.identity.get_client(target.id(), &client_id) {
                 Ok(Some(app)) => {
                     let mut tpl = AppEditTemplate::from_client(app, &target.0, &session, &state);
@@ -978,8 +944,7 @@ mod tests {
 
     /// Task 26.55: the edit form always posts the ID-token radio, so only a
     /// value that differs from the stored one is a change. Re-posting the
-    /// stored RS256 must not reach the engine, which would refuse it once the
-    /// realm has a `fapi_profile`, and block an unrelated edit.
+    /// stored RS256 must not reach the engine as a change.
     #[test]
     fn edit_form_forwards_only_a_changed_id_token_algorithm() {
         use crate::identity::IdTokenSigningAlg::{EdDsa, Rs256};

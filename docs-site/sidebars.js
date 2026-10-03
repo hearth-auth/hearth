@@ -45,7 +45,6 @@ const sidebars = {
         'client-scoped-roles',
         'organizations',
         'required-actions',
-        'sms-mfa-deployment',
         'session-version-revocation',
         'webhooks',
         'federation',
@@ -57,7 +56,6 @@ const sidebars = {
       label: 'Security',
       items: [
         'security-model',
-        'fapi2',
       ],
     },
     {
@@ -83,12 +81,11 @@ const sidebars = {
       label: 'SDKs',
       link: { type: 'doc', id: 'sdks/overview' },
       items: [
-        'sdks/typescript',
         {
           type: 'category',
-          label: 'Node.js',
-          link: { type: 'doc', id: 'sdks/node' },
-          items: ['sdks/node-nextjs'],
+          label: 'TypeScript',
+          link: { type: 'doc', id: 'sdks/typescript' },
+          items: ['sdks/typescript-nextjs'],
         },
         {
           type: 'category',
@@ -104,21 +101,9 @@ const sidebars = {
         },
         {
           type: 'category',
-          label: 'Rust',
-          link: { type: 'doc', id: 'sdks/rust' },
-          items: ['sdks/rust-actix'],
-        },
-        {
-          type: 'category',
           label: 'PHP',
           link: { type: 'doc', id: 'sdks/php' },
           items: ['sdks/php-laravel'],
-        },
-        {
-          type: 'category',
-          label: 'Kotlin',
-          link: { type: 'doc', id: 'sdks/kotlin' },
-          items: ['sdks/kotlin-ktor', 'sdks/kotlin-spring'],
         },
         'sdks/migration-from-keycloak',
       ],

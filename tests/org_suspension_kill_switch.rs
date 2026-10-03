@@ -41,7 +41,7 @@ fn make_org(h: &common::TestHarness, realm: &RealmId, slug: &str) -> Organizatio
                 name: slug.to_string(),
                 slug: slug.to_string(),
                 description: None,
-                config: Some(OrganizationConfig { max_members: None }),
+                config: Some(OrganizationConfig::default()),
                 ..Default::default()
             },
         )
@@ -89,7 +89,7 @@ fn set_status(
 
 #[tokio::test]
 async fn suspended_org_blocks_token_issuance_in_that_org_context() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let org = make_org(&h, &realm, "acme-suspend-token");
     let user = make_user(&h, &realm);
@@ -138,7 +138,7 @@ async fn suspended_org_blocks_token_issuance_in_that_org_context() {
 
 #[tokio::test]
 async fn archived_org_blocks_token_issuance_in_that_org_context() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let org = make_org(&h, &realm, "acme-archived-token");
     let user = make_user(&h, &realm);
@@ -171,7 +171,7 @@ async fn archived_org_blocks_token_issuance_in_that_org_context() {
 
 #[tokio::test]
 async fn suspended_org_does_not_block_realm_scoped_token_issuance() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let org = make_org(&h, &realm, "acme-suspend-realm-scope");
     let user = make_user(&h, &realm);
@@ -294,7 +294,7 @@ fn decide(h: &common::TestHarness, realm: &RealmId, token: &str, perm: &str, org
 
 #[tokio::test]
 async fn suspended_org_strips_org_scoped_authority_from_the_decision_endpoint() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let org = make_org(&h, &realm, "acme-decide");
     let user = make_user(&h, &realm);
@@ -327,7 +327,7 @@ async fn suspended_org_strips_org_scoped_authority_from_the_decision_endpoint() 
 
 #[tokio::test]
 async fn suspended_org_blocks_member_role_changes() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let org = make_org(&h, &realm, "acme-role-change");
     let user = make_user(&h, &realm);

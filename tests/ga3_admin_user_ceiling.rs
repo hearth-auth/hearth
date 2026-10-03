@@ -6,7 +6,7 @@
 //! holds every admin permission the target holds.
 //!
 //! Before the fix, `hearth.users.admin` alone could rewrite a superuser's
-//! email over REST, gRPC or the SCIM admin-JWT fallback, then reset the
+//! email over REST or the SCIM admin-JWT fallback, then reset the
 //! password — a sub-admin to `hearth.admin` escalation. One shared rule
 //! (`hearth::protocol::admin_auth::check_user_admin_ceiling`) now guards every
 //! user-administration surface; this file drives each of them.
@@ -23,13 +23,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use hearth::core::{RealmId, UserId};
 use hearth::identity::{CreateRealmRequest, CreateUserRequest, SessionContext, UserStatus};
-use hearth::protocol::admin_auth::AdminRateLimiter;
-use hearth::protocol::grpc::identity::IdentityAdminSvc;
-use hearth::protocol::grpc::server::GrpcState;
 use hearth::protocol::http::{router, AppState};
-use hearth::protocol::proto::identity::v1::{
-    self as pb, identity_admin_service_server::IdentityAdminService,
-};
 use hearth::rbac::{AssignRoleRequest, Scope, Subject};
 use serde_json::json;
 use tower::ServiceExt as _;
@@ -44,7 +38,7 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
-        let h = common::TestHarness::embedded().await.expect("harness");
+        let h = common::TestHarness::in_process().await.expect("harness");
         let realm = h
             .identity()
             .create_realm(&CreateRealmRequest {
@@ -61,15 +55,6 @@ impl Fixture {
             h.audit_arc(),
         )));
         Self { h, realm, app }
-    }
-
-    fn grpc(&self) -> IdentityAdminSvc {
-        IdentityAdminSvc::new(GrpcState::new(
-            self.h.identity_arc(),
-            self.h.rbac_arc(),
-            self.h.audit_arc(),
-            Arc::new(AdminRateLimiter::new()),
-        ))
     }
 
     /// Creates a user holding exactly the named seeded roles.
@@ -198,23 +183,6 @@ impl Fixture {
         self.rest(method, uri, bearer, body, "application/scim+json")
             .await
     }
-
-    fn grpc_req<T>(&self, token: &str, msg: T) -> tonic::Request<T> {
-        let mut r = tonic::Request::new(msg);
-        r.metadata_mut().insert(
-            "authorization",
-            format!("Bearer {token}").parse().expect("valid header"),
-        );
-        r.metadata_mut().insert(
-            "x-realm-id",
-            self.realm
-                .as_uuid()
-                .to_string()
-                .parse()
-                .expect("valid header"),
-        );
-        r
-    }
 }
 
 fn user_uri(id: &UserId) -> String {
@@ -271,8 +239,7 @@ async fn rest_users_admin_cannot_reemail_or_delete_superuser() {
     assert_eq!(f.email(&superuser), before, "email must be untouched");
 }
 
-/// Forcing a required action (e.g. `UPDATE_PASSWORD`) and erasing device
-/// fingerprints are user modifications too.
+/// Forcing a required action (e.g. `UPDATE_PASSWORD`) is a user modification too.
 #[tokio::test]
 async fn rest_users_admin_cannot_reset_superuser_state() {
     let f = Fixture::new().await;
@@ -291,17 +258,8 @@ async fn rest_users_admin_cannot_reset_superuser_state() {
             Some(json!({"add": ["UPDATE_PASSWORD"]})),
         )
         .await;
-    let fingerprints = f
-        .admin(
-            "DELETE",
-            &format!("/admin/users/{}/device-fingerprints", superuser.as_uuid()),
-            &token,
-            None,
-        )
-        .await;
 
     assert_eq!(actions, StatusCode::FORBIDDEN, "required-actions");
-    assert_eq!(fingerprints, StatusCode::FORBIDDEN, "device-fingerprints");
     let stored =
         f.h.identity()
             .get_user(&f.realm, &superuser)
@@ -414,69 +372,6 @@ async fn rest_superuser_manages_another_superuser() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(f.email(&other), "root2-renamed@ga3.test");
-}
-
-// ── gRPC UpdateUser / DeleteUser ─────────────────────────────────────────────
-
-#[tokio::test]
-async fn grpc_users_admin_cannot_update_or_delete_superuser() {
-    let f = Fixture::new().await;
-    let svc = f.grpc();
-    let superuser = f.user("root", &["realm.admin"]);
-    let before = f.email(&superuser);
-    let token = f.actor(&["hearth.users.admin"]);
-
-    let update = svc
-        .update_user(f.grpc_req(
-            &token,
-            pb::UpdateUserCall {
-                id: superuser.as_uuid().to_string(),
-                body: Some(pb::UpdateUserRequest {
-                    email: Some("attacker@evil.test".into()),
-                    ..Default::default()
-                }),
-            },
-        ))
-        .await
-        .expect_err("UpdateUser on a superuser must be refused");
-    let delete = svc
-        .delete_user(f.grpc_req(
-            &token,
-            pb::DeleteUserRequest {
-                id: superuser.as_uuid().to_string(),
-            },
-        ))
-        .await
-        .expect_err("DeleteUser on a superuser must be refused");
-
-    assert_eq!(update.code(), tonic::Code::PermissionDenied, "UpdateUser");
-    assert_eq!(delete.code(), tonic::Code::PermissionDenied, "DeleteUser");
-    assert_eq!(f.email(&superuser), before);
-}
-
-#[tokio::test]
-async fn grpc_users_admin_still_updates_plain_user() {
-    let f = Fixture::new().await;
-    let svc = f.grpc();
-    let plain = f.user("plain", &[]);
-    let token = f.actor(&["hearth.users.admin"]);
-
-    let user = svc
-        .update_user(f.grpc_req(
-            &token,
-            pb::UpdateUserCall {
-                id: plain.as_uuid().to_string(),
-                body: Some(pb::UpdateUserRequest {
-                    email: Some("plain-renamed@ga3.test".into()),
-                    ..Default::default()
-                }),
-            },
-        ))
-        .await
-        .expect("UpdateUser on a plain user")
-        .into_inner();
-
-    assert_eq!(user.email, "plain-renamed@ga3.test");
 }
 
 // ── SCIM /Users (admin-JWT fallback) ─────────────────────────────────────────

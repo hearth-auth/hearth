@@ -1,13 +1,13 @@
 //! Shared rate limiters for admin and token endpoints.
 //!
 //! [`AdminRateLimiter`] tracks per-admin-user request counts in a rolling
-//! 1-minute window, shared between HTTP and gRPC surfaces.
+//! 1-minute window.
 //!
 //! [`TokenRateLimiter`] tracks per-`(realm, client_id)` request counts on the
 //! OAuth token, introspection, and device-authorization endpoints.
 //!
-//! The module also holds the admission rules every admin surface (REST, gRPC,
-//! SCIM) shares, so the surfaces cannot drift apart: [`ADMIN_PERMISSIONS`],
+//! The module also holds the admission rules every admin surface (REST, SCIM)
+//! shares, so the surfaces cannot drift apart: [`ADMIN_PERMISSIONS`],
 //! [`grants_admin_permission`] and [`REALMS_ARE_YAML_MANAGED`].
 
 use std::sync::{Mutex, PoisonError};
@@ -475,8 +475,7 @@ impl JwksRateLimiter {
 ///
 /// Realms are declared in `hearth.yaml` and reconciled from it, so no API
 /// writes them: REST `POST /admin/realms` and `PATCH /admin/realms/{id}`
-/// answer `405`, gRPC `CreateRealm` and `UpdateRealm` answer
-/// `FAILED_PRECONDITION`, all with this message. gRPC `UpdateRealm` used to
+/// answer `405` with this message. The removed gRPC `UpdateRealm` used to
 /// replace the realm's whole config with the three fields its proto carries
 /// plus defaults, silently dropping the MFA, CIDR, lockout, SCIM-token and
 /// webhook settings until the next reload (GA audit round 3, G-7).
@@ -488,8 +487,8 @@ pub const REALMS_ARE_YAML_MANAGED: &str =
 pub const SUPERUSER_PERMISSION: &str = "hearth.admin";
 
 /// Every admin-grade permission. Holding any one of them admits a token to the
-/// administrative plane: REST `extract_admin_auth`, gRPC `authenticate_admin`
-/// and the SCIM admin-JWT fallback all test against this list, and each
+/// administrative plane: REST `extract_admin_auth` and the SCIM admin-JWT
+/// fallback both test against this list, and each
 /// endpoint then narrows to the one sub-permission it needs.
 ///
 /// The same list is the set of principals a SCIM provisioning token may not
@@ -519,7 +518,7 @@ pub fn is_admin_permission(permission: &str) -> bool {
 /// `required` itself must be present.
 ///
 /// This is the one per-endpoint rule shared by REST
-/// (`require_admin_permission`), gRPC (`grpc_require_permission`) and SCIM.
+/// (`require_admin_permission`) and SCIM.
 #[must_use]
 pub fn grants_admin_permission(permissions: &[String], required: &str) -> bool {
     permissions
@@ -647,12 +646,12 @@ fn ceiling_too_large(realm_id: &RealmId, what: &str) -> UserCeilingError {
 /// surfaces are REST `/admin/users*`,
 /// `/admin/realms/{id}/users/{id}/required-actions`, session and consent
 /// revocation, role unassignment, group-member removal and group deletion,
-/// role update and deletion; the gRPC twins and `DeleteOrganization`; and
-/// SCIM `/Users` and `/Groups`. Without it a sub-admin could rewrite a
-/// superuser's email and reset the password, or strip their role (GA audit
-/// round 3). The web console admits only `hearth.admin`, which satisfies the
-/// ceiling by construction; YAML reconciliation is operator-authoritative and
-/// exempt.
+/// role update and deletion, organization deletion and suspension, and
+/// removal of a member's organization role; and SCIM `/Users` and `/Groups`.
+/// Without it a sub-admin could rewrite a superuser's email and reset the
+/// password, or strip their role (GA audit round 3). The web console admits
+/// only `hearth.admin`, which satisfies the ceiling by construction; YAML
+/// reconciliation is operator-authoritative and exempt.
 ///
 /// # Errors
 ///
@@ -1334,8 +1333,7 @@ pub enum AdminRealmScope {
 }
 
 /// The realm-level object-authorization rule (BOLA guard) shared by every
-/// admin surface that takes a realm id: REST `/admin/realms/{id}/*` and gRPC
-/// `GetRealm` / `DeleteRealm`.
+/// admin surface that takes a realm id: REST `/admin/realms/{id}/*`.
 ///
 /// - `caller_realm == target_realm`: no boundary is crossed, always permitted.
 /// - A tenant realm may not address another realm: [`AdminRealmScope::OtherRealm`].
@@ -1351,9 +1349,9 @@ pub enum AdminRealmScope {
 ///      system realm's management plane on every deployment that has never
 ///      authored a policy.
 ///
-/// gRPC `GetRealm` / `DeleteRealm` used to apply only the first two rules, so
-/// a policy that refused the system realm held on REST and not on gRPC (GA
-/// audit round 3).
+/// The removed gRPC `GetRealm` / `DeleteRealm` applied only the first two
+/// rules, so a policy that refused the system realm held on REST and not on
+/// gRPC (GA audit round 3).
 ///
 /// # Errors
 ///

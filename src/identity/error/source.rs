@@ -25,7 +25,6 @@ impl std::error::Error for IdentityError {
             | Self::InvalidAuthorizationCode
             | Self::InvalidGrant { .. }
             | Self::InvalidClientSecret
-            | Self::PrivateKeyJwtRequired
             | Self::InvalidClientAssertion { .. }
             | Self::AuthorizationPending
             | Self::SlowDown
@@ -96,11 +95,7 @@ impl std::error::Error for IdentityError {
             | Self::AuthMethodNotAllowed { .. }
             | Self::MfaMethodNotAllowed { .. }
             | Self::WebhookNotFound
-            | Self::StepUpChallengeRequired
-            | Self::EnrollMfaRequired
             | Self::RequiredActionsBlocking { .. }
-            | Self::InvalidSmsOtp
-            | Self::SmsResendLimitExceeded
             | Self::InvalidEmailOtp
             | Self::InvalidPushedAuthorizationRequest
             | Self::InvalidDPopProof { .. }
@@ -112,7 +107,6 @@ impl std::error::Error for IdentityError {
             | Self::InvalidJar { .. }
             | Self::SessionVersionDisabled
             | Self::SessionLimitExceeded { .. }
-            | Self::FapiViolation { .. }
             | Self::EmailReserved
             | Self::EmailChangeTokenInvalid
             | Self::SilentAuthRateLimited

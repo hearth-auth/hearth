@@ -139,7 +139,7 @@ async fn setup_realm_and_client(harness: &common::TestHarness) -> (String, Strin
 
 #[tokio::test]
 async fn dpop_client_credentials_bound_token() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let (realm_id, client_id, client_secret) = setup_realm_and_client(&h).await;
     let state = Arc::new(AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()));
 
@@ -218,7 +218,7 @@ async fn dpop_client_credentials_bound_token() {
 
 #[tokio::test]
 async fn dpop_access_token_carries_cnf_jkt() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let (realm_id, client_id, client_secret) = setup_realm_and_client(&h).await;
     let state = Arc::new(AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()));
 
@@ -298,7 +298,7 @@ async fn dpop_access_token_carries_cnf_jkt() {
 
 #[tokio::test]
 async fn dpop_replay_rejected() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let (realm_id, client_id, client_secret) = setup_realm_and_client(&h).await;
     // Share the same AppState (and JTI cache) across all requests.
     let state = Arc::new(AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()));
@@ -366,7 +366,7 @@ async fn dpop_replay_rejected() {
 
 #[tokio::test]
 async fn dpop_invalid_proof_rejected() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let (realm_id, client_id, client_secret) = setup_realm_and_client(&h).await;
     let app = build_app_with_key(&h, [0u8; 32]).await;
 
@@ -404,7 +404,7 @@ async fn dpop_invalid_proof_rejected() {
 
 #[tokio::test]
 async fn no_dpop_yields_bearer_token_with_nonce_header() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let (realm_id, client_id, client_secret) = setup_realm_and_client(&h).await;
     let app = build_app_with_key(&h, [0u8; 32]).await;
 
@@ -458,7 +458,7 @@ async fn no_dpop_yields_bearer_token_with_nonce_header() {
 #[tokio::test]
 async fn dpop_nonce_required_missing_nonce_rejected() {
     let nonce_secret = [0xAB_u8; 32];
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let (realm_id, client_id, client_secret) = setup_realm_and_client(&h).await;
     let state = Arc::new(
         AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc())
@@ -540,7 +540,7 @@ async fn dpop_nonce_required_missing_nonce_rejected() {
 /// nonce directly with the secret.
 #[tokio::test]
 async fn app_state_with_dpop_nonce_secret_stores_value() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let secret = [0xDE_u8; 32];
     let state =
         AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()).with_dpop_nonce_secret(secret);
@@ -559,7 +559,7 @@ async fn app_state_with_dpop_nonce_secret_stores_value() {
 /// zero or unstable secret would silently break DPoP-Nonce validation.
 #[tokio::test]
 async fn auto_generated_dpop_nonce_secret_is_nonzero() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
 
     let secret1 = h.identity().get_realm_dpop_nonce_secret(&realm).unwrap();
@@ -586,7 +586,7 @@ async fn auto_generated_dpop_nonce_secret_is_nonzero() {
 /// from one realm do not validate against another).
 #[tokio::test]
 async fn dpop_nonce_secret_hex_decodes_correctly() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm_a = h.create_realm();
     let realm_b = h.create_realm();
 
@@ -646,7 +646,7 @@ fn make_resource_dpop_proof(key: &DPopKey, htm: &str, htu: &str, access_token: &
 /// endpoint MUST be rejected with 401 — not silently accepted.
 #[tokio::test]
 async fn dpop_cnf_bound_token_without_proof_at_resource_endpoint_is_401() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let (realm_id, client_id, client_secret) = setup_realm_and_client(&h).await;
     // Share AppState so the JTI cache is consistent across both legs.
     let state = Arc::new(AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()));
@@ -756,7 +756,7 @@ async fn dpop_cnf_bound_token_without_proof_at_resource_endpoint_is_401() {
 /// (e.g. sub parsing for a client-credentials token) is unrelated to DPoP.
 #[tokio::test]
 async fn dpop_cnf_bound_token_with_valid_proof_at_resource_endpoint_passes_auth() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let (realm_id, client_id, client_secret) = setup_realm_and_client(&h).await;
     let state = Arc::new(AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()));
     let token_app = router(Arc::clone(&state));
@@ -867,7 +867,7 @@ async fn dpop_cnf_bound_token_with_valid_proof_at_resource_endpoint_passes_auth(
 
 #[tokio::test]
 async fn dpop_htm_mismatch_rejected() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let (realm_id, client_id, client_secret) = setup_realm_and_client(&h).await;
     let app = build_app_with_key(&h, [0u8; 32]).await;
 

@@ -39,11 +39,6 @@
 # GHSA-g7r4-m6w7-qqqr suppressed `esbuild`, which is not installed in any
 # scanned lockfile. A suppression that matches nothing is coverage on paper.
 
-# guard: package=rsa lockfile=sdks/rust/Cargo.lock
-[[IgnoredVulns]]
-id = "RUSTSEC-2023-0071"
-reason = "Marvin Attack timing side-channel in the rsa crate. Scope correction (audit 2026-08-28 §4.12#15): the server does not link rsa at all — it is absent from the root Cargo.lock. rsa reaches exactly one scanned tree, sdks/rust/Cargo.lock, as a transitive dependency of jsonwebtoken. The advisory's only affected code path is PKCS#1 v1.5 decryption; the Rust SDK performs no RSA decryption, and Hearth signs Ed25519 only (CLAUDE.md: no HS256, no alg:none). No patched version of rsa is available; revisit when rsa 0.10+ lands in the jsonwebtoken dependency tree. Tracked in HEA-116."
-
 # guard: package=golang.org/x/crypto lockfile=sdks/go/go.mod
 [[IgnoredVulns]]
 id = "GO-2026-5932"
@@ -108,6 +103,23 @@ reason = "Same bundled undici 6.28.0 inside the npm CLI (node_modules/npm/node_m
 [[IgnoredVulns]]
 id = "GHSA-r53p-7pc4-xj5r"
 reason = "Same bundled undici 6.28.0 inside the npm CLI (release tooling, dev scope; no npm release bundles >= 6.28.1 as of 2026-09-29). The flaw needs undici's retry interceptor AND an application that forwards the resumed response downstream (a proxy/gateway); npm publish only downloads and uploads, it forwards nothing. Revisit when npm bundles undici >= 6.28.1."
+
+# braces 3.0.3 and http-cache-semantics 4.2.0 are the newest releases of both
+# packages; neither advisory has a patched version (checked 2026-10-03). Both
+# reach Hearth only through build tooling: Docusaurus (docs-site) and the
+# semantic-release toolchain (root package-lock.json, dev scope; the
+# http-cache-semantics copy is bundled inside the npm CLI). None of it ships in
+# the server binary or an SDK. Revisit when a patched release exists.
+
+# guard: package=braces lockfile=docs-site/package-lock.json
+[[IgnoredVulns]]
+id = "GHSA-vfj7-8cjw-p6xm"
+reason = "braces 3.0.3 (latest; no patched release as of 2026-10-03) via micromatch/chokidar in Docusaurus (docs-site build) and @semantic-release/git (release tooling, dev scope). Stack exhaustion on a crafted deeply nested pattern; both tools expand only glob patterns written in this repo, never external input. Revisit when braces publishes a fix."
+
+# guard: package=http-cache-semantics lockfile=docs-site/package-lock.json
+[[IgnoredVulns]]
+id = "GHSA-ch52-4w7c-c8xp"
+reason = "http-cache-semantics 4.2.0 (latest; no patched release as of 2026-10-03) via got/cacheable-request in Docusaurus's update-notifier (docs-site build) and bundled inside the npm CLI (release tooling, dev scope). The flaw discloses cached responses across users of a shared cache; both tools run as one CI user with no shared HTTP cache. Revisit when http-cache-semantics publishes a fix."
 
 # CVE-2026-42507, CVE-2026-42504 and CVE-2026-27145 were removed on 2026-09-28
 # (GA audit supply-chain fix). Their reasons blamed google.golang.org/protobuf

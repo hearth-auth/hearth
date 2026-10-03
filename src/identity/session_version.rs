@@ -226,7 +226,7 @@ impl SessionVersionStore {
             .scan(realm_id, &start_key, &end_key)
             .map_err(Self::storage_err)?;
 
-        let mut deltas = Vec::with_capacity(entries.len().min(limit));
+        let mut deltas = Vec::new();
         let mut next_seq = current_seq;
         for entry in entries.iter().take(limit) {
             match serde_json::from_slice::<SvDeltaEntry>(&entry.value) {

@@ -40,7 +40,7 @@ fn config_with_realm(realm_yaml: RealmYamlConfig) -> hearth::config::Config {
 
 #[tokio::test]
 async fn snapshot_absent_before_first_write() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let snap = load_snapshot(harness.storage()).expect("load_snapshot");
     assert!(
         snap.is_none(),
@@ -50,7 +50,7 @@ async fn snapshot_absent_before_first_write() {
 
 #[tokio::test]
 async fn snapshot_round_trip() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let config = base_config();
     let snap = ConfigSnapshot::from_config(&config);
@@ -70,7 +70,7 @@ async fn snapshot_round_trip() {
 
 #[tokio::test]
 async fn save_is_idempotent() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let config = base_config();
     let snap = ConfigSnapshot::from_config(&config);
@@ -88,7 +88,7 @@ async fn save_is_idempotent() {
 
 #[tokio::test]
 async fn diff_empty_when_config_unchanged() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let config = base_config();
     let snap = ConfigSnapshot::from_config(&config);
@@ -103,7 +103,7 @@ async fn diff_empty_when_config_unchanged() {
 
 #[tokio::test]
 async fn diff_detects_realm_added_between_restarts() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let config_v1 = base_config();
     let snap_v1 = ConfigSnapshot::from_config(&config_v1);
@@ -129,7 +129,7 @@ async fn diff_detects_realm_added_between_restarts() {
 
 #[tokio::test]
 async fn diff_detects_oidc_issuer_change() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let config_v1 = base_config();
     let snap_v1 = ConfigSnapshot::from_config(&config_v1);
@@ -153,7 +153,7 @@ async fn diff_detects_oidc_issuer_change() {
 
 #[tokio::test]
 async fn diff_detects_email_transport_change() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let config_v1 = base_config();
     let snap_v1 = ConfigSnapshot::from_config(&config_v1);
@@ -177,7 +177,7 @@ async fn diff_detects_email_transport_change() {
 
 #[tokio::test]
 async fn diff_detects_realm_settings_changed() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let config_v1 = config_with_realm(RealmYamlConfig::default());
     let snap_v1 = ConfigSnapshot::from_config(&config_v1);
@@ -205,7 +205,7 @@ async fn diff_detects_realm_settings_changed() {
 
 #[tokio::test]
 async fn diff_detects_mfa_policy_changed() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let config_v1 = config_with_realm(RealmYamlConfig::default());
     let snap_v1 = ConfigSnapshot::from_config(&config_v1);
@@ -235,7 +235,7 @@ async fn diff_detects_mfa_policy_changed() {
 
 #[tokio::test]
 async fn diff_detects_theme_changed() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let config_v1 = config_with_realm(RealmYamlConfig::default());
     let snap_v1 = ConfigSnapshot::from_config(&config_v1);
@@ -265,7 +265,7 @@ async fn diff_detects_theme_changed() {
 
 #[tokio::test]
 async fn diff_detects_token_ttl_changed() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let config_v1 = config_with_realm(RealmYamlConfig::default());
     let snap_v1 = ConfigSnapshot::from_config(&config_v1);
@@ -298,7 +298,7 @@ async fn diff_detects_token_ttl_changed() {
 
 #[tokio::test]
 async fn diff_detects_org_added() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let config_v1 = config_with_realm(RealmYamlConfig::default());
     let snap_v1 = ConfigSnapshot::from_config(&config_v1);
@@ -334,7 +334,7 @@ async fn diff_detects_org_added() {
 
 #[tokio::test]
 async fn diff_detects_org_removed() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let mut realm_v1 = RealmYamlConfig::default();
     let mut orgs = std::collections::HashMap::new();
@@ -369,7 +369,7 @@ async fn diff_detects_org_removed() {
 
 #[tokio::test]
 async fn diff_detects_application_added() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let config_v1 = config_with_realm(RealmYamlConfig::default());
     let snap_v1 = ConfigSnapshot::from_config(&config_v1);
@@ -392,7 +392,7 @@ async fn diff_detects_application_added() {
             trust_level: None,
             declared_scopes: None,
             consent_spans_orgs: None,
-            profile: None,
+            dpop_bound_access_tokens: None,
             jwks: None,
             id_token_signed_response_alg: None,
         },
@@ -417,7 +417,7 @@ async fn diff_detects_application_added() {
 
 #[tokio::test]
 async fn diff_detects_application_removed() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let mut realm_v1 = RealmYamlConfig::default();
     let mut apps = std::collections::HashMap::new();
@@ -436,7 +436,7 @@ async fn diff_detects_application_removed() {
             trust_level: None,
             declared_scopes: None,
             consent_spans_orgs: None,
-            profile: None,
+            dpop_bound_access_tokens: None,
             jwks: None,
             id_token_signed_response_alg: None,
         },
@@ -464,7 +464,7 @@ async fn diff_detects_application_removed() {
 
 #[tokio::test]
 async fn diff_detects_role_added() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let config_v1 = config_with_realm(RealmYamlConfig::default());
     let snap_v1 = ConfigSnapshot::from_config(&config_v1);
@@ -498,7 +498,7 @@ async fn diff_detects_role_added() {
 
 #[tokio::test]
 async fn diff_detects_role_removed() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let config_v1 = config_with_realm(RealmYamlConfig {
         roles: Some(vec![RoleYamlConfig {
@@ -531,7 +531,7 @@ async fn diff_detects_role_removed() {
 
 #[tokio::test]
 async fn diff_detects_group_added() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let config_v1 = config_with_realm(RealmYamlConfig::default());
     let snap_v1 = ConfigSnapshot::from_config(&config_v1);
@@ -563,7 +563,7 @@ async fn diff_detects_group_added() {
 
 #[tokio::test]
 async fn diff_detects_group_removed() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let config_v1 = config_with_realm(RealmYamlConfig {
         groups: Some(vec![GroupYamlConfig {
@@ -596,7 +596,7 @@ async fn diff_detects_group_removed() {
 async fn no_within_realm_diffs_for_new_realm() {
     // When a realm is new (RealmAdded), org/app/role/group diffs must NOT be
     // emitted for it — only RealmAdded should appear.
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let config_v1 = base_config(); // no realms
     let snap_v1 = ConfigSnapshot::from_config(&config_v1);
@@ -650,7 +650,7 @@ async fn no_within_realm_diffs_for_new_realm() {
 
 #[tokio::test]
 async fn apply_diff_config_only_returns_ok() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let config_v1 = base_config();
     let snap_v1 = ConfigSnapshot::from_config(&config_v1);
@@ -679,7 +679,7 @@ async fn apply_diff_config_only_returns_ok() {
 
 #[tokio::test]
 async fn apply_diff_org_added_creates_org_in_storage() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     // Create the realm in storage so apply_diff can look it up.
     let realm = harness
@@ -729,7 +729,7 @@ async fn apply_diff_org_added_creates_org_in_storage() {
 
 #[tokio::test]
 async fn apply_diff_idempotent_on_org_added() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let realm = harness
         .identity()
@@ -793,7 +793,7 @@ async fn apply_diff_idempotent_on_org_added() {
 
 #[tokio::test]
 async fn apply_diff_role_added_creates_role_in_storage() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let realm = harness
         .identity()
@@ -838,7 +838,7 @@ async fn apply_diff_role_added_creates_role_in_storage() {
 
 #[tokio::test]
 async fn apply_diff_group_added_creates_group_in_storage() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let realm = harness
         .identity()

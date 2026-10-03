@@ -26,10 +26,9 @@
 //! `prompt=none` (OIDC Core §3.1.2.1) forbids any UI, so every gate that
 //! would suspend the flow asks [`refuse_if_silent`] first and, for a silent
 //! request, answers the client with an error instead: `interaction_required`
-//! for a pending required action, `login_required` for the SMS factor,
-//! `consent_required` for consent. The first two gates used to redirect a
-//! silent request into their interactive page — and the SMS gate texted the
-//! user a code on every silent renew.
+//! for a pending required action, `consent_required` for consent. The
+//! required-action gate used to redirect a silent request into its
+//! interactive page.
 
 use std::sync::Arc;
 
@@ -77,8 +76,6 @@ pub(super) struct AuthorizeParams {
     pub response_mode: Option<ResponseMode>,
     /// RFC 8707 resource indicator, from a verified JAR or PAR entry only.
     pub resource: Option<String>,
-    /// Whether the request came through PAR (RFC 9126).
-    pub via_par: bool,
     /// What the browser session authorizing the request proved about a
     /// second factor. The code records it, and the token session its exchange
     /// opens proves exactly that (GA audit round 3, D-7). Set from the
@@ -103,7 +100,6 @@ impl AuthorizeParams {
             prompt: self.prompt.clone(),
             mfa_proof: self.mfa_proof,
             resource: self.resource.clone(),
-            via_par: self.via_par,
         }
     }
 
@@ -124,7 +120,6 @@ impl AuthorizeParams {
             prompt: p.prompt.clone(),
             response_mode: parse_response_mode(p.response_mode.as_deref())?,
             resource: p.resource.clone(),
-            via_par: p.via_par,
             mfa_proof: p.mfa_proof,
         })
     }
@@ -163,8 +158,6 @@ pub(super) fn parse_response_mode(wire: Option<&str>) -> Option<Option<ResponseM
 pub(super) enum Gate {
     /// Pending required actions (password change, enrolment, …).
     RequiredActions,
-    /// The realm's SMS MFA challenge.
-    SmsMfa,
     /// Consent and OIDC `prompt` handling, then code issuance.
     Consent,
 }
@@ -172,8 +165,8 @@ pub(super) enum Gate {
 /// Runs every gate from `from` onward and returns the response: an
 /// interstitial redirect, an error, or the code redirect.
 ///
-/// `amr_values` are the factors proved on the way here (e.g. `["sms"]` after
-/// the SMS challenge); they are bound into the issued code.
+/// `amr_values` are the factors proved on the way here; they are bound into
+/// the issued code.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_authorize_gates(
     state: &Arc<WebState>,
@@ -189,13 +182,6 @@ pub(super) fn run_authorize_gates(
         if let Some(resp) = super::required_action::required_action_intercept(
             state, realm, user_id, params, secure, now,
         ) {
-            return resp;
-        }
-    }
-    if from <= Gate::SmsMfa {
-        if let Some(resp) =
-            super::sms_challenge::sms_mfa_challenge_gate(state, realm, user_id, params, secure)
-        {
             return resp;
         }
     }
@@ -228,19 +214,11 @@ pub(super) fn mfa_use_gate(
     if session.mfa_proof.satisfies_mfa_required() {
         return None;
     }
-    let realm_config = match state.identity.get_realm(realm) {
-        Ok(r) => r.map(|r| r.config().clone()),
-        Err(e) => {
-            tracing::warn!(error = %e, "authorize: realm lookup failed at the MFA-use gate");
-            return Some(handlers_common::server_error());
-        }
-    };
     let client_id = params.client_id.as_uuid().to_string();
-    match super::required_action::client_or_role_requires_mfa(
+    match super::required_action::mfa_requirement_for(
         state,
         realm,
         &session.user_id,
-        realm_config.as_ref(),
         Some(&client_id),
     ) {
         Ok(false) => return None,
@@ -257,14 +235,14 @@ pub(super) fn mfa_use_gate(
         }
     }
 
-    let client = match state.identity.get_client(realm, &params.client_id) {
-        Ok(Some(c)) => c,
+    match state.identity.get_client(realm, &params.client_id) {
+        Ok(Some(_)) => {}
         Ok(None) => return Some(handlers_common::bad_request("unknown client")),
         Err(e) => {
             tracing::warn!(error = %e, "authorize: get_client failed at the MFA-use gate");
             return Some(handlers_common::server_error());
         }
-    };
+    }
     // The unproved session must not be reused for this client: revoke it so
     // the client's retry reaches the login page and its factor challenge.
     if let Err(e) = state.identity.revoke_session(realm, &session.session_id) {
@@ -272,11 +250,9 @@ pub(super) fn mfa_use_gate(
         return Some(handlers_common::server_error());
     }
     let error_return = ErrorReturn {
-        client_id: &params.client_id,
         redirect_uri: &params.redirect_uri,
         state: &params.state,
         response_mode: params.response_mode.as_ref(),
-        jarm_alg: client.authorization_signed_response_alg(),
     };
     Some(authorization_error_redirect(
         state,
@@ -306,20 +282,18 @@ pub(super) fn refuse_if_silent(
     if params.prompt != "none" {
         return None;
     }
-    let client = match state.identity.get_client(realm, &params.client_id) {
-        Ok(Some(c)) => c,
+    match state.identity.get_client(realm, &params.client_id) {
+        Ok(Some(_)) => {}
         Ok(None) => return Some(handlers_common::bad_request("unknown client")),
         Err(e) => {
             tracing::warn!(error = %e, "authorize: get_client failed refusing a silent request");
             return Some(handlers_common::server_error());
         }
-    };
+    }
     let error_return = ErrorReturn {
-        client_id: &params.client_id,
         redirect_uri: &params.redirect_uri,
         state: &params.state,
         response_mode: params.response_mode.as_ref(),
-        jarm_alg: client.authorization_signed_response_alg(),
     };
     let client_id_str = params.client_id.to_string();
     if let Err(crate::identity::IdentityError::SilentAuthRateLimited) = state
@@ -370,13 +344,11 @@ fn consent_gate(
     };
     let client_id_str = params.client_id.to_string();
     // Errors go back the way the code would have: in the request's
-    // response mode, signed when that mode (or the client) calls for JARM.
+    // response mode.
     let error_return = ErrorReturn {
-        client_id: &params.client_id,
         redirect_uri: &params.redirect_uri,
         state: &params.state,
         response_mode: params.response_mode.as_ref(),
-        jarm_alg: client.authorization_signed_response_alg(),
     };
 
     let requested_scopes = canonicalize_scopes(
@@ -464,11 +436,7 @@ fn consent_gate(
             .response_mode
             .as_ref()
             .map(|m| m.as_str().to_string()),
-        authorization_signed_response_alg: client
-            .authorization_signed_response_alg()
-            .map(str::to_string),
         resource: params.resource.clone(),
-        via_par: params.via_par,
         amr_values,
         created_at: now,
         expires_at: now.add_micros(CONSENT_TICKET_TTL_SECS * 1_000_000),
@@ -514,7 +482,6 @@ pub(super) fn issue_code(
         amr_values,
         response_mode: params.response_mode.clone(),
         request: None,
-        via_par: params.via_par,
     };
     match state
         .identity
@@ -554,7 +521,6 @@ mod tests {
             prompt: "consent".to_string(),
             response_mode: Some(ResponseMode::Fragment),
             resource: Some("https://api.example.com".to_string()),
-            via_par: true,
             mfa_proof: MfaProof::Proved,
         }
     }
@@ -573,7 +539,6 @@ mod tests {
         assert_eq!(back.prompt, p.prompt);
         assert_eq!(back.response_mode, p.response_mode);
         assert_eq!(back.resource, p.resource);
-        assert_eq!(back.via_par, p.via_par);
     }
 
     #[test]
@@ -587,11 +552,5 @@ mod tests {
         let mut o = sample().to_oidc_params();
         o.client_id = "not-a-uuid".to_string();
         assert!(AuthorizeParams::from_oidc_params(&o).is_none());
-    }
-
-    #[test]
-    fn gates_are_ordered_required_actions_sms_consent() {
-        assert!(Gate::RequiredActions < Gate::SmsMfa);
-        assert!(Gate::SmsMfa < Gate::Consent);
     }
 }

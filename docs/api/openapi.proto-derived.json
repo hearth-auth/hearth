@@ -1628,7 +1628,7 @@
     },
     "/admin/applications/{clientId}/regenerate-secret": {
       "post": {
-        "summary": "Replaces a confidential client's secret with a new Hearth-generated one (256 bits from the OS CSPRNG, stored only as a hash). The new secret is returned once, in the response's client_secret; the old one stops authenticating at once. Refused for a public client, a FAPI 2.0 client and in a FAPI 2.0 Advanced realm (private_key_jwt only). Audited.",
+        "summary": "Replaces a confidential client's secret with a new Hearth-generated one (256 bits from the OS CSPRNG, stored only as a hash). The new secret is returned once, in the response's client_secret; the old one stops authenticating at once. Refused for a public client. Audited.",
         "operationId": "ApplicationAdminService_RegenerateApplicationSecret",
         "responses": {
           "200": {
@@ -2303,6 +2303,10 @@
         "client_secret": {
           "type": "string",
           "description": "The generated client secret. Present only in the response that created a client_secret_basic or client_secret_post client, or that regenerated its secret, and never returned again: store it on receipt. Hearth keeps only its hash."
+        },
+        "dpop_bound_access_tokens": {
+          "type": "boolean",
+          "description": "RFC 9449 s5.2: when true, every token request from this client must carry a DPoP proof, and every token it gets is bound to the proof's key."
         }
       },
       "description": "A registered OAuth 2.0 client."
@@ -2463,7 +2467,7 @@
             "private_key_jwt",
             "none"
           ],
-          "description": "How the client authenticates at the token endpoint (RFC 7591 \u00a72). client_secret_basic or client_secret_post creates a confidential client: Hearth generates its secret (256 bits from the OS CSPRNG), stores only a hash, and returns the secret exactly once, as client_secret in this create response. private_key_jwt requires jwks. Omitted or none registers a public client (a private_key_jwt client when jwks is given). A client_secret_* method is refused in a FAPI 2.0 Advanced realm, which accepts private_key_jwt only."
+          "description": "How the client authenticates at the token endpoint (RFC 7591 \u00a72). client_secret_basic or client_secret_post creates a confidential client: Hearth generates its secret (256 bits from the OS CSPRNG), stores only a hash, and returns the secret exactly once, as client_secret in this create response. private_key_jwt requires jwks. Omitted or none registers a public client (a private_key_jwt client when jwks is given)."
         }
       },
       "description": "Request to register a new OAuth 2.0 client."

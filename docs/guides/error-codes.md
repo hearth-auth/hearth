@@ -66,7 +66,7 @@ For server-side (5xx) errors, `error_code` is `null` — internal detail is neve
 ### Cluster Availability
 
 Cluster mode only (experimental). Both answer `503 Service Unavailable` with a `Retry-After`
-header; gRPC answers `UNAVAILABLE`. See the
+header. See the
 [clustering guide](./clustering.md#h-3--writes-to-a-follower-forwarded-to-the-leader-fixed).
 
 | Code | Meaning |
@@ -102,8 +102,8 @@ header; gRPC answers `UNAVAILABLE`. See the
 | Code | Meaning |
 |------|---------|
 | `HEARTH_REALM_SUSPENDED` | Realm is suspended; all operations are denied. |
-| `HEARTH_REALM_ARCHIVED` | Suspend or unsuspend was requested for a realm that is archived or being deleted; those realms follow `hearth.yaml` only. Returned as `409` over REST and `FAILED_PRECONDITION` over gRPC. |
-| `HEARTH_REALM_NOT_ARCHIVED` | Permanent deletion was requested for a realm that is not archived. Remove it from `hearth.yaml` and restart to archive it first. Returned as `409` over REST and `FAILED_PRECONDITION` over gRPC. |
+| `HEARTH_REALM_ARCHIVED` | Suspend or unsuspend was requested for a realm that is archived or being deleted; those realms follow `hearth.yaml` only. Returned as `409`. |
+| `HEARTH_REALM_NOT_ARCHIVED` | Permanent deletion was requested for a realm that is not archived. Remove it from `hearth.yaml` and restart to archive it first. Returned as `409`. |
 
 ### Input Validation
 
@@ -117,7 +117,7 @@ header; gRPC answers `UNAVAILABLE`. See the
 |------|---------|
 | `HEARTH_DUPLICATE_EMAIL` | A user with this email already exists in the realm. |
 | `HEARTH_DUPLICATE_REALM_NAME` | A realm with this name already exists. |
-| `HEARTH_YAML_MANAGED_RESOURCE` | The resource is declared in `hearth.yaml`: it cannot be deleted at runtime (the next startup would re-create it), and an application's credentials and security profile (`jwks`, `assertion_public_key`, `profile`) cannot be changed at runtime (the next reload would undo the change — removing runtime-added keys from a secretless application would make it public). Change or remove the declaration and restart. Returned as `409` over REST and `FAILED_PRECONDITION` over gRPC. |
+| `HEARTH_YAML_MANAGED_RESOURCE` | The resource is declared in `hearth.yaml`: it cannot be deleted at runtime (the next startup would re-create it), and an application's credentials and security profile (`jwks`, `assertion_public_key`, `profile`) cannot be changed at runtime (the next reload would undo the change — removing runtime-added keys from a secretless application would make it public). Change or remove the declaration and restart. Returned as `409`. |
 
 ### Organizations
 
@@ -162,7 +162,7 @@ header; gRPC answers `UNAVAILABLE`. See the
 | `HEARTH_CONSENT_TICKET_INVALID` | Consent ticket is invalid or expired. |
 | `HEARTH_CONSENT_SCOPE_NOT_REQUESTED` | Approved scope was not in the original authorization request. |
 | `HEARTH_CONSENT_NOT_FOUND` | No consent record exists for this client. |
-| `HEARTH_CLIENT_MISMATCH` | `POST /authorize` (or gRPC `Authorize`) named a client the bearer token was not issued to. A token may authorize only the client it was issued to; a first-party session token only a first-party client. |
+| `HEARTH_CLIENT_MISMATCH` | `POST /authorize` named a client the bearer token was not issued to. A token may authorize only the client it was issued to; a first-party session token only a first-party client. |
 
 ### Federation
 

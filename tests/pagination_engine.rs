@@ -51,7 +51,7 @@ fn seed_users(identity: &dyn IdentityEngine, rid: &hearth::core::RealmId, count:
 
 #[tokio::test]
 async fn list_users_empty_returns_zero_total() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
     let rid = realm(id);
 
@@ -62,7 +62,7 @@ async fn list_users_empty_returns_zero_total() {
 
 #[tokio::test]
 async fn list_users_total_matches_count() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
     let rid = realm(id);
     seed_users(id, &rid, 7);
@@ -76,7 +76,7 @@ async fn list_users_total_matches_count() {
 
 #[tokio::test]
 async fn list_users_first_page_correct_window() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
     let rid = realm(id);
     seed_users(id, &rid, 10);
@@ -92,7 +92,7 @@ async fn list_users_first_page_correct_window() {
 
 #[tokio::test]
 async fn list_users_last_page_returns_remainder() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
     let rid = realm(id);
     seed_users(id, &rid, 10);
@@ -106,7 +106,7 @@ async fn list_users_last_page_returns_remainder() {
 
 #[tokio::test]
 async fn list_users_beyond_last_page_returns_empty() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
     let rid = realm(id);
     seed_users(id, &rid, 3);
@@ -127,7 +127,7 @@ async fn list_users_beyond_last_page_returns_empty() {
 
 #[tokio::test]
 async fn search_users_returns_total_and_first_page() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
     let rid = realm(id);
 
@@ -174,7 +174,7 @@ async fn search_users_returns_total_and_first_page() {
 async fn search_users_empty_query_matches_all_via_match_all() {
     // Empty query compiles to SearchQuery::MatchAll, which matches every user.
     // Callers that want the fast key-order path use list_users instead.
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
     let rid = realm(id);
     seed_users(id, &rid, 3);
@@ -188,7 +188,7 @@ async fn search_users_empty_query_matches_all_via_match_all() {
 
 #[tokio::test]
 async fn search_users_no_matches_returns_zero_total() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
     let rid = realm(id);
     seed_users(id, &rid, 3);
@@ -208,7 +208,7 @@ async fn search_users_no_matches_returns_zero_total() {
 
 #[tokio::test]
 async fn search_users_beyond_last_returns_empty_items_correct_total() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
     let rid = realm(id);
     seed_users(id, &rid, 3);
@@ -232,7 +232,7 @@ async fn search_users_beyond_last_returns_empty_items_correct_total() {
 
 #[tokio::test]
 async fn list_realms_total_and_first_page() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
 
     // seed 5 extra realms
@@ -257,7 +257,7 @@ async fn list_realms_total_and_first_page() {
 
 #[tokio::test]
 async fn list_realms_beyond_last_returns_empty() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
 
     let r_all = id
@@ -278,7 +278,7 @@ async fn list_realms_beyond_last_returns_empty() {
 
 #[tokio::test]
 async fn list_organizations_total_and_window() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
     let rid = realm(id);
 
@@ -305,7 +305,7 @@ async fn list_organizations_total_and_window() {
 
 #[tokio::test]
 async fn list_organizations_beyond_last_returns_empty() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
     let rid = realm(id);
 
@@ -322,7 +322,7 @@ async fn list_organizations_beyond_last_returns_empty() {
 
 #[tokio::test]
 async fn list_groups_total_and_windowed_pages() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
     let rbac = h.rbac_arc();
     let rid = realm(id);
@@ -354,7 +354,7 @@ async fn list_groups_total_and_windowed_pages() {
 
 #[tokio::test]
 async fn list_groups_empty_returns_zero_total() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
     let rbac = h.rbac_arc();
     let rid = realm(id);

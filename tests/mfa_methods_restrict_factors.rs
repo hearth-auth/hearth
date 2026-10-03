@@ -19,7 +19,7 @@ use hearth::identity::{
 
 /// Creates a realm with the given `mfa_methods` plus one user in it.
 async fn realm_with_methods(methods: Option<Vec<&str>>) -> (common::TestHarness, Realm, User) {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {

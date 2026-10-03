@@ -46,7 +46,7 @@ fn default_request(email: &str) -> RegisterUserRequest {
 
 #[tokio::test]
 async fn full_signup_verify_login_flow() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm_with_policy(&harness, Some(RegistrationPolicy::Open));
 
     let email = format!("alice-{}@example.com", uuid::Uuid::new_v4());
@@ -107,7 +107,7 @@ async fn full_signup_verify_login_flow() {
 
 #[tokio::test]
 async fn signup_rejected_when_policy_disabled() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     // None → Disabled (safe default).
     let realm = create_realm_with_policy(&harness, None);
 
@@ -125,7 +125,7 @@ async fn signup_rejected_when_policy_disabled() {
 
 #[tokio::test]
 async fn signup_domain_restricted_accepts_allowed_domain() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm_with_policy(
         &harness,
         Some(RegistrationPolicy::DomainRestricted(vec![
@@ -142,7 +142,7 @@ async fn signup_domain_restricted_accepts_allowed_domain() {
 
 #[tokio::test]
 async fn signup_domain_restricted_rejects_other_domain() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm_with_policy(
         &harness,
         Some(RegistrationPolicy::DomainRestricted(vec![
@@ -167,7 +167,7 @@ async fn signup_domain_restricted_rejects_other_domain() {
 
 #[tokio::test]
 async fn signup_duplicate_email_returns_generic_success() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm_with_policy(&harness, Some(RegistrationPolicy::Open));
 
     let email = format!("dup-{}@example.com", uuid::Uuid::new_v4());
@@ -204,7 +204,7 @@ async fn signup_duplicate_email_returns_generic_success() {
 
 #[tokio::test]
 async fn verification_link_single_use() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm_with_policy(&harness, Some(RegistrationPolicy::Open));
     let email = format!("once-{}@example.com", uuid::Uuid::new_v4());
     let resp = harness
@@ -232,7 +232,7 @@ async fn verification_link_single_use() {
 
 #[tokio::test]
 async fn signup_rate_limited_per_email() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm_with_policy(&harness, Some(RegistrationPolicy::Open));
 
     let email = format!("burst-{}@example.com", uuid::Uuid::new_v4());
@@ -257,7 +257,7 @@ async fn signup_rate_limited_per_email() {
 
 #[tokio::test]
 async fn signup_rate_limited_per_ip() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm_with_policy(&harness, Some(RegistrationPolicy::Open));
 
     let ip = "198.51.100.42".to_string();
@@ -285,7 +285,7 @@ async fn signup_rate_limited_per_ip() {
 
 #[tokio::test]
 async fn signup_enforces_realm_password_policy() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm_obj = harness
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -322,7 +322,7 @@ async fn signup_enforces_realm_password_policy() {
 
 #[tokio::test]
 async fn blank_display_name_synthesized_from_first_last() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm_with_policy(&harness, Some(RegistrationPolicy::Open));
 
     let email = format!("jane-{}@example.com", uuid::Uuid::new_v4());
@@ -359,7 +359,7 @@ async fn blank_display_name_synthesized_from_first_last() {
 
 #[tokio::test]
 async fn blank_display_name_and_blank_first_last_rejected() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm_with_policy(&harness, Some(RegistrationPolicy::Open));
 
     let email = format!("nobody-{}@example.com", uuid::Uuid::new_v4());

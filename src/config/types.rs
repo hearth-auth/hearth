@@ -60,25 +60,6 @@ pub struct ServerConfig {
     /// realm reconciliation runs, else the server refuses to start.
     #[serde(default)]
     pub default_realm: Option<String>,
-    /// Port for the gRPC management API. When `None` (the default), the
-    /// gRPC server is not started — REST-only deployments are unaffected.
-    #[serde(default)]
-    pub grpc_port: Option<u16>,
-    /// Optional bind address for the gRPC listener. Defaults to
-    /// `bind_address` when unset.
-    #[serde(default)]
-    pub grpc_bind_address: Option<String>,
-    /// Allow a plaintext gRPC listener on a non-loopback address outside
-    /// `--dev`.
-    ///
-    /// When `tls_cert_path` / `tls_key_path` are set, gRPC is served over TLS
-    /// with the same certificate as HTTPS and this key has no effect. Without
-    /// them gRPC is plaintext, and production validation refuses a
-    /// non-loopback gRPC bind — admin bearer tokens and client secrets would
-    /// cross the network in clear text — unless this is `true`, for a
-    /// deployment whose gRPC traffic is TLS-terminated by a proxy or mesh.
-    #[serde(default)]
-    pub grpc_allow_plaintext: bool,
     /// Filesystem directory containing the admin UI's mutable static
     /// assets — currently only `app.css` (the Tailwind build output).
     ///
@@ -127,9 +108,6 @@ impl Default for ServerConfig {
             tls_require_client_cert: false,
             trusted_proxies: Vec::new(),
             default_realm: None,
-            grpc_port: None,
-            grpc_bind_address: None,
-            grpc_allow_plaintext: false,
             assets_dir: None,
             trust_forwarded_proto: false,
         }
@@ -475,7 +453,7 @@ pub struct OperationalConfig {
     #[serde(default = "OperationalConfig::default_header_read_timeout_secs")]
     pub header_read_timeout_secs: u64,
     /// Seconds a client has to complete the TLS handshake before the
-    /// connection is closed. Applies to the HTTPS and gRPC listeners.
+    /// connection is closed. Applies to the HTTPS listener.
     #[serde(default = "OperationalConfig::default_tls_handshake_timeout_secs")]
     pub tls_handshake_timeout_secs: u64,
     /// Maximum concurrent connections from one client address (one IPv4
@@ -774,95 +752,6 @@ pub struct EmailConfig {
     pub allow_log_transport_in_production: bool,
 }
 
-/// SMS delivery transport selector.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SmsTransport {
-    /// Write SMS body to the `tracing` log at WARN level. No external delivery. Default.
-    #[default]
-    Log,
-    /// Deliver via the Twilio Messaging REST API.
-    Twilio,
-    /// Deliver via AWS SNS Transactional SMS (Signature Version 4).
-    #[serde(rename = "awssns")]
-    AwsSns,
-}
-
-/// Twilio SMS transport settings.
-///
-/// Required when [`SmsTransport::Twilio`] is selected.
-#[derive(Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TwilioConfig {
-    /// Twilio Account SID (e.g. `AC…`).
-    pub account_sid: String,
-    /// Twilio Auth Token. Loaded from the config file but handled as a secret.
-    pub auth_token: String,
-    /// Twilio sender phone number in E.164 format (e.g. `+15550001111`)
-    /// or a Messaging Service SID.
-    pub from: String,
-}
-
-/// Redacts the auth token (GA audit L20).
-impl std::fmt::Debug for TwilioConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TwilioConfig")
-            .field("account_sid", &self.account_sid)
-            .field("auth_token", &"<redacted>")
-            .field("from", &self.from)
-            .finish()
-    }
-}
-
-/// AWS SNS SMS transport settings.
-///
-/// Required when [`SmsTransport::AwsSns`] is selected.
-#[derive(Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SnsSmsConfig {
-    /// AWS region (e.g. `us-east-1`).
-    pub region: String,
-    /// AWS Access Key ID.
-    pub access_key_id: String,
-    /// AWS Secret Access Key. Loaded from the config file but handled as a secret.
-    pub secret_access_key: String,
-    /// Optional alphanumeric sender ID shown on recipient device (up to 11 chars).
-    #[serde(default)]
-    pub sender_id: Option<String>,
-}
-
-/// Redacts the secret access key (GA audit L20).
-impl std::fmt::Debug for SnsSmsConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SnsSmsConfig")
-            .field("region", &self.region)
-            .field("access_key_id", &self.access_key_id)
-            .field("secret_access_key", &"<redacted>")
-            .field("sender_id", &self.sender_id)
-            .finish()
-    }
-}
-
-/// SMS sender configuration.
-///
-/// Controls how OTP and transactional SMS messages are delivered.
-/// Defaults to the `Log` transport, suitable for local development.
-/// Production deployments should set `transport: twilio` (or `awssns`)
-/// and provide the corresponding config block.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SmsConfig {
-    /// Which transport to use for outbound SMS.
-    #[serde(default)]
-    pub transport: SmsTransport,
-    /// Twilio-specific settings. Required when `transport == Twilio`.
-    #[serde(default)]
-    pub twilio: Option<TwilioConfig>,
-    /// AWS SNS-specific settings. Required when `transport == AwsSns`.
-    #[serde(default)]
-    pub aws_sns: Option<SnsSmsConfig>,
-}
-
 /// Global branding configuration.
 ///
 /// Applies across the admin UI and email templates. When `logo_url` is
@@ -1100,15 +989,9 @@ pub struct SecurityYaml {
     /// accepted when their `scheme://host[:port]` matches an entry here.
     #[serde(default)]
     pub allowed_return_to_origins: Vec<String>,
-    /// IP reputation provider configuration (P-2).
-    #[serde(default)]
-    pub ip_reputation: IpReputationYaml,
     /// CAPTCHA provider configuration (P-1 — HEA-1202).
     #[serde(default)]
     pub captcha: Option<CaptchaYaml>,
-    /// gRPC-specific security settings (A-43).
-    #[serde(default)]
-    pub grpc: GrpcSecurityYaml,
     /// TLS-specific security settings (A-44).
     #[serde(default)]
     pub tls: TlsSecurityYaml,
@@ -1191,18 +1074,9 @@ pub struct SecurityYaml {
     /// A-50 cross-realm aggregation cap (`security.cross_realm_aggregation_cap`).
     #[serde(default)]
     pub cross_realm_aggregation_cap: CrossRealmAggCapYaml,
-    /// A-11 / P-4 step-up MFA risk scorer (`security.risk_scorer`).
-    #[serde(default)]
-    pub risk_scorer: RiskScorerYaml,
     /// A-12 adaptive exponential lockout backoff (`security.adaptive_backoff`).
     #[serde(default)]
     pub adaptive_backoff: AdaptiveBackoffYaml,
-    /// A-17 login-event tarpit (`security.tarpit`).
-    #[serde(default)]
-    pub tarpit: TarpitYaml,
-    /// P-3 / P-5 pluggable signal providers (`security.providers`).
-    #[serde(default)]
-    pub providers: AbuseProvidersYaml,
 }
 
 /// `security.distributed_attack_detector` — A-3 cardinality detector.
@@ -1259,12 +1133,6 @@ pub struct OutboundVolumeShieldYaml {
     /// Distinct email recipients per realm per window before a hard cap.
     #[serde(default = "OutboundVolumeShieldYaml::default_email_hard_cap")]
     pub email_hard_cap: usize,
-    /// Distinct SMS recipients per realm per window before a soft cap.
-    #[serde(default = "OutboundVolumeShieldYaml::default_sms_soft_cap")]
-    pub sms_soft_cap: usize,
-    /// Distinct SMS recipients per realm per window before a hard cap.
-    #[serde(default = "OutboundVolumeShieldYaml::default_sms_hard_cap")]
-    pub sms_hard_cap: usize,
 }
 
 impl OutboundVolumeShieldYaml {
@@ -1277,12 +1145,6 @@ impl OutboundVolumeShieldYaml {
     const fn default_email_hard_cap() -> usize {
         5_000
     }
-    const fn default_sms_soft_cap() -> usize {
-        100
-    }
-    const fn default_sms_hard_cap() -> usize {
-        500
-    }
 }
 
 impl Default for OutboundVolumeShieldYaml {
@@ -1292,8 +1154,6 @@ impl Default for OutboundVolumeShieldYaml {
             window: Self::default_window(),
             email_soft_cap: Self::default_email_soft_cap(),
             email_hard_cap: Self::default_email_hard_cap(),
-            sms_soft_cap: Self::default_sms_soft_cap(),
-            sms_hard_cap: Self::default_sms_hard_cap(),
         }
     }
 }
@@ -1317,12 +1177,6 @@ pub struct CrossRealmAggCapYaml {
     /// Distinct realms per email address before a hard cap.
     #[serde(default = "CrossRealmAggCapYaml::default_email_realm_hard_cap")]
     pub email_realm_hard_cap: usize,
-    /// Distinct realms per phone number before a soft cap.
-    #[serde(default = "CrossRealmAggCapYaml::default_sms_realm_soft_cap")]
-    pub sms_realm_soft_cap: usize,
-    /// Distinct realms per phone number before a hard cap.
-    #[serde(default = "CrossRealmAggCapYaml::default_sms_realm_hard_cap")]
-    pub sms_realm_hard_cap: usize,
 }
 
 impl CrossRealmAggCapYaml {
@@ -1338,12 +1192,6 @@ impl CrossRealmAggCapYaml {
     const fn default_email_realm_hard_cap() -> usize {
         10
     }
-    const fn default_sms_realm_soft_cap() -> usize {
-        3
-    }
-    const fn default_sms_realm_hard_cap() -> usize {
-        6
-    }
 }
 
 impl Default for CrossRealmAggCapYaml {
@@ -1354,97 +1202,6 @@ impl Default for CrossRealmAggCapYaml {
             alert_threshold: Self::default_alert_threshold(),
             email_realm_soft_cap: Self::default_email_realm_soft_cap(),
             email_realm_hard_cap: Self::default_email_realm_hard_cap(),
-            sms_realm_soft_cap: Self::default_sms_realm_soft_cap(),
-            sms_realm_hard_cap: Self::default_sms_realm_hard_cap(),
-        }
-    }
-}
-
-/// `security.risk_scorer` — A-11 / P-4 step-up MFA risk weights.
-///
-/// These become the realm default for [`RealmConfig::risk_scorer_config`],
-/// which the A-49 refresh-context check in the identity engine reads. That
-/// field was hard-coded to `None`, so the scorer ran permanently disabled no
-/// matter what the operator wrote (audit §4.17#9).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RiskScorerYaml {
-    /// Whether risk scoring is active. Default: `false` (fail-open).
-    #[serde(default)]
-    pub enabled: bool,
-    /// Score at or above which step-up MFA is required. Range `[0.0, 1.0]`.
-    #[serde(default = "RiskScorerYaml::default_step_up_threshold")]
-    pub step_up_threshold: f32,
-    /// Weight for the "unrecognised device" signal.
-    #[serde(default = "RiskScorerYaml::default_new_device_weight")]
-    pub new_device_weight: f32,
-    /// Weight for the "unrecognised country" signal.
-    #[serde(default = "RiskScorerYaml::default_new_country_weight")]
-    pub new_country_weight: f32,
-    /// Weight for the "password older than the threshold" signal.
-    #[serde(default = "RiskScorerYaml::default_password_age_weight")]
-    pub password_age_weight: f32,
-    /// Password age in days before `password_age_weight` applies.
-    #[serde(default = "RiskScorerYaml::default_password_age_days_threshold")]
-    pub password_age_days_threshold: u32,
-    /// Weight for a confirmed breach-corpus hit.
-    #[serde(default = "RiskScorerYaml::default_breach_corpus_weight")]
-    pub breach_corpus_weight: f32,
-    /// Weight per changed dimension in the A-49 refresh-context delta.
-    #[serde(default = "RiskScorerYaml::default_refresh_context_delta_weight")]
-    pub refresh_context_delta_weight: f32,
-}
-
-impl RiskScorerYaml {
-    const fn default_step_up_threshold() -> f32 {
-        0.5
-    }
-    const fn default_new_device_weight() -> f32 {
-        0.3
-    }
-    const fn default_new_country_weight() -> f32 {
-        0.4
-    }
-    const fn default_password_age_weight() -> f32 {
-        0.2
-    }
-    const fn default_password_age_days_threshold() -> u32 {
-        365
-    }
-    const fn default_breach_corpus_weight() -> f32 {
-        1.0
-    }
-    const fn default_refresh_context_delta_weight() -> f32 {
-        0.35
-    }
-
-    /// Projects the YAML declaration into the engine-level scorer config.
-    #[must_use]
-    pub fn to_domain(&self) -> crate::abuse::risk_scorer::RiskScorerConfig {
-        crate::abuse::risk_scorer::RiskScorerConfig {
-            enabled: self.enabled,
-            step_up_threshold: self.step_up_threshold,
-            new_device_weight: self.new_device_weight,
-            new_country_weight: self.new_country_weight,
-            password_age_weight: self.password_age_weight,
-            password_age_days_threshold: self.password_age_days_threshold,
-            breach_corpus_weight: self.breach_corpus_weight,
-            refresh_context_delta_weight: self.refresh_context_delta_weight,
-        }
-    }
-}
-
-impl Default for RiskScorerYaml {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            step_up_threshold: Self::default_step_up_threshold(),
-            new_device_weight: Self::default_new_device_weight(),
-            new_country_weight: Self::default_new_country_weight(),
-            password_age_weight: Self::default_password_age_weight(),
-            password_age_days_threshold: Self::default_password_age_days_threshold(),
-            breach_corpus_weight: Self::default_breach_corpus_weight(),
-            refresh_context_delta_weight: Self::default_refresh_context_delta_weight(),
         }
     }
 }
@@ -1485,81 +1242,6 @@ impl Default for AdaptiveBackoffYaml {
     }
 }
 
-/// `security.tarpit` — A-17 per-IP login tarpit.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TarpitYaml {
-    /// Failures per IP within `window_secs` before delays apply.
-    /// Absent = disabled (fail-open).
-    #[serde(default)]
-    pub threshold: Option<u32>,
-    /// Rolling window for counting failures, in seconds. Default: 60.
-    #[serde(default = "TarpitYaml::default_window_secs")]
-    pub window_secs: u64,
-    /// Deterministic delay per tarpitted request, in milliseconds.
-    /// Must be 100–500 per plan §4.1 A-17. Default: 200.
-    #[serde(default = "TarpitYaml::default_delay_ms")]
-    pub delay_ms: u64,
-}
-
-impl TarpitYaml {
-    const fn default_window_secs() -> u64 {
-        60
-    }
-    const fn default_delay_ms() -> u64 {
-        200
-    }
-}
-
-impl Default for TarpitYaml {
-    fn default() -> Self {
-        Self {
-            threshold: None,
-            window_secs: Self::default_window_secs(),
-            delay_ms: Self::default_delay_ms(),
-        }
-    }
-}
-
-/// `security.providers` — pluggable abuse-signal adapters (P-3, P-5).
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AbuseProvidersYaml {
-    /// P-3 UA + JA3/JA4 bot-signal heuristics.
-    #[serde(default)]
-    pub bot_signal: BotSignalYaml,
-    /// P-5 disposable-domain and role-address detection.
-    #[serde(default)]
-    pub email_reputation: EmailReputationProviderYaml,
-}
-
-/// `security.providers.bot_signal` — P-3 heuristic adapter.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BotSignalYaml {
-    /// Whether the heuristic adapter replaces the no-op default.
-    #[serde(default)]
-    pub enabled: bool,
-    /// Extra JA3 hashes to block beyond the built-in list.
-    #[serde(default)]
-    pub extra_ja3_blocklist: Vec<String>,
-    /// Extra JA4 hashes or prefixes to block beyond the built-in list.
-    #[serde(default)]
-    pub extra_ja4_blocklist: Vec<String>,
-}
-
-/// `security.providers.email_reputation` — P-5 built-in adapter.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct EmailReputationProviderYaml {
-    /// Whether the built-in adapter replaces the no-op default.
-    #[serde(default)]
-    pub enabled: bool,
-    /// Extra disposable domains beyond the built-in list.
-    #[serde(default)]
-    pub extra_disposable_domains: Vec<String>,
-}
-
 /// Redacts `dpop_nonce_secret` and `key_encryption_key` — both are secret key
 /// material (a DPoP-nonce HMAC key and the storage KEK) and MUST NOT be
 /// revealed if `SecurityYaml`, or any struct containing it, is ever
@@ -1583,9 +1265,7 @@ impl std::fmt::Debug for SecurityYaml {
             .field("request_shaper", &self.request_shaper)
             .field("load_test_unthrottled", &self.load_test_unthrottled)
             .field("allowed_return_to_origins", &self.allowed_return_to_origins)
-            .field("ip_reputation", &self.ip_reputation)
             .field("captcha", &self.captcha)
-            .field("grpc", &self.grpc)
             .field("tls", &self.tls)
             .field("backup", &self.backup)
             .field("reserved_slugs", &self.reserved_slugs)
@@ -1749,9 +1429,7 @@ impl Default for SecurityYaml {
             request_shaper: None,
             load_test_unthrottled: None,
             allowed_return_to_origins: Vec::new(),
-            ip_reputation: IpReputationYaml::default(),
             captcha: None,
-            grpc: GrpcSecurityYaml::default(),
             tls: TlsSecurityYaml::default(),
             backup: BackupSecurityYaml::default(),
             reserved_slugs: Self::default_reserved_slugs(),
@@ -1763,10 +1441,7 @@ impl Default for SecurityYaml {
             distributed_attack_detector: DistributedAttackDetectorYaml::default(),
             outbound_volume_shield: OutboundVolumeShieldYaml::default(),
             cross_realm_aggregation_cap: CrossRealmAggCapYaml::default(),
-            risk_scorer: RiskScorerYaml::default(),
             adaptive_backoff: AdaptiveBackoffYaml::default(),
-            tarpit: TarpitYaml::default(),
-            providers: AbuseProvidersYaml::default(),
         }
     }
 }
@@ -1948,65 +1623,6 @@ impl BackupSecurityYaml {
     }
 }
 
-/// `security.ip_reputation` — IP reputation policy and provider config (P-2).
-///
-/// Example:
-///
-/// ```yaml
-/// security:
-///   ip_reputation:
-///     enabled: true
-///     action: block          # block | challenge | log (default: log)
-///     spamhaus:
-///       drop_url: https://www.spamhaus.org/drop/drop.txt
-///       dropv6_url: https://www.spamhaus.org/drop/dropv6.txt
-///       refresh_interval_secs: 86400
-///     maxmind_db_path: /etc/hearth/GeoLite2-ASN.mmdb
-/// ```
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct IpReputationYaml {
-    /// Whether IP reputation checks are enabled.  Default: `false`.
-    #[serde(default)]
-    pub enabled: bool,
-    /// Action to take when the provider flags an IP (block / challenge / log).
-    /// Default: `"log"`.
-    #[serde(default)]
-    pub action: IpReputationActionYaml,
-    /// Spamhaus DROP / EDROP provider settings.
-    #[serde(default)]
-    pub spamhaus: SpamhausDropYaml,
-    /// Path to the MaxMind GeoLite2-ASN or GeoIP2-ASN MMDB file.
-    ///
-    /// Absent / empty = MaxMind ASN lookup disabled.
-    #[serde(default)]
-    pub maxmind_db_path: Option<String>,
-}
-
-/// `security.grpc` — gRPC-specific security settings (A-43).
-///
-/// Example:
-///
-/// ```yaml
-/// security:
-///   grpc:
-///     reflection_enabled: false   # default; omit for production-safe behaviour
-/// ```
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GrpcSecurityYaml {
-    /// Whether the gRPC server reflection service is enabled.
-    ///
-    /// `null` / absent → `false` in production, `true` under `--dev`.
-    /// Setting this to `true` in production requires the `--allow-reflection-in-prod`
-    /// CLI flag; the server refuses to start without it.
-    ///
-    /// gRPC reflection exposes the full API schema to any unauthenticated caller.
-    /// Keep it off in production.
-    #[serde(default)]
-    pub reflection_enabled: Option<bool>,
-}
-
 /// Minimum TLS protocol version the server will accept (HEA-SEC-33).
 ///
 /// Restricting to TLS 1.3 eliminates downgrade-attack surface present in TLS 1.2
@@ -2054,56 +1670,6 @@ pub struct TlsSecurityYaml {
     /// behaviour is preserved.
     #[serde(default)]
     pub crl_paths: Vec<PathBuf>,
-}
-
-/// Action taken when IP reputation flags an IP.
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum IpReputationActionYaml {
-    /// Reject the request with HTTP 403.
-    Block,
-    /// Return a challenge response (A-16 CAPTCHA-of-last-resort).
-    Challenge,
-    /// Allow but record the signal (default, fail-open posture).
-    #[default]
-    Log,
-}
-
-/// `security.ip_reputation.spamhaus` — Spamhaus DROP/EDROP refresh settings.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SpamhausDropYaml {
-    /// URL for the Spamhaus DROP (IPv4) list.
-    #[serde(default = "SpamhausDropYaml::default_drop_url")]
-    pub drop_url: String,
-    /// URL for the Spamhaus EDROP (IPv6) list.
-    #[serde(default = "SpamhausDropYaml::default_dropv6_url")]
-    pub dropv6_url: String,
-    /// Refresh interval in seconds.  Default: 86 400 (24 hours).
-    #[serde(default = "SpamhausDropYaml::default_refresh_interval_secs")]
-    pub refresh_interval_secs: u64,
-}
-
-impl SpamhausDropYaml {
-    fn default_drop_url() -> String {
-        "https://www.spamhaus.org/drop/drop.txt".into()
-    }
-    fn default_dropv6_url() -> String {
-        "https://www.spamhaus.org/drop/dropv6.txt".into()
-    }
-    fn default_refresh_interval_secs() -> u64 {
-        86_400
-    }
-}
-
-impl Default for SpamhausDropYaml {
-    fn default() -> Self {
-        Self {
-            drop_url: Self::default_drop_url(),
-            dropv6_url: Self::default_dropv6_url(),
-            refresh_interval_secs: Self::default_refresh_interval_secs(),
-        }
-    }
 }
 
 /// `security.http2` — HTTP/2 rapid-reset defense (A-39, CVE-2023-44487).
@@ -2624,6 +2190,10 @@ pub struct OrgConfigYaml {
     /// Maximum number of members allowed. `None` means unlimited.
     #[serde(default)]
     pub max_members: Option<u32>,
+    /// Members need MFA even where the realm does not require it. Default
+    /// `false`; it can only tighten the realm's policy (spec `mfa-policy`).
+    #[serde(default)]
+    pub mfa_required: Option<bool>,
 }
 
 /// YAML declaration for an OAuth 2.0 application (client).
@@ -2682,17 +2252,14 @@ pub struct ApplicationYamlConfig {
     /// Whether a realm-level consent row covers all org contexts.
     #[serde(default)]
     pub consent_spans_orgs: Option<bool>,
-    /// FAPI 2.0 Security Profile for this client.
-    ///
-    /// Accepted values: `"fapi2"`. Absent means standard profile.
-    /// Setting this flag subjects the client to FAPI 2.0 constraints
-    /// (DPoP, PAR, PKCE S256) regardless of the realm-level `fapi_profile`.
+    /// RFC 9449 §5.2 `dpop_bound_access_tokens`: when `true`, every token
+    /// request from this client must carry a `DPoP` proof. Default: `false`.
     #[serde(default)]
-    pub profile: Option<String>,
+    pub dpop_bound_access_tokens: Option<bool>,
     /// The client's public JWK Set (RFC 7517), inline: a YAML mapping
     /// `{keys: [...]}` or the same object as a JSON string. Its keys verify
     /// the client's `private_key_jwt` assertions and signed request objects.
-    /// Required with `profile: fapi2`. Public keys only.
+    /// Public keys only.
     #[serde(default)]
     pub jwks: Option<serde_json::Value>,
     /// Algorithm this client's ID tokens are signed with
@@ -3085,10 +2652,6 @@ pub struct RealmYamlConfig {
     /// connectors not represented in YAML are removed.
     #[serde(default)]
     pub federation: Option<FederationYamlConfig>,
-    /// SAML 2.0 Service Provider registrations (IdP side — Hearth as IdP).
-    /// Reconciled at startup; runtime SPs not represented here are removed.
-    #[serde(default)]
-    pub saml_service_providers: Option<std::collections::HashMap<String, SamlServiceProviderYaml>>,
     /// YAML-authored permission registry.
     #[serde(default)]
     pub permissions: Option<Vec<PermissionYamlConfig>>,
@@ -3145,13 +2708,6 @@ pub struct RealmYamlConfig {
     /// instead of setting this flag.
     #[serde(default)]
     pub rotate_signing_key: Option<bool>,
-    /// FAPI 2.0 Security Profile enforcement for this realm.
-    ///
-    /// Accepted values: `"baseline"` (PAR + PKCE required for all clients),
-    /// `"advanced"` (Baseline + JAR + JARM required). Absent or `null` means
-    /// standard OAuth 2.0 / OIDC rules apply with no FAPI constraints.
-    #[serde(default)]
-    pub fapi_profile: Option<String>,
     /// Declarative seed users for this realm.
     ///
     /// Each entry is created at startup if the email does not already exist.
@@ -3194,29 +2750,6 @@ pub struct RealmScimYaml {
     /// before it is persisted into the runtime realm config.
     #[serde(default)]
     pub bearer_token: Option<String>,
-}
-
-/// YAML for a single SAML SP registration (Hearth as IdP issues to this SP).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SamlServiceProviderYaml {
-    pub entity_id: String,
-    pub acs_url: String,
-    #[serde(default)]
-    pub slo_url: Option<String>,
-    #[serde(default)]
-    pub sp_certificate_pem: Option<String>,
-    #[serde(default)]
-    pub sign_assertions: Option<bool>,
-    #[serde(default)]
-    pub sign_responses: Option<bool>,
-    #[serde(default)]
-    pub want_authn_requests_signed: Option<bool>,
-    /// One of `emailAddress` / `persistent` / `transient` / `unspecified`.
-    #[serde(default)]
-    pub nameid_format: Option<String>,
-    #[serde(default)]
-    pub attribute_map: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// YAML for `realms.{name}.federation.*`.
@@ -3579,7 +3112,14 @@ impl RealmYamlConfig {
             .filter(|s| !s.is_empty())
             .map(sha256_hex);
 
-        let mfa_required = auth.and_then(|a| a.mfa_required).or(global.mfa_required);
+        // MFA is required unless the realm or the global `auth:` block says
+        // otherwise (scope-trim-trusted-core, spec `mfa-policy`). The value is
+        // recorded explicitly, so the realm record says what the server does.
+        let mfa_required = Some(
+            auth.and_then(|a| a.mfa_required)
+                .or(global.mfa_required)
+                .unwrap_or(true),
+        );
         // Realm wins over global, whole-list (audit 2026-08-28 §4.18#10).
         let mfa_methods = auth
             .and_then(|a| a.mfa_methods.clone())
@@ -3943,22 +3483,6 @@ impl RealmYamlConfig {
             })
             .collect();
 
-        // --- FAPI profile --------------------------------------------------
-
-        let fapi_profile = match self.fapi_profile.as_deref() {
-            None => None,
-            Some("baseline") => Some(crate::identity::FapiProfile::Baseline),
-            Some("advanced") => Some(crate::identity::FapiProfile::Advanced),
-            Some(other) => {
-                errors.push(RegistryError::InvalidRealmConfigField {
-                    field: "fapi_profile".to_string(),
-                    value: other.to_string(),
-                    reason: "expected \"baseline\" or \"advanced\"".to_string(),
-                });
-                None
-            }
-        };
-
         // --- Structural validation (cross-references, cycles, Tier 1) ------
         //
         // Bail early on grammar errors before running the structural checks
@@ -4099,12 +3623,6 @@ impl RealmYamlConfig {
             // declaring one is rejected by `deny_unknown_fields`. It is reachable
             // only by constructing `RealmConfig` in-process. Always default here.
             breach_check: crate::identity::BreachCheckConfig::default(),
-            // Audit §4.13#9: adaptive MFA has NO YAML key and NO admin-API surface —
-            // same as `breach_check` above. Always default here.
-            adaptive_mfa: crate::identity::AdaptiveMfaConfig::default(),
-            // SMS OTP expiry and max-attempt config; `None` uses OTP module defaults.
-            sms_otp_expiry_seconds: None,
-            sms_otp_max_attempts: None,
             // Email OTP expiry and max-attempt config; `None` uses OTP module defaults.
             email_otp_expiry_seconds: None,
             email_otp_max_attempts: None,
@@ -4113,12 +3631,6 @@ impl RealmYamlConfig {
             session_over_limit_policy,
             idle_timeout_secs: None,
             absolute_timeout_secs: None,
-            fapi_profile,
-            // Populated by `main.rs` from the global `security.risk_scorer`
-            // block after this call, alongside `web_theme_css` — the same
-            // post-processing seam, because `to_realm_config` is handed the
-            // `auth:` defaults but not the `security:` ones.
-            risk_scorer_config: None,
             // A-9 (§4.17#9): `realms.<name>.security.cidr_policy`. There was no
             // field to land in, so the documented block refused to boot and the
             // `CidrFilter` guard had no per-realm input.
@@ -4598,55 +4110,6 @@ mod tests {
         assert_eq!(merged.password_memory_cost, Some(65536));
         assert_eq!(merged.password_time_cost, Some(3));
     }
-
-    #[test]
-    fn fapi_profile_baseline_parsed() {
-        let yaml = RealmYamlConfig {
-            fapi_profile: Some("baseline".to_string()),
-            ..RealmYamlConfig::default()
-        };
-        let cfg = yaml
-            .to_realm_config(&AuthConfig::default(), None)
-            .expect("baseline is valid");
-        assert_eq!(
-            cfg.fapi_profile,
-            Some(crate::identity::FapiProfile::Baseline)
-        );
-    }
-
-    #[test]
-    fn fapi_profile_advanced_parsed() {
-        let yaml = RealmYamlConfig {
-            fapi_profile: Some("advanced".to_string()),
-            ..RealmYamlConfig::default()
-        };
-        let cfg = yaml
-            .to_realm_config(&AuthConfig::default(), None)
-            .expect("advanced is valid");
-        assert_eq!(
-            cfg.fapi_profile,
-            Some(crate::identity::FapiProfile::Advanced)
-        );
-    }
-
-    #[test]
-    fn fapi_profile_absent_yields_none() {
-        let yaml = RealmYamlConfig::default();
-        let cfg = yaml
-            .to_realm_config(&AuthConfig::default(), None)
-            .expect("no fapi_profile is valid");
-        assert!(cfg.fapi_profile.is_none());
-    }
-
-    #[test]
-    fn fapi_profile_unknown_value_is_error() {
-        let yaml = RealmYamlConfig {
-            fapi_profile: Some("enterprise".to_string()),
-            ..RealmYamlConfig::default()
-        };
-        let result = yaml.to_realm_config(&AuthConfig::default(), None);
-        assert!(result.is_err(), "unknown fapi_profile must fail validation");
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4689,9 +4152,6 @@ pub struct Config {
     /// Outbound email delivery settings.
     #[serde(default)]
     pub email: EmailConfig,
-    /// Outbound SMS delivery settings.
-    #[serde(default)]
-    pub sms: SmsConfig,
     /// First-run onboarding settings.
     #[serde(default)]
     pub onboarding: OnboardingConfig,

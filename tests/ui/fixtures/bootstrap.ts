@@ -9,6 +9,23 @@ export interface Credentials {
   user_id: string;
   access_token: string;
   refresh_token: string;
+  /** Base32 TOTP secret of `admin@dev.local`; returned by the first bootstrap only. */
+  totp_secret?: string;
+  /** Base32 TOTP secret of `admin@hearth.test`; returned by the first bootstrap only. */
+  admin_totp_secret?: string;
+}
+
+/**
+ * The server returns the TOTP secrets on the first bootstrap only (every realm
+ * requires MFA by default). A re-bootstrap answers them empty, so keep the
+ * cached ones.
+ */
+function keepSecrets(fresh: Credentials, cached: Credentials | null): Credentials {
+  return {
+    ...fresh,
+    totp_secret: fresh.totp_secret || cached?.totp_secret || '',
+    admin_totp_secret: fresh.admin_totp_secret || cached?.admin_totp_secret || '',
+  };
 }
 
 /**
@@ -92,7 +109,7 @@ export async function bootstrap(deps: BootstrapDeps = {}): Promise<Credentials> 
   // returns 200; on an existing realm a still-valid cached token yields 200.
   let resp = await callBootstrap(fetchFn, cached?.access_token);
   if (resp.ok) {
-    const creds = (await resp.json()) as Credentials;
+    const creds = keepSecrets((await resp.json()) as Credentials, cached);
     writeCache(creds);
     return creds;
   }
@@ -110,7 +127,7 @@ export async function bootstrap(deps: BootstrapDeps = {}): Promise<Credentials> 
     }
     resp = await callBootstrap(fetchFn, freshAccess);
     if (resp.ok) {
-      const creds = (await resp.json()) as Credentials;
+      const creds = keepSecrets((await resp.json()) as Credentials, cached);
       writeCache(creds);
       return creds;
     }

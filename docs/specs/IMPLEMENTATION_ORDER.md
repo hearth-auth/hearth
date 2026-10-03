@@ -20,7 +20,7 @@ Dependencies flow bottom-up (leaf → root), matching the layer architecture.
 | 6 | **Storage: Tiered Hot/Cold** | Storage: Tiered Hot/Cold (12 scenarios) | Depends on all storage components. Introduces hot path constraints. |
 | 7 | **Storage: Public trait API** | (implicit) | `mod.rs` trait interface wrapping WAL+memtable+SST+tiered into clean `get/put/delete/scan` with `RealmId` enforcement. |
 | 8 | **Configuration** | Configuration (5 scenarios) | Standalone, needed before wiring layers. YAML parsing, `--dev` flag, validation. |
-| 9 | **Test infrastructure** | Test Infrastructure (4 scenarios) | `TestHarness` embedded mode. Server mode stays `#[ignore]` until HTTP exists. |
+| 9 | **Test infrastructure** | Test Infrastructure (4 scenarios) | `TestHarness` in-process mode. Server mode stays `#[ignore]` until HTTP exists. |
 | 10 | **RBAC engine** | Authorization (Phase 0 RBAC scenarios) | Standalone module. Identity depends on it laterally (to resolve permissions at token-issue time), so build it first. See `AUTHORIZATION.md`. |
 | 11 | **Identity: User CRUD** | User CRUD (14 scenarios) | First domain logic. Depends on storage + core types. |
 | 12 | **Identity: Credentials** | Credential Storage (12 scenarios) | Depends on users. Argon2id hashing, multi-algo verification. |
@@ -60,7 +60,7 @@ All 148 Phase 0 scenarios must be passing. Steps 1–18 are complete.
 | 24 | **WebAuthn / Passkeys** | WebAuthn / Passkeys (12 scenarios) | Second credential type. FIDO2 registration/authentication ceremonies, CBOR parsing, multi-credential support, resident keys. Heavier than TOTP (CBOR, attestation formats) but no dependency on it. |
 | 25 | **Magic Link / Passwordless** | Magic Link / Passwordless (8 scenarios) | Third credential type. Simplest auth method — token generation, single-use validation, expiration. Depends on multi-tenancy (realm-scoped tokens) and audit logging. |
 | 26 | **TLS Termination** | TLS Termination (8 scenarios) | Transport security. Cert loading, hot-reload, TLS 1.3 negotiation, mTLS. Must be in place before Admin API exposes management endpoints over the network. |
-| 27 | **Admin API** | Admin API (10 scenarios) | REST and gRPC management endpoints for users, realms, applications, roles, groups, and role assignments. Depends on RBAC (`hearth.admin` permission enforcement), audit logging (mutation trail), and all domain modules it manages. Heaviest integration surface. |
+| 27 | **Admin API** | Admin API (10 scenarios) | REST management endpoints for users, realms, applications, roles, groups, and role assignments. Depends on RBAC (`hearth.admin` permission enforcement), audit logging (mutation trail), and all domain modules it manages. Heaviest integration surface. |
 | 28 | **OIDC Conformance** | OIDC Conformance (5 scenarios) | Conformance testing against OpenID Connect Core/Discovery/Dynamic Registration specs. Requires stable OAuth 2.0 + OIDC surface (steps 22, Phase 0 step 15). |
 | 29 | **SDK Integration (TS & Go)** | SDK Integration TS & Go (6 scenarios) | Client libraries for TypeScript and Go. Depends on stable API surface — auth code flow, admin CRUD, JWKS, token refresh must all be finalized. |
 | 30 | **Phase 1 E2E Flows** | Phase 1 E2E Flows (4 scenarios) | Integration tests spanning Phase 1 features: Keycloak migration, MFA enrollment + login, passkey-only auth, multi-realm isolation round-trip. |
@@ -78,12 +78,12 @@ All 148 Phase 0 scenarios must be passing. Steps 1–18 are complete.
 
 ## Phase 2 — Agent Authentication (AGENT_AUTH.md)
 
-Agent auth is developed in parallel with Phase 2 features. Steps follow `AGENT_AUTH.md` Phase A → B → C → D dependency order. Each step adds to `tests/agents.rs` and `tests/agent_credentials.rs` (new file when A.7 gRPC surface grows large enough to warrant splitting).
+Agent auth is developed in parallel with Phase 2 features. Steps follow `AGENT_AUTH.md` Phase A → B → C → D dependency order. Each step adds to `tests/agents.rs` and `tests/agent_credentials.rs` (new file when the A.7 credentials surface grows large enough to warrant splitting).
 
 | # | What | Why this order |
 |---|------|----------------|
 | A.1–A.2 | AgentId + entity CRUD | Foundational — completed in HEA-1325 |
-| A.3–A.7 | Credentials + REST + Agent Card | **M1 (HEA-1405) — complete**. API key (256-bit, SHA-256 stored), Agent Card at `/.well-known/agent.json`, REST CRUD at `/v1/agents`, gRPC stubs. |
+| A.3–A.7 | Credentials + REST + Agent Card | **M1 (HEA-1405) — complete**. API key (256-bit, SHA-256 stored), Agent Card at `/.well-known/agent.json`, REST CRUD at `/v1/agents`. |
 | A.4–A.5 | DPoP proof validation | Depends on storage TTL (HEA-1410). See `docs/specs/AGENT_AUTH.md §6`. |
 | A.6 | DPoP-bound token issuance | Depends on A.5 |
 | B.1–B.5 | Protected resource / MCP auth | Depends on A.6; enables tool servers |

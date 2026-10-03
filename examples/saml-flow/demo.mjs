@@ -5,15 +5,15 @@
 // hearth.yaml. run.sh handles boot + teardown; when iterating by hand,
 // start Hearth separately then `node demo.mjs`.
 //
-// Three acts:
+// Hearth is a SAML service provider: it consumes assertions from an
+// upstream IdP. (It does not act as a SAML IdP — removed in 3.0.0.)
+//
+// Two acts:
 //   1. Fetch Hearth's SP-side metadata (proves the SP metadata endpoint
 //      serves the configured ACS URL + our signing cert).
 //   2. Impersonate the external IdP: sign a <Response> with the test
 //      IdP key, POST it to Hearth's ACS. Then verify an audit event
 //      landed with action=SamlLoginCompleted.
-//   3. Impersonate an external SP: POST an <AuthnRequest> to Hearth's
-//      IdP SSO endpoint, parse the returned auto-submit HTML form,
-//      verify its <Response> is validly signed by Hearth's IdP cert.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -28,8 +28,6 @@ const HEARTH = "http://localhost:8420";
 const REALM = "demo";
 const CRED_FILE = path.join(__dirname, ".idp-cred.json");
 const IDP_ENTITY_ID = "http://localhost:9190/saml/metadata";
-const SP_ENTITY_ID = "http://localhost:9290/saml/metadata";
-const SP_ACS = "http://localhost:9290/saml/acs";
 const ok = (s) => `\x1b[32m✔\x1b[0m ${s}`;
 const step = (s) => console.log(`\n\x1b[1m▸\x1b[0m ${s}`);
 
@@ -89,16 +87,6 @@ function buildUnsignedResponse({
   const notBefore = new Date(now.getTime() - 60_000).toISOString();
   const notOnOrAfter = new Date(now.getTime() + 300_000).toISOString();
   return `<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="${responseId}" Version="2.0" IssueInstant="${issueInstant}" Destination="${destination}" InResponseTo="${inResponseTo}"><saml:Issuer>${issuer}</saml:Issuer><samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status><saml:Assertion ID="${assertionId}" Version="2.0" IssueInstant="${issueInstant}"><saml:Issuer>${issuer}</saml:Issuer><saml:Subject><saml:NameID Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">${nameId}</saml:NameID><saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer"><saml:SubjectConfirmationData NotOnOrAfter="${notOnOrAfter}" Recipient="${destination}" InResponseTo="${inResponseTo}"/></saml:SubjectConfirmation></saml:Subject><saml:Conditions NotBefore="${notBefore}" NotOnOrAfter="${notOnOrAfter}"><saml:AudienceRestriction><saml:Audience>${audience}</saml:Audience></saml:AudienceRestriction></saml:Conditions><saml:AuthnStatement AuthnInstant="${issueInstant}" SessionIndex="${sessionIndex}"><saml:AuthnContext><saml:AuthnContextClassRef>urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport</saml:AuthnContextClassRef></saml:AuthnContext></saml:AuthnStatement></saml:Assertion></samlp:Response>`;
-}
-
-function buildAuthnRequest({
-  requestId,
-  destination,
-  issuer,
-  acsUrl,
-  now = new Date(),
-}) {
-  return `<samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="${requestId}" Version="2.0" IssueInstant="${now.toISOString()}" Destination="${destination}" ProtocolBinding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" AssertionConsumerServiceURL="${acsUrl}" ForceAuthn="false"><saml:Issuer>${issuer}</saml:Issuer><samlp:NameIDPolicy AllowCreate="true" Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress"/></samlp:AuthnRequest>`;
 }
 
 // ─── Act 1: SP metadata roundtrip ────────────────────────────────────
@@ -209,106 +197,15 @@ async function act2_postAssertionToAcs({ privateKeyPem, certificatePem }, acsUrl
   console.log(ok(`replay rejected (HTTP ${replayRes.status})`));
 }
 
-// ─── Act 3: Fake SP → Hearth IdP SSO ─────────────────────────────────
-async function act3_postAuthnRequestToIdp() {
-  step("Act 3 — fake SP sends AuthnRequest to Hearth's IdP SSO");
-
-  // 3a. Fetch Hearth's IdP metadata to get the signing cert.
-  const idpMetaRes = await fetch(
-    `${HEARTH}/ui/realms/${REALM}/saml/metadata`,
-  );
-  if (!idpMetaRes.ok)
-    throw new Error(`IdP metadata HTTP ${idpMetaRes.status}`);
-  const idpMetaXml = await idpMetaRes.text();
-  const idpDoc = new DOMParser().parseFromString(idpMetaXml);
-  const certB64 = idpDoc
-    .getElementsByTagName("ds:X509Certificate")[0]
-    .textContent.replace(/\s+/g, "");
-  const idpCertPem =
-    "-----BEGIN CERTIFICATE-----\n" +
-    certB64.match(/.{1,64}/g).join("\n") +
-    "\n-----END CERTIFICATE-----\n";
-  console.log(ok(`fetched Hearth IdP metadata cert (${certB64.length} b64 chars)`));
-
-  // 3b. Build an AuthnRequest naming our fake SP as the Issuer.
-  const requestId = `_sp${randomBytes(12).toString("hex")}`;
-  const authnRequestXml = buildAuthnRequest({
-    requestId,
-    destination: `${HEARTH}/ui/realms/${REALM}/saml/sso`,
-    issuer: SP_ENTITY_ID,
-    acsUrl: SP_ACS,
-  });
-  const samlReqB64 = Buffer.from(authnRequestXml, "utf8").toString("base64");
-  const form = new URLSearchParams({
-    SAMLRequest: samlReqB64,
-    RelayState: "demo-sp-relay",
-  });
-
-  const ssoRes = await fetch(
-    `${HEARTH}/ui/realms/${REALM}/saml/sso`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: form,
-    },
-  );
-  if (!ssoRes.ok) {
-    const text = await ssoRes.text();
-    throw new Error(`SSO POST HTTP ${ssoRes.status}: ${text}`);
-  }
-  const autoSubmitHtml = await ssoRes.text();
-  if (!autoSubmitHtml.includes("SAMLResponse"))
-    throw new Error("SSO response didn't include a SAMLResponse");
-  console.log(ok(`Hearth IdP produced auto-submit HTML form (${autoSubmitHtml.length} bytes)`));
-
-  // 3c. Pluck the SAMLResponse from the form and verify the signature.
-  const m = autoSubmitHtml.match(
-    /name="SAMLResponse"\s+value="([^"]+)"/,
-  );
-  if (!m) throw new Error("could not find SAMLResponse input in form");
-  const respXml = Buffer.from(
-    m[1].replace(/&#x([0-9A-Fa-f]+);/g, (_, h) =>
-      String.fromCharCode(parseInt(h, 16)),
-    ),
-    "base64",
-  ).toString("utf8");
-
-  // Verify via xml-crypto.
-  const respDoc = new DOMParser().parseFromString(respXml);
-  const sigNode = respDoc.getElementsByTagNameNS(
-    "http://www.w3.org/2000/09/xmldsig#",
-    "Signature",
-  )[0];
-  if (!sigNode) throw new Error("Response has no <ds:Signature>");
-  const verifier = new SignedXml({ publicCert: idpCertPem });
-  verifier.loadSignature(sigNode);
-  const valid = verifier.checkSignature(respXml);
-  if (!valid) {
-    throw new Error(
-      "signature verification FAILED: " +
-        (verifier.validationErrors?.join(", ") || "unknown"),
-    );
-  }
-  console.log(ok("Hearth-signed Response verifies against Hearth's IdP cert"));
-
-  // 3d. Pull out the NameID and issuer for a sanity check.
-  const nameId = respDoc.getElementsByTagName("saml:NameID")[0]?.textContent;
-  const issuer = respDoc.getElementsByTagName("saml:Issuer")[0]?.textContent;
-  console.log(`  Issuer: ${issuer}`);
-  console.log(`  NameID: ${nameId}`);
-}
-
 // ─── Main ────────────────────────────────────────────────────────────
 try {
   const cred = loadIdpCredential();
   const acs = await act1_fetchSpMetadata();
   await act2_postAssertionToAcs(cred, acs);
-  await act3_postAuthnRequestToIdp();
   console.log(
-    "\n\x1b[32mAll three acts completed successfully.\x1b[0m Audit " +
-      "events for each act (SamlLoginCompleted, SamlLoginFailed replay, " +
-      "SamlIdpAuthnRequestReceived, SamlIdpResponseIssued) are visible " +
-      "via the audit API.",
+    "\n\x1b[32mBoth acts completed successfully.\x1b[0m Audit events " +
+      "for each act (SamlLoginCompleted, SamlLoginFailed replay) are " +
+      "visible via the audit API.",
   );
   process.exit(0);
 } catch (err) {

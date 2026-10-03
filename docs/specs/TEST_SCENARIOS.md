@@ -42,12 +42,12 @@ Phase 0 scenario counts by module and testing layer. `0/N` = completed/total. `-
 
 #### Unit
 
-- [x] TestHarness embedded mode starts with isolated temp directory and stops cleanly `P0` `fast`
+- [x] TestHarness in-process mode starts with isolated temp directory and stops cleanly `P0` `fast`
 - [x] TestHarness server mode starts on random port, accepts connections, and stops cleanly `P0` `fast`
 
 #### Integration
 
-- [x] Dual-mode test pattern: same async test logic runs against both embedded and server modes `P0` `fast`
+- [x] Dual-mode test pattern: same async test logic runs against both in-process and server modes `P0` `fast`
 - [x] Server-mode tests are `#[ignore]`-tagged until HTTP layer exists `P1` `fast`
 
 ---
@@ -163,7 +163,7 @@ Phase 0 scenario counts by module and testing layer. `0/N` = completed/total. `-
 
 #### Integration
 
-- [x] Full CRUD lifecycle via embedded public API (zero internal imports) `P0` `fast`
+- [x] Full CRUD lifecycle via the in-process public API (zero internal imports) `P0` `fast`
 - [x] Full CRUD lifecycle via server HTTP API `P1` `fast`
 - [x] Delete user cascades: associated sessions invalidated, credentials removed `P0` `fast`
 
@@ -227,7 +227,7 @@ Phase 0 scenario counts by module and testing layer. `0/N` = completed/total. `-
 
 #### Integration
 
-- [x] Full lifecycle (create → validate → refresh → revoke → validate-fails) via embedded API `P0` `fast`
+- [x] Full lifecycle (create → validate → refresh → revoke → validate-fails) via the in-process API `P0` `fast`
 - [x] Full lifecycle via server HTTP API `P1` `fast`
 - [x] Session data persists across server restart (WAL durability) `P0` `fast`
 
@@ -341,7 +341,7 @@ Covers `src/rbac/` — the claims-based RBAC engine. See [AUTHORIZATION.md](./AU
 
 #### Integration
 
-- [x] Full authorization code flow via embedded API (authorize → exchange → validate) `P0` `fast`
+- [x] Full authorization code flow via the in-process API (authorize → exchange → validate) `P0` `fast`
 - [x] Full authorization code flow via HTTP endpoints `P1` `fast`
 - [x] PKCE (S256): code challenge generated, code verifier validated on exchange `P0` `fast`
 
@@ -468,7 +468,7 @@ Phase 1 scenario counts by module and testing layer. `0/N` = completed/total. `-
 
 #### Integration
 
-- [x] Full client credentials flow via embedded API: register client → request token → validate → revoke `P0` `fast`
+- [x] Full client credentials flow via the in-process API: register client → request token → validate → revoke `P0` `fast`
 - [x] Full device authorization flow: device code request → user approval → token poll → access granted `P0` `fast`
 - [x] Refresh token rotation end-to-end: issue → expire access → refresh → validate new token `P0` `fast`
 
@@ -507,7 +507,7 @@ Phase 1 scenario counts by module and testing layer. `0/N` = completed/total. `-
 
 #### Integration
 
-- [x] Full registration + authentication lifecycle via embedded API `P0` `fast`
+- [x] Full registration + authentication lifecycle via the in-process API `P0` `fast`
 - [x] Credential management: register → authenticate → add second key → revoke first key → authenticate with second `P0` `fast`
 
 #### Fuzz
@@ -537,7 +537,7 @@ Phase 1 scenario counts by module and testing layer. `0/N` = completed/total. `-
 
 #### Integration
 
-- [x] Full passwordless flow via embedded API: request link → validate token → receive session `P0` `fast`
+- [x] Full passwordless flow via the in-process API: request link → validate token → receive session `P0` `fast`
 - [x] Magic link with existing user authenticates; with new email triggers account creation `P1` `fast`
 
 #### Adversarial
@@ -586,7 +586,7 @@ Phase 1 scenario counts by module and testing layer. `0/N` = completed/total. `-
 
 #### Integration
 
-- [x] Full realm lifecycle via embedded API: create → configure → create users → delete realm → verify cleanup `P0` `fast`
+- [x] Full realm lifecycle via the in-process API: create → configure → create users → delete realm → verify cleanup `P0` `fast`
 - [x] Multi-realm token issuance: tokens from realm A are not valid in realm B `P0` `fast`
 - [x] Realm-scoped OIDC: discovery documents and JWKS endpoints differ per realm `P0` `fast`
 
@@ -849,7 +849,7 @@ Phase 1 extends the Phase 0 RBAC engine with group nesting, role composition, or
 
 ### Agent DPoP — Phase A.5–A.6 (shipped M1–M5; verified HEA-1766 audit)
 
-<!-- HEA-1766 audit: un-gated (HEA-1410 shipped per AGENT_AUTH.md). Backed by tests/dpop.rs, tests/dpop_refresh_binding.rs, tests/fapi2_conformance.rs, src/identity/dpop.rs. -->
+<!-- HEA-1766 audit: un-gated (HEA-1410 shipped per AGENT_AUTH.md). Backed by tests/dpop.rs, tests/dpop_refresh_binding.rs, src/identity/dpop.rs. -->
 - [x] DPoP proof parsing, signature verification, nonce, replay (Unit)
 - [x] RFC 9449 test vector conformance (Conformance)
 - [x] DPoP-bound token issuance full flow (Integration)

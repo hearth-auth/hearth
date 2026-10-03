@@ -95,7 +95,7 @@ async fn patch_config(
 
 #[tokio::test]
 async fn a_misspelled_key_is_refused_instead_of_answering_200() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = admin_token(&h, &realm).await;
@@ -117,7 +117,7 @@ async fn a_misspelled_key_is_refused_instead_of_answering_200() {
 
 #[tokio::test]
 async fn omitting_default_required_actions_leaves_them_intact() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = admin_token(&h, &realm).await;
@@ -151,7 +151,7 @@ async fn omitting_default_required_actions_leaves_them_intact() {
 
 #[tokio::test]
 async fn an_explicit_empty_list_still_clears_default_required_actions() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = admin_token(&h, &realm).await;

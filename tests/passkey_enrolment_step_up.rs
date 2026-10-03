@@ -655,7 +655,7 @@ struct RestRig {
 }
 
 async fn build_rest_rig() -> RestRig {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {

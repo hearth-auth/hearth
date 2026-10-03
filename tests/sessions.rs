@@ -29,7 +29,7 @@ fn create_user(harness: &common::TestHarness, realm: &RealmId) -> User {
 
 #[tokio::test]
 async fn session_full_lifecycle() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -190,7 +190,7 @@ async fn session_persists_across_restart() {
 
 #[tokio::test]
 async fn delete_user_invalidates_sessions() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -237,7 +237,7 @@ async fn delete_user_invalidates_sessions() {
 
 #[tokio::test]
 async fn sessions_are_realm_isolated() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm_a = harness.create_realm();
@@ -269,7 +269,7 @@ async fn sessions_are_realm_isolated() {
 
 #[tokio::test]
 async fn create_session_for_nonexistent_user_fails() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -293,7 +293,7 @@ async fn create_session_for_nonexistent_user_fails() {
 
 #[tokio::test]
 async fn revoke_nonexistent_session_returns_error() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -316,7 +316,7 @@ async fn revoke_nonexistent_session_returns_error() {
 
 #[tokio::test]
 async fn replayed_session_token_rejected_after_revocation() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -378,7 +378,7 @@ async fn replayed_session_token_rejected_after_revocation() {
 
 #[tokio::test]
 async fn session_fixation_prevention() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();

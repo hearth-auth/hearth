@@ -103,7 +103,7 @@ async fn body_to_string(resp: axum::response::Response) -> String {
 /// `/healthz` (liveness probe) MUST return `200 OK` unconditionally.
 #[tokio::test]
 async fn healthz_returns_200_always() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let app = build_app(&h);
 
     let resp = app
@@ -127,7 +127,7 @@ async fn healthz_returns_200_always() {
 /// `/readyz` returns `200 OK` when storage is accessible.
 #[tokio::test]
 async fn readyz_returns_200_when_storage_healthy() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let app = build_app(&h);
 
     let resp = app
@@ -155,7 +155,7 @@ async fn readyz_returns_200_when_storage_healthy() {
 /// fault injection is enabled.
 #[tokio::test]
 async fn readyz_returns_503_when_storage_unhealthy() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
 
     // Back the fault engine with a real on-disk store so seeding succeeds.
     let fault_dir = tempfile::tempdir().expect("tempdir for fault storage");
@@ -215,7 +215,7 @@ async fn readyz_returns_503_when_storage_unhealthy() {
 /// `hearth_tokens_issued_total` time series appears in the scrape output.
 #[tokio::test]
 async fn metrics_tokens_issued_counter_increments() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
 
     // Use a unique realm label so this counter label does not appear before
     // this test increments it, regardless of other tests in the same process.
@@ -274,7 +274,7 @@ async fn metrics_tokens_issued_counter_increments() {
 /// surfaces in the `/metrics` scrape output.
 #[tokio::test]
 async fn metrics_audit_integrity_failure_increments() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
 
     // Baseline — read before the test so the assertion stays valid even if
@@ -370,7 +370,7 @@ async fn metrics_audit_integrity_failure_increments() {
 /// and Kubernetes kept sending it traffic it could not accept.
 #[tokio::test]
 async fn readyz_returns_503_when_wal_write_fenced() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
 
     let fault_dir = tempfile::tempdir().expect("tempdir for fault storage");
     let real_storage = Arc::new(

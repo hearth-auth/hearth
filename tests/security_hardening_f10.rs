@@ -35,9 +35,9 @@ async fn setup_env() -> (
     hearth::core::UserId,
     OAuthClient,
 ) {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
-        .expect("embedded harness");
+        .expect("in-process harness");
 
     let realm = harness
         .identity()
@@ -119,7 +119,6 @@ fn do_authcode_exchange(
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize");

@@ -695,20 +695,6 @@ pub(crate) fn identity_error_to_response(
         }
     }
 
-    // A FAPI auth-method refusal says which method is required (RFC 6749 §5.2
-    // `error_description`); it names the realm's or client's profile, never
-    // whether a presented credential was right.
-    if matches!(err, IdentityError::PrivateKeyJwtRequired) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({
-                "error": "invalid_client",
-                "error_description": err.to_string(),
-                "error_code": crate::protocol::error_codes::for_identity_error(err),
-            })),
-        );
-    }
-
     let (status, message) = match err {
         IdentityError::RealmNotFound | IdentityError::UserNotFound => {
             (StatusCode::NOT_FOUND, "not found")
@@ -749,9 +735,7 @@ pub(crate) fn identity_error_to_response(
             (StatusCode::BAD_REQUEST, "invalid authorization code")
         }
         IdentityError::InvalidGrant { .. } => (StatusCode::BAD_REQUEST, "invalid grant"),
-        IdentityError::InvalidClientSecret | IdentityError::PrivateKeyJwtRequired => {
-            (StatusCode::UNAUTHORIZED, "invalid_client")
-        }
+        IdentityError::InvalidClientSecret => (StatusCode::UNAUTHORIZED, "invalid_client"),
         IdentityError::AuthorizationPending => (StatusCode::BAD_REQUEST, "authorization_pending"),
         IdentityError::SlowDown => (StatusCode::BAD_REQUEST, "slow_down"),
         IdentityError::DeviceCodeExpired => (StatusCode::BAD_REQUEST, "expired_token"),
@@ -862,8 +846,7 @@ pub(crate) fn identity_error_to_response(
             crate::identity::federation::saml::SamlError::MetadataFetch { .. } => {
                 (StatusCode::BAD_GATEWAY, "SAML metadata fetch failed")
             }
-            crate::identity::federation::saml::SamlError::UnknownSp
-            | crate::identity::federation::saml::SamlError::UnknownIdp => {
+            crate::identity::federation::saml::SamlError::UnknownIdp => {
                 (StatusCode::NOT_FOUND, "SAML entity not found")
             }
             _ => (StatusCode::BAD_REQUEST, "invalid SAML message"),
@@ -894,15 +877,9 @@ pub(crate) fn identity_error_to_response(
         }
         IdentityError::AuditFailure { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
         IdentityError::WebhookNotFound => (StatusCode::NOT_FOUND, "webhook not found"),
-        IdentityError::StepUpChallengeRequired => (StatusCode::UNAUTHORIZED, "mfa_required"),
-        IdentityError::EnrollMfaRequired => (StatusCode::FORBIDDEN, "mfa_enrollment_required"),
         // Handled by the early return above; this arm satisfies exhaustiveness.
         IdentityError::RequiredActionsBlocking { .. } => {
             (StatusCode::BAD_REQUEST, "required_actions_pending")
-        }
-        IdentityError::InvalidSmsOtp => (StatusCode::UNAUTHORIZED, "invalid_sms_otp"),
-        IdentityError::SmsResendLimitExceeded => {
-            (StatusCode::TOO_MANY_REQUESTS, "sms_resend_limit_exceeded")
         }
         IdentityError::InvalidEmailOtp => (StatusCode::UNAUTHORIZED, "invalid_email_otp"),
         IdentityError::InvalidPushedAuthorizationRequest => {
@@ -919,7 +896,6 @@ pub(crate) fn identity_error_to_response(
             (StatusCode::UNAUTHORIZED, "invalid_grant")
         }
         IdentityError::InvalidJar { .. } => (StatusCode::BAD_REQUEST, "invalid_request_object"),
-        IdentityError::FapiViolation { .. } => (StatusCode::BAD_REQUEST, "invalid_request"),
         IdentityError::SessionLimitExceeded { .. } => {
             (StatusCode::TOO_MANY_REQUESTS, "session_limit_exceeded")
         }

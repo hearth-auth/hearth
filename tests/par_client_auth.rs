@@ -7,8 +7,7 @@
 //! used to read `client_id` from the body and push the request with no client
 //! authentication at all, so anyone could push scopes, a `resource`, a choice
 //! among the registered redirect URIs, a request object and a `prompt` in the
-//! name of a confidential client — and FAPI 2.0 makes PAR, with client
-//! authentication, the only way into `/authorize`.
+//! name of a confidential client.
 //!
 //! Pinned here, on both routes:
 //! - a confidential client with no credentials, a wrong secret, or a
@@ -20,9 +19,8 @@
 //!   cannot hold is refused rather than ignored;
 //! - the authenticated client must be the one the body and the request object
 //!   name; combining an assertion with a secret is `400 invalid_request`;
-//! - a FAPI 2.0 client (assertion key, no secret) cannot push on its
-//!   `client_id` alone, and a confidential client in a FAPI realm must
-//!   authenticate;
+//! - a secretless client holding keys (JWKS / assertion key) cannot push on
+//!   its `client_id` alone;
 //! - an Argon2id secret whose verification the saturated KDF gate sheds is
 //!   `503` + `Retry-After`, as at the token endpoint.
 
@@ -35,8 +33,7 @@ use base64::Engine as _;
 use hearth::core::{ClientId, RealmId};
 use hearth::identity::tokens::{Audience, JwtAssertionClaims};
 use hearth::identity::{
-    ClientProfile, CreateRealmRequest, FapiProfile, KdfGateConfig, RegisterClientRequest,
-    SigningKey, UpdateClientRequest, UpdateRealmRequest,
+    CreateRealmRequest, KdfGateConfig, RegisterClientRequest, SigningKey, UpdateClientRequest,
 };
 use ring::signature::{Ed25519KeyPair, KeyPair};
 
@@ -80,28 +77,6 @@ async fn server_env() -> Env {
         realm_id,
         issuer,
     }
-}
-
-/// Switches the realm to a FAPI 2.0 profile.
-fn set_fapi(env: &Env, profile: FapiProfile) {
-    let realm = env
-        .h
-        .identity()
-        .get_realm(&env.realm_id)
-        .expect("get realm")
-        .expect("realm exists");
-    let mut config = realm.config().clone();
-    config.fapi_profile = Some(profile);
-    env.h
-        .identity()
-        .update_realm(
-            &env.realm_id,
-            &UpdateRealmRequest {
-                config: Some(config),
-                ..Default::default()
-            },
-        )
-        .expect("set fapi profile");
 }
 
 fn register_with(env: &Env, req: RegisterClientRequest) -> ClientId {
@@ -642,26 +617,25 @@ async fn a_request_object_naming_another_client_is_refused() {
     }
 }
 
-// ===== FAPI 2.0 =====
+// ===== Secretless key-holding clients =====
 
 #[tokio::test]
-async fn fapi2_client_must_push_with_its_assertion() {
+async fn secretless_jwks_client_must_push_with_its_assertion() {
     let env = server_env().await;
     let jar = jar_key();
-    // FAPI 2.0 clients hold no secret and register a JWKS; they authenticate
-    // with private_key_jwt.
+    // A client that holds no secret and registers a JWKS is not public; it
+    // authenticates with private_key_jwt.
     let client = register_with(
         &env,
         RegisterClientRequest {
             jwks: Some(jar.jwks.clone()),
-            profile: ClientProfile::Fapi2,
             ..Default::default()
         },
     );
     let key = install_assertion_key(&env, &client);
     for route in ROUTES {
         let p = push(&env, route, &par_body(Some(&client)), None).await;
-        assert_invalid_client(&p, &format!("{route:?}: FAPI 2.0 client, client_id only"));
+        assert_invalid_client(&p, &format!("{route:?}: JWKS client, client_id only"));
 
         let body = with(
             par_body(Some(&client)),
@@ -671,27 +645,7 @@ async fn fapi2_client_must_push_with_its_assertion() {
             ],
         );
         let p = push(&env, route, &body, None).await;
-        assert_pushed(&p, &format!("{route:?}: FAPI 2.0 client, private_key_jwt"));
-    }
-}
-
-#[tokio::test]
-async fn confidential_client_in_a_fapi_realm_must_authenticate() {
-    let env = server_env().await;
-    set_fapi(&env, FapiProfile::Baseline);
-    let client = register(&env, Some(SECRET));
-    for route in ROUTES {
-        let p = push(&env, route, &par_body(Some(&client)), None).await;
-        assert_invalid_client(&p, &format!("{route:?}: FAPI Baseline, no credentials"));
-
-        let p = push(
-            &env,
-            route,
-            &par_body(Some(&client)),
-            Some(basic(&client, SECRET)),
-        )
-        .await;
-        assert_pushed(&p, &format!("{route:?}: FAPI Baseline, authenticated"));
+        assert_pushed(&p, &format!("{route:?}: JWKS client, private_key_jwt"));
     }
 }
 

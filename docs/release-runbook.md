@@ -12,13 +12,10 @@ PR merged to main (or 1.x / 2.x)
         │
         ├─▶ server root  → tag v1.1.0      ─▶ release.yml   (binaries, SBOM, SLSA)
         │                                  ─▶ helm.yml      (Helm OCI chart)
-        ├─▶ sdks/node    → tag sdk-node-v0.0.1 ─▶ sdk-publish-node.yml
         ├─▶ sdks/typescript → tag sdk-ts-v0.0.1 ─▶ sdk-publish-typescript.yml
         ├─▶ sdks/go      → tag sdks/go/v0.1.1  ─▶ sdk-publish-go.yml
-        ├─▶ sdks/rust    → tag sdk-rust-v0.2.1 ─▶ sdk-publish-rust.yml
         ├─▶ sdks/python  → tag sdk-python-v0.1.1 ─▶ sdk-publish-python.yml
-        ├─▶ sdks/php     → tag sdk-php-v0.0.1  ─▶ sdk-publish-php.yml
-        └─▶ sdks/kotlin  → tag sdk-kotlin-v0.1.1 ─▶ sdk-publish-kotlin.yml
+        └─▶ sdks/php     → tag sdk-php-v0.0.1  ─▶ sdk-publish-php.yml
 ```
 
 Packages with no releasable commits since their last tag are silently skipped.
@@ -105,13 +102,10 @@ Bootstrap steps (run once, **before** enabling semantic-release on main):
 git tag v1.0.0 <sha-of-1.0.0-commit>
 
 # SDK anchor tags
-git tag sdk-node-v0.0.1     <sha>
 git tag sdk-ts-v0.0.1       <sha>
 git tag sdks/go/v0.1.0      <sha>   # already released; skip if already present
-git tag sdk-rust-v0.2.0     <sha>
 git tag sdk-python-v0.1.0   <sha>
 git tag sdk-php-v0.0.0      <sha>
-git tag sdk-kotlin-v0.1.0   <sha>
 
 # Push all anchor tags
 git push origin --tags
@@ -123,12 +117,9 @@ After these anchor tags exist, the first merge to `main` triggers semantic-relea
 |---------|---------------------------------------|-----------|
 | server + Helm | `v1.1.0` | `v*` |
 | Go SDK | `sdks/go/v0.1.1` | `sdks/go/v*` |
-| Node SDK | `sdk-node-v0.0.2` | `sdk-node-v*` |
 | TypeScript SDK | `sdk-ts-v0.0.2` | `sdk-ts-v*` |
-| Rust SDK | `sdk-rust-v0.2.1` | `sdk-rust-v*` |
 | Python SDK | `sdk-python-v0.1.1` | `sdk-python-v*` |
 | PHP SDK | `sdk-php-v0.0.1` | `sdk-php-v*` |
-| Kotlin SDK | `sdk-kotlin-v0.1.1` | `sdk-kotlin-v*` |
 
 The `Cargo.toml` `version` field is bumped automatically by `@semantic-release/exec` on each server release; the in-binary version is set from the tag via `HEARTH_RELEASE_VERSION` in `build.rs`.
 
@@ -140,7 +131,7 @@ To verify the computed next version and tag names before enabling live releases:
 # On any branch that has commits since the last anchor tag:
 GITHUB_TOKEN=<pat> npx multi-semantic-release \
   --dry-run \
-  --packages sdks/node sdks/typescript sdks/go sdks/rust sdks/python sdks/php sdks/kotlin .
+  --packages sdks/typescript sdks/go sdks/python sdks/php .
 ```
 
 Check that each emitted `tagFormat` exactly matches the trigger pattern in the corresponding publish workflow:
@@ -148,13 +139,10 @@ Check that each emitted `tagFormat` exactly matches the trigger pattern in the c
 | Package | Emitted tag example | Trigger in workflow |
 |---------|--------------------|--------------------|
 | server | `v0.1.1` | `v[0-9]+.[0-9]+.[0-9]+` in `release.yml`, `helm.yml` |
-| Node SDK | `sdk-node-v0.0.2` | `sdk-node-v*` in `sdk-publish-node.yml` |
 | TS SDK | `sdk-ts-v0.0.2` | `sdk-ts-v*` in `sdk-publish-typescript.yml` |
 | Go SDK | `sdks/go/v0.1.1` | `sdks/go/v*` in `sdk-publish-go.yml` |
-| Rust SDK | `sdk-rust-v0.2.1` | `sdk-rust-v*` in `sdk-publish-rust.yml` |
 | Python SDK | `sdk-python-v0.1.1` | `sdk-python-v*` in `sdk-publish-python.yml` |
 | PHP SDK | `sdk-php-v0.0.2` | `sdk-php-v*` in `sdk-publish-php.yml` |
-| Kotlin SDK | `sdk-kotlin-v0.1.1` | `sdk-kotlin-v*` in `sdk-publish-kotlin.yml` |
 
 ## Branch protection requirements (merge gate = release gate)
 
@@ -178,7 +166,7 @@ Continuous deployment does not weaken signing or attestation:
 - Binaries: cosign keyless + SLSA L1 (via `release.yml`)
 - Container: cosign keyless + CycloneDX SBOM (via `docker.yml`)
 - Helm chart: cosign keyless OCI (via `helm.yml`)
-- npm packages: OIDC trusted publishing + `--provenance` (via `sdk-publish-{node,typescript}.yml`)
+- npm packages: OIDC trusted publishing + `--provenance` (via `sdk-publish-typescript.yml`)
 
 ## Support window
 

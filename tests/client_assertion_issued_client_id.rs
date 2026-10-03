@@ -53,7 +53,7 @@ struct Env {
 /// `jwks` (private_key_jwt, JAR) and as its `assertion_public_key`
 /// (JWT-bearer grant).
 async fn env() -> Env {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm_name = format!("issued-cid-{}", uuid::Uuid::new_v4());
     let realm = h
         .identity()

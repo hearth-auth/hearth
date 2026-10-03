@@ -160,19 +160,19 @@ function EditButton() {
 }
 ```
 
-For server-side TypeScript (Node.js), see the Node tab.
+For server-side TypeScript, see the Node.js tab.
 
 </TabItem>
-<TabItem value="node" label="Node">
+<TabItem value="node" label="Node.js">
 
 ```typescript
-import { HearthClient, TokenInvalidError } from '@hearth-auth/node';
+import { HearthClient } from '@hearth-auth/sdk';
 
-const client = new HearthClient({ issuer_url: process.env.HEARTH_ISSUER_URL! });
+const client = new HearthClient({ issuerUrl: process.env.HEARTH_ISSUER_URL! });
 
-// After verifyToken() — reads embedded JWT claims locally
-const token = await client.verifyToken(bearerToken);
-if (!token.hasPermission('docs.edit')) {
+// verifyToken() checks the signature, then the claims are read locally
+const claims = await client.verifyToken(bearerToken);
+if (!claims.hasPermission('docs.edit')) {
   res.status(403).json({ error: 'forbidden' });
   return;
 }
@@ -222,39 +222,6 @@ if (!$claims->hasPermission('docs.edit')) {
     exit(json_encode(['error' => 'forbidden']));
 }
 ```
-
-</TabItem>
-<TabItem value="rust" label="Rust">
-
-```rust
-use hearth_sdk::HearthClient;
-
-// Verifies the token against the cached JWKS, then reads its claims
-let allowed = client.has_permission(&access_token, "docs.edit").await?;
-if !allowed {
-    return Err(StatusCode::FORBIDDEN.into_response());
-}
-```
-
-</TabItem>
-<TabItem value="kotlin" label="Kotlin">
-
-```kotlin
-import io.hearth.sdk.HearthClient
-
-val client = HearthClient(
-    issuerUrl = System.getenv("HEARTH_URL"),
-    clientId  = System.getenv("HEARTH_CLIENT_ID"),
-)
-
-// Reads embedded JWT claims locally — no network call
-val claims = client.verifyToken(accessToken)
-if (!claims.hasPermission("docs.edit")) {
-    throw ResponseStatusException(HttpStatus.FORBIDDEN, "Forbidden")
-}
-```
-
-For Ktor, use `call.principal<HearthPrincipal>()!!.claims.hasPermission("docs.edit")` inside an `authenticate("api")` block. For Spring Boot, annotate the handler with `@PreAuthorize("hasAuthority('docs.edit')")` — see the [Kotlin SDK guide](/docs/sdks/kotlin) for setup.
 
 </TabItem>
 </Tabs>

@@ -80,7 +80,7 @@ pub mod redact;
 /// wire, `Authorization: Bearer <provider api key>` included, and
 /// `tracing-subscriber` bridges those `log` records into the global subscriber.
 /// The `h2`, `hyper` and `hyper_util` framing targets do the same for their own
-/// protocols. Every one of Hearth's egress paths — federation, email, SMS and
+/// protocols. Every one of Hearth's egress paths — federation, email and
 /// webhook dispatch — carries a provider credential in those headers.
 ///
 /// These caps are applied last and unconditionally, so neither

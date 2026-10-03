@@ -12,8 +12,8 @@ mod common;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hearth::identity::{
-    CleartextPassword, CreateRealmRequest, CreateUserRequest, IdentityError, MfaProof,
-    PasswordGrantRequest, RealmConfig, SessionContext, StepUpMfaGrantRequest,
+    CleartextPassword, CreateRealmRequest, CreateUserRequest, IdentityError, MfaProof, RealmConfig,
+    SessionContext,
 };
 
 const PASSWORD: &str = "S3cur3P@ss!1";
@@ -52,7 +52,7 @@ async fn mfa_realm_and_user(
     hearth::identity::Realm,
     hearth::identity::User,
 ) {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -141,7 +141,7 @@ async fn create_session_accepts_a_proved_factor() {
 /// A realm that does not require MFA is untouched by the gate.
 #[tokio::test]
 async fn create_session_is_unchanged_when_the_realm_does_not_require_mfa() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -166,82 +166,4 @@ async fn create_session_is_unchanged_when_the_realm_does_not_require_mfa() {
     h.identity()
         .create_session(realm.id(), user.id(), &SessionContext::default())
         .expect("no MFA policy means no gate");
-}
-
-// ─── ROPC ───────────────────────────────────────────────────────────────────
-
-/// ROPC never runs a challenge. With an enrolled factor it must ask the client
-/// to come back through the step-up MFA grant.
-#[tokio::test]
-async fn ropc_demands_the_second_factor_when_the_realm_requires_mfa() {
-    let (h, realm, user) = mfa_realm_and_user("mfa-use-ropc").await;
-    enrol_totp(&h, &realm, user.id());
-
-    let err = h
-        .identity()
-        .password_grant_token(
-            realm.id(),
-            &PasswordGrantRequest {
-                email: user.email().to_string(),
-                password: PASSWORD.to_string(),
-                scope: None,
-                client_ip: Some("10.1.2.3".to_string()),
-                user_agent: Some("UA/1".to_string()),
-            },
-        )
-        .expect_err("ROPC must not issue tokens without the second factor");
-    assert!(
-        matches!(err, IdentityError::StepUpChallengeRequired),
-        "expected StepUpChallengeRequired, got: {err:?}"
-    );
-}
-
-/// ROPC for an MFA-required user who has no factor at all must send them to
-/// enrolment, not issue tokens.
-#[tokio::test]
-async fn ropc_demands_enrolment_when_the_user_has_no_factor() {
-    let (h, realm, user) = mfa_realm_and_user("mfa-use-ropc-nofactor").await;
-
-    let err = h
-        .identity()
-        .password_grant_token(
-            realm.id(),
-            &PasswordGrantRequest {
-                email: user.email().to_string(),
-                password: PASSWORD.to_string(),
-                scope: None,
-                client_ip: Some("10.1.2.4".to_string()),
-                user_agent: Some("UA/1".to_string()),
-            },
-        )
-        .expect_err("ROPC must not issue tokens to an MFA-required user with no factor");
-    assert!(
-        matches!(err, IdentityError::EnrollMfaRequired),
-        "expected EnrollMfaRequired, got: {err:?}"
-    );
-}
-
-/// The step-up MFA grant verifies a TOTP code, so it still issues tokens on an
-/// MFA-required realm. This guards the fix against over-blocking.
-#[tokio::test]
-async fn step_up_mfa_grant_still_issues_tokens_when_the_realm_requires_mfa() {
-    let (h, realm, user) = mfa_realm_and_user("mfa-use-stepup").await;
-    let secret = enrol_totp(&h, &realm, user.id());
-
-    // A fresh time step avoids the replay guard tripping on the enrolment code.
-    let code = compute_totp_code(&secret, now_secs() + 30);
-    h.identity()
-        .step_up_mfa_grant_token(
-            realm.id(),
-            &StepUpMfaGrantRequest {
-                email: user.email().to_string(),
-                password: PASSWORD.to_string(),
-                mfa_code: code,
-                scope: None,
-                client_ip: Some("10.1.2.5".to_string()),
-                user_agent: Some("UA/1".to_string()),
-                dpop_jkt: None,
-            },
-        )
-        .expect("a verified TOTP code must issue tokens");
 }

@@ -21,9 +21,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use hearth::core::RealmId;
 use hearth::identity::{
-    CidrPolicy, CleartextPassword, CreateRealmRequest, CreateUserRequest, IdentityError,
-    RealmConfig, RegistrationOptions, RequiredAction, SessionContext, StepUpMfaGrantRequest,
-    UpdateUserRequest, User, UserStatus,
+    CidrPolicy, CleartextPassword, CreateRealmRequest, CreateUserRequest, RealmConfig,
+    RegistrationOptions, RequiredAction, SessionContext, UpdateUserRequest, User, UserStatus,
 };
 use tower::ServiceExt as _;
 
@@ -392,7 +391,7 @@ async fn passkey_login(
 /// A passkey login must not walk around a pending password change.
 #[tokio::test]
 async fn passkey_login_enforces_pending_required_actions() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, realm_name) = create_realm(&h, RealmConfig::default());
     let user = create_user(&h, &realm);
     let authenticator = enrol_passkey(&h, &realm, &user);
@@ -411,7 +410,7 @@ async fn passkey_login_enforces_pending_required_actions() {
 /// A magic link must not walk around a pending password change.
 #[tokio::test]
 async fn magic_link_redemption_enforces_pending_required_actions() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, realm_name) = create_realm(&h, RealmConfig::default());
     let user = create_user(&h, &realm);
     require_password_change(&h, &realm, &user);
@@ -435,7 +434,7 @@ async fn magic_link_redemption_enforces_pending_required_actions() {
 /// password grant does.
 #[tokio::test]
 async fn magic_link_grant_enforces_pending_required_actions() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, _) = create_realm(&h, RealmConfig::default());
     let user = create_user(&h, &realm);
     require_password_change(&h, &realm, &user);
@@ -446,42 +445,12 @@ async fn magic_link_grant_enforces_pending_required_actions() {
     assert!(!text.contains("access_token"), "no tokens: {text}");
 }
 
-/// The step-up MFA grant refuses a user with pending actions.
-#[tokio::test]
-async fn step_up_grant_enforces_pending_required_actions() {
-    let h = common::TestHarness::embedded().await.expect("harness");
-    let (realm, _) = create_realm(&h, RealmConfig::default());
-    let user = create_user(&h, &realm);
-    let secret = enrol_totp(&h, &realm, &user);
-    require_password_change(&h, &realm, &user);
-
-    let err = h
-        .identity()
-        .step_up_mfa_grant_token(
-            &realm,
-            &StepUpMfaGrantRequest {
-                email: user.email().to_string(),
-                password: password(),
-                mfa_code: compute_totp_code(&secret, now_secs() + 30),
-                scope: None,
-                client_ip: None,
-                user_agent: None,
-                dpop_jkt: None,
-            },
-        )
-        .expect_err("pending actions must block the grant");
-    assert!(
-        matches!(err, IdentityError::RequiredActionsBlocking { .. }),
-        "got {err:?}"
-    );
-}
-
 // ─── M13: the realm's network policy ────────────────────────────────────────
 
 /// The engine refuses a session from a denied network, whatever the path.
 #[tokio::test]
 async fn a_session_from_a_denied_network_is_refused() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, _) = create_realm(&h, loopback_denied());
     let user = create_user(&h, &realm);
 
@@ -512,7 +481,7 @@ async fn a_session_from_a_denied_network_is_refused() {
 /// signs in and everything outside the allow list is refused.
 #[tokio::test]
 async fn a_deny_exception_inside_an_allowed_range_is_refused() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, _) = create_realm(
         &h,
         RealmConfig {
@@ -543,7 +512,7 @@ async fn a_deny_exception_inside_an_allowed_range_is_refused() {
 /// The step-up grant from a denied network issues no tokens.
 #[tokio::test]
 async fn step_up_grant_from_a_denied_network_is_refused() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, _) = create_realm(&h, loopback_denied());
     let user = create_user(&h, &realm);
     let secret = enrol_totp(&h, &realm, &user);
@@ -556,7 +525,7 @@ async fn step_up_grant_from_a_denied_network_is_refused() {
 /// A magic link redeemed from a denied network signs nobody in.
 #[tokio::test]
 async fn magic_link_from_a_denied_network_is_refused() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, realm_name) = create_realm(&h, loopback_denied());
     let user = create_user(&h, &realm);
 
@@ -572,7 +541,7 @@ async fn magic_link_from_a_denied_network_is_refused() {
 /// A passkey login from a denied network signs nobody in.
 #[tokio::test]
 async fn passkey_login_from_a_denied_network_is_refused() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, realm_name) = create_realm(&h, loopback_denied());
     let user = create_user(&h, &realm);
     let authenticator = enrol_passkey(&h, &realm, &user);

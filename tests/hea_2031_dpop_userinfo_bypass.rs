@@ -140,7 +140,7 @@ struct Fixture {
 /// authorization-code + DPoP exchange path, so `sub` is a real user (a clean
 /// 200 is reachable once a valid proof is supplied).
 async fn setup() -> Fixture {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm_name = format!("hea2031-{}", uuid::Uuid::new_v4());
     let realm = harness
         .identity()
@@ -235,7 +235,6 @@ fn mint_bound_user_token(
                 amr_values: vec![],
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize");

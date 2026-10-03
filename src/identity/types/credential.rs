@@ -145,9 +145,7 @@ pub struct ImportClientRequest {
     /// ID-token signing algorithm (`"RS256"` or `"EdDSA"`), task 26.55.
     ///
     /// `None` means EdDSA, the administrative default. A backup restore passes
-    /// the archived client's value, so an RS256 client comes back RS256, even
-    /// in a realm whose `fapi_profile` refuses RS256 to a registration; there
-    /// its ID-token grants are refused at issuance, as they were before.
+    /// the archived client's value, so an RS256 client comes back RS256.
     pub id_token_signed_response_alg: Option<String>,
     /// A client-secret hash Hearth stored earlier (a backup restore), kept
     /// verbatim. Only the two formats Hearth writes are accepted
@@ -177,11 +175,8 @@ pub struct ImportClientRequest {
     pub jwks: Option<String>,
     /// JWKS URI (`https://`) of the client's public signing keys.
     pub jwks_uri: Option<String>,
-    /// Mandatory-JARM signing algorithm (`"EdDSA"` only).
-    pub authorization_signed_response_alg: Option<String>,
-    /// Security profile. A FAPI 2.0 client must hold a verifiable key and no
-    /// secret, as at registration.
-    pub profile: crate::identity::ClientProfile,
+    /// RFC 9449 §5.2 `dpop_bound_access_tokens`.
+    pub dpop_bound_access_tokens: bool,
     /// Per-client MFA requirement.
     pub mfa_required: Option<bool>,
 }

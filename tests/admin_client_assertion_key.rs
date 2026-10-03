@@ -110,7 +110,7 @@ fn valid_key() -> String {
 /// The headline gap: there was no way to set the key at all.
 #[tokio::test]
 async fn patch_installs_the_assertion_public_key() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = admin_token(&h, &realm, "keyadmin@example.com").await;
@@ -161,7 +161,7 @@ async fn patch_installs_the_assertion_public_key() {
 /// `null` clears the key; omitting the field leaves it alone.
 #[tokio::test]
 async fn patch_clears_and_preserves_the_assertion_public_key() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = admin_token(&h, &realm, "keyadmin2@example.com").await;
@@ -244,7 +244,7 @@ async fn patch_clears_and_preserves_the_assertion_public_key() {
 /// value must base64url-decode to exactly 32 bytes.
 #[tokio::test]
 async fn patch_rejects_a_malformed_assertion_public_key() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = admin_token(&h, &realm, "keyadmin3@example.com").await;

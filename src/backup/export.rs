@@ -503,22 +503,8 @@ impl BackupExporter {
             members.push((format!("{prefix}/webhooks.ndjson"), Zeroizing::new(data)));
         }
 
-        // saml_service_providers.ndjson + saml_signing_key.json — the SPs and
-        // the RSA key whose certificate they pinned. Restoring the SPs without
-        // the key would hand every one of them a certificate they do not
-        // trust, so the two travel together.
-        let sps = self
-            .identity
-            .export_all_saml_service_providers(realm_id)
-            .map_err(|e| BackupError::Engine(e.to_string()))?;
-        counts.saml_service_providers = sps.len() as u64;
-        if !sps.is_empty() {
-            let data = to_ndjson(&sps)?;
-            members.push((
-                format!("{prefix}/saml_service_providers.ndjson"),
-                Zeroizing::new(data),
-            ));
-        }
+        // saml_signing_key.json — the realm's SAML key, whose certificate the
+        // SP metadata publishes to upstream IdPs.
         if let Some(saml_key) = self
             .identity
             .export_realm_saml_key(realm_id)

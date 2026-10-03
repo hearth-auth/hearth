@@ -292,12 +292,6 @@ const REALM_ID_TOKEN_RSA_KEY_PREFIX: &str = "realm:idtoken_rsa:";
 /// active keys never picks up a retiring one.
 const REALM_ID_TOKEN_RSA_RETIRING_PREFIX: &str = "realm:idtoken_rsa_retiring:";
 
-/// Prefix for SAML registered Service Providers (per realm).
-///
-/// Format: `saml:sp:{sp_key}` — JSON-serialized `SamlServiceProvider`.
-/// The SP key is a stable slug (from YAML) so reconciliation survives edits.
-const SAML_SP_PREFIX: &str = "saml:sp:";
-
 /// Prefix for SAML outbound-request state (SP side).
 ///
 /// Format: `saml:state:{token}` — JSON-serialized `SamlStateBag`. 10-minute
@@ -310,22 +304,12 @@ const SAML_STATE_PREFIX: &str = "saml:state:";
 /// the assertion's `NotOnOrAfter - now`; duplicates are replay attacks.
 const SAML_ASSERTION_PREFIX: &str = "saml:asn:";
 
-/// Prefix for SAML IdP-issued session → SP registration (IdP side).
-///
-/// Format: `saml:sp_session:{session_uuid}:{sp_key}` — JSON-serialized
-/// `SamlSessionRegistration`. Used for SLO fan-out: when a user logs out
-/// at Hearth (acting as IdP), we find all SPs that consumed an assertion
-/// for that session and propagate `LogoutRequest`s.
-const SAML_SP_SESSION_PREFIX: &str = "saml:sp_session:";
-
 /// Prefix for SAML in-flight logout state.
 ///
 /// Format: `saml:logout:{token}` — JSON-serialized `SamlLogoutStateBag`.
 /// Matches the SP-side / IdP-side logout round-trip (LogoutRequest sent →
 /// LogoutResponse received). 5-minute TTL; single-use.
 #[allow(dead_code)]
-const SAML_LOGOUT_STATE_PREFIX: &str = "saml:logout:";
-
 /// Prefix for the SCIM `externalId` → Hearth `UserId` index.
 ///
 /// Format: `scim:ext_user:{external_id}` — value is the stringified
@@ -364,13 +348,6 @@ const CONFIG_SNAPSHOT_KEY: &str = "config:snapshot:v1";
 
 /// Prefix for user-to-sessions index keys.
 const SESSION_USER_PREFIX: &str = "ses:user:";
-
-/// Prefix for device-fingerprint records.
-///
-/// Format: `dfp:user:{user_uuid}:{hmac_hex}` → 8-byte little-endian i64 (Unix seconds expiry).
-/// Stored under the realm to which the user belongs. Scan by `dfp:user:{uuid}:` to enumerate
-/// all fingerprints for one user.
-const DEVICE_FP_PREFIX: &str = "dfp:user:";
 
 /// Encodes the primary key for a user record.
 ///
@@ -1704,20 +1681,6 @@ pub(crate) fn encode_realm_saml_key(realm_id: &RealmId) -> Vec<u8> {
     format!("{REALM_SAML_KEY_PREFIX}{}", realm_id.as_uuid()).into_bytes()
 }
 
-/// Encodes the storage key for a SAML registered Service Provider.
-///
-/// Format: `saml:sp:{sp_key}` — the SP key is a stable slug from YAML.
-pub(crate) fn encode_saml_sp_key(sp_key: &str) -> Vec<u8> {
-    format!("{SAML_SP_PREFIX}{sp_key}").into_bytes()
-}
-
-/// Returns the scan prefix for every SAML SP registration in the realm.
-///
-/// Format: `saml:sp:` — used by reconcile and cascade cleanup.
-pub(crate) fn saml_sp_scan_prefix() -> Vec<u8> {
-    SAML_SP_PREFIX.as_bytes().to_vec()
-}
-
 /// Encodes the storage key for SAML SP-side outbound request state.
 ///
 /// Format: `saml:state:{opaque_token}`.
@@ -1746,38 +1709,6 @@ pub(crate) fn encode_saml_assertion_prefix_for_idp(idp_id: &IdpId) -> Vec<u8> {
 /// Returns the scan prefix for all SAML assertion sentinels in the realm.
 pub(crate) fn saml_assertion_scan_prefix() -> Vec<u8> {
     SAML_ASSERTION_PREFIX.as_bytes().to_vec()
-}
-
-/// Encodes the SAML SP-session registration key (IdP side, for SLO fan-out).
-///
-/// Format: `saml:sp_session:{session_uuid}:{sp_key}`.
-pub(crate) fn encode_saml_sp_session(session_id: &SessionId, sp_key: &str) -> Vec<u8> {
-    format!("{SAML_SP_SESSION_PREFIX}{}:{sp_key}", session_id.as_uuid()).into_bytes()
-}
-
-/// Returns the scan prefix for all SP registrations on a session.
-pub(crate) fn encode_saml_sp_session_prefix(session_id: &SessionId) -> Vec<u8> {
-    format!("{SAML_SP_SESSION_PREFIX}{}:", session_id.as_uuid()).into_bytes()
-}
-
-/// Returns the scan prefix for all SP session registrations in the realm.
-#[allow(dead_code)]
-pub(crate) fn saml_sp_session_scan_prefix() -> Vec<u8> {
-    SAML_SP_SESSION_PREFIX.as_bytes().to_vec()
-}
-
-/// Encodes the SAML logout state key.
-///
-/// Format: `saml:logout:{opaque_token}`.
-#[allow(dead_code)]
-pub(crate) fn encode_saml_logout_key(token: &str) -> Vec<u8> {
-    format!("{SAML_LOGOUT_STATE_PREFIX}{token}").into_bytes()
-}
-
-/// Returns the scan prefix for SAML logout state.
-#[allow(dead_code)]
-pub(crate) fn saml_logout_scan_prefix() -> Vec<u8> {
-    SAML_LOGOUT_STATE_PREFIX.as_bytes().to_vec()
 }
 
 /// Encodes the session → grant-family index key.
@@ -2207,83 +2138,6 @@ pub(crate) fn encode_prompt_none_tracker(user_id: &UserId) -> Vec<u8> {
     format!("{PROMPT_NONE_TRACKER_PREFIX}{}", user_id.as_uuid()).into_bytes()
 }
 
-/// Encodes a device-fingerprint storage key.
-///
-/// Format: `dfp:user:{user_uuid}:{hmac_hex}`
-///
-/// `hmac_hex` is the lower-case hex encoding of the 32-byte HMAC-SHA256 output.
-/// The compound key supports scanning all fingerprints for a user and O(1)
-/// existence checks for a specific fingerprint.
-pub(crate) fn encode_device_fp(user_id: &UserId, hmac_hex: &str) -> Vec<u8> {
-    format!("{DEVICE_FP_PREFIX}{}:{hmac_hex}", user_id.as_uuid()).into_bytes()
-}
-
-/// Returns the per-user device-fingerprint scan prefix.
-///
-/// Format: `dfp:user:{user_uuid}:`
-///
-/// Use with [`prefix_end`] to scan all fingerprints for a given user.
-pub(crate) fn device_fp_scan_prefix(user_id: &UserId) -> Vec<u8> {
-    format!("{DEVICE_FP_PREFIX}{}:", user_id.as_uuid()).into_bytes()
-}
-
-/// Returns the realm-wide device-fingerprint scan prefix.
-///
-/// Format: `dfp:user:`
-///
-/// Use with [`prefix_end`] to scan **all** fingerprints in a realm, across
-/// every user.  Intended for the proactive background sweeper.
-pub(crate) fn device_fp_global_scan_prefix() -> Vec<u8> {
-    DEVICE_FP_PREFIX.as_bytes().to_vec()
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  SMS OTP keys
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Prefix for pending SMS OTP records.
-const SMS_PENDING_OTP_PREFIX: &str = "sms:pending_otp:";
-
-/// Prefix for per-phone SMS resend throttle counters.
-const SMS_RESEND_COUNT_PREFIX: &str = "sms:resend_count:";
-
-/// Encodes the storage key for a pending SMS OTP record.
-///
-/// Format: `sms:pending_otp:{nonce_hex}`
-///
-/// The nonce is a 128-bit CSPRNG value encoded as 32 lowercase hex characters.
-/// Value: JSON-serialized `StoredOtp`.
-pub(crate) fn encode_sms_pending_otp(nonce: &str) -> Vec<u8> {
-    format!("{SMS_PENDING_OTP_PREFIX}{nonce}").into_bytes()
-}
-
-/// Returns the scan prefix for all pending SMS OTP records in a realm.
-///
-/// Format: `sms:pending_otp:`
-#[allow(dead_code)]
-pub(crate) fn sms_pending_otp_scan_prefix() -> Vec<u8> {
-    SMS_PENDING_OTP_PREFIX.as_bytes().to_vec()
-}
-
-/// Encodes the storage key for a per-phone SMS resend throttle counter.
-///
-/// Format: `sms:resend_count:{phone_hash8}`
-///
-/// `phone_hash8` is the first 8 hex characters of SHA-256(E.164 phone),
-/// derived by `otp::phone_resend_key_suffix`. Value: JSON-serialized
-/// `StoredResendCount` with a 15-minute TTL.
-pub(crate) fn encode_sms_resend_count(phone_hash8: &str) -> Vec<u8> {
-    format!("{SMS_RESEND_COUNT_PREFIX}{phone_hash8}").into_bytes()
-}
-
-/// Returns the scan prefix for all SMS resend counters in a realm.
-///
-/// Format: `sms:resend_count:`
-#[allow(dead_code)]
-pub(crate) fn sms_resend_count_scan_prefix() -> Vec<u8> {
-    SMS_RESEND_COUNT_PREFIX.as_bytes().to_vec()
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 //  Email OTP keys
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2297,7 +2151,7 @@ const EMAIL_RESEND_COUNT_PREFIX: &str = "email:resend_count:";
 /// Encodes the per-address email-OTP resend counter key.
 ///
 /// Format: `email:resend_count:{address_hash8}` — the first 8 hex characters
-/// of SHA-256(lower-cased address), the same derivation the SMS counter uses.
+/// of SHA-256(lower-cased address).
 /// Value: JSON-serialized `StoredResendCount` (15-minute window).
 pub(crate) fn encode_email_resend_count(address_hash8: &str) -> Vec<u8> {
     format!("{EMAIL_RESEND_COUNT_PREFIX}{address_hash8}").into_bytes()
@@ -2443,7 +2297,7 @@ pub(crate) fn encode_consumed_txn(jti: &str) -> Vec<u8> {
     encode_consumed("txn", jti)
 }
 
-/// Single-use marker for a pending SMS or email OTP, keyed by channel and
+/// Single-use marker for a pending email OTP, keyed by channel and
 /// the OTP's nonce.
 ///
 /// Format: `consumed:otp:{channel}:{nonce}`

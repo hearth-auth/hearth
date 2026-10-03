@@ -277,7 +277,7 @@ fn scim_max_scan_limit_is_declared_and_bounded() {
 /// `totalResults` for a small realm.  This verifies correctness under the cap.
 #[tokio::test]
 async fn scim_list_users_count_pagination_correct() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm_id, token) = setup_scim_realm(&h, "pagination");
     let app = build_app(&h);
     let auth = format!("Bearer {token}");
@@ -330,7 +330,7 @@ async fn scim_list_users_count_pagination_correct() {
 /// Before the fix this returned 200; after the fix it returns 403.
 #[tokio::test]
 async fn scim_token_cannot_disable_realm_admin() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm_id, scim_token) = setup_scim_realm(&h, "disable-admin");
     let app = build_app(&h);
 
@@ -366,7 +366,7 @@ async fn scim_token_cannot_disable_realm_admin() {
 /// SCIM bearer token must NOT be able to DELETE a realm admin.
 #[tokio::test]
 async fn scim_token_cannot_delete_realm_admin() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm_id, scim_token) = setup_scim_realm(&h, "delete-admin");
     let app = build_app(&h);
 
@@ -393,7 +393,7 @@ async fn scim_token_cannot_delete_realm_admin() {
 /// SCIM bearer token must NOT be able to full-replace (PUT) a realm admin.
 #[tokio::test]
 async fn scim_token_cannot_replace_realm_admin() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm_id, scim_token) = setup_scim_realm(&h, "replace-admin");
     let app = build_app(&h);
 
@@ -419,7 +419,7 @@ async fn scim_token_cannot_replace_realm_admin() {
 /// The protection must be scoped to admin principals only.
 #[tokio::test]
 async fn scim_token_can_manage_non_admin_user() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm_id, scim_token) = setup_scim_realm(&h, "nonadmin-ok");
     let app = build_app(&h);
 
@@ -451,7 +451,7 @@ async fn scim_token_can_manage_non_admin_user() {
 /// after the fix both paths share the same per-realm bucket.
 #[tokio::test]
 async fn scim_admin_jwt_path_is_rate_limited() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     // App with an extremely tight rate limit (1/min per realm).
     let app = build_app_tight_ratelimit(&h);
 

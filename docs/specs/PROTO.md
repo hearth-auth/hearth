@@ -5,6 +5,27 @@ All proto changes are governed by `buf` — lint, format, and breaking-change ch
 run in CI (`proto.yml`) and in the pre-commit hook. Read this before touching
 anything under `proto/`.
 
+## What the protos are for (3.0.0+)
+
+Hearth has **no public gRPC API** — it was removed in 3.0.0. The API protos
+(`hearth/identity/v1`, `hearth/rbac/v1`, `hearth/events/v1`) remain the schema of the
+**REST API messages**:
+
+- `build.rs` compiles them with `prost` into the Rust request/response types the REST
+  handlers serialize, using the `pbjson` JSON codec (proto3 JSON mapping, `json_name`).
+- `buf generate` derives the TypeScript and Go SDK types and the OpenAPI document
+  (`docs/api/openapi.proto-derived.json`) from them.
+
+Their `service` blocks are **schema only**. `build.rs` sets `build_server(false)` and
+`build_client(false)`, so no gRPC server or client code is generated, and nothing
+serves those RPCs over gRPC. An RPC exists to name an operation and, through its
+`google.api.http` annotation, its REST route.
+
+The one gRPC service Hearth runs is the internal Raft peer transport between cluster
+nodes (`hearth/cluster/v1/raft.proto`, served on `cluster.peer_address` over mTLS). It
+is node-to-node only, not a client API, and its generated code is committed under
+`src/cluster/generated/` rather than produced by `build.rs`.
+
 ## Tooling
 
 | Command | What it does |
@@ -34,9 +55,10 @@ proto/
   buf.gen.yaml      # codegen plugins (TS + Go + OpenAPI)
   buf.lock          # pinned dependency digests — commit this file
   hearth/
-    identity/v1/    # identity service RPCs and types
-    rbac/v1/        # RBAC service RPCs and types
+    identity/v1/    # identity + OAuth REST message types (schema-only services)
+    rbac/v1/        # RBAC REST message types (schema-only services)
     events/v1/      # audit event types
+    cluster/v1/     # internal Raft peer transport (node-to-node gRPC, not a client API)
 ```
 
 All proto files belong to the `hearth.<service>.v1` package. Do not introduce
@@ -90,8 +112,11 @@ rpc GetUser(GetUserRequest) returns (User) {
 }
 ```
 
-gRPC-only RPCs (no HTTP exposure) MAY omit the annotation — document the
-intent in a comment above the RPC definition.
+An RPC without a `google.api.http` annotation gets no proto-derived route, and there is
+no gRPC server to reach it. Its REST route, if it has one, is written by hand under
+`src/protocol/http/` and documented in `docs/api/openapi.supplement.yaml` (the
+organization RPCs and several RBAC RPCs are examples). Say so in a comment above the
+RPC definition.
 
 ## Message Design
 

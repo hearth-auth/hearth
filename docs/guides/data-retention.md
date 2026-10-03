@@ -24,7 +24,6 @@
 | Credential history | Lifetime of user account | No | Deleted with user |
 | MFA secrets (TOTP/WebAuthn) | Lifetime of enrollment | No | Deleted with user or on unenroll |
 | Email tombstone | 90 days after deletion | No | Yes (storage TTL) |
-| Device fingerprints | 30 days (rolling) | Yes (`adaptive_mfa.recognition_window_days`) | Yes (background sweeper) |
 | One-time tokens (reset/magic link) | 1 hour / 30 minutes | Yes (per-realm, capped) | Yes (TTL on write) |
 | Audit log on realm deletion | Destroyed immediately | N/A | N/A — export first |
 
@@ -195,9 +194,8 @@ This cascades to every row keyed by the user: the credential record, credential
 history, the password-reset watermark, MFA secrets, WebAuthn credentials and
 their discoverable index, sessions and the session index, organization
 memberships (both directions), OAuth consent records, federated identity links
-(both directions), the SCIM `externalId` mapping (both directions), device
-fingerprints, RBAC role assignments and group memberships, and any agent the
-user owns.
+(both directions), the SCIM `externalId` mapping (both directions), RBAC role
+assignments and group memberships, and any agent the user owns.
 
 The cascade is not one atomic transaction. Only its last step is: the primary
 record, the email index and the 90-day email tombstone (§5) are written
@@ -281,41 +279,7 @@ The history is used exclusively to enforce password-reuse policies. It is not ex
 
 ---
 
-## 8. Device fingerprint retention
-
-### What is retained
-
-When adaptive MFA is enabled, Hearth stores a device fingerprint key `dfp:user:{user_uuid}:{hmac_sha256_hex}`. The key is an HMAC-SHA256 of the raw signals (IP address + user-agent string). **The raw IP address and user-agent string are never written to storage.**
-
-### Default retention window
-
-`30` days (rolling). A fingerprint seen within the recognition window is refreshed; one that has not been seen within the window expires.
-
-### Configuring
-
-```yaml
-realms:
-  acme-corp:
-    auth:
-      adaptive_mfa:
-        recognition_window_days: 14   # shorten for higher-security environments
-```
-
-### Cleanup
-
-A background sweeper scans all `dfp:user:*` keys approximately hourly and deletes expired entries. No operator action is required.
-
-**Manual deletion** (e.g., for a GDPR Art. 17 erasure request on a specific user's devices):
-
-```bash
-DELETE /admin/api/realms/{realm}/users/{user_id}/device-fingerprints
-```
-
-This endpoint is also called automatically as part of the full user deletion cascade.
-
----
-
-## 9. Compliance checklist
+## 8. Compliance checklist
 
 Use this checklist when preparing for an audit or completing a Data Protection Impact Assessment (DPIA).
 
@@ -342,7 +306,7 @@ Use this checklist when preparing for an audit or completing a Data Protection I
 
 ### GDPR / CCPA
 
-- [ ] Privacy notice documents: email tombstone (90 days), device fingerprint (30 days), session TTL.
+- [ ] Privacy notice documents: email tombstone (90 days), session TTL.
 - [ ] Data erasure procedure in place: `DELETE /admin/api/realms/{realm}/users/{user_id}` for right-to-erasure requests.
 - [ ] Audit log retention justified under Article 6 lawful basis (legitimate interest for security monitoring).
 - [ ] Downstream systems that receive Hearth JWT claims have independent deletion procedures.
@@ -350,7 +314,7 @@ Use this checklist when preparing for an audit or completing a Data Protection I
 
 ---
 
-## 10. Export and archival recommendations
+## 9. Export and archival recommendations
 
 For frameworks requiring retention beyond what is practical to keep in the Hearth engine, establish a scheduled export pipeline:
 

@@ -23,7 +23,7 @@ fn perms(list: &[&str]) -> Vec<Permission> {
 
 #[tokio::test]
 async fn role_composition_transitive() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
     let user = UserId::generate();
 
@@ -95,7 +95,7 @@ async fn role_composition_transitive() {
 
 #[tokio::test]
 async fn role_cycle_rejected() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
 
     let a = h
@@ -148,7 +148,7 @@ async fn role_cycle_rejected() {
 
 #[tokio::test]
 async fn role_depth_cap() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
 
     // Build a chain 0 ← 1 ← 2 ← ... ← N where N = MAX_ROLE_DEPTH + 2.
@@ -202,7 +202,7 @@ async fn role_depth_cap() {
 
 #[tokio::test]
 async fn group_nesting_transitive() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
     let user = UserId::generate();
 
@@ -294,7 +294,7 @@ async fn group_nesting_transitive() {
 
 #[tokio::test]
 async fn group_cycle_rejected() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
 
     let g1 = h
@@ -340,7 +340,7 @@ async fn group_cycle_rejected() {
 async fn group_caps_self_loop_rejected() {
     // The write-time cycle check rejects adding a group as a member of itself
     // with CycleDetected — this exercises the same code path that enforces caps.
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
     let g = h
         .rbac()
@@ -361,7 +361,7 @@ async fn group_caps_self_loop_rejected() {
 
 #[tokio::test]
 async fn scope_filtering_org_requires_matching_oid() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
     let user = UserId::generate();
     let org_a = OrganizationId::generate();
@@ -418,7 +418,7 @@ async fn scope_filtering_org_requires_matching_oid() {
 
 #[tokio::test]
 async fn scope_intersection_narrows_permissions() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
     h.rbac().seed_realm(&realm).expect("seed"); // installs `org` scope → [org.*]
     let user = UserId::generate();
@@ -476,7 +476,7 @@ async fn scope_intersection_narrows_permissions() {
 /// Archiving a role blocks new assignments; restoring it allows assignments again.
 #[tokio::test]
 async fn archived_role_blocks_and_restore_allows_assignment() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
     let user = UserId::generate();
 
@@ -564,7 +564,7 @@ async fn archived_role_blocks_and_restore_allows_assignment() {
 async fn delete_user_cascades_rbac_state() {
     use hearth::identity::CreateUserRequest;
 
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
 
     let realm_a = h.create_realm();
     let realm_b = h.create_realm();

@@ -83,7 +83,7 @@ fn tool_with_constraints(
 
 #[tokio::test]
 async fn issue_root_aat_returns_signed_jwt() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -111,7 +111,7 @@ async fn issue_root_aat_returns_signed_jwt() {
 
 #[tokio::test]
 async fn derive_aat_with_subset_scope_succeeds() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -160,7 +160,7 @@ async fn derive_aat_with_subset_scope_succeeds() {
 
 #[tokio::test]
 async fn derive_aat_with_wider_scope_returns_escalation_error() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -206,7 +206,7 @@ async fn derive_aat_with_wider_scope_returns_escalation_error() {
 
 #[tokio::test]
 async fn crafted_aat_with_escalated_tool_rejected() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -252,7 +252,7 @@ async fn crafted_aat_with_escalated_tool_rejected() {
 
 #[tokio::test]
 async fn crafted_aat_with_looser_numeric_constraint_rejected() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -303,7 +303,7 @@ async fn crafted_aat_with_looser_numeric_constraint_rejected() {
 
 #[tokio::test]
 async fn validate_aat_succeeds_for_valid_token() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -342,7 +342,7 @@ async fn validate_aat_succeeds_for_valid_token() {
 
 #[tokio::test]
 async fn revocation_invalidates_child_aats() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -411,7 +411,7 @@ async fn revocation_invalidates_child_aats() {
 /// which deriving with `constraints: "admin"` bypassed narrowing validation.
 #[tokio::test]
 async fn string_constraint_rejected_at_issuance() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -442,7 +442,7 @@ async fn string_constraint_rejected_at_issuance() {
 /// Issuing a root AAT with an array constraint must be rejected.
 #[tokio::test]
 async fn array_constraint_rejected_at_issuance() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -475,7 +475,7 @@ async fn array_constraint_rejected_at_issuance() {
 /// fell through and the `else if` only caught the null-parent case.
 #[tokio::test]
 async fn derive_aat_string_child_constraint_rejected() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -521,7 +521,7 @@ async fn derive_aat_string_child_constraint_rejected() {
 /// for non-object types are undefined regardless of whether child == parent.
 #[tokio::test]
 async fn derive_aat_same_string_child_constraint_rejected() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -567,7 +567,7 @@ async fn derive_aat_same_string_child_constraint_rejected() {
 /// (HEA-1468: previously only present-checked, not equality-checked).
 #[tokio::test]
 async fn derive_aat_widened_string_object_constraint_rejected() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -617,7 +617,7 @@ async fn derive_aat_widened_string_object_constraint_rejected() {
 /// (same value is not a widening).
 #[tokio::test]
 async fn derive_aat_equal_string_object_constraint_allowed() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -664,7 +664,7 @@ async fn derive_aat_equal_string_object_constraint_allowed() {
 /// the payload without a new signature is detected as `InvalidToken`.
 #[tokio::test]
 async fn crafted_aat_tampered_scope_payload_rejected() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -715,7 +715,7 @@ async fn crafted_aat_tampered_scope_payload_rejected() {
 /// check fires before chain-depth or revocation logic.
 #[tokio::test]
 async fn crafted_aat_forged_chain_depth_rejected() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -764,7 +764,7 @@ async fn crafted_aat_forged_chain_depth_rejected() {
 /// The signature does not cover B's payload, so validation must return `InvalidToken`.
 #[tokio::test]
 async fn crafted_aat_cross_signed_rejected() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -822,7 +822,7 @@ mod proptests {
     fn make_harness_sync() -> TestHarness {
         tokio::runtime::Runtime::new()
             .expect("tokio runtime")
-            .block_on(TestHarness::embedded())
+            .block_on(TestHarness::in_process())
             .expect("harness init")
     }
 
@@ -913,7 +913,7 @@ async fn crafted_aat_jti_reuse_derive_from_revoked_rejected() {
     // A revoked AAT must not be usable as a parent for derivation.
     // This covers the "mismatched jti reuse" adversarial case: the
     // revoked JTI is still present in the aat_chain, making it invalid.
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -970,7 +970,7 @@ async fn crafted_aat_jti_reuse_derive_from_revoked_rejected() {
 async fn crafted_aat_forged_act_chain_rejected() {
     // Tampering with the aat_chain payload claim invalidates the Ed25519 signature.
     // This proves the chain is tamper-evident: you cannot inject a false ancestor.
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -1023,7 +1023,7 @@ async fn crafted_aat_forged_act_chain_rejected() {
 
 #[tokio::test]
 async fn forged_aat_signature_rejected() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -1067,7 +1067,7 @@ async fn forged_aat_signature_rejected() {
 /// accepted regardless of audience.
 #[tokio::test]
 async fn aat_audience_mismatch_rejected() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -1105,7 +1105,7 @@ async fn aat_audience_mismatch_rejected() {
 /// AAT with no `aud` claim must be rejected when caller specifies an audience.
 #[tokio::test]
 async fn aat_no_audience_rejects_expected_audience() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -1151,7 +1151,7 @@ async fn aat_no_audience_rejects_expected_audience() {
 /// An AAT minted before the agent was revoked must stop validating.
 #[tokio::test]
 async fn aat_rejected_after_owning_agent_revoked() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -1191,7 +1191,7 @@ async fn aat_rejected_after_owning_agent_revoked() {
 /// A revoked agent must not be able to derive a child from an outstanding AAT.
 #[tokio::test]
 async fn aat_derive_rejected_after_owning_agent_revoked() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -1236,7 +1236,7 @@ async fn aat_derive_rejected_after_owning_agent_revoked() {
 /// stop its outstanding AATs, not merely be barred from minting new ones.
 #[tokio::test]
 async fn aat_rejected_after_owning_agent_suspended() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 

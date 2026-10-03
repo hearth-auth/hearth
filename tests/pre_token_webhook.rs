@@ -95,7 +95,6 @@ fn authorize_and_exchange(
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize");
@@ -194,7 +193,7 @@ async fn webhook_extra_claims_appear_in_access_token() {
     extra.insert("custom_tier".to_string(), json!("pro"));
     let (transport, _counter) = FixedClaimsTransport::new(extra);
 
-    let harness = common::TestHarness::embedded_with_pre_token_transport(Arc::new(transport))
+    let harness = common::TestHarness::in_process_with_pre_token_transport(Arc::new(transport))
         .await
         .expect("harness setup");
 
@@ -248,10 +247,12 @@ async fn webhook_cannot_override_reserved_claims() {
         "tid".to_string(),
         json!("00000000-0000-0000-0000-000000000000"),
     );
+    evil_claims.insert("aud".to_string(), json!("https://evil.example.com/api"));
+    evil_claims.insert("roles".to_string(), json!(["realm.admin"]));
     evil_claims.insert("legitimate_claim".to_string(), json!("ok"));
     let (transport, _counter) = FixedClaimsTransport::new(evil_claims);
 
-    let harness = common::TestHarness::embedded_with_pre_token_transport(Arc::new(transport))
+    let harness = common::TestHarness::in_process_with_pre_token_transport(Arc::new(transport))
         .await
         .expect("harness setup");
 
@@ -287,8 +288,36 @@ async fn webhook_cannot_override_reserved_claims() {
         json!("https://evil.example.com"),
         "iss was overridden by webhook!"
     );
+    assert_ne!(
+        claims["aud"],
+        json!("https://evil.example.com/api"),
+        "aud was overridden by webhook!"
+    );
+    assert!(
+        !claims["roles"]
+            .as_array()
+            .is_some_and(|r| r.contains(&json!("realm.admin"))),
+        "roles were overridden by webhook: {}",
+        claims["roles"]
+    );
     // The legitimate non-reserved claim should still be present
     assert_eq!(claims["legitimate_claim"], json!("ok"));
+}
+
+/// scope-trim-trusted-core, spec `pre-token-webhook-failure`: a webhook with
+/// no `on_error` fails closed — in `Default` and when deserialized.
+#[test]
+fn the_default_error_policy_is_fail_closed() {
+    assert_eq!(
+        PreTokenWebhookErrorPolicy::default(),
+        PreTokenWebhookErrorPolicy::FailClosed
+    );
+    let config: PreTokenWebhookConfig = serde_json::from_value(json!({
+        "url": "https://hooks.example.com/enrich",
+        "hmac_secret": "test-webhook-secret",
+    }))
+    .expect("config without on_error");
+    assert_eq!(config.on_error, PreTokenWebhookErrorPolicy::FailClosed);
 }
 
 /// When the webhook transport fails and the policy is `fail_open`,
@@ -297,7 +326,7 @@ async fn webhook_cannot_override_reserved_claims() {
 async fn webhook_fail_open_issues_token_despite_error() {
     let (transport, call_count) = FailingTransport::new();
 
-    let harness = common::TestHarness::embedded_with_pre_token_transport(Arc::new(transport))
+    let harness = common::TestHarness::in_process_with_pre_token_transport(Arc::new(transport))
         .await
         .expect("harness setup");
 
@@ -335,7 +364,7 @@ async fn webhook_fail_open_issues_token_despite_error() {
 async fn webhook_fail_closed_rejects_token_on_error() {
     let (transport, _call_count) = FailingTransport::new();
 
-    let harness = common::TestHarness::embedded_with_pre_token_transport(Arc::new(transport))
+    let harness = common::TestHarness::in_process_with_pre_token_transport(Arc::new(transport))
         .await
         .expect("harness setup");
 
@@ -406,7 +435,6 @@ async fn webhook_fail_closed_rejects_token_on_error() {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize");
@@ -441,7 +469,7 @@ async fn webhook_fail_closed_rejects_token_on_error() {
 async fn webhook_not_called_when_not_configured() {
     let (transport, call_count) = FixedClaimsTransport::new(BTreeMap::new());
 
-    let harness = common::TestHarness::embedded_with_pre_token_transport(Arc::new(transport))
+    let harness = common::TestHarness::in_process_with_pre_token_transport(Arc::new(transport))
         .await
         .expect("harness setup");
 
@@ -488,7 +516,7 @@ async fn webhook_request_contains_expected_context() {
         last_body: Arc::clone(&captured),
     };
 
-    let harness = common::TestHarness::embedded_with_pre_token_transport(Arc::new(transport))
+    let harness = common::TestHarness::in_process_with_pre_token_transport(Arc::new(transport))
         .await
         .expect("harness setup");
 
@@ -566,7 +594,7 @@ async fn webhook_hmac_sig_forwarded_to_transport_when_secret_configured() {
         captured_body: Arc::clone(&captured_body),
     };
 
-    let harness = common::TestHarness::embedded_with_pre_token_transport(Arc::new(transport))
+    let harness = common::TestHarness::in_process_with_pre_token_transport(Arc::new(transport))
         .await
         .expect("harness setup");
 
@@ -641,7 +669,7 @@ async fn webhook_hmac_sig_forwarded_to_transport_when_secret_configured() {
 /// neither HTTP nor gRPC callers can persist an insecure configuration.
 #[tokio::test]
 async fn webhook_without_hmac_secret_is_rejected_by_update_realm() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -677,7 +705,7 @@ async fn webhook_without_hmac_secret_is_rejected_by_update_realm() {
 /// SEC-20: `update_realm` MUST also reject a webhook config with an empty `hmac_secret`.
 #[tokio::test]
 async fn webhook_with_empty_hmac_secret_is_rejected_by_update_realm() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();

@@ -50,7 +50,6 @@ fn code_for(engine: &EmbeddedIdentityEngine, realm: &RealmId, client: &ClientId)
                 amr_values: vec![],
                 response_mode: None,
                 request: None,
-                via_par: true,
             },
         )
         .expect("authorize")

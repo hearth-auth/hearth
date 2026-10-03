@@ -31,12 +31,12 @@ src/rbac/resolve.rs        → #[cfg(test)] mod tests { ... }
 
 Black box tests interact with Hearth exclusively through its public API surface. They never import from internal modules — if a refactor breaks these tests, the public contract changed.
 
-Two modes are supported from day one:
+The harness has two modes:
 
-- **Embedded API**: Link against `hearth` as a library, call public functions directly. Available immediately.
-- **Server API**: Spin up a Hearth process on a random port, make HTTP requests to OIDC/SCIM/admin endpoints. Initially stubs/skipped until the HTTP layer exists, but the harness infrastructure is ready.
+- **In-process**: the test builds the engines inside the test process and calls the library's public API directly. This is a test tool, not a deployment mode: Hearth ships only as a server (there is no embedded/library mode).
+- **Server**: the test starts a Hearth server on a random port and sends HTTP requests to the OIDC, SCIM and admin endpoints.
 
-The same test logic runs against both modes via shared async test functions, ensuring the public contract is identical regardless of deployment mode.
+The same test logic can run against both modes through shared async test functions.
 
 **Scope**: Auth flows end-to-end (OAuth2 authorization code, client credentials, device flow), session lifecycle (create, validate, refresh, revoke, expire), authorization (role assignment, token claim population, `hasPermission` semantics, realm/org scoping), user CRUD (create, read, update, delete, list, search), token issuance and validation (JWT signing, verification, claims, expiration).
 
@@ -143,8 +143,9 @@ the certifying bodies' own harnesses:
 | Suite | File |
 |---|---|
 | OIDC Core / Discovery | `tests/oidc_conformance.rs` |
-| FAPI 2.0, realm-level (Baseline + Advanced) | `tests/fapi_conformance.rs` |
-| FAPI 2.0, per-client `ClientProfile::Fapi2` | `tests/fapi2_conformance.rs` |
+| PAR (RFC 9126) | `tests/par.rs`, `tests/par_client_auth.rs` |
+| JAR (RFC 9101) | `tests/jar.rs` |
+| DPoP (RFC 9449), incl. `dpop_bound_access_tokens` | `tests/dpop.rs`, `tests/dpop_refresh_binding.rs` |
 | RFC 8693 token exchange | `tests/rfc8693_conformance.rs` |
 | RFC 8707 resource indicators | `tests/rfc8707_conformance.rs` |
 | RFC 9728 Protected Resource Metadata | `tests/rfc9728_conformance.rs` |
@@ -164,7 +165,6 @@ followed. What follows is the state after the first real run. Full write-up:
 |---|---|
 | **OpenID Foundation conformance suite** (`gitlab.com/openid/conformance-suite`, `release-v5.3.1`) | **Run 2026-09-21.** `oidcc-config-certification-test-plan` (the **Config OP** certification profile) executed against a production-mode Hearth — `serve -c`, TLS on, real KEK, **not** `--dev`. Run twice, against the global and the realm-scoped discovery documents; identical both times. **Result: 38 conditions passed, 1 failed, 1 warned — the plan FAILED.** |
 | OIDF authorization-flow profiles (Basic / Implicit / Hybrid OP) | **Not run.** They would fail on the same single defect below, which every OP profile checks. |
-| OIDF FAPI plans | **Not run.** `tests/fapi_conformance.rs` / `tests/fapi2_conformance.rs` remain self-assessment. |
 | SCIM compliance suite | **Not run — and none exists to run.** The IETF operates no SCIM certification programme. The available options are Microsoft's hosted Entra SCIM Validator (needs a publicly reachable endpoint) and third-party checkers such as `scim2-tester`; neither is a certifying body's harness. |
 | SAML interop suite | **Not run.** The OASIS interop programme is dormant; the practical options are hosted services requiring public ingress. |
 
@@ -233,7 +233,7 @@ or explicit threshold assertions in the bench binary. Any threshold breach fails
 | Memory errors | AddressSanitizer (`make asan`), glibc heap checking (`make heap-check`) | ASan over the same `unsafe-check/` tests at full stress size; heap checking (`libc_malloc_debug.so` + `MALLOC_CHECK_=3` + `MALLOC_PERTURB_=165`, via `scripts/heap-check-runner.sh`) over Hearth's tests of the cells built on `EpochCell` |
 | Benchmarks | `criterion` | Statistical benchmarking, regression detection |
 | HTTP testing | `reqwest` (test dependency) | For black box server-mode tests |
-| Test fixtures | Custom `TestHarness` | Spins up embedded or server instance, handles cleanup |
+| Test fixtures | Custom `TestHarness` | Starts an in-process or server instance, handles cleanup |
 | Coverage | `cargo-llvm-cov` | LLVM-based, accurate line/branch coverage |
 | Simulation | `hearth-simulation` crate (`FaultFs`) | Real-thread crash recovery, I/O fault + latency injection |
 | Snapshot testing | `insta` | Serialization format stability, error message stability |
@@ -261,15 +261,15 @@ A repo-wide audit confirmed this approach at scale: all `#[cfg(test)]` blocks in
 ```rust
 // tests/common/mod.rs
 
-/// TestHarness wraps a running Hearth instance (embedded or server mode)
+/// TestHarness wraps a running Hearth instance (in-process or server mode)
 /// and provides only public API access.
 pub struct TestHarness {
     mode: HarnessMode,
 }
 
 enum HarnessMode {
-    /// Direct library access through the public API
-    Embedded {
+    /// The engines run in the test process; calls go through the public API
+    InProcess {
         // Public Hearth client handle
         // Temp directory for data
     },
@@ -283,8 +283,8 @@ enum HarnessMode {
 }
 
 impl TestHarness {
-    /// Start an embedded Hearth instance with an isolated temp directory.
-    pub async fn embedded() -> Self { /* ... */ }
+    /// Start in-process engines with an isolated temp directory.
+    pub async fn in_process() -> Self { /* ... */ }
 
     /// Start a Hearth server process on a random port.
     /// Returns Err if the server binary is not built.
@@ -301,7 +301,7 @@ impl Drop for TestHarness {
 
 ### Dual-Mode Test Pattern
 
-The same test logic runs against both embedded and server modes:
+The same test logic runs against both in-process and server modes:
 
 ```rust
 // tests/sessions.rs
@@ -319,8 +319,8 @@ async fn run_session_lifecycle_test(h: &TestHarness) {
 }
 
 #[tokio::test]
-async fn session_lifecycle_embedded() {
-    let h = TestHarness::embedded().await;
+async fn session_lifecycle_in_process() {
+    let h = TestHarness::in_process().await;
     run_session_lifecycle_test(&h).await;
 }
 
@@ -341,7 +341,7 @@ Server-mode tests are `#[ignore]`-tagged until the HTTP layer exists, but the ha
 hearth/
 ├── Cargo.toml
 ├── src/
-│   ├── lib.rs                  # Public embedded API
+│   ├── lib.rs                  # Public library API (used by the in-process harness)
 │   ├── main.rs                 # Binary entry point
 │   ├── storage/
 │   │   ├── mod.rs
@@ -694,7 +694,7 @@ std::thread::sleep(Duration::from_millis(50));
 
 > **The claim that "the codebase has zero `#[ignore]` markers today" was false and is withdrawn.**
 > At `333c74e6` there are **14** `#[ignore]` attributes: 4 in `tests/abuse_phase0.rs`, 7 in
-> `tests/ldap_federation.rs` (require a live LDAP server), 1 in `tests/backup.rs`, 1 in
+> `tests/ldap_federation.rs` (require a live LDAP server; the file was removed with LDAP support in 3.0.0), 1 in `tests/backup.rs`, 1 in
 > `tests/tenant_enumeration_oracle.rs`, and 1 in `simulation/src/tests/wal_group_commit.rs`.
 > Because rule I greps for the *text* `#[ignore` rather than parsing attributes, a prose comment
 > that merely mentions `#[ignore]` is also flagged. Both facts matter to anyone reading the rule:
@@ -736,6 +736,6 @@ make test-quality          # or: bash scripts/check-test-quality.sh
 ### Phase 2+ (Clustering, SAML, SCIM)
 - Simulation tests with network partitions (Raft consensus, leader election, split-brain)
 - Multi-node black box tests (replication consistency, failover behavior)
-- SAML conformance tests — **not done.** SAML ships (SP and IdP); coverage is `tests/saml*.rs` and `tests/abuse_*` adversarial tests, not a conformance suite
+- SAML conformance tests — **not done.** SAML ships as a service provider only (the IdP side was removed in 3.0.0); coverage is `tests/saml_sp.rs` (with the XSW1–XSW8 corpus), `tests/saml_web_hardening.rs` and `tests/abuse_scim_saml.rs`, not a conformance suite
 - SCIM compliance tests — **not done.** SCIM ships; coverage is `tests/scim*.rs`, not a compliance suite
 - Benchmarks for clustered operations (cross-node permission check, replicated session lookup)

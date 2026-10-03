@@ -46,10 +46,6 @@ pub const MFA_INVALID_CODE: &str = "HEARTH_MFA_INVALID_CODE";
 pub const MFA_NOT_ENABLED: &str = "HEARTH_MFA_NOT_ENABLED";
 /// MFA is already enrolled; disable before re-enrolling.
 pub const MFA_ALREADY_ENABLED: &str = "HEARTH_MFA_ALREADY_ENABLED";
-/// Adaptive step-up: login from unrecognised device, enrolled factor must be presented.
-pub const STEP_UP_CHALLENGE_REQUIRED: &str = "HEARTH_STEP_UP_CHALLENGE_REQUIRED";
-/// Adaptive step-up: login from unrecognised device with no enrolled factor; enrollment required.
-pub const ENROLL_MFA_REQUIRED: &str = "HEARTH_ENROLL_MFA_REQUIRED";
 /// Token issuance blocked: user has one or more pending required actions.
 pub const REQUIRED_ACTIONS_PENDING: &str = "HEARTH_REQUIRED_ACTIONS_PENDING";
 
@@ -119,13 +115,6 @@ pub const NOT_FOUND: &str = "HEARTH_NOT_FOUND";
 pub const SESSION_NOT_FOUND: &str = "HEARTH_SESSION_NOT_FOUND";
 /// The requested session version is disabled by realm policy.
 pub const SESSION_VERSION_DISABLED: &str = "HEARTH_SESSION_VERSION_DISABLED";
-
-// ── SMS / OTP ─────────────────────────────────────────────────────────────────
-
-/// SMS OTP code is invalid or expired.
-pub const INVALID_SMS_OTP: &str = "HEARTH_INVALID_SMS_OTP";
-/// SMS OTP resend rate limit exceeded; must wait before requesting another.
-pub const SMS_RESEND_LIMIT_EXCEEDED: &str = "HEARTH_SMS_RESEND_LIMIT_EXCEEDED";
 
 // ── Realm ──────────────────────────────────────────────────────────────────────
 
@@ -411,7 +400,7 @@ mod tests {
             Some(SAML_INVALID)
         );
         assert_eq!(
-            for_identity_error(&IdentityError::Saml(SamlError::UnknownSp)),
+            for_identity_error(&IdentityError::Saml(SamlError::UnknownIdp)),
             Some(SAML_ENTITY_NOT_FOUND)
         );
     }
@@ -472,8 +461,6 @@ mod tests {
             SESSION_NOT_FOUND,
             SESSION_VERSION_DISABLED,
             SESSION_LIMIT_EXCEEDED,
-            INVALID_SMS_OTP,
-            SMS_RESEND_LIMIT_EXCEEDED,
             REALM_SUSPENDED,
             INVALID_INPUT,
             DUPLICATE_EMAIL,
@@ -512,8 +499,6 @@ mod tests {
             DUPLICATE_SCIM_EXTERNAL_ID,
             FORBIDDEN,
             SYSTEM_REALM_PROTECTED,
-            STEP_UP_CHALLENGE_REQUIRED,
-            ENROLL_MFA_REQUIRED,
         ];
         for code in codes {
             assert!(

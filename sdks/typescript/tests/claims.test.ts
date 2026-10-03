@@ -154,3 +154,46 @@ describe("Claims.decode() — new claims present in JWT", () => {
     expect(c.orgGroups()).toEqual(["/org/eng"]);
   });
 });
+
+// ── requiredActions() / raw() / notBefore() (ported from the Node SDK) ─────
+
+describe("Claims.requiredActions()", () => {
+  it("returns the required_actions claim", () => {
+    const c = new Claims({
+      token_type: "required_action",
+      required_actions: ["VERIFY_EMAIL", "UPDATE_PASSWORD"],
+    });
+    expect(c.requiredActions()).toEqual(["VERIFY_EMAIL", "UPDATE_PASSWORD"]);
+  });
+
+  it("returns an empty array when the claim is absent or not an array", () => {
+    expect(new Claims({}).requiredActions()).toEqual([]);
+    expect(
+      new Claims({ required_actions: "VERIFY_EMAIL" as unknown as string[] }).requiredActions(),
+    ).toEqual([]);
+  });
+
+  it("returns a copy that does not alias the payload", () => {
+    const c = new Claims({ required_actions: ["VERIFY_EMAIL"] });
+    c.requiredActions().push("X");
+    expect(c.requiredActions()).toEqual(["VERIFY_EMAIL"]);
+  });
+});
+
+describe("Claims.raw()", () => {
+  it("returns a frozen copy of the payload", () => {
+    const payload = { sub: "u1", custom: 1 };
+    const c = new Claims(payload);
+    const raw = c.raw();
+    expect(raw).toEqual(payload);
+    expect(Object.isFrozen(raw)).toBe(true);
+    expect(raw).not.toBe(payload);
+  });
+});
+
+describe("Claims.notBefore()", () => {
+  it("returns nbf as a Date, or null when absent", () => {
+    expect(new Claims({ nbf: 1_700_000_000 }).notBefore()).toEqual(new Date(1_700_000_000_000));
+    expect(new Claims({}).notBefore()).toBeNull();
+  });
+});

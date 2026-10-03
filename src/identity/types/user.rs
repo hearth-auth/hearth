@@ -70,11 +70,6 @@ pub enum RequiredAction {
     /// Injected automatically by the adaptive-MFA engine when a login arrives
     /// from an unrecognised device and the user has no enrolled factor.
     EnrollMfa,
-    /// User must enroll a verified phone number via SMS OTP before proceeding.
-    ///
-    /// Injected automatically when a realm has `mfa_methods: ["sms"]` and the
-    /// user has no verified phone number on record.
-    EnrollPhoneOtp,
     /// User must enroll email OTP (6-digit code) as an MFA factor before proceeding.
     ///
     /// Injected automatically when a realm has `mfa_methods: ["email_otp"]` and the
@@ -85,16 +80,14 @@ pub enum RequiredAction {
 impl RequiredAction {
     /// Canonical execution priority. Lower numbers run first.
     ///
-    /// `VERIFY_EMAIL=1`, `UPDATE_PASSWORD=2`, `ENROLL_MFA=3`, `ENROLL_PHONE_OTP=4`,
-    /// `ENROLL_EMAIL_OTP=5`.
+    /// `VERIFY_EMAIL=1`, `UPDATE_PASSWORD=2`, `ENROLL_MFA=3`, `ENROLL_EMAIL_OTP=4`.
     #[must_use]
     pub fn priority(self) -> u8 {
         match self {
             Self::VerifyEmail => 1,
             Self::UpdatePassword => 2,
             Self::EnrollMfa => 3,
-            Self::EnrollPhoneOtp => 4,
-            Self::EnrollEmailOtp => 5,
+            Self::EnrollEmailOtp => 4,
         }
     }
 
@@ -105,7 +98,6 @@ impl RequiredAction {
             Self::VerifyEmail => "VERIFY_EMAIL",
             Self::UpdatePassword => "UPDATE_PASSWORD",
             Self::EnrollMfa => "enroll-mfa",
-            Self::EnrollPhoneOtp => "ENROLL_PHONE_OTP",
             Self::EnrollEmailOtp => "ENROLL_EMAIL_OTP",
         }
     }
@@ -116,7 +108,6 @@ impl RequiredAction {
             "VERIFY_EMAIL" => Some(Self::VerifyEmail),
             "UPDATE_PASSWORD" => Some(Self::UpdatePassword),
             "enroll-mfa" => Some(Self::EnrollMfa),
-            "ENROLL_PHONE_OTP" => Some(Self::EnrollPhoneOtp),
             "ENROLL_EMAIL_OTP" => Some(Self::EnrollEmailOtp),
             _ => None,
         }
@@ -143,12 +134,6 @@ pub struct User {
     /// Whether the user's email address has been verified. Absent in old records = false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     email_verified: bool,
-    /// E.164 phone number. `None` when no phone has been enrolled.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    phone_number: Option<String>,
-    /// Whether the stored phone number has been verified via OTP.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    phone_verified: bool,
     /// Whether the user has enrolled email OTP as an MFA factor.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     email_otp_enabled: bool,
@@ -179,8 +164,6 @@ impl User {
             status,
             required_actions,
             email_verified: false,
-            phone_number: None,
-            phone_verified: false,
             email_otp_enabled: false,
             created_at,
             updated_at,
@@ -282,38 +265,6 @@ impl User {
         self.email_verified = verified;
     }
 
-    /// Returns the user's enrolled phone number in E.164 format, or `None` if not set.
-    pub fn phone_number(&self) -> Option<&str> {
-        self.phone_number.as_deref()
-    }
-
-    /// Returns the phone number masked for display in admin UIs (e.g. `+1***-***-1234`).
-    ///
-    /// Shows the `+` sign and the first country-code digit, then `***-***-`, then the
-    /// last four digits. Returns `None` when no phone is enrolled. Phone numbers shorter
-    /// than 6 E.164 characters return `"****"` instead of a structured mask.
-    ///
-    /// The raw number is never included — callers MUST NOT log or trace the return value
-    /// as it still conveys partial PII.
-    pub fn masked_phone_number(&self) -> Option<String> {
-        self.phone_number.as_deref().map(mask_phone_number)
-    }
-
-    /// Sets (or clears) the user's phone number. Used internally by the identity engine.
-    pub(crate) fn set_phone_number(&mut self, phone: Option<String>) {
-        self.phone_number = phone;
-    }
-
-    /// Returns whether the stored phone number has been verified via OTP.
-    pub fn phone_verified(&self) -> bool {
-        self.phone_verified
-    }
-
-    /// Marks the user's phone number as verified (or unverified). Used internally.
-    pub(crate) fn set_phone_verified(&mut self, verified: bool) {
-        self.phone_verified = verified;
-    }
-
     /// Returns whether the user has email OTP enrolled as an MFA factor.
     pub fn email_otp_enabled(&self) -> bool {
         self.email_otp_enabled
@@ -345,8 +296,6 @@ impl User {
             status: self.status,
             required_actions: self.required_actions.clone(),
             email_verified: self.email_verified,
-            phone_number: self.phone_number.clone(),
-            phone_verified: self.phone_verified,
             email_otp_enabled: self.email_otp_enabled,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -365,8 +314,6 @@ impl User {
             status: r.status,
             required_actions: r.required_actions,
             email_verified: r.email_verified,
-            phone_number: r.phone_number,
-            phone_verified: r.phone_verified,
             email_otp_enabled: r.email_otp_enabled,
             created_at: r.created_at,
             updated_at: r.updated_at,
@@ -389,26 +336,9 @@ pub(crate) struct UserStorageRecord {
     pub(crate) status: UserStatus,
     pub(crate) required_actions: Vec<RequiredAction>,
     pub(crate) email_verified: bool,
-    pub(crate) phone_number: Option<String>,
-    pub(crate) phone_verified: bool,
     pub(crate) email_otp_enabled: bool,
     pub(crate) created_at: Timestamp,
     pub(crate) updated_at: Timestamp,
-}
-
-/// Masks an E.164 phone number for admin display.
-///
-/// Shows `+{first digit}***-***-{last 4}`. For numbers shorter than 6 chars,
-/// returns `"****"`. This function is intentionally not public — go through
-/// `User::masked_phone_number()`.
-pub(super) fn mask_phone_number(phone: &str) -> String {
-    let chars: Vec<char> = phone.chars().collect();
-    if chars.len() < 6 {
-        return "****".to_string();
-    }
-    let prefix: String = chars[..2].iter().collect();
-    let suffix: String = chars[chars.len() - 4..].iter().collect();
-    format!("{prefix}***-***-{suffix}")
 }
 
 /// Request to create a new user.
@@ -492,10 +422,6 @@ pub struct UpdateUserRequest {
     pub attributes: Option<BTreeMap<String, String>>,
     /// Replace the required actions list. `Some([])` clears all actions; `None` leaves unchanged.
     pub required_actions: Option<Vec<RequiredAction>>,
-    /// Set the user's phone number in E.164 format. `Some(None)` clears the field; `None` leaves unchanged.
-    pub phone_number: Option<Option<String>>,
-    /// Set the phone-verified flag. `None` leaves unchanged.
-    pub phone_verified: Option<bool>,
     /// Set the email OTP enrolled flag. `None` leaves unchanged.
     pub email_otp_enabled: Option<bool>,
 }
@@ -528,7 +454,6 @@ mod tests {
             Just(RequiredAction::VerifyEmail),
             Just(RequiredAction::UpdatePassword),
             Just(RequiredAction::EnrollMfa),
-            Just(RequiredAction::EnrollPhoneOtp),
             Just(RequiredAction::EnrollEmailOtp),
         ]
     }
@@ -548,8 +473,6 @@ mod tests {
             (
                 proptest::collection::vec(arb_required_action(), 0..3),
                 any::<bool>(),
-                proptest::option::of(".*"),
-                any::<bool>(),
                 any::<bool>(),
                 arb_timestamp(),
                 arb_timestamp(),
@@ -558,15 +481,7 @@ mod tests {
             .prop_map(
                 |(
                     (uuid, email, display_name, first_name, last_name, attributes, status),
-                    (
-                        required_actions,
-                        email_verified,
-                        phone_number,
-                        phone_verified,
-                        email_otp_enabled,
-                        created_at,
-                        updated_at,
-                    ),
+                    (required_actions, email_verified, email_otp_enabled, created_at, updated_at),
                 )| UserStorageRecord {
                     id: UserId::new(uuid),
                     email,
@@ -577,8 +492,6 @@ mod tests {
                     status,
                     required_actions,
                     email_verified,
-                    phone_number,
-                    phone_verified,
                     email_otp_enabled,
                     created_at,
                     updated_at,

@@ -117,7 +117,7 @@ struct Env {
 }
 
 async fn env() -> Env {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).unwrap();
     let own_role = create_role(&h, &realm, "docs-reader", &["docs.read"]);
@@ -235,7 +235,7 @@ async fn sub_admin_cannot_inherit_permissions_it_lacks_through_parent_roles() {
 
 #[tokio::test]
 async fn full_admin_is_not_bound_by_the_ceiling() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).unwrap();
     let own_role = create_role(&h, &realm, "docs-reader", &["docs.read"]);
@@ -257,50 +257,4 @@ async fn full_admin_is_not_bound_by_the_ceiling() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-}
-
-/// gRPC twin: the ceiling covered only the direct permissions; a parent role
-/// granting a permission the caller lacks slipped through.
-#[tokio::test]
-async fn grpc_sub_admin_cannot_inherit_permissions_it_lacks_through_parent_roles() {
-    use hearth::protocol::admin_auth::AdminRateLimiter;
-    use hearth::protocol::grpc::rbac_admin::RbacAdminSvc;
-    use hearth::protocol::grpc::server::GrpcState;
-    use hearth::protocol::proto::rbac::v1::{
-        self as pb, rbac_admin_service_server::RbacAdminService,
-    };
-
-    let e = env().await;
-    let powerful = create_role(&e.h, &e.realm, "impersonators", &["user.impersonate"]);
-    let svc = RbacAdminSvc::new(GrpcState::new(
-        e.h.identity_arc(),
-        e.h.rbac_arc(),
-        e.h.audit_arc(),
-        Arc::new(AdminRateLimiter::new()),
-    ));
-    let request = |parents: Vec<String>| {
-        let mut r = tonic::Request::new(pb::CreateRoleRequest {
-            realm_id: e.realm.as_uuid().to_string(),
-            name: format!("child-{}", uuid::Uuid::new_v4()),
-            description: String::new(),
-            permissions: vec!["docs.read".into()],
-            parent_role_ids: parents,
-        });
-        r.metadata_mut().insert(
-            "authorization",
-            format!("Bearer {}", e.token).parse().unwrap(),
-        );
-        r.metadata_mut()
-            .insert("x-realm-id", e.realm.as_uuid().to_string().parse().unwrap());
-        r
-    };
-
-    svc.create_role(request(vec![e.own_role.id.to_string()]))
-        .await
-        .expect("control: a parent whose permissions the caller holds");
-    let err = svc
-        .create_role(request(vec![powerful.id.to_string()]))
-        .await
-        .expect_err("a parent granting user.impersonate must be refused");
-    assert_eq!(err.code(), tonic::Code::PermissionDenied);
 }

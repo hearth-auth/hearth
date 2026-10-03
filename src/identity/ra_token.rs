@@ -59,7 +59,7 @@ pub struct OidcParams {
     pub state: Option<String>,
     /// Response type (e.g., `"code"`).
     pub response_type: String,
-    /// JARM response mode wire string (`query.jwt`, `fragment.jwt`, `jwt`).
+    /// Response mode wire string (`query` or `fragment`).
     ///
     /// `None` means default `query` mode. Preserved so that, after all
     /// required actions complete, the authorization code redirect uses the
@@ -81,13 +81,6 @@ pub struct OidcParams {
     /// audience the client asked for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource: Option<String>,
-    /// Whether the originating request went through PAR (RFC 9126).
-    ///
-    /// Preserved here so that `resume_oidc_flow` can pass `via_par = true`
-    /// to `issue_authorization_code` — FAPI Baseline/Advanced realms reject
-    /// code issuance when this flag is `false`.
-    #[serde(default)]
-    pub via_par: bool,
 }
 
 /// Claims embedded in a Required-Action session JWT.
@@ -274,29 +267,32 @@ impl RaClaims {
         self.mfa_proof = MfaProof::ProvedWebAuthn;
     }
 
-    /// Records that this flow enrolled a TOTP, SMS or email-OTP factor and
-    /// the user proved it by typing back a live code.
+    /// Records that this flow enrolled a TOTP factor and the user proved it
+    /// by typing back a live code.
     ///
     /// That counts as a second factor only for a login that had proved none
-    /// ([`MfaProof::None`]): the first-login enrolment a realm requiring MFA
-    /// relies on, which forced TOTP enrolment already records as
-    /// [`MfaProof::Proved`]. A login that proved something keeps its proof —
+    /// ([`MfaProof::None`]) or only an inbox ([`MfaProof::EmailOtp`]): the
+    /// first-login enrolment a realm requiring MFA relies on, which forced TOTP
+    /// enrolment already records as [`MfaProof::Proved`]. A login that proved
+    /// something stronger keeps its proof —
     /// in particular a UV-less passkey ([`MfaProof::PasskeyPossession`]) is
     /// not raised by enrolling a factor of the presenter's choosing, the way
     /// forced enrolment is never offered to a user who holds a factor.
     pub fn record_enrolled_factor(&mut self) {
-        if self.mfa_proof == MfaProof::None {
+        if matches!(self.mfa_proof, MfaProof::None | MfaProof::EmailOtp) {
             self.mfa_proof = MfaProof::Proved;
         }
     }
 
     /// Records that this flow enrolled email OTP and the user proved it by
-    /// typing back a code sent to the inbox: [`Self::record_enrolled_factor`],
-    /// except after a magic link ([`RaClaims::inbox_first_factor`]), which
-    /// proved the same inbox — one factor, not two (GA sweep 4 round 2).
+    /// typing back a code sent to the inbox: [`MfaProof::EmailOtp`] for a
+    /// login that had proved nothing — an inbox, never MFA (spec
+    /// `mfa-policy`). After a magic link ([`RaClaims::inbox_first_factor`])
+    /// nothing changes: the link proved the same inbox, one factor, not two
+    /// (GA sweep 4 round 2). A login that proved more keeps its proof.
     pub fn record_enrolled_email_otp(&mut self) {
-        if !self.inbox_first_factor {
-            self.record_enrolled_factor();
+        if !self.inbox_first_factor && self.mfa_proof == MfaProof::None {
+            self.mfa_proof = MfaProof::EmailOtp;
         }
     }
 }
@@ -426,7 +422,6 @@ mod tests {
             prompt: String::new(),
             mfa_proof: MfaProof::None,
             resource: None,
-            via_par: false,
         }
     }
 
@@ -643,6 +638,7 @@ mod tests {
     fn an_enrolled_factor_raises_only_a_login_that_proved_nothing() {
         for (before, after) in [
             (MfaProof::None, MfaProof::Proved),
+            (MfaProof::EmailOtp, MfaProof::Proved),
             (MfaProof::Proved, MfaProof::Proved),
             (MfaProof::ProvedWebAuthn, MfaProof::ProvedWebAuthn),
             (MfaProof::PasskeyPossession, MfaProof::PasskeyPossession),
@@ -661,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    fn an_email_otp_enrolled_after_a_magic_link_does_not_raise_the_proof() {
+    fn an_enrolled_email_otp_proves_the_inbox_and_never_mfa() {
         let mut after_link = browser_claims(MfaProof::None);
         after_link.inbox_first_factor = true;
         after_link.record_enrolled_email_otp();
@@ -669,9 +665,18 @@ mod tests {
 
         let mut after_password = browser_claims(MfaProof::None);
         after_password.record_enrolled_email_otp();
-        assert_eq!(after_password.mfa_proof, MfaProof::Proved);
+        assert_eq!(
+            after_password.mfa_proof,
+            MfaProof::EmailOtp,
+            "an inbox, not MFA"
+        );
+        assert!(!after_password.mfa_proof.satisfies_mfa_required());
 
-        // TOTP or SMS enrolled after a magic link is a different factor.
+        let mut after_totp = browser_claims(MfaProof::Proved);
+        after_totp.record_enrolled_email_otp();
+        assert_eq!(after_totp.mfa_proof, MfaProof::Proved, "never lowered");
+
+        // TOTP enrolled after a magic link is a different factor.
         let mut totp_after_link = browser_claims(MfaProof::None);
         totp_after_link.inbox_first_factor = true;
         totp_after_link.record_enrolled_factor();

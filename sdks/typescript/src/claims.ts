@@ -27,6 +27,7 @@ interface RawPayload {
   oid?: string;
   org_groups?: string[];
   token_type?: string;
+  required_actions?: string[];
   [key: string]: unknown;
 }
 
@@ -105,6 +106,11 @@ export class Claims {
     return this.payload.iat !== undefined ? new Date(this.payload.iat * 1000) : null;
   }
 
+  /** The `nbf` (not before) claim as a Date, or null if absent. */
+  notBefore(): Date | null {
+    return this.payload.nbf !== undefined ? new Date(this.payload.nbf * 1000) : null;
+  }
+
   /** The `jti` (JWT ID) claim, or null if absent. */
   jwtID(): string | null {
     return this.payload.jti ?? null;
@@ -165,8 +171,22 @@ export class Claims {
     return Array.isArray(og) ? og : [];
   }
 
+  /**
+   * The `required_actions` claim (e.g. `["VERIFY_EMAIL"]`), or an empty array.
+   * Present on tokens whose `token_type` is `"required_action"`.
+   */
+  requiredActions(): string[] {
+    const ra = this.payload.required_actions;
+    return Array.isArray(ra) ? [...ra] : [];
+  }
+
   /** Access an arbitrary claim by key. */
   get(key: string): unknown {
     return this.payload[key];
+  }
+
+  /** A frozen shallow copy of the whole JWT payload. */
+  raw(): Readonly<Record<string, unknown>> {
+    return Object.freeze({ ...this.payload });
   }
 }

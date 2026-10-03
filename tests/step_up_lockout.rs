@@ -118,7 +118,7 @@ fn routers(
 /// One active user with a password, a browser session, a first-party access
 /// token, and (with `totp`) an enrolled TOTP factor.
 async fn rig(totp: bool) -> Rig {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity_arc();
     let realm = identity
         .create_realm(&CreateRealmRequest {

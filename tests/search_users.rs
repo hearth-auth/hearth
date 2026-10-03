@@ -21,7 +21,7 @@ fn setup_realm(identity: &dyn IdentityEngine) -> hearth::core::RealmId {
 
 #[tokio::test]
 async fn search_users_by_email_prefix() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let tid = setup_realm(identity);
 
@@ -65,7 +65,7 @@ async fn search_users_by_email_prefix() {
 
 #[tokio::test]
 async fn search_users_by_display_name() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let tid = setup_realm(identity);
 
@@ -97,7 +97,7 @@ async fn search_users_by_display_name() {
 
 #[tokio::test]
 async fn search_users_case_insensitive() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let tid = setup_realm(identity);
 
@@ -140,7 +140,7 @@ async fn search_users_case_insensitive() {
 
 #[tokio::test]
 async fn search_users_respects_limit() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let tid = setup_realm(identity);
 
@@ -173,7 +173,7 @@ async fn search_users_respects_limit() {
 
 #[tokio::test]
 async fn search_users_empty_query_matches_all() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let tid = setup_realm(identity);
 
@@ -220,7 +220,7 @@ async fn search_users_empty_query_matches_all() {
 
 #[tokio::test]
 async fn search_users_no_matches_returns_empty() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let tid = setup_realm(identity);
 
@@ -253,7 +253,7 @@ async fn search_users_no_matches_returns_empty() {
 
 #[tokio::test]
 async fn get_realm_by_name_found() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let created = identity
@@ -273,7 +273,7 @@ async fn get_realm_by_name_found() {
 
 #[tokio::test]
 async fn get_realm_by_name_not_found() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let result = identity.get_realm_by_name("nonexistent").expect("lookup");
@@ -282,7 +282,7 @@ async fn get_realm_by_name_not_found() {
 
 #[tokio::test]
 async fn realm_name_index_survives_rename() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let realm = identity
@@ -318,7 +318,7 @@ async fn realm_name_index_survives_rename() {
 
 #[tokio::test]
 async fn realm_name_index_cleaned_on_delete() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let realm = identity
@@ -340,7 +340,7 @@ async fn realm_name_index_cleaned_on_delete() {
 
 #[tokio::test]
 async fn realm_archived_status_persists() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let realm = identity

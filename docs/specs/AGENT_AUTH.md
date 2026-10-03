@@ -1,7 +1,7 @@
 # Agent Authentication & Authorization
 
 > **Implementation status (updated 2026-06-21 — all milestones shipped):**
-> - **M1 — Phase A:** Agent entity `AgentId` newtype, agent CRUD + lifecycle, API-key credentials, Agent Card (`/.well-known/agent.json`), DPoP/RFC 9449 sender-constrained tokens (`src/identity/dpop.rs`), FAPI 2.0 enforcement.
+> - **M1 — Phase A:** Agent entity `AgentId` newtype, agent CRUD + lifecycle, API-key credentials, Agent Card (`/.well-known/agent.json`), DPoP/RFC 9449 sender-constrained tokens (`src/identity/dpop.rs`), per-client `dpop_bound_access_tokens` enforcement.
 > - **M2 — Phase B:** MCP authorization server, RFC 8693 token exchange (`urn:ietf:params:oauth:grant-type:token-exchange`), RFC 8707 resource indicators, RFC 9728 Protected Resource Metadata, On-Behalf-Of extension, consent management, delegation chain depth enforcement.
 > - **M3 — Phase C:** Tool-level permission grammar (`tool.*`/`toolgroup.*`, deny-wins evaluation), scope intersection at delegation, approval request lifecycle (create/approve/deny/CAS/capability-token), durable at-least-once approval webhook notifications, HTTP approval REST API.
 > - **M4 — Phase D:** AAT issuance/derivation/validation (`src/identity/engine/aat.rs`), single-use transaction tokens with replay prevention (`txn.rs`), cross-realm trust policies (`cross_realm.rs`), SPIFFE/mTLS workload identity with SVID mapping (`spiffe.rs`).
@@ -171,11 +171,10 @@ MCP clients need tokens scoped to a specific tool server. Hearth **MUST** suppor
 - Authorization requests and token requests **MUST** accept a `resource` parameter containing the URI of the target MCP server.
 - The `resource` value **MUST** match a registered protected resource (see [Section 2.5](#25-protected-resource-registration)).
   *Enforced on every surface:* the browser `/authorize` (plain query, JAR), PAR, and `/authorize`
-  over JSON or gRPC (which take a resource only through a pushed `request_uri`) canonicalize the
+  over JSON (which takes a resource only through a pushed `request_uri`) canonicalize the
   value (`core::Uri`) and refuse anything that is not a registered resource of the realm with RFC
   8707 `invalid_target` — the browser plain branch as an error redirect to the registered
-  `redirect_uri`, JAR/PAR errors as `400`, JSON as `400 {"error":"invalid_target"}`, gRPC as
-  `INVALID_ARGUMENT`. A pushed request whose resource was removed before the code is asked for is
+  `redirect_uri`, JAR/PAR errors as `400`, JSON as `400 {"error":"invalid_target"}`. A pushed request whose resource was removed before the code is asked for is
   refused the same way. The canonical form is what the code stores, what the consent record for
   the resource is keyed by, and what the token's `aud` carries, so every spelling of one resource
   is one resource.

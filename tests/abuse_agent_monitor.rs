@@ -22,7 +22,7 @@ async fn setup() -> (
     hearth::core::RealmId,
     hearth::core::UserId,
 ) {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = identity
         .create_realm(&CreateRealmRequest {

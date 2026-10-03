@@ -74,7 +74,9 @@ check_sdk() {
   echo ""
   echo "  [§5] Error types"
   for err in "${REQUIRED_ERRORS[@]}"; do
-    if grep -rql "$err" "$sdk_dir" --include="*.ts" --include="*.go" --include="*.py" --include="*.rs" 2>/dev/null; then
+    # §5 allows the language-native form: PHP names these `...Exception`.
+    if grep -rqlE "${err%Error}(Error|Exception)" "$sdk_dir" \
+        --include="*.ts" --include="*.go" --include="*.py" --include="*.php" 2>/dev/null; then
       pass "$err"
     else
       fail "$err — not found in $sdk_dir source; add this error type (spec §5)"
@@ -86,7 +88,7 @@ check_sdk() {
   echo "  [§4] Claims API methods"
   for method in "${REQUIRED_CLAIMS[@]}"; do
     if grep -rql "\b${method}\b" "$sdk_dir" \
-        --include="*.ts" --include="*.go" --include="*.py" --include="*.rs" 2>/dev/null; then
+        --include="*.ts" --include="*.go" --include="*.py" --include="*.php" 2>/dev/null; then
       pass "$method"
     else
       fail "$method — not found in $sdk_dir source; implement this Claims API method (spec §4)"
@@ -133,12 +135,14 @@ if [[ "${1:-}" != "" ]]; then
   check_sdk "$sdk_path"
 else
   # All SDKs
-  for sdk in typescript go python rust; do
+  # The supported SDK set (openspec sdk-support-contract). A missing directory
+  # is a failure, not a skip: a supported SDK cannot disappear silently.
+  for sdk in typescript go python php; do
     sdk_path="$REPO_ROOT/sdks/$sdk"
     if [[ -d "$sdk_path" ]]; then
       check_sdk "$sdk_path"
     else
-      warn "SDK directory not found, skipping: $sdk_path"
+      fail "supported SDK directory not found: $sdk_path"
     fi
   done
 fi

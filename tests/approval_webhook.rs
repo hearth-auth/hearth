@@ -145,7 +145,7 @@ fn make_realm_with_webhook(
 #[tokio::test]
 async fn approval_webhook_delivers_payload_on_create() {
     let capture = Arc::new(ApprovalCapture::new());
-    let h = TestHarness::embedded_with_approval_transport(
+    let h = TestHarness::in_process_with_approval_transport(
         Arc::clone(&capture) as Arc<dyn ApprovalWebhookTransport>
     )
     .await
@@ -209,7 +209,7 @@ async fn approval_webhook_delivers_payload_on_create() {
 #[tokio::test]
 async fn approval_webhook_delivery_id_is_stable() {
     let capture = Arc::new(ApprovalCapture::new());
-    let h = TestHarness::embedded_with_approval_transport(
+    let h = TestHarness::in_process_with_approval_transport(
         Arc::clone(&capture) as Arc<dyn ApprovalWebhookTransport>
     )
     .await
@@ -245,7 +245,7 @@ async fn approval_webhook_delivery_id_is_stable() {
 #[tokio::test]
 async fn approval_webhook_signed_when_secret_configured() {
     let capture = Arc::new(ApprovalCapture::new());
-    let h = TestHarness::embedded_with_approval_transport(
+    let h = TestHarness::in_process_with_approval_transport(
         Arc::clone(&capture) as Arc<dyn ApprovalWebhookTransport>
     )
     .await
@@ -289,7 +289,7 @@ async fn approval_webhook_signed_when_secret_configured() {
 #[tokio::test]
 async fn approval_webhook_not_delivered_when_not_configured() {
     let capture = Arc::new(ApprovalCapture::new());
-    let h = TestHarness::embedded_with_approval_transport(
+    let h = TestHarness::in_process_with_approval_transport(
         Arc::clone(&capture) as Arc<dyn ApprovalWebhookTransport>
     )
     .await
@@ -356,7 +356,7 @@ async fn approval_webhook_not_delivered_when_not_configured() {
 
 #[tokio::test]
 async fn approval_webhook_http_url_rejected_at_registration() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
 
     let result = h.identity().create_realm(&CreateRealmRequest {
         name: format!("http-webhook-{}", uuid::Uuid::new_v4()),
@@ -386,7 +386,7 @@ async fn approval_webhook_http_url_rejected_at_registration() {
 #[tokio::test]
 async fn approval_webhook_ssrf_blocked_at_delivery() {
     // Use the production transport (no injection) so the SSRF guard is active.
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
 
     // https:// scheme passes the registration-time check; 169.254.169.254 is
     // blocked by the delivery-time DNS check (link-local / cloud metadata).
@@ -542,7 +542,7 @@ impl ApprovalWebhookTransport for FlakyApprovalTransport {
 #[tokio::test]
 async fn a_refused_approval_webhook_is_redelivered_by_the_outbox_flush() {
     let transport = Arc::new(FlakyApprovalTransport::new());
-    let h = TestHarness::embedded_with_approval_transport(
+    let h = TestHarness::in_process_with_approval_transport(
         Arc::clone(&transport) as Arc<dyn ApprovalWebhookTransport>
     )
     .await
@@ -621,7 +621,7 @@ async fn a_refused_approval_webhook_is_redelivered_by_the_outbox_flush() {
 #[tokio::test]
 async fn the_realms_configured_timeout_reaches_the_transport() {
     let capture = Arc::new(ApprovalCapture::new());
-    let h = TestHarness::embedded_with_approval_transport(
+    let h = TestHarness::in_process_with_approval_transport(
         Arc::clone(&capture) as Arc<dyn ApprovalWebhookTransport>
     )
     .await

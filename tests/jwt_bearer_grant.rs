@@ -70,7 +70,7 @@ fn make_assertion(
 
 #[tokio::test]
 async fn jwt_bearer_valid_assertion_issues_token() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -141,7 +141,7 @@ async fn jwt_bearer_valid_assertion_issues_token() {
 
 #[tokio::test]
 async fn jwt_bearer_expired_assertion_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -210,7 +210,7 @@ async fn jwt_bearer_expired_assertion_rejected() {
 
 #[tokio::test]
 async fn jwt_bearer_jti_replay_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -295,7 +295,7 @@ async fn jwt_bearer_jti_replay_rejected() {
 
 #[tokio::test]
 async fn jwt_bearer_wrong_issuer_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -371,7 +371,7 @@ async fn jwt_bearer_wrong_issuer_rejected() {
 
 #[tokio::test]
 async fn jwt_bearer_wrong_audience_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -439,7 +439,7 @@ async fn jwt_bearer_wrong_audience_rejected() {
 
 #[tokio::test]
 async fn jwt_bearer_no_registered_key_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -496,7 +496,7 @@ async fn jwt_bearer_no_registered_key_rejected() {
 
 #[tokio::test]
 async fn jwt_bearer_tampered_signature_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -569,7 +569,7 @@ async fn jwt_bearer_tampered_signature_rejected() {
 
 #[tokio::test]
 async fn jwt_bearer_no_jti_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -639,7 +639,7 @@ async fn jwt_bearer_no_jti_rejected() {
 
 #[tokio::test]
 async fn jwt_bearer_sub_mismatch_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -715,7 +715,7 @@ async fn jwt_bearer_sub_mismatch_rejected() {
 
 #[tokio::test]
 async fn jwt_bearer_exp_too_far_future_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -787,7 +787,7 @@ async fn jwt_bearer_exp_too_far_future_rejected() {
 
 #[tokio::test]
 async fn jwt_bearer_corrupted_jti_bytes_returns_internal_error() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -879,7 +879,7 @@ async fn jwt_bearer_corrupted_jti_bytes_returns_internal_error() {
 
 #[tokio::test]
 async fn jwt_bearer_grant_in_discovery() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
 
@@ -891,103 +891,5 @@ async fn jwt_bearer_grant_in_discovery() {
             .contains(&JWT_BEARER_GRANT.to_string()),
         "OIDC discovery must list jwt-bearer grant type; got: {:?}",
         discovery.grant_types_supported
-    );
-}
-
-// ===== Test: FAPI realm requires DPoP on the jwt-bearer grant (GA audit 3 B-6) =====
-
-/// A realm with a `fapi_profile` refuses a jwt-bearer grant without a DPoP
-/// proof, as it refuses every other grant; the refusal leaves the
-/// assertion's `jti` unspent, so the same assertion succeeds with a proof and
-/// yields a DPoP-bound token.
-#[tokio::test]
-async fn jwt_bearer_fapi_realm_requires_dpop() {
-    use hearth::identity::{FapiProfile, IdentityError, UpdateRealmRequest};
-
-    let harness = common::TestHarness::embedded()
-        .await
-        .expect("harness setup");
-    let realm = create_realm(&harness);
-    let mut config = harness
-        .identity()
-        .get_realm(&realm)
-        .expect("get realm")
-        .expect("realm exists")
-        .config()
-        .clone();
-    config.fapi_profile = Some(FapiProfile::Baseline);
-    harness
-        .identity()
-        .update_realm(
-            &realm,
-            &UpdateRealmRequest {
-                config: Some(config),
-                ..Default::default()
-            },
-        )
-        .expect("set fapi profile");
-
-    let assertion_key = SigningKey::generate().expect("generate key");
-    let client = harness
-        .identity()
-        .register_client(
-            &realm,
-            &RegisterClientRequest {
-                client_name: "FAPI JWT Bearer Client".to_string(),
-                redirect_uris: vec![],
-                client_secret: None,
-                grant_types: vec![JWT_BEARER_GRANT.to_string()],
-                require_consent: false,
-                ..Default::default()
-            },
-        )
-        .expect("register client");
-    harness
-        .identity()
-        .update_client(
-            &realm,
-            client.client_id(),
-            &UpdateClientRequest {
-                assertion_public_key: Some(Some(
-                    URL_SAFE_NO_PAD.encode(assertion_key.public_key_bytes()),
-                )),
-                ..Default::default()
-            },
-        )
-        .expect("set assertion key");
-    let assertion = make_assertion(
-        &assertion_key,
-        &client.client_id().as_uuid().to_string(),
-        &realm_issuer(&harness, &realm),
-        60,
-        Some(uuid::Uuid::new_v4().to_string()),
-    );
-    let request = |dpop_jkt: Option<&str>| JwtBearerRequest {
-        client_id: client.client_id().clone(),
-        assertion: assertion.clone(),
-        scope: Some("read".to_string()),
-        dpop_jkt: dpop_jkt.map(str::to_string),
-    };
-
-    let err = harness
-        .identity()
-        .jwt_bearer_token(&realm, &request(None))
-        .expect_err("a FAPI realm must refuse an unbound jwt-bearer token");
-    assert!(
-        matches!(err, IdentityError::FapiViolation { .. }),
-        "expected FapiViolation, got {err:?}"
-    );
-
-    let resp = harness
-        .identity()
-        .jwt_bearer_token(&realm, &request(Some("jb-fapi-thumbprint")))
-        .expect("the same assertion succeeds with a proof");
-    let claims = harness
-        .identity()
-        .validate_token(&realm, resp.access_token())
-        .expect("validates");
-    assert_eq!(
-        claims.cnf.as_ref().map(|c| c.jkt.as_str()),
-        Some("jb-fapi-thumbprint")
     );
 }

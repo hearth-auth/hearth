@@ -1,20 +1,19 @@
 # SAML 2.0 — Normative Specification
 
 Status: **Normative.** Requirement levels follow RFC 2119 (MUST / SHOULD / MAY).
-Scope: Hearth's SAML 2.0 Web-SSO and Single-Logout support in **both** roles —
-**Service Provider (SP)** for inbound federation and **Identity Provider (IdP)**
-for asserting to third-party SPs. The implementation lives under
+Scope: Hearth's SAML 2.0 Web-SSO support as a **Service Provider (SP)** for
+inbound federation. The implementation lives under
 `src/identity/federation/saml/`; this document is the authoritative contract for
 its security-relevant behavior. Where code and this document disagree, that is a
 bug in one of them — file an issue.
 
-> **Correction (documentation-truth sweep, 2026-09-21).** §1 previously stated that
-> Hearth "acts **only** as a SAML SP" and "is not a SAML IdP for third parties."
-> That was never true: `saml/idp.rs` and the four IdP routes listed in §1 have been
-> registered since the initial SAML commit (`8fd2f02b`). The normative content of
-> this document is almost entirely about the **SP** assertion-consumption path;
-> the IdP side is described in §1 and §8 but is **not** comprehensively specified
-> here. Do not read silence in §§2–7 as a normative statement about IdP behaviour.
+> **Hearth is not a SAML IdP (3.0.0).** Earlier releases also acted as a SAML
+> Identity Provider for third-party SPs (`/realms/{realm}/saml/{metadata,sso,sso/init,slo-idp}`
+> and `realms.<name>.saml_service_providers`). That side was removed in 3.0.0
+> (OpenSpec change `scope-trim-trusted-core`) to shrink the attack surface:
+> connect applications to Hearth over OpenID Connect instead. A configuration
+> that still sets `saml_service_providers` refuses to start with an error that
+> names the key.
 
 Related specs: `docs/specs/AUTHORIZATION.md` (claim mapping after login),
 `docs/specs/OIDC.md` (the OIDC federation path), `docs/specs/ARCHITECTURE.md`
@@ -28,11 +27,8 @@ observable has a corresponding rejection test.
 
 ## 1. Role and profile
 
-Hearth implements both SAML roles. They are independent surfaces with separate
-routes, separate registries and separate keys.
-
-**As a Service Provider (Relying Party)** — inbound federation, the subject of
-§§2–7 below:
+Hearth implements the SAML **Service Provider (Relying Party)** role only —
+inbound federation, the subject of §§2–7 below:
 
 | Route | Purpose |
 |---|---|
@@ -46,52 +42,23 @@ policy. A successful consumption establishes a real Hearth session; the
 completed-login audit event is emitted **only** when a session cookie was
 actually issued (`issued_session_cookie`, `src/protocol/web/saml.rs`).
 
-**As an Identity Provider** — Hearth asserts to third-party SPs registered in
-the realm's SP registry:
+Hearth publishes the realm's RSA signing certificate in its SP metadata. It does
+not sign `AuthnRequest`s (`sign_authn_requests` is `false` in the metadata).
 
-| Route | Purpose |
-|---|---|
-| `GET /realms/{realm}/saml/metadata` | Hearth's IdP metadata |
-| `GET`/`POST /realms/{realm}/saml/sso` | SSO endpoint (Redirect + POST bindings) |
-| `GET /realms/{realm}/saml/sso/init` | IdP-initiated (unsolicited) SSO |
-| `GET`/`POST /realms/{realm}/saml/slo-idp` | IdP-side Single Logout |
-
-Every IdP route requires a live Hearth session (the `UiSession` extractor) whose
-realm matches the path realm; the asserted `NameID` is that session's user
-email. Every assertion also carries an `email_verified` attribute (`true` /
-`false`) stating whether the account proved that address — through the
-verification mail, the email-change confirmation, or an upstream IdP that
-verified it. An operator- or SCIM-created account has not, so an SP that keys
-accounts on the email SHOULD require `email_verified` = `true` before trusting
-the `NameID` as proof of the address. Hearth signs IdP responses with the
-realm's RSA key (§4's algorithm rules apply in both directions).
-
-`want_authn_requests_signed` on a registered SP is **enforced** at
-`src/protocol/web/saml.rs`: when the flag is set, the `<AuthnRequest>` MUST carry
-a signature that verifies against the SP's `sp_certificate_pem`, and an SP with
-the flag set but **no** certificate registered is refused with `403` — it fails
-closed. The signature is read from the XML, so an SP that sets this flag MUST
-use the **HTTP-POST** binding; the HTTP-Redirect binding carries its signature as
-query parameters and is not accepted for signed `AuthnRequest`s. The audit found
-this flag parsed, validated and never consulted (2026-08-28 §4.10#4); it is
-consulted now.
-
-- Supported profile: **Web Browser SSO Profile** and **Single Logout Profile**
-  of SAML 2.0 (`urn:oasis:names:tc:SAML:2.0:protocol`).
+- Supported profile: the **Web Browser SSO Profile** of SAML 2.0
+  (`urn:oasis:names:tc:SAML:2.0:protocol`), SP side. Single Logout is not
+  supported: no SLO endpoint is registered.
 
 ## 2. Bindings
 
 | Direction | Binding | Support |
 |-----------|---------|---------|
-| SP → IdP (`AuthnRequest`, `LogoutRequest`) | HTTP-Redirect (`DEFLATE` + base64 + URL) | MUST |
-| SP → IdP | HTTP-POST (form) | MUST |
-| IdP → SP (`Response`, `LogoutResponse`) at ACS | HTTP-POST (base64, **no** DEFLATE) | MUST |
+| SP → IdP (`AuthnRequest`) | HTTP-Redirect (`DEFLATE` + base64 + URL) | MUST |
+| IdP → SP (`Response`) at ACS | HTTP-POST (base64, **no** DEFLATE) | MUST |
 | Any | HTTP-Artifact | **Not supported.** No artifact-resolution endpoint is registered, so an `SAMLart` flow has nowhere to land — it 404s. There is no explicit "artifact rejected" branch; the strings `artifact`, `SOAP` and `PAOS` appear nowhere under `src/identity/federation/saml/`. |
 | Any | SOAP / PAOS (ECP) | **Not supported** — same: no endpoint exists. |
 
-- Inbound HTTP-Redirect payloads are DEFLATE-inflated with a hard cap of
-  **1 MiB** (`MAX_INFLATED_SAML_BYTES`). A payload that would inflate past the
-  cap MUST be rejected before full expansion (decompression-bomb defense).
+- Hearth receives no HTTP-Redirect payloads: the ACS accepts HTTP-POST only.
 - Inbound HTTP-POST payloads are base64-decoded only; they MUST NOT be
   DEFLATE-inflated (POST bodies are not compressed in the SAML POST binding).
 
@@ -125,13 +92,13 @@ scanners and the canonicalizer (`saml/c14n.rs`) always agree. It enforces:
 - **One root element.** A document with a second top-level element is rejected;
   its fields could otherwise be merged into the first document's.
 - **Signature-blind field extraction.** Every SAML field reader
-  (`parse_response`, `parse_authn_request`, `parse_logout_request`,
-  `parse_logout_response`) reads through `xml::walk_outside_signatures`, which
+  (`parse_response`, and `parse_idp_metadata` for upstream metadata) reads
+  through `xml::walk_outside_signatures`, which
   never reports anything inside a `<ds:Signature>` at any depth — the region the
   enveloped-signature transform removes from the digest (§4.1).
 - **Structural field positions.** Fields are read only from the position the
   SAML 2.0 core schema defines for them (e.g. the subject is
-  `Response/Assertion/Subject/NameID`, the requester is `AuthnRequest/Issuer`),
+  `Response/Assertion/Subject/NameID`),
   decided from the element's parent; a same-named element anywhere else is
   ignored. A second occurrence of a single-valued field is rejected rather than
   resolved last-write-wins (§4.1).
@@ -236,19 +203,29 @@ but consumes another. Hearth defends structurally:
   mapped `<saml:Attribute>`, or `<saml:Conditions>` extended to any date,
   under an unchanged digest. Now only the verified signature is removed, a
   second one is refused outright, and the parser never reads inside either.
-  The same primitive guards the IdP side's signed `<AuthnRequest>` and
-  `<LogoutRequest>`.
   (Tests: `sp_rejects_second_signature_carrying_a_forged_name_id`,
   `sp_rejects_second_signature_carrying_a_forged_attribute`,
   `sp_rejects_second_signature_carrying_extended_conditions`,
   `sp_rejects_second_signature_on_a_response_level_signature`,
-  `idp_sso_refuses_signed_authn_request_carrying_a_second_signature`,
-  `idp_slo_refuses_signed_logout_request_carrying_a_second_signature`,
   `second_direct_child_signature_rejected`,
   `canon_removes_only_the_named_signature`; in Entra ID's default-namespace
   spelling: `sp_accepts_an_entra_style_default_namespace_response`,
   `sp_rejects_a_second_default_namespace_signature`,
   `sp_rejects_a_moved_default_namespace_signature_with_content_after_key_info`.)
+- **Signatures only where the profile puts them (strict SP profile, 3.0.0).**
+  Before any signature is verified, `check_signature_placement`
+  (`saml/xml.rs`) refuses, with `SamlError::Signature`, any `<ds:Signature>`
+  that is not a direct child of the root `<samlp:Response>` or of the
+  `<saml:Assertion>`, and a second one under either. A signature inside
+  `<samlp:Status>`, `<saml:Subject>`, a nested `<samlp:Response>`, or another
+  signature's `<ds:KeyInfo>` / `<ds:Object>` is an unverified region; the
+  parsers never read inside one (§3), and the document is now refused instead.
+  Signing both the Response and the Assertion, once each, stays accepted.
+  (Tests: `strict_profile_rejects_a_signature_outside_its_two_allowed_places`,
+  `strict_profile_accepts_a_response_and_an_assertion_each_signed_once`,
+  `strict_profile_refuses_the_eight_published_xsw_variants` — XSW1–XSW8 of
+  Somorovsky et al., USENIX Security 2012, generated from a real signed
+  document; and the `signature_placement_*` unit tests.)
 - **Nothing but `SignedInfo`, `SignatureValue` and `KeyInfo` in a signature.**
   The verified `<ds:Signature>` MUST have exactly one `<ds:SignedInfo>`,
   exactly one `<ds:SignatureValue>`, at most one `<ds:KeyInfo>`, and no other
@@ -263,14 +240,10 @@ but consumes another. Hearth defends structurally:
 - **No duplicate single-valued fields.** Inside one `<Assertion>`, a second
   `<Issuer>`, `<Subject>`, subject `<NameID>`, `<Conditions>`, or `<Attribute>`
   with an already-seen `Name` is rejected with `SamlError::Parse`; so is a
-  second `<Response>`-level `<Issuer>`, `<Status>` or top-level `<StatusCode>`,
-  and a second `<Issuer>` / `<NameID>` in an `<AuthnRequest>` or
-  `<LogoutRequest>`.
+  second `<Response>`-level `<Issuer>`, `<Status>` or top-level `<StatusCode>`.
   (Tests: `parse_rejects_duplicate_single_valued_fields`,
   `parse_rejects_duplicate_subject_name_id`,
-  `parse_rejects_duplicate_response_level_fields`,
-  `parse_authn_request_rejects_duplicate_issuer`,
-  `parse_logout_request_rejects_duplicate_fields`.)
+  `parse_rejects_duplicate_response_level_fields`.)
 - **`WantAssertionsSigned`.** When the IdP registration sets
   `want_assertions_signed`, an assertion-level signature is **required**; a
   Response-level-only signature MUST be rejected. When it is unset, Hearth falls
@@ -440,7 +413,7 @@ All SAML failures map to `SamlError` (`saml/error.rs`), converted to
 | Replayed assertion ID | `Replay` | `HEARTH_SAML_INVALID` |
 | Audience / Issuer / Destination / InResponseTo mismatch | `AudienceMismatch`, `IssuerMismatch`, `DestinationMismatch`, `InvalidAuthnRequest` | `HEARTH_SAML_INVALID` |
 | IdP metadata fetch failed | `MetadataFetch` | `HEARTH_SAML_METADATA_FETCH_FAILED` |
-| Unknown SP/IdP for realm | `UnknownSp`, `UnknownIdp` | `HEARTH_SAML_ENTITY_NOT_FOUND` |
+| Unknown IdP for realm | `UnknownIdp` | `HEARTH_SAML_ENTITY_NOT_FOUND` |
 
 - Error messages and logs MUST NOT contain assertion contents, subject PII,
   tokens, or raw upstream bodies.

@@ -185,8 +185,7 @@ pub(super) fn required_action_intercept(
 /// * `Ok(None)` — the user does not exist, or cannot sign in (disabled, or
 ///   still waiting for email verification). No required-action session is
 ///   minted for such an account (GA audit round 3, D-11): it let a disabled
-///   or unverified account holder who knew the password change it, bind a
-///   phone and send SMS. Every caller's next step (session creation, code
+///   or unverified account holder who knew the password change it. Every caller's next step (session creation, code
 ///   exchange) refuses the account with its usual answer.
 /// * `Err(response)` — a lookup failed. The actions (or the realm's
 ///   enrolment requirements) are unknown, so the caller must refuse: reading
@@ -209,7 +208,7 @@ fn pending_required_actions(
             return Err(handlers_common::server_error());
         }
     };
-    // The realm's enrolment requirements (SMS / email OTP / passkey) are read
+    // The realm's enrolment requirements (email OTP / passkey) are read
     // from the realm record; an error there is equally unknown.
     let realm_config = match state.identity.get_realm(realm) {
         Ok(r) => r.map(|r| r.config().clone()),
@@ -224,15 +223,6 @@ fn pending_required_actions(
     };
 
     let mut actions: Vec<RequiredAction> = user.required_actions().to_vec();
-    // Dynamic injection: SMS MFA enrollment if realm requires it.
-    inject_enroll_phone_otp_if_needed(
-        state,
-        realm,
-        user_id,
-        &user,
-        realm_config.as_ref(),
-        &mut actions,
-    );
     // Dynamic injection: Email OTP enrollment if realm requires it.
     inject_enroll_email_otp_if_needed(
         state,
@@ -272,7 +262,7 @@ fn pending_required_actions(
 /// in the RA session token, and the session created when the flow ends
 /// records it ([`resume_browser_flow`]). A flow that cannot end in a session
 /// is not started (GA audit round 3, D-1): starting it let whoever relayed a
-/// password and a TOTP code enrol a phone of their own on the account before
+/// password and a TOTP code enrol a factor of their own on the account before
 /// the login was refused.
 ///
 /// * The realm's `cidr_policy` refuses the client address (`403`). The
@@ -337,8 +327,11 @@ pub fn required_action_check_browser(
         }
     };
     if let Some(config) = realm_config.as_ref() {
-        let reachable = best_reachable_proof(mfa_proof, &actions, config, inbox_first_factor);
-        if !realm_policy_admits(config, reachable) {
+        let reachable = best_reachable_proof(mfa_proof, &actions, config);
+        let Ok(mfa_required) = mfa_requirement_for(state, realm, user_id, None) else {
+            return Some(handlers_common::server_error());
+        };
+        if !realm_policy_admits(config, mfa_required, reachable) {
             tracing::info!(
                 realm_id = %realm.as_uuid(),
                 "required actions: this login cannot meet the realm's second-factor policy; \
@@ -380,17 +373,15 @@ pub fn required_action_check_browser(
 /// The strongest proof a browser required-action flow that starts from
 /// `proof` with `actions` pending can end with: a passkey registration (the
 /// `ENROLL_MFA` page registers one in a realm that offers passkeys) records
-/// [`MfaProof::ProvedWebAuthn`]; any enrolment raises a login that proved
-/// nothing to [`MfaProof::Proved`] (see [`ra_token::RaClaims`]) — except an
-/// email-OTP enrolment after a magic link (`inbox_first_factor`), which proves
-/// the inbox the login already proved. An upper bound — an action can be
-/// skipped as already satisfied — so the session the flow ends in is still
-/// checked by the engine.
+/// [`MfaProof::ProvedWebAuthn`]; a TOTP enrolment raises a login that proved
+/// nothing to [`MfaProof::Proved`] (see [`ra_token::RaClaims`]). An email-OTP
+/// enrolment proves an inbox, never MFA ([`MfaProof::EmailOtp`], spec
+/// `mfa-policy`). An upper bound — an action can be skipped as already
+/// satisfied — so the session the flow ends in is still checked by the engine.
 fn best_reachable_proof(
     proof: MfaProof,
     actions: &[RequiredAction],
     config: &crate::identity::RealmConfig,
-    inbox_first_factor: bool,
 ) -> MfaProof {
     let offers_passkeys = config
         .mfa_methods
@@ -399,21 +390,26 @@ fn best_reachable_proof(
     if offers_passkeys && actions.contains(&RequiredAction::EnrollMfa) {
         return MfaProof::ProvedWebAuthn;
     }
-    let enrols_a_factor = actions.iter().any(|a| match a {
-        RequiredAction::EnrollMfa | RequiredAction::EnrollPhoneOtp => true,
-        RequiredAction::EnrollEmailOtp => !inbox_first_factor,
-        _ => false,
-    });
-    if enrols_a_factor && proof == MfaProof::None {
+    if actions.contains(&RequiredAction::EnrollMfa)
+        && matches!(proof, MfaProof::None | MfaProof::EmailOtp)
+    {
         return MfaProof::Proved;
+    }
+    if actions.contains(&RequiredAction::EnrollEmailOtp) && proof == MfaProof::None {
+        return MfaProof::EmailOtp;
     }
     proof
 }
 
-/// Whether the realm's second-factor policy admits a session with `proof` —
-/// the same two predicates `create_session` applies.
-fn realm_policy_admits(config: &crate::identity::RealmConfig, proof: MfaProof) -> bool {
-    let mfa_ok = !config.mfa_required.unwrap_or(false) || proof.satisfies_mfa_required();
+/// Whether the second-factor policy admits a session with `proof` — the same
+/// two predicates `create_session` applies. `mfa_required` is the resolver's
+/// answer for this user.
+fn realm_policy_admits(
+    config: &crate::identity::RealmConfig,
+    mfa_required: bool,
+    proof: MfaProof,
+) -> bool {
+    let mfa_ok = !mfa_required || proof.satisfies_mfa_required();
     let webauthn_ok =
         !config.webauthn_required.unwrap_or(false) || proof.satisfies_webauthn_required();
     mfa_ok && webauthn_ok
@@ -589,7 +585,7 @@ pub fn resume_oidc_flow(
         realm,
         &user_id,
         &params,
-        Gate::SmsMfa,
+        Gate::Consent,
         Vec::new(),
         secure,
         Timestamp::from_micros(now_micros()),
@@ -666,55 +662,6 @@ pub fn next_required_action(
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
-
-/// Dynamically injects `ENROLL_PHONE_OTP` when a realm requires SMS MFA and
-/// the user has no verified phone number.
-///
-/// Persists the action to the user record so subsequent `required_actions()`
-/// reads see it. Idempotent: no-op if already present or not applicable.
-fn inject_enroll_phone_otp_if_needed(
-    state: &Arc<WebState>,
-    realm: &RealmId,
-    user_id: &UserId,
-    user: &crate::identity::User,
-    realm_config: Option<&crate::identity::RealmConfig>,
-    actions: &mut Vec<RequiredAction>,
-) {
-    if user.phone_verified() {
-        return;
-    }
-    if actions.contains(&RequiredAction::EnrollPhoneOtp) {
-        return;
-    }
-    let sms_required = realm_config
-        .and_then(|c| c.mfa_methods.as_ref())
-        .is_some_and(|methods| methods.iter().any(|m| m == "sms"));
-
-    if !sms_required {
-        return;
-    }
-
-    actions.push(RequiredAction::EnrollPhoneOtp);
-
-    // Persist so the RA-JWT and future checks agree on the list.
-    let mut persisted = user.required_actions().to_vec();
-    if !persisted.contains(&RequiredAction::EnrollPhoneOtp) {
-        persisted.push(RequiredAction::EnrollPhoneOtp);
-        if let Err(e) = state.identity.update_user(
-            realm,
-            user_id,
-            &UpdateUserRequest {
-                required_actions: Some(persisted),
-                ..Default::default()
-            },
-        ) {
-            tracing::warn!(
-                error = %e,
-                "inject_enroll_phone_otp_if_needed: failed to persist ENROLL_PHONE_OTP"
-            );
-        }
-    }
-}
 
 /// Dynamically injects `ENROLL_EMAIL_OTP` when a realm requires email OTP MFA
 /// and the user has not yet enrolled email OTP.
@@ -837,74 +784,36 @@ fn inject_enroll_mfa_if_needed(
         return Ok(());
     }
 
-    if client_or_role_requires_mfa(state, realm, user_id, realm_config, client_id_str)? {
+    if mfa_requirement_for(state, realm, user_id, client_id_str)? {
         actions.push(RequiredAction::EnrollMfa);
     }
     Ok(())
 }
 
-/// Whether the client (its `mfa_required`) or one of the user's roles (listed
-/// in the realm's `mfa_required_roles`) demands a second factor for this
-/// authorization.
-///
-/// `Err(())` when a lookup the answer depends on fails: the requirement is
-/// then unknown and the caller refuses. A client or role that does not exist
-/// imposes nothing.
-pub(super) fn client_or_role_requires_mfa(
+/// Whether `user_id` needs a qualifying second factor for this request:
+/// the identity layer's one MFA resolver
+/// ([`crate::identity::IdentityEngine::effective_mfa_requirement`]) with the
+/// client named by `client_id_str`, if any. A lookup failure is logged and
+/// returned as `Err(())`, so the caller refuses.
+pub(super) fn mfa_requirement_for(
     state: &Arc<WebState>,
     realm: &RealmId,
     user_id: &UserId,
-    realm_config: Option<&crate::identity::RealmConfig>,
     client_id_str: Option<&str>,
 ) -> Result<bool, ()> {
-    let refuse = |what: &str, e: &dyn std::fmt::Display| {
-        tracing::warn!(
-            error = %e,
-            realm_id = %realm.as_uuid(),
-            lookup = what,
-            "required actions: MFA-requirement lookup failed; refusing"
-        );
-    };
-
-    // Per-client requirement.
-    let client_requires_mfa = match client_id_str
+    let client_id = client_id_str
         .and_then(|cid| uuid::Uuid::parse_str(cid).ok())
-        .map(ClientId::new)
-    {
-        Some(cid) => state
-            .identity
-            .get_client(realm, &cid)
-            .map_err(|e| refuse("client", &e))?
-            .and_then(|c| c.mfa_required())
-            .unwrap_or(false),
-        None => false,
-    };
-    if client_requires_mfa {
-        return Ok(true);
-    }
-
-    // Per-role requirement: any role the user holds that appears in
-    // `realm.config.mfa_required_roles` triggers enforcement.
-    let required_roles = realm_config
-        .and_then(|c| c.mfa_required_roles.as_deref())
-        .unwrap_or_default();
-    if required_roles.is_empty() {
-        return Ok(false);
-    }
-    let assignments = state
-        .rbac
-        .list_user_assignments(realm, user_id)
-        .map_err(|e| refuse("role assignments", &e))?;
-    for assignment in &assignments {
-        let role = state
-            .rbac
-            .get_role(realm, &assignment.role_id)
-            .map_err(|e| refuse("role", &e))?;
-        if role.is_some_and(|r| required_roles.iter().any(|req| req == &r.name)) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+        .map(ClientId::new);
+    state
+        .identity
+        .effective_mfa_requirement(realm, user_id, client_id.as_ref())
+        .map_err(|e| {
+            tracing::warn!(
+                error = %e,
+                realm_id = %realm.as_uuid(),
+                "MFA-requirement lookup failed; refusing"
+            );
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -1678,115 +1587,6 @@ fn update_password_csrf_failure(state: &Arc<WebState>, headers: &HeaderMap) -> R
     super::templates::render_status(&tmpl, StatusCode::FORBIDDEN)
 }
 
-// ---------------------------------------------------------------------------
-// GET /required-action/ENROLL_PHONE_OTP
-// ---------------------------------------------------------------------------
-
-/// Rendered by `GET /required-action/ENROLL_PHONE_OTP`.
-#[derive(Template)]
-#[template(path = "ui/required_action/enroll_phone_otp.html")]
-struct EnrollPhoneOtpPageTemplate {
-    error: Option<String>,
-    chrome: bool,
-    active: &'static str,
-    user_email: Option<String>,
-    is_admin: bool,
-    narrow: bool,
-    flash: Option<super::templates::Flash>,
-    csrf: Option<String>,
-    product_name: String,
-    logo_url: String,
-    realm_theme_url: Option<String>,
-    inline_theme_css: Option<String>,
-}
-
-/// Rendered by `POST /required-action/ENROLL_PHONE_OTP/send` on success.
-#[derive(Template)]
-#[template(path = "ui/required_action/enroll_phone_otp_verify.html")]
-struct EnrollPhoneOtpVerifyTemplate {
-    /// Masked display of the phone (e.g. `+1•••••0100`).
-    masked_phone: String,
-    /// Raw phone (for hidden form fields).
-    phone: String,
-    /// Opaque nonce returned by `issue_sms_otp`; `None` in rate-limited renders.
-    nonce: Option<String>,
-    error: Option<String>,
-    chrome: bool,
-    active: &'static str,
-    user_email: Option<String>,
-    is_admin: bool,
-    narrow: bool,
-    flash: Option<super::templates::Flash>,
-    csrf: Option<String>,
-    product_name: String,
-    logo_url: String,
-    realm_theme_url: Option<String>,
-    inline_theme_css: Option<String>,
-}
-
-/// `application/x-www-form-urlencoded` body for `POST /required-action/ENROLL_PHONE_OTP/send`.
-#[derive(Debug, Deserialize)]
-pub struct EnrollPhoneOtpSendForm {
-    /// The page's [`ra_form_token`].
-    #[serde(rename = "_csrf", default)]
-    pub csrf: String,
-    #[serde(default)]
-    pub phone: String,
-}
-
-/// `application/x-www-form-urlencoded` body for `POST /required-action/ENROLL_PHONE_OTP/verify`.
-#[derive(Debug, Deserialize)]
-pub struct EnrollPhoneOtpVerifyForm {
-    /// The page's [`ra_form_token`].
-    #[serde(rename = "_csrf", default)]
-    pub csrf: String,
-    #[serde(default)]
-    pub nonce: String,
-    #[serde(default)]
-    pub phone: String,
-    #[serde(default)]
-    pub code: String,
-}
-
-/// Renders the phone-number input form.
-pub async fn enroll_phone_otp_page(
-    State(state): State<Arc<WebState>>,
-    PeerAddr(peer_addr): PeerAddr,
-    headers: HeaderMap,
-) -> Response {
-    // Verify the RA session token, exactly as the email twin does — cookie
-    // presence alone proves nothing (audit 2026-08-28 §4.19#7).
-    let (realm, claims) = match validated_ra_session(&state, &headers) {
-        Ok(session) => session,
-        Err(response) => return response,
-    };
-    // A user who already holds a verified phone has nothing to enrol here.
-    let Ok(user_uuid) = uuid::Uuid::parse_str(&claims.sub) else {
-        return handlers_common::server_error();
-    };
-    let user_id = UserId::new(user_uuid);
-    match state.identity.get_user(&realm, &user_id) {
-        Ok(Some(user)) if user.phone_verified() => {
-            let secure = state.is_secure_request(&headers);
-            let now = Timestamp::from_micros(now_micros());
-            return skip_satisfied_action(
-                &state,
-                &realm,
-                &user_id,
-                claims,
-                RequiredAction::EnrollPhoneOtp,
-                "phone_already_verified",
-                &client_context(&state, &headers, peer_addr),
-                secure,
-                now,
-            );
-        }
-        Ok(Some(_)) => {}
-        _ => return handlers_common::server_error(),
-    }
-    render_enroll_phone_page(&state, &headers, None)
-}
-
 /// Verifies the RA session cookie and returns its realm and claims.
 ///
 /// The realm is read from the payload only to select the verification key; the
@@ -1819,339 +1619,6 @@ fn validated_ra_session(
             "Invalid required-action session token",
         )),
     }
-}
-
-/// Sends an SMS OTP to the supplied E.164 phone number and renders the
-/// code-entry form.
-///
-/// Enumeration resistance (AC 3.5.3): always returns 200 with the code-entry
-/// form regardless of whether the phone is already registered to another user.
-/// The OTP simply won't verify on the complete step, yielding a generic error.
-pub async fn enroll_phone_otp_send(
-    State(state): State<Arc<WebState>>,
-    headers: HeaderMap,
-    Form(form): Form<EnrollPhoneOtpSendForm>,
-) -> Response {
-    if read_ra_cookie(&headers).is_some() && !ra_form_ok(&state, &headers, &form.csrf) {
-        return ra_form_refused();
-    }
-    // Verify the RA session token before doing anything that costs the realm
-    // money: the realm below comes from the verified token, not from the
-    // unauthenticated payload (audit 2026-08-28 §4.19#7).
-    let realm = match validated_ra_session(&state, &headers) {
-        Ok((realm, _claims)) => realm,
-        Err(response) => return response,
-    };
-
-    let phone = form.phone.trim().to_string();
-
-    // Basic E.164 validation: must start with '+' and contain 7-15 digits.
-    if !is_e164(&phone) {
-        return render_enroll_phone_page(
-            &state,
-            &headers,
-            Some("Enter a valid international phone number (e.g. +15555550100)."),
-        );
-    }
-
-    let Some(sms_sender) = state.sms.as_ref() else {
-        tracing::warn!("enroll_phone_otp_send: SMS transport not configured");
-        return render_enroll_phone_page(
-            &state,
-            &headers,
-            Some("SMS delivery is not configured. Contact your administrator."),
-        );
-    };
-
-    let Some(hmac_key) = sms_otp_hmac_key_bytes(&state) else {
-        return render_enroll_phone_page(
-            &state,
-            &headers,
-            Some("SMS delivery is not configured. Contact your administrator."),
-        );
-    };
-    let now_ts = now_unix_ts();
-
-    let nonce = match state.identity.issue_sms_otp(
-        &realm,
-        &phone,
-        &hmac_key,
-        sms_sender.as_ref(),
-        now_ts,
-    ) {
-        Ok(n) => n,
-        Err(crate::identity::IdentityError::SmsResendLimitExceeded) => {
-            return render_enroll_phone_verify(
-                &state,
-                &headers,
-                // Return the verify page with a warning rather than blocking —
-                // the real OTP was already sent recently (rate limit window).
-                &phone,
-                None,
-                Some("A code was recently sent to this number. Please wait before requesting another."),
-            );
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "enroll_phone_otp_send: issue_sms_otp failed");
-            return render_enroll_phone_page(
-                &state,
-                &headers,
-                Some("Failed to send verification code. Please try again."),
-            );
-        }
-    };
-
-    render_enroll_phone_verify(&state, &headers, &phone, Some(&nonce), None)
-}
-
-/// Verifies the submitted OTP code, stores the phone as verified, clears
-/// `ENROLL_PHONE_OTP` from the user's required actions, and advances the flow.
-#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
-pub async fn enroll_phone_otp_verify_submit(
-    State(state): State<Arc<WebState>>,
-    PeerAddr(peer_addr): PeerAddr,
-    headers: HeaderMap,
-    Form(form): Form<EnrollPhoneOtpVerifyForm>,
-) -> Response {
-    if read_ra_cookie(&headers).is_some() && !ra_form_ok(&state, &headers, &form.csrf) {
-        return ra_form_refused();
-    }
-    let Some(token) = read_ra_cookie(&headers) else {
-        return handlers_common::bad_request("No active required-action session");
-    };
-
-    let Some(realm_str) = ra_token::extract_realm_unchecked(&token) else {
-        return handlers_common::bad_request("Malformed RA session token");
-    };
-    let Ok(realm_uuid) = uuid::Uuid::parse_str(&realm_str) else {
-        return handlers_common::bad_request("Malformed realm in RA session token");
-    };
-    let realm = RealmId::new(realm_uuid);
-
-    let now = Timestamp::from_micros(now_micros());
-    let claims = match state.identity.validate_ra_token(&realm, &token, now) {
-        Ok(c) => c,
-        Err(ra_token::RaTokenError::Expired) => {
-            return Redirect::to("/").into_response();
-        }
-        Err(_) => {
-            return handlers_common::bad_request("Invalid required-action session token");
-        }
-    };
-
-    let Ok(user_uuid) = uuid::Uuid::parse_str(&claims.sub) else {
-        return handlers_common::server_error();
-    };
-    let user_id = UserId::new(user_uuid);
-    let secure = state.is_secure_request(&headers);
-
-    let phone = form.phone.trim().to_string();
-    // 22.4 (audit 2026-08-28 §4.4#2): a phone that fails E.164 validation must
-    // not be echoed back into the verify page — that page masks it, and the
-    // masking used to index raw bytes. `mask_phone` is total now, but this
-    // layer still validates its own input rather than trusting the form: an
-    // unparsed number has nothing to mask, so send the user back to the entry
-    // page instead of rendering a masked view of junk.
-    if !is_e164(&phone) {
-        return render_enroll_phone_page(&state, &headers, Some("Invalid submission."));
-    }
-    if form.nonce.is_empty() || form.code.is_empty() {
-        return render_enroll_phone_verify(
-            &state,
-            &headers,
-            &phone,
-            Some(&form.nonce),
-            Some("Invalid submission."),
-        );
-    }
-
-    let Some(hmac_key) = sms_otp_hmac_key_bytes(&state) else {
-        return render_enroll_phone_page(
-            &state,
-            &headers,
-            Some("SMS delivery is not configured. Contact your administrator."),
-        );
-    };
-    let now_ts = now_unix_ts();
-
-    match state
-        .identity
-        // Bound to the submitted number: a code sent to one phone must not
-        // mark a different one verified.
-        .verify_sms_otp(&realm, &form.nonce, &phone, &form.code, &hmac_key, now_ts)
-    {
-        Ok(()) => {}
-        Err(_) => {
-            return render_enroll_phone_verify(
-                &state,
-                &headers,
-                &phone,
-                Some(&form.nonce),
-                Some("That code is incorrect or has expired. Try again or request a new code."),
-            );
-        }
-    }
-
-    // OTP verified — store phone number as verified and clear ENROLL_PHONE_OTP.
-    let updated_actions: Vec<RequiredAction> = claims
-        .pending_actions
-        .iter()
-        .filter(|&&a| a != RequiredAction::EnrollPhoneOtp)
-        .copied()
-        .collect();
-
-    if let Err(e) = state.identity.update_user(
-        &realm,
-        &user_id,
-        &UpdateUserRequest {
-            phone_number: Some(Some(phone.clone())),
-            phone_verified: Some(true),
-            required_actions: Some(updated_actions.clone()),
-            ..Default::default()
-        },
-    ) {
-        tracing::warn!(error = %e, "enroll_phone_otp_verify_submit: update_user failed");
-        return handlers_common::server_error();
-    }
-
-    if let Err(e) = state.audit.append(&CreateAuditEvent {
-        realm_id: realm.clone(),
-        actor: user_id.as_uuid().to_string(),
-        action: AuditAction::RequiredActionCompleted,
-        resource_type: "user".to_string(),
-        resource_id: user_id.as_uuid().to_string(),
-        metadata: Some(serde_json::json!({ "action_type": "ENROLL_PHONE_OTP" })),
-    }) {
-        tracing::warn!(error = %e, "enroll_phone_otp_verify_submit: audit append failed");
-    }
-
-    // The user proved the phone just enrolled; see `record_enrolled_factor`.
-    let mut claims = claims;
-    claims.record_enrolled_factor();
-    advance_flow(
-        &state,
-        &realm,
-        claims,
-        RequiredAction::EnrollPhoneOtp,
-        &client_context(&state, &headers, peer_addr),
-        secure,
-        now,
-    )
-}
-
-// ---------------------------------------------------------------------------
-// ENROLL_PHONE_OTP helpers
-// ---------------------------------------------------------------------------
-
-fn render_enroll_phone_page(
-    state: &Arc<WebState>,
-    headers: &HeaderMap,
-    error: Option<&str>,
-) -> Response {
-    let tmpl = EnrollPhoneOtpPageTemplate {
-        error: error.map(str::to_string),
-        chrome: false,
-        active: "",
-        user_email: None,
-        is_admin: false,
-        narrow: true,
-        flash: None,
-        csrf: ra_form_token(state, headers),
-        product_name: state.product_name.clone(),
-        logo_url: state.logo_url.clone(),
-        realm_theme_url: state.realm_theme_url(),
-        inline_theme_css: state.inline_theme_css(),
-    };
-    render(&tmpl)
-}
-
-fn render_enroll_phone_verify(
-    state: &Arc<WebState>,
-    headers: &HeaderMap,
-    phone: &str,
-    nonce: Option<&str>,
-    error: Option<&str>,
-) -> Response {
-    let tmpl = EnrollPhoneOtpVerifyTemplate {
-        masked_phone: mask_phone(phone),
-        phone: phone.to_string(),
-        nonce: nonce.map(str::to_string),
-        error: error.map(str::to_string),
-        chrome: false,
-        active: "",
-        user_email: None,
-        is_admin: false,
-        narrow: true,
-        flash: None,
-        csrf: ra_form_token(state, headers),
-        product_name: state.product_name.clone(),
-        logo_url: state.logo_url.clone(),
-        realm_theme_url: state.realm_theme_url(),
-        inline_theme_css: state.inline_theme_css(),
-    };
-    render(&tmpl)
-}
-
-/// Masks a phone number for display: keeps the country code and last 4 digits.
-/// E.g. `"+15555550100"` → `"+1••••••0100"`.
-///
-/// 22.4 (audit 2026-08-28 §4.4#2): this used to index `phone` by **byte**
-/// offset in three places — `phone[phone.len() - 4..]`, `phone[..prefix_end]`,
-/// and a `phone.len() - prefix_end - 4` width that could underflow. Any of the
-/// three panicked the handler on input that was not pure ASCII (a multi-byte
-/// character landing across a slice boundary) or that had no digit in the first
-/// few characters. The function is now total for every `&str`: it works on
-/// `char`s and clamps the prefix so the dot count can never go negative.
-fn mask_phone(phone: &str) -> String {
-    let chars: Vec<char> = phone.chars().collect();
-    if chars.len() <= 5 {
-        return phone.to_string();
-    }
-    let suffix_start = chars.len() - 4;
-    // Country code = everything up to and including the first ASCII digit
-    // (e.g. "+1"), clamped so it can never overlap the visible suffix.
-    let prefix_end = chars
-        .iter()
-        .position(char::is_ascii_digit)
-        .unwrap_or(1)
-        .saturating_add(1)
-        .min(suffix_start);
-    let country_code: String = chars[..prefix_end].iter().collect();
-    let visible_suffix: String = chars[suffix_start..].iter().collect();
-    let dots = "•".repeat(suffix_start - prefix_end);
-    format!("{country_code}{dots}{visible_suffix}")
-}
-
-/// Returns true when `s` is a syntactically valid E.164 number:
-/// starts with '+', followed by 7–15 ASCII digits, no spaces.
-fn is_e164(s: &str) -> bool {
-    if !s.starts_with('+') {
-        return false;
-    }
-    let digits = &s[1..];
-    digits.len() >= 7 && digits.len() <= 15 && digits.chars().all(|c| c.is_ascii_digit())
-}
-
-/// Returns the HMAC key bytes to use for SMS OTP operations, or `None` when
-/// no key is loaded.
-///
-/// There is deliberately no fallback. This used to substitute an all-zero
-/// 32-byte key whenever `HEARTH_SMS_OTP_HMAC_KEY` was unset (the `log`
-/// transport), which made every stored OTP digest brute-forceable by anyone
-/// who could read storage. Every caller now treats `None` as "SMS OTP is
-/// unavailable" and fails closed: no code is issued and nothing verifies.
-///
-/// Startup always loads a key for a real SMS transport, and generates a random
-/// per-process key in dev mode, so `None` means a production `log` transport.
-pub(super) fn sms_otp_hmac_key_bytes(state: &Arc<WebState>) -> Option<Vec<u8>> {
-    let key = state.sms_otp_hmac_key.clone();
-    if key.is_none() {
-        tracing::warn!(
-            "SMS OTP refused: no HEARTH_SMS_OTP_HMAC_KEY is loaded, so no code can be \
-             issued or verified (configure a real sms.transport and the key)"
-        );
-    }
-    key
 }
 
 /// Returns the current Unix timestamp in whole seconds.
@@ -2587,17 +2054,12 @@ fn render_enroll_email_otp_verify(
 
 /// Returns the HMAC key bytes to use for email OTP operations.
 ///
-/// Always a secret key — see [`derive_email_otp_hmac_key`]. This used to fall
-/// back to the public constant `hearth-dev-email-otp-key-not-for-production`
-/// whenever no SMS OTP key was loaded, which is every production deployment
-/// on the `log` SMS transport: each stored email OTP digest was then keyed
-/// with a value anyone could read in the source, and so brute-forceable
-/// offline in about 10^6 HMACs.
+/// Always a secret key — see [`derive_email_otp_hmac_key`]. This once fell
+/// back to the public constant `hearth-dev-email-otp-key-not-for-production`:
+/// each stored email OTP digest was then keyed with a value anyone could read
+/// in the source, and so brute-forceable offline in about 10^6 HMACs.
 pub(super) fn email_otp_hmac_key_bytes(state: &Arc<WebState>) -> Vec<u8> {
-    derive_email_otp_hmac_key(
-        state.sms_otp_hmac_key.as_deref(),
-        super::auth::cookie_secret_bytes(&state.cookie_secret),
-    )
+    derive_email_otp_hmac_key(super::auth::cookie_secret_bytes(&state.cookie_secret))
 }
 
 /// Domain-separation label for [`derive_email_otp_hmac_key`].
@@ -2605,15 +2067,12 @@ const EMAIL_OTP_KEY_LABEL: &[u8] = b"hearth/email-otp-hmac-key/v1";
 
 /// Derives the email OTP HMAC key: `HMAC-SHA256(base, label)`.
 ///
-/// `base` is the operator's `HEARTH_SMS_OTP_HMAC_KEY` when one is loaded (it is
-/// stable across restarts and shared by every node), otherwise the process's
-/// random cookie secret. The cookie secret already bounds the email OTP login
-/// flow — the MFA pending cookie is MAC'd with it — so a code issued under it
+/// `base` is the process's random cookie secret. The cookie secret already
+/// bounds the email OTP login flow — the MFA pending cookie is MAC'd with it — so a code issued under it
 /// lives exactly as long, and on exactly the node, as the login it belongs to.
 /// The label keeps the derived key distinct from the key it came from.
-fn derive_email_otp_hmac_key(sms_key: Option<&[u8]>, cookie_secret: &[u8]) -> Vec<u8> {
-    let base = sms_key.unwrap_or(cookie_secret);
-    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, base);
+fn derive_email_otp_hmac_key(cookie_secret: &[u8]) -> Vec<u8> {
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, cookie_secret);
     ring::hmac::sign(&key, EMAIL_OTP_KEY_LABEL)
         .as_ref()
         .to_vec()
@@ -3108,107 +2567,25 @@ mod tests {
 }
 
 #[cfg(test)]
-mod mask_phone_tests {
-    use super::{is_e164, mask_phone};
-
-    /// The documented happy path still masks exactly as before.
-    #[test]
-    fn masks_an_e164_number_keeping_country_code_and_last_four() {
-        assert_eq!(mask_phone("+15555550100"), "+1••••••0100");
-        assert_eq!(mask_phone("+442071838750"), "+4•••••••8750");
-    }
-
-    /// Short inputs pass through untouched (no suffix to preserve).
-    #[test]
-    fn short_input_passes_through() {
-        assert_eq!(mask_phone(""), "");
-        assert_eq!(mask_phone("+1234"), "+1234");
-        assert_eq!(mask_phone("+1"), "+1");
-    }
-
-    /// 22.4 (§4.4#2): the three byte-slicing panics.
-    ///
-    /// Each of these strings made the old implementation abort the handler:
-    /// a multi-byte char across the `len() - 4` suffix boundary, a multi-byte
-    /// char under the `[..prefix_end]` country-code slice, and a digit far
-    /// enough in that `len() - prefix_end - 4` underflowed.
-    #[test]
-    fn multibyte_and_digitless_input_does_not_panic() {
-        for input in [
-            "+1555555€",       // multi-byte char inside the 4-char suffix
-            "€€€€€€€€",        // every char multi-byte, no ASCII digit at all
-            "++++++9",         // first digit at index 6 ⇒ prefix_end 7 > len - 4
-            "+🔥🔥🔥🔥🔥1234", // emoji (4-byte) before the digits
-            "ありがとう1234",  // no leading '+', multi-byte prefix
-            "+++++++++",       // no digit anywhere, all ASCII
-        ] {
-            let masked = mask_phone(input);
-            // Total, and it never invents characters it was not given.
-            assert!(
-                !masked.is_empty(),
-                "mask_phone({input:?}) returned empty string"
-            );
-        }
-    }
-
-    /// The masked form never leaks more than the last four characters.
-    #[test]
-    fn masked_form_hides_the_middle() {
-        let masked = mask_phone("+15555550100");
-        assert!(!masked.contains("555555"), "middle digits leaked: {masked}");
-        assert!(masked.ends_with("0100"), "suffix missing: {masked}");
-    }
-
-    /// The entry-point guard that keeps unvalidated input away from the
-    /// masking view in the first place (22.4, second half).
-    #[test]
-    fn e164_validator_rejects_the_panic_inputs() {
-        for input in ["+1555555€", "€€€€€€€€", "++++++9", "ありがとう1234"] {
-            assert!(!is_e164(input), "is_e164 accepted {input:?}");
-        }
-        assert!(is_e164("+15555550100"));
-    }
-}
-
-#[cfg(test)]
 mod email_otp_key_tests {
     use super::derive_email_otp_hmac_key;
 
-    /// The constant this used to fall back to whenever no SMS OTP key was
-    /// loaded — i.e. every production deployment on the `log` SMS transport.
-    /// It is in the public source, so every digest keyed with it could be
+    /// The constant this used to fall back to. It is in the public source, so every digest keyed with it could be
     /// brute-forced offline (10^6 HMACs) by anyone who could read storage.
     const OLD_PUBLIC_KEY: &[u8] = b"hearth-dev-email-otp-key-not-for-production";
 
     #[test]
-    fn no_sms_key_derives_from_the_process_secret_not_a_public_constant() {
-        let a = derive_email_otp_hmac_key(None, &[1u8; 32]);
-        let b = derive_email_otp_hmac_key(None, &[2u8; 32]);
+    fn derives_from_the_process_secret_not_a_public_constant() {
+        let a = derive_email_otp_hmac_key(&[1u8; 32]);
+        let b = derive_email_otp_hmac_key(&[2u8; 32]);
         assert_ne!(a.as_slice(), OLD_PUBLIC_KEY);
         assert_eq!(a.len(), 32, "a full HMAC-SHA256 key");
         assert_ne!(a, b, "the key must depend on the secret, not be a constant");
         assert_eq!(
             a,
-            derive_email_otp_hmac_key(None, &[1u8; 32]),
+            derive_email_otp_hmac_key(&[1u8; 32]),
             "deterministic for one secret, so issue and verify agree"
         );
-    }
-
-    #[test]
-    fn an_sms_key_is_preferred_but_never_reused_verbatim() {
-        let sms = b"0123456789abcdef0123456789abcdef";
-        let k = derive_email_otp_hmac_key(Some(sms), &[1u8; 32]);
-        assert_ne!(
-            k.as_slice(),
-            sms.as_slice(),
-            "domain-separated from the SMS key"
-        );
-        assert_eq!(
-            k,
-            derive_email_otp_hmac_key(Some(sms), &[9u8; 32]),
-            "the operator's cluster-shared key wins over the per-process secret"
-        );
-        assert_ne!(k.as_slice(), OLD_PUBLIC_KEY);
     }
 }
 

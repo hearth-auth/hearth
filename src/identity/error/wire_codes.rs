@@ -20,9 +20,7 @@ impl IdentityError {
             Self::InvalidCredential { .. } | Self::CredentialNotFound => {
                 Some("HEARTH_INVALID_CREDENTIAL")
             }
-            Self::InvalidClient | Self::InvalidClientSecret | Self::PrivateKeyJwtRequired => {
-                Some("HEARTH_INVALID_CLIENT")
-            }
+            Self::InvalidClient | Self::InvalidClientSecret => Some("HEARTH_INVALID_CLIENT"),
             Self::InvalidClientAssertion { .. } => Some("HEARTH_INVALID_CLIENT_ASSERTION"),
             Self::InvalidAuthorizationCode | Self::InvalidGrant { .. } => {
                 Some("HEARTH_INVALID_GRANT")
@@ -59,11 +57,7 @@ impl IdentityError {
             Self::PasswordCompromised => Some("HEARTH_PASSWORD_COMPROMISED"),
             Self::AuthMethodNotAllowed { .. } => Some("HEARTH_AUTH_METHOD_NOT_ALLOWED"),
             Self::MfaMethodNotAllowed { .. } => Some("HEARTH_MFA_METHOD_NOT_ALLOWED"),
-            Self::StepUpChallengeRequired => Some("HEARTH_STEP_UP_CHALLENGE_REQUIRED"),
-            Self::EnrollMfaRequired => Some("HEARTH_ENROLL_MFA_REQUIRED"),
             Self::RequiredActionsBlocking { .. } => Some("HEARTH_REQUIRED_ACTIONS_PENDING"),
-            Self::InvalidSmsOtp => Some("HEARTH_INVALID_SMS_OTP"),
-            Self::SmsResendLimitExceeded => Some("HEARTH_SMS_RESEND_LIMIT_EXCEEDED"),
             Self::InvalidEmailOtp => Some("HEARTH_INVALID_EMAIL_OTP"),
 
             Self::RealmNotFound
@@ -144,7 +138,6 @@ impl IdentityError {
 
             Self::InvalidPushedAuthorizationRequest => Some("invalid_request"),
             Self::InvalidJar { .. } => Some("invalid_request_object"),
-            Self::FapiViolation { .. } => Some("fapi_violation"),
 
             Self::InvalidDPopProof { .. } => Some("invalid_dpop_proof"),
             Self::DPopProofReplay | Self::DPopNonceInvalid => Some("use_dpop_nonce"),

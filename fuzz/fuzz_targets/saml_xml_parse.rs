@@ -5,12 +5,13 @@
 //! IdPs and is therefore fully attacker-controlled. Each parser must never
 //! panic, only return `Ok` or `Err`.
 //!
-//! Parsers exercised:
-//! - `parse_response`      — `<samlp:Response>` + `<saml:Assertion>` (ACS path)
-//! - `parse_authn_request` — `<samlp:AuthnRequest>` (IdP-side receive path)
-//! - `parse_logout_request`  — `<samlp:LogoutRequest>` (SLO initiation)
-//! - `parse_logout_response` — `<samlp:LogoutResponse>` (SLO completion)
-//! - `parse_idp_metadata`  — `<md:EntityDescriptor>` (metadata exchange)
+//! Parsers exercised (Hearth is a SAML service provider only; the IdP-side
+//! request and logout parsers were removed in 3.0.0):
+//! - `parse_response`     — `<samlp:Response>` + `<saml:Assertion>` (ACS path)
+//! - `parse_idp_metadata` — `<md:EntityDescriptor>` (metadata exchange)
+//!
+//! The seeds keep their AuthnRequest and logout shapes: to these parsers they
+//! are hostile, near-miss documents, which is exactly what fuzzing wants.
 //!
 //! Why each of these matters for security:
 //! - Signature-wrapping attacks depend on the parser accepting an envelope
@@ -25,19 +26,13 @@
 
 #![no_main]
 
-use hearth::identity::federation::saml::{
-    parse_authn_request, parse_idp_metadata, parse_logout_request, parse_logout_response,
-    parse_response,
-};
+use hearth::identity::federation::saml::{parse_idp_metadata, parse_response};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    // All five parsers consume the same raw bytes. Each must handle
-    // arbitrary input — including non-UTF-8, deeply nested elements,
-    // namespace confusion, and truncated input — without panicking.
+    // Both parsers consume the same raw bytes. Each must handle arbitrary
+    // input — including non-UTF-8, deeply nested elements, namespace
+    // confusion, and truncated input — without panicking.
     let _ = parse_response(data);
-    let _ = parse_authn_request(data);
-    let _ = parse_logout_request(data);
-    let _ = parse_logout_response(data);
     let _ = parse_idp_metadata(data);
 });

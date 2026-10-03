@@ -217,7 +217,7 @@ fn strip_member(src: &std::path::Path, drop_path: &str) -> NamedTempFile {
 #[allow(clippy::too_many_lines)]
 async fn a_restored_system_realm_brings_back_operators_their_factors_and_the_signing_key() {
     let sys = system_realm();
-    let src = common::TestHarness::embedded().await.expect("src");
+    let src = common::TestHarness::in_process().await.expect("src");
     let email = "operator@hearth.test";
     let password = "Operat0r-Pa55word!";
     let op = seed_operator(&src, email, password);
@@ -260,7 +260,7 @@ async fn a_restored_system_realm_brings_back_operators_their_factors_and_the_sig
 
     let archive = export(&src, std::slice::from_ref(&sys));
 
-    let dst = common::TestHarness::embedded().await.expect("dst");
+    let dst = common::TestHarness::in_process().await.expect("dst");
     assert_ne!(
         system_key(&dst),
         src_key,
@@ -363,12 +363,12 @@ async fn a_restored_system_realm_brings_back_operators_their_factors_and_the_sig
 #[tokio::test]
 async fn skip_and_merge_keep_a_live_system_realm_and_add_missing_operators() {
     for mode in [RestoreMode::Skip, RestoreMode::Merge] {
-        let src = common::TestHarness::embedded().await.expect("src");
+        let src = common::TestHarness::in_process().await.expect("src");
         seed_operator(&src, "shared@hearth.test", "Archive-Pa55word!");
         seed_operator(&src, "restored@hearth.test", "Restored-Pa55word!");
         let archive = export(&src, &[system_realm()]);
 
-        let dst = common::TestHarness::embedded().await.expect("dst");
+        let dst = common::TestHarness::in_process().await.expect("dst");
         seed_operator(&dst, "shared@hearth.test", "Live-Pa55word!");
         let live_key = system_key(&dst);
 
@@ -406,7 +406,7 @@ async fn skip_and_merge_keep_a_live_system_realm_and_add_missing_operators() {
 #[tokio::test]
 async fn overwrite_replaces_the_live_system_key_and_operators() {
     let sys = system_realm();
-    let src = common::TestHarness::embedded().await.expect("src");
+    let src = common::TestHarness::in_process().await.expect("src");
     seed_operator(&src, "shared@hearth.test", "Archive-Pa55word!");
     let src_key = system_key(&src);
     let src_kid = src.identity().realm_jwks(&sys).expect("jwks").keys[0]
@@ -414,7 +414,7 @@ async fn overwrite_replaces_the_live_system_key_and_operators() {
         .clone();
     let archive = export(&src, std::slice::from_ref(&sys));
 
-    let dst = common::TestHarness::embedded().await.expect("dst");
+    let dst = common::TestHarness::in_process().await.expect("dst");
     seed_operator(&dst, "shared@hearth.test", "Live-Pa55word!");
     // Warm the key cache so a stale cached key would be observable.
     let _ = dst.identity().realm_jwks(&sys).expect("warm jwks");
@@ -453,11 +453,11 @@ fn replace_key(mode: RestoreMode) -> ImportOptions {
 /// opt-in (`--replace-system-signing-key`).
 #[tokio::test]
 async fn overwrite_keeps_a_live_system_key_without_the_explicit_opt_in() {
-    let src = common::TestHarness::embedded().await.expect("src");
+    let src = common::TestHarness::in_process().await.expect("src");
     seed_operator(&src, "shared@hearth.test", "Archive-Pa55word!");
     let archive = export(&src, &[system_realm()]);
 
-    let dst = common::TestHarness::embedded().await.expect("dst");
+    let dst = common::TestHarness::in_process().await.expect("dst");
     seed_operator(&dst, "shared@hearth.test", "Live-Pa55word!");
     let live_key = system_key(&dst);
 
@@ -489,7 +489,7 @@ async fn overwrite_keeps_a_live_system_key_without_the_explicit_opt_in() {
 async fn a_system_key_the_live_realm_rotated_away_from_is_never_reinstalled() {
     let sys = system_realm();
     for grace_secs in [0_u64, 3600] {
-        let dst = common::TestHarness::embedded().await.expect("dst");
+        let dst = common::TestHarness::in_process().await.expect("dst");
         seed_operator(&dst, "operator@hearth.test", "Operat0r-Pa55word!");
         let archive = export(&dst, std::slice::from_ref(&sys));
         dst.identity()
@@ -529,7 +529,7 @@ async fn a_system_key_the_live_realm_rotated_away_from_is_never_reinstalled() {
 #[tokio::test]
 async fn a_revoked_system_retiring_key_is_not_reinstated_by_a_restore() {
     let sys = system_realm();
-    let dst = common::TestHarness::embedded().await.expect("dst");
+    let dst = common::TestHarness::in_process().await.expect("dst");
     seed_operator(&dst, "operator@hearth.test", "Operat0r-Pa55word!");
     dst.identity()
         .rotate_realm_signing_key(&sys, 3600)
@@ -573,12 +573,12 @@ async fn a_revoked_system_retiring_key_is_not_reinstated_by_a_restore() {
 #[tokio::test]
 async fn a_system_key_a_restore_displaced_is_never_reinstalled() {
     let sys = system_realm();
-    let dst = common::TestHarness::embedded().await.expect("dst");
+    let dst = common::TestHarness::in_process().await.expect("dst");
     seed_operator(&dst, "operator@hearth.test", "Operat0r-Pa55word!");
     let displaced = system_key(&dst);
     let old_archive = export(&dst, std::slice::from_ref(&sys));
 
-    let other = common::TestHarness::embedded().await.expect("other");
+    let other = common::TestHarness::in_process().await.expect("other");
     seed_operator(&other, "operator@hearth.test", "Operat0r-Pa55word!");
     let other_archive = export(&other, std::slice::from_ref(&sys));
     restore(&dst, &other_archive, &replace_key(RestoreMode::Overwrite))
@@ -602,11 +602,11 @@ async fn a_system_key_a_restore_displaced_is_never_reinstalled() {
 
 #[tokio::test]
 async fn a_dry_run_of_the_system_realm_writes_nothing() {
-    let src = common::TestHarness::embedded().await.expect("src");
+    let src = common::TestHarness::in_process().await.expect("src");
     seed_operator(&src, "operator@hearth.test", "Operat0r-Pa55word!");
     let archive = export(&src, &[system_realm()]);
 
-    let dst = common::TestHarness::embedded().await.expect("dst");
+    let dst = common::TestHarness::in_process().await.expect("dst");
     let seeded = system_key(&dst);
     let report = restore(
         &dst,
@@ -640,11 +640,11 @@ async fn a_dry_run_of_the_system_realm_writes_nothing() {
 #[tokio::test]
 async fn a_dry_run_predicts_what_the_restore_does_with_the_system_key() {
     let sys = system_realm();
-    let src = common::TestHarness::embedded().await.expect("src");
+    let src = common::TestHarness::in_process().await.expect("src");
     seed_operator(&src, "operator@hearth.test", "Operat0r-Pa55word!");
     let archive = export(&src, std::slice::from_ref(&sys));
 
-    let dst = common::TestHarness::embedded().await.expect("dst");
+    let dst = common::TestHarness::in_process().await.expect("dst");
     seed_operator(&dst, "live@hearth.test", "Live-Pa55word!");
     for options in [
         opts(RestoreMode::Skip),
@@ -704,11 +704,11 @@ async fn a_dry_run_predicts_what_the_restore_does_with_the_system_key() {
 /// realm, and the refusal comes before anything is written.
 #[tokio::test]
 async fn a_realm_scoped_restore_refuses_the_system_realm_before_writing() {
-    let src = common::TestHarness::embedded().await.expect("src");
+    let src = common::TestHarness::in_process().await.expect("src");
     seed_operator(&src, "intruder@hearth.test", "Intruder-Pa55word!");
     let archive = export(&src, &[system_realm()]);
 
-    let dst = common::TestHarness::embedded().await.expect("dst");
+    let dst = common::TestHarness::in_process().await.expect("dst");
     let tenant = dst.create_realm();
     let seeded = system_key(&dst);
     for mode in [RestoreMode::Skip, RestoreMode::Overwrite] {
@@ -744,12 +744,12 @@ async fn a_realm_scoped_restore_refuses_the_system_realm_before_writing() {
 /// the key it already has.
 #[tokio::test]
 async fn a_system_realm_without_its_signing_key_fails_closed_unless_allowed() {
-    let src = common::TestHarness::embedded().await.expect("src");
+    let src = common::TestHarness::in_process().await.expect("src");
     seed_operator(&src, "operator@hearth.test", "Operat0r-Pa55word!");
     let full = export(&src, &[system_realm()]);
     let keyless = strip_member(full.path(), "realms/system/signing_key.json");
 
-    let dst = common::TestHarness::embedded().await.expect("dst");
+    let dst = common::TestHarness::in_process().await.expect("dst");
     let seeded = system_key(&dst);
     let err = restore(&dst, &keyless, &opts(RestoreMode::Skip))
         .expect_err("a keyless system realm must be refused by default");
@@ -794,7 +794,7 @@ async fn a_system_realm_without_its_signing_key_fails_closed_unless_allowed() {
 /// target's system realm alone.
 #[tokio::test]
 async fn full_archives_restore_both_and_tenant_only_archives_leave_the_system_realm_alone() {
-    let src = common::TestHarness::embedded().await.expect("src");
+    let src = common::TestHarness::in_process().await.expect("src");
     let tenant = src.create_realm();
     src.rbac().seed_realm(&tenant).expect("seed tenant");
     seed_operator(&src, "operator@hearth.test", "Operat0r-Pa55word!");
@@ -808,7 +808,7 @@ async fn full_archives_restore_both_and_tenant_only_archives_leave_the_system_re
 
     // Full archive, restored slug by slug as the CLI does.
     let full = export(&src, &[tenant.clone(), system_realm()]);
-    let dst = common::TestHarness::embedded().await.expect("dst");
+    let dst = common::TestHarness::in_process().await.expect("dst");
     let reader = BackupArchive::open(full.path()).expect("open");
     for r in reader.realms() {
         let report = importer(&dst)
@@ -825,7 +825,7 @@ async fn full_archives_restore_both_and_tenant_only_archives_leave_the_system_re
 
     // Tenant-only archive.
     let tenant_only = export(&src, std::slice::from_ref(&tenant));
-    let dst2 = common::TestHarness::embedded().await.expect("dst2");
+    let dst2 = common::TestHarness::in_process().await.expect("dst2");
     let seeded = system_key(&dst2);
     let reader = BackupArchive::open(tenant_only.path()).expect("open");
     let report = importer(&dst2)
@@ -907,22 +907,21 @@ fn decrypted_members(
 }
 
 /// The live API never creates organizations (nor their memberships and
-/// invitations), agents, external IdPs, federation links, SAML service
-/// providers or a SAML signing key in the system realm. A system-realm archive
+/// invitations), agents, external IdPs, federation links or a SAML signing
+/// key in the system realm. A system-realm archive
 /// carrying them — hand-built, since no export of a real store can — must not
 /// write them there either: each is refused and reported, and the rest of the
 /// restore carries on.
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // one record of each forbidden family
 async fn a_system_realm_restore_refuses_what_the_live_api_never_creates_there() {
-    use hearth::identity::federation::saml::{SamlNameIdFormat, SamlServiceProvider};
     use hearth::identity::federation::{FederationSecret, IdpConfig, IdpKind};
     use hearth::identity::{
         AgentOwner, CreateAgentRequest, CreateInvitationRequest, CreateOrganizationRequest,
         FederationLinkExport, OrganizationRole,
     };
 
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let tenant = h.create_realm();
     let id = h.identity();
     let user = id
@@ -993,22 +992,6 @@ async fn a_system_realm_restore_refuses_what_the_live_api_never_creates_there() 
         updated_at: hearth::core::Timestamp::from_micros(0),
     })
     .expect("idp");
-    id.register_saml_sp(
-        &tenant,
-        &SamlServiceProvider {
-            sp_key: "crm".to_string(),
-            entity_id: "https://crm.example".to_string(),
-            acs_url: "https://crm.example/acs".to_string(),
-            slo_url: None,
-            sp_certificate_pem: None,
-            sign_assertions: true,
-            sign_responses: true,
-            want_authn_requests_signed: false,
-            nameid_format: SamlNameIdFormat::EmailAddress,
-            attribute_map: std::collections::BTreeMap::new(),
-        },
-    )
-    .expect("saml sp");
     id.get_or_create_saml_signing_key(&tenant, "https://tenant.example")
         .expect("saml key");
     // A consent needs a client, and the system realm refuses clients.
@@ -1046,7 +1029,6 @@ async fn a_system_realm_restore_refuses_what_the_live_api_never_creates_there() 
         "invitations.ndjson",
         "agents.ndjson",
         "identity_providers.ndjson",
-        "saml_service_providers.ndjson",
         "saml_signing_key.json",
     ]
     .iter()
@@ -1094,7 +1076,6 @@ async fn a_system_realm_restore_refuses_what_the_live_api_never_creates_there() 
         ("agents", &report.agents),
         ("identity_providers", &report.identity_providers),
         ("federation_links", &report.federation_links),
-        ("saml_service_providers", &report.saml_service_providers),
         ("consents", &report.consents),
         ("scim_mappings", &report.scim_mappings),
     ] {
@@ -1117,7 +1098,6 @@ async fn a_system_realm_restore_refuses_what_the_live_api_never_creates_there() 
     let sys = system_realm();
     assert!(id.get_organization(&sys, org.id()).expect("get").is_none());
     assert!(id.get_idp(&sys, &idp_id).expect("get").is_none());
-    assert!(id.get_saml_sp_by_key(&sys, "crm").expect("get").is_none());
     assert!(
         id.get_consent(&sys, user.id(), client.client_id())
             .expect("get consent")

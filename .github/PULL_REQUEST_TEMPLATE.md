@@ -4,7 +4,7 @@
 
 ## SDK Conformance Checklist
 
-If this PR touches any SDK (`sdks/typescript`, `sdks/go`, `sdks/python`, `sdks/rust`),
+If this PR touches any SDK (`sdks/typescript`, `sdks/go`, `sdks/python`, `sdks/php`),
 verify each item against the [Hearth SDK Common Specification](../docs/specs/SDK.md).
 Leave items unchecked only if they genuinely do not apply — CI will also enforce most of these automatically.
 

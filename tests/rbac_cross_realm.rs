@@ -8,7 +8,7 @@ use hearth::rbac::{AssignRoleRequest, CreateRoleRequest, Permission, Scope, Subj
 
 #[tokio::test]
 async fn assignment_in_realm_a_not_visible_in_realm_b() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm_a = RealmId::generate();
     let realm_b = RealmId::generate();
 
@@ -59,7 +59,7 @@ async fn assignment_in_realm_a_not_visible_in_realm_b() {
 
 #[tokio::test]
 async fn role_lookup_by_id_does_not_cross_realms() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm_a = RealmId::generate();
     let realm_b = RealmId::generate();
 

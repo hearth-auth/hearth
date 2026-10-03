@@ -78,7 +78,7 @@ fn suspend_realm(harness: &common::TestHarness, realm: &RealmId) {
 /// A suspended realm must not mint fresh client-credentials tokens.
 #[tokio::test]
 async fn suspended_realm_refuses_client_credentials_grant() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm(&harness);
     let client_id = register_m2m_client(&harness, &realm);
 
@@ -104,7 +104,7 @@ async fn suspended_realm_refuses_client_credentials_grant() {
 /// suspended realm answers `RealmSuspended` — not an assertion error.
 #[tokio::test]
 async fn suspended_realm_refuses_jwt_bearer_grant() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm(&harness);
     let client_id = register_m2m_client(&harness, &realm);
 
@@ -132,7 +132,7 @@ async fn suspended_realm_refuses_jwt_bearer_grant() {
 /// authorize through `decide` while the realm is suspended.
 #[tokio::test]
 async fn suspended_realm_token_is_inactive_on_introspect_and_decide() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm(&harness);
     let client_id = register_m2m_client(&harness, &realm);
 

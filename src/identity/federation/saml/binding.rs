@@ -2,51 +2,12 @@
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
-use flate2::write::{DeflateDecoder, DeflateEncoder};
+use flate2::write::DeflateEncoder;
 use flate2::Compression;
 use std::io::Write as _;
 
-use super::xml::{escape_attr, parse_err};
+use super::xml::parse_err;
 use crate::identity::error::IdentityError;
-
-/// Maximum number of bytes we will inflate from a single HTTP-Redirect
-/// binding payload.
-///
-/// A legitimate SAML `AuthnRequest` / `LogoutRequest` is a few kilobytes;
-/// this 1 MiB ceiling is orders of magnitude above any real message. The
-/// cap defends against a DEFLATE decompression bomb (S2 / HEA-1751): a tiny
-/// highly-compressible payload that would otherwise expand to gigabytes and
-/// exhaust server memory before the XML parser ever runs.
-const MAX_INFLATED_SAML_BYTES: usize = 1 << 20;
-
-/// A [`std::io::Write`] sink that accepts at most `limit` bytes in total,
-/// returning an error the moment the cap would be exceeded.
-///
-/// Wrapping the DEFLATE decoder's output in this sink bounds inflation
-/// incrementally: the decoder errors out as soon as cumulative decompressed
-/// output crosses the ceiling, so a compression bomb is stopped long before
-/// it can materialize in full.
-struct CappedSink {
-    buf: Vec<u8>,
-    limit: usize,
-}
-
-impl std::io::Write for CappedSink {
-    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        if self.buf.len() + data.len() > self.limit {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "inflated SAML payload exceeds byte cap",
-            ));
-        }
-        self.buf.extend_from_slice(data);
-        Ok(data.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
 
 /// Builds a fully-qualified redirect URL per SAML HTTP-Redirect binding.
 ///
@@ -82,118 +43,6 @@ pub fn build_redirect_url(
     Ok(out)
 }
 
-/// Decodes an inbound HTTP-Redirect request's `SAMLRequest` (or
-/// `SAMLResponse`) parameter: URL-decode + base64 + DEFLATE.
-pub fn decode_redirect_request(param_value: &str) -> Result<Vec<u8>, IdentityError> {
-    let url_decoded = url_decode(param_value);
-    let b64_decoded = B64
-        .decode(url_decoded.as_slice())
-        .map_err(|e| parse_err(format!("base64 decode: {e}")))?;
-    let mut dec = DeflateDecoder::new(CappedSink {
-        buf: Vec::new(),
-        limit: MAX_INFLATED_SAML_BYTES,
-    });
-    dec.write_all(&b64_decoded)
-        .map_err(|e| parse_err(format!("inflate: {e}")))?;
-    let inflated = dec
-        .finish()
-        .map_err(|e| parse_err(format!("inflate finish: {e}")))?;
-    Ok(inflated.buf)
-}
-
-/// Builds the HTML form-POST body per SAML HTTP-POST binding.
-///
-/// The browser loads this HTML and auto-submits the form to `action`,
-/// carrying the SAML payload as `SAMLResponse` (or `SAMLRequest`) plus
-/// a RelayState.
-///
-/// `nonce` selects how the auto-submit is wired (task 21.8, audit §4.23#7):
-///
-/// * `Some(n)` — a `<script nonce="n">` element performs the submit. A CSP
-///   nonce covers a `<script>` element but **never** an inline event-handler
-///   attribute, so the historical `<body onload="...">` is silently dead under
-///   any policy stricter than `script-src 'unsafe-inline'`. Callers that emit
-///   this page under a CSP must pass a nonce and put the same value in
-///   `script-src 'nonce-n'`.
-/// * `None` — the legacy `onload` attribute, for callers with no CSP.
-///
-/// The `<noscript>` manual-submit button is kept either way, but note it is
-/// only usable if the emitting response also allows `action` in `form-action`.
-pub fn build_post_form_html(
-    action: &str,
-    param_name: &str,
-    saml_xml: &[u8],
-    relay_state: Option<&str>,
-    nonce: Option<&str>,
-) -> String {
-    let b64 = B64.encode(saml_xml);
-    let relay = relay_state
-        .map(|r| {
-            format!(
-                r#"<input type="hidden" name="RelayState" value="{}"/>"#,
-                escape_attr(r)
-            )
-        })
-        .unwrap_or_default();
-    let (body_attr, submit_script) = match nonce {
-        Some(n) => (
-            String::new(),
-            format!(
-                r#"<script nonce="{}">document.forms[0].submit();</script>"#,
-                escape_attr(n)
-            ),
-        ),
-        None => (
-            r#" onload="document.forms[0].submit()""#.to_string(),
-            String::new(),
-        ),
-    };
-    format!(
-        r#"<!DOCTYPE html><html><head><title>SAML</title></head><body{body_attr}><noscript><p>JavaScript is required to complete the SAML flow. Submit the form below manually.</p></noscript><form method="POST" action="{action}"><input type="hidden" name="{param}" value="{payload}"/>{relay}<input type="submit" value="Continue"/></form>{submit_script}</body></html>"#,
-        body_attr = body_attr,
-        action = escape_attr(action),
-        param = param_name,
-        payload = escape_attr(&b64),
-        relay = relay,
-        submit_script = submit_script,
-    )
-}
-
-/// Generates a fresh 128-bit CSP nonce, base64url-encoded.
-///
-/// Used by the SAML HTTP-POST binding pages so the auto-submit script can run
-/// under `script-src 'nonce-…'` without opening `'unsafe-inline'`.
-#[must_use]
-pub fn csp_nonce() -> String {
-    use ring::rand::{SecureRandom, SystemRandom};
-    let mut bytes = [0u8; 16];
-    // INVARIANT: `fill` fails only on catastrophic OS RNG failure, at which
-    // point the process cannot serve anything safely anyway.
-    #[allow(clippy::unwrap_used)]
-    SystemRandom::new().fill(&mut bytes).unwrap();
-    data_encoding::BASE64URL_NOPAD.encode(&bytes)
-}
-
-/// Returns the `scheme://host[:port]` origin of `url`, for a CSP `form-action`
-/// source expression. Returns `None` when `url` is not an absolute http(s) URL.
-#[must_use]
-pub fn url_origin(url: &str) -> Option<String> {
-    let (scheme, rest) = url.split_once("://")?;
-    if !scheme.eq_ignore_ascii_case("https") && !scheme.eq_ignore_ascii_case("http") {
-        return None;
-    }
-    let authority = rest.split(['/', '?', '#']).next()?;
-    if authority.is_empty() {
-        return None;
-    }
-    // Strip userinfo — never valid in a CSP source expression.
-    let host = authority.rsplit('@').next()?;
-    if host.is_empty() || host.contains(|c: char| c.is_whitespace() || c == ';' || c == ',') {
-        return None;
-    }
-    Some(format!("{}://{host}", scheme.to_ascii_lowercase()))
-}
-
 /// Decodes an inbound HTTP-POST form body SAML payload (base64 only,
 /// no DEFLATE).
 pub fn parse_post_form_saml(b64_value: &str) -> Result<Vec<u8>, IdentityError> {
@@ -216,44 +65,41 @@ fn url_encode(s: &str) -> String {
     out
 }
 
-fn url_decode(s: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b'%' if i + 2 < bytes.len() => {
-                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("00");
-                let val = u8::from_str_radix(hex, 16).unwrap_or(0);
-                out.push(val);
-                i += 3;
-            }
-            b => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flate2::write::DeflateDecoder;
+
+    /// Reverses `build_redirect_url` for one parameter: percent-decode,
+    /// base64-decode, inflate. Test-only — Hearth no longer receives
+    /// HTTP-Redirect messages (the IdP side was removed in 3.0.0).
+    fn decode_param(param: &str) -> Vec<u8> {
+        let bytes = param.as_bytes();
+        let mut unescaped = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).expect("hex");
+                unescaped.push(u8::from_str_radix(hex, 16).expect("hex digit"));
+                i += 3;
+            } else {
+                unescaped.push(bytes[i]);
+                i += 1;
+            }
+        }
+        let deflated = B64.decode(&unescaped).expect("base64");
+        let mut dec = DeflateDecoder::new(Vec::new());
+        dec.write_all(&deflated).expect("inflate");
+        dec.finish().expect("finish")
+    }
 
     #[test]
     fn redirect_roundtrip() {
         let xml = b"<AuthnRequest>hello</AuthnRequest>";
         let url = build_redirect_url("https://idp.example/sso", "SAMLRequest", xml, Some("rs1"))
             .expect("build");
-        assert!(url.contains("SAMLRequest="));
+        assert!(url.starts_with("https://idp.example/sso?SAMLRequest="));
         assert!(url.contains("RelayState=rs1"));
-
-        // Extract param.
         let param = url
             .split("SAMLRequest=")
             .nth(1)
@@ -261,60 +107,28 @@ mod tests {
             .split('&')
             .next()
             .expect("first segment");
-        let decoded = decode_redirect_request(param).expect("decode");
-        assert_eq!(decoded, xml);
+        assert_eq!(decode_param(param), xml);
     }
 
     #[test]
-    fn inflate_rejects_decompression_bomb() {
-        // 5 MiB of zeros compresses to a few hundred bytes of DEFLATE but
-        // would inflate well past the 1 MiB cap — the classic bomb shape.
-        let big = vec![0u8; 5 * 1024 * 1024];
-        let mut enc = DeflateEncoder::new(Vec::new(), Compression::best());
-        enc.write_all(&big).expect("deflate");
-        let deflated = enc.finish().expect("finish");
-        assert!(
-            deflated.len() < 64 * 1024,
-            "sanity: bomb payload should be tiny, got {} bytes",
-            deflated.len()
-        );
-        let b64 = B64.encode(&deflated);
-        let result = decode_redirect_request(&b64);
-        assert!(
-            result.is_err(),
-            "oversized inflate must be rejected before full expansion"
-        );
-    }
-
-    #[test]
-    fn inflate_accepts_normal_payload() {
-        // A legitimate small payload still round-trips under the cap.
-        let xml = b"<AuthnRequest>hello world</AuthnRequest>";
-        let url =
-            build_redirect_url("https://idp.example/sso", "SAMLRequest", xml, None).expect("build");
-        let param = url
-            .split("SAMLRequest=")
-            .nth(1)
-            .expect("param")
-            .split('&')
-            .next()
-            .expect("segment");
-        let decoded = decode_redirect_request(param).expect("decode within cap");
-        assert_eq!(decoded, xml);
-    }
-
-    #[test]
-    fn post_form_contains_payload() {
-        let xml = b"<Response>x</Response>";
-        let html = build_post_form_html(
-            "https://sp.example/acs",
-            "SAMLResponse",
-            xml,
-            Some("rs"),
+    fn redirect_url_appends_to_an_existing_query() {
+        let url = build_redirect_url(
+            "https://idp.example/sso?tenant=a",
+            "SAMLRequest",
+            b"<x/>",
             None,
+        )
+        .expect("build");
+        assert!(
+            url.starts_with("https://idp.example/sso?tenant=a&SAMLRequest="),
+            "got {url}"
         );
-        assert!(html.contains("action=\"https://sp.example/acs\""));
-        assert!(html.contains("name=\"SAMLResponse\""));
-        assert!(html.contains("RelayState"));
+    }
+
+    #[test]
+    fn post_form_value_round_trips_base64() {
+        let decoded = parse_post_form_saml(&B64.encode(b"<Response>x</Response>")).expect("decode");
+        assert_eq!(decoded, b"<Response>x</Response>");
+        parse_post_form_saml("not base64 !!!").expect_err("garbage must be refused");
     }
 }

@@ -485,8 +485,8 @@ pub struct CreateRoleRequest {
     #[serde(default = "default_role_scope_kind")]
     pub scope_kind: RoleScopeKind,
     /// When `true`, permissions in the `hearth.*` reserved namespace are
-    /// allowed. Only set by the gRPC handler when the caller holds
-    /// `hearth.admin`. Defaults to `false` (operator-safe behaviour).
+    /// allowed. Only the removed gRPC handler set it (for a `hearth.admin`
+    /// caller); every current caller passes `false` (operator-safe behaviour).
     #[serde(default)]
     pub allow_reserved_permissions: bool,
 }
@@ -508,8 +508,8 @@ pub struct UpdateRoleRequest {
     /// New lifecycle status. Used to archive or restore a role.
     pub status: Option<RoleStatus>,
     /// When `true`, permissions in the `hearth.*` reserved namespace are
-    /// allowed. Only set by the gRPC handler when the caller holds
-    /// `hearth.admin`. Defaults to `false` (operator-safe behaviour).
+    /// allowed. Only the removed gRPC handler set it (for a `hearth.admin`
+    /// caller); every current caller passes `false` (operator-safe behaviour).
     #[serde(default)]
     pub allow_reserved_permissions: bool,
 }

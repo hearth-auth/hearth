@@ -49,11 +49,12 @@ realms:
         description: "Acme account"
         config:
           max_members: 50
+          mfa_required: true
       beta-customer:
         name: "Beta Customer"
 ```
 
-The YAML key (`acme-corp`) becomes the URL-safe slug. `max_members` is optional; omit it for unlimited membership. Members and invitations are runtime-only and cannot be seeded from YAML.
+The YAML key (`acme-corp`) becomes the URL-safe slug. `max_members` is optional; omit it for unlimited membership. `mfa_required` is optional and defaults to `false`. Members and invitations are runtime-only and cannot be seeded from YAML.
 
 ## Managing organizations via the Admin UI
 
@@ -110,19 +111,20 @@ curl -X POST http://127.0.0.1:8420/admin/users/<user-id>/roles \
 </TabItem>
 <TabItem value="ts" label="TypeScript">
 
+The TypeScript SDK's `AdminClient` has no role-assignment method. Send the request with `fetch`:
+
 ```typescript
-import { AdminClient } from '@hearth-auth/node';
-
-const admin = new AdminClient({
-  base_url:     'https://hearth.example.com',
-  realm_id:     '<realm-id>',
-  access_token: adminToken,
-});
-
-await admin.assignRole({
-  user_id: '<user-id>',
-  role_id: '<role-id>',
-  scope:   { type: 'org', org_id: 'org_<uuid>' },
+await fetch('https://hearth.example.com/admin/users/<user-id>/roles', {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${adminToken}`,
+    'X-Realm-ID': '<realm-id>',
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({
+    role_id: '<role-id>',
+    scope: { type: 'org', org_id: 'org_<uuid>' },
+  }),
 });
 ```
 
@@ -180,40 +182,6 @@ $admin->assignRole(
 ```
 
 </TabItem>
-<TabItem value="rust" label="Rust">
-
-```rust
-use hearth_sdk::HearthClient;
-
-let admin = client.admin(admin_token);
-
-admin.assign_role(hearth_sdk::AssignRoleRequest {
-    user_id: "<user-id>".to_string(),
-    role_id: "<role-id>".to_string(),
-    scope:   Some(hearth_sdk::OrgScope { org_id: "org_<uuid>".to_string() }),
-}).await?;
-```
-
-</TabItem>
-<TabItem value="kotlin" label="Kotlin">
-
-```kotlin
-import io.hearth.sdk.AdminClient
-
-val admin = AdminClient(
-    baseUrl     = "https://hearth.example.com",
-    realmId     = "<realm-id>",
-    accessToken = adminToken,
-)
-
-admin.assignRole(
-    userId = "<user-id>",
-    roleId = "<role-id>",
-    scope  = OrgScope(orgId = "org_<uuid>"),
-)
-```
-
-</TabItem>
 </Tabs>
 
 The `org_id` value is the full `org_`-prefixed organization ID (e.g., `org_550e8400-e29b-41d4-a716-446655440000`).
@@ -241,13 +209,15 @@ curl "http://127.0.0.1:8420/admin/users/<user-id>/effective-permissions?org_id=<
 </TabItem>
 <TabItem value="ts" label="TypeScript">
 
+`client.mePermissions(accessToken)` takes no org parameter. To include org-scoped
+assignments, call the endpoint with `org_id`:
+
 ```typescript
-import { HearthClient } from '@hearth-auth/node';
-
-const client = new HearthClient({ issuer_url: process.env.HEARTH_ISSUER_URL! });
-
-// Fetch permissions including org-scoped assignments
-const perms = await client.mePermissions(accessToken, { org_id: '<org-uuid>' });
+const res = await fetch(
+  'https://hearth.example.com/v1/me/permissions?org_id=<org-uuid>',
+  { headers: { Authorization: `Bearer ${accessToken}`, 'X-Realm-ID': '<realm-id>' } },
+);
+const perms = await res.json();
 // perms.roles, perms.groups, perms.permissions — includes org-scoped entries
 ```
 
@@ -281,22 +251,6 @@ $perms = $hearth->mePermissions($accessToken, orgId: 'org_<uuid>');
 ```
 
 </TabItem>
-<TabItem value="rust" label="Rust">
-
-```rust
-let perms = client.me_permissions(&access_token, Some("org_<uuid>")).await?;
-// perms.roles, perms.groups, perms.permissions — includes org-scoped entries
-```
-
-</TabItem>
-<TabItem value="kotlin" label="Kotlin">
-
-```kotlin
-val perms = client.mePermissions(accessToken, orgId = "org_<uuid>")
-// perms.roles, perms.groups, perms.permissions — includes org-scoped entries
-```
-
-</TabItem>
 </Tabs>
 
 See [AUTHORIZATION.md §2.4](../specs/AUTHORIZATION.md) for the full org-scoped permission resolution algorithm and the `oid` JWT claim specification.
@@ -325,6 +279,7 @@ Slugs must also be unique within the realm. Once set, a slug cannot be changed v
 | Field | Default | Description |
 |-------|---------|-------------|
 | `max_members` | unlimited | Maximum number of active members. Invitation acceptance fails when the limit would be exceeded. |
+| `mfa_required` | `false` | When `true`, every member must use MFA, even where the realm does not require it. It can only tighten the realm policy. Set it in YAML under `config`, with `mfa_required` on the admin REST API, or with the **Members need MFA** checkbox in the Admin console. Organizations created through SCIM start with `false`. |
 
 ## Cascading deletes
 
@@ -359,10 +314,10 @@ Pass `attributes` on create or update:
 
 ```bash
 # Create with attributes
-POST /admin/orgs
+POST /admin/organizations
 {
   "slug": "acme-corp",
-  "name": "Acme Corporation",
+  "display_name": "Acme Corporation",
   "attributes": {
     "crm_id": "SF-00123",
     "contract_tier": "enterprise"
@@ -370,7 +325,7 @@ POST /admin/orgs
 }
 
 # Update attributes (full replacement)
-PATCH /admin/orgs/{id}
+PATCH /admin/organizations/{id}
 {
   "attributes": { "crm_id": "SF-00456" }
 }
@@ -386,7 +341,7 @@ Attributes are included in every organization response:
 {
   "id": "<uuid>",
   "slug": "acme-corp",
-  "name": "Acme Corporation",
+  "display_name": "Acme Corporation",
   "attributes": { "crm_id": "SF-00123", "contract_tier": "enterprise" }
 }
 ```

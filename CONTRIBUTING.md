@@ -1,5 +1,23 @@
 # Contributing to Hearth
 
+## Feature freeze (from v3.0.0)
+
+Hearth 3.0.0 is a trusted core: the scope trim removed every feature that was not needed.
+From v3.0.0, the server takes **no new features** until the confidence work is done.
+
+Allowed during the freeze:
+- defect fixes, each with a red test first
+- removals
+- tests, documentation and tooling
+- the SDK work in OpenSpec `sdk-standard-libraries`
+
+Not allowed: a new endpoint, config key, grant, login method or protocol. A review refuses
+such a change and cites this section.
+
+The freeze ends when OpenSpec `trusted-core-confidence` is archived. That change holds the
+gates: external OIDC conformance, entry-point invariant tests, mutation testing and an
+external pentest.
+
 ## Local development without Docker
 
 Hearth runs fully in-process — no external services required.

@@ -2,8 +2,7 @@
 //! Task 18.18 (audit 2026-08-28 §4.19#8) — the DPoP sender-constraint
 //! (RFC 9449 §7.2) MUST be enforced on the administrative surface.
 //!
-//! `extract_admin_auth`, SCIM's `authenticate` and the gRPC `authenticate_admin`
-//! all validated the bearer token's signature, realm and permissions and never
+//! `extract_admin_auth` and SCIM's `authenticate` both validated the bearer token's signature, realm and permissions and never
 //! looked at `cnf`. A DPoP-bound admin token — one whose holder proved
 //! possession of a private key at issuance — was therefore replayable as a
 //! plain `Bearer` for every admin read and write, which is precisely the attack
@@ -16,8 +15,6 @@
 //!     bound token **with** a valid proof → passes the layer (the fix is not a
 //!     blanket reject); an unbound admin token is untouched.
 //!   * `/scim/v2/*` — same rejection.
-//!   * gRPC admin — a bound token is refused with `UNAUTHENTICATED`, because
-//!     that transport has no proof channel to validate against.
 
 mod common;
 
@@ -31,8 +28,6 @@ use hearth::identity::{
     AuthorizationRequest, CodeChallengeMethod, CreateUserRequest, RegisterClientRequest,
     SessionContext, TokenExchangeRequest,
 };
-use hearth::protocol::admin_auth::AdminRateLimiter;
-use hearth::protocol::grpc::server::GrpcState;
 use hearth::protocol::http::{router, AppState};
 use ring::{
     rand::SystemRandom,
@@ -138,7 +133,7 @@ struct Fixture {
 }
 
 async fn setup() -> Fixture {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = harness.create_realm();
     harness.rbac().seed_realm(&realm).expect("seed realm");
 
@@ -233,7 +228,6 @@ fn mint_bound_token(
                 amr_values: vec![],
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize");
@@ -392,47 +386,6 @@ async fn scim_rejects_bound_token_replayed_as_plain_bearer() {
         .await
         .unwrap();
     assert_dpop_rejected(resp, "GET /scim/v2/Users").await;
-}
-
-// ── gRPC admin ───────────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn grpc_admin_refuses_a_sender_constrained_token() {
-    use hearth::protocol::grpc::auth::authenticate_admin;
-
-    let f = setup().await;
-    let state = GrpcState::new(
-        f.harness.identity_arc(),
-        f.harness.rbac_arc(),
-        f.harness.audit_arc(),
-        Arc::new(AdminRateLimiter::new()),
-    );
-
-    let mut md = tonic::metadata::MetadataMap::new();
-    md.insert(
-        "authorization",
-        format!("Bearer {}", f.bound_token).parse().unwrap(),
-    );
-    md.insert("x-realm-id", f.realm.as_uuid().to_string().parse().unwrap());
-
-    let err = authenticate_admin(&md, &state)
-        .expect_err("a cnf-bound token must not authenticate on the gRPC admin API");
-    assert_eq!(
-        err.code(),
-        tonic::Code::Unauthenticated,
-        "gRPC has no DPoP proof channel, so a sender-constrained token must be \
-         refused rather than accepted unbound; got {err:?}"
-    );
-
-    // Control: the same call with an unbound admin token authenticates, so the
-    // refusal is the cnf check and not a broken fixture.
-    let mut ok_md = tonic::metadata::MetadataMap::new();
-    ok_md.insert(
-        "authorization",
-        format!("Bearer {}", f.unbound_admin_token).parse().unwrap(),
-    );
-    ok_md.insert("x-realm-id", f.realm.as_uuid().to_string().parse().unwrap());
-    authenticate_admin(&ok_md, &state).expect("an unbound admin token must still authenticate");
 }
 
 // ── Task 25.17 — the admin surface outside the `/admin` and `/scim/v2` nests ──

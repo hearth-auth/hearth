@@ -46,7 +46,7 @@ fn make_role(
 
 #[tokio::test]
 async fn add_additional_role_stores_role() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
     let org = OrganizationId::generate();
     let user = UserId::generate();
@@ -66,7 +66,7 @@ async fn add_additional_role_stores_role() {
 
 #[tokio::test]
 async fn remove_additional_role_removes_it() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
     let org = OrganizationId::generate();
     let user = UserId::generate();
@@ -90,7 +90,7 @@ async fn remove_additional_role_removes_it() {
 
 #[tokio::test]
 async fn list_additional_roles_empty_for_new_user() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
     let org = OrganizationId::generate();
     let user = UserId::generate();
@@ -104,7 +104,7 @@ async fn list_additional_roles_empty_for_new_user() {
 
 #[tokio::test]
 async fn add_additional_role_nonexistent_role_fails() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
     let org = OrganizationId::generate();
     let user = UserId::generate();
@@ -121,7 +121,7 @@ async fn add_additional_role_nonexistent_role_fails() {
 
 #[tokio::test]
 async fn additional_roles_included_in_resolve_permissions() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
     let org = OrganizationId::generate();
     let user = UserId::generate();
@@ -153,7 +153,7 @@ async fn additional_roles_included_in_resolve_permissions() {
 
 #[tokio::test]
 async fn additional_roles_scoped_to_org() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
     let org_a = OrganizationId::generate();
     let org_b = OrganizationId::generate();
@@ -186,7 +186,7 @@ async fn additional_roles_scoped_to_org() {
 
 #[tokio::test]
 async fn additional_roles_do_not_appear_without_org_context() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
     let org = OrganizationId::generate();
     let user = UserId::generate();
@@ -213,7 +213,7 @@ async fn additional_roles_do_not_appear_without_org_context() {
 
 #[tokio::test]
 async fn add_multiple_additional_roles_all_listed() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
     let org = OrganizationId::generate();
     let user = UserId::generate();
@@ -238,7 +238,7 @@ async fn add_multiple_additional_roles_all_listed() {
 
 #[tokio::test]
 async fn realm_level_and_additional_org_role_permissions_unioned() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
     let org = OrganizationId::generate();
     let user = UserId::generate();

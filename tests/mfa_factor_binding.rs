@@ -317,7 +317,7 @@ async fn post_login(app: &axum::Router, realm_name: &str, email: &str) -> axum::
 /// second factor.
 #[tokio::test]
 async fn an_unproved_session_is_refused_for_a_totp_holder_on_an_optional_mfa_realm() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, _) = create_realm(&h, RealmConfig::default());
     let user = create_user(&h, &realm);
     enrol_totp(&h, &realm, &user);
@@ -349,7 +349,7 @@ async fn an_unproved_session_is_refused_for_a_totp_holder_on_an_optional_mfa_rea
 /// B5: a passkey is a second factor. A path that proved nothing is refused.
 #[tokio::test]
 async fn an_unproved_session_is_refused_for_a_passkey_holder() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, _) = create_realm(&h, RealmConfig::default());
     let user = create_user(&h, &realm);
     enrol_passkey(&h, &realm, &user, true);
@@ -381,7 +381,7 @@ async fn an_unproved_session_is_refused_for_a_passkey_holder() {
 /// also holds TOTP — that factor is still owed.
 #[tokio::test]
 async fn passkey_possession_satisfies_only_a_passkey_only_user() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, _) = create_realm(&h, RealmConfig::default());
     let ctx = SessionContext {
         mfa_proof: MfaProof::PasskeyPossession,
@@ -408,7 +408,7 @@ async fn passkey_possession_satisfies_only_a_passkey_only_user() {
 /// survives a reload from storage.
 #[tokio::test]
 async fn a_session_records_the_proof_its_authentication_made() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, _) = create_realm(&h, RealmConfig::default());
     let user = create_user(&h, &realm);
     let session = h
@@ -447,7 +447,7 @@ async fn a_session_records_the_proof_its_authentication_made() {
 /// the TOTP challenge with a pending cookie — never set a session cookie.
 #[tokio::test]
 async fn magic_link_redemption_challenges_an_enrolled_totp() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, realm_name) = create_realm(&h, RealmConfig::default());
     let user = create_user(&h, &realm);
     enrol_totp(&h, &realm, &user);
@@ -474,7 +474,7 @@ async fn magic_link_redemption_challenges_an_enrolled_totp() {
 /// The same for a passkey-only user: the passkey is challenged.
 #[tokio::test]
 async fn magic_link_redemption_challenges_an_enrolled_passkey() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, realm_name) = create_realm(&h, RealmConfig::default());
     let user = create_user(&h, &realm);
     enrol_passkey(&h, &realm, &user, true);
@@ -498,7 +498,7 @@ async fn magic_link_redemption_challenges_an_enrolled_passkey() {
 /// code.
 #[tokio::test]
 async fn magic_link_and_email_otp_are_one_factor_not_two() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, realm_name) = create_realm(
         &h,
         RealmConfig {
@@ -546,7 +546,7 @@ async fn magic_link_and_email_otp_are_one_factor_not_two() {
 /// A user with no second factor still signs in with the link alone.
 #[tokio::test]
 async fn magic_link_redemption_still_signs_in_a_user_without_a_factor() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, realm_name) = create_realm(&h, RealmConfig::default());
     let user = create_user(&h, &realm);
     let minted = h
@@ -596,7 +596,7 @@ async fn magic_link_grant(
 /// a user who holds a second factor instead of minting tokens.
 #[tokio::test]
 async fn magic_link_grant_refuses_a_user_who_holds_a_second_factor() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, _) = create_realm(&h, RealmConfig::default());
     let user = create_user(&h, &realm);
     enrol_totp(&h, &realm, &user);
@@ -620,7 +620,7 @@ async fn magic_link_grant_refuses_a_user_who_holds_a_second_factor() {
 /// holds a passkey must lead to a passkey challenge, not a session.
 #[tokio::test]
 async fn password_login_challenges_an_enrolled_passkey() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, realm_name) = create_realm(&h, RealmConfig::default());
     let user = create_user(&h, &realm);
     enrol_passkey(&h, &realm, &user, true);
@@ -640,7 +640,7 @@ async fn password_login_challenges_an_enrolled_passkey() {
 /// the enrolment page must refuse them outright.
 #[tokio::test]
 async fn an_mfa_required_realm_never_offers_forced_enrolment_to_a_passkey_holder() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, realm_name) = create_realm(
         &h,
         RealmConfig {
@@ -736,7 +736,7 @@ async fn complete_passkey_challenge(
 /// WebAuthn proof.
 #[tokio::test]
 async fn the_passkey_challenge_completes_a_password_login() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, realm_name) = create_realm(&h, RealmConfig::default());
     let user = create_user(&h, &realm);
     let authenticator = enrol_passkey(&h, &realm, &user, true);
@@ -774,7 +774,7 @@ async fn the_passkey_challenge_completes_a_password_login() {
 /// pending login.
 #[tokio::test]
 async fn the_passkey_challenge_refuses_another_users_passkey() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, realm_name) = create_realm(&h, RealmConfig::default());
     let victim = create_user(&h, &realm);
     enrol_passkey(&h, &realm, &victim, true);
@@ -842,7 +842,7 @@ async fn authorize(
 /// prove it.
 #[tokio::test]
 async fn an_mfa_required_client_refuses_a_session_that_proved_no_factor() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, realm_name) = create_realm(&h, RealmConfig::default());
     let user = create_user(&h, &realm);
     let client = mfa_client(&h, &realm);
@@ -865,7 +865,7 @@ async fn an_mfa_required_client_refuses_a_session_that_proved_no_factor() {
 /// The control: a session that proved the passkey is issued the code.
 #[tokio::test]
 async fn an_mfa_required_client_accepts_a_session_that_proved_a_factor() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, realm_name) = create_realm(&h, RealmConfig::default());
     let user = create_user(&h, &realm);
     let authenticator = enrol_passkey(&h, &realm, &user, true);

@@ -131,7 +131,7 @@ A scope bundle maps a scope string to a subset of permissions. Even if a user ha
 Every use of a refresh token issues a *new* refresh token and invalidates the old one. If a refresh token is presented a second time (i.e., a token was stolen and used in parallel), Hearth detects the reuse and revokes the **entire grant family** — all access and refresh tokens derived from that original login. This prevents silent session hijacking.
 
 Rotation is not optional and has no fallback path. Every grant that mints a refresh
-token — authorization code, ROPC, step-up MFA, device code and password reset alike —
+token — authorization code, step-up MFA, device code and password reset alike —
 records a grant family and embeds its id in the token as `fid`. A refresh token that
 carries no `fid` is **refused**, not served: the branch that used to honour one had
 neither rotation, nor reuse detection, nor the client-authentication, DPoP and consent
@@ -164,7 +164,7 @@ Each realm has its own Ed25519 signing key, stored under the system realm namesp
 
 **Required actions** are per-user gates on authentication and token issuance. When a user has pending required actions, the OIDC authorization code flow intercepts the login and presents a series of interstitial pages — one per action, in a fixed priority order — before the authorization code is issued. All actions must be completed before the user can obtain tokens.
 
-Four action types are supported: `VERIFY_EMAIL`, `UPDATE_PASSWORD`, `ENROLL_MFA`, and `ENROLL_PHONE_OTP`. Admins assign and remove actions via `PATCH /admin/realms/{realm_id}/users/{user_id}/required-actions`. Two action types (`ENROLL_MFA` and `ENROLL_PHONE_OTP`) can also be injected automatically by the engine based on realm policy — for example, when a realm requires SMS MFA but the user has no verified phone.
+Four action types are supported: `VERIFY_EMAIL`, `UPDATE_PASSWORD`, `ENROLL_MFA`, and `ENROLL_EMAIL_OTP`. Admins assign and remove actions via `PATCH /admin/realms/{realm_id}/users/{user_id}/required-actions`. Two action types (`ENROLL_MFA` and `ENROLL_EMAIL_OTP`) can also be injected automatically by the engine based on realm policy — for example, when a client requires MFA but the user has no second factor.
 
 → See [Required actions guide](required-actions.md) for the full admin API, enforcement scope, execution priority, and Keycloak mapping.
 

@@ -32,7 +32,7 @@ fn system_realm_id() -> RealmId {
 
 #[tokio::test]
 async fn system_realm_exists_after_startup() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     // Direct lookup: the record is there.
@@ -56,7 +56,7 @@ async fn system_realm_exists_after_startup() {
 
 #[tokio::test]
 async fn get_realm_by_name_rejects_reserved_name() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let result = identity.get_realm_by_name("system").expect("lookup");
     assert!(
@@ -69,7 +69,7 @@ async fn get_realm_by_name_rejects_reserved_name() {
 
 #[tokio::test]
 async fn create_realm_rejects_reserved_name() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let result = identity.create_realm(&CreateRealmRequest {
         name: "system".to_string(),
@@ -83,7 +83,7 @@ async fn create_realm_rejects_reserved_name() {
 
 #[tokio::test]
 async fn delete_realm_rejects_system_realm() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let result = identity.delete_realm(&system_realm_id());
     assert!(
@@ -96,7 +96,7 @@ async fn delete_realm_rejects_system_realm() {
 
 #[tokio::test]
 async fn register_user_rejects_system_realm() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let result = identity.register_user(
         &system_realm_id(),
@@ -120,7 +120,7 @@ async fn register_user_rejects_system_realm() {
 
 #[tokio::test]
 async fn register_client_rejects_system_realm() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let result = identity.register_client(
         &system_realm_id(),
@@ -143,7 +143,7 @@ async fn register_client_rejects_system_realm() {
 #[tokio::test]
 async fn create_user_rejects_system_realm() {
     use hearth::identity::CreateUserRequest;
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let result = identity.create_user(
         &system_realm_id(),
@@ -164,7 +164,7 @@ async fn create_user_rejects_system_realm() {
 #[tokio::test]
 async fn create_admin_user_succeeds_on_system_realm() {
     use hearth::identity::CreateUserRequest;
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let user = identity
         .create_admin_user(&CreateUserRequest {
@@ -187,7 +187,7 @@ async fn create_admin_user_succeeds_on_system_realm() {
 async fn update_organization_rejects_system_realm() {
     use hearth::core::OrganizationId;
     use hearth::identity::UpdateOrganizationRequest;
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let result = identity.update_organization(
         &system_realm_id(),
@@ -208,7 +208,7 @@ async fn update_organization_rejects_system_realm() {
 
 #[tokio::test]
 async fn create_organization_rejects_system_realm() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let result = identity.create_organization(
         &system_realm_id(),
@@ -216,7 +216,7 @@ async fn create_organization_rejects_system_realm() {
             name: "Sneaky Org".to_string(),
             slug: "sneaky".to_string(),
             description: None,
-            config: Some(OrganizationConfig { max_members: None }),
+            config: Some(OrganizationConfig::default()),
             attributes: std::collections::BTreeMap::new(),
         },
     );
@@ -706,7 +706,7 @@ async fn admin_setup_verify_login_end_to_end() {
 
 #[tokio::test]
 async fn list_realms_excludes_system_even_with_many_realms() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     // Create five application realms, then list — system realm must not
     // appear at any position or under any page boundary.

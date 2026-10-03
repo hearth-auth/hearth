@@ -2,8 +2,8 @@
 //! every authorization surface, not only at the token-exchange endpoint.
 //!
 //! The authorization request's `resource` becomes the `aud` of the code's
-//! access token. PAR stored any value, and `/authorize` (JSON, gRPC — which
-//! take a resource only through a pushed `request_uri`) issued a code for it,
+//! access token. PAR stored any value, and `/authorize` (JSON — which takes a
+//! resource only through a pushed `request_uri`) issued a code for it,
 //! so a client could mint a Hearth-signed token for a resource server the
 //! realm never declared, or for one removed since the request was pushed.
 //! Each surface now answers RFC 8707 `invalid_target`.
@@ -19,11 +19,7 @@ use hearth::identity::{
     CreateRealmRequest, CreateUserRequest, RegisterClientRequest, RegisterProtectedResourceRequest,
     SessionContext,
 };
-use hearth::protocol::admin_auth::AdminRateLimiter;
-use hearth::protocol::grpc::oauth::OAuthSvc;
-use hearth::protocol::grpc::GrpcState;
 use hearth::protocol::http::{router, AppState};
-use hearth::protocol::proto::identity::v1::{self as pb, o_auth_service_server::OAuthService};
 use tokio::net::TcpListener;
 
 const REDIRECT_URI: &str = "https://app.example.com/callback";
@@ -51,7 +47,7 @@ fn declared(uri: &str) -> RegisterProtectedResourceRequest {
 }
 
 async fn setup() -> Env {
-    let harness = Arc::new(common::TestHarness::embedded().await.expect("harness"));
+    let harness = Arc::new(common::TestHarness::in_process().await.expect("harness"));
     let identity = harness.identity();
     let realm_id = identity
         .create_realm(&CreateRealmRequest {
@@ -215,38 +211,4 @@ async fn json_authorize_refuses_a_resource_removed_since_the_push() {
     let status = resp.status();
     let body: serde_json::Value = resp.json().await.unwrap_or_default();
     assert_invalid_target(status, &body, "JSON /authorize for a removed resource");
-}
-
-#[tokio::test]
-async fn grpc_authorize_refuses_a_resource_removed_since_the_push() {
-    let env = setup().await;
-    let request_uri = request_uri_for_a_removed_resource(&env).await;
-    let svc = OAuthSvc::new(GrpcState::new(
-        env.harness.identity_arc(),
-        env.harness.rbac_arc(),
-        env.harness.audit_arc(),
-        Arc::new(AdminRateLimiter::new()),
-    ));
-    let mut req = tonic::Request::new(pb::AuthorizationRequest {
-        client_id: env.client_uuid.clone(),
-        request_uri: Some(request_uri),
-        ..Default::default()
-    });
-    req.metadata_mut().insert(
-        "x-realm-id",
-        env.realm_id.as_uuid().to_string().parse().unwrap(),
-    );
-    req.metadata_mut().insert(
-        "authorization",
-        format!("Bearer {}", env.user_token).parse().unwrap(),
-    );
-    let err = svc
-        .authorize(req)
-        .await
-        .expect_err("a removed resource must not get a code over gRPC");
-    assert_eq!(
-        (err.code(), err.message().contains("invalid_target")),
-        (tonic::Code::InvalidArgument, true),
-        "gRPC must answer INVALID_ARGUMENT invalid_target, got {err:?}"
-    );
 }

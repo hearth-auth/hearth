@@ -177,10 +177,6 @@ const PRE_AUTH_SHAPES: &[(&str, &str, Option<&str>)] = &[
     ("GET", "/federation/saml/metadata?idp=nope", None),
     ("GET", "/federation/saml/begin?idp=nope", None),
     ("POST", "/federation/saml/acs", Some("SAMLResponse=nope")),
-    ("GET", "/saml/metadata", None),
-    ("GET", "/saml/sso?SAMLRequest=nope", None),
-    ("GET", "/saml/sso/init?sp=nope", None),
-    ("GET", "/saml/slo-idp?SAMLRequest=nope", None),
     ("GET", "/oauth/authorize?client_id=nope", None),
 ];
 

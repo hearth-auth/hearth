@@ -149,7 +149,7 @@ struct Fixture {
 /// NOT carry `hearth.sv_feed` (reserved perms are not embedded), so the
 /// permission gate denies it 403 once DPoP has accepted the proof.
 async fn setup() -> Fixture {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm_name = format!("hea2039-{}", uuid::Uuid::new_v4());
     let realm = harness
         .identity()
@@ -249,7 +249,6 @@ fn mint_bound_user_token(
                 amr_values: vec![],
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize");

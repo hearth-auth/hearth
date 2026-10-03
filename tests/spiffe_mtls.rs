@@ -69,7 +69,7 @@ fn spiffe_id(agent_id: &hearth::core::AgentId) -> String {
 
 #[tokio::test]
 async fn register_spiffe_mapping_returns_record() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
     let sid = spiffe_id(&agent_id);
@@ -95,7 +95,7 @@ async fn register_spiffe_mapping_returns_record() {
 
 #[tokio::test]
 async fn lookup_agent_by_spiffe_id_returns_mapped_agent() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
     let sid = spiffe_id(&agent_id);
@@ -124,7 +124,7 @@ async fn lookup_agent_by_spiffe_id_returns_mapped_agent() {
 
 #[tokio::test]
 async fn lookup_unknown_spiffe_id_returns_none() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
 
     let result = h
@@ -139,7 +139,7 @@ async fn lookup_unknown_spiffe_id_returns_none() {
 
 #[tokio::test]
 async fn delete_spiffe_mapping_removes_the_mapping() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
     let sid = spiffe_id(&agent_id);
@@ -171,7 +171,7 @@ async fn delete_spiffe_mapping_removes_the_mapping() {
 
 #[tokio::test]
 async fn duplicate_spiffe_mapping_is_rejected() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
     let sid = spiffe_id(&agent_id);
@@ -209,7 +209,7 @@ async fn duplicate_spiffe_mapping_is_rejected() {
 
 #[tokio::test]
 async fn invalid_spiffe_id_format_rejected() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -250,7 +250,7 @@ async fn invalid_spiffe_id_format_rejected() {
 
 #[tokio::test]
 async fn cross_agent_spiffe_id_squatting_blocked() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
 
     // Legitimate owner registers first.
@@ -305,7 +305,7 @@ async fn cross_agent_spiffe_id_squatting_blocked() {
 
 #[tokio::test]
 async fn delete_nonexistent_spiffe_mapping_returns_error() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -346,7 +346,7 @@ fn cert_der_expired_spiffe_uri_san(spiffe_id: &str) -> Vec<u8> {
 /// [HEA-1444](/HEA/issues/HEA-1444).
 #[tokio::test]
 async fn expired_svid_is_rejected() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
     let sid = spiffe_id(&agent_id);
@@ -436,7 +436,7 @@ fn cert_der_two_spiffe_uri_sans(id1: &str, id2: &str) -> Vec<u8> {
 /// cert.
 #[tokio::test]
 async fn spiffe_in_cn_not_san_is_rejected() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
     let victim_sid = spiffe_id(&agent_id);
@@ -458,7 +458,7 @@ async fn spiffe_in_cn_not_san_is_rejected() {
 /// matching SPIFFE mapping exists.
 #[tokio::test]
 async fn spiffe_in_proper_uri_san_is_accepted() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
     let sid = spiffe_id(&agent_id);
@@ -494,7 +494,7 @@ async fn spiffe_in_proper_uri_san_is_accepted() {
 /// cert that passes trust-anchor validation on the first.
 #[tokio::test]
 async fn multiple_spiffe_uri_sans_is_rejected() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
     let sid1 = spiffe_id(&agent_id);

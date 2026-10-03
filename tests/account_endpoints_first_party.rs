@@ -59,7 +59,7 @@ struct Fixture {
 /// allows authenticated DCR, and a user holding the seeded `realm.admin`
 /// role (`hearth.admin`) with a password.
 async fn setup() -> Fixture {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {

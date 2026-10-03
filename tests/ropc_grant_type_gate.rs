@@ -141,7 +141,7 @@ async fn post_ropc(
 /// per-client check at all, so the refusal is `unsupported_grant_type`.
 #[tokio::test]
 async fn ropc_rejected_when_client_not_registered_for_password_grant() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let f = fixture(&h, "gate", &["authorization_code"]).await;
 
     let (status, body) = post_ropc(build_app(&h).await, &f, &f.password).await;
@@ -162,32 +162,55 @@ async fn ropc_rejected_when_client_not_registered_for_password_grant() {
     );
 }
 
-// ===== ROPC-G2: even an opted-in client is rejected (HEA-1862) =====
+// ===== ROPC-G2: a client cannot opt in to the password grant (3.0.0) =====
 
-/// The HEA-1671 positive path is gone. A client explicitly registered with
-/// `grant_types: ["password"]`, sending a **correct** username and password,
-/// must still be refused — the grant no longer exists on the endpoint, so
-/// opting in cannot resurrect the MFA bypass.
+/// The HEA-1671 positive path is gone, and since 3.0.0 so is the opt-in:
+/// registering a client with `grant_types: ["password"]` is refused, on
+/// registration and on update, so no stored client can claim the grant.
 #[tokio::test]
-async fn ropc_rejected_even_when_client_registered_for_password_grant() {
-    let h = common::TestHarness::embedded().await.expect("harness");
-    let f = fixture(&h, "optin", &["password"]).await;
+async fn a_client_cannot_be_registered_or_updated_for_the_password_grant() {
+    let h = common::TestHarness::in_process().await.expect("harness");
+    let realm = h
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("ropc-optin-{}", uuid::Uuid::new_v4()),
+            config: None,
+        })
+        .expect("create realm");
+    let request = |grants: &[&str]| RegisterClientRequest {
+        client_name: "ROPC opt-in".to_string(),
+        redirect_uris: vec!["https://app.example.com/cb".to_string()],
+        grant_types: grants.iter().map(|g| (*g).to_string()).collect(),
+        ..Default::default()
+    };
 
-    let (status, body) = post_ropc(build_app(&h).await, &f, &f.password).await;
-
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "ROPC must be refused even for a client registered for the password grant"
-    );
-    assert_eq!(
-        body["error"].as_str().unwrap_or(""),
-        "unsupported_grant_type",
-        "error must be `unsupported_grant_type`, got: {body}"
-    );
+    let err = h
+        .identity()
+        .register_client(realm.id(), &request(&["authorization_code", "password"]))
+        .expect_err("registering the password grant must be refused");
     assert!(
-        body["access_token"].is_null(),
-        "credentials were valid, so a token here would be an MFA bypass: {body}"
+        matches!(err, hearth::identity::IdentityError::InvalidInput { .. }),
+        "got: {err:?}"
+    );
+
+    let client = h
+        .identity()
+        .register_client(realm.id(), &request(&["authorization_code"]))
+        .expect("control: a standard client registers");
+    let err = h
+        .identity()
+        .update_client(
+            realm.id(),
+            client.client_id(),
+            &hearth::identity::UpdateClientRequest {
+                grant_types: Some(vec!["password".to_string()]),
+                ..Default::default()
+            },
+        )
+        .expect_err("updating a client to the password grant must be refused");
+    assert!(
+        matches!(err, hearth::identity::IdentityError::InvalidInput { .. }),
+        "got: {err:?}"
     );
 }
 
@@ -199,8 +222,8 @@ async fn ropc_rejected_even_when_client_registered_for_password_grant() {
 /// password-validity oracle.
 #[tokio::test]
 async fn ropc_refusal_is_identical_for_valid_and_invalid_passwords() {
-    let h = common::TestHarness::embedded().await.expect("harness");
-    let f = fixture(&h, "oracle", &["password"]).await;
+    let h = common::TestHarness::in_process().await.expect("harness");
+    let f = fixture(&h, "oracle", &["authorization_code"]).await;
 
     let (good_status, good_body) = post_ropc(build_app(&h).await, &f, &f.password).await;
     let invalid_password = format!("invalid-for-{}", f.email);

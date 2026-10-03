@@ -31,7 +31,7 @@ async fn create_test_realm(harness: &TestHarness) -> RealmId {
 /// token string anywhere in the persisted record.
 #[tokio::test]
 async fn revoke_audit_record_never_contains_the_raw_token() {
-    let harness = TestHarness::embedded().await.expect("harness");
+    let harness = TestHarness::in_process().await.expect("harness");
     let realm_id = create_test_realm(&harness).await;
 
     let user = harness
@@ -115,7 +115,7 @@ async fn revoke_audit_record_never_contains_the_raw_token() {
 /// twice references it the same way, so operators can still correlate.
 #[tokio::test]
 async fn revoke_audit_reference_is_stable_and_opaque() {
-    let harness = TestHarness::embedded().await.expect("harness");
+    let harness = TestHarness::in_process().await.expect("harness");
     let realm_id = create_test_realm(&harness).await;
 
     let user = harness

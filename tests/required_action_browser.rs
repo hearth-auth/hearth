@@ -35,8 +35,7 @@ use hearth::identity::onboarding::OnboardingService;
 use hearth::identity::{
     CleartextPassword, ClientTrustLevel, CreateRealmRequest, CreateUserRequest, CredentialConfig,
     EmbeddedIdentityEngine, IdentityConfig, IdentityEngine, OAuthClient, RealmConfig,
-    RegisterClientRequest, RequiredAction, SessionContext, SmsError, SmsMessage, SmsSender,
-    UpdateUserRequest, UserStatus,
+    RegisterClientRequest, RequiredAction, SessionContext, UpdateUserRequest, UserStatus,
 };
 use hearth::protocol::web::{self, CookieSecret, WebState};
 use hearth::rbac::{EmbeddedRbacEngine, RbacEngine};
@@ -51,17 +50,7 @@ const CALLBACK: &str = "https://app.example.com/cb";
 
 #[derive(Default)]
 struct Outbox {
-    sms: Mutex<Vec<String>>,
     mail: Mutex<Vec<String>>,
-}
-
-struct CapturingSms(Arc<Outbox>);
-impl SmsSender for CapturingSms {
-    fn send(&self, message: &SmsMessage) -> Result<(), SmsError> {
-        #[allow(clippy::unwrap_used)] // INVARIANT: test-only mutex, never poisoned.
-        self.0.sms.lock().unwrap().push(message.body.clone());
-        Ok(())
-    }
 }
 
 struct CapturingMail(Arc<Outbox>);
@@ -78,15 +67,6 @@ impl EmailSender for CapturingMail {
 }
 
 impl Outbox {
-    fn last_sms(&self) -> String {
-        #[allow(clippy::unwrap_used)] // INVARIANT: test-only mutex, never poisoned.
-        self.sms
-            .lock()
-            .unwrap()
-            .last()
-            .cloned()
-            .expect("an SMS was sent")
-    }
     fn last_mail(&self) -> String {
         #[allow(clippy::unwrap_used)] // INVARIANT: test-only mutex, never poisoned.
         self.mail
@@ -212,11 +192,7 @@ fn build_rig_with(mfa_methods: &[&str], webauthn_required: bool) -> Rig {
         CookieSecret::from_bytes(COOKIE_SECRET),
         Some(email),
     )
-    .with_dev_mode(false)
-    .with_sms(
-        Arc::new(CapturingSms(Arc::clone(&outbox))) as _,
-        Some(b"browser-jar-sms-key".to_vec()),
-    );
+    .with_dev_mode(false);
     Rig {
         app: web::router(state),
         identity,
@@ -368,7 +344,7 @@ async fn submit_forged(
 
 /// The action completed: the browser is redirected out of the
 /// required-action flow — back to the client with a code, or on to the
-/// login's remaining step (an enrolled SMS factor is challenged next).
+/// login's remaining step.
 fn assert_flow_finished(resp: &axum::response::Response) {
     assert!(
         resp.status().is_redirection(),
@@ -456,68 +432,6 @@ async fn update_password_refuses_a_forged_post() {
             &CleartextPassword::from_string(PASSWORD.to_string())
         )
         .expect("verify"));
-}
-
-// ── ENROLL_PHONE_OTP ────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn phone_enrolment_completes_in_a_real_browser() {
-    let rig = build_rig(&["sms"]);
-    let (mut browser, _user) = signed_in_browser(
-        &rig,
-        "jar-phone@example.com",
-        vec![RequiredAction::EnrollPhoneOtp],
-    );
-    let page = start_flow(&rig, &mut browser).await;
-    assert_eq!(page, "/required-action/ENROLL_PHONE_OTP");
-    let html = open(&mut browser, &page).await;
-    let send = "/required-action/ENROLL_PHONE_OTP/send";
-    let resp = submit(&mut browser, &html, send, &[("phone", "+15555550142")]).await;
-    assert_eq!(
-        resp.status(),
-        StatusCode::OK,
-        "the send step renders the code form"
-    );
-    let html = body_text(resp).await;
-    let code = six_digit_code(&rig.outbox.last_sms());
-    let resp = submit(
-        &mut browser,
-        &html,
-        "/required-action/ENROLL_PHONE_OTP/verify",
-        &[("code", &code)],
-    )
-    .await;
-    assert_flow_finished(&resp);
-}
-
-#[tokio::test]
-async fn phone_enrolment_refuses_forged_posts() {
-    let rig = build_rig(&["sms"]);
-    let (mut browser, _user) = signed_in_browser(
-        &rig,
-        "jar-phone-csrf@example.com",
-        vec![RequiredAction::EnrollPhoneOtp],
-    );
-    let page = start_flow(&rig, &mut browser).await;
-    let html = open(&mut browser, &page).await;
-    let send = "/required-action/ENROLL_PHONE_OTP/send";
-    let forged = submit_forged(&mut browser, &html, send, &[("phone", "+15555550143")]).await;
-    assert_refused(&forged);
-    #[allow(clippy::unwrap_used)] // INVARIANT: test-only mutex, never poisoned.
-    let sms_count = rig.outbox.sms.lock().unwrap().len();
-    assert_eq!(sms_count, 0, "a forged send must not cost the realm an SMS");
-
-    let resp = submit(&mut browser, &html, send, &[("phone", "+15555550143")]).await;
-    let html = body_text(resp).await;
-    let code = six_digit_code(&rig.outbox.last_sms());
-    let forged = submit_forged(
-        &mut browser,
-        &html,
-        "/required-action/ENROLL_PHONE_OTP/verify",
-        &[("code", &code)],
-    )
-    .await;
-    assert_refused(&forged);
 }
 
 // ── ENROLL_EMAIL_OTP ────────────────────────────────────────────────────────
@@ -689,12 +603,6 @@ async fn an_action_cannot_be_skipped_by_posting_to_its_page() {
             "/required-action/VERIFY_EMAIL",
         ),
         (
-            &["sms"][..],
-            "jar-skip-phone@example.com",
-            RequiredAction::EnrollPhoneOtp,
-            "/required-action/ENROLL_PHONE_OTP",
-        ),
-        (
             &["email_otp"][..],
             "jar-skip-emailotp@example.com",
             RequiredAction::EnrollEmailOtp,
@@ -860,34 +768,6 @@ async fn completing_enrol_mfa_clears_it_from_the_account() {
         !pending_on_account(&rig, &user).contains(&RequiredAction::EnrollMfa),
         "an enrolled user must not be sent back to enrolment on the next login"
     );
-}
-
-#[tokio::test]
-async fn a_verified_phone_with_a_pending_phone_enrolment_continues_the_login() {
-    let rig = build_rig(&["sms"]);
-    let (mut browser, user) = signed_in_browser(
-        &rig,
-        "sat-phone@example.com",
-        vec![RequiredAction::EnrollPhoneOtp],
-    );
-    rig.identity
-        .update_user(
-            &rig.realm_id,
-            &user,
-            &UpdateUserRequest {
-                phone_number: Some(Some("+15555550177".to_string())),
-                phone_verified: Some(true),
-                ..Default::default()
-            },
-        )
-        .expect("verified phone");
-    let page = start_flow(&rig, &mut browser).await;
-    assert_eq!(page, "/required-action/ENROLL_PHONE_OTP");
-
-    let resp = get_without_self_redirect(&mut browser, &page).await;
-    assert_flow_finished(&resp);
-    assert!(!pending_on_account(&rig, &user).contains(&RequiredAction::EnrollPhoneOtp));
-    assert_eq!(auto_cleared_events(&rig).len(), 1);
 }
 
 #[tokio::test]
@@ -1426,10 +1306,12 @@ async fn an_email_otp_enrolled_after_a_magic_link_is_not_a_second_factor() {
     );
 }
 
-/// The control: after a password login the same enrolment is a second
-/// factor, as it always was.
+/// The control: after a password login the same enrolment proves the
+/// email-OTP factor the account now holds, so the flow ends in a session on
+/// this realm, which does not require MFA. The proof is an inbox
+/// (`EmailOtp`), never MFA (spec `mfa-policy`).
 #[tokio::test]
-async fn an_email_otp_enrolled_after_a_password_login_is_a_second_factor() {
+async fn an_email_otp_enrolled_after_a_password_login_proves_the_inbox() {
     let rig = build_rig(&["email_otp"]);
     let email = "jar-password-emailotp@example.com";
     user_with_actions(&rig, email, vec![RequiredAction::EnrollEmailOtp]);
@@ -1451,6 +1333,6 @@ async fn an_email_otp_enrolled_after_a_password_login_is_a_second_factor() {
 
     assert_eq!(
         jar_session_proof(&rig, &browser),
-        hearth::identity::MfaProof::Proved
+        hearth::identity::MfaProof::EmailOtp
     );
 }

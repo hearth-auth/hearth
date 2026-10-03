@@ -40,7 +40,7 @@ fn string_def(key: &str, required: bool) -> AttributeDefinition {
 
 #[tokio::test]
 async fn user_schema_unknown_key_rejected() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
 
     h.identity()
@@ -90,7 +90,7 @@ async fn user_schema_unknown_key_rejected() {
 
 #[tokio::test]
 async fn user_schema_required_key_missing_on_create_rejected() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
 
     h.identity()
@@ -128,7 +128,7 @@ async fn user_schema_required_key_missing_on_create_rejected() {
 
 #[tokio::test]
 async fn user_schema_required_key_present_on_create_accepted() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
 
     h.identity()
@@ -166,7 +166,7 @@ async fn user_schema_required_key_present_on_create_accepted() {
 
 #[tokio::test]
 async fn user_free_form_accepts_any_valid_key() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
 
     let user = h
@@ -204,7 +204,7 @@ async fn user_free_form_accepts_any_valid_key() {
 
 #[tokio::test]
 async fn org_create_with_attributes_stored_and_returned() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
 
     let org = h
@@ -233,7 +233,7 @@ async fn org_create_with_attributes_stored_and_returned() {
 
 #[tokio::test]
 async fn org_update_attributes_persisted() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
 
     let org = h
@@ -274,7 +274,7 @@ async fn org_update_attributes_persisted() {
 
 #[tokio::test]
 async fn org_update_none_attributes_leaves_existing() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
 
     let org = h
@@ -317,7 +317,7 @@ async fn org_update_none_attributes_leaves_existing() {
 
 #[tokio::test]
 async fn org_schema_unknown_key_rejected() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
 
     h.identity()
@@ -355,7 +355,7 @@ async fn org_schema_unknown_key_rejected() {
 
 #[tokio::test]
 async fn org_schema_required_key_enforced() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
 
     h.identity()
@@ -397,7 +397,7 @@ async fn org_schema_required_key_enforced() {
 
 #[tokio::test]
 async fn user_more_than_50_keys_rejected() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
 
     let user = h
@@ -436,7 +436,7 @@ async fn user_more_than_50_keys_rejected() {
 
 #[tokio::test]
 async fn org_more_than_50_keys_rejected() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
 
     let org = h

@@ -24,8 +24,8 @@ use hearth::backup::{
 };
 use hearth::core::{ClientId, RealmId};
 use hearth::identity::{
-    ClientProfile, ClientTrustLevel, CreateRealmRequest, GeneratedClientSecret,
-    RegisterClientRequest, UpdateClientRequest,
+    ClientTrustLevel, CreateRealmRequest, GeneratedClientSecret, RegisterClientRequest,
+    UpdateClientRequest,
 };
 use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair};
@@ -276,7 +276,9 @@ fn all_grants() -> Vec<String> {
 /// `/device_authorization`.
 #[tokio::test]
 async fn restored_secret_clients_still_require_their_secret() {
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let realm = source_realm(&src).await;
 
     let argon = src
@@ -384,7 +386,9 @@ async fn restored_secret_clients_still_require_their_secret() {
 /// on its `client_id` alone.
 #[tokio::test]
 async fn restored_private_key_jwt_client_still_requires_its_assertion() {
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let realm = source_realm(&src).await;
     let key = ClientKey::new();
     let assertion_key = ClientKey::new();
@@ -464,11 +468,14 @@ async fn restored_private_key_jwt_client_still_requires_its_assertion() {
     }
 }
 
-/// A FAPI 2.0 client is never public (bf9fbfbd). It comes back as FAPI 2.0
-/// with its JWKS, and PAR still demands its assertion.
+/// A JWKS-only client is never public (bf9fbfbd). It comes back with its JWKS
+/// and its `dpop_bound_access_tokens` flag, and PAR still demands its
+/// assertion.
 #[tokio::test]
-async fn restored_fapi2_client_stays_fapi2_and_is_never_public() {
-    let src = common::TestHarness::embedded().await.expect("src harness");
+async fn restored_jwks_client_keeps_its_flags_and_is_never_public() {
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let realm = source_realm(&src).await;
     let key = ClientKey::new();
     let cid = src
@@ -476,16 +483,16 @@ async fn restored_fapi2_client_stays_fapi2_and_is_never_public() {
         .register_client(
             &realm,
             &RegisterClientRequest {
-                client_name: "FAPI 2.0 client".to_string(),
+                client_name: "JWKS-only client".to_string(),
                 redirect_uris: vec![REDIRECT_URI.to_string()],
                 grant_types: vec!["authorization_code".to_string()],
                 trust_level: ClientTrustLevel::FirstParty,
                 jwks: Some(key.jwks()),
-                profile: ClientProfile::Fapi2,
+                dpop_bound_access_tokens: true,
                 ..Default::default()
             },
         )
-        .expect("register fapi2 client")
+        .expect("register JWKS-only client")
         .client_id()
         .clone();
 
@@ -497,17 +504,18 @@ async fn restored_fapi2_client_stays_fapi2_and_is_never_public() {
         .expect("get client")
         .expect("restored");
     assert!(
-        restored.profile().is_fapi2(),
-        "the FAPI 2.0 profile must be restored"
+        restored.dpop_bound_access_tokens(),
+        "dpop_bound_access_tokens must be restored"
     );
-    assert!(!restored.is_public(), "a FAPI 2.0 client is never public");
+    assert!(restored.jwks().is_some(), "the JWKS must be restored");
+    assert!(!restored.is_public(), "a JWKS-only client is never public");
 
     for route in ROUTES {
         let (s, b) = dst.post(route, "as/par", &par_form(&cid), None).await;
-        assert_refused(s, &b, &format!("{route:?} FAPI 2.0 /as/par"));
+        assert_refused(s, &b, &format!("{route:?} JWKS-only /as/par"));
         let form = with_assertion(par_form(&cid), &key, &cid, &dst.issuer);
         let (s, b) = dst.post(route, "as/par", &form, None).await;
-        assert_eq!(s, 201, "{route:?} FAPI 2.0 /as/par with an assertion: {b}");
+        assert_eq!(s, 201, "{route:?} JWKS-only /as/par with an assertion: {b}");
     }
 }
 
@@ -515,7 +523,9 @@ async fn restored_fapi2_client_stays_fapi2_and_is_never_public() {
 /// public — the fix must not break SPAs and native apps.
 #[tokio::test]
 async fn restored_public_client_stays_public() {
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let realm = source_realm(&src).await;
     let cid = src
         .identity()

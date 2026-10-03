@@ -18,7 +18,7 @@ fn find_event(
 
 #[tokio::test]
 async fn test_delete_user_audited() {
-    let harness = TestHarness::embedded().await.expect("harness");
+    let harness = TestHarness::in_process().await.expect("harness");
     let realm_id = create_test_realm(&harness).await;
 
     let user = harness
@@ -54,7 +54,7 @@ async fn test_delete_user_audited() {
 
 #[tokio::test]
 async fn test_add_member_audited() {
-    let harness = TestHarness::embedded().await.expect("harness");
+    let harness = TestHarness::in_process().await.expect("harness");
     let realm_id = create_test_realm(&harness).await;
 
     let org = harness
@@ -104,7 +104,7 @@ async fn test_add_member_audited() {
 
 #[tokio::test]
 async fn test_delete_realm_cascading_one_event() {
-    let harness = TestHarness::embedded().await.expect("harness");
+    let harness = TestHarness::in_process().await.expect("harness");
 
     let realm = harness
         .identity()

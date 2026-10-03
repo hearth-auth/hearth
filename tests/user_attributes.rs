@@ -45,7 +45,7 @@ fn attrs(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 
 #[tokio::test]
 async fn update_user_valid_attributes_accepted() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let user_id = create_user(&h, &realm).await;
 
@@ -77,7 +77,7 @@ async fn update_user_valid_attributes_accepted() {
 
 #[tokio::test]
 async fn update_user_empty_key_rejected() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let user_id = create_user(&h, &realm).await;
 
@@ -98,7 +98,7 @@ async fn update_user_empty_key_rejected() {
 
 #[tokio::test]
 async fn update_user_key_too_long_rejected() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let user_id = create_user(&h, &realm).await;
 
@@ -121,7 +121,7 @@ async fn update_user_key_too_long_rejected() {
 
 #[tokio::test]
 async fn update_user_value_too_large_rejected() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let user_id = create_user(&h, &realm).await;
 
@@ -144,7 +144,7 @@ async fn update_user_value_too_large_rejected() {
 
 #[tokio::test]
 async fn update_user_total_size_exceeded_rejected() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let user_id = create_user(&h, &realm).await;
 
@@ -174,7 +174,7 @@ async fn update_user_total_size_exceeded_rejected() {
 
 #[tokio::test]
 async fn update_user_invalid_chars_in_key_space_rejected() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let user_id = create_user(&h, &realm).await;
 
@@ -195,7 +195,7 @@ async fn update_user_invalid_chars_in_key_space_rejected() {
 
 #[tokio::test]
 async fn update_user_invalid_chars_in_key_at_rejected() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let user_id = create_user(&h, &realm).await;
 
@@ -216,7 +216,7 @@ async fn update_user_invalid_chars_in_key_at_rejected() {
 
 #[tokio::test]
 async fn update_user_key_exactly_64_chars_accepted() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let user_id = create_user(&h, &realm).await;
 
@@ -239,7 +239,7 @@ async fn update_user_key_exactly_64_chars_accepted() {
 
 #[tokio::test]
 async fn update_user_value_exactly_1024_bytes_accepted() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let user_id = create_user(&h, &realm).await;
 

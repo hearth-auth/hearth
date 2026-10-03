@@ -207,7 +207,7 @@ fn second_rotation_adds_another_retiring_key() {
 
 #[tokio::test]
 async fn snapshot_rotate_flag_cleared_after_apply_diff() {
-    let harness = common::TestHarness::embedded().await.unwrap();
+    let harness = common::TestHarness::in_process().await.unwrap();
 
     // Create realm in storage.
     let realm = harness
@@ -660,7 +660,7 @@ async fn admin_get(app: &axum::Router, uri: &str, token: &str, realm: &RealmId) 
 /// /admin/realms/{id}/rotate-signing-key` therefore revokes by default.
 #[tokio::test]
 async fn admin_rotate_signing_key_revokes_the_retired_key() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed rbac");
     let app = build_admin_app(&h);
@@ -705,7 +705,7 @@ async fn admin_rotate_signing_key_revokes_the_retired_key() {
 /// The operator opts in; it is never the default.
 #[tokio::test]
 async fn admin_rotate_signing_key_honours_an_explicit_grace_period() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed rbac");
     let app = build_admin_app(&h);

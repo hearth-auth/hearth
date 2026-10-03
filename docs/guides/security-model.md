@@ -255,4 +255,4 @@ known limitation. See [docs/guides/security-hardening.md](./security-hardening.m
 | Operational hardening (session TTL, SAML algorithm suite, secret rotation) | [docs/guides/security-hardening.md](./security-hardening.md) |
 | Normative multi-tenancy isolation rules | [docs/specs/ARCHITECTURE.md § 7](../specs/ARCHITECTURE.md) |
 | RBAC, roles, groups, permission embedding in JWT | [docs/specs/AUTHORIZATION.md](../specs/AUTHORIZATION.md) |
-| OIDC / OAuth 2.0 / FAPI 2.0 security profile | [docs/specs/OIDC.md](../specs/OIDC.md) |
+| OIDC / OAuth 2.0 (PAR, JAR, PKCE, DPoP) | [docs/specs/OIDC.md](../specs/OIDC.md) |

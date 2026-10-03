@@ -96,7 +96,7 @@ fn create_user_with_password(
 /// Happy-path: request reset → use token → old password rejected, new accepted.
 #[tokio::test]
 async fn forgot_password_full_flow() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = harness.create_realm();
     let identity = harness.identity();
 
@@ -161,7 +161,7 @@ async fn forgot_password_full_flow() {
 /// Active sessions must be revoked when a password reset completes.
 #[tokio::test]
 async fn forgot_password_invalidates_sessions() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = harness.create_realm();
     let identity = harness.identity();
 

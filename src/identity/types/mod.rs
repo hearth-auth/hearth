@@ -24,7 +24,6 @@ pub use user::*;
 
 #[cfg(test)]
 mod tests {
-    use super::user::mask_phone_number;
     use super::*;
     use crate::core::{ClientId, OrganizationId, RealmId, Timestamp, UserId};
     use crate::identity::InvitationId;
@@ -145,7 +144,7 @@ mod tests {
         assert_eq!(realm.updated_at(), now);
 
         // Verify new auth policy fields default to None
-        assert!(config.mfa_required.is_none());
+        assert!(config.mfa_required.is_none()); // mfa-resolver-ok: a test
         assert!(config.mfa_methods.is_none());
         assert!(config.allowed_auth_methods.is_none());
         assert!(config.password_policy.is_none());
@@ -232,6 +231,7 @@ mod tests {
         let now = Timestamp::from_micros(1_000_000);
         let config = OrganizationConfig {
             max_members: Some(100),
+            mfa_required: false,
         };
         let org = Organization::new(
             id.clone(),
@@ -290,6 +290,7 @@ mod tests {
         org.set_status(OrganizationStatus::Suspended);
         org.set_config(OrganizationConfig {
             max_members: Some(50),
+            mfa_required: false,
         });
         org.set_updated_at(Timestamp::from_micros(2_000));
 
@@ -505,10 +506,6 @@ mod tests {
             serde_json::to_string(&RequiredAction::UpdatePassword).expect("serialize"),
             "\"UPDATE_PASSWORD\""
         );
-        assert_eq!(
-            serde_json::to_string(&RequiredAction::EnrollPhoneOtp).expect("serialize"),
-            "\"ENROLL_PHONE_OTP\""
-        );
     }
 
     #[test]
@@ -519,92 +516,8 @@ mod tests {
         let b: RequiredAction = serde_json::from_str("\"UPDATE_PASSWORD\"").expect("deserialize");
         assert_eq!(b, RequiredAction::UpdatePassword);
 
-        let c: RequiredAction = serde_json::from_str("\"ENROLL_PHONE_OTP\"").expect("deserialize");
-        assert_eq!(c, RequiredAction::EnrollPhoneOtp);
-    }
-
-    #[test]
-    fn enroll_phone_otp_priority_and_path_segment() {
-        assert_eq!(RequiredAction::EnrollPhoneOtp.priority(), 4);
-        assert_eq!(
-            RequiredAction::EnrollPhoneOtp.as_path_segment(),
-            "ENROLL_PHONE_OTP"
-        );
-        assert_eq!(
-            RequiredAction::from_path_segment("ENROLL_PHONE_OTP"),
-            Some(RequiredAction::EnrollPhoneOtp)
-        );
-    }
-
-    #[test]
-    fn user_phone_fields_default_none_on_legacy_record() {
-        let legacy_json = r#"{
-            "id": "00000000-0000-0000-0000-000000000001",
-            "email": "old@example.com",
-            "display_name": "Old User",
-            "first_name": "Old",
-            "last_name": "User",
-            "status": "Active",
-            "created_at": 1000000,
-            "updated_at": 1000000
-        }"#;
-        let user: User = serde_json::from_str(legacy_json).expect("deserialize");
-        assert!(
-            user.phone_number().is_none(),
-            "legacy user must have no phone"
-        );
-        assert!(
-            !user.phone_verified(),
-            "legacy user must not be phone-verified"
-        );
-    }
-
-    #[test]
-    fn user_phone_fields_round_trip() {
-        let now = Timestamp::from_micros(1_000_000);
-        let mut user = User::new(
-            UserId::generate(),
-            "alice@example.com".to_string(),
-            "Alice".to_string(),
-            "Alice".to_string(),
-            String::new(),
-            UserStatus::Active,
-            Vec::new(),
-            now,
-            now,
-        );
-        user.set_phone_number(Some("+15555550100".to_string()));
-        user.set_phone_verified(true);
-
-        let json = serde_json::to_string(&user).expect("serialize");
-        let back: User = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(back.phone_number(), Some("+15555550100"));
-        assert!(back.phone_verified());
-    }
-
-    #[test]
-    fn user_without_phone_omits_fields_in_json() {
-        let now = Timestamp::from_micros(1_000_000);
-        let user = User::new(
-            UserId::generate(),
-            "bob@example.com".to_string(),
-            "Bob".to_string(),
-            "Bob".to_string(),
-            String::new(),
-            UserStatus::Active,
-            Vec::new(),
-            now,
-            now,
-        );
-        let json = serde_json::to_string(&user).expect("serialize");
-        assert!(
-            !json.contains("phone_number"),
-            "absent phone must be omitted"
-        );
-        assert!(
-            !json.contains("phone_verified"),
-            "false phone_verified must be omitted"
-        );
+        let c: Result<RequiredAction, _> = serde_json::from_str("\"ENROLL_PHONE_OTP\"");
+        assert!(c.is_err(), "ENROLL_PHONE_OTP was removed in 3.0.0");
     }
 
     #[test]
@@ -672,103 +585,6 @@ mod tests {
         );
     }
 
-    // ── mask_phone_number / User::masked_phone_number ──────────────────────
-
-    #[test]
-    fn masked_phone_matches_ac_example() {
-        assert_eq!(mask_phone_number("+15555551234"), "+1***-***-1234");
-    }
-
-    #[test]
-    fn masked_phone_uk_number() {
-        assert_eq!(mask_phone_number("+441234567890"), "+4***-***-7890");
-    }
-
-    #[test]
-    fn masked_phone_short_number_returns_stars() {
-        assert_eq!(mask_phone_number("+123"), "****");
-        assert_eq!(mask_phone_number("+12"), "****");
-    }
-
-    #[test]
-    fn user_masked_phone_number_returns_none_when_no_phone() {
-        let now = Timestamp::from_micros(1_000_000);
-        let user = User::new(
-            UserId::generate(),
-            "alice@example.com".to_string(),
-            "Alice".to_string(),
-            "Alice".to_string(),
-            String::new(),
-            UserStatus::Active,
-            Vec::new(),
-            now,
-            now,
-        );
-        assert!(user.masked_phone_number().is_none());
-    }
-
-    #[test]
-    fn user_masked_phone_number_masks_enrolled_phone() {
-        let now = Timestamp::from_micros(1_000_000);
-        let mut user = User::new(
-            UserId::generate(),
-            "alice@example.com".to_string(),
-            "Alice".to_string(),
-            "Alice".to_string(),
-            String::new(),
-            UserStatus::Active,
-            Vec::new(),
-            now,
-            now,
-        );
-        user.set_phone_number(Some("+15555551234".to_string()));
-        assert_eq!(
-            user.masked_phone_number(),
-            Some("+1***-***-1234".to_string())
-        );
-    }
-
-    // ── RealmConfig sms_otp fields ─────────────────────────────────────────
-
-    #[test]
-    fn realm_config_sms_otp_fields_default_none() {
-        let config = RealmConfig::default();
-        assert!(config.sms_otp_expiry_seconds.is_none());
-        assert!(config.sms_otp_max_attempts.is_none());
-    }
-
-    #[test]
-    fn realm_config_sms_otp_fields_roundtrip() {
-        let config = RealmConfig {
-            sms_otp_expiry_seconds: Some(300),
-            sms_otp_max_attempts: Some(3),
-            ..RealmConfig::default()
-        };
-        let json = serde_json::to_string(&config).expect("serialize");
-        let back: RealmConfig = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(back.sms_otp_expiry_seconds, Some(300));
-        assert_eq!(back.sms_otp_max_attempts, Some(3));
-    }
-
-    #[test]
-    fn realm_config_sms_otp_fields_absent_in_legacy_json() {
-        let legacy_json = r#"{"name": "test", "status": "Active"}"#;
-        let config: RealmConfig = serde_json::from_str(legacy_json).unwrap_or_default();
-        assert!(config.sms_otp_expiry_seconds.is_none());
-        assert!(config.sms_otp_max_attempts.is_none());
-    }
-
-    #[test]
-    fn realm_config_mfa_methods_accepts_sms_value() {
-        let config = RealmConfig {
-            mfa_methods: Some(vec!["sms".to_string()]),
-            ..RealmConfig::default()
-        };
-        let json = serde_json::to_string(&config).expect("serialize");
-        let back: RealmConfig = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(back.mfa_methods, Some(vec!["sms".to_string()]));
-    }
-
     #[test]
     fn pending_authorization_request_serde_round_trip() {
         let pending = PendingAuthorizationRequest {
@@ -783,9 +599,7 @@ mod tests {
             code_challenge_method: Some("S256".to_string()),
             nonce: Some("n-0".to_string()),
             response_mode: None,
-            authorization_signed_response_alg: Some("EdDSA".to_string()),
             resource: None,
-            via_par: false,
             amr_values: Vec::new(),
             created_at: Timestamp::from_micros(1_000_000),
             expires_at: Timestamp::from_micros(1_600_000_000),

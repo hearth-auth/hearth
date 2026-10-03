@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { ADMIN_EMAIL, ADMIN_PASSWORD } from '../fixtures/auth';
+import { ADMIN_EMAIL, ADMIN_PASSWORD, adminTotpSecret, passSecondFactor } from '../fixtures/auth';
 
 const BASE_URL = process.env.HEARTH_URL ?? 'http://127.0.0.1:8420';
 
@@ -13,10 +13,10 @@ test.describe('Login flow', () => {
 
     await page.fill('input[name="email"]', ADMIN_EMAIL);
     await page.fill('input[name="password"]', ADMIN_PASSWORD);
-    await Promise.all([
-      page.waitForURL(/\/ui(?:\/|$)/, { timeout: 15_000 }),
-      page.click('button[type="submit"]'),
-    ]);
+    await page.click('button[type="submit"]');
+    // The system realm always requires MFA: the password step asks for TOTP.
+    await passSecondFactor(page, adminTotpSecret());
+    await page.waitForURL((url) => !url.pathname.includes('/login'), { timeout: 15_000 });
 
     // Sidebar nav confirms authenticated shell rendered
     await expect(page.locator('nav[aria-label="Admin"]')).toBeVisible();
@@ -81,10 +81,10 @@ test.describe('Login flow', () => {
 
     // Fill password again (it is always cleared for security) and resubmit.
     await page.fill('input[name="password"]', ADMIN_PASSWORD);
-    await Promise.all([
-      page.waitForURL(/\/ui(?:\/|$)/, { timeout: 15_000 }),
-      page.click('button[type="submit"]'),
-    ]);
+    await page.click('button[type="submit"]');
+    // The system realm always requires MFA: the password step asks for TOTP.
+    await passSecondFactor(page, adminTotpSecret());
+    await page.waitForURL((url) => !url.pathname.includes('/login'), { timeout: 15_000 });
 
     // Successful login — authenticated admin shell is visible.
     await expect(page.locator('nav[aria-label="Admin"]')).toBeVisible();

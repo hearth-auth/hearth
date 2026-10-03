@@ -239,7 +239,6 @@ impl Env {
                     amr_values: vec![],
                     response_mode: None,
                     request: None,
-                    via_par: true,
                 },
             )
             .expect("authorize")
@@ -539,14 +538,6 @@ async fn token_grants_without_client_authentication() {
         (
             "urn:ietf:params:oauth:grant-type:jwt-bearer",
             vec![("assertion", "not-a-jwt".to_string())],
-        ),
-        (
-            "urn:hearth:params:grant-type:step-up-mfa",
-            vec![
-                ("username", "nobody@example.com".to_string()),
-                ("password", "wrong".to_string()),
-                ("mfa_code", "000000".to_string()),
-            ],
         ),
         (
             "urn:hearth:grant-type:magic-link",

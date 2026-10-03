@@ -59,7 +59,7 @@ mod webauthn_helper;
 
 #[tokio::test]
 async fn webauthn_full_lifecycle() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -152,7 +152,7 @@ async fn webauthn_full_lifecycle() {
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn webauthn_credential_management() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -297,7 +297,7 @@ async fn webauthn_credential_management() {
 
 #[tokio::test]
 async fn webauthn_credential_naming() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -377,7 +377,7 @@ async fn webauthn_credential_naming() {
 
 #[tokio::test]
 async fn webauthn_counter_replay_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -476,7 +476,7 @@ async fn webauthn_counter_replay_rejected() {
 
 #[tokio::test]
 async fn webauthn_rp_id_mismatch_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -553,7 +553,7 @@ async fn webauthn_rp_id_mismatch_rejected() {
 
 #[tokio::test]
 async fn webauthn_tampered_client_data_json_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -632,7 +632,7 @@ async fn webauthn_tampered_client_data_json_rejected() {
 
 #[tokio::test]
 async fn webauthn_cbor_malformed_auth_data_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -687,7 +687,7 @@ async fn webauthn_cbor_malformed_auth_data_rejected() {
 
 #[tokio::test]
 async fn webauthn_discoverable_userhandle_spoofing_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -826,7 +826,7 @@ fn register_discoverable(
 /// checks the response, so the knob is dead code.
 #[tokio::test]
 async fn realm_requiring_user_verification_refuses_an_unverified_assertion() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm_with_config(
@@ -881,7 +881,7 @@ async fn realm_requiring_user_verification_refuses_an_unverified_assertion() {
 /// verification.
 #[tokio::test]
 async fn realm_requiring_user_verification_accepts_a_verified_assertion() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm_with_config(
@@ -1025,7 +1025,7 @@ async fn uv_less_passkey_does_not_satisfy_mfa_required() {
     use base64::Engine as _;
     use tower::ServiceExt as _;
 
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm_id = create_realm_with_config(
@@ -1156,7 +1156,7 @@ async fn uv_proven_passkey_satisfies_mfa_required() {
     use base64::Engine as _;
     use tower::ServiceExt as _;
 
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm_id = create_realm_with_config(
@@ -1275,7 +1275,7 @@ async fn uv_proven_passkey_satisfies_mfa_required() {
 /// still completes.
 #[tokio::test]
 async fn registration_challenge_minted_in_realm_a_is_refused_in_realm_b() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm_a = create_realm(&harness);
@@ -1332,7 +1332,7 @@ async fn registration_challenge_minted_in_realm_a_is_refused_in_realm_b() {
 /// realm B, even when the very same authenticator is enrolled in both.
 #[tokio::test]
 async fn authentication_challenge_minted_in_realm_a_is_refused_in_realm_b() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm_a = create_realm(&harness);
@@ -1407,7 +1407,7 @@ async fn authentication_challenge_minted_in_realm_a_is_refused_in_realm_b() {
 /// with one. Otherwise a single enrolment touch is replayable as a login.
 #[tokio::test]
 async fn registration_challenge_is_refused_at_an_authentication_redemption() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -1508,7 +1508,7 @@ async fn registration_challenge_is_refused_at_an_authentication_redemption() {
 /// account backdoor.
 #[tokio::test]
 async fn authentication_challenge_is_refused_at_a_registration_redemption() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -1606,7 +1606,7 @@ fn realm_requiring_webauthn_with_enrolled_user(
 /// recovery code. A realm that set `webauthn_required` must refuse it.
 #[tokio::test]
 async fn webauthn_required_refuses_a_totp_second_factor() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let (realm_id, user, _authenticator) =
@@ -1634,7 +1634,7 @@ async fn webauthn_required_refuses_a_totp_second_factor() {
 /// above could pass by refusing every login.
 #[tokio::test]
 async fn webauthn_required_accepts_a_webauthn_assertion() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let (realm_id, user, _authenticator) =
@@ -1663,7 +1663,7 @@ async fn webauthn_required_accepts_a_webauthn_assertion() {
 /// blanket ban on non-WebAuthn factors.
 #[tokio::test]
 async fn a_realm_without_webauthn_required_still_accepts_totp() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let (realm_id, user, _authenticator) =
@@ -1765,7 +1765,7 @@ async fn passkey_browser_login(
 /// `webauthn_required` gate locks out the very factor it demands.
 #[tokio::test]
 async fn webauthn_required_realm_issues_a_session_for_a_passkey_login() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let (realm_id, user, authenticator) =

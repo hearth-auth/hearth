@@ -11,9 +11,16 @@ import type {
   AccessTokenAuthorizationMode,
   AuthorizePermissionOptions,
   DeviceAuthorizationResponse,
+  ExchangeCodeOptions,
+  LoginBeginResult,
+  MePermissionsResponse,
+  SvDeltaResponse,
+  SvSnapshotResponse,
   TokenResponse,
+  UserInfoResponse,
 } from "./types.js";
 import { Claims } from "./claims.js";
+import { buildAuthorizationUrl, generateCodeChallenge, generateCodeVerifier } from "./pkce.js";
 
 /** Configuration for {@link HearthClient}. */
 export interface HearthClientConfig {
@@ -65,15 +72,27 @@ export interface HearthClientConfig {
   expectedMode?: AccessTokenAuthorizationMode;
 }
 
-interface OidcConfiguration {
+/** The OIDC discovery document fields the SDK reads. */
+export interface OidcConfiguration {
   issuer: string;
   jwks_uri: string;
   introspection_endpoint?: string;
+  authorization_endpoint?: string;
+  token_endpoint?: string;
+  device_authorization_endpoint?: string;
+  userinfo_endpoint?: string;
   [key: string]: unknown;
 }
 
+/** Discovery fields that hold an endpoint URL. */
+type EndpointField =
+  | "authorization_endpoint"
+  | "token_endpoint"
+  | "device_authorization_endpoint"
+  | "userinfo_endpoint";
+
 /**
- * Primary entry point for the Hearth Node.js SDK.
+ * Primary entry point for the Hearth SDK.
  *
  * Accepts a single configuration object, auto-discovers all endpoint URLs
  * from `{issuerUrl}/.well-known/openid-configuration` on first use, and
@@ -97,6 +116,7 @@ export class HearthClient {
   readonly expectedMode: AccessTokenAuthorizationMode | undefined;
 
   private _discovery: OidcConfiguration | null = null;
+  private _discoveryInFlight: Promise<OidcConfiguration> | null = null;
   private _jwksClient: JwksClient | null = null;
   private _introspectionClient: IntrospectionClient | null = null;
 
@@ -124,12 +144,35 @@ export class HearthClient {
    * Fetches and caches the OIDC discovery document from
    * `{issuerUrl}/.well-known/openid-configuration`.
    *
+   * Concurrent callers share one request. A failed fetch is not cached.
+   *
    * Throws {@link DiscoveryError} when the endpoint is unreachable,
    * returns a non-2xx status, or returns invalid JSON.
    */
   async discover(): Promise<OidcConfiguration> {
     if (this._discovery) return this._discovery;
+    if (!this._discoveryInFlight) {
+      this._discoveryInFlight = this.fetchDiscovery().finally(() => {
+        this._discoveryInFlight = null;
+      });
+    }
+    return this._discoveryInFlight;
+  }
 
+  /**
+   * Drop the cached discovery document, JWKS key set and introspection client.
+   * The next call fetches them again. Call it after the issuer rotates keys or
+   * changes endpoints, or after a resource server answers 401 for a token you
+   * believe is valid.
+   */
+  invalidateCache(): void {
+    this._discovery = null;
+    this._discoveryInFlight = null;
+    this._jwksClient = null;
+    this._introspectionClient = null;
+  }
+
+  private async fetchDiscovery(): Promise<OidcConfiguration> {
     const url = `${this.issuerUrl}/.well-known/openid-configuration`;
     let resp: Response;
     try {
@@ -266,12 +309,17 @@ export class HearthClient {
    * deployments where the resource server and the issuing client disagree on
    * the permission delivery strategy.
    *
+   * @param tokenTypeHint - Optional RFC 7662 `token_type_hint`.
    * @throws {@link ConfigurationError} when `clientId`/`clientSecret` are absent.
+   * @throws {@link IntrospectionError} when the introspection request fails.
    * @throws {@link AuthorizationModeMismatchError} on mode echo mismatch.
    */
-  async introspect(token: string): Promise<IntrospectionResult> {
+  async introspect(
+    token: string,
+    tokenTypeHint?: "access_token" | "refresh_token",
+  ): Promise<IntrospectionResult> {
     const ic = await this.introspectionClient();
-    const result = await ic.introspect(token);
+    const result = await ic.introspect(token, tokenTypeHint);
     if (
       this.expectedMode !== undefined &&
       result.mode !== undefined &&
@@ -316,27 +364,115 @@ export class HearthClient {
   // ── §4.5 — OAuth Flows ───────────────────────────────────────────────────
 
   /**
+   * Begin an authorization-code login with PKCE.
+   *
+   * Generates a code verifier and a `state` value and builds the URL of the
+   * discovered `authorization_endpoint`. Store `state` and `codeVerifier` in the
+   * server-side session, redirect the browser to `authorizationUrl`, then call
+   * {@link completeLogin} on the callback route.
+   *
+   * @param redirectUri - Callback URL registered for this client.
+   * @param scope - Space-delimited scopes. Default: `"openid"`.
+   * @throws {@link ConfigurationError} when `clientId` is absent or discovery has
+   *   no `authorization_endpoint`.
+   */
+  async beginLogin(redirectUri: string, scope = "openid"): Promise<LoginBeginResult> {
+    const clientId = this.requireClientId("beginLogin");
+    const authorizationEndpoint = await this.endpoint("authorization_endpoint");
+    const codeVerifier = generateCodeVerifier();
+    const { url, state } = buildAuthorizationUrl({
+      authorizationEndpoint,
+      clientId,
+      redirectUri,
+      codeChallenge: await generateCodeChallenge(codeVerifier),
+      scope,
+    });
+    return { authorizationUrl: url, state, codeVerifier };
+  }
+
+  /**
+   * Complete an authorization-code login: exchange the callback `code` for
+   * tokens. Check the callback's `state` against the stored one first.
+   *
+   * @param code - The `code` query parameter from the callback URL.
+   * @param codeVerifier - The verifier returned by {@link beginLogin}.
+   * @param redirectUri - The same redirect URI passed to {@link beginLogin}.
+   * @throws {@link OAuthFlowError} on a non-2xx response or a network failure.
+   */
+  async completeLogin(
+    code: string,
+    codeVerifier: string,
+    redirectUri: string,
+  ): Promise<TokenResponse> {
+    return this.exchangeCode(code, redirectUri, { codeVerifier });
+  }
+
+  /**
+   * Exchange an authorization code for tokens (RFC 6749 §4.1.3).
+   *
+   * Posts to the discovered `token_endpoint` as
+   * `application/x-www-form-urlencoded`. `client_secret` is sent only when
+   * configured, so public clients use PKCE alone.
+   *
+   * @param code - Authorization code from the callback URL.
+   * @param redirectUri - The redirect URI used in the authorization request.
+   * @param opts - `codeVerifier` for PKCE-protected flows.
+   * @throws {@link ConfigurationError} when `clientId` is absent.
+   * @throws {@link OAuthFlowError} on a non-2xx response or a network failure.
+   */
+  async exchangeCode(
+    code: string,
+    redirectUri: string,
+    opts?: ExchangeCodeOptions,
+  ): Promise<TokenResponse> {
+    const params: Record<string, string> = {
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: redirectUri,
+      ...this.clientAuthParams("exchangeCode"),
+    };
+    if (opts?.codeVerifier) params.code_verifier = opts.codeVerifier;
+    return this.postForm<TokenResponse>(await this.endpoint("token_endpoint"), params);
+  }
+
+  /**
+   * Exchange a refresh token for new tokens (RFC 6749 §6).
+   *
+   * The response may carry a rotated `refresh_token`; store it in place of the
+   * old one when present.
+   *
+   * @param refreshToken - Refresh token previously issued to this client.
+   * @param scope - Optional space-delimited scopes (must not widen the grant).
+   * @throws {@link ConfigurationError} when `clientId` is absent.
+   * @throws {@link OAuthFlowError} on a non-2xx response or a network failure.
+   */
+  async refreshTokens(refreshToken: string, scope?: string): Promise<TokenResponse> {
+    const params: Record<string, string> = {
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+      ...this.clientAuthParams("refreshTokens"),
+    };
+    if (scope !== undefined) params.scope = scope;
+    return this.postForm<TokenResponse>(await this.endpoint("token_endpoint"), params);
+  }
+
+  /**
    * Obtain a token via the Client Credentials grant (RFC 6749 §4.4).
    *
    * Sends `client_id` and `client_secret` as `application/x-www-form-urlencoded`
    * body fields — NEVER as URL query parameters. The token endpoint is discovered
    * from the OIDC discovery document.
    *
-   * @throws {@link OAuthFlowError} on any non-2xx response.
+   * @throws {@link OAuthFlowError} on a non-2xx response or a network failure.
    */
   async clientCredentials(scope?: string): Promise<TokenResponse> {
-    const doc = await this.discover();
-    const tokenEndpoint = (doc as Record<string, unknown>)["token_endpoint"] as string | undefined;
-    if (!tokenEndpoint) {
-      throw new ConfigurationError("token_endpoint not found in OIDC discovery document");
-    }
     const params: Record<string, string> = {
       grant_type: "client_credentials",
       client_id: this.clientId ?? "",
       client_secret: this.clientSecret ?? "",
     };
     if (scope !== undefined) params.scope = scope;
-    return this.postForm<TokenResponse>(tokenEndpoint, params);
+    return this.postForm<TokenResponse>(await this.endpoint("token_endpoint"), params);
   }
 
   /**
@@ -346,20 +482,15 @@ export class HearthClient {
    * Pass the returned `device_code` and `interval` to `pollDeviceToken()` to await approval.
    *
    * @throws {@link ConfigurationError} when `device_authorization_endpoint` is absent.
-   * @throws {@link OAuthFlowError} on any non-2xx response.
+   * @throws {@link OAuthFlowError} on a non-2xx response or a network failure.
    */
   async startDeviceFlow(scope?: string): Promise<DeviceAuthorizationResponse> {
-    const doc = await this.discover();
-    const deviceEndpoint = (doc as Record<string, unknown>)["device_authorization_endpoint"] as
-      string | undefined;
-    if (!deviceEndpoint) {
-      throw new ConfigurationError(
-        "device_authorization_endpoint not found in OIDC discovery document",
-      );
-    }
     const params: Record<string, string> = { client_id: this.clientId ?? "" };
     if (scope !== undefined) params.scope = scope;
-    return this.postForm<DeviceAuthorizationResponse>(deviceEndpoint, params);
+    return this.postForm<DeviceAuthorizationResponse>(
+      await this.endpoint("device_authorization_endpoint"),
+      params,
+    );
   }
 
   /**
@@ -372,53 +503,31 @@ export class HearthClient {
    * @param deviceCode - The `device_code` from `startDeviceFlow()`.
    * @param intervalSeconds - Initial polling interval (from `startDeviceFlow().interval`).
    * @throws {@link TokenExpiredError} — device code has expired.
-   * @throws {@link OAuthFlowError} — non-recoverable error from the server.
+   * @throws {@link OAuthFlowError} — non-recoverable error from the server, or a network failure.
    */
   async pollDeviceToken(deviceCode: string, intervalSeconds: number): Promise<TokenResponse> {
-    const doc = await this.discover();
-    const tokenEndpoint = (doc as Record<string, unknown>)["token_endpoint"] as string | undefined;
-    if (!tokenEndpoint) {
-      throw new ConfigurationError("token_endpoint not found in OIDC discovery document");
-    }
+    const tokenEndpoint = await this.endpoint("token_endpoint");
     let currentIntervalMs = intervalSeconds * 1000;
 
     // Use while(true) + await-setTimeout so Vitest fake timers can control polling in tests.
     while (true) {
       await new Promise<void>((res) => setTimeout(res, currentIntervalMs));
 
-      const body = new URLSearchParams({
-        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-        device_code: deviceCode,
-        client_id: this.clientId ?? "",
-      }).toString();
-
-      const resp = await fetch(tokenEndpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body,
-      });
-
-      if (resp.ok) {
-        return resp.json() as Promise<TokenResponse>;
-      }
-
-      let errorCode = "unknown";
       try {
-        const parsed = (await resp.json()) as Record<string, unknown>;
-        errorCode = typeof parsed["error"] === "string" ? parsed["error"] : "unknown";
-      } catch {
-        /* ignore parse failures */
-      }
-
-      if (errorCode === "authorization_pending") {
-        continue;
-      } else if (errorCode === "slow_down") {
-        currentIntervalMs += 5000;
-        continue;
-      } else if (errorCode === "expired_token") {
-        throw new TokenExpiredError(new Date());
-      } else {
-        throw new OAuthFlowError(resp.status, errorCode);
+        return await this.postForm<TokenResponse>(tokenEndpoint, {
+          grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+          device_code: deviceCode,
+          client_id: this.clientId ?? "",
+        });
+      } catch (err) {
+        if (!(err instanceof OAuthFlowError)) throw err;
+        if (err.errorCode === "authorization_pending") continue;
+        if (err.errorCode === "slow_down") {
+          currentIntervalMs += 5000;
+          continue;
+        }
+        if (err.errorCode === "expired_token") throw new TokenExpiredError(new Date());
+        throw err;
       }
     }
   }
@@ -433,23 +542,18 @@ export class HearthClient {
    * Requires `realmId` in `HearthClientConfig`.
    *
    * @throws {@link ConfigurationError} when `realmId` is absent.
-   * @throws {@link OAuthFlowError} on non-2xx response.
+   * @throws {@link OAuthFlowError} on a non-2xx response or a network failure.
    */
   async requestMagicLink(email: string): Promise<void> {
     if (!this.realmId) {
       throw new ConfigurationError("realmId is required for requestMagicLink");
     }
-    const url = `${this.issuerUrl}/v1/${this.realmId}/auth/magic-link`;
-    const resp = await fetch(url, {
+    const resp = await this.send(`${this.issuerUrl}/v1/${this.realmId}/auth/magic-link`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email }),
-      signal: AbortSignal.timeout(this.httpTimeout),
     });
-    if (resp.status === 202) return;
-    if (!resp.ok) {
-      throw new OAuthFlowError(resp.status, `HTTP ${resp.status}`);
-    }
+    if (!resp.ok) throw await oauthFlowError(resp);
   }
 
   /**
@@ -464,38 +568,164 @@ export class HearthClient {
    * @throws {@link OAuthFlowError} on any non-2xx response (e.g. expired/used token).
    */
   async exchangeMagicLink(token: string): Promise<TokenResponse> {
-    const doc = await this.discover();
-    const tokenEndpoint = (doc as Record<string, unknown>)["token_endpoint"] as string | undefined;
-    if (!tokenEndpoint) {
-      throw new ConfigurationError("token_endpoint not found in OIDC discovery document");
-    }
     const params: Record<string, string> = {
       grant_type: "urn:hearth:grant-type:magic-link",
       token,
     };
     if (this.clientId) params.client_id = this.clientId;
-    return this.postForm<TokenResponse>(tokenEndpoint, params);
+    return this.postForm<TokenResponse>(await this.endpoint("token_endpoint"), params);
+  }
+
+  // ── UserInfo, live permissions and the session-version feed ─────────────
+
+  /**
+   * Fetch the OIDC userinfo claims for an access token from the discovered
+   * `userinfo_endpoint`. Sends `X-Realm-ID` when `realmId` is configured.
+   *
+   * @throws {@link ConfigurationError} when discovery has no `userinfo_endpoint`.
+   * @throws {@link OAuthFlowError} on a non-2xx response or a network failure.
+   */
+  async userinfo(accessToken: string): Promise<UserInfoResponse> {
+    const endpoint = await this.endpoint("userinfo_endpoint");
+    return this.getRequired<UserInfoResponse>(endpoint, accessToken);
+  }
+
+  /**
+   * Fetch the user's current roles, groups and permissions from
+   * `GET /v1/me/permissions`. Unlike the claims in the JWT, which are fixed
+   * when the token is issued, this reflects assignments made since.
+   *
+   * @throws {@link ConfigurationError} when `realmId` is absent.
+   * @throws {@link OAuthFlowError} on a non-2xx response or a network failure.
+   */
+  async mePermissions(accessToken: string): Promise<MePermissionsResponse> {
+    this.requireRealmId("mePermissions");
+    const url = `${this.issuerUrl}/v1/me/permissions`;
+    return this.getRequired<MePermissionsResponse>(url, accessToken);
+  }
+
+  /**
+   * Fetch the full session-version snapshot (RFC HEA-930): every
+   * `{sessionId → minSv}` pair in the realm. Use it to seed a cache, then
+   * follow {@link svDelta} from `current_seq`. {@link SessionVersionCache} does
+   * both for you.
+   *
+   * @param serviceToken - Token with the `hearth.sv_feed` scope.
+   * @throws {@link ConfigurationError} when `realmId` is absent.
+   * @throws {@link OAuthFlowError} on a non-2xx response or a network failure.
+   */
+  async svSnapshot(serviceToken: string): Promise<SvSnapshotResponse> {
+    this.requireRealmId("svSnapshot");
+    const url = `${this.issuerUrl}/oauth/session-versions/snapshot`;
+    return this.getRequired<SvSnapshotResponse>(url, serviceToken);
+  }
+
+  /**
+   * Fetch session-version changes with `seq > since` (RFC HEA-930).
+   *
+   * @param serviceToken - Token with the `hearth.sv_feed` scope.
+   * @param since - Return only events after this sequence number.
+   * @param limit - Maximum number of entries (server default when omitted).
+   * @returns The deltas, or `null` when there are none (HTTP 204).
+   * @throws {@link ConfigurationError} when `realmId` is absent.
+   * @throws {@link OAuthFlowError} on a non-2xx response or a network failure.
+   */
+  async svDelta(
+    serviceToken: string,
+    since: number,
+    limit?: number,
+  ): Promise<SvDeltaResponse | null> {
+    this.requireRealmId("svDelta");
+    const url = new URL(`${this.issuerUrl}/oauth/session-versions`);
+    url.searchParams.set("since", String(since));
+    if (limit !== undefined) url.searchParams.set("limit", String(limit));
+    return this.getWithBearer<SvDeltaResponse>(url.toString(), serviceToken);
   }
 
   // ── Private helpers ──────────────────────────────────────────────────────
 
+  private requireClientId(method: string): string {
+    if (!this.clientId) throw new ConfigurationError(`clientId is required for ${method}()`);
+    return this.clientId;
+  }
+
+  private requireRealmId(method: string): string {
+    if (!this.realmId) throw new ConfigurationError(`realmId is required for ${method}()`);
+    return this.realmId;
+  }
+
+  /** `client_id`, plus `client_secret` when this is a confidential client. */
+  private clientAuthParams(method: string): Record<string, string> {
+    const params: Record<string, string> = { client_id: this.requireClientId(method) };
+    if (this.clientSecret) params.client_secret = this.clientSecret;
+    return params;
+  }
+
+  /** Read an endpoint URL from the discovery document. */
+  private async endpoint(field: EndpointField): Promise<string> {
+    const value = (await this.discover())[field];
+    if (typeof value !== "string" || value === "") {
+      throw new ConfigurationError(`${field} not found in OIDC discovery document`);
+    }
+    return value;
+  }
+
+  /** `fetch` with the configured timeout; a network failure becomes `OAuthFlowError(0)`. */
+  private async send(url: string, init: RequestInit): Promise<Response> {
+    try {
+      return await fetch(url, { ...init, signal: AbortSignal.timeout(this.httpTimeout) });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new OAuthFlowError(0, "request_failed", `Request to ${url} failed: ${detail}`);
+    }
+  }
+
   private async postForm<T>(endpoint: string, params: Record<string, string>): Promise<T> {
-    const resp = await fetch(endpoint, {
+    const resp = await this.send(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams(params).toString(),
-      signal: AbortSignal.timeout(this.httpTimeout),
     });
-    if (!resp.ok) {
-      let errorCode = `HTTP ${resp.status}`;
-      try {
-        const parsed = (await resp.json()) as Record<string, unknown>;
-        if (typeof parsed["error"] === "string") errorCode = parsed["error"];
-      } catch {
-        /* ignore */
-      }
-      throw new OAuthFlowError(resp.status, errorCode);
-    }
+    if (!resp.ok) throw await oauthFlowError(resp);
     return resp.json() as Promise<T>;
   }
+
+  /** GET with a bearer token, for endpoints that must return a body. */
+  private async getRequired<T>(url: string, token: string): Promise<T> {
+    const result = await this.getWithBearer<T>(url, token);
+    if (result === null) {
+      throw new OAuthFlowError(204, "no_content", `${url} answered 204 No Content`);
+    }
+    return result;
+  }
+
+  /** GET with a bearer token; `null` on 204 No Content. */
+  private async getWithBearer<T>(url: string, token: string): Promise<T | null> {
+    const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
+    if (this.realmId) headers["X-Realm-ID"] = this.realmId;
+    const resp = await this.send(url, { headers });
+    if (resp.status === 204) return null;
+    if (!resp.ok) throw await oauthFlowError(resp);
+    return resp.json() as Promise<T>;
+  }
+}
+
+/**
+ * Build an {@link OAuthFlowError} from a non-2xx response, taking `error` and
+ * `error_description` from an RFC 6749 §5.2 JSON body when there is one.
+ */
+async function oauthFlowError(resp: Response): Promise<OAuthFlowError> {
+  let errorCode = `HTTP ${resp.status}`;
+  let description: string | undefined;
+  try {
+    const parsed = (await resp.json()) as Record<string, unknown>;
+    if (typeof parsed["error"] === "string") errorCode = parsed["error"];
+    if (typeof parsed["error_description"] === "string") {
+      description = parsed["error_description"];
+    }
+  } catch {
+    /* body is not JSON */
+  }
+  const message = `OAuth flow error ${resp.status}: ${errorCode}${description ? ` (${description})` : ""}`;
+  return new OAuthFlowError(resp.status, errorCode, message);
 }

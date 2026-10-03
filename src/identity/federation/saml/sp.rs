@@ -1,4 +1,4 @@
-//! SP-side orchestration: begin login, consume Response at ACS, SLO.
+//! SP-side orchestration: consume a `<samlp:Response>` at the ACS.
 //!
 //! Pure logic — no storage, no HTTP. Callers (engine, web handlers)
 //! combine these primitives with their own state-stores.
@@ -6,7 +6,7 @@
 use super::response::{extract_and_validate_assertion, parse_response, Assertion, ValidateParams};
 use super::signature::verify_signed_element_with_any;
 use super::types::{AttributeMap, SamlIdpConfig};
-use super::xml::{count_elements, ns};
+use super::xml::{check_signature_placement, count_elements, ns};
 use crate::core::Timestamp;
 use crate::identity::error::IdentityError;
 use crate::identity::federation::saml::SamlError;
@@ -97,6 +97,13 @@ impl SamlSpService {
         if count_elements(xml, ns::SAML, "Assertion")? != 1 {
             return Err(IdentityError::Saml(SamlError::Signature));
         }
+
+        // Strict SP profile (scope-trim-trusted-core): a `<ds:Signature>` may
+        // sit only directly under the root `<samlp:Response>` or under the
+        // assertion, one each. Anything else is refused before any signature
+        // is verified — an unverified signature region is removed, not
+        // skipped.
+        check_signature_placement(xml)?;
 
         // Signature verification: prefer Assertion-level signature if
         // want_assertions_signed, else accept Response-level signature.

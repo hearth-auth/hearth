@@ -26,9 +26,9 @@ async fn setup_oidc_env() -> (
     hearth::core::UserId,
     OAuthClient,
 ) {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
-        .expect("embedded harness");
+        .expect("in-process harness");
 
     let realm = harness
         .identity()
@@ -108,7 +108,6 @@ fn authorize_and_exchange(
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize");
@@ -231,9 +230,9 @@ async fn oidc_core_required_claims_and_signing() {
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // TODO: split this function
 async fn oidc_discovery_all_required_fields() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
-        .expect("embedded harness");
+        .expect("in-process harness");
 
     let doc = harness.identity().oidc_discovery();
 

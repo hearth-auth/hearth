@@ -90,7 +90,6 @@ fn every_spelling_of_a_resource_reads_the_same_consent_record() {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         );
         assert!(

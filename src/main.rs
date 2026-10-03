@@ -8,9 +8,7 @@ use tokio::sync::Notify;
 use tracing::{error, info, warn};
 
 use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
-use hearth::config::{
-    Config, EmailTransport, SmsTransport, StorageSection, TlsMinVersionYaml, ValidationIssue,
-};
+use hearth::config::{Config, EmailTransport, StorageSection, TlsMinVersionYaml, ValidationIssue};
 use hearth::core::{Clock, SystemClock};
 use hearth::identity::email::mailcatcher::{
     generate_password, MailcatcherSender, MailcatcherState,
@@ -21,14 +19,10 @@ use hearth::identity::email::{
     MailtrapEmailSender, PostmarkEmailSender, SendgridEmailSender, SharedEmailSender,
 };
 use hearth::identity::onboarding::{self, OnboardingService};
-use hearth::identity::sms::{
-    LoggingSmsSender, SharedSmsSender, SmsSecret, SnsSmsSender, TwilioSmsSender,
-};
 use hearth::identity::{
     CredentialConfig, EmbeddedIdentityEngine, IdentityConfig, IdentityEngine, OidcConfig,
     RateLimitConfig, TokenConfig,
 };
-use hearth::protocol;
 use hearth::protocol::admin_auth::JwksRateLimiter;
 use hearth::protocol::http::{self, AppState};
 use hearth::protocol::tls::{build_server_config, ReloadableTlsConfig, TlsConfigParams};
@@ -70,16 +64,6 @@ enum Commands {
         /// the startup phase only (respects existing log level for steady-state).
         #[arg(long, short = 'v')]
         verbose: bool,
-
-        /// Allow gRPC server reflection in production mode (A-43).
-        ///
-        /// gRPC reflection exposes the full API schema to any unauthenticated caller.
-        /// Hearth refuses to start with `security.grpc.reflection_enabled = true` in
-        /// production mode unless this flag is explicitly passed.
-        ///
-        /// Use only for debugging. Never enable in real deployments.
-        #[arg(long)]
-        allow_reflection_in_prod: bool,
     },
     /// Manage realms.
     Realm {
@@ -577,18 +561,8 @@ async fn main() {
             port,
             bind,
             verbose,
-            allow_reflection_in_prod,
         } => {
-            if let Err(e) = run_serve(
-                dev,
-                config_path,
-                port,
-                bind,
-                verbose,
-                allow_reflection_in_prod,
-            )
-            .await
-            {
+            if let Err(e) = run_serve(dev, config_path, port, bind, verbose).await {
                 // Route through report_startup_fatal — tracing may not be
                 // initialized yet if the error occurred during config loading,
                 // in which case a bare `tracing::error!` writes nowhere and the
@@ -886,12 +860,11 @@ fn run_rbac_command(action: RbacAction) {
 /// against the server's bind address.
 ///
 /// The rate-limit-disable path (HEA-1796) is prod-gated on TWO conditions
-/// (HEA-1797): the process must run in `--dev` mode **and** every effective
-/// bind (HTTP and, when enabled, gRPC) must be loopback. If either check fails
-/// the request is refused and every limiter stays on, so a misconfigured
-/// production server — or a dev server whose gRPC listener diverges onto a
-/// public interface, or a prod-config binary behind a reverse proxy — can never
-/// silently ship with brute-force / abuse protection removed.
+/// (HEA-1797): the process must run in `--dev` mode **and** the effective HTTP
+/// bind must be loopback. If either check fails the request is refused and
+/// every limiter stays on, so a misconfigured production server — or a
+/// prod-config binary behind a reverse proxy — can never silently ship with
+/// brute-force / abuse protection removed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LoadtestUnthrottle {
     /// The flag is unset — limiters stay on (normal operation).
@@ -899,8 +872,8 @@ enum LoadtestUnthrottle {
     /// The flag is set, dev mode is on, and every bind is loopback — disable
     /// all limiters.
     Enabled,
-    /// The flag is set but at least one effective bind (HTTP or gRPC) is
-    /// non-loopback — refuse, keep limiters on.
+    /// The flag is set but the effective HTTP bind is non-loopback — refuse,
+    /// keep limiters on.
     RefusedNonLoopback,
     /// The flag is set but the process is not in `--dev` mode — refuse, keep
     /// limiters on. Guards the reverse-proxy topology where a prod server binds
@@ -952,88 +925,21 @@ fn split_bind_override(bind: &str) -> (String, Option<u16>) {
 /// logging / I/O) so the prod-safety gate is unit tested; the caller emits the
 /// operator-facing warn/error log.
 ///
-/// `http_bind` is the raw `server.bind_address` and `grpc_bind` the effective
-/// gRPC bind (`None` when the gRPC listener is disabled), both already trimmed
-/// by the caller. A bare `localhost` is treated as loopback; anything that does
-/// not parse to a loopback `IpAddr` (including a wildcard `0.0.0.0` / `::`) is
+/// `http_bind` is the raw `server.bind_address`, already trimmed by the
+/// caller. A bare `localhost` is treated as loopback; anything that does not
+/// parse to a loopback `IpAddr` (including a wildcard `0.0.0.0` / `::`) is
 /// non-loopback and refuses the request.
-fn loadtest_unthrottle_decision(
-    enabled: bool,
-    dev: bool,
-    http_bind: &str,
-    grpc_bind: Option<&str>,
-) -> LoadtestUnthrottle {
+fn loadtest_unthrottle_decision(enabled: bool, dev: bool, http_bind: &str) -> LoadtestUnthrottle {
     if !enabled {
         return LoadtestUnthrottle::Off;
     }
     if !dev {
         return LoadtestUnthrottle::RefusedNotDev;
     }
-    // Every effective bind must be loopback. A disabled gRPC listener (`None`)
-    // cannot be reached, so it does not gate the decision.
-    let all_loopback = bind_is_loopback(http_bind)
-        && match grpc_bind {
-            Some(g) => bind_is_loopback(g),
-            None => true,
-        };
-    if all_loopback {
+    if bind_is_loopback(http_bind) {
         LoadtestUnthrottle::Enabled
     } else {
         LoadtestUnthrottle::RefusedNonLoopback
-    }
-}
-
-/// Resolves the SMS OTP HMAC key from `HEARTH_SMS_OTP_HMAC_KEY` at startup.
-///
-/// The key cryptographically binds OTP codes to the server. It is required
-/// **only when SMS is actually enabled** — i.e. `sms.transport` is a real
-/// transport (Twilio, AWS SNS). The `log` transport dispatches no real SMS, so
-/// the key is optional there (HEA-2105/H).
-///
-/// When the key is absent:
-/// * in dev mode a fresh random 32-byte key is generated for this process, so
-///   SMS MFA works out of the box against the (body-logging) dev transport;
-/// * otherwise the result is `None`, and every SMS OTP surface fails closed —
-///   no code is issued and no SMS challenge can pass. There is no fallback
-///   key: the handlers used to substitute an all-zero one, which made every
-///   stored OTP digest brute-forceable offline by anyone.
-///
-/// Pure apart from the OS RNG (no env access, no other I/O) so the startup gate
-/// is unit tested; the caller reads the env var and maps the `Err` message onto
-/// the fatal-startup path.
-fn resolve_sms_otp_hmac_key(
-    env_value: Option<&str>,
-    sms_transport: SmsTransport,
-    dev_mode: bool,
-) -> Result<Option<Vec<u8>>, String> {
-    match env_value {
-        Some(key) if !key.is_empty() => {
-            if key.len() < 32 {
-                return Err(
-                    "HEARTH_SMS_OTP_HMAC_KEY must be at least 32 bytes for adequate \
-                     HMAC-SHA256 security; use a 32+ byte random value"
-                        .into(),
-                );
-            }
-            Ok(Some(key.as_bytes().to_vec()))
-        }
-        // Missing or empty: only a hard error when a real SMS transport needs it.
-        _ => {
-            if sms_transport != SmsTransport::Log {
-                return Err("HEARTH_SMS_OTP_HMAC_KEY environment variable is required \
-                     when sms.transport is not 'log' (a real SMS transport is configured)"
-                    .into());
-            }
-            if dev_mode {
-                use ring::rand::SecureRandom as _;
-                let mut key = vec![0u8; 32];
-                ring::rand::SystemRandom::new()
-                    .fill(&mut key)
-                    .map_err(|_| "failed to generate a dev-mode SMS OTP HMAC key".to_string())?;
-                return Ok(Some(key));
-            }
-            Ok(None)
-        }
     }
 }
 
@@ -1048,8 +954,8 @@ enum DevBindCheck {
     RefusedNonLoopback,
 }
 
-/// Hard startup gate for `--dev` mode: refuses to start when any effective
-/// bind (HTTP or gRPC) is non-loopback (HEA-1980).
+/// Hard startup gate for `--dev` mode: refuses to start when the effective
+/// HTTP bind is non-loopback (HEA-1980).
 ///
 /// Unlike the config-file check in `validate.rs`, this runs **after** CLI
 /// `--bind`/`--port` overrides are applied, so `hearth serve --dev --bind
@@ -1058,16 +964,11 @@ enum DevBindCheck {
 ///
 /// Pure (no logging / I/O) so the gate is unit-testable; the caller emits the
 /// operator-facing error.
-fn dev_mode_bind_check(dev: bool, http_bind: &str, grpc_bind: Option<&str>) -> DevBindCheck {
+fn dev_mode_bind_check(dev: bool, http_bind: &str) -> DevBindCheck {
     if !dev {
         return DevBindCheck::NotDev;
     }
-    let all_loopback = bind_is_loopback(http_bind)
-        && match grpc_bind {
-            Some(g) => bind_is_loopback(g),
-            None => true,
-        };
-    if all_loopback {
+    if bind_is_loopback(http_bind) {
         DevBindCheck::Ok
     } else {
         DevBindCheck::RefusedNonLoopback
@@ -1166,7 +1067,6 @@ async fn run_serve(
     port_override: Option<u16>,
     bind_override: Option<String>,
     verbose: bool,
-    allow_reflection_in_prod: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Load configuration. This runs before `telemetry::init` below, so a
     // failure here cannot be reported through `tracing` — write the same
@@ -1403,7 +1303,7 @@ async fn run_serve(
     //
     // L24 (GA audit 2026-09-28): one shutdown signal for every listener. The
     // sender is armed by the signal task spawned just before serving; each
-    // listener — HTTP(S), redirect, gRPC, the Raft peer server — starts
+    // listener — HTTP(S), redirect, the Raft peer server — starts
     // draining the moment it fires, and all of them share one deadline
     // measured from the signal. gRPC used to be told only after HTTP had
     // drained (so shutdown could take twice the timeout), and the Raft peer
@@ -1699,7 +1599,6 @@ async fn run_serve(
     // Extract cleanup config before identity_config is consumed by the engine.
     let cleanup_enabled = identity_config.cleanup.enabled;
     let cleanup_interval_secs = identity_config.cleanup.interval_secs;
-    let dfp_sweeper_interval_secs = identity_config.cleanup.dfp_sweeper_interval_secs;
 
     // Build the RBAC engine before the identity engine — identity depends on rbac.
     let raw_rbac_engine = Arc::new(EmbeddedRbacEngine::new(
@@ -1793,31 +1692,10 @@ async fn run_serve(
         );
     }
 
-    // HSEC-003/004: Production startup security checks against the system realm.
+    // HSEC-003: Production startup security checks against the system realm.
     if !config.dev_mode {
         let sys_realm_id = hearth::core::RealmId::new(uuid::Uuid::nil());
         if let Ok(Some(sys_realm)) = identity_engine.get_realm(&sys_realm_id) {
-            // HSEC-004: Hard error — explicitly disabling MFA on the admin control
-            // plane is a misconfiguration that blocks startup in production.
-            if sys_realm.config().mfa_required == Some(false) {
-                return Err(
-                    "security: system realm mfa_required is explicitly set to false; \
-                     MFA may not be disabled on the admin realm in production. \
-                     Remove the override or set mfa_required: true."
-                        .into(),
-                );
-            }
-            // HSEC-004: Soft warning — when mfa_required is not configured at all,
-            // the system realm defaults to MFA not required. Operators should enroll
-            // a second factor for all admin accounts and then set mfa_required: true
-            // in hearth.yaml to enforce it.
-            if sys_realm.config().mfa_required.is_none() {
-                warn!(
-                    "system realm mfa_required is not configured; admin sessions do not \
-                     require a second factor. Enroll MFA for all admin accounts and set \
-                     mfa_required: true under the system realm config to enforce it."
-                );
-            }
             // HSEC-003: Non-fatal warning — the 12-character floor (NIST SP 800-63B) is always
             // enforced at validation time, but an explicit policy is recommended in production.
             if sys_realm.config().password_policy.is_none() {
@@ -1830,15 +1708,6 @@ async fn run_serve(
             }
         }
     }
-
-    // A-43: Resolve effective reflection_enabled and apply the production guard.
-    // `None` in the config means "use the mode default": true in --dev, false in prod.
-    let reflection_enabled = protocol::grpc::resolve_grpc_reflection(
-        config.security.grpc.reflection_enabled,
-        config.dev_mode,
-        allow_reflection_in_prod,
-    )
-    .map_err(|e| e.to_string())?;
 
     // In dev mode, upgrade Log and Smtp to mailcatcher so `make dev` works without
     // Docker or a real mail server. Production cloud transports (sendgrid, postmark,
@@ -1866,23 +1735,6 @@ async fn run_serve(
     // Email sender + service (default: log transport — stderr at WARN level).
     let email_sender: SharedEmailSender = build_email_sender(&config, mailcatcher_state.as_ref())?;
     let email_service = Arc::new(build_email_service(email_sender, &config)?);
-
-    // SMS sender (default: log transport).
-    // HEARTH_SMS_OTP_HMAC_KEY cryptographically binds OTP codes to the server.
-    // It is required only when a real SMS transport is configured; the Log
-    // transport needs no key because no real SMS is sent (HEA-2105/H). Without
-    // one, dev mode generates a per-process key and production SMS OTP fails
-    // closed.
-    let sms_env = std::env::var("HEARTH_SMS_OTP_HMAC_KEY").ok();
-    let sms_hmac_key_bytes: Option<Vec<u8>> =
-        resolve_sms_otp_hmac_key(sms_env.as_deref(), config.sms.transport, config.dev_mode)?;
-    let sms_sender: SharedSmsSender = build_sms_sender(&config)?;
-    if config.sms.transport == SmsTransport::Log && !config.dev_mode {
-        warn!(
-            "sms.transport = log is active outside dev mode — no real SMS messages will be \
-             sent, SMS MFA cannot be enabled, and SMS OTP challenges fail closed"
-        );
-    }
 
     // Ensure a first-run setup token exists BEFORE realm reconciliation.
     // Reconciliation may auto-create realms from YAML config, which would
@@ -1980,6 +1832,22 @@ async fn run_serve(
         Err(e) => {
             error!(error = %e, "realm reconciliation failed");
         }
+    }
+
+    // MFA policy (spec `mfa-policy`). The system realm — the admin console —
+    // always requires a second factor, in `--dev` as in production. Every
+    // other realm whose MFA is off is named once, loudly.
+    identity_engine
+        .apply_system_realm_mfa_required(true)
+        .map_err(|e| format!("could not apply the system realm MFA policy: {e}"))?;
+    match hearth::identity::realms_with_mfa_off(identity_engine.as_ref()) {
+        Ok(off) if !off.is_empty() => warn!(
+            realms = %off.join(", "),
+            "MFA is NOT required in these realms: a stolen password alone signs a user in. \
+             Remove `mfa_required: false` from hearth.yaml to require a second factor."
+        ),
+        Ok(_) => {}
+        Err(e) => warn!(error = %e, "could not list realms for the MFA policy check"),
     }
 
     // Re-seed RBAC defaults on every realm that exists in storage, not just
@@ -2249,78 +2117,6 @@ async fn run_serve(
                     }
                     offset += n;
                 }
-            }
-        });
-    }
-
-    // Background device-fingerprint TTL sweeper (GDPR proactive eviction).
-    if cleanup_enabled && dfp_sweeper_interval_secs > 0 {
-        let dfp_engine = Arc::clone(&identity_engine);
-        tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(Duration::from_secs(dfp_sweeper_interval_secs));
-            // Skip the immediate first tick so the server finishes warm-up.
-            interval.tick().await;
-            loop {
-                interval.tick().await;
-                let batch = hearth::core::MAX_PAGE_LIMIT;
-                let mut total_evicted: u64 = 0;
-                let mut total_active: u64 = 0;
-                let mut offset = 0u64;
-                loop {
-                    let page = match dfp_engine
-                        .list_realms(&hearth::core::PageRequest::new(offset, batch))
-                    {
-                        Ok(p) => p,
-                        Err(e) => {
-                            warn!(error = %e, "dfp_sweeper: realm enumeration failed, retrying next tick");
-                            break;
-                        }
-                    };
-                    let n = page.items.len() as u64;
-                    let now_secs = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs() as i64)
-                        .unwrap_or(0);
-                    for realm in &page.items {
-                        match dfp_engine.sweep_expired_fingerprints(realm.id(), now_secs) {
-                            Ok((evicted, active)) => {
-                                total_evicted += evicted;
-                                total_active += active;
-                                if evicted > 0 {
-                                    info!(
-                                        realm = %realm.name(),
-                                        evicted,
-                                        active,
-                                        "dfp_sweeper: evicted expired fingerprints",
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                warn!(
-                                    realm = %realm.name(),
-                                    error = %e,
-                                    "dfp_sweeper: sweep failed for realm",
-                                );
-                            }
-                        }
-                    }
-                    if n == 0 || offset + n >= page.total {
-                        break;
-                    }
-                    offset += n;
-                }
-                // Realistic eviction/active counts never approach 2^53, so the
-                // u64 → f64 conversion is lossless in practice. Prometheus
-                // counter/gauge APIs accept f64 only.
-                #[allow(clippy::cast_precision_loss)]
-                let evicted_f64 = total_evicted as f64;
-                #[allow(clippy::cast_precision_loss)]
-                let active_f64 = total_active as f64;
-                hearth::metrics::metrics()
-                    .dfp_sweeper_evicted_total
-                    .inc_by(evicted_f64);
-                hearth::metrics::metrics().dfp_keys_active.set(active_f64);
             }
         });
     }
@@ -2671,41 +2467,25 @@ async fn run_serve(
         ))
     };
 
-    // A-2: build a shared RequestShaper from operator config (or defaults) and
-    // wire it to BOTH the HTTP AppState and the gRPC GrpcState so that per-IP
-    // counters accumulate across protocols — a caller cannot evade the limit by
-    // switching from REST to gRPC.
+    // A-2: build the RequestShaper from operator config (or defaults) and wire
+    // it into the HTTP AppState.
     // Load-test escape hatch (`security.load_test_unthrottled`): when set AND
-    // the process runs in `--dev` mode AND every effective bind (HTTP + gRPC)
-    // is loopback, disable every request-rate limiter so a single-node
+    // the process runs in `--dev` mode AND the effective HTTP bind is
+    // loopback, disable every request-rate limiter so a single-node
     // throughput/soak test can saturate the hot path instead of measuring the
     // rate limiter. Refused (fail-safe: limiters stay ON) when not in dev mode
-    // (guards reverse-proxy prod topologies) or when any bind — including the
-    // gRPC listener, which may diverge from the HTTP bind — is non-loopback, so
-    // this can never silently expose a public server (HEA-1797).
+    // (guards reverse-proxy prod topologies) or when the bind is non-loopback,
+    // so this can never silently expose a public server (HEA-1797).
     let bind = config.server.bind_address.trim();
-    // Effective gRPC bind: only relevant when the gRPC listener is enabled
-    // (`grpc_port` set); it inherits `bind_address` when `grpc_bind_address` is
-    // unset. Mirrors the resolution at the gRPC spawn site below.
-    let grpc_bind = config.server.grpc_port.map(|_| {
-        config
-            .server
-            .grpc_bind_address
-            .as_deref()
-            .unwrap_or(config.server.bind_address.as_str())
-            .trim()
-    });
     // Hard gate: dev mode must never expose on a non-loopback address (HEA-1980).
     // The config-file validation in validate.rs catches a non-loopback
     // bind_address when a config file is used, but (a) the CLI --bind override
     // is applied after that validation, and (b) Config::dev() (the no-config-file
     // path) skips validate() entirely — so both cases bypass the earlier check.
-    if let DevBindCheck::RefusedNonLoopback = dev_mode_bind_check(config.dev_mode, bind, grpc_bind)
-    {
+    if let DevBindCheck::RefusedNonLoopback = dev_mode_bind_check(config.dev_mode, bind) {
         error!(
             bind_address = %bind,
-            grpc_bind_address = grpc_bind.unwrap_or("<disabled>"),
-            "dev mode refused: all effective binds must be loopback (HEA-1980). \
+            "dev mode refused: the bind address must be loopback (HEA-1980). \
              --dev enables unauthenticated endpoints (/dev/seed-session, /admin/bootstrap) \
              and weakened Argon2 parameters — exposing them on a routable interface \
              is a critical security risk. Use --bind 127.0.0.1 or --bind ::1."
@@ -2717,13 +2497,11 @@ async fn run_serve(
         config.security.load_test_unthrottled.unwrap_or(false),
         config.dev_mode,
         bind,
-        grpc_bind,
     ) {
         LoadtestUnthrottle::Off => false,
         LoadtestUnthrottle::Enabled => {
             tracing::warn!(
                 bind_address = %bind,
-                grpc_bind_address = grpc_bind.unwrap_or("<disabled>"),
                 "security.load_test_unthrottled=true — ALL request-rate limiters \
                  (token endpoint, admin API, export, request shaper) are DISABLED. \
                  Load-test-only mode; never enable on a production bind."
@@ -2738,10 +2516,9 @@ async fn run_serve(
         LoadtestUnthrottle::RefusedNonLoopback => {
             tracing::error!(
                 bind_address = %bind,
-                grpc_bind_address = grpc_bind.unwrap_or("<disabled>"),
-                "security.load_test_unthrottled=true refused: every effective bind \
-                 (HTTP and gRPC) must be loopback; rate limiters remain ENABLED. \
-                 Bind both to 127.0.0.1 or ::1 to run an unthrottled load test."
+                "security.load_test_unthrottled=true refused: the bind address must be \
+                 loopback; rate limiters remain ENABLED. Bind to 127.0.0.1 or ::1 to \
+                 run an unthrottled load test."
             );
             false
         }
@@ -2852,16 +2629,10 @@ async fn run_serve(
     let abuse_guards = Arc::new(hearth::abuse::runtime::AbuseGuards::from_security(
         &config.security,
     ));
-    abuse_guards.spawn_background_tasks(&config.security);
     info!(
-        tarpit = config.security.tarpit.threshold.is_some(),
         distributed_attack_detector = config.security.distributed_attack_detector.enabled,
         outbound_volume_shield = config.security.outbound_volume_shield.enabled,
         cross_realm_aggregation_cap = config.security.cross_realm_aggregation_cap.enabled,
-        bot_signal = config.security.providers.bot_signal.enabled,
-        email_reputation = config.security.providers.email_reputation.enabled,
-        ip_reputation = config.security.ip_reputation.enabled,
-        risk_scorer = config.security.risk_scorer.enabled,
         "abuse-prevention guards installed"
     );
 
@@ -2891,7 +2662,6 @@ async fn run_serve(
             .with_agent_advanced(true)
             .with_email(Some(Arc::clone(&email_service)))
             .with_public_base_url(public_base_url.clone())
-            .with_sms_transport(config.sms.transport)
             .with_abuse_guards(Arc::clone(&abuse_guards)),
         )
     } else {
@@ -2917,7 +2687,6 @@ async fn run_serve(
             .with_agent_advanced(config.agent_auth.capabilities.advanced)
             .with_email(Some(Arc::clone(&email_service)))
             .with_public_base_url(public_base_url.clone())
-            .with_sms_transport(config.sms.transport)
             .with_abuse_guards(Arc::clone(&abuse_guards)),
         )
     };
@@ -2951,8 +2720,6 @@ async fn run_serve(
     .with_logo_url(web_logo_url)
     .with_default_realm(config.server.default_realm.clone())
     .with_config(Arc::new(config.clone()))
-    .with_sms(sms_sender, sms_hmac_key_bytes)
-    .with_sms_transport(config.sms.transport)
     .with_abuse_guards(Arc::clone(&abuse_guards))
     .with_dev_mode(config.dev_mode);
 
@@ -3232,64 +2999,13 @@ async fn run_serve(
         });
     }
 
-    // M14 (GA audit 2026-09-28): one certificate for HTTPS and gRPC. Built
-    // here, before either listener, so the gRPC listener can terminate TLS
-    // with the same (hot-reloadable) certificate; it used to be plaintext
-    // unconditionally.
+    // M14 (GA audit 2026-09-28): the HTTPS listener's (hot-reloadable)
+    // certificate, built here before the listener starts.
     let tls = match (&config.server.tls_cert_path, &config.server.tls_key_path) {
         (Some(cert_path), Some(key_path)) => {
             Some(build_tls_acceptor(&config, cert_path, key_path)?)
         }
         _ => None,
-    };
-
-    // Spawn the gRPC management API alongside the HTTP server. Both share
-    // the `AdminRateLimiter` so rate limits apply across protocols.
-    let grpc_server = if let Some(grpc_port) = config.server.grpc_port {
-        let bind = config
-            .server
-            .grpc_bind_address
-            .as_deref()
-            .unwrap_or(config.server.bind_address.as_str());
-        let grpc_addr: SocketAddr = format!("{bind}:{grpc_port}")
-            .parse()
-            .map_err(|e| format!("invalid gRPC bind address: {e}"))?;
-        let grpc_state = protocol::grpc::GrpcState::new(
-            Arc::clone(&identity_engine),
-            Arc::clone(&rbac_engine),
-            Arc::clone(&audit_engine),
-            Arc::clone(&app_state.admin_rate_limiter),
-        )
-        // A-2: share the same RequestShaper so HTTP + gRPC per-IP counts
-        // accumulate in the same sliding window.
-        .with_shaper(Arc::clone(&request_shaper));
-        let grpc_tls = tls.as_ref().map(|(_, acceptor)| acceptor.clone());
-        let grpc_tls_enabled = grpc_tls.is_some();
-        let shutdown = shutdown_requested(shutdown_signal_rx.clone());
-        let handle = tokio::spawn(async move {
-            if let Err(e) = protocol::grpc::serve(
-                grpc_addr,
-                grpc_state,
-                reflection_enabled,
-                grpc_tls,
-                shutdown,
-            )
-            .await
-            {
-                error!(error = %e, "gRPC server exited with error");
-            }
-        });
-        info!(address = %grpc_addr, tls = grpc_tls_enabled, "gRPC management API enabled");
-        if !grpc_tls_enabled && !config.dev_mode {
-            warn!(
-                address = %grpc_addr,
-                "gRPC management API is PLAINTEXT (no server.tls_cert_path): admin tokens and \
-                 client secrets are not encrypted on this listener"
-            );
-        }
-        Some(handle)
-    } else {
-        None
     };
 
     // Write PID file for `hearth config reload` CLI.
@@ -3424,10 +3140,10 @@ async fn run_serve(
         }
     }
 
-    // gRPC and the Raft peer server began draining at the signal, alongside
-    // HTTP; wait for them only until the SAME deadline (L24).
+    // The Raft peer server began draining at the signal, alongside HTTP; wait
+    // for it only until the SAME deadline (L24).
     let deadline = shared_drain_deadline(&shutdown_signal_rx, Duration::from_secs(drain_secs));
-    for (listener, handle) in [("gRPC", grpc_server), ("Raft peer", raft_server)] {
+    for (listener, handle) in [("Raft peer", raft_server)] {
         let Some(handle) = handle else { continue };
         if tokio::time::timeout_at(deadline, handle).await.is_err() {
             warn!(
@@ -3774,47 +3490,6 @@ fn build_email_sender(
     })
 }
 
-/// Builds the outbound SMS sender from configuration.
-///
-/// Returns the appropriate transport adapter based on the configured
-/// `sms.transport`. Fails if the transport config is structurally invalid.
-fn build_sms_sender(config: &Config) -> Result<SharedSmsSender, Box<dyn std::error::Error>> {
-    use hearth::identity::sms::http::UreqSmsTransport;
-
-    Ok(match config.sms.transport {
-        // Only dev mode may log the body: it carries the one-time code.
-        SmsTransport::Log if config.dev_mode => Arc::new(LoggingSmsSender::new_dev()),
-        SmsTransport::Log => Arc::new(LoggingSmsSender::new()),
-        SmsTransport::Twilio => {
-            let tw = config
-                .sms
-                .twilio
-                .as_ref()
-                .ok_or("sms.twilio block is required for twilio transport")?;
-            Arc::new(TwilioSmsSender::new(
-                UreqSmsTransport,
-                tw.account_sid.clone(),
-                SmsSecret::new(tw.auth_token.clone()),
-                tw.from.clone(),
-            ))
-        }
-        SmsTransport::AwsSns => {
-            let sns = config
-                .sms
-                .aws_sns
-                .as_ref()
-                .ok_or("sms.aws_sns block is required for awssns transport")?;
-            Arc::new(SnsSmsSender::new(
-                UreqSmsTransport,
-                sns.region.clone(),
-                sns.access_key_id.clone(),
-                SmsSecret::new(sns.secret_access_key.clone()),
-                sns.sender_id.clone(),
-            ))
-        }
-    })
-}
-
 /// Builds the email service (orchestration layer) wrapping a sender.
 ///
 /// `product_name` and `logo_url` come from the global `branding:`
@@ -3912,10 +3587,10 @@ fn shared_drain_deadline(
     fired_at.unwrap_or_else(tokio::time::Instant::now) + drain
 }
 
-/// Builds the TLS acceptor shared by the HTTPS and gRPC listeners (M14).
+/// Builds the HTTPS listener's TLS acceptor (M14).
 ///
 /// The returned [`ReloadableTlsConfig`] backs the acceptor's certificate
-/// resolver, so a SIGHUP certificate reload reaches both listeners.
+/// resolver, so a SIGHUP certificate reload reaches the listener.
 fn build_tls_acceptor(
     config: &Config,
     cert_path: &std::path::Path,
@@ -5426,7 +5101,6 @@ fn import_report_had_errors(report: &hearth::backup::ImportReport) -> bool {
         || report.identity_providers.errored > 0
         || report.federation_links.errored > 0
         || report.webhooks.errored > 0
-        || report.saml_service_providers.errored > 0
         || report.scim_mappings.errored > 0
         || report.invitations.errored > 0
         || report.revocations.errored > 0
@@ -5575,7 +5249,7 @@ fn run_backup_inspect(input: &std::path::Path) -> Result<(), Box<dyn std::error:
 /// 23.5). A restore report that hides seven of its eleven entity types is
 /// indistinguishable from a clean one.
 fn print_import_report(slug: &str, report: &hearth::backup::ImportReport) {
-    let buckets: [(&str, &hearth::backup::EntityCounts); 23] = [
+    let buckets: [(&str, &hearth::backup::EntityCounts); 22] = [
         ("realms", &report.realms),
         ("users", &report.users),
         ("mfa", &report.mfa_factors),
@@ -5593,7 +5267,6 @@ fn print_import_report(slug: &str, report: &hearth::backup::ImportReport) {
         ("idps", &report.identity_providers),
         ("federation links", &report.federation_links),
         ("webhooks", &report.webhooks),
-        ("saml sps", &report.saml_service_providers),
         ("scim mappings", &report.scim_mappings),
         ("invitations", &report.invitations),
         ("revocations", &report.revocations),
@@ -7421,129 +7094,27 @@ mod tests {
         drop(first);
     }
 
-    // ── resolve_sms_otp_hmac_key (HEA-2105/H startup gate) ────────────────
-
-    #[test]
-    fn sms_key_optional_for_log_transport_in_production() {
-        // Production deploy (dev_mode is not a factor), Log transport, no key:
-        // the server must start with no HMAC key rather than refusing to boot.
-        // This is the fail-then-pass case for HEA-2105/H — before the fix the
-        // `|| !dev_mode` clause forced the key on every non-dev deployment.
-        let decision = resolve_sms_otp_hmac_key(None, SmsTransport::Log, false);
-        assert_eq!(decision, Ok(None));
-    }
-
-    #[test]
-    fn sms_key_optional_for_log_transport_when_empty() {
-        // An empty env var is treated the same as absent under Log transport.
-        let decision = resolve_sms_otp_hmac_key(Some(""), SmsTransport::Log, false);
-        assert_eq!(decision, Ok(None));
-    }
-
-    #[test]
-    fn sms_key_required_for_real_transport_when_missing() {
-        // SMS actually enabled (Twilio) but no key → hard startup error.
-        let err = resolve_sms_otp_hmac_key(None, SmsTransport::Twilio, false)
-            .expect_err("real transport without a key must be rejected");
-        assert!(
-            err.contains("HEARTH_SMS_OTP_HMAC_KEY environment variable is required"),
-            "unexpected error message: {err}"
-        );
-    }
-
-    #[test]
-    fn sms_key_required_for_real_transport_when_empty() {
-        let err = resolve_sms_otp_hmac_key(Some(""), SmsTransport::AwsSns, false)
-            .expect_err("real transport with an empty key must be rejected");
-        assert!(
-            err.contains("HEARTH_SMS_OTP_HMAC_KEY environment variable is required"),
-            "unexpected error message: {err}"
-        );
-    }
-
-    #[test]
-    fn sms_key_too_short_is_rejected_for_real_transport() {
-        let err = resolve_sms_otp_hmac_key(Some("short"), SmsTransport::Twilio, false)
-            .expect_err("a sub-32-byte key must be rejected");
-        assert!(
-            err.contains("at least 32 bytes"),
-            "unexpected error message: {err}"
-        );
-    }
-
-    #[test]
-    fn sms_key_too_short_is_rejected_even_under_log_transport() {
-        // A supplied-but-malformed key is always an error, even for Log — the
-        // operator clearly intended to set one, so surface the mistake.
-        let err = resolve_sms_otp_hmac_key(Some("short"), SmsTransport::Log, false)
-            .expect_err("a sub-32-byte key must be rejected");
-        assert!(
-            err.contains("at least 32 bytes"),
-            "unexpected error message: {err}"
-        );
-    }
-
-    #[test]
-    fn sms_key_accepted_when_valid() {
-        let key = "0123456789abcdef0123456789abcdef"; // exactly 32 bytes
-        let decision = resolve_sms_otp_hmac_key(Some(key), SmsTransport::Twilio, false);
-        assert_eq!(decision, Ok(Some(key.as_bytes().to_vec())));
-    }
-
-    // ── fix/ga-sms: no all-zero key, random per-process key in dev only ──
-
-    #[test]
-    fn dev_mode_without_a_key_gets_a_random_non_zero_key() {
-        let a = resolve_sms_otp_hmac_key(None, SmsTransport::Log, true)
-            .expect("dev mode must start without a key")
-            .expect("dev mode must get a generated key, not none");
-        let b = resolve_sms_otp_hmac_key(Some(""), SmsTransport::Log, true)
-            .expect("dev mode must start without a key")
-            .expect("dev mode must get a generated key, not none");
-        assert_eq!(a.len(), 32, "a 32-byte HMAC-SHA256 key");
-        assert!(a.iter().any(|&x| x != 0), "never the all-zero key");
-        assert_ne!(a, b, "generated per call from the OS RNG, not a constant");
-    }
-
-    #[test]
-    fn dev_mode_keeps_an_operator_supplied_key() {
-        let key = "0123456789abcdef0123456789abcdef";
-        assert_eq!(
-            resolve_sms_otp_hmac_key(Some(key), SmsTransport::Log, true),
-            Ok(Some(key.as_bytes().to_vec()))
-        );
-    }
-
     // ── loadtest_unthrottle_decision (HEA-1796 prod-safety gate) ──────────
 
     #[test]
     fn unthrottle_off_when_flag_unset() {
         // Flag unset → limiters stay on regardless of dev/bind (even loopback).
         assert_eq!(
-            loadtest_unthrottle_decision(false, true, "127.0.0.1", None),
+            loadtest_unthrottle_decision(false, true, "127.0.0.1"),
             LoadtestUnthrottle::Off
         );
     }
 
     #[test]
     fn unthrottle_enabled_on_loopback_binds() {
-        // Dev mode + loopback HTTP bind, gRPC disabled → enabled.
+        // Dev mode + loopback HTTP bind → enabled.
         for bind in ["127.0.0.1", "127.0.0.53", "::1", "localhost", "LOCALHOST"] {
             assert_eq!(
-                loadtest_unthrottle_decision(true, true, bind, None),
+                loadtest_unthrottle_decision(true, true, bind),
                 LoadtestUnthrottle::Enabled,
                 "{bind} must be treated as loopback"
             );
         }
-    }
-
-    #[test]
-    fn unthrottle_enabled_when_both_binds_loopback() {
-        // HEA-1797 Finding 1: an enabled gRPC listener must also be loopback.
-        assert_eq!(
-            loadtest_unthrottle_decision(true, true, "127.0.0.1", Some("::1")),
-            LoadtestUnthrottle::Enabled
-        );
     }
 
     #[test]
@@ -7552,23 +7123,9 @@ mod tests {
         // guard that keeps rate limiters on if the flag is set by mistake.
         for bind in ["0.0.0.0", "::", "10.0.0.5", "192.168.1.10", "example.com"] {
             assert_eq!(
-                loadtest_unthrottle_decision(true, true, bind, None),
+                loadtest_unthrottle_decision(true, true, bind),
                 LoadtestUnthrottle::RefusedNonLoopback,
                 "{bind} must refuse the unthrottle escape hatch"
-            );
-        }
-    }
-
-    #[test]
-    fn unthrottle_refused_on_divergent_grpc_bind() {
-        // HEA-1797 Finding 1: HTTP loopback but gRPC on a public interface must
-        // refuse — otherwise the disabled shaper + admin limiter leak onto a
-        // publicly reachable gRPC management endpoint.
-        for grpc in ["0.0.0.0", "::", "10.0.0.5", "192.168.1.10"] {
-            assert_eq!(
-                loadtest_unthrottle_decision(true, true, "127.0.0.1", Some(grpc)),
-                LoadtestUnthrottle::RefusedNonLoopback,
-                "gRPC bind {grpc} must refuse even when HTTP is loopback"
             );
         }
     }
@@ -7578,12 +7135,12 @@ mod tests {
         // HEA-1797 Finding 2: a prod-config binary on loopback can still be
         // internet-reachable behind a reverse proxy — refuse unless --dev.
         assert_eq!(
-            loadtest_unthrottle_decision(true, false, "127.0.0.1", None),
+            loadtest_unthrottle_decision(true, false, "127.0.0.1"),
             LoadtestUnthrottle::RefusedNotDev
         );
         // Non-dev takes precedence over a bind check.
         assert_eq!(
-            loadtest_unthrottle_decision(true, false, "0.0.0.0", Some("0.0.0.0")),
+            loadtest_unthrottle_decision(true, false, "0.0.0.0"),
             LoadtestUnthrottle::RefusedNotDev
         );
     }
@@ -7788,7 +7345,7 @@ mod tests {
         // Gate only applies in --dev mode; production mode always passes through.
         for bind in ["0.0.0.0", "::", "10.0.0.5", "127.0.0.1"] {
             assert_eq!(
-                dev_mode_bind_check(false, bind, None),
+                dev_mode_bind_check(false, bind),
                 DevBindCheck::NotDev,
                 "non-dev mode must not be refused for bind {bind}"
             );
@@ -7796,8 +7353,8 @@ mod tests {
     }
 
     #[test]
-    fn dev_bind_check_dev_loopback_http_no_grpc() {
-        // Dev + loopback HTTP, gRPC disabled → Ok. Covers both bare-host and
+    fn dev_bind_check_dev_loopback_http() {
+        // Dev + loopback HTTP → Ok. Covers both bare-host and
         // `host:port` forms — the HEA-1997 runbook §3A prescribes the latter
         // (`--bind 127.0.0.1:8420`), which HEA-2008 must accept.
         for bind in [
@@ -7811,7 +7368,7 @@ mod tests {
             "localhost:8420",
         ] {
             assert_eq!(
-                dev_mode_bind_check(true, bind, None),
+                dev_mode_bind_check(true, bind),
                 DevBindCheck::Ok,
                 "{bind} is loopback and must be allowed in dev mode"
             );
@@ -7820,7 +7377,7 @@ mod tests {
 
     #[test]
     fn dev_bind_check_refused_non_loopback_http() {
-        // Dev + non-loopback HTTP bind → refused, even when gRPC is disabled.
+        // Dev + non-loopback HTTP bind → refused.
         // `host:port` wildcard forms and unparseable garbage stay fail-closed.
         for bind in [
             "0.0.0.0",
@@ -7833,36 +7390,11 @@ mod tests {
             "garbage",
         ] {
             assert_eq!(
-                dev_mode_bind_check(true, bind, None),
+                dev_mode_bind_check(true, bind),
                 DevBindCheck::RefusedNonLoopback,
                 "dev mode with http bind {bind} must be refused"
             );
         }
-    }
-
-    #[test]
-    fn dev_bind_check_refused_non_loopback_grpc() {
-        // Dev + loopback HTTP but non-loopback gRPC → refused (both binds must be loopback).
-        for grpc in ["0.0.0.0", "::", "10.0.0.5", "192.168.1.10"] {
-            assert_eq!(
-                dev_mode_bind_check(true, "127.0.0.1", Some(grpc)),
-                DevBindCheck::RefusedNonLoopback,
-                "dev mode with grpc bind {grpc} must be refused even when http is loopback"
-            );
-        }
-    }
-
-    #[test]
-    fn dev_bind_check_dev_both_binds_loopback() {
-        // Dev + loopback HTTP + loopback gRPC → Ok.
-        assert_eq!(
-            dev_mode_bind_check(true, "127.0.0.1", Some("::1")),
-            DevBindCheck::Ok
-        );
-        assert_eq!(
-            dev_mode_bind_check(true, "::1", Some("127.0.0.1")),
-            DevBindCheck::Ok
-        );
     }
 
     #[test]
@@ -7871,12 +7403,12 @@ mod tests {
         // config-file validation misses because it runs before the override is
         // applied (HEA-1980).
         assert_eq!(
-            dev_mode_bind_check(true, "0.0.0.0", None),
+            dev_mode_bind_check(true, "0.0.0.0"),
             DevBindCheck::RefusedNonLoopback,
             "--dev --bind 0.0.0.0 must be refused at startup"
         );
         assert_eq!(
-            dev_mode_bind_check(true, "::", None),
+            dev_mode_bind_check(true, "::"),
             DevBindCheck::RefusedNonLoopback,
             "--dev --bind :: must be refused at startup"
         );

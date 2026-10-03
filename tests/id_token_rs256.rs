@@ -32,11 +32,10 @@ use hearth::audit::EmbeddedAuditEngine;
 use hearth::core::{ClientId, Clock, FakeClock, RealmId, SessionId, Timestamp};
 use hearth::identity::oidc::RpLogoutRequest;
 use hearth::identity::{
-    AuthorizationRequest, ClientProfile, CodeChallengeMethod, CreateRealmRequest,
-    CreateUserRequest, CredentialConfig, DcrPolicy, EmbeddedIdentityEngine, FapiProfile,
-    IdTokenSigningAlg, IdentityConfig, IdentityEngine, IdentityError, OidcTokenResponse,
-    RealmConfig, RegisterClientRequest, TokenExchangeRequest, TokenIntrospectionRequest,
-    TokenRevocationRequest, UpdateClientRequest, UpdateRealmRequest,
+    AuthorizationRequest, CodeChallengeMethod, CreateRealmRequest, CreateUserRequest,
+    CredentialConfig, DcrPolicy, EmbeddedIdentityEngine, IdTokenSigningAlg, IdentityConfig,
+    IdentityEngine, IdentityError, OidcTokenResponse, RealmConfig, RegisterClientRequest,
+    TokenExchangeRequest, TokenIntrospectionRequest, TokenRevocationRequest, UpdateClientRequest,
 };
 use hearth::protocol::http::{router, AppState};
 use hearth::rbac::EmbeddedRbacEngine;
@@ -210,7 +209,6 @@ fn code_flow(engine: &dyn IdentityEngine, realm: &RealmId, client: &ClientId) ->
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize")
@@ -373,7 +371,7 @@ fn rsa_retiring_blobs(storage: &Arc<dyn StorageEngine>, realm: &RealmId) -> usiz
 /// run-2026-09-21.md §4.1).
 #[tokio::test]
 async fn discovery_advertises_rs256_and_eddsa_for_id_tokens() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = dcr_realm(&h);
 
     for uri in [
@@ -398,7 +396,7 @@ async fn discovery_advertises_rs256_and_eddsa_for_id_tokens() {
 /// returns registered metadata, defaults included).
 #[tokio::test]
 async fn dynamic_registration_without_the_parameter_gets_rs256() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = dcr_realm(&h);
 
     let (status, body) = realm_register(&realm, registration(serde_json::json!({}))).await;
@@ -422,7 +420,7 @@ async fn dynamic_registration_without_the_parameter_gets_rs256() {
 
 #[tokio::test]
 async fn dynamic_registration_honours_an_explicit_rs256_or_eddsa() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = dcr_realm(&h);
 
     for (requested, expected) in [
@@ -459,7 +457,7 @@ async fn dynamic_registration_honours_an_explicit_rs256_or_eddsa() {
 /// would let it forge its own ID tokens.
 #[tokio::test]
 async fn dynamic_registration_refuses_unsupported_algorithms() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = dcr_realm(&h);
 
     for bad in [
@@ -512,7 +510,7 @@ async fn dynamic_registration_refuses_unsupported_algorithms() {
 /// as dynamic registration does.
 #[tokio::test]
 async fn admin_registration_defaults_to_eddsa_and_validates_the_parameter() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
 
     let default = admin_register(h.identity(), &realm, None).unwrap();
@@ -604,7 +602,7 @@ async fn admin_call(
 /// switch to RS256 would have been ignored with a `200`.
 #[tokio::test]
 async fn admin_rest_api_sets_and_validates_id_token_signed_response_alg() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let token = admin_token(&h, &realm);
     let state = Arc::new(AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()));
@@ -688,7 +686,7 @@ async fn admin_rest_api_sets_and_validates_id_token_signed_response_alg() {
 /// grant is still EdDSA and verifies against the Ed25519 key.
 #[tokio::test]
 async fn rs256_client_receives_an_id_token_that_verifies_against_the_realm_jwks() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = dcr_realm(&h);
     let (status, body) = realm_register(&realm, registration(serde_json::json!({}))).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
@@ -739,7 +737,7 @@ async fn rs256_client_receives_an_id_token_that_verifies_against_the_realm_jwks(
 /// client publishes no RSA key.
 #[tokio::test]
 async fn eddsa_client_keeps_eddsa_id_tokens() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let client = admin_register(h.identity(), &realm, None).unwrap();
 
@@ -755,7 +753,7 @@ async fn eddsa_client_keeps_eddsa_id_tokens() {
 /// on the next grant; an unsupported value is refused and changes nothing.
 #[tokio::test]
 async fn updating_a_client_switches_its_id_token_algorithm() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let client = admin_register(h.identity(), &realm, None).unwrap();
 
@@ -800,7 +798,7 @@ async fn updating_a_client_switches_its_id_token_algorithm() {
 /// algorithm too.
 #[tokio::test]
 async fn device_grant_signs_the_id_token_with_the_clients_algorithm() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let client = h
         .identity()
@@ -848,7 +846,7 @@ async fn device_grant_signs_the_id_token_with_the_clients_algorithm() {
 /// introspection, and `userinfo`.
 #[tokio::test]
 async fn an_rs256_id_token_is_never_accepted_as_an_access_token() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = dcr_realm(&h);
     let (_, body) = realm_register(&realm, registration(serde_json::json!({}))).await;
     let tokens = code_flow(h.identity(), &realm.id, &client_id_of(&body));
@@ -907,7 +905,7 @@ async fn an_rs256_id_token_is_never_accepted_as_an_access_token() {
 /// holds, so it must work as `id_token_hint` — and a tampered one must not.
 #[tokio::test]
 async fn an_rs256_id_token_hint_ends_the_session_and_a_forged_one_does_not() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let client = admin_register(h.identity(), &realm, Some("RS256")).unwrap();
     let tokens = code_flow(h.identity(), &realm, &client);
@@ -971,7 +969,7 @@ async fn an_rs256_id_token_hint_ends_the_session_and_a_forged_one_does_not() {
 /// silently ignored RS256 token would report a revocation that never happened).
 #[tokio::test]
 async fn revoking_an_rs256_id_token_ends_its_session() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let client = admin_register(h.identity(), &realm, Some("RS256")).unwrap();
     let tokens = code_flow(h.identity(), &realm, &client);
@@ -1173,7 +1171,7 @@ fn realm_delete_removes_the_rsa_keys() {
 /// leave that token unverifiable.
 #[tokio::test]
 async fn concurrent_rs256_registrations_converge_on_one_rsa_key() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let identity = h.identity_arc();
 
@@ -1211,266 +1209,4 @@ async fn concurrent_rs256_registrations_converge_on_one_rsa_key() {
             "each ID token must verify against the single published RSA key"
         );
     }
-}
-
-// ── FAPI 2.0: RS256 is not an allowed algorithm ───────────────────────────────
-//
-// FAPI 2.0 Security Profile §5.4.1 lets authorization servers, clients and
-// resource servers use only PS256, ES256 and EdDSA (Ed25519). RS256
-// (RSASSA-PKCS1-v1_5) is not among them, so wherever FAPI applies — a client
-// registered with the FAPI 2.0 profile, or any client of a realm with a
-// `fapi_profile` — Hearth must neither accept RS256 nor default to it.
-
-/// A JWKS a FAPI 2.0 client must register for `private_key_jwt`.
-fn fapi_client_jwks() -> String {
-    // A complete public JWK: registration validates the set (the key is never
-    // used to verify anything here).
-    r#"{"keys":[{"kty":"OKP","use":"sig","alg":"EdDSA","crv":"Ed25519","kid":"fapi2-rp","x":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"}]}"#
-        .to_string()
-}
-
-fn register_fapi2_client(
-    engine: &dyn IdentityEngine,
-    realm: &RealmId,
-    alg: Option<&str>,
-) -> Result<hearth::identity::OAuthClient, IdentityError> {
-    engine.register_client(
-        realm,
-        &RegisterClientRequest {
-            client_name: "FAPI 2.0 RP".to_string(),
-            redirect_uris: vec![REDIRECT_URI.to_string()],
-            grant_types: vec!["authorization_code".to_string()],
-            jwks: Some(fapi_client_jwks()),
-            profile: ClientProfile::Fapi2,
-            id_token_signed_response_alg: alg.map(str::to_string),
-            ..Default::default()
-        },
-    )
-}
-
-fn fapi_realm(engine: &dyn IdentityEngine, dcr_policy: Option<DcrPolicy>) -> (RealmId, String) {
-    let name = format!("rs256-fapi-{}", uuid::Uuid::new_v4());
-    let realm = engine
-        .create_realm(&CreateRealmRequest {
-            name: name.clone(),
-            config: Some(RealmConfig {
-                fapi_profile: Some(FapiProfile::Baseline),
-                dcr_policy,
-                ..Default::default()
-            }),
-        })
-        .unwrap();
-    (realm.id().clone(), name)
-}
-
-fn is_rs256_fapi_refusal(result: &Result<impl std::fmt::Debug, IdentityError>) -> bool {
-    matches!(result, Err(IdentityError::FapiViolation { reason }) if reason.contains("RS256"))
-}
-
-/// Registration refuses RS256 for a FAPI 2.0 client and for any client of a
-/// FAPI realm — and, refused, provisions no RSA key. Omitting the parameter on
-/// these administrative paths still yields EdDSA.
-#[tokio::test]
-async fn fapi_clients_and_fapi_realms_cannot_register_rs256() {
-    let h = common::TestHarness::embedded().await.unwrap();
-
-    let realm = h.create_realm();
-    let refused = register_fapi2_client(h.identity(), &realm, Some("RS256"));
-    assert!(
-        is_rs256_fapi_refusal(&refused),
-        "a FAPI 2.0 client must not register RS256, got {refused:?}"
-    );
-    let fapi_client = register_fapi2_client(h.identity(), &realm, None)
-        .expect("a FAPI 2.0 client registers without the parameter");
-    assert_eq!(
-        fapi_client.id_token_signed_response_alg(),
-        IdTokenSigningAlg::EdDsa
-    );
-
-    let (fapi_realm, _) = fapi_realm(h.identity(), None);
-    let refused = admin_register(h.identity(), &fapi_realm, Some("RS256"));
-    assert!(
-        is_rs256_fapi_refusal(&refused),
-        "no client of a FAPI realm may register RS256, got {refused:?}"
-    );
-
-    for realm in [&realm, &fapi_realm] {
-        assert!(
-            rsa_kids(&h.identity().realm_jwks(realm).unwrap()).is_empty(),
-            "a refused RS256 registration must not provision an RSA key"
-        );
-    }
-}
-
-/// Dynamic registration in a FAPI realm: the OIDC Registration default
-/// (RS256) is one FAPI 2.0 forbids, so an omitted parameter resolves to EdDSA
-/// there, and an explicit RS256 is `invalid_client_metadata` on both endpoints.
-#[tokio::test]
-async fn dynamic_registration_in_a_fapi_realm_defaults_to_eddsa_and_refuses_rs256() {
-    let h = common::TestHarness::embedded().await.unwrap();
-    let (id, name) = fapi_realm(h.identity(), Some(DcrPolicy::Open));
-    let realm = DcrRealm {
-        state: Arc::new(AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc())),
-        name,
-        id,
-    };
-
-    for global in [false, true] {
-        let body = registration(serde_json::json!({}));
-        let (status, resp) = if global {
-            global_register(&realm, body).await
-        } else {
-            realm_register(&realm, body).await
-        };
-        assert_eq!(status, StatusCode::CREATED, "global={global}: {resp}");
-        assert_eq!(
-            resp["id_token_signed_response_alg"], "EdDSA",
-            "global={global}: a FAPI realm must not default to RS256"
-        );
-
-        let body = registration(serde_json::json!({ "id_token_signed_response_alg": "RS256" }));
-        let (status, resp) = if global {
-            global_register(&realm, body).await
-        } else {
-            realm_register(&realm, body).await
-        };
-        assert_eq!(status, StatusCode::BAD_REQUEST, "global={global}: {resp}");
-        assert_eq!(resp["error"], "invalid_client_metadata", "global={global}");
-    }
-    assert_eq!(
-        rsa_kids(&h.identity().realm_jwks(&realm.id).unwrap()),
-        [] as [std::string::String; 0]
-    );
-}
-
-/// An update may not produce an RS256 client under FAPI either way round:
-/// selecting RS256 for a FAPI 2.0 client, or moving an RS256 client to the
-/// FAPI 2.0 profile. Both refusals leave the client unchanged.
-#[tokio::test]
-async fn an_update_cannot_combine_rs256_with_fapi() {
-    let h = common::TestHarness::embedded().await.unwrap();
-    let realm = h.create_realm();
-
-    let fapi_client = register_fapi2_client(h.identity(), &realm, None)
-        .unwrap()
-        .client_id()
-        .clone();
-    let refused = h.identity().update_client(
-        &realm,
-        &fapi_client,
-        &UpdateClientRequest {
-            id_token_signed_response_alg: Some("RS256".to_string()),
-            ..Default::default()
-        },
-    );
-    assert!(
-        is_rs256_fapi_refusal(&refused),
-        "a FAPI 2.0 client must not switch to RS256, got {refused:?}"
-    );
-    assert_eq!(
-        h.identity()
-            .get_client(&realm, &fapi_client)
-            .unwrap()
-            .unwrap()
-            .id_token_signed_response_alg(),
-        IdTokenSigningAlg::EdDsa
-    );
-
-    let rs_client = admin_register(h.identity(), &realm, Some("RS256")).unwrap();
-    let refused = h.identity().update_client(
-        &realm,
-        &rs_client,
-        &UpdateClientRequest {
-            profile: Some(ClientProfile::Fapi2),
-            // Keys, so the only thing wrong with the move is RS256 (a FAPI 2.0
-            // client without keys is refused on its own account).
-            jwks: Some(Some(fapi_client_jwks())),
-            ..Default::default()
-        },
-    );
-    assert!(
-        is_rs256_fapi_refusal(&refused),
-        "an RS256 client must not move to the FAPI 2.0 profile, got {refused:?}"
-    );
-    assert_eq!(
-        h.identity()
-            .get_client(&realm, &rs_client)
-            .unwrap()
-            .unwrap()
-            .profile(),
-        ClientProfile::Standard
-    );
-}
-
-/// A realm that turns FAPI on after an RS256 client registered must stop
-/// signing that client's ID tokens with RS256: the grant is refused rather
-/// than answered with a token FAPI 2.0 forbids.
-#[test]
-fn enabling_fapi_on_a_realm_stops_rs256_id_token_issuance() {
-    let (_dir, engine, _clock, _storage) = engine_with_clock(None);
-    let realm = plain_realm(&engine);
-    let client = admin_register(&engine, &realm, Some("RS256")).unwrap();
-    assert_eq!(
-        header_alg(code_flow(&engine, &realm, &client).id_token()),
-        "RS256",
-        "precondition: before FAPI the client receives RS256 ID tokens"
-    );
-
-    engine
-        .update_realm(
-            &realm,
-            &UpdateRealmRequest {
-                config: Some(RealmConfig {
-                    fapi_profile: Some(FapiProfile::Baseline),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-    // A grant that satisfies FAPI 2.0 Baseline — PAR, PKCE S256 and a DPoP
-    // binding — so the only thing left to refuse is the RS256 ID token.
-    let user = new_user(&engine, &realm);
-    let challenge = URL_SAFE_NO_PAD
-        .encode(ring::digest::digest(&ring::digest::SHA256, PKCE_VERIFIER.as_bytes()).as_ref());
-    let code = engine
-        .authorize(
-            &realm,
-            &AuthorizationRequest {
-                client_id: client.clone(),
-                redirect_uri: REDIRECT_URI.to_string(),
-                scope: "openid".to_string(),
-                state: "st".to_string(),
-                response_type: "code".to_string(),
-                user_id: user,
-                code_challenge: Some(challenge),
-                code_challenge_method: Some(CodeChallengeMethod::S256),
-                nonce: Some("n-fapi".to_string()),
-                resource: None,
-                amr_values: Vec::new(),
-                response_mode: None,
-                request: None,
-                via_par: true,
-            },
-        )
-        .expect("a PAR + PKCE request satisfies FAPI 2.0 Baseline")
-        .code()
-        .to_string();
-    let refused = engine.exchange_authorization_code(
-        &realm,
-        &TokenExchangeRequest {
-            client_id: client,
-            code,
-            redirect_uri: REDIRECT_URI.to_string(),
-            code_verifier: Some(PKCE_VERIFIER.to_string()),
-            dpop_jkt: Some("0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I".to_string()),
-            client_assertion_type: None,
-            client_assertion: None,
-        },
-    );
-    assert!(
-        is_rs256_fapi_refusal(&refused),
-        "a FAPI realm must not issue an RS256 ID token, got {refused:?}"
-    );
 }

@@ -139,18 +139,6 @@ pub struct Metrics {
     /// tampering or storage corruption and SHOULD trigger an alert.
     pub audit_integrity_failures_total: Counter,
 
-    /// Total device-fingerprint entries evicted by the background sweeper.
-    ///
-    /// Monotonically increasing. Each increment represents one expired
-    /// `dfp:user:*` storage entry deleted by the proactive TTL sweeper.
-    pub dfp_sweeper_evicted_total: Counter,
-
-    /// Active (non-expired) device-fingerprint entries as of the last sweep.
-    ///
-    /// Sampled once per sweep pass across all realms. Useful for capacity
-    /// planning and detecting abnormal fingerprint accumulation.
-    pub dfp_keys_active: Gauge,
-
     // ── Agent Auth (Phase A–D) ──────────────────────────────────────────────
     /// Total agent delegation token exchanges completed.
     ///
@@ -482,24 +470,6 @@ impl Metrics {
             .register(Box::new(audit_integrity_failures_total.clone()))
             .expect("metric registration succeeds on a fresh registry");
 
-        let dfp_sweeper_evicted_total = Counter::new(
-            "hearth_dfp_sweeper_evicted_total",
-            "Total device-fingerprint entries evicted by the background sweeper",
-        )
-        .expect("metric descriptor is valid");
-        registry
-            .register(Box::new(dfp_sweeper_evicted_total.clone()))
-            .expect("metric registration succeeds on a fresh registry");
-
-        let dfp_keys_active = Gauge::new(
-            "hearth_dfp_keys_active",
-            "Active (non-expired) device-fingerprint entries as of the last sweep",
-        )
-        .expect("metric descriptor is valid");
-        registry
-            .register(Box::new(dfp_keys_active.clone()))
-            .expect("metric registration succeeds on a fresh registry");
-
         let agent_delegation_total = CounterVec::new(
             Opts::new(
                 "hearth_agent_delegation_total",
@@ -809,8 +779,6 @@ impl Metrics {
             active_sessions,
             storage_operation_duration_seconds,
             audit_integrity_failures_total,
-            dfp_sweeper_evicted_total,
-            dfp_keys_active,
             agent_delegation_total,
             agent_approval_total,
             agent_aat_issued_total,

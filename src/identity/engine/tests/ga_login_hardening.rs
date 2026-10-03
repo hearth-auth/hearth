@@ -19,27 +19,6 @@ fn realm_with(engine: &EmbeddedIdentityEngine, config: RealmConfig) -> RealmId {
         .clone()
 }
 
-fn user_with_password(engine: &EmbeddedIdentityEngine, realm: &RealmId) -> User {
-    let user = engine
-        .create_user(
-            realm,
-            &CreateUserRequest {
-                email: format!("u-{}@example.com", uuid::Uuid::new_v4().simple()),
-                display_name: "Hardening User".to_string(),
-                ..Default::default()
-            },
-        )
-        .expect("create user");
-    engine
-        .set_password(
-            realm,
-            user.id(),
-            &CleartextPassword::from_string(PASSWORD.to_string()),
-        )
-        .expect("set password");
-    user
-}
-
 // ─── L15: the breach check runs before the account exists ───────────────────
 
 struct AlwaysPwned;
@@ -129,56 +108,5 @@ fn registration_checks_the_breach_list_before_creating_the_account() {
     assert!(
         matches!(err, IdentityError::PasswordCompromised),
         "got {err:?}"
-    );
-}
-
-// ─── L14: the unknown-account arm pays the realm's KDF cost ─────────────────
-
-/// A realm with a raised Argon2 cost verifies real users at that cost. The
-/// unknown-account arm of the step-up grant used the engine's global dummy
-/// hash, which is cheaper, so an address with no account answered measurably
-/// faster. With the realm's own dummy the two arms cost the same.
-#[test]
-fn the_unknown_account_arm_pays_the_realms_kdf_cost() {
-    let (_dir, engine, _clock) = setup_engine();
-    let realm = realm_with(
-        &engine,
-        RealmConfig {
-            password_memory_cost: Some(16 * 1024),
-            password_time_cost: Some(2),
-            ..RealmConfig::default()
-        },
-    );
-    let user = user_with_password(&engine, &realm);
-    // The known account is given its real password, so it pays exactly one
-    // verify at the realm's cost and never trips the per-account lockout.
-    let grant = |email: &str| crate::identity::oidc::StepUpMfaGrantRequest {
-        email: email.to_string(),
-        password: PASSWORD.to_string(),
-        mfa_code: "000000".to_string(),
-        scope: None,
-        client_ip: None,
-        user_agent: None,
-        dpop_jkt: None,
-    };
-
-    // Warm both paths once (the realm dummy hash is computed lazily).
-    let _ = engine.step_up_mfa_grant_token(&realm, &grant("nobody@example.com"));
-    let _ = engine.step_up_mfa_grant_token(&realm, &grant(user.email()));
-
-    let time = |email: &str| {
-        let start = std::time::Instant::now();
-        let _ = engine.step_up_mfa_grant_token(&realm, &grant(email));
-        start.elapsed()
-    };
-    let known = (0..3).map(|_| time(user.email())).min().expect("samples");
-    let unknown = (0..3)
-        .map(|_| time("nobody@example.com"))
-        .min()
-        .expect("samples");
-    assert!(
-        unknown * 3 >= known,
-        "an unknown address must cost about what a known one does: \
-         known={known:?} unknown={unknown:?}"
     );
 }

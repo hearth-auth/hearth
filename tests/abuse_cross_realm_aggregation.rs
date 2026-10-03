@@ -78,26 +78,31 @@ fn integration_alert_then_soft_then_hard_cap_escalation() {
 }
 
 #[test]
-fn integration_phone_and_email_counters_independent() {
+fn integration_distinct_targets_counted_independently() {
     let cap = CrossRealmAggregationCap::new(CrossRealmAggCapConfig {
         alert_threshold: 2,
         email_realm_soft_cap: 3,
         email_realm_hard_cap: 5,
-        sms_realm_soft_cap: 3,
-        sms_realm_hard_cap: 5,
         ..CrossRealmAggCapConfig::default()
     });
     let now = Instant::now();
-    // Exhaust email cap
-    for i in 0..5u32 {
+    // Exhaust the cap for one target.
+    for i in 0..6u32 {
         let _ = cap.check_email_with_time(&realm(i), "user@example.com", now);
     }
-    // SMS cap for a different target must be unaffected
-    let out = cap.check_sms_with_time(&realm(0), "+12025550100", now);
+    assert!(
+        matches!(
+            cap.check_email_with_time(&realm(6), "user@example.com", now),
+            CrossRealmOutcome::HardCap { .. }
+        ),
+        "the exhausted target must be hard-capped"
+    );
+    // A different target must be unaffected.
+    let out = cap.check_email_with_time(&realm(0), "other@example.com", now);
     assert_eq!(
         out,
         CrossRealmOutcome::Allow,
-        "email cap exhaustion must not bleed into SMS counter"
+        "one target's cap exhaustion must not bleed into another target's counter"
     );
 }
 
@@ -108,7 +113,6 @@ fn integration_window_rotation_resets_cap() {
         email_realm_soft_cap: 3,
         email_realm_hard_cap: 4,
         window: Duration::from_millis(200),
-        ..CrossRealmAggCapConfig::default()
     });
     let t0 = Instant::now();
     let target = "user@example.com";
@@ -158,26 +162,6 @@ fn adversarial_fifty_realm_bypass_blocked() {
     assert!(
         matches!(last, CrossRealmOutcome::HardCap { .. }),
         "50-realm bypass must trigger HardCap, got {last:?}"
-    );
-}
-
-#[test]
-fn adversarial_sms_cross_realm_attack_blocked() {
-    let cap = CrossRealmAggregationCap::new(CrossRealmAggCapConfig {
-        sms_realm_soft_cap: 3,
-        sms_realm_hard_cap: 5,
-        ..CrossRealmAggCapConfig::default()
-    });
-    let now = Instant::now();
-    let phone = "+12025550199";
-
-    let mut last = CrossRealmOutcome::Allow;
-    for i in 0..20u32 {
-        last = cap.check_sms_with_time(&realm(i), phone, now);
-    }
-    assert!(
-        matches!(last, CrossRealmOutcome::HardCap { .. }),
-        "SMS cross-realm attack must trigger HardCap, got {last:?}"
     );
 }
 

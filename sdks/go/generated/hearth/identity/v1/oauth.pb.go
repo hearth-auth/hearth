@@ -145,8 +145,8 @@ type AuthorizationRequest struct {
 	CodeChallengeMethod *string                `protobuf:"bytes,8,opt,name=code_challenge_method,json=codeChallengeMethod,proto3,oneof" json:"code_challenge_method,omitempty"`
 	Nonce               *string                `protobuf:"bytes,9,opt,name=nonce,proto3,oneof" json:"nonce,omitempty"`
 	// PAR request_uri (RFC 9126). When set, the server expands the stored
-	// pushed authorization parameters and treats this as a PAR-backed request
-	// (via_par = true). Other authorization fields are ignored when this is set.
+	// pushed authorization parameters. Other authorization fields are ignored
+	// when this is set.
 	RequestUri    *string `protobuf:"bytes,10,opt,name=request_uri,json=requestUri,proto3,oneof" json:"request_uri,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -478,8 +478,7 @@ type RegisterClientRequest struct {
 	// generates (256 bits from the OS CSPRNG) and returns exactly once, in the
 	// response's client_secret. Only a hash is stored. "private_key_jwt"
 	// requires jwks. Omitted or "none" registers a public client (or a
-	// private_key_jwt client when jwks is given). A client_secret_* method is
-	// refused in a FAPI 2.0 Advanced realm, which accepts private_key_jwt only.
+	// private_key_jwt client when jwks is given).
 	TokenEndpointAuthMethod *string `protobuf:"bytes,8,opt,name=token_endpoint_auth_method,proto3,oneof" json:"token_endpoint_auth_method,omitempty"`
 	unknownFields           protoimpl.UnknownFields
 	sizeCache               protoimpl.SizeCache
@@ -675,9 +674,12 @@ type OAuthClient struct {
 	// "client_secret_basic" or "client_secret_post"); never returned again.
 	// Store it on receipt: Hearth keeps only its hash. Also set, once, by
 	// RegenerateApplicationSecret.
-	ClientSecret  *string `protobuf:"bytes,9,opt,name=client_secret,proto3,oneof" json:"client_secret,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	ClientSecret *string `protobuf:"bytes,9,opt,name=client_secret,proto3,oneof" json:"client_secret,omitempty"`
+	// RFC 9449 s5.2: when true, every token request from this client must carry
+	// a DPoP proof, and every token it gets is bound to the proof's key.
+	DpopBoundAccessTokens bool `protobuf:"varint,10,opt,name=dpop_bound_access_tokens,proto3" json:"dpop_bound_access_tokens,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *OAuthClient) Reset() {
@@ -771,6 +773,13 @@ func (x *OAuthClient) GetClientSecret() string {
 		return *x.ClientSecret
 	}
 	return ""
+}
+
+func (x *OAuthClient) GetDpopBoundAccessTokens() bool {
+	if x != nil {
+		return x.DpopBoundAccessTokens
+	}
+	return false
 }
 
 // A cursor-based page of OAuth clients.
@@ -1877,8 +1886,15 @@ type BootstrapResponse struct {
 	// The reserved system realm id (the nil UUID). Use as the `X-Realm-ID` header
 	// alongside `system_access_token` for cross-realm admin API calls.
 	SystemRealmId string `protobuf:"bytes,8,opt,name=system_realm_id,json=systemRealmId,proto3" json:"system_realm_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// Base32 TOTP secret of the dev-realm admin (`admin@dev.local`). Every realm
+	// requires MFA by default, so bootstrap enrols TOTP for this admin. Non-empty
+	// ONLY on the first bootstrap call; add it to an authenticator app.
+	TotpSecret string `protobuf:"bytes,9,opt,name=totp_secret,json=totpSecret,proto3" json:"totp_secret,omitempty"`
+	// Base32 TOTP secret of the system-realm admin (`admin@hearth.test`), whose
+	// console sign-in asks for a code. Non-empty ONLY on the first bootstrap call.
+	AdminTotpSecret string `protobuf:"bytes,10,opt,name=admin_totp_secret,json=adminTotpSecret,proto3" json:"admin_totp_secret,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *BootstrapResponse) Reset() {
@@ -1963,6 +1979,20 @@ func (x *BootstrapResponse) GetSystemAccessToken() string {
 func (x *BootstrapResponse) GetSystemRealmId() string {
 	if x != nil {
 		return x.SystemRealmId
+	}
+	return ""
+}
+
+func (x *BootstrapResponse) GetTotpSecret() string {
+	if x != nil {
+		return x.TotpSecret
+	}
+	return ""
+}
+
+func (x *BootstrapResponse) GetAdminTotpSecret() string {
+	if x != nil {
+		return x.AdminTotpSecret
 	}
 	return ""
 }
@@ -2310,7 +2340,7 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"\f_client_nameB\x1d\n" +
 	"\x1b_access_token_authorizationB\x0e\n" +
 	"\f_trust_levelB\x1f\n" +
-	"\x1d_id_token_signed_response_alg\"\xc6\x03\n" +
+	"\x1d_id_token_signed_response_alg\"\x82\x04\n" +
 	"\vOAuthClient\x12\x1b\n" +
 	"\tclient_id\x18\x01 \x01(\tR\bclientId\x12\x1f\n" +
 	"\vclient_name\x18\x02 \x01(\tR\n" +
@@ -2323,7 +2353,9 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"grantTypes\x12j\n" +
 	"\x1aaccess_token_authorization\x18\a \x01(\x0e2,.hearth.identity.v1.AccessTokenAuthorizationR\x18accessTokenAuthorization\x12B\n" +
 	"\x1cid_token_signed_response_alg\x18\b \x01(\tR\x1cid_token_signed_response_alg\x12)\n" +
-	"\rclient_secret\x18\t \x01(\tH\x00R\rclient_secret\x88\x01\x01B\x10\n" +
+	"\rclient_secret\x18\t \x01(\tH\x00R\rclient_secret\x88\x01\x01\x12:\n" +
+	"\x18dpop_bound_access_tokens\x18\n" +
+	" \x01(\bR\x18dpop_bound_access_tokensB\x10\n" +
 	"\x0e_client_secret\"~\n" +
 	"\x0fOAuthClientPage\x125\n" +
 	"\x05items\x18\x01 \x03(\v2\x1f.hearth.identity.v1.OAuthClientR\x05items\x12$\n" +
@@ -2446,7 +2478,7 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"\x03use\x18\x05 \x01(\tR\x03use\x12\x10\n" +
 	"\x03alg\x18\x06 \x01(\tR\x03alg\"B\n" +
 	"\fJwksDocument\x122\n" +
-	"\x04keys\x18\x01 \x03(\v2\x1e.hearth.identity.v1.JsonWebKeyR\x04keys\"\xae\x02\n" +
+	"\x04keys\x18\x01 \x03(\v2\x1e.hearth.identity.v1.JsonWebKeyR\x04keys\"\xfb\x02\n" +
 	"\x11BootstrapResponse\x12\x19\n" +
 	"\brealm_id\x18\x01 \x01(\tR\arealmId\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\tR\x06userId\x12!\n" +
@@ -2457,7 +2489,11 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"quickstart\x12%\n" +
 	"\x0eadmin_password\x18\x06 \x01(\tR\radminPassword\x12.\n" +
 	"\x13system_access_token\x18\a \x01(\tR\x11systemAccessToken\x12&\n" +
-	"\x0fsystem_realm_id\x18\b \x01(\tR\rsystemRealmId\"f\n" +
+	"\x0fsystem_realm_id\x18\b \x01(\tR\rsystemRealmId\x12\x1f\n" +
+	"\vtotp_secret\x18\t \x01(\tR\n" +
+	"totpSecret\x12*\n" +
+	"\x11admin_totp_secret\x18\n" +
+	" \x01(\tR\x0fadminTotpSecret\"f\n" +
 	"\x17ListApplicationsRequest\x12\x1b\n" +
 	"\x06cursor\x18\x01 \x01(\tH\x00R\x06cursor\x88\x01\x01\x12\x19\n" +
 	"\x05limit\x18\x02 \x01(\rH\x01R\x05limit\x88\x01\x01B\t\n" +

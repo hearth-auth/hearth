@@ -54,7 +54,7 @@ fn archive(h: &common::TestHarness, realm: &RealmId) {
 /// asked. Before this, only REST and the `/ui` tree refused; gRPC did not.
 #[tokio::test]
 async fn deleting_an_active_realm_is_refused_by_the_engine() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm(&h, "gate-active");
 
     let err = h
@@ -75,7 +75,7 @@ async fn deleting_an_active_realm_is_refused_by_the_engine() {
 /// A suspended realm is frozen, not retired. It is still not deletable.
 #[tokio::test]
 async fn deleting_a_suspended_realm_is_refused_by_the_engine() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm(&h, "gate-suspended");
     h.identity()
         .update_realm(
@@ -100,7 +100,7 @@ async fn deleting_a_suspended_realm_is_refused_by_the_engine() {
 /// An archived realm is what the gate exists to admit.
 #[tokio::test]
 async fn deleting_an_archived_realm_succeeds() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm(&h, "gate-archived");
     archive(&h, &realm);
 
@@ -121,7 +121,7 @@ async fn deleting_an_archived_realm_succeeds() {
 /// the retry that converges an interrupted cascade is not blocked by the gate.
 #[tokio::test]
 async fn the_gate_does_not_block_a_retry_on_a_realm_with_no_record() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
 
     let err = h
         .identity()
@@ -141,7 +141,7 @@ async fn the_gate_does_not_block_a_retry_on_a_realm_with_no_record() {
 /// refuses — for every adapter, not just the `/ui` tree.
 #[tokio::test]
 async fn deleting_a_yaml_managed_application_is_refused_by_the_engine() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm(&h, "gate-yaml-app");
 
     // `reconcile_applications` derives a YAML app's `ClientId` as a UUID v5 from
@@ -196,7 +196,7 @@ async fn deleting_a_yaml_managed_application_is_refused_by_the_engine() {
 /// A runtime-registered application is still deletable.
 #[tokio::test]
 async fn deleting_a_runtime_application_succeeds() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm(&h, "gate-runtime-app");
 
     let client = h

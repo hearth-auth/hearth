@@ -137,7 +137,6 @@ fn mint_code(
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize")
@@ -193,7 +192,7 @@ struct Fixture {
 }
 
 async fn fixture_with_secret(secret: &str) -> Fixture {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm_name = format!("hea2112-{}", uuid::Uuid::new_v4());
     let realm = h
         .identity()
@@ -555,7 +554,7 @@ async fn basic_auth_unencoded_legacy_secret_still_authenticates() {
 /// supported methods.
 #[tokio::test]
 async fn basic_auth_discovery_advertises_client_secret_basic() {
-    let harness = common::TestHarness::embedded().await.unwrap();
+    let harness = common::TestHarness::in_process().await.unwrap();
     let doc = harness.identity().oidc_discovery();
 
     // The method DCR hands out (`token_endpoint_auth_method` in DcrResponse)

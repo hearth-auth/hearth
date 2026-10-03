@@ -123,7 +123,7 @@ There is **no generic "environment overrides `hearth.yaml`" mechanism.** A varia
 in one of two ways only:
 
 1. It is one of the few variables the server reads directly: `HEARTH_MASTER_KEY`, `HEARTH_KEK`,
-   `HEARTH_PREVIOUS_MASTER_KEY`, `HEARTH_SMS_OTP_HMAC_KEY`, `HEARTH_TURNSTILE_SECRET_KEY`,
+   `HEARTH_PREVIOUS_MASTER_KEY`, `HEARTH_TURNSTILE_SECRET_KEY`,
    `HEARTH_MAILCATCHER_PASSWORD`, `RUST_LOG` (plus the dev-only `HEARTH_DEV_DATA_DIR`).
 2. `hearth.yaml` references it with `${VAR}` substitution. In production an unset or empty
    `${VAR}` is a hard start-up error.

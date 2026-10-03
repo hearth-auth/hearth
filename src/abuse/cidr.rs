@@ -2,8 +2,7 @@
 //!
 //! Operators set per-realm allow/deny lists in
 //! `realms.<name>.security.cidr_policy` and a [`CidrFilter`] is built from
-//! them for in-memory lookup. The Spamhaus DROP feed is compiled into the same
-//! type.
+//! them for in-memory lookup.
 //!
 //! # Entries
 //!

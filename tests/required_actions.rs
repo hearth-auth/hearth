@@ -26,7 +26,7 @@ fn make_user_request(prefix: &str) -> CreateUserRequest {
 
 #[tokio::test]
 async fn new_user_in_realm_with_no_defaults_has_empty_required_actions() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
 
     let user = h
@@ -47,7 +47,7 @@ async fn new_user_in_realm_with_no_defaults_has_empty_required_actions() {
 
 #[tokio::test]
 async fn new_user_inherits_realm_default_required_actions() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
 
     let realm = h
         .identity()
@@ -83,7 +83,7 @@ async fn new_user_inherits_realm_default_required_actions() {
 
 #[tokio::test]
 async fn required_actions_visible_on_get_user() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
 
     let realm = h
         .identity()
@@ -122,7 +122,7 @@ async fn required_actions_visible_on_get_user() {
 
 #[tokio::test]
 async fn update_user_can_clear_required_actions() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
 
     let realm = h
         .identity()
@@ -169,7 +169,7 @@ async fn update_user_can_clear_required_actions() {
 
 #[tokio::test]
 async fn register_user_inherits_realm_default_required_actions() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
 
     let realm = h
         .identity()

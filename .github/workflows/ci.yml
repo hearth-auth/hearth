@@ -7,7 +7,7 @@ name: CI
 #   filter ─┬─> quality        (Rust changes)
 #           ├─> proto-freshness (proto/ or generated SDK types — audit §4.8#8)
 #           ├─> ui             (UI changes — replaces ui-tests + ui-tests-exploratory)
-#           ├─> sdk-node       (sdks/node changes — folded from node-sdk-ci.yml)
+#           ├─> sdk-*          (one job per supported SDK: go, typescript, python, php)
 #           └─> sdk-conformance (any SDK / spec / script change — folded from sdk-conformance.yml)
 #
 # Downstream jobs gate on the `filter` job's outputs so doc-only PRs run
@@ -63,12 +63,9 @@ jobs:
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       ui: ${{ steps.filter.outputs.ui }}
-      sdks-node: ${{ steps.filter.outputs.sdks-node }}
       sdks-go: ${{ steps.filter.outputs.sdks-go }}
       sdks-python: ${{ steps.filter.outputs.sdks-python }}
-      sdks-rust: ${{ steps.filter.outputs.sdks-rust }}
       sdks-php: ${{ steps.filter.outputs.sdks-php }}
-      sdks-kotlin: ${{ steps.filter.outputs.sdks-kotlin }}
       sdks-typescript: ${{ steps.filter.outputs.sdks-typescript }}
       sdks-any: ${{ steps.filter.outputs.sdks-any }}
       proto: ${{ steps.filter.outputs.proto }}
@@ -79,7 +76,6 @@ jobs:
       # scanners rather than skipping them.
       docs-only: ${{ steps.docs.outputs.non-docs == 'false' && 'true' || 'false' }}
       abuse-coverage: ${{ steps.filter.outputs.abuse-coverage }}
-      ldap: ${{ steps.filter.outputs.ldap }}
 
     steps:
       - name: Checkout
@@ -142,10 +138,6 @@ jobs:
               - 'tests/ui/**'
               - 'Makefile'
               - '.github/workflows/ci.yml'
-            sdks-node:
-              - 'sdks/node/**'
-              - 'proto/**'
-              - '.github/workflows/ci.yml'
             # HEA-2171: one filter per SDK so every SDK suite is testable in CI.
             # The integration suites (go, typescript) additionally trigger on
             # 'src/protocol/**' — they build the hearth server and exercise its
@@ -165,19 +157,8 @@ jobs:
               - 'sdks/python/**'
               - 'proto/**'
               - '.github/workflows/ci.yml'
-            sdks-rust:
-              - 'sdks/rust/**'
-              - 'proto/**'
-              # sdks/rust has no rustfmt.toml of its own; `cargo fmt` in the
-              # sdk-rust job reads the repository's.
-              - 'rustfmt.toml'
-              - '.github/workflows/ci.yml'
             sdks-php:
               - 'sdks/php/**'
-              - 'proto/**'
-              - '.github/workflows/ci.yml'
-            sdks-kotlin:
-              - 'sdks/kotlin/**'
               - 'proto/**'
               - '.github/workflows/ci.yml'
             sdks-any:
@@ -230,9 +211,6 @@ jobs:
               - 'tests/abuse_*.rs'
               - 'scripts/check-abuse-coverage.sh'
               - '.github/workflows/ci.yml'
-            ldap:
-              - 'src/identity/ldap/**'
-              - 'tests/ldap_*.rs'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
@@ -281,7 +259,6 @@ jobs:
             echo "| loadtest | ${{ steps.filter.outputs.loadtest }} |"
             echo "| non-docs (any non-documentation file changed) | ${{ steps.docs.outputs.non-docs }} |"
             echo "| abuse-coverage | ${{ steps.filter.outputs.abuse-coverage }} |"
-            echo "| ldap | ${{ steps.filter.outputs.ldap }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # HEA-858: static guard against committing real secret material.
@@ -292,7 +269,7 @@ jobs:
 
       # HEA-1657: prevent recurrence of the cross-realm BOLA class (HEA-1629).
       # Fails on `let _auth`, `let _ = extract_admin_auth(...)`, or any unbound
-      # auth call in src/protocol/http/admin.rs and src/protocol/grpc/*.rs.
+      # auth call in src/protocol/http/admin.rs and src/protocol/http/admin/*.rs.
       # Runs on every PR — pure grep, no Rust build required.
       - name: Auth-discard lint (check-auth-discard.sh)
         run: bash scripts/check-auth-discard.sh
@@ -304,6 +281,12 @@ jobs:
       # Runs on every PR — pure grep, no Rust build required.
       - name: RBAC storage-write lint (check-rbac-storage-writes.sh)
         run: bash scripts/check-rbac-storage-writes.sh
+
+      # scope-trim-trusted-core, spec `mfa-policy`: every decision on whether
+      # a sign-in needs MFA goes through IdentityEngine::effective_mfa_requirement.
+      # Fails on a direct read of `mfa_required` outside it. Pure grep.
+      - name: MFA resolver lint (check-mfa-resolver.sh)
+        run: bash scripts/check-mfa-resolver.sh
 
       # HEA-2116: prevent a release from shipping with stale install-instruction
       # version references in README.md. Compares every pinned release URL / tag
@@ -909,61 +892,6 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-  # ── Node SDK matrix (folded from node-sdk-ci.yml) ────────────────────────────
-
-  sdk-node:
-    name: sdk-node (${{ matrix.node-version }}.x)
-    needs: filter
-    # HEA-685: guard with `needs.filter.result == 'success'` — see `quality` above.
-    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-node == 'true') || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: sdks/node
-
-    strategy:
-      fail-fast: false
-      matrix:
-        node-version: ["20", "22"]
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Set up Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: ${{ matrix.node-version }}
-          cache: "npm"
-          cache-dependency-path: sdks/node/package-lock.json
-
-      - name: Install dependencies
-        run: npm ci
-
-      # Tool versions come from package-lock.json (prettier is pinned exact).
-      - name: Lint (eslint)
-        run: npm run lint
-
-      - name: Format check (prettier)
-        run: npm run format:check
-
-      - name: Typecheck
-        run: npm run typecheck
-
-      - name: Test with coverage (>=80% line gate)
-        run: npm test
-
-      - name: Upload coverage report
-        if: matrix.node-version == '20'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: node-sdk-coverage
-          path: sdks/node/coverage/
-          retention-days: 7
-
   # ── SDK spec conformance (folded from sdk-conformance.yml) ───────────────────
 
   sdk-conformance:
@@ -985,53 +913,23 @@ jobs:
 
   # ── Per-SDK test suites (HEA-2171) ───────────────────────────────────────────
   #
-  # Before HEA-2171 only the Node SDK ran its tests in CI, so a `createRealm`
-  # method the server 405s shipped in all seven SDKs and two integration suites
-  # sat red at HEAD unnoticed. Every SDK now runs its own suite here.
+  # Before HEA-2171 only one SDK ran its tests in CI, so a `createRealm`
+  # method the server 405s shipped in every SDK and two integration suites
+  # sat red at HEAD unnoticed. Every supported SDK (go, typescript, python,
+  # php) now runs its own suite here.
   #
   # Gating: every sdk-* job is in required-summary's `needs:` and results loop
   # (audit §4.12#12; scripts/check-required-summary-coverage.sh fails CI if one
-  # drops out), so a red SDK suite blocks the merge. That includes sdk-go,
-  # sdk-typescript and sdk-kotlin, which HEA-2171 first added as run-only.
+  # drops out), so a red SDK suite blocks the merge.
   # The PHP integration suite needs a live server and runs in sdk-smoke.yml.
   #
   # Lint (GA sweep 4): every SDK job also runs its language's linter and
   # formatter check, with the tool version pinned in the SDK's own manifest:
-  # rust rustfmt + clippy -D warnings, python ruff check + ruff format
-  # (pyproject dev extra), php phpstan (composer.lock), go golangci-lint
-  # (version below; config sdks/go/.golangci.yml), typescript/node eslint +
-  # prettier (package-lock.json). Lint steps run before the tests so a style
-  # failure is reported without waiting for a server build. Kotlin declares
-  # no linter (no ktlint/detekt in its Gradle build), so sdk-kotlin has none.
-
-  # Rust SDK — unit suite (client logic, no server). Gated. All features, so
-  # the tower/actix middleware modules and their tests are compiled and run.
-  sdk-rust:
-    name: sdk-rust
-    needs: filter
-    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-rust == 'true') || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          components: clippy, rustfmt
-      # sdks/rust is its own workspace, so the root fmt/clippy gates never
-      # reach it. rustfmt picks up the repository's rustfmt.toml.
-      - name: cargo fmt --check
-        working-directory: sdks/rust
-        run: cargo fmt --check
-      - name: cargo clippy (all targets, all features)
-        working-directory: sdks/rust
-        run: cargo clippy --all-targets --all-features -- -D warnings
-      - name: cargo test (all features)
-        working-directory: sdks/rust
-        run: cargo test --all-features
+  # python ruff check + ruff format (pyproject dev extra), php phpstan
+  # (composer.lock), go golangci-lint (version below; config
+  # sdks/go/.golangci.yml), typescript eslint + prettier (package-lock.json).
+  # Lint steps run before the tests so a style failure is reported without
+  # waiting for a server build.
 
   # Python SDK — unit suite (respx-mocked). Gated.
   sdk-python:
@@ -1089,31 +987,6 @@ jobs:
       - name: composer test (unit)
         working-directory: sdks/php
         run: composer test
-
-  # Kotlin SDK — unit suite (MockWebServer). Gated.
-  sdk-kotlin:
-    name: sdk-kotlin
-    needs: filter
-    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-kotlin == 'true') || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - name: Set up JDK
-        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
-        with:
-          distribution: temurin
-          java-version: "17"
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@48b5f213c81028ace310571dc5ec0fbbca0b2947 # v4
-        with:
-          gradle-version: "8.10"
-      - name: gradle test
-        working-directory: sdks/kotlin
-        run: gradle test
 
   # Go SDK — integration suite; the tests build and boot the hearth server, so
   # Rust + protoc are provisioned. Gated.
@@ -1233,149 +1106,6 @@ jobs:
         # To bypass temporarily: set SKIP_ABUSE_COVERAGE_CHECK: '1' in the env
         # block above. Document the reason and the tracking issue in the PR.
         run: bash scripts/check-abuse-coverage.sh
-
-  # ── LDAP / Active Directory integration tests (HEA-1331) ────────────────────
-  #
-  # Spins up bitnamilegacy/openldap (Bitnami's legacy namespace, same env-var
-  # schema as the retired bitnami/openldap) with LDAPS enabled. LDAP integration
-  # tests must be marked #[ignore] in source so the `quality` job skips them
-  # when no LDAP server is present. This job runs them via --run-ignored against
-  # the real service container.
-  #
-  # Service credentials are test-only — the OpenLDAP container is ephemeral
-  # with no real user data.
-  #
-  # Image pinned by manifest-list digest (HEA-1331 resolved).
-
-  ldap-integration:
-    name: ldap-integration (OpenLDAP — HEA-1331)
-    needs: filter
-    if: (needs.filter.result == 'success' && needs.filter.outputs.ldap == 'true') || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    # No services: block — OpenLDAP is started in a step so we can mount
-    # ephemeral TLS certificates. bitnami/openldap 2.6.10+ removed auto-cert
-    # generation; explicit certs are required for LDAP_ENABLE_TLS=yes.
-
-    env:
-      # Consumed by LDAP integration tests (see tests/ldap_*.rs).
-      HEARTH_TEST_LDAP_URL: ldap://localhost:1389
-      HEARTH_TEST_LDAPS_URL: ldaps://localhost:1636
-      HEARTH_TEST_LDAP_BIND_DN: cn=admin,dc=hearth,dc=test
-      HEARTH_TEST_LDAP_BIND_PASSWORD: HearthLdapCI1!
-      HEARTH_TEST_LDAP_BASE_DN: dc=hearth,dc=test
-      HEARTH_TEST_LDAP_USER: hearthldaptest
-      HEARTH_TEST_LDAP_USER_PASSWORD: HearthLdapUser1!
-      # Same reason as the quality job: this run died on "ld terminated with
-      # signal 7 [Bus error]" followed by "No space left on device". Full debug
-      # info is ~90% of every test binary's bytes.
-      CARGO_PROFILE_DEV_DEBUG: line-tables-only
-      CARGO_PROFILE_TEST_DEBUG: line-tables-only
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
-          df -h
-
-      - name: Generate TLS certs and start OpenLDAP (HEA-1382/HEA-1385)
-        run: |
-          # bitnami/openldap 2.6.10+ requires explicit TLS certs. Generate a
-          # proper 2-tier PKI: CA cert (CA:TRUE) + server end-entity cert
-          # (CA:FALSE). Rustls rejects CA-flagged certs as server certs
-          # (CaUsedAsEndEntity), so the server cert must NOT have CA:TRUE.
-          mkdir -p /tmp/ldap-tls
-
-          # 1. Generate CA key + self-signed CA cert
-          openssl genrsa -out /tmp/ldap-tls/ca.key 2048
-          openssl req -x509 -new -nodes -key /tmp/ldap-tls/ca.key \
-            -sha256 -days 1 -out /tmp/ldap-tls/ca.crt \
-            -subj "/CN=hearth-ldap-ci-ca" \
-            -addext "basicConstraints=critical,CA:TRUE" \
-            -addext "keyUsage=critical,keyCertSign,cRLSign"
-
-          # 2. Generate server key + CSR
-          openssl genrsa -out /tmp/ldap-tls/server.key 2048
-          openssl req -new -key /tmp/ldap-tls/server.key \
-            -out /tmp/ldap-tls/server.csr \
-            -subj "/CN=localhost"
-
-          # 3. Sign server cert with CA — end-entity (CA:FALSE), SAN required by rustls
-          openssl x509 -req \
-            -in /tmp/ldap-tls/server.csr \
-            -CA /tmp/ldap-tls/ca.crt -CAkey /tmp/ldap-tls/ca.key -CAcreateserial \
-            -out /tmp/ldap-tls/server.crt -days 1 -sha256 \
-            -extfile <(printf "subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\n")
-
-          chmod 644 /tmp/ldap-tls/*.crt /tmp/ldap-tls/*.key
-
-          # Trust the CA so rustls-native-certs (used by ldap3 tls-rustls-ring)
-          # accepts the LDAPS connection in ldaps_connection_succeeds test.
-          sudo cp /tmp/ldap-tls/ca.crt /usr/local/share/ca-certificates/hearth-ldap-ci.crt
-          sudo update-ca-certificates
-
-          # Start OpenLDAP with certs mounted; digest-pinned image (HEA-1382)
-          docker run -d --name openldap \
-            -p 1389:1389 -p 1636:1636 \
-            -e LDAP_ADMIN_USERNAME=admin \
-            -e LDAP_ADMIN_PASSWORD=HearthLdapCI1! \
-            -e LDAP_ROOT=dc=hearth,dc=test \
-            -e LDAP_ENABLE_TLS=yes \
-            -e LDAP_TLS_VERIFY_CLIENT=never \
-            -e LDAP_USERS=hearthldaptest \
-            -e LDAP_PASSWORDS=HearthLdapUser1! \
-            -e LDAP_TLS_CERT_FILE=/tls/server.crt \
-            -e LDAP_TLS_KEY_FILE=/tls/server.key \
-            -e LDAP_TLS_CA_FILE=/tls/ca.crt \
-            -v /tmp/ldap-tls:/tls:ro \
-            bitnamilegacy/openldap:2.6.10-debian-12-r4@sha256:966fd39ed25813890e9bd57dac56def163bbcfe64967e0bae59ab018d505bd93
-
-      - name: Setup Rust toolchain (HEA-676 reusable)
-        uses: ./.github/actions/setup-rust
-        with:
-          toolchain: stable
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2.77.7
-        with:
-          tool: cargo-nextest
-
-      - name: Install ldap-utils (runner-side ldapsearch for readiness probe)
-        run: sudo apt-get install -y --no-install-recommends ldap-utils
-
-      - name: Wait for OpenLDAP to be ready
-        run: |
-          # Wait for LDAP port AND user seeding: bitnami seeds LDAP_USERS
-          # asynchronously after the port comes up, so we must verify at least
-          # one inetOrgPerson entry exists before running tests.
-          for i in $(seq 1 40); do
-            USER_COUNT=$(ldapsearch -x -H ldap://localhost:1389 \
-              -b dc=hearth,dc=test \
-              -D cn=admin,dc=hearth,dc=test \
-              -w HearthLdapCI1! \
-              "(objectClass=inetOrgPerson)" 2>/dev/null | grep -c "^dn:" || true)
-            if [ "${USER_COUNT:-0}" -gt 0 ]; then
-              echo "OpenLDAP ready with ${USER_COUNT} user(s) (attempt $i)"
-              break
-            fi
-            echo "Waiting for OpenLDAP users... (attempt $i/40, currently ${USER_COUNT:-0} users)"
-            sleep 3
-          done
-
-      - name: Run LDAP integration tests (run-ignored against real server)
-        run: |
-          cargo nextest run --workspace \
-            --run-ignored all \
-            -E 'test(ldap)' \
-            --no-fail-fast
-        env:
-          PROTOC: protoc
 
   # ── Raft cluster chaos validation (Gap C-1, HEA-1323) ───────────────────────
   #
@@ -1638,7 +1368,7 @@ jobs:
   # (paths-filter determined no changes in scope). It fails if any upstream job
   # failed or was cancelled.
   #
-  # Why: conditional matrix jobs (sdk-node) and conditional jobs (quality, ui,
+  # Why: conditional jobs (quality, ui, the sdk-* jobs,
   # sdk-conformance) only post individual check-run entries when they actually
   # execute. When paths-filter skips them, branch protection sees "Expected —
   # Waiting for status to be reported" for each individual check name forever.
@@ -1726,7 +1456,7 @@ jobs:
   required-summary:
     name: required-summary
     if: always()
-    needs: [filter, quality, proto-freshness, ui, sdk-node, sdk-rust, sdk-python, sdk-php, sdk-kotlin, sdk-go, sdk-typescript, sdk-conformance, abuse-coverage, ldap-integration, cluster-chaos, no-dev-endpoints, cargo-deny, msrv, unsafe-code, commit-lint, proto-governance, sdk-smoke, security, loadtest-smoke]
+    needs: [filter, quality, proto-freshness, ui, sdk-python, sdk-php, sdk-go, sdk-typescript, sdk-conformance, abuse-coverage, cluster-chaos, no-dev-endpoints, cargo-deny, msrv, unsafe-code, commit-lint, proto-governance, sdk-smoke, security, loadtest-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 1
 
@@ -1737,16 +1467,12 @@ jobs:
           QUALITY: ${{ needs.quality.result }}
           PROTO_FRESHNESS: ${{ needs.proto-freshness.result }}
           UI: ${{ needs.ui.result }}
-          SDK_NODE: ${{ needs.sdk-node.result }}
-          SDK_RUST: ${{ needs.sdk-rust.result }}
           SDK_PYTHON: ${{ needs.sdk-python.result }}
           SDK_PHP: ${{ needs.sdk-php.result }}
-          SDK_KOTLIN: ${{ needs.sdk-kotlin.result }}
           SDK_GO: ${{ needs.sdk-go.result }}
           SDK_TYPESCRIPT: ${{ needs.sdk-typescript.result }}
           SDK_CONFORMANCE: ${{ needs.sdk-conformance.result }}
           ABUSE_COVERAGE: ${{ needs.abuse-coverage.result }}
-          LDAP_INTEGRATION: ${{ needs.ldap-integration.result }}
           CLUSTER_CHAOS: ${{ needs.cluster-chaos.result }}
           NO_DEV_ENDPOINTS: ${{ needs.no-dev-endpoints.result }}
           CARGO_DENY: ${{ needs.cargo-deny.result }}
@@ -1758,14 +1484,14 @@ jobs:
           SECURITY: ${{ needs.security.result }}
           LOADTEST_SMOKE: ${{ needs.loadtest-smoke.result }}
         run: |
-          echo "filter=$FILTER quality=$QUALITY proto-freshness=$PROTO_FRESHNESS ui=$UI sdk-node=$SDK_NODE sdk-rust=$SDK_RUST sdk-python=$SDK_PYTHON sdk-php=$SDK_PHP sdk-kotlin=$SDK_KOTLIN sdk-go=$SDK_GO sdk-typescript=$SDK_TYPESCRIPT sdk-conformance=$SDK_CONFORMANCE abuse-coverage=$ABUSE_COVERAGE ldap-integration=$LDAP_INTEGRATION cluster-chaos=$CLUSTER_CHAOS no-dev-endpoints=$NO_DEV_ENDPOINTS cargo-deny=$CARGO_DENY msrv=$MSRV unsafe-code=$UNSAFE_CODE commit-lint=$COMMIT_LINT proto-governance=$PROTO_GOVERNANCE sdk-smoke=$SDK_SMOKE security=$SECURITY loadtest-smoke=$LOADTEST_SMOKE"
+          echo "filter=$FILTER quality=$QUALITY proto-freshness=$PROTO_FRESHNESS ui=$UI sdk-python=$SDK_PYTHON sdk-php=$SDK_PHP sdk-go=$SDK_GO sdk-typescript=$SDK_TYPESCRIPT sdk-conformance=$SDK_CONFORMANCE abuse-coverage=$ABUSE_COVERAGE cluster-chaos=$CLUSTER_CHAOS no-dev-endpoints=$NO_DEV_ENDPOINTS cargo-deny=$CARGO_DENY msrv=$MSRV unsafe-code=$UNSAFE_CODE commit-lint=$COMMIT_LINT proto-governance=$PROTO_GOVERNANCE sdk-smoke=$SDK_SMOKE security=$SECURITY loadtest-smoke=$LOADTEST_SMOKE"
           # ALLOWLIST, not a denylist (production-readiness task 24.4). This
           # loop used to fail only on "failure" or "cancelled". That is
           # fail-open by construction: any result GitHub adds, and any empty
           # string from an expression that did not evaluate, would have been
           # read as "fine". `success` and `skipped` are the only two results
           # that may pass; everything else — including "" — blocks the merge.
-          for result in "$FILTER" "$QUALITY" "$PROTO_FRESHNESS" "$UI" "$SDK_NODE" "$SDK_RUST" "$SDK_PYTHON" "$SDK_PHP" "$SDK_KOTLIN" "$SDK_GO" "$SDK_TYPESCRIPT" "$SDK_CONFORMANCE" "$ABUSE_COVERAGE" "$LDAP_INTEGRATION" "$CLUSTER_CHAOS" "$NO_DEV_ENDPOINTS" "$CARGO_DENY" "$MSRV" "$UNSAFE_CODE" "$COMMIT_LINT" "$PROTO_GOVERNANCE" "$SDK_SMOKE" "$SECURITY" "$LOADTEST_SMOKE"; do
+          for result in "$FILTER" "$QUALITY" "$PROTO_FRESHNESS" "$UI" "$SDK_PYTHON" "$SDK_PHP" "$SDK_GO" "$SDK_TYPESCRIPT" "$SDK_CONFORMANCE" "$ABUSE_COVERAGE" "$CLUSTER_CHAOS" "$NO_DEV_ENDPOINTS" "$CARGO_DENY" "$MSRV" "$UNSAFE_CODE" "$COMMIT_LINT" "$PROTO_GOVERNANCE" "$SDK_SMOKE" "$SECURITY" "$LOADTEST_SMOKE"; do
             case "$result" in
               success|skipped) ;;
               *)

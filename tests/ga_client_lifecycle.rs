@@ -109,7 +109,6 @@ fn client_refresh(h: &common::TestHarness, realm: &RealmId, client: &ClientId) -
 fn bind(client: &ClientId) -> RefreshBindContext {
     RefreshBindContext {
         authenticated_client_id: Some(client.clone()),
-        ..Default::default()
     }
 }
 
@@ -149,7 +148,7 @@ fn par_request(client: &ClientId) -> PushedAuthorizationRequest {
 
 #[tokio::test]
 async fn archived_client_cannot_use_client_credentials() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let client = register(&h, &realm, Some(SECRET));
     h.identity()
@@ -169,7 +168,7 @@ async fn archived_client_cannot_use_client_credentials() {
 
 #[tokio::test]
 async fn archived_client_cannot_authenticate_at_the_endpoint() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let confidential = register(&h, &realm, Some(SECRET));
     let public = register(&h, &realm, None);
@@ -203,7 +202,7 @@ async fn archived_client_cannot_authenticate_at_the_endpoint() {
 
 #[tokio::test]
 async fn archived_client_cannot_refresh() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let client = register(&h, &realm, Some(SECRET));
     let refresh = client_refresh(&h, &realm, &client);
@@ -224,7 +223,7 @@ async fn archived_client_cannot_refresh() {
 
 #[tokio::test]
 async fn archival_revokes_the_clients_refresh_tokens() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let client = register(&h, &realm, Some(SECRET));
     let refresh = client_refresh(&h, &realm, &client);
@@ -248,7 +247,7 @@ async fn archival_revokes_the_clients_refresh_tokens() {
 
 #[tokio::test]
 async fn archived_client_cannot_start_device_authorization() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let client = register(&h, &realm, None);
     let req = DeviceAuthorizationRequest {
@@ -269,7 +268,7 @@ async fn archived_client_cannot_start_device_authorization() {
 
 #[tokio::test]
 async fn archived_client_cannot_push_a_par_request() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let client = register(&h, &realm, None);
     h.identity()
@@ -306,7 +305,7 @@ async fn post_token(state: &Arc<AppState>, realm: &RealmId, form: &str) -> Statu
 /// client answers 401, as for an unknown one.
 #[tokio::test]
 async fn archived_client_credentials_over_http_is_401() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let client = register(&h, &realm, Some(SECRET));
     let state = Arc::new(AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()));
@@ -327,7 +326,7 @@ async fn archived_client_credentials_over_http_is_401() {
 
 #[tokio::test]
 async fn archival_invalidates_outstanding_client_credentials_tokens() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let client = register(&h, &realm, Some(SECRET));
     let token = h
@@ -356,7 +355,7 @@ async fn archival_invalidates_outstanding_client_credentials_tokens() {
 
 #[tokio::test]
 async fn deletion_invalidates_outstanding_client_credentials_tokens() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let client = register(&h, &realm, Some(SECRET));
     let other = register(&h, &realm, Some(SECRET));
@@ -389,7 +388,7 @@ async fn deletion_invalidates_outstanding_client_credentials_tokens() {
 
 #[tokio::test]
 async fn public_refresh_token_cannot_be_redeemed_under_another_client_id() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let owner = register(&h, &realm, None);
     let other = register(&h, &realm, None);

@@ -130,7 +130,7 @@ make_workflow "${TMP}/failopen.yml" \
     "$GOOD_QUANT" "$GOOD_PATTERNS"
 run_case "fail-open negation fails" 1 "${TMP}/failopen.yml" "non-docs == 'false'"
 
-make_workflow "${TMP}/nooutput.yml" "      ldap: \${{ steps.filter.outputs.ldap }}" \
+make_workflow "${TMP}/nooutput.yml" "      rust: \${{ steps.filter.outputs.rust }}" \
     "$GOOD_QUANT" "$GOOD_PATTERNS"
 run_case "missing docs-only output fails" 1 "${TMP}/nooutput.yml" "exports no 'docs-only' output"
 

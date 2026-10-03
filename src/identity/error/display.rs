@@ -28,11 +28,6 @@ impl fmt::Display for IdentityError {
             Self::InvalidAuthorizationCode => write!(f, "invalid authorization code"),
             Self::InvalidGrant { reason } => write!(f, "invalid grant: {reason}"),
             Self::InvalidClientSecret => write!(f, "invalid client secret"),
-            Self::PrivateKeyJwtRequired => write!(
-                f,
-                "FAPI 2.0 requires private_key_jwt client authentication; \
-                 client_secret_basic, client_secret_post and none are not accepted"
-            ),
             Self::InvalidClientAssertion { reason } => {
                 write!(f, "invalid client assertion: {reason}")
             }
@@ -185,19 +180,8 @@ impl fmt::Display for IdentityError {
             Self::PasswordCompromised => {
                 write!(f, "password has appeared in a known data breach")
             }
-            Self::StepUpChallengeRequired => {
-                write!(f, "MFA challenge required: login from unrecognised device")
-            }
-            Self::EnrollMfaRequired => write!(
-                f,
-                "MFA enrollment required: login from unrecognised device with no enrolled factor"
-            ),
             Self::RequiredActionsBlocking { actions } => {
                 write!(f, "token blocked: pending required actions: {actions:?}")
-            }
-            Self::InvalidSmsOtp => write!(f, "invalid or expired SMS OTP"),
-            Self::SmsResendLimitExceeded => {
-                write!(f, "SMS OTP resend limit exceeded for this phone number")
             }
             Self::InvalidEmailOtp => write!(f, "invalid or expired email OTP"),
             Self::InvalidPushedAuthorizationRequest => {
@@ -213,7 +197,6 @@ impl fmt::Display for IdentityError {
             Self::JwtBearerAssertionInvalid { reason } => {
                 write!(f, "invalid JWT bearer assertion: {reason}")
             }
-            Self::FapiViolation { reason } => write!(f, "FAPI 2.0 violation: {reason}"),
             Self::EmailReserved => write!(
                 f,
                 "a user with this email already exists or was recently deleted"

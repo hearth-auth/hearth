@@ -87,7 +87,7 @@ fn create_user(harness: &common::TestHarness, realm: &RealmId) -> hearth::identi
 
 #[tokio::test]
 async fn magic_link_blocked_when_not_in_allowed_methods() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm_with_config(
         &harness,
         RealmConfig {
@@ -110,7 +110,7 @@ async fn magic_link_blocked_when_not_in_allowed_methods() {
 
 #[tokio::test]
 async fn magic_link_allowed_when_in_allowed_methods() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm_with_config(
         &harness,
         RealmConfig {
@@ -132,7 +132,7 @@ async fn magic_link_allowed_when_in_allowed_methods() {
 
 #[tokio::test]
 async fn magic_link_allowed_when_no_restriction() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm_with_config(&harness, RealmConfig::default());
     let user = create_user(&harness, realm.id());
 
@@ -160,7 +160,7 @@ async fn magic_link_allowed_when_no_restriction() {
 async fn token_ttl_overrides_applied_at_issuance() {
     use base64::Engine as _;
 
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     // 5-minute access TTL (tight, easily distinguishable from the default 60-min).
     let access_ttl_secs: i64 = 5 * 60; // 300 s
@@ -231,7 +231,6 @@ async fn token_ttl_overrides_applied_at_issuance() {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize");
@@ -286,7 +285,7 @@ async fn token_ttl_overrides_applied_at_issuance() {
 
 #[tokio::test]
 async fn password_complexity_enforced_on_set_password() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm_with_config(
         &harness,
         RealmConfig {
@@ -334,7 +333,7 @@ async fn password_complexity_enforced_on_set_password() {
 
 #[tokio::test]
 async fn mfa_required_realm_config_persists_and_is_readable() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm_with_config(
         &harness,
         RealmConfig {
@@ -360,7 +359,7 @@ async fn mfa_required_realm_config_persists_and_is_readable() {
 
 #[tokio::test]
 async fn allowed_auth_methods_can_be_updated() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm_with_config(&harness, RealmConfig::default());
     let user = create_user(&harness, realm.id());
 
@@ -401,7 +400,7 @@ async fn allowed_auth_methods_can_be_updated() {
 
 #[tokio::test]
 async fn mfa_required_blocks_session_when_user_has_no_mfa() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm_with_config(
         &harness,
         RealmConfig {
@@ -428,7 +427,7 @@ async fn mfa_required_blocks_session_when_user_has_no_mfa() {
 /// walk past an `mfa_required` realm.
 #[tokio::test]
 async fn mfa_required_blocks_session_when_the_enrolled_factor_was_not_used() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm_with_config(
         &harness,
         RealmConfig {
@@ -451,7 +450,7 @@ async fn mfa_required_blocks_session_when_the_enrolled_factor_was_not_used() {
 
 #[tokio::test]
 async fn mfa_required_allows_session_when_the_factor_was_used() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm_with_config(
         &harness,
         RealmConfig {
@@ -485,7 +484,7 @@ async fn mfa_required_passkey_satisfies_policy() {
     // `mfa_proof: ProvedWebAuthn` only for such a ceremony (audit B10, task
     // 25.26); either proved variant clears `mfa_required`, so this test
     // exercises the engine gate with a proof already established.
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm_with_config(
         &harness,
         RealmConfig {
@@ -514,7 +513,7 @@ async fn mfa_required_passkey_satisfies_policy() {
 
 #[tokio::test]
 async fn password_blocked_when_not_in_allowed_methods() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm_with_config(
         &harness,
         RealmConfig {
@@ -551,7 +550,7 @@ async fn password_blocked_when_not_in_allowed_methods() {
 
 #[tokio::test]
 async fn password_allowed_when_in_allowed_methods() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm_with_config(
         &harness,
         RealmConfig {
@@ -584,7 +583,7 @@ async fn password_allowed_when_in_allowed_methods() {
 
 #[tokio::test]
 async fn password_complexity_require_special_enforced() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm_with_config(
         &harness,
         RealmConfig {
@@ -625,7 +624,7 @@ async fn password_complexity_require_special_enforced() {
 
 #[tokio::test]
 async fn password_complexity_not_email_enforced() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm_with_config(
         &harness,
         RealmConfig {

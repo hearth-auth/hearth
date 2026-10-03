@@ -34,7 +34,7 @@ fn plain_session_context() -> SessionContext {
 
 #[tokio::test]
 async fn empty_password_rejected_without_policy() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = harness
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -74,7 +74,7 @@ async fn empty_password_rejected_without_policy() {
 
 #[tokio::test]
 async fn short_password_rejected_without_policy() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = harness
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -115,7 +115,7 @@ async fn short_password_rejected_without_policy() {
 
 #[tokio::test]
 async fn twelve_char_password_accepted_without_policy() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = harness
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -152,7 +152,7 @@ async fn twelve_char_password_accepted_without_policy() {
 
 #[tokio::test]
 async fn policy_min_length_below_floor_still_enforces_floor() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = harness
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -210,7 +210,7 @@ async fn policy_min_length_below_floor_still_enforces_floor() {
 
 #[tokio::test]
 async fn policy_min_length_above_floor_is_respected() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = harness
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -269,7 +269,7 @@ async fn policy_min_length_above_floor_is_respected() {
 
 #[tokio::test]
 async fn self_registration_short_password_rejected_without_policy() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = harness
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -312,7 +312,7 @@ async fn self_registration_short_password_rejected_without_policy() {
 /// enrollment via `mfa_required: true` in hearth.yaml.
 #[tokio::test]
 async fn system_realm_session_succeeds_without_mfa_when_not_configured() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let sys_realm = RealmId::new(uuid::Uuid::nil());
 
     // create_admin_user is the system-realm-specific entry point; create_user
@@ -350,7 +350,7 @@ async fn system_realm_session_succeeds_without_mfa_when_not_configured() {
 /// so we use a user realm which exercises the identical enforcement block).
 #[tokio::test]
 async fn realm_session_requires_mfa_when_explicitly_configured() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let realm = harness
         .identity()

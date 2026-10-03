@@ -45,7 +45,9 @@ fn config(uris: &[&str]) -> Config {
         }
         s
     };
-    let yaml = format!("realms:\n  {REALM}:\n    session_ttl: \"12h\"\n{resources}");
+    let yaml = format!(
+        "auth:\n  mfa_required: false\nrealms:\n  {REALM}:\n    session_ttl: \"12h\"\n{resources}"
+    );
     let mut config = Config::from_yaml_str_unchecked(&yaml).expect("parse yaml");
     config.dev_mode = true;
     config
@@ -188,7 +190,7 @@ fn assert_exchange_targets(
 /// The full lifecycle for one request parameter: listed → allowed, unlisted →
 /// `invalid_target`, removed from YAML and reconciled → `invalid_target`.
 async fn yaml_lifecycle(via: Target) {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = reconcile(&h, &[RS, RS2]);
     let c = client(&h, &realm);
 
@@ -230,7 +232,7 @@ async fn resource_indicator_follows_yaml_protected_resources() {
 /// idempotent.
 #[tokio::test]
 async fn registry_mirrors_yaml_exactly() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = reconcile(&h, &[RS]);
     h.identity()
         .register_protected_resource(
@@ -281,10 +283,11 @@ async fn registry_mirrors_yaml_exactly() {
 /// A changed `display_name` or scope bundle list updates the record in place.
 #[tokio::test]
 async fn a_changed_yaml_entry_updates_the_record() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = reconcile(&h, &[RS]);
     let yaml = format!(
-        "realms:\n  {REALM}:\n    session_ttl: \"12h\"\n    protected_resources:\n      \
+        "auth:\n  mfa_required: false\nrealms:\n  {REALM}:\n    session_ttl: \"12h\"\n    \
+         protected_resources:\n      \
          - resource_uri: \"{RS}\"\n        display_name: \"Renamed\"\n        scopes:\n          \
          - name: \"mcp:tools:invoke\"\n            display_name: \"Invoke tools\"\n"
     );
@@ -314,7 +317,7 @@ fn declared(uri: &str) -> RegisterProtectedResourceRequest {
 /// (neither the valid new entry is added nor the undeclared one removed).
 #[tokio::test]
 async fn an_invalid_declared_set_changes_nothing() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = reconcile(&h, &[RS]);
     for bad in [
         vec![declared(RS2), declared(RS2)],
@@ -338,7 +341,7 @@ async fn an_invalid_declared_set_changes_nothing() {
 /// path refuses cannot enter the registry another way.
 #[tokio::test]
 async fn register_refuses_a_fragment_or_padded_resource_uri() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = reconcile(&h, &[]);
     for bad in [
         "https://rs.example.com/api#frag",
@@ -380,7 +383,8 @@ const DIFFERENT: [&str; 4] = [
 /// whose `mcp:tools:invoke` bundle grants it (none → no `protected_resources`).
 fn bundle_config(uris: &[&str]) -> Config {
     let mut yaml = format!(
-        "realms:\n  {REALM}:\n    session_ttl: \"12h\"\n    permissions:\n      \
+        "auth:\n  mfa_required: false\nrealms:\n  {REALM}:\n    session_ttl: \"12h\"\n    \
+         permissions:\n      \
          - name: {PERM}\n        display_name: Invoke\n"
     );
     if !uris.is_empty() {
@@ -469,7 +473,7 @@ fn rbac_grants_bundle(
 /// differs in scheme, port, path or path case is a different resource to both.
 #[tokio::test]
 async fn spelling_variants_match_in_both_layers() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = reconcile_config(&h, &bundle_config(&["HTTPS://MCP.Example.com:443/api/"]));
     assert_eq!(
         registered_uris(&h, &realm),
@@ -510,7 +514,7 @@ async fn spelling_variants_match_in_both_layers() {
 /// and an emptied list all remove the bundles.
 #[tokio::test]
 async fn rbac_resource_bundles_follow_yaml() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = reconcile_config(&h, &bundle_config(&[RS, RS2]));
     let user = user_with_bundle_permission(&h, &realm);
     assert!(rbac_grants_bundle(&h, &realm, &user, RS));
@@ -590,7 +594,7 @@ fn introspect_active(h: &common::TestHarness, realm: &RealmId, token: &str) -> b
 /// rotating; tokens for other resources and for Hearth alone are untouched.
 #[tokio::test]
 async fn removing_a_resource_stops_its_tokens() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = reconcile(&h, &[RS, RS2]);
     let c = client(&h, &realm);
 

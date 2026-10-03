@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::core::{IdpId, SessionId, Timestamp, UserId};
+use crate::core::{IdpId, Timestamp};
 
 /// Attribute name mapping for SAML claim translation.
 ///
@@ -87,44 +87,6 @@ pub struct SamlIdpConfig {
     pub attribute_map: AttributeMap,
 }
 
-/// Configuration for a downstream SAML SP that this realm issues to.
-///
-/// IdP-side view: everything Hearth needs to validate a `<AuthnRequest>`
-/// from the SP and issue a signed `<Response>` back.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SamlServiceProvider {
-    /// Realm-stable slug (matches YAML key).
-    pub sp_key: String,
-    /// SP's entity ID (what they sign assertions' `AudienceRestriction` with).
-    pub entity_id: String,
-    /// SP's Assertion Consumer Service URL — where signed `<Response>`s go.
-    pub acs_url: String,
-    /// SP's SingleLogoutService URL (optional).
-    pub slo_url: Option<String>,
-    /// SP's signing certificate PEM. Verifies signed `<AuthnRequest>`s and
-    /// `<LogoutRequest>`s from this SP.
-    ///
-    /// Required when `want_authn_requests_signed` is true — config validation
-    /// refuses the pairing without it, and the SSO endpoint fails closed if a
-    /// runtime registration reaches that state anyway.
-    pub sp_certificate_pem: Option<String>,
-    /// Sign individual `<Assertion>` elements.
-    pub sign_assertions: bool,
-    /// Sign the outer `<Response>` envelope.
-    pub sign_responses: bool,
-    /// If true, reject incoming `<AuthnRequest>`s that do not carry a
-    /// signature verifiable against `sp_certificate_pem`.
-    ///
-    /// The HTTP-Redirect binding carries its signature in query parameters,
-    /// not in the XML, so an SP with this flag set must use the HTTP-POST
-    /// binding.
-    pub want_authn_requests_signed: bool,
-    /// NameID format to use in issued assertions.
-    pub nameid_format: SamlNameIdFormat,
-    /// Attribute map: Hearth field → SAML attribute URI for outbound claims.
-    pub attribute_map: AttributeMap,
-}
-
 /// How long an SP-side SAML request-state bag stays valid, in seconds.
 ///
 /// A browser round-trip to the IdP and back; ten minutes is generous. The
@@ -168,45 +130,6 @@ pub struct SamlStateBag {
     /// Optional post-login destination (e.g., `/ui/account`).
     pub return_to: Option<String>,
     /// Issued-at — used to enforce the 10-minute TTL.
-    pub created_at: Timestamp,
-}
-
-/// Session↔SP registration for SLO fan-out on the IdP side.
-///
-/// Written when Hearth (acting as IdP) issues a `<Response>` to an SP.
-/// Looked up at logout time to find all SPs that share this session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SamlSessionRegistration {
-    /// The user session this registration belongs to.
-    pub session_id: SessionId,
-    /// The user behind the session.
-    pub user_id: UserId,
-    /// The SP the assertion was issued to.
-    pub sp_key: String,
-    /// The NameID emitted to the SP (for `<LogoutRequest>` construction).
-    pub name_id: String,
-    /// NameID format used.
-    pub name_id_format: SamlNameIdFormat,
-    /// Created timestamp.
-    pub created_at: Timestamp,
-}
-
-/// In-flight logout state (tracks a LogoutRequest we sent or received).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SamlLogoutStateBag {
-    /// Opaque token (also the storage key suffix).
-    pub token: String,
-    /// Logout request ID we issued (matched in `<LogoutResponse InResponseTo="…"/>`).
-    pub request_id: String,
-    /// Realm.
-    pub realm_id: crate::core::RealmId,
-    /// Whether we initiated as IdP (true) or as SP (false).
-    pub initiated_as_idp: bool,
-    /// Session we're logging out.
-    pub session_id: Option<SessionId>,
-    /// SP / IdP counterparty key.
-    pub counterparty_key: String,
-    /// Created timestamp.
     pub created_at: Timestamp,
 }
 

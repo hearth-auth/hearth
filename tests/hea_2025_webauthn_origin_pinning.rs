@@ -257,7 +257,7 @@ async fn post_json(
 /// (1) `auth/begin` must return the server-pinned RP ID, ignoring the client's.
 #[tokio::test]
 async fn auth_begin_ignores_client_rp_id() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm(&harness);
     let user = create_user(&harness, &realm);
     let app = build_app(&harness);
@@ -282,7 +282,7 @@ async fn auth_begin_ignores_client_rp_id() {
 /// (2) + (3) `auth/complete` rejects a forged origin and accepts the pinned one.
 #[tokio::test]
 async fn auth_complete_pins_origin_server_side() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm(&harness);
     let user = create_user(&harness, &realm);
     let app = build_app(&harness);
@@ -396,7 +396,7 @@ async fn auth_complete_pins_origin_server_side() {
 /// this REST path an oversight rather than a design choice.
 #[tokio::test]
 async fn auth_begin_honours_the_realms_user_verification_policy() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm(&harness);
     let user = create_user(&harness, &realm);
     let app = build_app(&harness);

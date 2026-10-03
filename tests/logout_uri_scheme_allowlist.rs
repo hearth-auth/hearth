@@ -54,9 +54,9 @@ const BACKCHANNEL_ALSO_REFUSED: &[&str] = &[
 ];
 
 async fn setup() -> (common::TestHarness, RealmId, OAuthClient) {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
-        .expect("embedded harness");
+        .expect("in-process harness");
     let realm = harness
         .identity()
         .create_realm(&CreateRealmRequest {

@@ -68,7 +68,7 @@ async fn body_string(resp: axum::response::Response) -> String {
 /// so an attacker cannot enumerate valid user ids through the admin API.
 #[tokio::test]
 async fn admin_user_lookup_does_not_leak_existence_unauthenticated() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm(&harness);
 
     let existing = harness
@@ -178,7 +178,7 @@ async fn median_latency(harness: &common::TestHarness, path: &str) -> Duration {
 /// unauthenticated caller (a matched admin route still consumes shaper budget).
 #[tokio::test]
 async fn admin_route_enforces_rate_limit_429() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let shaper = Arc::new(RequestShaper::with_config(ShaperConfig {
         ip_rps: Some(1),

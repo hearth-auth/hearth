@@ -350,10 +350,9 @@ pub async fn admin_onboarding_app_post(
         access_token_authorization: crate::identity::AccessTokenAuthorization::Embedded,
         jwks: None,
         jwks_uri: None,
-        authorization_signed_response_alg: None,
         // Administrative default (EdDSA); editable afterwards (task 26.55).
         id_token_signed_response_alg: None,
-        profile: crate::identity::ClientProfile::Standard,
+        dpop_bound_access_tokens: false,
         mfa_required: None,
     };
 

@@ -91,7 +91,7 @@ fn create_realm_with_limit(
 
 #[tokio::test]
 async fn reject_new_policy_blocks_4th_session() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm_with_limit(&harness, 3, SessionLimitPolicy::RejectNew);
     let user = create_user_in(&harness, &realm);
 
@@ -121,7 +121,7 @@ async fn reject_new_policy_blocks_4th_session() {
 
 #[tokio::test]
 async fn reject_new_policy_audit_event_written() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm_with_limit(&harness, 1, SessionLimitPolicy::RejectNew);
     let user = create_user_in(&harness, &realm);
 
@@ -149,7 +149,7 @@ async fn reject_new_policy_audit_event_written() {
 
 #[tokio::test]
 async fn evict_oldest_policy_evicts_session_1() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm_with_limit(&harness, 3, SessionLimitPolicy::EvictOldest);
     let user = create_user_in(&harness, &realm);
 
@@ -183,7 +183,7 @@ async fn evict_oldest_policy_evicts_session_1() {
 
 #[tokio::test]
 async fn evict_oldest_audit_event_written() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm_with_limit(&harness, 1, SessionLimitPolicy::EvictOldest);
     let user = create_user_in(&harness, &realm);
 
@@ -213,7 +213,7 @@ async fn evict_oldest_audit_event_written() {
 
 #[tokio::test]
 async fn no_limit_allows_many_sessions() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = harness.create_realm(); // no limit
     let user = create_user_in(&harness, &realm);
 
@@ -229,7 +229,7 @@ async fn no_limit_allows_many_sessions() {
 
 #[tokio::test]
 async fn revoked_sessions_do_not_count_toward_limit() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm_with_limit(&harness, 2, SessionLimitPolicy::RejectNew);
     let user = create_user_in(&harness, &realm);
 

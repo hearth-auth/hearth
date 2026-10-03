@@ -60,7 +60,7 @@ fn make_user(h: &common::TestHarness, realm: &hearth::core::RealmId) -> hearth::
 /// sv claim is emitted in access tokens when sv is enabled for the realm.
 #[tokio::test]
 async fn sv_claim_emitted_when_enabled() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = setup_sv_realm(&h);
     let user = make_user(&h, &realm);
     let session = h
@@ -87,7 +87,7 @@ async fn sv_claim_emitted_when_enabled() {
 /// sv claim is absent when sv is disabled for the realm.
 #[tokio::test]
 async fn sv_claim_absent_when_disabled() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm(); // sv disabled by default
     let user = make_user(&h, &realm);
     let session = h
@@ -109,7 +109,7 @@ async fn sv_claim_absent_when_disabled() {
 /// Logout (user-initiated session revoke) bumps the sv counter.
 #[tokio::test]
 async fn sv_bumped_on_logout() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = setup_sv_realm(&h);
     let user = make_user(&h, &realm);
     let session = h
@@ -149,7 +149,7 @@ async fn sv_bumped_on_logout() {
 /// Admin session revoke bumps the sv counter.
 #[tokio::test]
 async fn sv_bumped_on_admin_revoke() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = setup_sv_realm(&h);
     let user = make_user(&h, &realm);
     let session = h
@@ -185,7 +185,7 @@ async fn sv_bumped_on_admin_revoke() {
 /// Password change bumps sv for all sessions of the user.
 #[tokio::test]
 async fn sv_bumped_on_password_change() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = setup_sv_realm(&h);
     let user = make_user(&h, &realm);
 
@@ -236,7 +236,7 @@ async fn sv_bumped_on_password_change() {
 /// Role assignment change bumps sv for the affected user.
 #[tokio::test]
 async fn sv_bumped_on_role_assignment() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = setup_sv_realm(&h);
     h.rbac().seed_realm(&realm).expect("seed");
     let user = make_user(&h, &realm);
@@ -305,7 +305,7 @@ async fn sv_bumped_on_role_assignment() {
 /// Group membership change bumps sv for the affected user.
 #[tokio::test]
 async fn sv_bumped_on_group_membership_change() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = setup_sv_realm(&h);
     let user = make_user(&h, &realm);
     let session = h
@@ -370,7 +370,7 @@ async fn sv_bumped_on_group_membership_change() {
 /// `sv_snapshot` returns all tracked sessions.
 #[tokio::test]
 async fn sv_snapshot_returns_tracked_sessions() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = setup_sv_realm(&h);
     let user = make_user(&h, &realm);
     let session = h
@@ -398,7 +398,7 @@ async fn sv_snapshot_returns_tracked_sessions() {
 /// `sv_bump_all` bumps every tracked session in the realm.
 #[tokio::test]
 async fn sv_bump_all_bumps_every_session() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = setup_sv_realm(&h);
     let user1 = make_user(&h, &realm);
     let user2 = make_user(&h, &realm);
@@ -439,7 +439,7 @@ async fn sv_bump_all_bumps_every_session() {
 /// `sv_list_deltas` returns `None` when the `since` cursor is behind the retention window.
 #[tokio::test]
 async fn sv_list_deltas_returns_none_when_since_too_old() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = setup_sv_realm(&h);
     let user = make_user(&h, &realm);
     let session = h
@@ -462,7 +462,7 @@ async fn sv_list_deltas_returns_none_when_since_too_old() {
 /// sv operations return `SessionVersionDisabled` when sv is disabled for the realm.
 #[tokio::test]
 async fn sv_ops_disabled_returns_error() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm(); // sv disabled
     let user = make_user(&h, &realm);
     let session = h

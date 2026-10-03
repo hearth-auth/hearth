@@ -8,9 +8,8 @@
 //!    at once, so a single host cannot take every slot.
 //! 2. [`FirstBytesDeadline`] closes a connection that does not send its first
 //!    bytes in time. hyper's `header_read_timeout` covers HTTP/1 header blocks,
-//!    but the automatic HTTP/1-vs-HTTP/2 detection in front of it — and the
-//!    HTTP/2 preface read on the gRPC listener — wait for those first bytes
-//!    with no deadline of their own.
+//!    but the automatic HTTP/1-vs-HTTP/2 detection in front of it waits for
+//!    those first bytes with no deadline of its own.
 
 use std::collections::HashMap;
 use std::future::Future;

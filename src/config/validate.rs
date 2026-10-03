@@ -7,12 +7,12 @@ use std::path::Path;
 
 use super::env;
 use super::error::ConfigError;
+use super::removed::{removed_key_issue, REMOVED_KEYS};
 use super::types::{
     parse_duration_to_micros, AgentAuthConfig, AuthConfig, BrandingConfig, CompactionSection,
     Config, DemoConfig, EmailConfig, EmailTransport, MetricsConfig, ObservabilityConfig,
     OidcYamlConfig, OnboardingConfig, OperationalConfig, RealmYamlConfig, RegistrationModeYaml,
-    SecurityYaml, ServerConfig, SmsConfig, SmsTransport, StorageSection, TokenYamlConfig,
-    ValidationIssue,
+    SecurityYaml, ServerConfig, StorageSection, TokenYamlConfig, ValidationIssue,
 };
 use crate::identity::credentials::{CredentialConfig, PepperConfig, PepperKey};
 
@@ -94,32 +94,20 @@ const DEMO_FORBIDDEN_IN_PROD: &str =
 /// `email_otp` was missing, so an operator following CONFIGURATION.md —
 /// which lists it, and which three code paths already read — got a hard
 /// config error for a documented value (audit 2026-08-28 §4.18#10).
-const VALID_MFA_METHODS: &[&str] = &["totp", "webauthn", "sms", "email_otp"];
+const VALID_MFA_METHODS: &[&str] = &["totp", "webauthn", "email_otp"];
 
 /// The one rule every surface that writes `mfa_methods` applies — the YAML
 /// validator (global `auth.mfa_methods` and `realms.<name>.auth.mfa_methods`),
 /// the JSON admin API and the admin console realm config PATCH.
 ///
-/// Refuses:
-/// * any name outside [`VALID_MFA_METHODS`];
-/// * `sms` when the effective SMS transport cannot deliver a code — the
-///   `log` transport outside dev mode. In dev mode the log transport writes
-///   the full message body to the log, so the developer does receive the
-///   code; in production it writes a redacted line and delivers nothing, so
-///   an `sms` factor there could never be satisfied.
-///
-/// Runtime surfaces used to skip both checks, so an admin could enable SMS
-/// MFA on a server that can only log (and, before the redaction, leak) OTPs.
+/// Refuses any name outside [`VALID_MFA_METHODS`]. `sms` was removed in
+/// 3.0.0 with SMS one-time codes, so it is refused as unknown.
 ///
 /// # Errors
 ///
-/// Returns the operator-facing reason for the first violation. It names the
-/// offending method or transport, never a secret.
-pub fn check_mfa_methods(
-    methods: &[String],
-    sms_transport: SmsTransport,
-    dev_mode: bool,
-) -> Result<(), String> {
+/// Returns the operator-facing reason. It names the offending method, never
+/// a secret.
+pub fn check_mfa_methods(methods: &[String]) -> Result<(), String> {
     if let Some(unknown) = methods
         .iter()
         .find(|m| !VALID_MFA_METHODS.contains(&m.as_str()))
@@ -128,14 +116,6 @@ pub fn check_mfa_methods(
             "unknown MFA method '{unknown}'; valid methods are: {}",
             VALID_MFA_METHODS.join(", ")
         ));
-    }
-    if !dev_mode && sms_transport == SmsTransport::Log && methods.iter().any(|m| m == "sms") {
-        return Err(
-            "'sms' is listed as an MFA method but sms.transport is 'log', which delivers no \
-             message outside dev mode; configure a real SMS transport (twilio or awssns) to \
-             deliver OTP codes"
-                .to_string(),
-        );
     }
     Ok(())
 }
@@ -205,6 +185,9 @@ impl Config {
     /// Returns an error for invalid YAML or values that fail validation.
     pub fn from_yaml_str(yaml: &str) -> Result<Self, ConfigError> {
         let (substituted, warnings) = env::substitute_env_vars(yaml);
+        if let Some(err) = removed_key_issue(&substituted, REMOVED_KEYS) {
+            return Err(err);
+        }
         // HEA control-liveness 10.2 / audit §4.7#3: `dev_mode` is
         // #[serde(default)], so serde WOULD accept it here. This explicit
         // refusal — not any serde attribute — is what keeps it unreachable
@@ -261,9 +244,6 @@ impl Config {
                 tls_require_client_cert: false,
                 trusted_proxies: Vec::new(),
                 default_realm: None,
-                grpc_port: None,
-                grpc_bind_address: None,
-                grpc_allow_plaintext: false,
                 assets_dir: None,
                 trust_forwarded_proto: false,
             },
@@ -286,7 +266,6 @@ impl Config {
             },
             operational: OperationalConfig::default(),
             email: EmailConfig::default(),
-            sms: SmsConfig::default(),
             onboarding: OnboardingConfig::default(),
             branding: BrandingConfig::default(),
             oidc: OidcYamlConfig::default(),
@@ -346,6 +325,11 @@ impl Config {
     /// Environment variables are still substituted.
     pub fn from_yaml_str_unchecked(yaml: &str) -> Result<Self, ConfigError> {
         let (substituted, warnings) = env::substitute_env_vars(yaml);
+        // A removed key is refused even here: `--dev` loads through this path,
+        // and dev must fail the same way production does.
+        if let Some(err) = removed_key_issue(&substituted, REMOVED_KEYS) {
+            return Err(err);
+        }
         let mut config: Self = serde_norway::from_str(&substituted)
             .map_err(|e| ConfigError::ParseError(e.to_string()))?;
         config.config_warnings = warnings;
@@ -451,34 +435,6 @@ impl Config {
                     reason: DEMO_FORBIDDEN_IN_PROD.to_string(),
                 });
             }
-            // GA audit 2026-09-28 M14: gRPC is served over TLS with the HTTPS
-            // certificate when one is configured. Without one it is plaintext,
-            // and the HTTPS gate above says nothing about it.
-            if let Some(port) = self.server.grpc_port {
-                let grpc_bind = self
-                    .server
-                    .grpc_bind_address
-                    .as_deref()
-                    .unwrap_or(self.server.bind_address.as_str());
-                if self.server.tls_cert_path.is_none()
-                    && is_public_listener(grpc_bind)
-                    && !self.server.grpc_allow_plaintext
-                {
-                    issues.push(ValidationIssue {
-                        field: "server.grpc_port".to_string(),
-                        reason: format!(
-                            "the gRPC management API would listen in plaintext on \
-                             {grpc_bind}:{port}: with no server.tls_cert_path there is no \
-                             certificate to serve it with, so admin bearer tokens, OAuth client \
-                             secrets and agent API keys would cross the network in clear text. \
-                             Configure server.tls_cert_path + server.tls_key_path (gRPC then \
-                             uses the same certificate), bind gRPC to loopback with \
-                             server.grpc_bind_address: 127.0.0.1, or — only when a proxy or \
-                             mesh terminates TLS for gRPC — set server.grpc_allow_plaintext: true."
-                        ),
-                    });
-                }
-            }
         }
 
         if !ObservabilityConfig::VALID_LOG_LEVELS.contains(&self.observability.log_level.as_str()) {
@@ -544,7 +500,6 @@ impl Config {
         validate_oidc_all(&self.oidc, self.dev_mode, &mut issues);
         validate_token_all(&self.token, &mut issues);
         validate_email_all(&self.email, &mut issues);
-        validate_sms_all(&self.sms, &mut issues);
         validate_branding_all(&self.branding, &mut issues);
         if let Some(realms) = self.realms.as_ref() {
             if realms.contains_key("system") {
@@ -556,22 +511,17 @@ impl Config {
         }
         validate_realm_web_configs_all(self.realms.as_ref(), &mut issues);
         if let Some(methods) = &self.auth.mfa_methods {
-            if let Err(reason) = check_mfa_methods(methods, self.sms.transport, self.dev_mode) {
+            if let Err(reason) = check_mfa_methods(methods) {
                 issues.push(ValidationIssue {
                     field: "auth.mfa_methods".to_string(),
                     reason,
                 });
             }
         }
-        validate_realm_auth_configs_all(
-            self.realms.as_ref(),
-            &self.sms,
-            self.dev_mode,
-            &mut issues,
-        );
+        validate_realm_auth_configs_all(self.realms.as_ref(), &mut issues);
+        validate_mfa_is_satisfiable(&self.auth, self.realms.as_ref(), &mut issues);
         validate_realm_applications_all(self.realms.as_ref(), &mut issues);
         validate_realm_organizations_all(self.realms.as_ref(), &mut issues);
-        validate_realm_saml_sps_all(self.realms.as_ref(), &mut issues);
         validate_realm_federation_keys_all(self.realms.as_ref(), &mut issues);
         validate_realm_protected_resources_all(self.realms.as_ref(), self.dev_mode, &mut issues);
         validate_realm_introspection_clients_all(self.realms.as_ref(), &mut issues);
@@ -1331,39 +1281,6 @@ fn validate_email_transport_log_prod_all(
     }
 }
 
-/// Checks one SAML SP registration's signing-verification pairing.
-///
-/// `want_authn_requests_signed: true` is only enforceable with a certificate
-/// to verify against, and the certificate is only usable if it parses. Both
-/// are checked at boot so the operator learns about a broken pairing then,
-/// not at the first federated login (audit 2026-08-28 §4.10#4).
-///
-/// Returns `Some((field, reason))` on a problem.
-fn saml_sp_signing_problem(
-    realm: &str,
-    sp_key: &str,
-    sp: &crate::config::SamlServiceProviderYaml,
-) -> Option<(String, String)> {
-    let base = format!("realms.{realm}.saml_service_providers.{sp_key}");
-    if let Some(pem) = sp.sp_certificate_pem.as_deref() {
-        if let Err(e) = crate::identity::federation::saml::validate_signing_cert_pem(pem) {
-            return Some((
-                format!("{base}.sp_certificate_pem"),
-                format!("not a usable RSA certificate: {e}"),
-            ));
-        }
-    } else if sp.want_authn_requests_signed == Some(true) {
-        return Some((
-            format!("{base}.want_authn_requests_signed"),
-            "requires `sp_certificate_pem` — without a certificate there is \
-             nothing to verify an AuthnRequest signature against, and the SSO \
-             endpoint refuses every request from this SP"
-                .to_string(),
-        ));
-    }
-    None
-}
-
 fn validate_realm_protected_resources_all(
     realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
     dev_mode: bool,
@@ -1436,23 +1353,6 @@ fn validate_realm_introspection_clients_all(
                          (applications / oauth_clients)"
                     ),
                 });
-            }
-        }
-    }
-}
-
-fn validate_realm_saml_sps_all(
-    realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
-    issues: &mut Vec<ValidationIssue>,
-) {
-    let Some(realms) = realms else { return };
-    for (name, cfg) in realms {
-        let Some(sps) = &cfg.saml_service_providers else {
-            continue;
-        };
-        for (sp_key, sp) in sps {
-            if let Some((field, reason)) = saml_sp_signing_problem(name, sp_key, sp) {
-                issues.push(ValidationIssue { field, reason });
             }
         }
     }
@@ -1535,79 +1435,6 @@ const REFRESH_TOKEN_TTL_MAX_MICROS: i64 = 30 * 86_400 * 1_000_000;
 const ACCESS_TOKEN_TTL_WARN_MICROS: i64 = 900 * 1_000_000;
 /// Warning threshold: refresh token TTL > 24 hours warrants an operator alert.
 const REFRESH_TOKEN_TTL_WARN_MICROS: i64 = 86_400 * 1_000_000;
-
-fn validate_sms(sms: &SmsConfig) -> Result<(), ConfigError> {
-    match sms.transport {
-        SmsTransport::Log => return Ok(()),
-        SmsTransport::Twilio => validate_sms_twilio(sms)?,
-        SmsTransport::AwsSns => validate_sms_awssns(sms)?,
-    }
-    // For real transports, HEARTH_SMS_OTP_HMAC_KEY must be present and long enough.
-    match std::env::var("HEARTH_SMS_OTP_HMAC_KEY") {
-        Ok(key) if key.len() >= 32 => Ok(()),
-        Ok(key) if !key.is_empty() => Err(invalid(
-            "sms",
-            "HEARTH_SMS_OTP_HMAC_KEY must be at least 32 bytes for adequate HMAC-SHA256 \
-             security; use a 32+ byte random value",
-        )),
-        _ => Err(invalid(
-            "sms",
-            "HEARTH_SMS_OTP_HMAC_KEY environment variable is required when \
-             sms.transport is not 'log'",
-        )),
-    }
-}
-
-fn validate_sms_twilio(sms: &SmsConfig) -> Result<(), ConfigError> {
-    let tw = sms.twilio.as_ref().ok_or_else(|| {
-        invalid(
-            "sms.twilio",
-            "twilio block is required when sms.transport is twilio",
-        )
-    })?;
-    if tw.account_sid.is_empty() {
-        return Err(invalid("sms.twilio.account_sid", "must not be empty"));
-    }
-    if tw.auth_token.is_empty() {
-        return Err(invalid("sms.twilio.auth_token", "must not be empty"));
-    }
-    if tw.from.is_empty() {
-        return Err(invalid("sms.twilio.from", "must not be empty"));
-    }
-    Ok(())
-}
-
-fn validate_sms_awssns(sms: &SmsConfig) -> Result<(), ConfigError> {
-    let aws_sns = sms.aws_sns.as_ref().ok_or_else(|| {
-        invalid(
-            "sms.aws_sns",
-            "aws_sns block is required when sms.transport is awssns",
-        )
-    })?;
-    if aws_sns.region.is_empty() {
-        return Err(invalid("sms.aws_sns.region", "must not be empty"));
-    }
-    if aws_sns.access_key_id.is_empty() {
-        return Err(invalid("sms.aws_sns.access_key_id", "must not be empty"));
-    }
-    if aws_sns.secret_access_key.is_empty() {
-        return Err(invalid(
-            "sms.aws_sns.secret_access_key",
-            "must not be empty",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_sms_all(sms: &SmsConfig, issues: &mut Vec<ValidationIssue>) {
-    match validate_sms(sms) {
-        Ok(()) => {}
-        Err(ConfigError::ValidationError { field, reason }) => {
-            issues.push(ValidationIssue { field, reason });
-        }
-        Err(_) => {}
-    }
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Accumulating validators (used by `Config::validate_all`)
@@ -1961,11 +1788,45 @@ fn validate_realm_web_configs_all(
     }
 }
 
+/// A realm that requires MFA — explicitly or by the default — must offer a
+/// method that satisfies it: a passkey (`webauthn`) or TOTP. Email OTP alone
+/// cannot (spec `mfa-policy`), so such a realm could never finish a sign-in.
+/// An absent `mfa_methods` restricts nothing and always passes.
+fn validate_mfa_is_satisfiable(
+    global: &AuthConfig,
+    realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let Some(realms) = realms else { return };
+    for (name, cfg) in realms {
+        let auth = cfg.auth.as_ref();
+        let required = auth
+            .and_then(|a| a.mfa_required)
+            .or(global.mfa_required)
+            .unwrap_or(true);
+        let (source, methods) = match auth.and_then(|a| a.mfa_methods.as_ref()) {
+            Some(m) => ("", Some(m)),
+            None => (
+                " (inherited from auth.mfa_methods)",
+                global.mfa_methods.as_ref(),
+            ),
+        };
+        let Some(methods) = methods else { continue };
+        if required && !methods.iter().any(|m| m == "totp" || m == "webauthn") {
+            issues.push(ValidationIssue {
+                field: format!("realms.{name}.auth.mfa_methods"),
+                reason: format!(
+                    "this realm requires MFA, so mfa_methods{source} must include totp or \
+                     webauthn: email OTP does not satisfy MFA"
+                ),
+            });
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn validate_realm_auth_configs_all(
     realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
-    sms: &SmsConfig,
-    dev_mode: bool,
     issues: &mut Vec<ValidationIssue>,
 ) {
     let Some(realms) = realms else { return };
@@ -1992,7 +1853,7 @@ fn validate_realm_auth_configs_all(
             issues,
         );
         if let Some(methods) = &auth.mfa_methods {
-            if let Err(reason) = check_mfa_methods(methods, sms.transport, dev_mode) {
+            if let Err(reason) = check_mfa_methods(methods) {
                 issues.push(ValidationIssue {
                     field: format!("realms.{name}.auth.mfa_methods"),
                     reason,
@@ -2116,15 +1977,11 @@ fn validate_realm_auth_configs_all(
 
 /// Validates an application's `id_token_signed_response_alg` (task 26.55).
 ///
-/// The engine refuses anything but RS256/EdDSA, and RS256 wherever FAPI 2.0
-/// applies (FAPI 2.0 Security Profile §5.4.1 permits only PS256, ES256 and
-/// EdDSA), at reconcile time; `hearth config validate` must say so first, not
-/// after a boot that already failed. `realm_fapi` is whether the realm has a
-/// `fapi_profile`.
+/// The engine refuses anything but RS256/EdDSA at reconcile time; `hearth config validate` must say so first, not
+/// after a boot that already failed.
 fn validate_app_id_token_alg(
     prefix: &str,
     app: &super::types::ApplicationYamlConfig,
-    realm_fapi: bool,
     issues: &mut Vec<ValidationIssue>,
 ) {
     let Some(alg) = &app.id_token_signed_response_alg else {
@@ -2135,12 +1992,6 @@ fn validate_app_id_token_alg(
             "must be \"RS256\" or \"EdDSA\" (case-sensitive); \"none\" and symmetric HS* \
              algorithms are never supported"
         }
-        Ok(crate::identity::IdTokenSigningAlg::Rs256)
-            if realm_fapi || app.profile.as_deref() == Some("fapi2") =>
-        {
-            "RS256 is not permitted under FAPI 2.0 (a `profile: fapi2` application or a realm \
-             with `fapi_profile`); use \"EdDSA\""
-        }
         Ok(_) => return,
     };
     issues.push(ValidationIssue {
@@ -2149,15 +2000,9 @@ fn validate_app_id_token_alg(
     });
 }
 
-/// Validates an application's `profile` and `jwks`.
-///
-/// Only `standard` and `fapi2` exist (anything else used to be read as
-/// standard with a warning). A `fapi2` application authenticates with
-/// `private_key_jwt` only, so it must declare the public keys it signs
-/// assertions with (`jwks`) and must not hold a secret — without keys,
-/// reconcile made it a client that counted as PUBLIC. The engine refuses the
-/// same at reconcile; `hearth config validate` must say so first.
-fn validate_app_profile_keys(
+/// Validates an application's inline `jwks`: the engine refuses an invalid
+/// set at reconcile, so `hearth config validate` must say so first.
+fn validate_app_jwks(
     prefix: &str,
     app: &super::types::ApplicationYamlConfig,
     issues: &mut Vec<ValidationIssue>,
@@ -2169,62 +2014,6 @@ fn validate_app_profile_keys(
                 reason,
             });
         }
-    }
-    let fapi2 = match app.profile.as_deref() {
-        None | Some("standard") => false,
-        Some("fapi2") => true,
-        Some(_) => {
-            issues.push(ValidationIssue {
-                field: format!("{prefix}.profile"),
-                reason: "must be \"standard\" or \"fapi2\"".to_string(),
-            });
-            false
-        }
-    };
-    if !fapi2 {
-        return;
-    }
-    if app.jwks_json().is_none() {
-        issues.push(ValidationIssue {
-            field: format!("{prefix}.jwks"),
-            reason: "a `profile: fapi2` application authenticates with private_key_jwt only and \
-                     must declare its public keys inline (`jwks: {keys: [...]}`)"
-                .to_string(),
-        });
-    }
-    if app.confidential == Some(true) || app.client_secret.is_some() {
-        issues.push(ValidationIssue {
-            field: format!("{prefix}.client_secret"),
-            reason: "a `profile: fapi2` application must not hold a client secret; it \
-                     authenticates with private_key_jwt"
-                .to_string(),
-        });
-    }
-}
-
-/// A FAPI 2.0 Advanced realm accepts `private_key_jwt` only: the token
-/// endpoint refuses every client secret there, and the admin API refuses to
-/// create a secret-based client. A YAML application with a secret was
-/// accepted here and reconciled into a client that could never authenticate.
-fn validate_app_no_secret_in_fapi_advanced_realm(
-    prefix: &str,
-    realm_name: &str,
-    app_key: &str,
-    realm_fapi_profile: Option<&str>,
-    app: &super::types::ApplicationYamlConfig,
-    issues: &mut Vec<ValidationIssue>,
-) {
-    let advanced = realm_fapi_profile.is_some_and(|p| p.eq_ignore_ascii_case("advanced"));
-    if advanced && (app.confidential == Some(true) || app.client_secret.is_some()) {
-        issues.push(ValidationIssue {
-            field: format!("{prefix}.client_secret"),
-            reason: format!(
-                "application '{app_key}' in realm '{realm_name}' uses a client secret, but the \
-                 realm's fapi_profile is advanced, which accepts private_key_jwt only: a secret \
-                 could never authenticate. Remove `confidential`/`client_secret` and declare \
-                 the client's public keys in `jwks`"
-            ),
-        });
     }
 }
 
@@ -2264,16 +2053,8 @@ fn validate_realm_applications_all(
                     }
                 }
             }
-            validate_app_id_token_alg(&prefix, app, cfg.fapi_profile.is_some(), issues);
-            validate_app_profile_keys(&prefix, app, issues);
-            validate_app_no_secret_in_fapi_advanced_realm(
-                &prefix,
-                realm_name,
-                app_key,
-                cfg.fapi_profile.as_deref(),
-                app,
-                issues,
-            );
+            validate_app_id_token_alg(&prefix, app, issues);
+            validate_app_jwks(&prefix, app, issues);
             // A confidential client whose `client_secret` is present but empty
             // authenticates with `Authorization: Basic base64("<client_id>:")`,
             // which any caller who knows the client id can send. The `is_none()`
@@ -2423,10 +2204,9 @@ mod tests {
 
     fn validate_realm_auth_configs(
         realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
-        sms: &SmsConfig,
     ) -> Result<(), ConfigError> {
         let mut issues = Vec::new();
-        super::validate_realm_auth_configs_all(realms, sms, false, &mut issues);
+        super::validate_realm_auth_configs_all(realms, &mut issues);
         first_error(issues)
     }
 
@@ -2440,10 +2220,7 @@ mod tests {
         }
     }
     use super::*;
-    use crate::config::types::{
-        PasswordSecurityYaml, PepperYaml, RealmAuthYaml, RealmYamlConfig, SmsConfig, SmsTransport,
-        TwilioConfig,
-    };
+    use crate::config::types::{PasswordSecurityYaml, PepperYaml, RealmAuthYaml, RealmYamlConfig};
 
     fn realm_with_mfa(methods: &[&str]) -> RealmYamlConfig {
         RealmYamlConfig {
@@ -2866,13 +2643,6 @@ mod tests {
         ));
     }
 
-    fn sms_log() -> SmsConfig {
-        SmsConfig {
-            transport: SmsTransport::Log,
-            ..Default::default()
-        }
-    }
-
     #[test]
     fn omitted_security_block_keeps_documented_defaults() {
         // HEA control-liveness: `SecurityYaml` derived `Default`, which zeroes
@@ -2928,51 +2698,10 @@ mod tests {
     }
 
     #[test]
-    fn sms_is_accepted_in_mfa_methods_with_real_transport() {
-        // "sms" was previously missing from VALID_MFA_METHODS — verify it is now accepted
-        // when paired with a non-log transport. We use Twilio here; the cross-validation
-        // only fires when transport==Log.
-        let mut realms = std::collections::HashMap::new();
-        realms.insert("default".to_string(), realm_with_mfa(&["totp", "sms"]));
-        let sms = SmsConfig {
-            transport: SmsTransport::Twilio,
-            twilio: Some(TwilioConfig {
-                account_sid: "ACtest".to_string(),
-                auth_token: "token".to_string(),
-                from: "+15550001111".to_string(),
-            }),
-            ..Default::default()
-        };
-        // HMAC key must be present for non-log transport validation; inject it via env.
-        // We only test the mfa_methods portion of the validator here (not full validate_sms).
-        let result = validate_realm_auth_configs(Some(&realms), &sms);
-        // Should succeed (the sms + real-transport combo is valid for mfa_methods check).
-        assert!(result.is_ok(), "expected Ok but got: {result:?}");
-    }
-
-    #[test]
-    fn sms_mfa_with_log_transport_is_rejected() {
-        // Operators cannot deliver OTPs via the log transport; a config that enables
-        // sms as an MFA method while leaving sms.transport=log is a misconfiguration.
-        let mut realms = std::collections::HashMap::new();
-        realms.insert("default".to_string(), realm_with_mfa(&["totp", "sms"]));
-        let result = validate_realm_auth_configs(Some(&realms), &sms_log());
-        let Err(ConfigError::ValidationError { field, reason }) = result else {
-            panic!("expected ValidationError but got: {result:?}");
-        };
-        assert_eq!(field, "realms.default.auth.mfa_methods");
-        assert!(
-            reason.contains("log"),
-            "reason should mention 'log': {reason}"
-        );
-    }
-
-    #[test]
-    fn totp_and_webauthn_still_accepted_with_log_transport() {
-        // Non-sms methods must still be accepted regardless of sms.transport.
+    fn totp_and_webauthn_are_accepted() {
         let mut realms = std::collections::HashMap::new();
         realms.insert("default".to_string(), realm_with_mfa(&["totp", "webauthn"]));
-        let result = validate_realm_auth_configs(Some(&realms), &sms_log());
+        let result = validate_realm_auth_configs(Some(&realms));
         assert!(result.is_ok(), "expected Ok but got: {result:?}");
     }
 
@@ -2983,7 +2712,7 @@ mod tests {
             "default".to_string(),
             realm_with_mfa(&["totp", "carrier_pigeon"]),
         );
-        let result = validate_realm_auth_configs(Some(&realms), &sms_log());
+        let result = validate_realm_auth_configs(Some(&realms));
         let Err(ConfigError::ValidationError { field, reason }) = result else {
             panic!("expected ValidationError but got: {result:?}");
         };
@@ -2998,62 +2727,22 @@ mod tests {
     }
 
     #[test]
-    fn shared_mfa_rule_refuses_sms_on_the_log_transport_outside_dev() {
-        let err = check_mfa_methods(&methods(&["totp", "sms"]), SmsTransport::Log, false)
-            .expect_err("log transport cannot deliver an OTP in production");
-        assert!(err.contains("log"), "reason must name the transport: {err}");
-    }
-
-    #[test]
-    fn shared_mfa_rule_allows_sms_on_the_log_transport_in_dev() {
-        // Dev mode logs the full SMS body, so the developer does get the code.
-        assert_eq!(
-            check_mfa_methods(&methods(&["sms"]), SmsTransport::Log, true),
-            Ok(())
-        );
-    }
-
-    #[test]
-    fn shared_mfa_rule_allows_sms_on_a_real_transport() {
-        for t in [SmsTransport::Twilio, SmsTransport::AwsSns] {
-            assert_eq!(check_mfa_methods(&methods(&["sms"]), t, false), Ok(()));
-        }
-    }
-
-    #[test]
-    fn shared_mfa_rule_refuses_unknown_methods_even_in_dev() {
-        let err = check_mfa_methods(&methods(&["carrier_pigeon"]), SmsTransport::Twilio, true)
-            .expect_err("unknown method");
+    fn shared_mfa_rule_refuses_unknown_methods() {
+        let err = check_mfa_methods(&methods(&["carrier_pigeon"])).expect_err("unknown method");
         assert!(err.contains("carrier_pigeon"), "{err}");
     }
 
     #[test]
-    fn shared_mfa_rule_accepts_non_sms_methods_on_the_log_transport() {
-        assert_eq!(
-            check_mfa_methods(
-                &methods(&["totp", "webauthn", "email_otp"]),
-                SmsTransport::Log,
-                false
-            ),
-            Ok(())
-        );
+    fn shared_mfa_rule_refuses_sms() {
+        let err = check_mfa_methods(&methods(&["totp", "sms"])).expect_err("sms was removed");
+        assert!(err.contains("unknown MFA method 'sms'"), "{err}");
     }
 
-    /// The global `auth.mfa_methods` default is inherited by every realm that
-    /// does not override it, but only the per-realm list was ever validated.
     #[test]
-    fn global_auth_mfa_methods_with_sms_on_the_log_transport_is_refused() {
-        let yaml = "security:\n  key_encryption_key: \"".to_string()
-            + &"ab".repeat(32)
-            + "\"\nauth:\n  mfa_methods: [\"sms\"]\n\
-               storage:\n  data_dir: \"/tmp/ga-sms-global\"\n";
-        let config = Config::from_yaml_str_unchecked(&yaml).expect("parses");
-        let issues = config.validate_all();
-        assert!(
-            issues
-                .iter()
-                .any(|i| i.field == "auth.mfa_methods" && i.reason.contains("log")),
-            "global sms MFA on the log transport must be refused: {issues:?}"
+    fn shared_mfa_rule_accepts_the_kept_methods() {
+        assert_eq!(
+            check_mfa_methods(&methods(&["totp", "webauthn", "email_otp"])),
+            Ok(())
         );
     }
 
@@ -3105,75 +2794,6 @@ mod tests {
         );
         cfg.dev_mode = true;
         assert_eq!(fields(&cfg), Vec::<String>::new());
-    }
-
-    #[test]
-    fn validate_all_sms_mfa_with_log_transport_accumulates_issue() {
-        let mut realms = std::collections::HashMap::new();
-        realms.insert("default".to_string(), realm_with_mfa(&["sms"]));
-        let mut issues = Vec::new();
-        validate_realm_auth_configs_all(Some(&realms), &sms_log(), false, &mut issues);
-        assert!(
-            issues
-                .iter()
-                .any(|i| i.field == "realms.default.auth.mfa_methods" && i.reason.contains("log")),
-            "expected an issue about log transport; got: {issues:?}"
-        );
-    }
-
-    #[test]
-    fn sms_hmac_key_required_for_non_log_transport() {
-        // Ensure the HMAC key check is caught by validate_sms when transport != Log.
-        // Remove the env var so the check fires.
-        std::env::remove_var("HEARTH_SMS_OTP_HMAC_KEY");
-        let sms = SmsConfig {
-            transport: SmsTransport::Twilio,
-            twilio: Some(TwilioConfig {
-                account_sid: "ACtest".to_string(),
-                auth_token: "token".to_string(),
-                from: "+15550001111".to_string(),
-            }),
-            ..Default::default()
-        };
-        let result = validate_sms(&sms);
-        let Err(ConfigError::ValidationError { field, reason }) = result else {
-            panic!("expected ValidationError but got: {result:?}");
-        };
-        assert_eq!(field, "sms");
-        assert!(
-            reason.contains("HEARTH_SMS_OTP_HMAC_KEY"),
-            "reason should mention HEARTH_SMS_OTP_HMAC_KEY: {reason}"
-        );
-    }
-
-    #[test]
-    fn sms_hmac_key_too_short_is_rejected() {
-        std::env::set_var("HEARTH_SMS_OTP_HMAC_KEY", "short");
-        let sms = SmsConfig {
-            transport: SmsTransport::Twilio,
-            twilio: Some(TwilioConfig {
-                account_sid: "ACtest".to_string(),
-                auth_token: "token".to_string(),
-                from: "+15550001111".to_string(),
-            }),
-            ..Default::default()
-        };
-        let result = validate_sms(&sms);
-        std::env::remove_var("HEARTH_SMS_OTP_HMAC_KEY");
-        let Err(ConfigError::ValidationError { reason, .. }) = result else {
-            panic!("expected ValidationError but got: {result:?}");
-        };
-        assert!(
-            reason.contains("32 bytes"),
-            "reason should mention 32 bytes: {reason}"
-        );
-    }
-
-    #[test]
-    fn sms_log_transport_does_not_require_hmac_key() {
-        std::env::remove_var("HEARTH_SMS_OTP_HMAC_KEY");
-        let result = validate_sms(&sms_log());
-        assert!(result.is_ok(), "log transport should not require HMAC key");
     }
 
     // ===== HEA-SEC-27: TTL cap enforcement =====
@@ -3320,7 +2940,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let result = validate_realm_auth_configs(Some(&realms), &sms_log());
+        let result = validate_realm_auth_configs(Some(&realms));
         let Err(ConfigError::ValidationError { field, reason }) = result else {
             panic!("expected ValidationError; got: {result:?}");
         };
@@ -3976,186 +3596,6 @@ realms:
         }
     }
 
-    /// FAPI 2.0 Security Profile §5.4.1 permits only PS256, ES256 and EdDSA, so
-    /// `hearth config validate` refuses RS256 for a `profile: fapi2`
-    /// application and for any application of a realm with a `fapi_profile` —
-    /// the engine refuses both at reconcile, and the operator should hear first.
-    #[test]
-    fn config_refuses_rs256_id_tokens_under_fapi() {
-        let yaml = |realm_fapi: &str, app_profile: &str, alg: &str| {
-            format!(
-                r#"
-oidc:
-  issuer: "https://auth.example.com"
-server:
-  trust_forwarded_proto: true
-  trusted_proxies: ["127.0.0.1"]
-security:
-  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
-realms:
-  myrealm:
-{realm_fapi}
-    applications:
-      my-app:
-        name: "My App"
-        redirect_uris: ["https://app.example.com/cb"]
-{app_profile}
-        id_token_signed_response_alg: "{alg}"
-"#
-            )
-        };
-        let alg_issues = |realm_fapi: &str, app_profile: &str, alg: &str| {
-            Config::from_yaml_str_unchecked(&yaml(realm_fapi, app_profile, alg))
-                .expect("fixture parses")
-                .validate_all()
-                .into_iter()
-                .filter(|issue| {
-                    issue.field == "realms.myrealm.applications.my-app.id_token_signed_response_alg"
-                })
-                .count()
-        };
-        let fapi_realm = "    fapi_profile: baseline";
-        let fapi_app = "        profile: fapi2";
-        assert_eq!(alg_issues(fapi_realm, "", "RS256"), 1, "FAPI realm + RS256");
-        assert_eq!(alg_issues("", fapi_app, "RS256"), 1, "FAPI 2.0 app + RS256");
-        assert_eq!(alg_issues(fapi_realm, "", "EdDSA"), 0, "FAPI realm + EdDSA");
-        assert_eq!(alg_issues("", fapi_app, "EdDSA"), 0, "FAPI 2.0 app + EdDSA");
-        assert_eq!(alg_issues("", "", "RS256"), 0, "no FAPI + RS256");
-    }
-
-    /// Both loaders a config reload (SIGHUP / `POST /admin/api/config/reload`)
-    /// and startup go through refuse a secret-based application in a realm
-    /// whose `fapi_profile` is advanced, naming realm and application: the
-    /// runtime refuses every client secret there.
-    #[test]
-    fn loaders_refuse_a_secret_application_in_a_fapi_advanced_realm() {
-        let yaml = r#"
-oidc:
-  issuer: "https://auth.example.com"
-server:
-  trust_forwarded_proto: true
-  trusted_proxies: ["127.0.0.1"]
-storage:
-  data_dir: "/tmp/hearth-test"
-security:
-  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
-email:
-  transport: smtp
-  from: "auth@example.com"
-  smtp:
-    host: "mail.example.com"
-    port: 587
-realms:
-  bank:
-    fapi_profile: advanced
-    applications:
-      ledger:
-        name: "Ledger"
-        redirect_uris: ["https://ledger.example.com/cb"]
-        confidential: true
-        client_secret: "a-long-enough-secret-value-123"
-"#;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("hearth.yaml");
-        std::fs::write(&path, yaml).expect("write");
-        for (loader, result) in [
-            ("from_file", Config::from_file(&path)),
-            ("from_file_as_dev", Config::from_file_as_dev(&path)),
-        ] {
-            match result {
-                Err(ConfigError::ValidationError { field, reason }) => {
-                    assert_eq!(
-                        field, "realms.bank.applications.ledger.client_secret",
-                        "{loader}"
-                    );
-                    assert!(
-                        reason.contains("'ledger'") && reason.contains("'bank'"),
-                        "{loader}: {reason}"
-                    );
-                }
-                other => panic!("{loader}: expected the FAPI Advanced refusal, got {other:?}"),
-            }
-        }
-    }
-
-    /// A `profile: fapi2` application authenticates with `private_key_jwt`
-    /// only, so it must declare the keys it signs assertions with (`jwks`) and
-    /// no secret; an unknown profile is refused rather than read as standard.
-    /// Before, reconcile set `profile = Fapi2` on a keyless client that then
-    /// counted as PUBLIC.
-    #[test]
-    fn config_requires_keys_and_no_secret_for_a_fapi2_application() {
-        let yaml = |app: &str| {
-            format!(
-                r#"
-oidc:
-  issuer: "https://auth.example.com"
-server:
-  trust_forwarded_proto: true
-  trusted_proxies: ["127.0.0.1"]
-security:
-  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
-realms:
-  myrealm:
-    applications:
-      my-app:
-        name: "My App"
-        redirect_uris: ["https://app.example.com/cb"]
-{app}
-"#
-            )
-        };
-        let issues = |app: &str| -> Vec<String> {
-            Config::from_yaml_str_unchecked(&yaml(app))
-                .expect("fixture parses")
-                .validate_all()
-                .into_iter()
-                .filter(|i| i.field.starts_with("realms.myrealm.applications.my-app"))
-                .map(|i| format!("{}: {}", i.field, i.reason))
-                .collect()
-        };
-        let jwks = r"        jwks:
-          keys:
-            - kty: OKP
-              crv: Ed25519
-              kid: k1
-              alg: EdDSA
-              use: sig
-              x: 11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo";
-
-        let keyless = issues("        profile: fapi2");
-        assert!(
-            keyless
-                .iter()
-                .any(|i| i.contains(".jwks") && i.contains("private_key_jwt")),
-            "a keyless fapi2 application must be refused, naming jwks: {keyless:?}"
-        );
-        let with_secret = issues(&format!(
-            "        profile: fapi2\n        confidential: true\n        client_secret: \"s3cret-s3cret-s3cret\"\n{jwks}"
-        ));
-        assert!(
-            with_secret.iter().any(|i| i.contains("client_secret")),
-            "a fapi2 application with a secret must be refused: {with_secret:?}"
-        );
-        let unknown = issues("        profile: fapi3");
-        assert!(
-            unknown.iter().any(|i| i.contains(".profile")),
-            "an unknown profile must be refused: {unknown:?}"
-        );
-        let private = issues(&format!(
-            "        profile: fapi2\n{jwks}\n              d: nWGxne_9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A"
-        ));
-        assert!(
-            private
-                .iter()
-                .any(|i| i.contains(".jwks") && i.contains("private")),
-            "a JWKS carrying private key material must be refused: {private:?}"
-        );
-        let ok = issues(&format!("        profile: fapi2\n{jwks}"));
-        assert!(ok.is_empty(), "fapi2 with an inline JWKS is valid: {ok:?}");
-        assert!(issues("").is_empty(), "control: a standard application");
-    }
-
     #[test]
     fn config_rejects_ropc_password_grant_in_applications() {
         let yaml = r#"
@@ -4256,104 +3696,6 @@ realms:
     }
 
     // ── SAML SP signing pairing (§4.10#4) ─────────────────────────────────
-
-    /// `want_authn_requests_signed: true` is only enforceable against a
-    /// registered certificate. Boot must refuse the unenforceable pairing
-    /// rather than accept a flag that turns the SP off.
-    #[test]
-    fn saml_sp_wanting_signed_authn_requests_without_certificate_is_refused() {
-        let yaml = r#"
-oidc:
-  issuer: "https://auth.example.com"
-server:
-  trust_forwarded_proto: true
-  trusted_proxies: ["127.0.0.1"]
-security:
-  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
-email:
-  transport: smtp
-  from: "noreply@example.com"
-  smtp:
-    host: "smtp.example.com"
-    port: 587
-realms:
-  acme:
-    saml_service_providers:
-      crm:
-        entity_id: "https://crm.example"
-        acs_url: "https://crm.example/acs"
-        want_authn_requests_signed: true
-"#;
-        let err = Config::from_yaml_str(yaml)
-            .expect_err("want_authn_requests_signed without a certificate must be refused");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("sp_certificate_pem"),
-            "the error must name the missing key: {msg}"
-        );
-    }
-
-    /// The same SP with the flag left at its default is accepted.
-    #[test]
-    fn saml_sp_without_signing_requirement_is_accepted() {
-        let yaml = r#"
-oidc:
-  issuer: "https://auth.example.com"
-server:
-  trust_forwarded_proto: true
-  trusted_proxies: ["127.0.0.1"]
-security:
-  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
-email:
-  transport: smtp
-  from: "noreply@example.com"
-  smtp:
-    host: "smtp.example.com"
-    port: 587
-realms:
-  acme:
-    saml_service_providers:
-      crm:
-        entity_id: "https://crm.example"
-        acs_url: "https://crm.example/acs"
-"#;
-        Config::from_yaml_str(yaml).expect("an SP that does not require signing must be accepted");
-    }
-
-    /// A certificate that cannot be parsed can never verify a signature, so
-    /// it is refused at boot instead of at the first federated login.
-    #[test]
-    fn saml_sp_certificate_pem_must_be_a_usable_certificate() {
-        let yaml = r#"
-oidc:
-  issuer: "https://auth.example.com"
-server:
-  trust_forwarded_proto: true
-  trusted_proxies: ["127.0.0.1"]
-security:
-  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
-email:
-  transport: smtp
-  from: "noreply@example.com"
-  smtp:
-    host: "smtp.example.com"
-    port: 587
-realms:
-  acme:
-    saml_service_providers:
-      crm:
-        entity_id: "https://crm.example"
-        acs_url: "https://crm.example/acs"
-        want_authn_requests_signed: true
-        sp_certificate_pem: "not a certificate"
-"#;
-        let err = Config::from_yaml_str(yaml).expect_err("an unusable certificate must be refused");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("sp_certificate_pem"),
-            "the error must name the offending key: {msg}"
-        );
-    }
 
     // ── GA audit 3 round 3: federation PEMs are parsed at load/reload ───────
     //
@@ -4571,60 +3913,6 @@ realms:
                 .any(|i| i.field == "security.key_encryption_key" && i.reason.contains("UTF-8")),
             "a HEARTH_KEK that is not valid UTF-8 must be reported; got {issues:?}"
         );
-    }
-
-    // ── GA audit 2026-09-28 M14: plaintext gRPC in production ───────────────
-
-    fn grpc_issues(yaml: &str) -> Vec<ValidationIssue> {
-        Config::from_yaml_str_unchecked(yaml)
-            .expect("parse")
-            .validate_all()
-            .into_iter()
-            .filter(|i| i.field.starts_with("server.grpc"))
-            .collect()
-    }
-
-    /// Without an HTTPS certificate there is no TLS to serve gRPC with, so a
-    /// gRPC listener reachable off-host would carry admin tokens in clear text.
-    #[test]
-    fn a_public_plaintext_grpc_listener_is_refused_in_production() {
-        let issues = grpc_issues(
-            "server:\n  bind_address: 0.0.0.0\n  trust_forwarded_proto: true\n  grpc_port: 9090\n",
-        );
-        assert!(
-            issues.iter().any(|i| i.field == "server.grpc_port"),
-            "a non-loopback gRPC bind with no TLS must be refused; got {issues:?}"
-        );
-    }
-
-    #[test]
-    fn plaintext_grpc_is_allowed_on_loopback_with_tls_or_with_the_opt_in() {
-        for yaml in [
-            // Loopback gRPC bind, public HTTP bind.
-            "server:\n  bind_address: 0.0.0.0\n  grpc_port: 9090\n  grpc_bind_address: 127.0.0.1\n",
-            // gRPC served with the HTTPS certificate.
-            "server:\n  bind_address: 0.0.0.0\n  grpc_port: 9090\n  tls_cert_path: /c.pem\n  tls_key_path: /k.pem\n",
-            // TLS terminated by a proxy in front of gRPC too.
-            "server:\n  bind_address: 0.0.0.0\n  grpc_port: 9090\n  grpc_allow_plaintext: true\n",
-            // No gRPC listener at all.
-            "server:\n  bind_address: 0.0.0.0\n",
-        ] {
-            let issues = grpc_issues(yaml);
-            assert!(issues.is_empty(), "{yaml}\nmust be accepted; got {issues:?}");
-        }
-    }
-
-    #[test]
-    fn plaintext_grpc_stays_allowed_in_dev_mode() {
-        let mut config = Config::dev();
-        config.server.grpc_port = Some(9090);
-        config.server.grpc_bind_address = Some("0.0.0.0".to_string());
-        let issues: Vec<_> = config
-            .validate_all()
-            .into_iter()
-            .filter(|i| i.field.starts_with("server.grpc"))
-            .collect();
-        assert!(issues.is_empty(), "got {issues:?}");
     }
 
     // ── GA audit 2026-09-28 M15: `email.transport: log` in production ───────

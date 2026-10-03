@@ -31,13 +31,9 @@ Where a guard is consulted:
 | A-3 distributed-attack detector | login form, pre-gate |
 | A-9 tenant CIDR policy | login form, pre-gate |
 | A-16 CAPTCHA challenge state | login form, pre-gate |
-| A-17 login tarpit | login form, pre-gate (awaited, never slept on) |
-| P-2 IP reputation | login form, pre-gate |
-| P-3 bot signal | login form, pre-gate |
-| P-5 email reputation | `POST /ui/register` |
 | A-4 outbound volume shield | self-service verification and password-reset sends |
 | A-50 cross-realm aggregation cap | self-service verification and password-reset sends |
-| A-11 / P-4 risk scorer | refresh-token context-drift check (A-49) |
+| A-11 risk scorer, A-49 refresh drift check, A-17 login tarpit, P-2 IP reputation, P-3 bot signal, P-5 email reputation | Removed in 3.0.0 |
 | A-12 adaptive backoff | `POST /ui/device` approval guard |
 
 "Pre-gate" means before a permit is taken from the Argon2 admission gate, for
@@ -100,80 +96,9 @@ When absent, `NoopCaptchaProvider` is active (fail-open per §6.1).
 
 ---
 
-## P-2 — IP Reputation: Spamhaus DROP + MaxMind ASN
+## P-2 — IP Reputation
 
-**Status:** Shipped (HEA-1203)  
-**Module:** `src/abuse/ip_reputation/` → `IpReputationProvider` (trait), `SpamhausDropProvider`, `MaxMindAsnProvider`
-
-### What it provides
-
-| Adapter | Signal | Source | Refresh |
-|---------|--------|--------|---------|
-| `SpamhausDropProvider` | `is_blocklisted: bool` | Spamhaus DROP (IPv4) + EDROP (IPv6) CIDR lists | Daily, background task |
-| `MaxMindAsnProvider` | `asn: Option<u32>`, `asn_org: Option<String>` | Local MaxMind GeoLite2-ASN / GeoIP2-ASN MMDB file | On restart / manual |
-
-### Trait contract
-
-```rust
-pub trait IpReputationProvider: Send + Sync {
-    fn check(&self, ip: IpAddr) -> IpReputationVerdict;
-}
-```
-
-`check()` MUST be synchronous, allocation-free on the happy path, and
-**fail-open** (return `IpReputationVerdict::default()` on any error).
-
-### Data structure
-
-`SpamhausDropProvider` holds an `Arc<SwapCell<CidrFilter>>` (`core::SwapCell`).
-The background refresh task builds a new `CidrFilter` from the downloaded DROP +
-EDROP text, then calls `SwapCell::store(Arc::new(new_filter))` to replace it
-atomically. Reads call `SwapCell::load()` — a read lock, on which readers never
-block one another, permitted here because reputation checks are not on the
-`validate_token` / `lookup_session` hot path — then perform a linear scan over
-the deny `Vec<Cidr>`.  For the current DROP list size (~800 IPv4 + ~100 IPv6
-CIDRs) this stays well under the 5 µs `AbuseGuard.check()` budget. (The filter
-was held in an `ArcSwap` until task 26.5; `arc-swap` is now banned, see
-`ARCHITECTURE.md` §9.1.)
-
-### Outcome and caller contract
-
-Callers inspect `IpReputationVerdict`:
-- `is_blocklisted = true` → IP is in Spamhaus DROP/EDROP.  Callers apply the
-  per-realm `IpReputationPolicy.action` (Block / Challenge / Log).
-- `asn`, `asn_org` → populated by `MaxMindAsnProvider` when available; used
-  as an input signal for A-11 risk scoring.  Never used as a direct block
-  decision — ASN alone does not block.
-
-Callers MUST NOT expose `is_blocklisted` reason to the client.
-
-### Failure mode: fail-open
-
-Per §6.1 of the abuse-prevention plan: `IpReputation` is **fail-open**.
-
-- `SpamhausDropProvider` starts with an empty filter until the first background
-  refresh succeeds.  If a refresh fails, the previous filter is retained.
-- `MaxMindAsnProvider` returns `IpReputationVerdict::default()` if the MMDB
-  file is missing, unreadable, or the IP has no ASN record.
-- Both: any internal error returns the default verdict — no request is ever
-  blocked by a provider fault.
-
-### Configuration (`hearth.yaml`)
-
-```yaml
-security:
-  ip_reputation:
-    enabled: true           # false (default) = checks skipped entirely
-    action: block           # block | challenge | log (default: log)
-    spamhaus:
-      drop_url: https://www.spamhaus.org/drop/drop.txt
-      dropv6_url: https://www.spamhaus.org/drop/dropv6.txt
-      refresh_interval_secs: 86400   # 24 hours
-    maxmind_db_path: /etc/hearth/GeoLite2-ASN.mmdb   # absent = disabled
-```
-
-Per-realm override: set `security.ip_reputation.enabled: false` in the realm
-block to opt a realm out of IP reputation checks.
+**Status:** Removed in Hearth 3.0.0. A `security.ip_reputation` block stops startup; use the per-IP rate limits and the A-16 CAPTCHA challenge.
 
 ---
 
@@ -212,7 +137,7 @@ DetectorOutcome::Challenge { reason: &'static str }
 
 Callers receiving `Challenge` MUST:
 1. Emit `AuditAction::AbuseDetected` with IP and username in metadata.
-2. Apply a challenge response (A-16 CAPTCHA or A-17 tarpit).
+2. Apply a challenge response (A-16 CAPTCHA).
 3. Return an appropriate error to the client (HTTP 429 or challenge token).
 
 MUST NOT surface the `reason` field to the client.
@@ -238,7 +163,7 @@ dimensions without recompiling.
 
 ---
 
-## A-4 — Outbound Email/SMS Volume Shield
+## A-4 — Outbound Email Volume Shield
 
 **Status:** Shipped (HEA-1189)  
 **Module:** `src/abuse/detector` → `OutboundVolumeShield`
@@ -264,7 +189,7 @@ recipient addresses are never retained in memory.
 
 Callers that dispatch outbound email call
 `OutboundVolumeShield::check_email(realm_id, recipient)` before the actual
-send.  For SMS (when `src/identity/sms.rs` ships), call `check_sms(...)`.
+send.  (The SMS caps were removed in Hearth 3.0.0 with SMS one-time codes.)
 
 ```rust
 match volume_shield.check_email(realm_id, recipient) {
@@ -289,8 +214,6 @@ security:
     window: 3600s           # rolling window (default: 1 hour)
     email_soft_cap: 1000    # distinct email recipients before SoftCap
     email_hard_cap: 5000    # distinct email recipients before HardCap
-    sms_soft_cap: 100       # distinct SMS recipients before SoftCap
-    sms_hard_cap: 500       # distinct SMS recipients before HardCap
 ```
 
 ---
@@ -356,12 +279,10 @@ access to the admin UI.
 ### Not yet implemented on this page
 
 - **Block / unblock IPs** — requires A-9 (CIDR allow/deny lists).
-- **ASN view** — requires P-2 (`IpReputationProvider` integration).
-- **Geo heat-map** — requires P-2 (MaxMind GeoIP2 or equivalent).
 
 ---
 
-## A-50 — Cross-Realm SMS / Email Aggregation Cap
+## A-50 — Cross-Realm Email Aggregation Cap
 
 **Status:** Shipped (HEA-1201)  
 **Module:** `src/abuse/detector` → `CrossRealmAggregationCap`  
@@ -375,7 +296,7 @@ caught here.
 ### Threat closed (§3.53)
 
 A-4 caps *per-realm* distinct recipients per hour.  Without A-50, an attacker
-controlling 50 realms can target the same `+1 555-0100` from each, staying
+controlling 50 realms can target the same `victim@example.com` from each, staying
 below A-4's per-realm threshold while flooding the victim.  A-50 detects the
 cross-realm pattern and escalates.
 
@@ -385,8 +306,8 @@ cross-realm pattern and escalates.
 |---------|--------------|------------------------|
 | `Allow` | — | Proceed with send |
 | `MultiRealmAlert { realm_count }` | ≥ `alert_threshold` | Emit `AbuseDetected` audit + A-7 webhook; MAY still send |
-| `SoftCap { realm_count }` | ≥ `email/sms_realm_soft_cap` | MUST apply CAPTCHA or queue; SHOULD emit audit + webhook |
-| `HardCap { realm_count }` | ≥ `email/sms_realm_hard_cap` | MUST reject send (HTTP 429); MUST emit audit + webhook |
+| `SoftCap { realm_count }` | ≥ `email_realm_soft_cap` | MUST apply CAPTCHA or queue; SHOULD emit audit + webhook |
+| `HardCap { realm_count }` | ≥ `email_realm_hard_cap` | MUST reject send (HTTP 429); MUST emit audit + webhook |
 
 Callers MUST NOT surface the `realm_count` value to the sending realm or to
 any external client.
@@ -403,7 +324,7 @@ per-realm caps and A-2 request shaper remain backstops.
 
 ### Integration point
 
-Call **in addition to** `OutboundVolumeShield::check_email` / `check_sms`.
+Call **in addition to** `OutboundVolumeShield::check_email`.
 Both checks must pass before a send proceeds:
 
 ```rust
@@ -431,9 +352,9 @@ security:
     alert_threshold: 3          # distinct realms before operator alert
     email_realm_soft_cap: 5     # distinct realms before email SoftCap
     email_realm_hard_cap: 10    # distinct realms before email HardCap
-    sms_realm_soft_cap: 3       # distinct realms before SMS SoftCap
-    sms_realm_hard_cap: 6       # distinct realms before SMS HardCap
 ```
+
+The SMS caps (`sms_realm_soft_cap` / `sms_realm_hard_cap`) were removed in Hearth 3.0.0.
 
 Set all thresholds to `usize::MAX` (or use `CrossRealmAggregationCap::disabled()`)
 to disable without recompiling.
@@ -501,83 +422,14 @@ rejected.  No fallback, no degraded path.
 
 ---
 
-## A-49 — Refresh-Token UA/ASN Context Binding
+## A-49 — Refresh-Token Context Binding
 
-**Status:** Shipped (HEA-1200)  
-**Module:** `src/identity/engine/mod.rs`, `src/identity/oidc.rs`, `src/protocol/http.rs`  
-**Closes:** §3.52 of the abuse-prevention plan
+**Status:** Drift scoring removed in Hearth 3.0.0.
 
-### Threat (§3.52)
-
-Refresh tokens are bearer tokens.  Rotation catches replay *after* a first
-theft-detect (mismatch family hash), but not "stolen token replayed from a
-wholly different network / device before the legitimate holder next refreshes."
-A-49 closes this window by flagging a context switch into the A-11 risk scorer.
-
-### Implementation
-
-**Grant family binding** (`src/identity/oidc.rs::StoredGrantFamily`):
-
-| Field | Type | Purpose |
-|-------|------|---------|
-| `ua_hash` | `Option<String>` | SHA-256 hex of the first `User-Agent` seen on a refresh exchange |
-| `bound_asn` | `Option<u32>` | ASN from the first refresh (stub — absent until P-2 ships) |
-
-Both fields default to `None` at grant-family creation; they are recorded on
-the **first refresh exchange** (lazy binding) so that clients that never
-refresh do not carry stale context.
-
-**Context detection** (`engine/mod.rs`, `rotate_grant_family`):
-
-1. `callback_impl` in `http.rs` extracts the `User-Agent` header and wraps it
-   in a `RefreshBindContext { user_agent, asn }`.
-2. On each refresh exchange, `ua_changed` and `asn_changed` are computed by
-   comparing hashes against the stored family values.  If neither stored hash
-   is present (fresh grant or pre-upgrade), both flags are `false` (fail-open).
-3. When `ua_changed || asn_changed`:
-   - Reads `realm.config.risk_scorer_config` (or default).
-   - Builds a `RiskContext { signals: [RefreshContextDelta { ua_changed, asn_changed }] }`.
-   - If `scorer.score(&ctx).step_up_required` → `Err(IdentityError::StepUpChallengeRequired)`.
-4. On the first refresh, the family's `ua_hash` / `bound_asn` are written with
-   the current values for future comparisons.
-
-**Signal weight** (default `refresh_context_delta_weight = 0.35`):
-
-| Changed dimensions | Score contribution |
-|-------------------|--------------------|
-| None | 0.0 |
-| UA only | 0.35 |
-| ASN only | 0.35 |
-| Both | 0.70 → exceeds default `step_up_threshold = 0.5` |
-
-### Fail mode
-
-Fail-**open**.
-
-- Scorer disabled (`security.risk_scorer.enabled: false`, the default) → never blocks.
-- No stored `ua_hash` / no inbound `User-Agent` → skip check entirely.
-- Risk scorer is a heuristic signal, not a hard gate; operators must explicitly
-  enable it and set an appropriate threshold.
-
-### Configuration (`security.risk_scorer` in `hearth.yaml`)
-
-See the P-4 section for the full config reference.  The relevant field:
-
-```yaml
-security:
-  risk_scorer:
-    enabled: true                      # false by default — opt-in
-    step_up_threshold: 0.5             # 0.70 (both dims) > 0.5 → step-up
-    refresh_context_delta_weight: 0.35 # per changed dimension
-```
-
-### Tests
-
-| Test file | Coverage |
-|-----------|---------|
-| `tests/abuse_risk.rs::a49_*` | Unit — disabled scorer, UA-only change, both dims, no change |
-| `tests/abuse_a48_a49.rs::a49_*` | Adversarial — stolen token UA change triggers step-up; fail-open guarantee; both-dims threshold; field API |
-| `tests/abuse_risk_scorer.rs::p4_refresh_*` | Scorer weight arithmetic — one/both/zero dims |
+The User-Agent/ASN drift check that fed the A-11 risk scorer was removed with
+it. Refresh tokens keep their DPoP key binding (RFC 9449) and their binding to
+the confidential client they were issued to; rotation and family-hash replay
+detection are unchanged.
 
 ---
 
@@ -791,33 +643,31 @@ Prevention Cheat Sheet.
 
 ### A-38a: DPoP sender-constraint enforcement on all access-token-issuing grants
 
-**Threat**: A FAPI 2.0 realm or FAPI 2.0 client calls `client_credentials` or
-`jwt-bearer` without a DPoP proof.  The issued token is sender-unconstrained
-(a bearer token any party can replay).  Previously only the authorization-code
-exchange path enforced the FAPI DPoP gate.
+**Threat**: A client registered with `dpop_bound_access_tokens: true` (RFC 9449
+§5.2) calls a token grant without a DPoP proof. The issued token would be
+sender-unconstrained (a bearer token any party can replay), defeating the
+client's declared binding.
 
 **Implementation**:
 
-Both `client_credentials_token_inner` and `jwt_bearer_token_inner` in
-`src/identity/engine/oauth.rs` now execute the same FAPI gate as
-`exchange_code_for_tokens`:
+Every access-token-issuing grant in `src/identity/engine/oauth.rs` and
+`src/identity/engine/mod.rs` — authorization code, refresh, client
+credentials, JWT bearer and device code — calls the same gate before issuing:
 
 ```
-if (client.profile().is_fapi2() || realm.config().fapi_profile.is_some())
-   && request.dpop_jkt.is_none()
-→ return Err(FapiViolation)
+require_dpop_for_bound_client(client, request.dpop_jkt)
+  if client.dpop_bound_access_tokens() && dpop_jkt.is_none()
+  → return Err(InvalidDPopProof)   // wire: invalid_dpop_proof
 ```
 
-The gate checks both the per-client `profile` field *and* the realm-level
-`fapi_profile` so a standard client cannot bypass a realm-wide FAPI
-enforcement.
+A token issued with a proof carries `cnf.jkt` and `token_type: DPoP`.
 
-**Fail mode**: Fail-closed for FAPI realms/clients; fail-open for non-FAPI
-(DPoP remains optional).
+**Fail mode**: Fail-closed for `dpop_bound_access_tokens` clients; for other
+clients DPoP remains optional (a proof, when sent, still binds the token).
 
-**RFC references**: FAPI 2.0 Security Profile §5.3.3 (sender-constrained
-tokens mandatory on all grant types); RFC 9449 (DPoP); RFC 6749 §4.4
-(client credentials grant).
+**RFC references**: RFC 9449 §5.2 (`dpop_bound_access_tokens` client
+metadata) and §5 (DPoP access token request); RFC 6749 §4.4 (client
+credentials grant).
 
 ### A-38b: RFC 8693 `act` delegation-chain depth cap
 
@@ -871,43 +721,8 @@ and `tests/token_exchange.rs` (delegation depth + nested `act` chain tests).
 
 ## A-11 — Step-up MFA Risk Scorer
 
-**Source**: `src/identity/risk.rs` (re-exports from `src/abuse/risk_scorer.rs` — HEA-1205)
-
-Aggregates risk signals at login time into a normalised score `[0.0, 1.0]`.
-When `score >= step_up_threshold` (default `0.5`), the login handler returns
-`IdentityError::StepUpChallengeRequired` — the same gate as the existing
-device-fingerprint step-up.
-
-### Signals
-
-| Signal | Default weight | Source |
-|--------|---------------|--------|
-| `NewDevice` | 0.3 | Device-fingerprint miss (`src/identity/device_fp`) |
-| `NewCountry` | 0.4 | GeoIP lookup (stub — absent until P-2 ships) |
-| `PasswordAge { days }` | 0.2 (if `days >= threshold`) | `user.created_at()` (approximation) |
-| `BreachCorpusHit` | 1.0 (forces step-up) | HIBP k-anonymity |
-| `RefreshContextDelta` | 0.35 per dim | UA-hash or ASN change on refresh (A-49) |
-
-### Config (`security.risk_scorer` in `hearth.yaml`)
-
-```yaml
-security:
-  risk_scorer:
-    enabled: true                    # default: false (fail-open)
-    step_up_threshold: 0.5           # score >= this → step-up
-    new_device_weight: 0.3
-    new_country_weight: 0.4
-    password_age_weight: 0.2
-    password_age_days_threshold: 365
-    breach_corpus_weight: 1.0
-    refresh_context_delta_weight: 0.35
-```
-
-**Fail mode**: Fail-open. When disabled (`enabled: false`, the default) score
-is always `0.0` so existing deployments are unaffected.
-
-**Extension point (P-4)**: See [§ P-4: `RiskScorer`](#p-4-riskscorer--rule-based-step-up-mfa-risk-engine)
-for the pluggable trait contract and swap-in instructions.
+**Status:** Removed in Hearth 3.0.0. A `security.risk_scorer` block stops
+startup. MFA is a plain per-realm policy (`mfa_required`), never a risk score.
 
 ---
 
@@ -1164,7 +979,7 @@ configured `issuer` for the IdP connector **before** exchanging the code.
 
 - **Present + matching** → allowed.
 - **Present + mismatched** → `IdentityError::FederationIdpMixup`
-  (HTTP 400, gRPC `INVALID_ARGUMENT`, wire code `HEARTH_FEDERATION_IDP_MIXUP`).
+  (HTTP 400, wire code `HEARTH_FEDERATION_IDP_MIXUP`).
 - **Absent** → allowed (fail-open; not all authorization servers send it — RFC 9207
   is optional for the AS side).
 
@@ -1322,204 +1137,9 @@ not found" to avoid locking out users during transient outages.
 
 ---
 
-## P-3: `BotSignalProvider` — UA + JA3/JA4 Heuristics Adapter
+## P-3 — Bot Signals; P-5 — Email Reputation
 
-**Status**: Shipped (HEA-1204)  
-**Source**: `src/abuse/bot_signal.rs`
-
-### Overview
-
-`BotSignalProvider` is the P-3 extension point for bot-signal detection.  The
-built-in `HeuristicBotSignalProvider` reference adapter ships with Hearth.
-External adapters (Cloudflare Bot Management, Datadome, Kasada, Akamai) implement
-the trait and are wired at startup via `security.providers.bot_signal`.
-
-### Signal layers (applied in order)
-
-| Priority | Layer | Signal | Verdict |
-|----------|-------|--------|---------|
-| 1 | JA3 hash | Matches built-in or operator blocklist | `Block` |
-| 2 | JA4 hash | Matches built-in or operator blocklist | `Block` |
-| 3 | UA — woothee category | `"crawler"` | `Block` |
-| 3 | UA — substring | Known scripting client (`curl/`, `python-requests/`, etc.) | `Block` |
-| 4 | UA — substring | Headless browser / automation framework (`HeadlessChrome`, `Selenium`, etc.) | `Suspect` |
-| 5 | UA — length | Shorter than 10 characters after trimming | `Suspect` |
-| 5 | UA — absent | `User-Agent` header missing | `Suspect` |
-| — | (none matched) | — | `Allow` |
-
-### JA3/JA4 notes
-
-JA3 and JA4 hashes must be injected by the proxy tier (`X-JA3-Hash` /
-`X-JA4-Hash` headers set by Nginx, HAProxy, Cloudflare, etc.).  Hearth does not
-perform TLS fingerprinting of its own listener — these headers are treated as
-advisory.  When absent, the layers are skipped entirely.
-
-The built-in JA3 blocklist contains 7 publicly documented automated-scanner
-fingerprints (zgrab2/masscan, Nmap NSE, Metasploit, Shodan, Censys.io, etc.).
-Add site-specific hashes via `security.providers.bot_signal.extra_ja3_blocklist`.
-
-**False-positive warning**: JA3 hashes can collide between legitimate clients
-and bots sharing the same TLS implementation.  Always pair JA3 blocking with
-additional signals.
-
-### Config (`security.providers.bot_signal` in `hearth.yaml`)
-
-```yaml
-security:
-  providers:
-    bot_signal:
-      extra_ja3_blocklist:
-        - "deadbeef00000000deadbeef00000000"
-      extra_ja4_blocklist: []
-```
-
-### Fail-open policy (§6.1)
-
-`BotSignal` is **fail-open**.  The default shipping configuration uses
-`NoopBotSignalProvider` — no request is ever blocked until an adapter is
-explicitly configured.  External adapter implementations MUST return
-`BotSignalVerdict::Allow` on any transport or internal error.
-
-### Off hot-path guarantee
-
-The provider is consulted only at registration, forgot-password, and magic-link
-flows — never during `validate_token()` or `lookup_session()`.
-
----
-
-## P-4: `RiskScorer` — Rule-Based Step-Up MFA Risk Engine
-
-**Status**: Shipped (HEA-1205)  
-**Source**: `src/abuse/risk_scorer.rs`
-
-### Overview
-
-`RiskScorer` is the P-4 extension point for adaptive, risk-based step-up MFA.
-The built-in [`RuleBasedRiskScorer`] reference adapter implements the A-11 rule
-engine: it aggregates configurable risk signals observed at login time, computes
-a normalised score in `[0.0, 1.0]`, and sets `step_up_required = true` when the
-score meets or exceeds the operator's configured threshold.
-
-Operators who need vendor risk models or custom ML pipelines implement the
-`RiskScorer` trait and supply their adapter at startup.
-
-### Risk signals
-
-| Signal | Default weight | Source |
-|--------|---------------|--------|
-| `NewDevice` | 0.3 | Device-fingerprint miss (`(user_id, ip/24, UA)` not seen before) |
-| `NewCountry` | 0.4 | GeoIP country change (stub — absent until P-2 ships) |
-| `PasswordAge { days }` | 0.2 | Credential `created_at` ≥ `password_age_days_threshold` |
-| `BreachCorpusHit` | 1.0 | HIBP k-anonymity match |
-| `RefreshContextDelta` | 0.35 per dim | UA-hash or ASN change on refresh exchange (A-49) |
-
-Weights sum additively; the total is clamped to `1.0` before the threshold
-comparison.
-
-### Fail-open policy
-
-Per §6.1 of the abuse-prevention plan: `RiskScorer` is **fail-open**.
-
-- The default config ships with `enabled: false` — `RuleBasedRiskScorer::disabled()`
-  always returns score `0.0` and `step_up_required = false`.
-- `NoopRiskScorer` always returns score `0.0` regardless of signals.
-- External adapter implementations **MUST** return `step_up_required = false` on
-  any transient error so that a scorer outage never blocks legitimate logins.
-
-### Configuration (`hearth.yaml`)
-
-```yaml
-security:
-  risk_scorer:
-    enabled: true                    # false = fail-open (default)
-    step_up_threshold: 0.5           # [0.0, 1.0] — score ≥ this triggers MFA
-    new_device_weight: 0.3
-    new_country_weight: 0.4
-    password_age_weight: 0.2
-    password_age_days_threshold: 365 # days before PasswordAge signal fires
-    breach_corpus_weight: 1.0
-    refresh_context_delta_weight: 0.35
-```
-
-All weights are per-signal contributions in `[0.0, 1.0]`.  Setting a weight to
-`0.0` disables that signal without a code change.
-
-### Off hot-path guarantee
-
-The scorer is consulted only at login time (browser form-submit flows).
-It is **not** on the `validate_token()` or `lookup_session()` hot path.
-
----
-
-## P-5: `EmailReputation` — Disposable-Domain List + Role-Address Detection
-
-**Status**: Shipped (HEA-1204)  
-**Source**: `src/abuse/email_reputation.rs`
-
-### Overview
-
-`EmailReputation` is the P-5 extension point for email-address reputation checks.
-The built-in `BuiltinEmailReputation` reference adapter ships with Hearth.
-`security.providers.email_reputation.enabled` chooses between the built-in
-adapter and the no-op. External services (Kickbox, ZeroBounce, NeverBounce)
-can implement the trait, but there is no configuration key that loads one —
-wiring a third-party adapter is a code change.
-
-### Verdict flags
-
-| Flag | Meaning |
-|------|---------|
-| `is_disposable` | Domain matched the bundled (~400-entry) disposable-domain list |
-| `is_role_address` | Local part is a well-known role address (`noreply`, `admin`, etc.) |
-
-All flags are **advisory** — callers decide policy.  `is_clean()` is true only
-when both flags are false.
-
-### No DNS / MX lookup
-
-Hearth performs no DNS lookup of the email domain — there is no resolver
-dependency and `check()` is synchronous by contract. A domain that does not
-exist or has no MX record is **not** flagged. (An earlier `no-MX` verdict flag
-was removed: nothing ever set it, so it implied a check that never ran.) Use
-email verification to establish that an address receives mail.
-
-### Disposable-domain list
-
-~400 entries from well-known community lists (disposable-email-domains project,
-ivolo/disposable-email-domains, wesbos/burner-email-providers).  Domain matching
-is exact and case-insensitive (domain is lowercased before lookup).  Subdomains
-are NOT checked by default — add them via `extra_disposable_domains` if needed.
-
-### Role-address prefixes (RFC 2142 + common additions)
-
-`noreply`, `no-reply`, `no_reply`, `donotreply`, `postmaster`, `hostmaster`,
-`webmaster`, `mailer-daemon`, `abuse`, `security`, `admin`, `administrator`,
-`root`, `support`, `helpdesk`, `help`, `info`, `contact`, `sales`, `marketing`,
-`billing`, `finance`, `hr`, `jobs`, `careers`, `newsletter`, `notifications`,
-`alerts`, `bounce`, `bounces`, `unsubscribe`, `feedback`, `system`, `daemon`.
-
-### Config (`security.providers.email_reputation` in `hearth.yaml`)
-
-```yaml
-security:
-  providers:
-    email_reputation:
-      extra_disposable_domains:
-        - "my-internal-throwaway.example"
-```
-
-### Fail-open policy (§6.1)
-
-`EmailReputation` is **fail-open**.  The default shipping configuration uses
-`NoopEmailReputation` — no registration is ever blocked until an adapter is
-explicitly configured.  External adapter implementations MUST return a
-permissive verdict (all flags `false`) on any transport or internal error.
-
-### Off hot-path guarantee
-
-The provider is consulted only at registration, invitation acceptance, and
-similar account-creation flows — never during `validate_token()` or
-`lookup_session()`.
+**Status:** Removed in Hearth 3.0.0. A `security.providers` block stops startup; use the per-IP and per-account rate limits and the A-16 CAPTCHA challenge.
 
 ---
 
@@ -1750,82 +1370,17 @@ The backoff key is a free-form string.  Auth handlers use:
 
 ## A-17 — Login-Event Tarpit
 
-**Status:** Shipped (HEA-1191)  
-**Module:** `src/abuse/tarpit`
-
-Once a source IP exceeds the failure threshold, every subsequent auth `POST`
-from that IP receives a deterministic fixed delay before credential
-verification.  The delay is **off the hot path**: `check()` returns
-immediately; the caller applies `tokio::time::sleep(delay)`.
-
-### Hot-path contract
-
-`TarpitStore::check()` is:
-- Synchronous and allocation-free.
-- Holds a `Mutex` only for the duration of a hash-map lookup.
-- Completes in ≤1 µs p99; the overall `AbuseGuard::check()` budget is ≤5 µs.
-
-### Fail-open policy
-
-`threshold: None` (the default) means all calls return `Allow`.  The tarpit
-does not activate until explicitly configured.
-
-### Configuration surface
-
-```yaml
-security:
-  tarpit:
-    threshold: 5          # failures in `window_secs` before tarpit activates
-    window_secs: 60       # rolling window for counting failures
-    delay_ms: 200         # deterministic delay (100–500 ms per plan §4.1 A-17)
-```
-
-### Relationship to A-16 (Challenge)
-
-A-16 **gates** the request (CAPTCHA required).  A-17 **adds latency** but
-does not gate.  Both can be active simultaneously; tarpit fires before the
-CAPTCHA check in handler order.
+**Status:** Removed in Hearth 3.0.0. A `security.tarpit` block stops startup; use the A-12 adaptive backoff, the per-IP rate limits and the A-16 CAPTCHA challenge.
 
 ---
 
-## A-43 — gRPC Reflection Production-Disable
+## A-43 — gRPC Reflection Production-Disable (retired in 3.0.0)
 
-### Threat
-
-`grpc.reflection.v1.ServerReflection` exposes the full API schema
-(service names, method signatures, request/response types) to any unauthenticated
-caller.  In production this is an enumeration and reconnaissance primitive.
-
-### Mitigation
-
-`security.grpc.reflection_enabled` (default `false`) gates the reflection service.
-
-- **`--dev` mode**: defaults to `true` — grpcurl / Postman work out-of-the-box.
-- **Production (`null`/absent or `false`)**: service is omitted from the gRPC router entirely; clients that query it receive an "unimplemented" status, not schema data.
-- **Production with `true`**: Hearth **refuses to start** unless `--allow-reflection-in-prod` is passed.  The error message is actionable:
-
-  ```
-  security.grpc.reflection_enabled = true is not allowed in production mode.
-  Pass --allow-reflection-in-prod to override (debugging only; never in real deployments).
-  ```
-
-### Fail-closed
-
-The guard is fail-closed.  There is no runtime fallback: if the invariant is violated the process exits before accepting any connection.
-
-### Configuration surface
-
-```yaml
-security:
-  grpc:
-    reflection_enabled: false   # default; omit for production-safe behaviour
-```
-
-CLI:
-
-```
-hearth serve --allow-reflection-in-prod   # required when reflection_enabled = true in prod
-```
+Hearth 3.0.0 removed the public gRPC API, and with it the gRPC reflection service
+this control gated. There is no reflection endpoint to enumerate. The
+`security.grpc.reflection_enabled` key and the `hearth serve --allow-reflection-in-prod`
+flag are gone; a configuration that still sets `security.grpc` refuses to start with an
+error naming the removed key (see `CONFIGURATION.md`).
 
 ---
 

@@ -29,7 +29,7 @@ use crate::identity::keys::{
     config_migration_history_key, config_migration_history_scan_prefix, config_orphan_key,
     config_orphan_scan_prefix, config_snapshot_key, prefix_end,
 };
-use crate::identity::oidc::{ApplicationStatus, ClientProfile, UpdateClientRequest};
+use crate::identity::oidc::{ApplicationStatus, UpdateClientRequest};
 use crate::identity::{
     CleartextPassword, CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest,
     DemoSeedSpec, IdentityEngine, ImportClientRequest, OrganizationConfig, OrganizationStatus,
@@ -931,13 +931,12 @@ fn reconcile_declared_realms(
             continue;
         }
 
-        let mut realm_config = yaml_cfg
+        let realm_config = yaml_cfg
             .to_realm_config(&config.auth, config.email.branding.as_ref())
             .map_err(|errors| IdentityError::ConfigInvalid {
                 realm_name: name.clone(),
                 errors,
             })?;
-        apply_global_security_defaults(&mut realm_config, config);
 
         let realm_id = match engine.get_realm_by_name(name)? {
             None => {
@@ -1006,11 +1005,6 @@ fn reconcile_declared_realms(
         if let Some(fed) = &yaml_cfg.federation {
             reconcile_federation_for_realm(engine, &realm_id, name, fed, report)?;
         }
-
-        // Reconcile SAML Service Provider registrations (Hearth as IdP).
-        if let Some(sps) = &yaml_cfg.saml_service_providers {
-            reconcile_saml_sps_for_realm(engine, &realm_id, name, sps, report)?;
-        }
     }
 
     // Archive storage realms not in YAML
@@ -1047,26 +1041,8 @@ fn reconcile_declared_realms(
 /// Uses a default (empty) `RealmYamlConfig`, so validation always succeeds.
 fn default_realm_config(auth: &AuthConfig, config: &Config) -> RealmConfig {
     let yaml = RealmYamlConfig::default();
-    let mut cfg = yaml
-        .to_realm_config(auth, config.email.branding.as_ref())
-        .expect("default RealmYamlConfig must always pass validation");
-    apply_global_security_defaults(&mut cfg, config);
-    cfg
-}
-
-/// Folds global `security:` settings that have no per-realm YAML key into a
-/// freshly built [`RealmConfig`].
-///
-/// `RealmYamlConfig::to_realm_config` is handed the `auth:` defaults but not
-/// the `security:` ones, so `risk_scorer_config` was hard-coded to `None` and
-/// the A-49 refresh-context check ran against `RiskScorerConfig::default()` —
-/// permanently disabled, whatever `security.risk_scorer` said (audit §4.17#9,
-/// task 20.13). This is the one place realm records are written from config,
-/// so it is the one place the fold belongs.
-fn apply_global_security_defaults(realm_config: &mut RealmConfig, config: &Config) {
-    if realm_config.risk_scorer_config.is_none() {
-        realm_config.risk_scorer_config = Some(config.security.risk_scorer.to_domain());
-    }
+    yaml.to_realm_config(auth, config.email.branding.as_ref())
+        .expect("default RealmYamlConfig must always pass validation")
 }
 
 /// UUID v5 namespace for deterministic application client IDs.
@@ -1135,22 +1111,9 @@ pub(crate) fn reconcile_applications(
                     .as_str()
                     .to_string()
             });
-        // YAML is authoritative for the inline JWKS too: absent clears it. A
-        // `profile: fapi2` client needs it (the engine refuses one without).
+        // YAML is authoritative for the inline JWKS too: absent clears it.
         let cfg_jwks = app_cfg.jwks_json();
-        let cfg_profile = match app_cfg.profile.as_deref() {
-            None | Some("standard") => ClientProfile::Standard,
-            Some("fapi2") => ClientProfile::Fapi2,
-            Some(other) => {
-                warn!(
-                    realm = realm_name,
-                    app = app_key,
-                    profile = other,
-                    "unknown client profile in YAML; treating as standard"
-                );
-                ClientProfile::Standard
-            }
-        };
+        let cfg_dpop = app_cfg.dpop_bound_access_tokens.unwrap_or(false);
 
         match engine.get_client(realm_id, &client_id) {
             Ok(Some(existing)) => {
@@ -1161,7 +1124,7 @@ pub(crate) fn reconcile_applications(
                 let grants_changed = existing.grant_types() != grant_types;
                 let consent_changed = existing.require_consent() != cfg_require_consent;
                 let logo_changed = existing.client_logo_url() != cfg_logo.as_deref();
-                let profile_changed = existing.profile() != cfg_profile;
+                let dpop_changed = existing.dpop_bound_access_tokens() != cfg_dpop;
                 let jwks_changed = existing.jwks() != cfg_jwks.as_deref();
                 let post_logout_changed = existing.post_logout_redirect_uris() != cfg_post_logout;
                 let id_token_alg_changed =
@@ -1169,8 +1132,7 @@ pub(crate) fn reconcile_applications(
 
                 // Reconcile never makes a client weaker than it is: a YAML
                 // change that would remove the last credential of a client
-                // that holds one (dropping `jwks`, or the FAPI 2.0 profile, of
-                // a secretless client) would turn it into a PUBLIC client that
+                // that holds one (dropping the `jwks` of a secretless client) would turn it into a PUBLIC client that
                 // anyone knowing its client_id can act as. Refuse it, report
                 // it, and leave the client unchanged.
                 let jwks_after = if jwks_changed {
@@ -1181,11 +1143,10 @@ pub(crate) fn reconcile_applications(
                 let public_after = existing.client_secret_hash().is_none()
                     && existing.assertion_public_key().is_none()
                     && existing.jwks_uri().is_none()
-                    && jwks_after.is_none()
-                    && !cfg_profile.is_fapi2();
+                    && jwks_after.is_none();
                 if !existing.is_public() && public_after {
                     let reason = "the change would remove the client's last credential \
-                                  (its jwks or FAPI 2.0 profile) and make it a public client; \
+                                  (its jwks) and make it a public client; \
                                   declare the jwks again, or give it a secret"
                         .to_string();
                     warn!(
@@ -1207,7 +1168,7 @@ pub(crate) fn reconcile_applications(
                     || grants_changed
                     || consent_changed
                     || logo_changed
-                    || profile_changed
+                    || dpop_changed
                     || jwks_changed
                     || post_logout_changed
                     || id_token_alg_changed
@@ -1241,11 +1202,7 @@ pub(crate) fn reconcile_applications(
                             } else {
                                 None
                             },
-                            profile: if profile_changed {
-                                Some(cfg_profile)
-                            } else {
-                                None
-                            },
+                            dpop_bound_access_tokens: dpop_changed.then_some(cfg_dpop),
                             jwks: jwks_changed.then(|| cfg_jwks.clone()),
                             post_logout_redirect_uris: if post_logout_changed {
                                 Some(cfg_post_logout.clone())
@@ -1300,13 +1257,13 @@ pub(crate) fn reconcile_applications(
                     None
                 };
 
-                // One write carrying the final profile, JWKS and consent
-                // settings. Creating a public Standard client first and
-                // applying the profile/JWKS in a second write left a public
-                // client behind whenever that second write failed.
+                // One write carrying the final DPoP, JWKS and consent
+                // settings. Creating a public client first and applying the
+                // JWKS in a second write left a public client behind whenever
+                // that second write failed.
                 let needs_consent_override = !cfg_require_consent
                     || cfg_logo.is_some()
-                    || cfg_profile != ClientProfile::Standard
+                    || cfg_dpop
                     || cfg_jwks.is_some()
                     || !cfg_post_logout.is_empty();
                 engine.import_client(
@@ -1331,7 +1288,7 @@ pub(crate) fn reconcile_applications(
                         require_consent: (needs_consent_override && app_cfg.trust_level.is_none())
                             .then_some(cfg_require_consent),
                         client_logo_url: cfg_logo.clone(),
-                        profile: cfg_profile,
+                        dpop_bound_access_tokens: cfg_dpop,
                         jwks: cfg_jwks.clone(),
                         post_logout_redirect_uris: cfg_post_logout.clone(),
                         ..Default::default()
@@ -1423,6 +1380,11 @@ pub(crate) fn reconcile_organizations(
     for (slug, org_cfg) in orgs {
         let yaml_config = OrganizationConfig {
             max_members: org_cfg.config.as_ref().and_then(|c| c.max_members),
+            mfa_required: org_cfg
+                .config
+                .as_ref()
+                .and_then(|c| c.mfa_required)
+                .unwrap_or(false),
         };
         let description = org_cfg.description.clone().unwrap_or_default();
 
@@ -1843,55 +1805,6 @@ fn build_saml_idp_config(
         created_at: now,
         updated_at: now,
     })
-}
-
-/// Reconciles SAML Service Providers (Hearth-as-IdP side) declared in
-/// `realms.{name}.saml_service_providers`.
-pub(crate) fn reconcile_saml_sps_for_realm(
-    engine: &dyn IdentityEngine,
-    realm_id: &RealmId,
-    realm_name: &str,
-    sps: &std::collections::HashMap<String, crate::config::SamlServiceProviderYaml>,
-    _report: &mut ReconcileReport,
-) -> Result<(), IdentityError> {
-    use crate::identity::federation::saml::{SamlNameIdFormat, SamlServiceProvider};
-
-    let mut yaml_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (sp_key, yaml) in sps {
-        yaml_keys.insert(sp_key.clone());
-        let nameid_format = match yaml.nameid_format.as_deref().unwrap_or("emailAddress") {
-            "persistent" => SamlNameIdFormat::Persistent,
-            "transient" => SamlNameIdFormat::Transient,
-            "unspecified" => SamlNameIdFormat::Unspecified,
-            _ => SamlNameIdFormat::EmailAddress,
-        };
-        let attribute_map = yaml.attribute_map.clone().unwrap_or_default();
-
-        let sp = SamlServiceProvider {
-            sp_key: sp_key.clone(),
-            entity_id: yaml.entity_id.clone(),
-            acs_url: yaml.acs_url.clone(),
-            slo_url: yaml.slo_url.clone(),
-            sp_certificate_pem: yaml.sp_certificate_pem.clone(),
-            sign_assertions: yaml.sign_assertions.unwrap_or(true),
-            sign_responses: yaml.sign_responses.unwrap_or(true),
-            want_authn_requests_signed: yaml.want_authn_requests_signed.unwrap_or(false),
-            nameid_format,
-            attribute_map,
-        };
-        engine.register_saml_sp(realm_id, &sp)?;
-        info!(realm = %realm_name, sp_key = %sp_key, "reconciled SAML SP");
-    }
-
-    // Remove SPs no longer in YAML.
-    for existing in engine.list_saml_sps(realm_id)? {
-        if !yaml_keys.contains(&existing.sp_key) {
-            engine.delete_saml_sp(realm_id, &existing.sp_key)?;
-            info!(realm = %realm_name, sp_key = %existing.sp_key, "removed SAML SP no longer in YAML");
-        }
-    }
-
-    Ok(())
 }
 
 // ── Config snapshot I/O ────────────────────────────────────────────────────────

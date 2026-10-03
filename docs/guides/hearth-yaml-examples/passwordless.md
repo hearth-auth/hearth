@@ -38,6 +38,9 @@ realms:
 
 - `email` must be configured with a real transport; magic links cannot be delivered via the
   default `log` transport in production.
+- MFA is required by default, and a magic link does not satisfy MFA. Users in this realm must
+  also prove a passkey or TOTP. Set `auth.mfa_required: false` to opt out. Startup then logs a
+  `WARN` that names the realm.
 - `onboarding.base_url` (or `oidc.issuer`) is used to construct the clickable link in emails.
 - Users who previously had passwords can no longer log in with them once `allowed_auth_methods`
   excludes `password`.

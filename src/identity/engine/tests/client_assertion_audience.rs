@@ -1,12 +1,6 @@
-//! The `aud` of a `private_key_jwt` assertion (FAPI review L-FAPI-1).
-//!
-//! FAPI 2.0 Security Profile §5.3.2.1: the authorization server "shall only
-//! accept its issuer identifier value (as defined in RFC 8414) as a string in
-//! the `aud` claim". Hearth accepted any `aud` that CONTAINED the issuer,
-//! arrays included. Under FAPI 2.0 — a `fapi2` client, or any client of a
-//! realm with a `fapi_profile` — `aud` must now be the issuer as a single
-//! string. Elsewhere RFC 7523 §3 still applies: the issuer may be one value of
-//! an array.
+//! The `aud` of a `private_key_jwt` assertion (review L-FAPI-1): it must
+//! name the realm's issuer, as a single string or as one value of an array
+//! (RFC 7523 §3).
 
 use super::*;
 
@@ -14,13 +8,11 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 use crate::identity::oidc::UpdateClientRequest;
 use crate::identity::tokens::{Audience, JwtAssertionClaims};
-use crate::identity::{ClientProfile, FapiProfile};
 
-/// A secretless client with an Ed25519 assertion key, optionally FAPI 2.0.
+/// A secretless client with an Ed25519 assertion key.
 fn register(
     engine: &EmbeddedIdentityEngine,
     realm: &RealmId,
-    fapi2: bool,
 ) -> (crate::core::ClientId, SigningKey) {
     let key = SigningKey::generate().expect("key");
     let client_id = engine
@@ -41,7 +33,6 @@ fn register(
             &client_id,
             &UpdateClientRequest {
                 assertion_public_key: Some(Some(URL_SAFE_NO_PAD.encode(key.public_key_bytes()))),
-                profile: fapi2.then_some(ClientProfile::Fapi2),
                 ..Default::default()
             },
         )
@@ -88,55 +79,10 @@ fn audiences(issuer: &str) -> [(Audience, &'static str); 3] {
 fn a_standard_client_may_send_an_array_audience() {
     let (_dir, engine, clock) = setup_engine();
     let realm = create_test_realm(&engine);
-    let (client, key) = register(&engine, &realm, false);
+    let (client, key) = register(&engine, &realm);
     for (aud, what) in audiences(&engine.realm_issuer_url(&realm)) {
         engine
             .verify_client_assertion(&realm, &client, &assertion(&clock, &client, &key, aud))
             .unwrap_or_else(|e| panic!("{what}: RFC 7523 §3 accepts it, got {e:?}"));
-    }
-}
-
-#[test]
-fn fapi_requires_the_issuer_as_a_single_string() {
-    let (_dir, engine, clock) = setup_engine();
-    // A FAPI 2.0 client in a standard realm, and a standard client in a FAPI
-    // realm.
-    let realm = create_test_realm(&engine);
-    let fapi_client = register(&engine, &realm, true);
-    let fapi_realm = create_test_realm(&engine);
-    let plain_in_fapi_realm = register(&engine, &fapi_realm, false);
-    let realm_obj = engine.get_realm(&fapi_realm).expect("get").expect("realm");
-    let mut config = realm_obj.config().clone();
-    config.fapi_profile = Some(FapiProfile::Baseline);
-    engine
-        .update_realm(
-            &fapi_realm,
-            &crate::identity::UpdateRealmRequest {
-                config: Some(config),
-                ..Default::default()
-            },
-        )
-        .expect("set fapi profile");
-
-    for (realm, (client, key), who) in [
-        (&realm, fapi_client, "fapi2 client"),
-        (&fapi_realm, plain_in_fapi_realm, "client of a FAPI realm"),
-    ] {
-        for (aud, what) in audiences(&engine.realm_issuer_url(realm)) {
-            let single = matches!(aud, Audience::Single(_));
-            let outcome = engine.verify_client_assertion(
-                realm,
-                &client,
-                &assertion(&clock, &client, &key, aud),
-            );
-            if single {
-                outcome.unwrap_or_else(|e| panic!("{who}, {what}: must verify, got {e:?}"));
-            } else {
-                assert!(
-                    matches!(outcome, Err(IdentityError::InvalidClientAssertion { .. })),
-                    "{who}, {what}: FAPI 2.0 §5.3.2.1 accepts only a string aud, got {outcome:?}"
-                );
-            }
-        }
     }
 }

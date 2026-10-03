@@ -39,6 +39,9 @@ use super::{
 };
 
 /// Registers all admin API routes (mounted under `/admin` by the parent router).
+mod orgs;
+mod rbac_extras;
+
 pub(super) fn admin_api_routes() -> axum::Router<Arc<AppState>> {
     use axum::routing::{delete, get, patch, post};
     axum::Router::new()
@@ -51,10 +54,6 @@ pub(super) fn admin_api_routes() -> axum::Router<Arc<AppState>> {
             get(admin_get_user)
                 .patch(admin_update_user)
                 .delete(admin_delete_user),
-        )
-        .route(
-            "/users/{id}/device-fingerprints",
-            delete(admin_delete_user_device_fingerprints),
         )
         .route("/realms", get(admin_list_realms).post(admin_create_realm))
         .route(
@@ -108,6 +107,43 @@ pub(super) fn admin_api_routes() -> axum::Router<Arc<AppState>> {
         )
         .route("/audit", get(admin_list_audit))
         .route("/roles", get(admin_list_roles).post(admin_create_role))
+        .route(
+            "/roles/{id}/members",
+            get(rbac_extras::admin_list_role_members),
+        )
+        .route("/permissions", get(rbac_extras::admin_list_permissions))
+        .route("/audit/verify", post(rbac_extras::admin_verify_audit))
+        .route(
+            "/groups/{id}/roles",
+            post(rbac_extras::admin_assign_group_role),
+        )
+        .route(
+            "/users/{id}/permissions",
+            get(rbac_extras::admin_list_user_permissions)
+                .post(rbac_extras::admin_grant_user_permission),
+        )
+        .route(
+            "/users/{id}/permissions/{permission}",
+            delete(rbac_extras::admin_revoke_user_permission),
+        )
+        .route(
+            "/organizations",
+            get(orgs::admin_list_organizations).post(orgs::admin_create_organization),
+        )
+        .route(
+            "/organizations/{id}",
+            get(orgs::admin_get_organization)
+                .patch(orgs::admin_update_organization)
+                .delete(orgs::admin_delete_organization),
+        )
+        .route(
+            "/organizations/{id}/members/{user_id}/roles",
+            get(orgs::admin_list_additional_roles).post(orgs::admin_add_additional_role),
+        )
+        .route(
+            "/organizations/{id}/members/{user_id}/roles/{role_name}",
+            delete(orgs::admin_remove_additional_role),
+        )
         .route(
             "/roles/{id}",
             get(admin_get_role)
@@ -315,8 +351,7 @@ fn reject_system_realm_write(auth: &AdminAuth) -> Result<(), Response> {
 /// Enforces realm-level object authorization (BOLA guard).
 ///
 /// Returns `path_realm_id` when access is permitted, per the shared rule in
-/// [`crate::protocol::admin_auth::admin_realm_scope`] (also applied by gRPC
-/// `GetRealm` / `DeleteRealm`):
+/// [`crate::protocol::admin_auth::admin_realm_scope`]:
 /// - `auth.realm_id == path_realm_id` — no boundary is crossed, always allowed.
 /// - The **system realm** (nil UUID) is a superuser that may operate on any
 ///   realm, *subject to the target realm's cross-realm trust policies*.
@@ -785,7 +820,7 @@ async fn admin_import_users(
 
     let mut imported = 0u32;
     let mut failed = 0u32;
-    let mut results = Vec::with_capacity(body.users.len());
+    let mut results = Vec::new();
 
     for entry in &body.users {
         let status = match entry.status.as_deref().unwrap_or("active") {
@@ -1136,66 +1171,6 @@ async fn admin_delete_user(
     }
 }
 
-/// Admin: erase all device fingerprints for a user (GDPR Art. 17 / AC-11).
-///
-/// `DELETE /admin/users/{id}/device-fingerprints`
-///
-/// Satisfies DSAR erasure requests for biometric/device-signal data without
-/// requiring deletion of the entire user account.  Returns `{ "erased": N }`.
-async fn admin_delete_user_device_fingerprints(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    let auth = match extract_admin_auth(&headers, &state) {
-        Ok(a) => a,
-        Err(e) => return e.into_response(),
-    };
-    if let Err(e) = require_admin_permission(&auth, "hearth.users.admin") {
-        return e.into_response();
-    }
-
-    let user_uuid: uuid::Uuid = match id.parse() {
-        Ok(u) => u,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid user ID"})),
-            )
-                .into_response()
-        }
-    };
-
-    let user_id = UserId::new(user_uuid);
-    if let Err(e) = require_user_admin_ceiling(&state, &auth, &auth.realm_id, &user_id) {
-        return e.into_response();
-    }
-
-    match state
-        .identity
-        .delete_user_device_fingerprints(&auth.realm_id, &user_id)
-    {
-        Ok(erased) => {
-            crate::protocol::audit_log::record(
-                state.audit.as_ref(),
-                &CreateAuditEvent {
-                    realm_id: auth.realm_id.clone(),
-                    actor: auth.user_id.as_uuid().to_string(),
-                    action: crate::audit::AuditAction::DeviceFingerprintsErased,
-                    resource_type: "user".to_string(),
-                    resource_id: user_uuid.to_string(),
-                    metadata: Some(serde_json::json!({
-                        "via": "admin_api",
-                        "count": erased,
-                    })),
-                },
-            );
-            (StatusCode::OK, Json(serde_json::json!({"erased": erased}))).into_response()
-        }
-        Err(e) => identity_error_to_response(&e).into_response(),
-    }
-}
-
 /// HTTP request body for bulk user operations.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1332,7 +1307,7 @@ async fn admin_list_realms(
     }
 
     // System-realm admins may list all realms; a tenant realm admin sees only
-    // their own realm — the gRPC ListRealms twin has always filtered this way
+    // their own realm — the removed gRPC ListRealms twin filtered this way
     // (audit 2026-08-28 §4.1#2).
     if crate::identity::keys::is_system_realm(&auth.realm_id) {
         match state.identity.list_realms(&params.as_page_request()) {
@@ -1755,9 +1730,8 @@ async fn admin_patch_user_required_actions(
 /// Replaces the realm's default required-actions list. Only affects users
 /// created after this call. Unknown action strings return 400.
 ///
-/// Optional fields applied only when present: `mfa_methods`,
-/// `sms_otp_expiry_seconds`, `sms_otp_max_attempts`, `email_otp_expiry_seconds`,
-/// `email_otp_max_attempts`, `fapi_profile` (`"baseline"`/`"advanced"`/`null`),
+/// Optional fields applied only when present: `mfa_methods`, `email_otp_expiry_seconds`,
+/// `email_otp_max_attempts`,
 /// and `dcr_policy` (`"disabled"`/`"open"`/`"authenticated"`/`null`) — the
 /// Dynamic Client Registration policy for `POST /register`.
 #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
@@ -1800,11 +1774,8 @@ async fn admin_patch_realm_config(
     const KNOWN_KEYS: &[&str] = &[
         "default_required_actions",
         "mfa_methods",
-        "sms_otp_expiry_seconds",
-        "sms_otp_max_attempts",
         "email_otp_expiry_seconds",
         "email_otp_max_attempts",
-        "fapi_profile",
         "dcr_policy",
     ];
     if let Some(obj) = body.as_object() {
@@ -1902,11 +1873,8 @@ async fn admin_patch_realm_config(
                 };
                 strs.push(s.to_string());
             }
-            // The same rule the YAML validator applies: known names only, and
-            // no `sms` on a transport that cannot deliver the code.
-            if let Err(reason) =
-                crate::config::check_mfa_methods(&strs, state.sms_transport, state.dev_mode)
-            {
+            // The same rule the YAML validator applies: known names only.
+            if let Err(reason) = crate::config::check_mfa_methods(&strs) {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({ "error": reason })),
@@ -1923,15 +1891,6 @@ async fn admin_patch_realm_config(
                 .into_response();
         }
     }
-    if let Some(v) = body["sms_otp_expiry_seconds"].as_u64() {
-        config.sms_otp_expiry_seconds = Some(v);
-    }
-    if let Some(v) = body["sms_otp_max_attempts"].as_u64() {
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            config.sms_otp_max_attempts = Some(v as u32);
-        }
-    }
     if let Some(v) = body["email_otp_expiry_seconds"].as_u64() {
         config.email_otp_expiry_seconds = Some(v);
     }
@@ -1939,34 +1898,6 @@ async fn admin_patch_realm_config(
         #[allow(clippy::cast_possible_truncation)]
         {
             config.email_otp_max_attempts = Some(v as u32);
-        }
-    }
-    if let Some(v) = body.get("fapi_profile") {
-        use crate::identity::FapiProfile;
-        if v.is_null() {
-            config.fapi_profile = None;
-        } else if let Some(s) = v.as_str() {
-            match s {
-                "baseline" => config.fapi_profile = Some(FapiProfile::Baseline),
-                "advanced" => config.fapi_profile = Some(FapiProfile::Advanced),
-                other => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({
-                            "error": format!("unknown fapi_profile value {other:?}; expected \"baseline\", \"advanced\", or null")
-                        })),
-                    )
-                        .into_response();
-                }
-            }
-        } else {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": "fapi_profile must be a string or null"
-                })),
-            )
-                .into_response();
         }
     }
     if let Some(v) = body.get("dcr_policy") {
@@ -2551,9 +2482,9 @@ async fn admin_register_client(
         return e.into_response();
     }
 
-    // `jwks`, `jwks_uri`, `profile` and `authorization_signed_response_alg`
-    // ride beside the proto fields, so an operator can register a FAPI 2.0
-    // `private_key_jwt` client over REST.
+    // `jwks`, `jwks_uri` and `dpop_bound_access_tokens` ride beside the proto
+    // fields, so an operator can register a `private_key_jwt` or DPoP-bound
+    // client over REST.
     let request = match super::oauth::admin_registration_request(body) {
         Ok(r) => r,
         Err(resp) => return resp,
@@ -2587,8 +2518,8 @@ async fn admin_register_client(
 ///
 /// Answers `200` with the client record and the new `client_secret`, the
 /// only time it is returned; the old secret stops authenticating at once.
-/// Audited with the acting admin. `400` for a public or FAPI 2.0 client or in
-/// a FAPI 2.0 Advanced realm, `404` for an unknown client.
+/// Audited with the acting admin. `400` for a public client, `404` for an
+/// unknown client.
 async fn admin_regenerate_client_secret(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -2706,8 +2637,8 @@ struct AdminUpdateClientBody {
     /// 22.15 (audit 2026-08-28 §4.22#7): the engine has read this key since
     /// those features shipped, and `UpdateClientRequest` has carried the field
     /// all along, but no protocol surface ever set it — every caller passed
-    /// `None`. Discovery advertised `private_key_jwt` and FAPI 2.0 Advanced
-    /// against a key an operator had no way to install.
+    /// `None`. Discovery advertised `private_key_jwt` against a key an operator
+    /// had no way to install.
     #[serde(default, deserialize_with = "deserialize_nullable_string")]
     assertion_public_key: Option<Option<String>>,
     /// ID-token signing algorithm: `"RS256"` or `"EdDSA"` (task 26.55).
@@ -2719,10 +2650,9 @@ struct AdminUpdateClientBody {
     /// the engine (public signing keys only).
     #[serde(default, deserialize_with = "deserialize_nullable_jwks")]
     jwks: Option<Option<String>>,
-    /// Security profile: `"standard"` or `"fapi2"`. Omit to leave unchanged.
-    /// A FAPI 2.0 client must hold keys (`jwks` or an assertion key) and no
-    /// secret; the engine refuses the change otherwise.
-    profile: Option<String>,
+    /// RFC 9449 §5.2 `dpop_bound_access_tokens`: `true` makes every token
+    /// request from this client need a DPoP proof. Omit to leave unchanged.
+    dpop_bound_access_tokens: Option<bool>,
 }
 
 /// Deserializes `jwks` for [`AdminUpdateClientBody`]: absent → `None`,
@@ -2797,18 +2727,6 @@ async fn admin_update_client(
         "first_party" => ClientTrustLevel::FirstParty,
         _ => ClientTrustLevel::ThirdParty,
     });
-    let profile = match body.profile.as_deref() {
-        None => None,
-        Some("standard") => Some(crate::identity::ClientProfile::Standard),
-        Some("fapi2") => Some(crate::identity::ClientProfile::Fapi2),
-        Some(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "profile must be \"standard\" or \"fapi2\""})),
-            )
-                .into_response()
-        }
-    };
     let request = crate::identity::UpdateClientRequest {
         client_name: body.client_name,
         redirect_uris: if body.redirect_uris.is_empty() {
@@ -2827,7 +2745,7 @@ async fn admin_update_client(
         require_consent: body.require_consent,
         access_token_authorization,
         trust_level,
-        mfa_required: body.mfa_required.map(Some),
+        mfa_required: body.mfa_required.map(Some), // mfa-resolver-ok: a write
         cors_origins: body.cors_origins,
         // 22.15: the operator surface for `private_key_jwt` / `jwt-bearer`.
         // `update_client_inner` validates the base64url decode and the 32-byte
@@ -2836,10 +2754,9 @@ async fn admin_update_client(
         // Validated (RS256 | EdDSA) by `update_client_inner`, which also
         // provisions the realm's RSA ID-token key on a switch to RS256.
         id_token_signed_response_alg: body.id_token_signed_response_alg,
-        // Validated by `update_client_inner` (public signing keys; a FAPI 2.0
-        // client keeps a key and holds no secret).
+        // Validated by `update_client_inner` (public signing keys only).
         jwks: body.jwks,
-        profile,
+        dpop_bound_access_tokens: body.dpop_bound_access_tokens,
         ..Default::default()
     };
 
@@ -3168,6 +3085,10 @@ async fn admin_get_user_effective_permissions(
         }
         None => None,
     };
+    // A suspended or archived organisation grants nothing, here as in tokens
+    // and `/v1/me/permissions` (the removed gRPC twin applied this; REST did
+    // not).
+    let org_id = state.identity.active_org_context(&auth.realm_id, org_id);
     let scope = params.get("scope").cloned();
 
     let resolved = match state.rbac.resolve_permissions(
@@ -3292,10 +3213,13 @@ pub(super) async fn dev_seed_session(
         }
     };
     let user_id = UserId::new(user_uuid);
+    // A seeded user ran no ceremony. This dev-only endpoint already mints a
+    // session with no authentication, so it states a proved second factor, as
+    // bootstrap does; otherwise every realm that requires MFA refuses it.
     match state.identity.create_session(
         &realm_id,
         &user_id,
-        &crate::identity::SessionContext::default(),
+        &dev_session_context(crate::identity::MfaProof::Proved),
     ) {
         Ok(session) => (
             StatusCode::CREATED,
@@ -3343,10 +3267,11 @@ pub(super) async fn dev_seed_token(
         }
     };
     let user_id = UserId::new(user_uuid);
+    // Same proof as `dev_seed_session`, for the same reason.
     let session = match state.identity.create_session(
         &realm_id,
         &user_id,
-        &crate::identity::SessionContext::default(),
+        &dev_session_context(crate::identity::MfaProof::Proved),
     ) {
         Ok(s) => s,
         Err(e) => return identity_error_to_response(&e).into_response(),
@@ -3437,8 +3362,11 @@ pub(super) const DEV_SYSTEM_ADMIN_PASSWORD: &str = "HearthTest123!";
 /// user already existed — the existing password is left untouched.
 ///
 /// Best-effort: logs on error but never returns a failure to the caller.
+/// Returns the password and the base32 TOTP secret, on creation only: the
+/// system realm requires MFA, so the admin gets a TOTP factor (spec
+/// `mfa-policy`).
 #[cfg(feature = "dev-endpoints")]
-fn dev_seed_system_admin(state: &AppState) -> Option<String> {
+fn dev_seed_system_admin(state: &AppState) -> Option<(String, String)> {
     let sys = crate::identity::keys::system_realm_id();
 
     // Ensure the system realm has RBAC roles seeded.
@@ -3514,7 +3442,47 @@ fn dev_seed_system_admin(state: &AppState) -> Option<String> {
         tracing::warn!(error = %e, "dev bootstrap: system realm role assignment failed");
     }
 
-    Some(password)
+    match dev_enrol_totp(state, &sys, admin.id()) {
+        Ok(secret) => Some((password, secret)),
+        Err(e) => {
+            tracing::warn!(error = %e, "dev bootstrap: system admin TOTP enrolment failed");
+            None
+        }
+    }
+}
+
+/// Enrols TOTP for a dev admin and activates it with a code computed from
+/// the new secret — the step a person makes with an authenticator app.
+/// Returns the base32 secret, which bootstrap hands back once.
+#[cfg(feature = "dev-endpoints")]
+fn dev_enrol_totp(
+    state: &AppState,
+    realm_id: &RealmId,
+    user_id: &UserId,
+) -> Result<String, crate::identity::IdentityError> {
+    let enrolment = state.identity.enroll_totp(realm_id, user_id)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let code = crate::identity::totp::code_at(&enrolment.secret_base32, now).ok_or_else(|| {
+        crate::identity::IdentityError::Internal {
+            reason: "dev bootstrap: TOTP secret did not decode".to_string(),
+        }
+    })?;
+    state
+        .identity
+        .verify_totp_enrollment(realm_id, user_id, &code)?;
+    Ok(enrolment.secret_base32.clone())
+}
+
+/// The session context for a dev-endpoint session (bootstrap and the seed
+/// endpoints): it records `proof`, the second factor the caller states.
+#[cfg(feature = "dev-endpoints")]
+fn dev_session_context(proof: crate::identity::MfaProof) -> crate::identity::SessionContext {
+    crate::identity::SessionContext {
+        mfa_proof: proof,
+        ..Default::default()
+    }
 }
 
 /// Issues a fresh access token for the reserved system-realm admin
@@ -3529,8 +3497,11 @@ fn dev_seed_system_admin(state: &AppState) -> Option<String> {
 ///
 /// Best-effort: logs on error and returns `None` rather than failing bootstrap.
 /// Call [`dev_seed_system_admin`] first to guarantee the admin user exists.
+///
+/// The session records `proof`: what the authentication behind this bootstrap
+/// call proved (the TOTP just activated, or the Bearer session's proof).
 #[cfg(feature = "dev-endpoints")]
-fn dev_system_admin_token(state: &AppState) -> Option<String> {
+fn dev_system_admin_token(state: &AppState, proof: crate::identity::MfaProof) -> Option<String> {
     let sys = crate::identity::keys::system_realm_id();
     let admin = match state.identity.get_user_by_email(&sys, "admin@hearth.test") {
         Ok(Some(u)) => u,
@@ -3543,11 +3514,10 @@ fn dev_system_admin_token(state: &AppState) -> Option<String> {
             return None;
         }
     };
-    let session = match state.identity.create_session(
-        &sys,
-        admin.id(),
-        &crate::identity::SessionContext::default(),
-    ) {
+    let session = match state
+        .identity
+        .create_session(&sys, admin.id(), &dev_session_context(proof))
+    {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = %e, "dev bootstrap: system admin session creation failed");
@@ -3623,7 +3593,11 @@ pub(super) async fn admin_bootstrap(
         .identity
         .create_realm(&crate::identity::CreateRealmRequest {
             name: "dev-realm".to_string(),
-            config: None,
+            // The production MFA default holds under `--dev` too.
+            config: Some(crate::identity::RealmConfig {
+                mfa_required: Some(true),
+                ..Default::default()
+            }),
         }) {
         Ok(t) => t,
         Err(crate::identity::IdentityError::DuplicateRealmName) => {
@@ -3648,13 +3622,27 @@ pub(super) async fn admin_bootstrap(
 
             // Validate the Bearer token against the dev-realm to confirm the
             // caller completed the first bootstrap.
-            if state.identity.validate_token(&rid, &bearer).is_err() {
+            let Ok(claims) = state.identity.validate_token(&rid, &bearer) else {
                 return (
                     StatusCode::UNAUTHORIZED,
                     Json(serde_json::json!({"error": "invalid or expired token"})),
                 )
                     .into_response();
-            }
+            };
+            // The new sessions carry what the Bearer token's session proved.
+            let proof = claims
+                .sid
+                .strip_prefix("session_")
+                .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                .and_then(|u| {
+                    state
+                        .identity
+                        .get_session(&rid, &crate::core::SessionId::new(u))
+                        .ok()
+                        .flatten()
+                })
+                .map_or(crate::identity::MfaProof::None, |s| s.mfa_proof());
+            let mut totp_secret = String::new();
 
             // Reconciliation archives realms not in hearth.yaml. Re-activate
             // the dev-realm so create_session doesn't reject it as non-Active.
@@ -3711,19 +3699,23 @@ pub(super) async fn admin_bootstrap(
                             },
                         );
                     }
+                    totp_secret = match dev_enrol_totp(&state, &rid, &new_uid) {
+                        Ok(secret) => secret,
+                        Err(e) => return identity_error_to_response(&e).into_response(),
+                    };
                     new_user
                 }
                 Err(e) => return identity_error_to_response(&e).into_response(),
             };
             let uid = admin.id().clone();
-            let session = match state.identity.create_session(
-                &rid,
-                &uid,
-                &crate::identity::SessionContext::default(),
-            ) {
-                Ok(s) => s,
-                Err(e) => return identity_error_to_response(&e).into_response(),
-            };
+            let session =
+                match state
+                    .identity
+                    .create_session(&rid, &uid, &dev_session_context(proof))
+                {
+                    Ok(s) => s,
+                    Err(e) => return identity_error_to_response(&e).into_response(),
+                };
             let tokens = match state.identity.issue_tokens(&rid, &uid, session.id()) {
                 Ok(t) => t,
                 Err(e) => return identity_error_to_response(&e).into_response(),
@@ -3733,8 +3725,10 @@ pub(super) async fn admin_bootstrap(
             let qs = bootstrap_quickstart(&headers, &at_str, &rid_str);
             // Re-bootstrap: do not modify existing password (HEA-1670). Still
             // mint a fresh cross-realm system token (HEA-2087).
-            dev_seed_system_admin(&state);
-            let system_access_token = dev_system_admin_token(&state).unwrap_or_default();
+            let admin_totp_secret = dev_seed_system_admin(&state)
+                .map(|(_, secret)| secret)
+                .unwrap_or_default();
+            let system_access_token = dev_system_admin_token(&state, proof).unwrap_or_default();
             return (
                 StatusCode::OK,
                 Json(pb::BootstrapResponse {
@@ -3748,6 +3742,8 @@ pub(super) async fn admin_bootstrap(
                     system_realm_id: crate::identity::keys::system_realm_id()
                         .as_uuid()
                         .to_string(),
+                    totp_secret,
+                    admin_totp_secret,
                 }),
             )
                 .into_response();
@@ -3822,15 +3818,23 @@ pub(super) async fn admin_bootstrap(
         return rbac_error_to_response(&e).into_response();
     }
 
-    // Create session (API-initiated — no browser context)
-    let session = match state.identity.create_session(
-        &realm_id,
-        &user_id,
-        &crate::identity::SessionContext::default(),
-    ) {
-        Ok(s) => s,
+    // Every realm requires MFA by default, so the admin gets a TOTP factor;
+    // activating it proves the factor for the session below.
+    let totp_secret = match dev_enrol_totp(&state, &realm_id, &user_id) {
+        Ok(secret) => secret,
         Err(e) => return identity_error_to_response(&e).into_response(),
     };
+    let proof = crate::identity::MfaProof::Proved;
+
+    // Create session (API-initiated — no browser context)
+    let session =
+        match state
+            .identity
+            .create_session(&realm_id, &user_id, &dev_session_context(proof))
+        {
+            Ok(s) => s,
+            Err(e) => return identity_error_to_response(&e).into_response(),
+        };
 
     // Issue tokens — now resolves `realm.admin` role's permissions into
     // the JWT claim set.
@@ -3846,10 +3850,10 @@ pub(super) async fn admin_bootstrap(
     let access_token_str = tokens.access_token().to_string();
     let quickstart = bootstrap_quickstart(&headers, &access_token_str, &realm_id_str);
 
-    let admin_password = dev_seed_system_admin(&state).unwrap_or_default();
+    let (admin_password, admin_totp_secret) = dev_seed_system_admin(&state).unwrap_or_default();
     // Cross-realm system-realm admin token (HEA-2087) — the dev-realm
     // `access_token` above cannot manage other realms.
-    let system_access_token = dev_system_admin_token(&state).unwrap_or_default();
+    let system_access_token = dev_system_admin_token(&state, proof).unwrap_or_default();
     (
         StatusCode::OK,
         Json(pb::BootstrapResponse {
@@ -3863,6 +3867,8 @@ pub(super) async fn admin_bootstrap(
             system_realm_id: crate::identity::keys::system_realm_id()
                 .as_uuid()
                 .to_string(),
+            totp_secret,
+            admin_totp_secret,
         }),
     )
         .into_response()
@@ -3986,8 +3992,8 @@ fn parse_user_id_path(raw: &str) -> Result<UserId, (StatusCode, Json<serde_json:
 }
 
 /// Refuses a role definition that would grant a permission the caller does not
-/// hold (GA audit M6), mirroring gRPC `CreateRole`/`UpdateRole` through the
-/// shared [`crate::protocol::role_ceiling`] check. `hearth.admin` is exempt.
+/// hold (GA audit M6), through the [`crate::protocol::role_ceiling`] check.
+/// `hearth.admin` is exempt.
 fn require_role_definition_ceiling(
     state: &AppState,
     auth: &AdminAuth,
@@ -4615,16 +4621,43 @@ async fn admin_assign_role(
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
-    // Privilege-ceiling check (HEA-SEC-13): a sub-admin (hearth.realm.admin) may only
-    // assign roles whose effective permissions are a subset of their own. hearth.admin
-    // bypasses this — they unconditionally hold all permissions.
+    if let Some(refusal) = role_permission_ceiling_refusal(&state, &auth, &role_id) {
+        return refusal;
+    }
+    let scope = match resolve_org_scope(&state, &auth, body.org_id.as_deref()) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    match state.rbac.assign_role(
+        &auth.realm_id,
+        &AssignRoleRequest {
+            subject: Subject::User(user_id),
+            role_id,
+            scope,
+            assigned_by: Some(auth.user_id.clone()),
+        },
+    ) {
+        Ok(a) => (StatusCode::CREATED, Json(a)).into_response(),
+        Err(e) => rbac_error_to_response(&e).into_response(),
+    }
+}
+
+/// Privilege-ceiling check (HEA-SEC-13) for granting a role: a sub-admin
+/// (`hearth.realm.admin`) may only hand out roles whose effective permissions
+/// are a subset of its own. `hearth.admin` bypasses this — it unconditionally
+/// holds all permissions. Returns the refusal, or `None` when allowed.
+///
+/// Shared by every route that grants a role: user and group assignment and
+/// extra org roles.
+fn role_permission_ceiling_refusal(
+    state: &AppState,
+    auth: &AdminAuth,
+    role_id: &RoleId,
+) -> Option<Response> {
     if !auth.permissions.iter().any(|p| p == "hearth.admin") {
-        let role_perms = match state
-            .rbac
-            .resolve_role_permissions(&auth.realm_id, &role_id)
-        {
+        let role_perms = match state.rbac.resolve_role_permissions(&auth.realm_id, role_id) {
             Ok(perms) => perms,
-            Err(e) => return rbac_error_to_response(&e).into_response(),
+            Err(e) => return Some(rbac_error_to_response(&e).into_response()),
         };
         let assigner_perms: std::collections::HashSet<&str> =
             auth.permissions.iter().map(String::as_str).collect();
@@ -4638,19 +4671,31 @@ async fn admin_assign_role(
                 missing_permission = %p,
                 "role assignment blocked: role contains permission assigner does not hold"
             );
-            return (
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({
-                    "error": "forbidden",
-                    "error_description": "role contains permissions the assigner does not hold"
-                })),
-            )
-                .into_response();
+            return Some(
+                (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "error": "forbidden",
+                        "error_description": "role contains permissions the assigner does not hold"
+                    })),
+                )
+                    .into_response(),
+            );
         }
     }
-    let scope = match body.org_id {
+    None
+}
+
+/// Resolves an optional `org_id` into an assignment scope, refusing an
+/// organization that does not exist in the caller's realm (task 26.45).
+fn resolve_org_scope(
+    state: &AppState,
+    auth: &AdminAuth,
+    org_id: Option<&str>,
+) -> Result<Scope, Response> {
+    match org_id {
         Some(s) => {
-            let stripped = s.strip_prefix("org_").unwrap_or(&s);
+            let stripped = s.strip_prefix("org_").unwrap_or(s);
             match uuid::Uuid::parse_str(stripped).map(crate::core::OrganizationId::new) {
                 Ok(oid) => {
                     // Task 26.45: the organisation must exist.
@@ -4670,45 +4715,29 @@ async fn admin_assign_role(
                     // task 26.16 made `active_org_context` fail closed on an
                     // unknown organisation — but it was one before that.
                     match state.identity.get_organization(&auth.realm_id, &oid) {
-                        Ok(Some(_)) => Scope::Org { org_id: oid },
-                        Ok(None) => {
-                            return (
-                                StatusCode::NOT_FOUND,
-                                Json(serde_json::json!({
-                                    "error": "organization not found",
-                                    "error_description":
-                                        "the organization named by org_id does not exist in \
-                                         this realm; a role scoped to it could never grant \
-                                         anything"
-                                })),
-                            )
-                                .into_response();
-                        }
-                        Err(e) => return identity_error_to_response(&e).into_response(),
+                        Ok(Some(_)) => Ok(Scope::Org { org_id: oid }),
+                        Ok(None) => Err((
+                            StatusCode::NOT_FOUND,
+                            Json(serde_json::json!({
+                                "error": "organization not found",
+                                "error_description":
+                                    "the organization named by org_id does not exist in \
+                                     this realm; a role scoped to it could never grant \
+                                     anything"
+                            })),
+                        )
+                            .into_response()),
+                        Err(e) => Err(identity_error_to_response(&e).into_response()),
                     }
                 }
-                Err(_) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error": "invalid org id"})),
-                    )
-                        .into_response();
-                }
+                Err(_) => Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "invalid org id"})),
+                )
+                    .into_response()),
             }
         }
-        None => Scope::Realm,
-    };
-    match state.rbac.assign_role(
-        &auth.realm_id,
-        &AssignRoleRequest {
-            subject: Subject::User(user_id),
-            role_id,
-            scope,
-            assigned_by: Some(auth.user_id.clone()),
-        },
-    ) {
-        Ok(a) => (StatusCode::CREATED, Json(a)).into_response(),
-        Err(e) => rbac_error_to_response(&e).into_response(),
+        None => Ok(Scope::Realm),
     }
 }
 

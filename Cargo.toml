@@ -65,7 +65,6 @@ lettre = { version = "0.11", default-features = false, features = [
     "builder",
     "hostname",
 ] }
-maxminddb = "0.30"
 memmap2 = "0.9"
 password-hash = "0.5"
 pbkdf2 = { version = "0.12", default-features = false }
@@ -111,10 +110,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 openraft = { version = "0.9", features = ["serde", "storage-v2"] }
 redb = "2"
 tonic = { version = "0.14", features = ["transport", "tls-ring", "gzip"] }
-tonic-health = "0.14"
 tonic-prost = "0.14"
-tonic-reflection = "0.14"
-tonic-types = "0.14"
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace"] }
 tracing = "0.1"
@@ -152,7 +148,6 @@ form_urlencoded = "1.2.2"
 prometheus = { version = "0.14", default-features = false, features = ["process"] }
 tar = "0.4"
 zstd = "0.13"
-ldap3 = { version = "0.12", default-features = false, features = ["tls-rustls-ring"] }
 rpassword = "7"
 secrecy = { version = "0.8", features = ["alloc"] }
 

@@ -3,8 +3,8 @@
 //! Every operator-supplied network list in Hearth goes through
 //! [`IpRange::from_str`]: `server.trusted_proxies` (via
 //! [`crate::core::TrustedProxy`], which adds its own breadth policy on top),
-//! the per-realm `security.cidr_policy` allow/deny lists and the Spamhaus DROP
-//! feed (via `abuse::cidr::CidrFilter`), and the webhook SSRF blocklist. The
+//! the per-realm `security.cidr_policy` allow/deny lists (via
+//! `abuse::cidr::CidrFilter`), and the webhook SSRF blocklist. The
 //! config validator uses the same function, so an entry validation accepts is
 //! an entry the runtime matches — and an entry the runtime would refuse is
 //! refused at load, naming the entry, instead of being dropped.

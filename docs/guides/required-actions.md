@@ -21,15 +21,16 @@ Required actions are stored on the user record in the `required_actions` array a
 
 ## Action types
 
-Five action types are supported. Values are SCREAMING_SNAKE_CASE strings in the JSON API.
+Four action types are supported. Values are SCREAMING_SNAKE_CASE strings in the JSON API.
 
 | Wire value | When to use | Auto-injected? |
 |---|---|---|
 | `VERIFY_EMAIL` | User must click a verification link sent to their registered email address. | No — assign explicitly. |
 | `UPDATE_PASSWORD` | User must set a new password. Use after an admin-initiated credential reset or a forced rotation policy. | No — assign explicitly. |
-| `ENROLL_MFA` | User must enroll a second factor: TOTP, or — in a realm with `webauthn_required` — a passkey. | Yes — injected when a client or role requires MFA and the user has no factor, and when the realm sets `webauthn_required` and the user has no passkey (see [Passkey enrolment during login](#passkey-enrolment-during-login)). |
-| `ENROLL_PHONE_OTP` | User must register and verify a phone number via SMS OTP. | Yes — injected when the realm's `mfa_methods` includes `sms` and the user has no verified phone on record. |
+| `ENROLL_MFA` | User must enroll a second factor: TOTP, or — in a realm with `webauthn_required` — a passkey. | Yes — injected when the realm, an organization of the user, the client or a role in `mfa_required_roles` requires MFA and the user has no passkey or TOTP. A user who signs in with a password and email OTP in such a realm also gets it: email OTP does not satisfy MFA. Also injected when the realm sets `webauthn_required` and the user has no passkey (see [Passkey enrolment during login](#passkey-enrolment-during-login)). |
 | `ENROLL_EMAIL_OTP` | User must enable email one-time codes as a second factor. | Yes — injected when the realm's `mfa_methods` includes `email_otp` and the user has not enabled it. |
+
+`ENROLL_PHONE_OTP` was removed in Hearth 3.0.0 with SMS one-time codes; the API refuses it as an unknown action. A stored user that still carries it loads with the action dropped.
 
 ---
 
@@ -42,8 +43,7 @@ When a user has multiple pending actions, Hearth presents interstitials in a fix
 | 1 (first) | `VERIFY_EMAIL` |
 | 2 | `UPDATE_PASSWORD` |
 | 3 | `ENROLL_MFA` |
-| 4 | `ENROLL_PHONE_OTP` |
-| 5 (last) | `ENROLL_EMAIL_OTP` |
+| 4 (last) | `ENROLL_EMAIL_OTP` |
 
 ---
 
@@ -122,12 +122,11 @@ When a user with pending required actions visits the authorization endpoint:
 | `VERIFY_EMAIL` | `/required-action/VERIFY_EMAIL` |
 | `UPDATE_PASSWORD` | `/required-action/UPDATE_PASSWORD` |
 | `ENROLL_MFA` | `/required-action/enroll-mfa` |
-| `ENROLL_PHONE_OTP` | `/required-action/ENROLL_PHONE_OTP` |
 | `ENROLL_EMAIL_OTP` | `/required-action/ENROLL_EMAIL_OTP` |
 
 These pages are served by the Hearth browser UI. They require the `hearth_ra_session` cookie to be present; direct requests without the cookie are rejected. Every form on them carries a token bound to that cookie, and a submission without it is refused (`403`).
 
-An enrolment or verification action the user has **already satisfied** when its page is reached — TOTP or a passkey for `ENROLL_MFA`, a verified phone for `ENROLL_PHONE_OTP`, email OTP for `ENROLL_EMAIL_OTP`, a verified address for `VERIFY_EMAIL` — is recorded as completed (`RequiredActionAutoCleared` audit event), removed from the account, and the login continues.
+An enrolment or verification action the user has **already satisfied** when its page is reached — TOTP or a passkey for `ENROLL_MFA`, email OTP for `ENROLL_EMAIL_OTP`, a verified address for `VERIFY_EMAIL` — is recorded as completed (`RequiredActionAutoCleared` audit event), removed from the account, and the login continues.
 
 ### Passkey enrolment during login
 
@@ -170,7 +169,6 @@ Operators migrating from Keycloak will find this feature conceptually identical.
 | `UPDATE_PASSWORD` | `UPDATE_PASSWORD` | `UPDATE_PASSWORD` |
 | `VERIFY_EMAIL` | `VERIFY_EMAIL` | `VERIFY_EMAIL` |
 | MFA enrollment | `CONFIGURE_TOTP` | `ENROLL_MFA` (covers TOTP and WebAuthn) |
-| SMS enrollment | *(no built-in equivalent)* | `ENROLL_PHONE_OTP` — only injected when `mfa_methods` includes `sms` |
 | **Admin assignment API** | `PUT /admin/realms/{realm}/users/{id}` — `requiredActions` field replaces the full list | `PATCH /admin/realms/{realm_id}/users/{user_id}/required-actions` — diff model with explicit `add`/`remove` |
 | **Realm defaults** | Admin UI → Authentication → Required Actions tab | `PATCH /admin/realms/{realm_id}/config` with `{"default_required_actions": [...]}` — API only, no admin UI |
 

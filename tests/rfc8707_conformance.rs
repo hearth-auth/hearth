@@ -100,7 +100,6 @@ fn authorize_and_exchange(
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize");
@@ -152,7 +151,7 @@ async fn res01_resource_indicator_produces_multi_aud() {
 
     let resource_uri = v["input"]["resource"].as_str().unwrap();
 
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = identity
@@ -209,7 +208,7 @@ async fn res02_no_resource_produces_single_aud() {
     assert_eq!(v["id"].as_str().unwrap(), "RES-02");
     assert_eq!(v["expected_aud_type"].as_str().unwrap(), "single");
 
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = identity
@@ -251,7 +250,7 @@ async fn res03_resource_aud_preserved_through_refresh() {
 
     let resource_uri = v["input"]["resource"].as_str().unwrap();
 
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = identity

@@ -161,29 +161,40 @@ fn proto_derived_routes_present_in_merged_spec() {
 }
 
 // ---------------------------------------------------------------------------
-// Parity gate: gRPC-only routes absent from merged REST spec
+// REST parity for the former gRPC-only operations (scope-trim-trusted-core)
 // ---------------------------------------------------------------------------
 
-/// Routes that are intentionally gRPC-only (listed in docs/api/grpc-only.txt)
-/// must not appear as REST paths in the merged spec.  If they do, either
-/// grpc-only.txt needs updating or the supplement has a stale entry.
+/// The admin operations that existed only over gRPC got REST routes in 3.0.0
+/// when the public gRPC API was removed. Each must be documented, with the
+/// methods the router serves.
 #[test]
-fn grpc_only_routes_absent_from_merged_rest_spec() {
+fn former_grpc_only_admin_routes_are_documented() {
     let v = merged();
     let paths = v["paths"].as_object().expect("paths");
-
-    // Organization admin endpoints are gRPC-only (see grpc-only.txt).
-    // The REST path would be /admin/organizations if we had wired it.
-    let grpc_only_axum_paths = ["/admin/organizations", "/admin/organizations/{id}"];
-
-    for path in grpc_only_axum_paths {
-        if let Some(item) = paths.get(path) {
-            // If the path exists it must not have a GET or POST — those would
-            // indicate we accidentally wired a REST route for a gRPC-only RPC.
-            assert!(
-                item.get("get").is_none() && item.get("post").is_none(),
-                "gRPC-only path {path} must not have GET or POST in merged REST spec"
-            );
+    let expected: &[(&str, &[&str])] = &[
+        ("/admin/organizations", &["get", "post"]),
+        ("/admin/organizations/{id}", &["get", "patch", "delete"]),
+        (
+            "/admin/organizations/{id}/members/{user_id}/roles",
+            &["get", "post"],
+        ),
+        (
+            "/admin/organizations/{id}/members/{user_id}/roles/{role_name}",
+            &["delete"],
+        ),
+        ("/admin/groups/{id}/roles", &["post"]),
+        ("/admin/roles/{id}/members", &["get"]),
+        ("/admin/users/{id}/permissions", &["get", "post"]),
+        ("/admin/users/{id}/permissions/{permission}", &["delete"]),
+        ("/admin/permissions", &["get"]),
+        ("/admin/audit/verify", &["post"]),
+    ];
+    for (path, methods) in expected {
+        let item = paths
+            .get(*path)
+            .unwrap_or_else(|| panic!("{path} is missing from the merged spec"));
+        for m in *methods {
+            assert!(item.get(*m).is_some(), "{path} must document {m}");
         }
     }
 }

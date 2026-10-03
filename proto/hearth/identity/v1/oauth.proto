@@ -18,8 +18,8 @@ message AuthorizationRequest {
   optional string code_challenge_method = 8;
   optional string nonce = 9;
   // PAR request_uri (RFC 9126). When set, the server expands the stored
-  // pushed authorization parameters and treats this as a PAR-backed request
-  // (via_par = true). Other authorization fields are ignored when this is set.
+  // pushed authorization parameters. Other authorization fields are ignored
+  // when this is set.
   optional string request_uri = 10;
 }
 
@@ -96,8 +96,7 @@ message RegisterClientRequest {
   // generates (256 bits from the OS CSPRNG) and returns exactly once, in the
   // response's client_secret. Only a hash is stored. "private_key_jwt"
   // requires jwks. Omitted or "none" registers a public client (or a
-  // private_key_jwt client when jwks is given). A client_secret_* method is
-  // refused in a FAPI 2.0 Advanced realm, which accepts private_key_jwt only.
+  // private_key_jwt client when jwks is given).
   optional string token_endpoint_auth_method = 8 [json_name = "token_endpoint_auth_method"];
 }
 
@@ -130,6 +129,9 @@ message OAuthClient {
   // Store it on receipt: Hearth keeps only its hash. Also set, once, by
   // RegenerateApplicationSecret.
   optional string client_secret = 9 [json_name = "client_secret"];
+  // RFC 9449 s5.2: when true, every token request from this client must carry
+  // a DPoP proof, and every token it gets is bound to the proof's key.
+  bool dpop_bound_access_tokens = 10 [json_name = "dpop_bound_access_tokens"];
 }
 
 // A cursor-based page of OAuth clients.
@@ -290,6 +292,13 @@ message BootstrapResponse {
   // The reserved system realm id (the nil UUID). Use as the `X-Realm-ID` header
   // alongside `system_access_token` for cross-realm admin API calls.
   string system_realm_id = 8;
+  // Base32 TOTP secret of the dev-realm admin (`admin@dev.local`). Every realm
+  // requires MFA by default, so bootstrap enrols TOTP for this admin. Non-empty
+  // ONLY on the first bootstrap call; add it to an authenticator app.
+  string totp_secret = 9;
+  // Base32 TOTP secret of the system-realm admin (`admin@hearth.test`), whose
+  // console sign-in asks for a code. Non-empty ONLY on the first bootstrap call.
+  string admin_totp_secret = 10;
 }
 
 // ---------------------------------------------------------------------------
@@ -352,8 +361,7 @@ service ApplicationAdminService {
   // Replaces a confidential client's secret with a new Hearth-generated one
   // (256 bits from the OS CSPRNG, stored only as a hash). The new secret is
   // returned once, in the response's client_secret; the old one stops
-  // authenticating at once. Refused for a public client, a FAPI 2.0 client
-  // and in a FAPI 2.0 Advanced realm (private_key_jwt only). Audited.
+  // authenticating at once. Refused for a public client. Audited.
   rpc RegenerateApplicationSecret(RegenerateApplicationSecretRequest) returns (OAuthClient) {
     option (google.api.http) = {post: "/admin/applications/{client_id}/regenerate-secret"};
   }

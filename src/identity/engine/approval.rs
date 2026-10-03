@@ -361,7 +361,7 @@ impl EmbeddedIdentityEngine {
         let has_more = request_ids.len() > limit;
         request_ids.truncate(limit);
 
-        let mut items = Vec::with_capacity(request_ids.len());
+        let mut items = Vec::new();
         for rid in &request_ids {
             let pk = keys::encode_approval_request_id(rid);
             let Some(bytes) = self.storage.get(realm_id, &pk).map_err(Self::storage_err)? else {

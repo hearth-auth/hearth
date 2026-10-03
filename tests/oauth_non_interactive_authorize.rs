@@ -1,8 +1,7 @@
 #![allow(clippy::unwrap_used)]
 //! GA audit 2026-09-28 B2 / L8 — the non-interactive authorization surfaces.
 //!
-//! `POST /authorize`, `POST /realms/{realm}/authorize` and gRPC `Authorize`
-//! mint an authorization code from a bearer token alone. They issued one for
+//! `POST /authorize` and `POST /realms/{realm}/authorize` mint an authorization code from a bearer token alone. They issued one for
 //! ANY client and ANY scope with no consent: `authorize_inner` only re-checked
 //! a consent record that already existed. Any access token of user U — one
 //! leaked from an unrelated app — became a code for any client, delivered in
@@ -17,8 +16,7 @@
 //! L8: `realm_authorize` built the DPoP `htu` from the nested `Uri`, whose
 //! `/realms/{realm}` prefix axum strips, so no correct proof could ever match.
 //!
-//! gRPC `Authorize` and `Decide` ignored the DPoP `cnf` binding; they now
-//! refuse a sender-constrained token as the gRPC admin surface does.
+//! A DPoP-bound (`cnf`) token replayed without a proof is refused.
 //!
 //! GA audit 3 B-1: the consent rule alone still let a third-party client's
 //! token mint a code for a first-party public client (which needs no consent)
@@ -38,11 +36,7 @@ use hearth::identity::{
     AuthorizationRequest, ClientTrustLevel, CodeChallengeMethod, CreateRealmRequest,
     CreateUserRequest, RegisterClientRequest, SessionContext, TokenExchangeRequest,
 };
-use hearth::protocol::admin_auth::AdminRateLimiter;
-use hearth::protocol::grpc::oauth::OAuthSvc;
-use hearth::protocol::grpc::GrpcState;
 use hearth::protocol::http::{router, AppState};
-use hearth::protocol::proto::identity::v1::{self as pb, o_auth_service_server::OAuthService};
 use ring::rand::SystemRandom;
 use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
 use tower::ServiceExt as _;
@@ -130,7 +124,7 @@ struct Fixture {
 }
 
 async fn setup() -> Fixture {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm_name = format!("nonint-{}", uuid::Uuid::new_v4());
     let realm = harness
         .identity()
@@ -202,15 +196,6 @@ impl Fixture {
         )))
     }
 
-    fn grpc(&self) -> OAuthSvc {
-        OAuthSvc::new(GrpcState::new(
-            self.harness.identity_arc(),
-            self.harness.rbac_arc(),
-            self.harness.audit_arc(),
-            Arc::new(AdminRateLimiter::new()),
-        ))
-    }
-
     /// Mints a DPoP-bound (`cnf.jkt`) access token for `user` via `client`.
     fn bound_token(&self, client: &ClientId, jkt: &str) -> String {
         self.client_token(client, Some(jkt))
@@ -241,7 +226,6 @@ impl Fixture {
                     amr_values: vec![],
                     response_mode: None,
                     request: None,
-                    via_par: false,
                 },
             )
             .expect("authorize");
@@ -641,169 +625,45 @@ async fn realm_authorize_accepts_a_dpop_proof_for_the_full_request_path() {
     );
 }
 
-// ── B2 + DPoP: gRPC Authorize and Decide ─────────────────────────────────────
+// ── DPoP: a bound token without a proof ─────────────────────────────────────
 
-fn grpc_request<T>(f: &Fixture, token: &str, body: T) -> tonic::Request<T> {
-    let mut req = tonic::Request::new(body);
-    req.metadata_mut()
-        .insert("x-realm-id", f.realm.as_uuid().to_string().parse().unwrap());
-    req.metadata_mut()
-        .insert("authorization", format!("Bearer {token}").parse().unwrap());
-    req
-}
-
-fn grpc_authorize_body(client: &ClientId) -> pb::AuthorizationRequest {
-    pb::AuthorizationRequest {
-        client_id: client.as_uuid().to_string(),
-        redirect_uri: REDIRECT_URI.into(),
-        scope: "openid".into(),
-        state: "st".into(),
-        response_type: "code".into(),
-        user_id: String::new(),
-        code_challenge: Some(PKCE_CHALLENGE.into()),
-        code_challenge_method: Some("S256".into()),
-        nonce: None,
-        request_uri: None,
-    }
-}
-
+/// A sender-constrained (`cnf.jkt`) token replayed as a plain bearer must
+/// not mint a code. (The gRPC `Authorize` twin of this refusal went with the
+/// public gRPC API; `POST /oauth/authorize`'s twin is
+/// `hea_2031_dpop_userinfo_bypass::oauth_decide_permission_denies_bound_token_replayed_as_plain_bearer`.)
 #[tokio::test]
-async fn grpc_authorize_refuses_a_client_that_requires_consent_without_a_recorded_consent() {
-    let f = setup().await;
-    let client = f.register(ClientTrustLevel::ThirdParty, true);
-    // The client's own token (GA audit 3 B-1), so the consent gate decides.
-    let own = f.client_token(&client, None);
-    let err = f
-        .grpc()
-        .authorize(grpc_request(&f, &own, grpc_authorize_body(&client)))
-        .await
-        .expect_err("gRPC Authorize must not issue a code without consent");
-    assert_eq!(err.code(), tonic::Code::PermissionDenied, "got {err:?}");
-    assert!(
-        err.message().contains("consent"),
-        "the refusal must be the consent refusal: {err:?}"
-    );
-
-    // Control: once consent is recorded, the same call issues a code.
-    f.harness
-        .identity()
-        .grant_consent(&f.realm, &f.user, &client, &["openid".to_string()])
-        .expect("grant consent");
-    let code = f
-        .grpc()
-        .authorize(grpc_request(&f, &own, grpc_authorize_body(&client)))
-        .await
-        .expect("covered consent issues a code")
-        .into_inner()
-        .code;
-    assert!(!code.is_empty(), "a code must be issued");
-}
-
-/// GA audit 3 B-1 over gRPC: a third-party client's token must not mint a
-/// code for a first-party client.
-#[tokio::test]
-async fn grpc_authorize_refuses_a_third_party_clients_token_for_a_first_party_client() {
-    let f = setup().await;
-    let third_party = f.register(ClientTrustLevel::ThirdParty, true);
-    let first_party = f.register(ClientTrustLevel::FirstParty, false);
-    let stolen = f.client_token(&third_party, None);
-
-    let err = f
-        .grpc()
-        .authorize(grpc_request(&f, &stolen, grpc_authorize_body(&first_party)))
-        .await
-        .expect_err("gRPC Authorize must not mint a code for another client");
-    assert_eq!(err.code(), tonic::Code::PermissionDenied, "got {err:?}");
-    assert!(
-        err.message().contains("client"),
-        "the refusal must name the client mismatch: {err:?}"
-    );
-
-    // Control: a session token (no client_id claim) still authorizes a
-    // first-party client.
-    let code = f
-        .grpc()
-        .authorize(grpc_request(
-            &f,
-            &f.token,
-            grpc_authorize_body(&first_party),
-        ))
-        .await
-        .expect("a session token authorizes a first-party client")
-        .into_inner()
-        .code;
-    assert!(!code.is_empty(), "a code must be issued");
-}
-
-#[tokio::test]
-async fn grpc_authorize_refuses_a_dpop_bound_token() {
+async fn realm_authorize_refuses_a_dpop_bound_token_without_a_proof() {
     let f = setup().await;
     let client = f.register(ClientTrustLevel::FirstParty, false);
-    let bound = f.bound_token(&client, &DPopKey::generate().thumbprint());
-    let err = f
-        .grpc()
-        .authorize(grpc_request(&f, &bound, grpc_authorize_body(&client)))
-        .await
-        .expect_err("a cnf-bound token has no proof channel on gRPC and must be refused");
-    assert_eq!(err.code(), tonic::Code::Unauthenticated, "got {err:?}");
-}
+    let key = DPopKey::generate();
+    let bound = f.bound_token(&client, &key.thumbprint());
+    let path = format!("/realms/{}/authorize", f.realm_name);
 
-#[tokio::test]
-async fn grpc_decide_denies_a_dpop_bound_token() {
-    use hearth::rbac::{AssignRoleRequest, CreateRoleRequest, Permission, Scope, Subject};
+    let (status, body) =
+        post_authorize(&f, &path, &bound, authorize_body(&client, "openid"), None).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "a cnf-bound token without a DPoP proof must be refused; body {body}"
+    );
+    assert!(body.get("code").is_none(), "no code may be issued: {body}");
 
-    let f = setup().await;
-    let role = f
-        .harness
-        .rbac()
-        .create_role(
-            &f.realm,
-            &CreateRoleRequest {
-                name: "docs.viewer".into(),
-                description: None,
-                permissions: vec![Permission::new("docs.view").unwrap()],
-                parent_roles: vec![],
-                ..Default::default()
-            },
-        )
-        .expect("create role");
-    f.harness
-        .rbac()
-        .assign_role(
-            &f.realm,
-            &AssignRoleRequest {
-                subject: Subject::User(f.user.clone()),
-                role_id: role.id,
-                scope: Scope::Realm,
-                assigned_by: None,
-            },
-        )
-        .expect("assign role");
-    let client = f.register(ClientTrustLevel::FirstParty, false);
-    let bound = f.bound_token(&client, &DPopKey::generate().thumbprint());
-
-    let svc = f.grpc();
-    let decide = |token: &str| {
-        svc.decide(grpc_request(
-            &f,
-            token,
-            pb::TokenDecisionRequest {
-                permission: "docs.view".into(),
-                ..Default::default()
-            },
-        ))
-    };
-
-    // Control: the unbound token of the same user is allowed, so a denial
-    // below is the binding and not the permission.
-    let unbound = decide(&f.token).await.expect("decide").into_inner();
-    assert!(unbound.allowed, "control: the user holds docs.view");
-
-    let bound = decide(&bound).await.expect("decide").into_inner();
+    // Control: the same token with a valid proof gets a code, so the refusal
+    // above is the missing proof.
+    let issuer = f.harness.identity().oidc_discovery().issuer;
+    let proof = key.resource_proof("POST", &format!("{issuer}{path}"), &bound);
+    let (status, body) = post_authorize(
+        &f,
+        &path,
+        &bound,
+        authorize_body(&client, "openid"),
+        Some(&proof),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "control: proved; body {body}");
     assert!(
-        !bound.allowed,
-        "a cnf-bound token replayed without a DPoP proof must be denied, as \
-         POST /oauth/authorize denies it"
+        body["code"].as_str().is_some_and(|c| !c.is_empty()),
+        "control: a code is issued: {body}"
     );
 }
 

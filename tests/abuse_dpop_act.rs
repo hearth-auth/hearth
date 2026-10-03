@@ -2,56 +2,45 @@
 //! chain depth cap.
 //!
 //! Covers:
-//! - A-38a: `client_credentials` access tokens require `dpop_jkt` when FAPI
-//!   is enforced at the realm level.
-//! - A-38b: `client_credentials` with a FAPI-profile client requires `dpop_jkt`.
-//! - A-38c: `client_credentials` without `dpop_jkt` on a non-FAPI realm succeeds.
+//! - A-38a: `client_credentials` access tokens require `dpop_jkt` for a client
+//!   registered with `dpop_bound_access_tokens` (RFC 9449 §5.2); with a proof
+//!   the token carries `cnf.jkt`.
+//! - A-38c: `client_credentials` without `dpop_jkt` for a client without the
+//!   flag succeeds.
 //! - A-38d: `MAX_ACT_CHAIN_DEPTH` is the documented sentinel value of 3.
 
 mod common;
 
 use base64::prelude::{Engine as _, BASE64_URL_SAFE_NO_PAD};
 use hearth::abuse::MAX_ACT_CHAIN_DEPTH;
-use hearth::identity::oidc::{ClientCredentialsRequest, ClientProfile, RegisterClientRequest};
-use hearth::identity::{CreateRealmRequest, FapiProfile, RealmConfig};
+use hearth::identity::oidc::{ClientCredentialsRequest, RegisterClientRequest};
 
 // ─────────────────────────────────────────────────────────────────────────────
-// A-38a — FAPI realm-level cnf.jkt enforcement on client_credentials
+// A-38a — `dpop_bound_access_tokens` cnf.jkt enforcement on client_credentials
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Realm with `fapi_profile: Baseline` — `client_credentials` without
-/// `dpop_jkt` must be rejected with `FapiViolation`.
+/// A `dpop_bound_access_tokens` client — `client_credentials` without
+/// `dpop_jkt` must be rejected with `InvalidDPopProof`.
 #[tokio::test]
-async fn a38a_fapi_realm_client_credentials_without_dpop_rejected() {
-    let harness = common::TestHarness::embedded()
+async fn a38a_dpop_bound_client_credentials_without_dpop_rejected() {
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
 
-    // Create a FAPI Baseline realm.
-    let realm_id = harness
-        .identity()
-        .create_realm(&CreateRealmRequest {
-            name: "fapi-cc-test".to_string(),
-            config: Some(RealmConfig {
-                fapi_profile: Some(FapiProfile::Baseline),
-                ..Default::default()
-            }),
-        })
-        .expect("create FAPI realm")
-        .id()
-        .clone();
+    let realm_id = harness.create_realm();
 
-    // Register a standard (non-FAPI) confidential client — realm gate applies.
+    // A confidential client that must use sender-constrained tokens.
     let client = harness
         .identity()
         .register_client(
             &realm_id,
             &RegisterClientRequest {
-                client_name: "m2m-fapi-test".to_string(),
+                client_name: "m2m-dpop-bound-test".to_string(),
                 redirect_uris: vec![],
                 client_secret: Some("super-secret-123!".to_string()),
                 grant_types: vec!["client_credentials".to_string()],
                 require_consent: false,
+                dpop_bound_access_tokens: true,
                 ..Default::default()
             },
         )
@@ -71,34 +60,26 @@ async fn a38a_fapi_realm_client_credentials_without_dpop_rejected() {
                 client_assertion: None,
             },
         )
-        .expect_err("must fail without dpop_jkt on FAPI realm");
+        .expect_err("must fail without dpop_jkt for a dpop_bound_access_tokens client");
 
     assert!(
-        matches!(err, hearth::identity::IdentityError::FapiViolation { .. }),
-        "expected FapiViolation, got: {err:?}"
+        matches!(
+            err,
+            hearth::identity::IdentityError::InvalidDPopProof { .. }
+        ),
+        "expected InvalidDPopProof, got: {err:?}"
     );
 }
 
-/// Realm with `fapi_profile: Baseline` — `client_credentials` WITH a dummy
+/// A `dpop_bound_access_tokens` client — `client_credentials` WITH a dummy
 /// `dpop_jkt` thumbprint must succeed (the token carries `cnf.jkt`).
 #[tokio::test]
-async fn a38a_fapi_realm_client_credentials_with_dpop_jkt_accepted() {
-    let harness = common::TestHarness::embedded()
+async fn a38a_dpop_bound_client_credentials_with_dpop_jkt_accepted() {
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
 
-    let realm_id = harness
-        .identity()
-        .create_realm(&CreateRealmRequest {
-            name: "fapi-cc-ok".to_string(),
-            config: Some(RealmConfig {
-                fapi_profile: Some(FapiProfile::Baseline),
-                ..Default::default()
-            }),
-        })
-        .expect("create FAPI realm")
-        .id()
-        .clone();
+    let realm_id = harness.create_realm();
 
     let client = harness
         .identity()
@@ -110,6 +91,7 @@ async fn a38a_fapi_realm_client_credentials_with_dpop_jkt_accepted() {
                 client_secret: Some("super-secret-456!".to_string()),
                 grant_types: vec!["client_credentials".to_string()],
                 require_consent: false,
+                dpop_bound_access_tokens: true,
                 ..Default::default()
             },
         )
@@ -132,7 +114,9 @@ async fn a38a_fapi_realm_client_credentials_with_dpop_jkt_accepted() {
                 client_assertion: None,
             },
         )
-        .expect("client_credentials with dpop_jkt on FAPI realm must succeed");
+        .expect(
+            "client_credentials with dpop_jkt must succeed for a dpop_bound_access_tokens client",
+        );
 
     assert!(
         !resp.access_token().is_empty(),
@@ -158,56 +142,14 @@ async fn a38a_fapi_realm_client_credentials_with_dpop_jkt_accepted() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// A-38b — FAPI per-client profile cnf.jkt enforcement
+// A-38c — Client without `dpop_bound_access_tokens`: no dpop_jkt enforcement
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Non-FAPI realm but FAPI-profile client — FAPI 2.0 mandates `private_key_jwt`
-/// so registering a FAPI2 client with `client_secret` is itself rejected as
-/// a `FapiViolation` (A-38b gate fires at registration, not just at the token
-/// endpoint).
+/// A client without `dpop_bound_access_tokens` — `client_credentials` without
+/// `dpop_jkt` must succeed (DPoP is optional for it).
 #[tokio::test]
-async fn a38b_fapi_client_profile_enforces_dpop_jkt() {
-    let harness = common::TestHarness::embedded()
-        .await
-        .expect("harness setup");
-
-    let realm_id = harness.create_realm();
-
-    // FAPI 2.0 clients MUST NOT use client_secret (§5.3 — private_key_jwt only).
-    // The engine enforces this at registration time so no non-DPoP-capable
-    // FAPI2 client can ever be created (defense-in-depth: gate fires before
-    // token issuance is even possible).
-    let err = harness
-        .identity()
-        .register_client(
-            &realm_id,
-            &RegisterClientRequest {
-                client_name: "fapi2-client".to_string(),
-                redirect_uris: vec![],
-                client_secret: Some("super-secret-789!".to_string()),
-                grant_types: vec!["client_credentials".to_string()],
-                require_consent: false,
-                profile: ClientProfile::Fapi2,
-                ..Default::default()
-            },
-        )
-        .expect_err("registering a FAPI2 client with client_secret must fail");
-
-    assert!(
-        matches!(err, hearth::identity::IdentityError::FapiViolation { .. }),
-        "expected FapiViolation at registration, got: {err:?}"
-    );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// A-38c — Non-FAPI realm: no dpop_jkt enforcement
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Non-FAPI realm with standard client — `client_credentials` without
-/// `dpop_jkt` must succeed (DPoP is optional in non-FAPI mode).
-#[tokio::test]
-async fn a38c_non_fapi_client_credentials_without_dpop_ok() {
-    let harness = common::TestHarness::embedded()
+async fn a38c_unbound_client_credentials_without_dpop_ok() {
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
 
@@ -218,7 +160,7 @@ async fn a38c_non_fapi_client_credentials_without_dpop_ok() {
         .register_client(
             &realm_id,
             &RegisterClientRequest {
-                client_name: "non-fapi-m2m".to_string(),
+                client_name: "unbound-m2m".to_string(),
                 redirect_uris: vec![],
                 client_secret: Some("super-secret-000!".to_string()),
                 grant_types: vec!["client_credentials".to_string()],
@@ -241,7 +183,7 @@ async fn a38c_non_fapi_client_credentials_without_dpop_ok() {
                 client_assertion: None,
             },
         )
-        .expect("non-FAPI client_credentials without dpop_jkt must succeed");
+        .expect("client_credentials without dpop_jkt must succeed for an unbound client");
 
     assert!(
         !resp.access_token().is_empty(),

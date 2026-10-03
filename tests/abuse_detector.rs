@@ -430,7 +430,6 @@ fn a4_window_rotation_resets_count() {
         window,
         email_soft_cap: 3,
         email_hard_cap: 10,
-        ..VolumeShieldConfig::default()
     };
     let shield = OutboundVolumeShield::new(cfg);
     let realm = "realm1";

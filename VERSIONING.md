@@ -60,11 +60,9 @@ The table below defines what counts as breaking for **every** committed family a
 
 For a URL-versioned family, a breaking change requires a new prefix (`/v2/…`) and the previous version must be served for at least one full major release. For an unprefixed family, a breaking change requires a major version bump of Hearth itself plus the deprecation notice period below. Concurrent support of two active versions will be documented in [`docs/specs/ARCHITECTURE.md`](docs/specs/ARCHITECTURE.md) § 4.3 and the CHANGELOG.
 
-### gRPC API (`hearth.*` protobuf services)
+### gRPC API
 
-The same rules apply as for the REST API. Hearth runs `buf breaking --against main` on every proto-touching PR to enforce wire compatibility. A breaking proto change triggers a new service major version suffix (e.g., `RbacAdminV2Service`).
-
-Fields removed from proto definitions must first be deprecated for one major release (annotated with `// Deprecated:` in the `.proto` file and announced in CHANGELOG).
+Hearth 3.0.0 removed the public gRPC API. The `proto/` files still define the message types that the REST API serialises, so a change to a message is a REST change and follows the REST rules above. The cluster's internal Raft transport also uses gRPC; it is not a public surface.
 
 ### Configuration (`hearth.yaml`)
 
@@ -139,12 +137,16 @@ If a 2.0 release ships before 2027-12-21, the 1.x line still receives security f
 Before removing or renaming any endpoint, config key, CLI flag, or SDK method:
 
 1. **Announce** — add a `### Deprecated` entry to CHANGELOG listing the item, the recommended replacement, and the target version of removal.
-2. **Notice period** — the deprecated item ships in at least one minor release before removal. For breaking HTTP or gRPC changes, the notice period is one full major version.
+2. **Notice period** — the deprecated item ships in at least one minor release before removal. For breaking HTTP changes, the notice period is one full major version.
 3. **Remove** — the item is removed in the announced target version, with a `### Removed` or `**Breaking:**` CHANGELOG entry.
 
 Deprecation annotations in source code:
 - Rust: `#[deprecated(since = "1.x.0", note = "...")]`
-- Go, Kotlin, Node, PHP, Python, TypeScript: language-native deprecation annotation
+- Go, PHP, Python, TypeScript: language-native deprecation annotation
+
+### The 3.0.0 exception: no deprecation window
+
+Hearth 3.0.0 removes features without a deprecation window or a migration guide. It removes the SAML Identity Provider side, the public gRPC API, LDAP, JARM, the FAPI 2.0 profile, SMS codes, risk scoring, the ROPC and step-up MFA grants, the abuse extras, and the Kotlin, Rust and Node.js SDKs. The reason: Hearth had no production users, so nobody had to migrate. The rules in this document apply again from 3.0.0 on.
 
 ---
 

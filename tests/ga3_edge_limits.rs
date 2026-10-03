@@ -3,8 +3,9 @@
 //!
 //! * E-1: the HTTP request shaper's "per-realm" bucket was one server-wide
 //!   bucket (`""`), so ~10 addresses at the per-IP cap starved every tenant.
-//! * E-2: every limiter map grew without bound; the gRPC realm key was any
-//!   attacker-chosen string.
+//! * E-2: every limiter map grew without bound. (Its gRPC realm-key half
+//!   went with the public gRPC API; the HTTP half is pinned by
+//!   `e1_admin_realm_bucket_is_keyed_by_a_uuid_x_realm_id`.)
 //! * E-3: every per-IP limiter keyed on the full IPv6 address, so one host
 //!   with a routed `/64` had 2^64 fresh budgets.
 //! * E-6: the raw request method was a Prometheus label, so every invented
@@ -18,9 +19,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use hearth::abuse::shaper::{RequestShaper, ShaperConfig};
-use hearth::protocol::grpc::server::grpc_rate_limit_interceptor;
 use hearth::protocol::http::{router, AppState};
-use tonic::transport::server::TcpConnectInfo;
 use tower::ServiceExt as _;
 
 /// A `oneshot` request from an explicit peer, so the shaper sees a real
@@ -38,7 +37,7 @@ fn request_from(method: &str, uri: &str, peer: &str, realm_header: Option<&str>)
 }
 
 async fn state_with(shaper: ShaperConfig) -> Arc<AppState> {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     Arc::new(
         AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc())
             .with_request_shaper(Arc::new(RequestShaper::with_config(shaper))),
@@ -192,40 +191,6 @@ async fn e1_admin_realm_bucket_is_keyed_by_a_uuid_x_realm_id() {
     );
 }
 
-// ── E-2: the gRPC realm key is bounded ──────────────────────────────────────
-
-/// The gRPC interceptor keyed the realm bucket on the raw `x-realm-id`
-/// metadata — any string, one map entry per request, forever. Only a UUID
-/// names a realm; anything else must open no bucket.
-#[test]
-fn e2_grpc_non_uuid_realm_header_opens_no_realm_bucket() {
-    let shaper = Arc::new(RequestShaper::with_config(ShaperConfig {
-        ip_rps: None,
-        realm_rps: Some(1),
-    }));
-    let intercept = grpc_rate_limit_interceptor(Arc::clone(&shaper));
-
-    for i in 0..200 {
-        let mut req = tonic::Request::new(());
-        let junk = format!("junk-realm-{i}-{}", "x".repeat(2_000));
-        req.metadata_mut()
-            .insert("x-realm-id", junk.parse().expect("ascii metadata"));
-        req.extensions_mut().insert(TcpConnectInfo {
-            local_addr: None,
-            remote_addr: Some("203.0.113.7:4000".parse().expect("addr")),
-        });
-        assert!(
-            intercept(req).is_ok(),
-            "a call naming no real realm is not realm-limited (call {i})"
-        );
-    }
-    assert_eq!(
-        shaper.realm_bucket_count(),
-        0,
-        "attacker-chosen non-UUID realm headers must not populate the realm map"
-    );
-}
-
 // ── E-3: IPv6 peers are bucketed per /64 ────────────────────────────────────
 
 /// Two addresses inside one `/64` are one host and share one per-IP bucket; an
@@ -271,7 +236,7 @@ async fn e3_two_ipv6_peers_in_one_slash64_share_the_per_ip_bucket() {
 /// were fifty budgets. They are one client.
 #[tokio::test]
 async fn e3_login_per_ip_limit_counts_an_ipv6_slash64_as_one_client() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let identity = h.identity_arc();
 

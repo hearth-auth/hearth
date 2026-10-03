@@ -591,7 +591,6 @@ fn email_scope_token(h: &common::TestHarness, realm: &RealmId, user: &UserId) ->
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize")
@@ -645,7 +644,7 @@ fn userinfo_setup(h: &common::TestHarness) -> (RealmId, UserId) {
 /// must say so, and say `true` once the address is verified.
 #[tokio::test]
 async fn userinfo_reports_the_accounts_own_email_verification_state() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, user) = userinfo_setup(&h);
 
     let token = email_scope_token(&h, &realm, &user);
@@ -676,7 +675,7 @@ async fn userinfo_reports_the_accounts_own_email_verification_state() {
 /// the NEW address unproven.
 #[tokio::test]
 async fn changing_the_address_clears_its_verification() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, user) = userinfo_setup(&h);
     let verify = h
         .identity()

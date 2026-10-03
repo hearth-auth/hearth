@@ -240,7 +240,7 @@
     "/admin/applications/{clientId}/regenerate-secret": {
       "post": {
         "operationId": "ApplicationAdminService_RegenerateApplicationSecret",
-        "summary": "Replaces a confidential client's secret with a new Hearth-generated one (256 bits from the OS CSPRNG, stored only as a hash). The new secret is returned once, in the response's client_secret; the old one stops authenticating at once. Refused for a public client, a FAPI 2.0 client and in a FAPI 2.0 Advanced realm (private_key_jwt only). Audited.",
+        "summary": "Replaces a confidential client's secret with a new Hearth-generated one (256 bits from the OS CSPRNG, stored only as a hash). The new secret is returned once, in the response's client_secret; the old one stops authenticating at once. Refused for a public client. Audited.",
         "tags": [
           "ApplicationAdminService"
         ],
@@ -472,6 +472,20 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/admin/audit/verify": {
+      "post": {
+        "summary": "Verify the realm's audit hash chain",
+        "operationId": "adminVerifyAudit",
+        "tags": [
+          "Admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "`{ok, event_count}`"
           }
         }
       }
@@ -1015,6 +1029,259 @@
         }
       }
     },
+    "/admin/groups/{id}/roles": {
+      "post": {
+        "summary": "Assign a role to a group",
+        "description": "Body: `{role_id, org_id?}`. Same ceiling and org-existence rules as `POST /admin/users/{id}/roles`. Unassign with `DELETE /admin/assignments/{id}`.",
+        "operationId": "adminAssignGroupRole",
+        "tags": [
+          "Admin"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "The role assignment"
+          },
+          "403": {
+            "description": "The role holds permissions the caller lacks"
+          },
+          "404": {
+            "description": "No such group or organization"
+          }
+        }
+      }
+    },
+    "/admin/organizations": {
+      "get": {
+        "summary": "List organizations",
+        "description": "Requires `hearth.realm.admin`. `cursor` is a decimal offset; follow `next_cursor` until it is null.",
+        "operationId": "adminListOrganizations",
+        "tags": [
+          "Admin"
+        ],
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`{items: [Organization], next_cursor}`"
+          }
+        }
+      },
+      "post": {
+        "summary": "Create an organization",
+        "description": "Requires `hearth.realm.admin`. Body: `{slug, display_name, member_limit?, mfa_required?, attributes?}`. `mfa_required` (default `false`) makes members need MFA even where the realm does not; it can only tighten. Refused in the system realm.",
+        "operationId": "adminCreateOrganization",
+        "tags": [
+          "Admin"
+        ],
+        "responses": {
+          "201": {
+            "description": "The created organization"
+          },
+          "403": {
+            "description": "Missing `hearth.realm.admin`",
+            "or the system realm": null
+          }
+        }
+      }
+    },
+    "/admin/organizations/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "Get an organization",
+        "operationId": "adminGetOrganization",
+        "tags": [
+          "Admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "The organization"
+          },
+          "404": {
+            "description": "No such organization in the realm"
+          }
+        }
+      },
+      "patch": {
+        "summary": "Update an organization",
+        "description": "Body: `{display_name?, status? (active|suspended), member_limit?, mfa_required?, attributes?}`. A field left out keeps its value. A `slug` is refused with 400 (it is immutable). Suspending is checked against the admin privilege ceiling, like a delete.",
+        "operationId": "adminUpdateOrganization",
+        "tags": [
+          "Admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "The updated organization"
+          },
+          "400": {
+            "description": "A slug change or an unknown status"
+          },
+          "403": {
+            "description": "A member holds admin authority the caller lacks"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete an organization",
+        "description": "Refused when a member holds admin authority in the organization that the caller lacks.",
+        "operationId": "adminDeleteOrganization",
+        "tags": [
+          "Admin"
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "403": {
+            "description": "Admin privilege ceiling"
+          }
+        }
+      }
+    },
+    "/admin/organizations/{id}/members/{user_id}/roles": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "user_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "List a member's extra org roles",
+        "operationId": "adminListAdditionalRoles",
+        "tags": [
+          "Admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "`{items: [role_name]}`"
+          }
+        }
+      },
+      "post": {
+        "summary": "Give a member an extra org role",
+        "description": "Body: `{role_name}`. The user must be a member (409 otherwise); a sub-admin may only give roles within its own permissions.",
+        "operationId": "adminAddAdditionalRole",
+        "tags": [
+          "Admin"
+        ],
+        "responses": {
+          "204": {
+            "description": "Added"
+          },
+          "403": {
+            "description": "The role holds permissions the caller lacks"
+          },
+          "404": {
+            "description": "No such organization",
+            "user or role": null
+          },
+          "409": {
+            "description": "The user is not a member of the organization"
+          }
+        }
+      }
+    },
+    "/admin/organizations/{id}/members/{user_id}/roles/{role_name}": {
+      "delete": {
+        "summary": "Remove a member's extra org role",
+        "description": "Checked against the admin privilege ceiling.",
+        "operationId": "adminRemoveAdditionalRole",
+        "tags": [
+          "Admin"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "role_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed"
+          }
+        }
+      }
+    },
+    "/admin/permissions": {
+      "get": {
+        "summary": "List the realm's permission registry",
+        "operationId": "adminListPermissions",
+        "tags": [
+          "Admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "`{items: [{name, status}]}`"
+          }
+        }
+      }
+    },
     "/admin/realms": {
       "get": {
         "operationId": "IdentityAdminService_ListRealms",
@@ -1360,7 +1627,7 @@
     "/admin/realms/{id}/suspend": {
       "post": {
         "summary": "Suspend a realm (incident-response freeze)",
-        "description": "Every token of the realm stops validating, its sessions are revoked and no new session starts until the realm is reinstated. Caller must be a system-realm admin (`hearth.realm.admin` or `hearth.admin`, with `X-Realm-ID` set to the system realm); the target realm's cross-realm trust policy applies. The system realm cannot be suspended. Audited in the target realm with the actor and old/new status. YAML reconciliation never clears a suspension. gRPC twin: `IdentityAdminService/SuspendRealm`.",
+        "description": "Every token of the realm stops validating, its sessions are revoked and no new session starts until the realm is reinstated. Caller must be a system-realm admin (`hearth.realm.admin` or `hearth.admin`, with `X-Realm-ID` set to the system realm); the target realm's cross-realm trust policy applies. The system realm cannot be suspended. Audited in the target realm with the actor and old/new status. YAML reconciliation never clears a suspension.",
         "operationId": "IdentityAdminService_SuspendRealm",
         "tags": [
           "IdentityAdminService"
@@ -1401,7 +1668,7 @@
     "/admin/realms/{id}/unsuspend": {
       "post": {
         "summary": "Reinstate a suspended realm",
-        "description": "Restores a suspended realm to active. Same gate as suspend. An archived realm is not revived (409): only reappearing in hearth.yaml does that. gRPC twin: `IdentityAdminService/UnsuspendRealm`.",
+        "description": "Restores a suspended realm to active. Same gate as suspend. An archived realm is not revived (409): only reappearing in hearth.yaml does that.",
         "operationId": "IdentityAdminService_UnsuspendRealm",
         "tags": [
           "IdentityAdminService"
@@ -1624,6 +1891,44 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/admin/roles/{id}/members": {
+      "get": {
+        "summary": "List the users and groups holding a role",
+        "operationId": "adminListRoleMembers",
+        "tags": [
+          "Admin"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`{items: [{subject_type, subject_id}], next_cursor}`"
           }
         }
       }
@@ -2056,10 +2361,54 @@
         }
       }
     },
-    "/admin/users/{id}/device-fingerprints": {
+    "/admin/users/{id}/permissions": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "List a user's direct permission grants",
+        "operationId": "adminListUserPermissions",
+        "tags": [
+          "Admin"
+        ],
+        "responses": {
+          "200": {
+            "description": "`{items: [{permission, scope_type, org_id, granted_by, granted_at}]}`"
+          }
+        }
+      },
+      "post": {
+        "summary": "Grant a permission directly to a user",
+        "description": "Body: `{permission, org_id?}`. A sub-admin may grant only a permission it holds; `granted_by` is the caller.",
+        "operationId": "adminGrantUserPermission",
+        "tags": [
+          "Admin"
+        ],
+        "responses": {
+          "201": {
+            "description": "The grant"
+          },
+          "403": {
+            "description": "The caller does not hold the permission"
+          },
+          "404": {
+            "description": "No such user or organization"
+          }
+        }
+      }
+    },
+    "/admin/users/{id}/permissions/{permission}": {
       "delete": {
-        "summary": "Delete all device fingerprints for a user",
-        "operationId": "adminDeleteUserDeviceFingerprints",
+        "summary": "Revoke a direct permission grant",
+        "description": "Add `?org_id=` for an org-scoped grant. Checked against the admin privilege ceiling.",
+        "operationId": "adminRevokeUserPermission",
         "tags": [
           "Admin"
         ],
@@ -2071,11 +2420,29 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "permission",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "org_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
           "204": {
-            "description": "Fingerprints deleted"
+            "description": "Revoked"
+          },
+          "403": {
+            "description": "Admin privilege ceiling"
           }
         }
       }
@@ -4384,6 +4751,10 @@
           "client_secret": {
             "type": "string",
             "description": "The generated client secret. Present only in the response that created a client_secret_basic or client_secret_post client, or that regenerated its secret, and never returned again: store it on receipt. Hearth keeps only its hash."
+          },
+          "dpop_bound_access_tokens": {
+            "type": "boolean",
+            "description": "RFC 9449 s5.2: when true, every token request from this client must carry a DPoP proof, and every token it gets is bound to the proof's key."
           }
         },
         "description": "A registered OAuth 2.0 client."
@@ -4544,7 +4915,7 @@
               "private_key_jwt",
               "none"
             ],
-            "description": "How the client authenticates at the token endpoint (RFC 7591 \u00a72). client_secret_basic or client_secret_post creates a confidential client: Hearth generates its secret (256 bits from the OS CSPRNG), stores only a hash, and returns the secret exactly once, as client_secret in this create response. private_key_jwt requires jwks. Omitted or none registers a public client (a private_key_jwt client when jwks is given). A client_secret_* method is refused in a FAPI 2.0 Advanced realm, which accepts private_key_jwt only."
+            "description": "How the client authenticates at the token endpoint (RFC 7591 \u00a72). client_secret_basic or client_secret_post creates a confidential client: Hearth generates its secret (256 bits from the OS CSPRNG), stores only a hash, and returns the secret exactly once, as client_secret in this create response. private_key_jwt requires jwks. Omitted or none registers a public client (a private_key_jwt client when jwks is given)."
           }
         },
         "description": "Request to register a new OAuth 2.0 client."

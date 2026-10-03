@@ -96,7 +96,7 @@ SDKs must parse OKP JWKs that omit `y`. Parsers that assume `y` is always presen
 
 **`verifyToken()` — required in every SDK, no per-language exception ([HEA-1553](/HEA/issues/HEA-1553) §7.1):**
 
-Every SDK MUST expose a `verifyToken()` method — or the language-idiomatic equivalent (`VerifyToken` in Go, `verify_token` in Python/Rust/Kotlin) — with the following contract:
+Every SDK MUST expose a `verifyToken()` method — or the language-idiomatic equivalent (`VerifyToken` in Go, `verify_token` in Python) — with the following contract:
 
 ```
 verifyToken(token: string) → Claims
@@ -108,22 +108,22 @@ verifyToken(token: string) → Claims
 - MUST return a typed error from §5 on any validation failure — never a bare string or generic exception.
 - MUST NOT silently fall back to introspection or skip signature verification on any recoverable error.
 
-**No per-language or per-platform exception applies.** Go, Python, Rust, Kotlin, PHP, and all future language SDKs must implement full EdDSA JWKS-based local verification. If a language's standard library does not include an Ed25519 verifier, the SDK MUST declare a dependency on a reputable Ed25519 library (e.g., `golang.org/x/crypto` for Go; `PyNaCl` or `cryptography` for Python; `ring` or `ed25519-dalek` for Rust; `tink` or `bouncycastle` for Kotlin/Java). Delegating signature verification to a reverse-proxy header, gateway, or remote service is non-conformant.
+**No per-language or per-platform exception applies.** Go, Python, PHP, and all future language SDKs must implement full EdDSA JWKS-based local verification. If a language's standard library does not include an Ed25519 verifier, the SDK MUST declare a dependency on a reputable Ed25519 library (e.g., `golang.org/x/crypto` for Go; `PyNaCl` or `cryptography` for Python). Delegating signature verification to a reverse-proxy header, gateway, or remote service is non-conformant.
 
 ---
 
 ## 2.5 Per-SDK Symbol Name Mapping
 
-Every Hearth SDK exposes the same contract under language-idiomatic names. The table below maps the canonical spec method name to the shipped symbol in each SDK as of C1–C8. Use this table when reading spec requirements: "every SDK MUST expose `verifyToken()`" means the name in the **Canonical** column, with the language-specific form in each SDK column.
+Every Hearth SDK exposes the same contract under language-idiomatic names. The table below maps the canonical spec method name to the shipped symbol in each of the four SDKs (TypeScript, Go, Python, PHP). Use this table when reading spec requirements: "every SDK MUST expose `verifyToken()`" means the name in the **Canonical** column, with the language-specific form in each SDK column.
 
-| Canonical (spec) | TypeScript (`@hearth-auth/sdk`) | Node.js (`@hearth-auth/node`) | Go (`hearth`) | Python (`hearth`) | Rust (`hearth-sdk`) | PHP (`HearthClient`) | Kotlin (`HearthClient`) |
-|---|---|---|---|---|---|---|---|
-| `verifyToken(token)` | `client.verifyToken(token)` | `client.verifyToken(token)` | `client.VerifyToken(ctx, token, aud...)` | `client.verify_token(token)` | `client.verify_token(token).await` | `$client->verifyToken($token)` | `client.verifyToken(token)` |
-| `clientCredentials(scope?)` | `client.clientCredentials(scope?)` | `client.clientCredentials(scope?)` | `client.ClientCredentials(ctx, scope...)` | `client.client_credentials(scope?)` | `client.client_credentials(scope?).await` | `$client->clientCredentials($scope)` | `client.clientCredentials(scope?)` |
-| `startDeviceFlow(scope?)` | `client.startDeviceFlow(scope?)` | `client.startDeviceFlow(scope?)` | `client.StartDeviceFlow(ctx, scope...)` | `client.start_device_flow(scope?)` | `client.start_device_flow(scope?).await` | `$client->startDeviceFlow($scope)` | `client.deviceAuthorization(scope?)` ⚠ |
-| `pollDeviceToken(deviceCode, interval)` | `client.pollDeviceToken(deviceCode, interval)` | `client.pollDeviceToken(deviceCode, interval)` | `client.PollDeviceToken(ctx, deviceCode)` ⚠ | `client.poll_device_token(deviceCode, interval)` | `client.poll_device_token(deviceCode, interval).await` | `$client->pollDeviceToken($deviceCode, $interval)` | `client.pollDeviceToken(deviceCode)` ⚠ |
-| `requestMagicLink(email)` | `client.requestMagicLink(email)` | `client.requestMagicLink(email)` | `client.RequestMagicLink(ctx, email)` | `client.request_magic_link(email)` | `client.initiate_magic_link(email).await` ⚠ | `$client->requestMagicLink($email)` | — ⚠ |
-| `introspect(token)` | `client.introspect(token)` | `client.introspect(token)` | `client.Introspect(ctx, req)` | `client.introspect(token, ...)` | `client.introspect(token).await` | `$client->getIntrospectionClient()->introspect(...)` | `client.introspect(token)` |
+| Canonical (spec) | TypeScript (`@hearth-auth/sdk`) | Go (`hearth`) | Python (`hearth`) | PHP (`HearthClient`) |
+|---|---|---|---|---|
+| `verifyToken(token)` | `client.verifyToken(token)` | `client.VerifyToken(ctx, token, aud...)` | `client.verify_token(token)` | `$client->verifyToken($token)` |
+| `clientCredentials(scope?)` | `client.clientCredentials(scope?)` | `client.ClientCredentials(ctx, scope...)` | `client.client_credentials(scope?)` | `$client->clientCredentials($scope)` |
+| `startDeviceFlow(scope?)` | `client.startDeviceFlow(scope?)` | `client.StartDeviceFlow(ctx, scope...)` | `client.start_device_flow(scope?)` | `$client->startDeviceFlow($scope)` |
+| `pollDeviceToken(deviceCode, interval)` | `client.pollDeviceToken(deviceCode, interval)` | `client.PollDeviceToken(ctx, deviceCode)` ⚠ | `client.poll_device_token(deviceCode, interval)` | `$client->pollDeviceToken($deviceCode, $interval)` |
+| `requestMagicLink(email)` | `client.requestMagicLink(email)` | `client.RequestMagicLink(ctx, email)` | `client.request_magic_link(email)` | `$client->requestMagicLink($email)` |
+| `introspect(token)` | `client.introspect(token)` | `client.Introspect(ctx, req)` | `client.introspect(token, ...)` | `$client->getIntrospectionClient()->introspect(...)` |
 
 ### Platform Exceptions
 
@@ -133,23 +133,8 @@ The following deviations from the canonical name are intentional and permanent f
 Signature: `PollDeviceToken(ctx context.Context, deviceCode string) (*TokenResponse, error)`.  
 There is no `intervalSeconds` parameter. The Go SDK reads the `interval` from the `DeviceAuthorizationResponse` and advances it internally on `slow_down` responses. Callers loop until a non-nil `TokenResponse` is returned or an error is raised.
 
-**Rust — `initiate_magic_link` instead of `requestMagicLink`.**  
-Signature: `initiate_magic_link(email: &str) -> Result<(), HearthError>`.  
-Behaviour is identical to the spec; only the name differs.
-
-**Kotlin — `deviceAuthorization` instead of `startDeviceFlow`.**  
-Signature: `deviceAuthorization(scope: String? = null): DeviceAuthorizationResponse`.  
-The method calls the `device_authorization_endpoint` discovered from OIDC and returns the full `DeviceAuthorizationResponse`. Naming follows the RFC 8628 document title.
-
-**Kotlin — `pollDeviceToken` does not accept an `intervalSeconds` parameter.**  
-Signature: `pollDeviceToken(deviceCode: String): TokenResponse?`.  
-Returns `null` on `authorization_pending` or `slow_down`; the caller is responsible for the sleep loop. `slow_down` increments the interval by 5 s; the initial value comes from `DeviceAuthorizationResponse.interval`.
-
-**Kotlin — no `requestMagicLink` (magic-link initiation).**  
-The Kotlin SDK does not yet expose a method for initiating a magic-link email. Use a raw HTTP POST to `/v1/{realm_slug}/auth/magic-link` (see §4.5.3 example). The Kotlin SDK does expose `exchangeMagicLink(magicToken: String): TokenResponse` for completing the flow once the user clicks the link and is redirected back to the app with a token.
-
-**Node.js — OAuth flows are on `HearthClient` directly.**  
-`clientCredentials`, `startDeviceFlow`, `pollDeviceToken`, and `requestMagicLink` are methods on `HearthClient` (the primary entry point). `OAuthFlowsClient` is a lower-level export for advanced use.
+**TypeScript — OAuth flows are on `HearthClient` directly.**  
+`beginLogin`, `completeLogin`, `exchangeCode`, `refreshTokens`, `clientCredentials`, `startDeviceFlow`, `pollDeviceToken` and `requestMagicLink` are methods on `HearthClient` (the primary entry point). The same package serves browser and Node.js code; `HearthApiClient` is the lower-level client kept for backwards compatibility.
 
 ---
 
@@ -402,7 +387,7 @@ SDK requirements:
 - The admin route answers `401 missing authorization header` without a token. SDKs MUST send
   the caller's token: the client's configured access token, or an explicit token argument.
   Adding that argument MUST NOT break existing callers where the language allows it (optional
-  or variadic parameter; in Rust, a new `register_client_with_token` method).
+  or variadic parameter).
 - The admin route's request body is the proto `RegisterClientRequest`: the name key is
   `client_name` (the server rejects an unknown `name` key with `422`), and the enum fields take
   their proto names — `trust_level` is `CLIENT_TRUST_LEVEL_FIRST_PARTY` /
@@ -413,12 +398,12 @@ SDK requirements:
 - SDKs SHOULD let the caller pass `token_endpoint_auth_method` (`client_secret_basic`,
   `client_secret_post`, `private_key_jwt`, `none`) and MUST surface a `client_secret` in the
   create response: it is the only time the server returns the generated secret. The server
-  refuses a caller-chosen `client_secret` on these routes with `422`. All seven SDKs carry both
-  (PHP and Node through the `createClient` params/record; PHP also has `AdminClient::AUTH_*`).
+  refuses a caller-chosen `client_secret` on these routes with `422`. All four SDKs carry both
+  (TypeScript and PHP through the `createClient` params/record; PHP also has `AdminClient::AUTH_*`).
 - `POST /admin/applications/{id}/regenerate-secret` returns the client record with a new
   `client_secret`, once; the old secret stops working at once. SDKs MUST offer it on their admin
-  client: `regenerateClientSecret` (TypeScript, Node, PHP, Kotlin), `RegenerateClientSecret`
-  (Go), `regenerate_client_secret` (Python, Rust).
+  client: `regenerateClientSecret` (TypeScript, PHP), `RegenerateClientSecret`
+  (Go), `regenerate_client_secret` (Python).
 - An RFC 7591 method MUST accept an optional initial access token and send it as
   `Authorization: Bearer` when it is given.
 
@@ -459,7 +444,7 @@ All errors must include a human-readable `message`. Errors that wrap an underlyi
 
 ## 6. Middleware
 
-All server-side SDKs (node, go, python, php, rust, kotlin) must provide HTTP middleware that:
+All server-side SDKs (TypeScript on Node.js, Go, Python, PHP) must provide HTTP middleware that:
 
 1. Extracts the Bearer token from `Authorization: Bearer <token>`.
 2. Verifies the token locally (JWKS path) by default. Introspection must be opt-in.
@@ -616,10 +601,13 @@ Role assignment is not CRUD-shaped: `POST /admin/users/{id}/roles` with a
 `{ "role_id": ..., "org_id"?: ... }` body creates an assignment,
 `GET /admin/users/{id}/roles` lists them, and `DELETE /admin/assignments/{id}` removes one.
 
-**Organization memberships are not an SDK surface.** Hearth serves no organization route
-over HTTP — there is no `/admin/orgs`, no `/admin/orgs/{id}/members` and no per-member
-route in the router — so no SDK may expose org-membership methods (audit 2026-08-28
-§25.19). Membership is administered through the admin console.
+**Organizations.** The REST admin API serves organization CRUD at `/admin/organizations`
+and `/admin/organizations/{id}`, and a member's extra organization roles at
+`/admin/organizations/{id}/members/{user_id}/roles` (Hearth 3.0.0). No SDK exposes these
+yet; the OpenAPI-generated admin clients of the follow-up change `sdk-standard-libraries`
+will. **Membership itself (adding or removing a member) has no REST route**, so no SDK may
+expose membership methods (audit 2026-08-28 §25.19). Membership is administered through the
+admin console or SCIM.
 
 ### Pagination
 

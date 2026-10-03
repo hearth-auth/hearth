@@ -44,7 +44,6 @@ key:
 | `HEARTH_MASTER_KEY` | Required in production | 32-byte host key that wraps every realm KEK on disk, and the passphrase for `hearth backup export` / `restore`. It is the only host-key source in production: when unset, startup fails, and a `{data_dir}/hearth.host_key` file is never read (only `--dev` generates and reads one). `hearth config validate` warns when it is unset. |
 | `HEARTH_PREVIOUS_MASTER_KEY` | Only during a host-key rotation | Previous host key value. Set it when startup fails with `HostKeyMismatch` after rotating `HEARTH_MASTER_KEY`; remove it once every realm KEK has been re-wrapped. |
 | `HEARTH_KEK` | One of this or `security.key_encryption_key` | Key-encryption key for realm signing keys at rest. 64 lowercase hex characters (`openssl rand -hex 32`). |
-| `HEARTH_SMS_OTP_HMAC_KEY` | Required whenever `sms.transport` is not `"log"` | At least 32 bytes. Cryptographically binds an SMS OTP to this server; startup fails without it once a real SMS transport is configured. |
 | `HEARTH_TURNSTILE_SECRET_KEY` | Only when `security.captcha.provider: turnstile` | Cloudflare Turnstile secret. Preferred over writing `security.captcha.turnstile.secret_key` into the file. |
 
 > `dev_mode` is **not** a config-file key. A YAML file containing `dev_mode: true` is
@@ -115,7 +114,7 @@ Network binding and TLS configuration.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `bind_address` | string | `"127.0.0.1"` | IP address to bind the HTTP(S) listener to. Use `"0.0.0.0"` for all interfaces. **In `--dev` mode, the server refuses to start if this (or the gRPC bind) is non-loopback (HEA-1980).** |
+| `bind_address` | string | `"127.0.0.1"` | IP address to bind the HTTP(S) listener to. Use `"0.0.0.0"` for all interfaces. **In `--dev` mode, the server refuses to start if this is non-loopback (HEA-1980).** |
 | `port` | integer | `8420` | TCP port for the main listener. |
 | `tls_cert_path` | string | — | Path to a PEM-encoded TLS certificate. If set, `tls_key_path` MUST also be set. |
 | `tls_key_path` | string | — | Path to the PEM-encoded private key for the TLS certificate. |
@@ -124,13 +123,7 @@ Network binding and TLS configuration.
 | `trusted_proxies` | list of strings | `[]` | Trusted reverse proxies, each a single IP address (`10.0.0.7`, `2001:db8::7`) or a CIDR range (`10.42.0.0/16`, `2001:db8:42::/48`) — use a range when proxy addresses change, e.g. Kubernetes ingress-controller pods. When non-empty, the real client IP is extracted from `X-Forwarded-For` using the rightmost-non-trusted algorithm (a hop inside any listed range counts as trusted), `X-Forwarded-Proto` is honoured from a peer inside the list, and such peers are exempt from `operational.max_connections_per_ip`. When empty (the default), the peer socket address is used and both headers are ignored — the safe default for direct-to-internet deployments. Every entry is checked the same way by `hearth config validate` and at start-up; one bad entry refuses the whole config (nothing is silently dropped). Refused: anything that is not an address or `address/prefix`; a range with **host bits set** (`10.0.0.7/8` — write `10.0.0.0/8` for the range or `10.0.0.7` for the address; Hearth refuses rather than guess which you meant); the unspecified address or a range starting at it (`0.0.0.0`, `::`, `0.0.0.0/0`, `::/0`); and a range broader than `/8` (IPv4) or `/16` (IPv6), which would trust a large share of the internet. A loopback entry is refused on a non-loopback `bind_address`. An IPv4-mapped IPv6 entry (`::ffff:10.0.0.7`) is treated as its IPv4 form. |
 | `trust_forwarded_proto` | bool | `false` | Trust the `X-Forwarded-Proto: https` header when deciding whether a request arrived over HTTPS (session cookies carry `Secure`, HSTS is sent, the login Origin check). The header is honoured **only when the connection's TCP peer is listed in `trusted_proxies`**; from any other peer it is removed before the request is handled. **Requires a non-empty `trusted_proxies`** — setting it to `true` with an empty proxy list is refused at start-up and by `hearth config validate`, because the flag would then have no effect. |
 
-| `grpc_port` | integer | — (disabled) | TCP port for the gRPC management API. When unset, no gRPC listener is started. |
-| `grpc_bind_address` | string | `bind_address` | IP address for the gRPC listener. `127.0.0.1` keeps the management API host-local. |
-| `grpc_allow_plaintext` | bool | `false` | Outside `--dev`, a gRPC listener on a non-loopback address with no `tls_cert_path` is refused at start-up (it would carry admin bearer tokens, OAuth client secrets and agent API keys in clear text). Set `true` only when a proxy or service mesh terminates TLS for gRPC. Has no effect when `tls_cert_path` is set. |
-
 When TLS is enabled, Hearth also spawns an HTTP → HTTPS redirect listener on `port - 1` (or port 80 when `port: 443`). Send `SIGHUP` to hot-reload the certificate and key without downtime.
-
-When `tls_cert_path` / `tls_key_path` are set, the gRPC listener (`grpc_port`) serves **TLS with the same certificate** (ALPN `h2`), and inherits `tls_client_ca_path` / `tls_require_client_cert` and `security.tls.*`; a SIGHUP certificate reload reaches both listeners. Clients must connect with `https://`. Without a certificate, gRPC is plaintext — see `grpc_allow_plaintext`.
 
 ```yaml
 server:
@@ -254,7 +247,7 @@ storage:
 
 Multi-node Raft consensus configuration. **Omit this section entirely for single-node deployments** — when absent, Hearth runs in single-node mode with no clustering overhead, no extra port, and no Raft log.
 
-When present, Hearth starts a Raft engine and participates in peer-to-peer log replication over mTLS-secured gRPC. All three TLS certificate fields are required — plaintext peer connections are unconditionally rejected.
+When present, Hearth starts a Raft engine and participates in peer-to-peer log replication over mTLS-secured gRPC (an internal node-to-node transport, not a client API). All three TLS certificate fields are required — plaintext peer connections are unconditionally rejected.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -357,13 +350,13 @@ Operational limits and timeouts.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `request_timeout_secs` | integer | `30` | Maximum time in seconds for a single HTTP request. |
-| `shutdown_timeout_secs` | integer | `10` | Drain deadline in seconds after a shutdown signal (SIGINT or SIGTERM). Every listener — HTTP(S), the HTTP→HTTPS redirect, gRPC and the Raft peer server — stops accepting and starts draining at the signal, and all of them share this one deadline, so the whole drain takes at most this long. **Must be less than `terminationGracePeriodSeconds`** in Kubernetes; the Helm chart default is 60 s, leaving a 30 s buffer above the recommended production value of 30 s. |
-| `max_connections` | integer | `1024` | Maximum concurrent connections served per listener (the HTTP(S) listener, the redirect listener and the gRPC listener each have their own allowance). |
+| `shutdown_timeout_secs` | integer | `10` | Drain deadline in seconds after a shutdown signal (SIGINT or SIGTERM). Every listener — HTTP(S), the HTTP→HTTPS redirect and the Raft peer server — stops accepting and starts draining at the signal, and all of them share this one deadline, so the whole drain takes at most this long. **Must be less than `terminationGracePeriodSeconds`** in Kubernetes; the Helm chart default is 60 s, leaving a 30 s buffer above the recommended production value of 30 s. |
+| `max_connections` | integer | `1024` | Maximum concurrent connections served per listener (the HTTP(S) listener and the redirect listener each have their own allowance). |
 | `queue_depth` | integer | `4096` | Connections allowed to wait for one of the `max_connections` slots; past that, new connections are closed immediately. |
 | `max_connections_per_ip` | integer | `64` | Concurrent connections one client may hold — per IPv4 address, or per IPv6 `/64`. Further connections are closed immediately. `0` disables the cap. Peers listed in `server.trusted_proxies` are exempt, because every client behind a proxy shares its address; the cap is on the TCP peer, so `X-Forwarded-For` does not affect it. |
-| `header_read_timeout_secs` | integer | `10` | Seconds a client has to send its first bytes and each complete set of HTTP/1.1 request headers. Also closes an HTTP/1.1 keep-alive connection left idle this long, and a gRPC connection that does not send the HTTP/2 preface in time. Must be greater than 0. |
-| `tls_handshake_timeout_secs` | integer | `10` | Seconds a client has to complete the TLS handshake on the HTTPS and gRPC listeners. Must be greater than 0. |
-| `http2_keepalive_interval_secs` | integer | `30` | Seconds between HTTP/2 keep-alive `PING`s (HTTP and gRPC listeners); a peer that does not acknowledge within 20 s is disconnected. `0` disables pings. |
+| `header_read_timeout_secs` | integer | `10` | Seconds a client has to send its first bytes and each complete set of HTTP/1.1 request headers. Also closes an HTTP/1.1 keep-alive connection left idle this long. Must be greater than 0. |
+| `tls_handshake_timeout_secs` | integer | `10` | Seconds a client has to complete the TLS handshake on the HTTPS listener. Must be greater than 0. |
+| `http2_keepalive_interval_secs` | integer | `30` | Seconds between HTTP/2 keep-alive `PING`s (HTTP(S) listener); a peer that does not acknowledge within 20 s is disconnected. `0` disables pings. |
 
 Together, `max_connections_per_ip`, `header_read_timeout_secs` and `tls_handshake_timeout_secs` stop one client from holding every connection slot with requests it never finishes (GA audit 2026-09-28, B6).
 
@@ -481,81 +474,17 @@ email:
     support_email: "support@example.com"
 ```
 
-### `sms`
+> **Email OTP key.** Email OTP codes are HMAC'd under a key derived (domain-separated) from
+> the process's random cookie secret, so the key is always secret and no dedicated variable is
+> needed. An email OTP verifies only on the process that issued it — the same scope as the
+> login cookies it completes.
 
-Outbound SMS delivery for one-time passwords (OTPs). Required when SMS MFA is enabled in any
-realm. Defaults to the `log` transport, which delivers nothing: under `--dev` it writes the
-full message (OTP included) to the structured log so a developer can read the code; outside
-`--dev` it logs only that a message was dropped, with the body redacted.
+### `sms` (removed)
 
-Outside `--dev`, `sms` cannot be listed in `auth.mfa_methods` or any
-`realms.<name>.auth.mfa_methods` while `transport` is `log` — the config is refused at
-startup, and the admin API / admin console realm config `PATCH` answers `400` — because no
-code could ever be delivered. The same rule rejects unknown method names on every surface.
-
-> **Environment variable:** `HEARTH_SMS_OTP_HMAC_KEY` must be set when `transport` is not
-> `log`. Generate with `openssl rand -hex 32`. Must be at least 32 characters. Set in the
-> process environment only — never in `hearth.yaml`. Under `--dev` with no key, Hearth
-> generates a random per-process key. Outside `--dev` with no key, SMS OTP fails closed: no
-> code is issued, and a user whose second factor is SMS cannot complete login until SMS is
-> configured. There is no fallback or dev key in production.
->
-> **Email OTP key.** Email OTP codes are HMAC'd under a key derived from
-> `HEARTH_SMS_OTP_HMAC_KEY` when it is set (domain-separated, never the SMS key itself), and
-> otherwise from the process's random cookie secret. Either way the key is secret — never a
-> constant — so no dedicated email OTP variable is needed. Without `HEARTH_SMS_OTP_HMAC_KEY`
-> an email OTP verifies only on the process that issued it, the same scope as the login
-> cookies it completes; set the variable if your deployment routes one sign-in across nodes.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `transport` | string | `"log"` | SMS delivery backend. One of: `log`, `twilio`, `awssns`. |
-| `twilio` | object | — | Twilio settings. **Required** when `transport: twilio`. |
-| `aws_sns` | object | — | AWS SNS settings. **Required** when `transport: awssns`. |
-
-#### `sms.twilio`
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `account_sid` | string | *required* | Twilio Account SID (e.g. `ACxxxxxxxx…`). |
-| `auth_token` | string | *required* | Twilio Auth Token. Use `${VAR}` substitution — never hardcode. |
-| `from` | string | *required* | Sender in E.164 format (e.g. `+15550001111`), short code, toll-free number, or Messaging Service SID. |
-
-#### `sms.aws_sns`
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `region` | string | *required* | AWS region for SNS calls (e.g. `us-east-1`). |
-| `access_key_id` | string | *required* | AWS Access Key ID. Use `${VAR}` substitution. |
-| `secret_access_key` | string | *required* | AWS Secret Access Key. Use `${VAR}` substitution. |
-| `sender_id` | string | — | Alphanumeric sender ID shown on recipient devices in supported markets (max 11 chars, optional). |
-
-> **AWS SNS credential chain:** Hearth does not use the AWS SDK credential chain (instance
-> roles, `~/.aws/credentials`, etc.) for the SNS transport. `access_key_id` and
-> `secret_access_key` must be supplied explicitly, using `${VAR}` substitution from
-> environment variables.
-
-```yaml
-# Twilio
-sms:
-  transport: twilio
-  twilio:
-    account_sid: "${TWILIO_ACCOUNT_SID}"
-    auth_token: "${TWILIO_AUTH_TOKEN}"
-    from: "+15005550006"
-
-# AWS SNS
-# sms:
-#   transport: awssns
-#   aws_sns:
-#     region: "us-east-1"
-#     access_key_id: "${AWS_ACCESS_KEY_ID}"
-#     secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
-#     sender_id: "MyBrand"    # optional
-```
-
-See the [SMS MFA deployment guide](../guides/sms-mfa-deployment.md) for carrier registration
-requirements, per-region setup, and the production readiness checklist.
+SMS one-time codes were removed in Hearth 3.0.0. An `sms:` block stops startup with an
+error naming the key, and `sms` in any `mfa_methods` list is refused as an unknown method.
+Use a passkey, TOTP (with recovery codes) or email OTP as the second factor. Only a passkey, TOTP or a
+recovery code satisfies a realm that requires MFA. Email OTP works as a second step only where MFA is optional.
 
 ---
 
@@ -607,8 +536,8 @@ Global authentication defaults. These apply to all realms unless overridden per-
 | `session_ttl` | duration | `"24h"` | Default session lifetime. |
 | `password_memory_cost` | integer | `19456` | Argon2id memory parameter in KiB. Floored at the OWASP minimum — see below. |
 | `password_time_cost` | integer | `2` | Argon2id time parameter (iterations). Floored at the OWASP minimum — see below. |
-| `mfa_required` | bool | `false` | Whether MFA is required for all users. Per-realm `auth.mfa_required` overrides. |
-| `mfa_methods` | list | — | Allowed MFA methods for every realm: `"totp"`, `"webauthn"`, `"email_otp"`, `"sms"`. A realm's `realms.<name>.auth.mfa_methods` replaces this list wholesale rather than merging with it. Absent at both levels = all methods allowed. See the per-realm key for what restriction means. |
+| `mfa_required` | bool | `true` when unset | Whether MFA is required for all users. MFA is required by default; set `false` to opt out. Per-realm `auth.mfa_required` overrides. When a realm's MFA is off, startup logs one `WARN` that names every such realm. Only a passkey (WebAuthn, user-verified), a TOTP code or a recovery code satisfies MFA. Email OTP and magic links do not. |
+| `mfa_methods` | list | — | Allowed MFA methods for every realm: `"totp"`, `"webauthn"`, `"email_otp"`. `"sms"` was removed in 3.0.0 and is refused as an unknown method. A realm's `realms.<name>.auth.mfa_methods` replaces this list wholesale rather than merging with it. Absent at both levels = all methods allowed. A realm that requires MFA must offer `totp` or `webauthn` in its effective list. A list with only `email_otp` is a validation error that stops startup. See the per-realm key for what restriction means. |
 | `passkey_requires_mfa` | bool | `false` | Whether passkey login requires an additional TOTP challenge. Per-realm `auth.passkey_requires_mfa` overrides. |
 | `webauthn_required` | bool | — | Global default for "every user must hold a passkey". When `true`, a user with no registered passkey is intercepted by the `ENROLL_MFA` required action, which registers one during login (user verification required; see the required-actions guide), **and** every session must be opened by a WebAuthn assertion that proved user verification — a TOTP code, a recovery code or an OTP is refused with `mfa_required` even when the account holds a passkey. Per-realm `realms.<name>.auth.webauthn_required` overrides. |
 | `webauthn_resident_key` | string | — | Global default `residentKey` preference for registration ceremonies: `"required"`, `"preferred"` or `"discouraged"`. An unrecognised value is refused at startup. Per-realm `realms.<name>.auth.webauthn_resident_key` overrides. |
@@ -761,14 +690,12 @@ queueing unboundedly.
 
 The shared pool also admits every **Argon2id client-secret verification** — a
 caller-chosen or legacy client secret presented at `/token`, `/introspect`,
-`/revoke`, `/device_authorization`, `/as/par`, their realm twins or the gRPC OAuth
-service (gRPC sheds with `UNAVAILABLE`). Such a request waits for its permit
+`/revoke`, `/device_authorization`, `/as/par`, or their realm twins. Such a request waits for its permit
 asynchronously — it holds no worker or blocking-pool thread while it waits, so a
 burst larger than the blocking pool is served or shed, never hung — for at most
 `max_queue_wait_ms`. The permit covers the Argon2id verification alone; the rest
 of the request (for `client_credentials`, token signing and issuance) runs after it
-is released. In a FAPI 2.0 Advanced realm a presented secret is refused before the
-gate. Hearth-generated client secrets are SHA-256 and never take a permit. See
+is released. Hearth-generated client secrets are SHA-256 and never take a permit. See
 `docs/guides/security-hardening.md` § OAuth client secrets.
 
 | Field | Type | Default | Description |
@@ -862,7 +789,7 @@ Global per-IP and per-account rate-limit thresholds. These are the server-wide d
 | `login_per_ip.window_seconds` | integer | `60` | Sliding window length in seconds for per-IP failed-login counting. |
 | `login_per_account.max_failures` | integer | `5` | Maximum consecutive failures for a single account before it is locked out. |
 | `login_per_account.lockout_seconds` | integer | `300` | Duration (seconds) of the account lockout after `max_failures` is reached. |
-| `admin_per_minute` | integer | `100` | Maximum admin-API requests per minute per admin user, shared across the REST and gRPC surfaces. Requests beyond the cap receive `429 Too Many Requests`. Set to `0` to disable the limiter entirely. |
+| `admin_per_minute` | integer | `100` | Maximum admin-API requests per minute per admin user. Requests beyond the cap receive `429 Too Many Requests`. Set to `0` to disable the limiter entirely. |
 | `token_per_minute` | integer | `200` | Maximum OAuth token, pushed-authorization (`/as/par`), introspection, revocation and device-authorization requests per minute per `(realm, client)` pair, counted before the client is authenticated — keyed on the claimed `client_id` (body, else Basic username), or on the client IP when there is none. `/as/par` (and its realm twin) has its **own** budget of this size, so a login's push and its code exchange each draw on a separate bucket; the other endpoints share one. Set to `0` to disable the limiter entirely. |
 
 ```yaml
@@ -957,14 +884,14 @@ security:
 
 #### `security.request_shaper`
 
-Global per-client and per-realm one-second sliding-window request limiter (A-2), shared by the HTTP and gRPC listeners. It is **on by default**: when the section is absent the defaults below apply. Set a field to `0` to turn that dimension off (for example when an upstream proxy already rate-limits). A shed request answers `429` with `{"limiter":"shaper"}` (gRPC: `RESOURCE_EXHAUSTED`). Browser static assets (`/ui/static/*`, the favicons) are not counted.
+Global per-client and per-realm one-second sliding-window request limiter (A-2), applied to the HTTP(S) listener. It is **on by default**: when the section is absent the defaults below apply. Set a field to `0` to turn that dimension off (for example when an upstream proxy already rate-limits). A shed request answers `429` with `{"limiter":"shaper"}`. Browser static assets (`/ui/static/*`, the favicons) are not counted.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `ip_rps` | integer | `100` | Maximum requests per second from one client across all endpoints. A client is an IPv4 address, or an IPv6 `/64` (one host is routinely assigned a whole `/64`). `0` disables. |
-| `realm_rps` | integer | `1000` | Maximum requests per second to one realm, across all clients. A request counts against a realm only when it names one: the realm segment of a `/realms/{realm}/…`, `/ui/realms/{realm}/…` or `/v1/{realm}/…` path, otherwise a UUID `X-Realm-ID` header (gRPC: `x-realm-id` metadata). Requests that name no realm — `/health`, root discovery, the admin console — are limited per client only. A realm addressed by name on one route and by id on another is counted in two buckets. `0` disables. |
+| `realm_rps` | integer | `1000` | Maximum requests per second to one realm, across all clients. A request counts against a realm only when it names one: the realm segment of a `/realms/{realm}/…`, `/ui/realms/{realm}/…` or `/v1/{realm}/…` path, otherwise a UUID `X-Realm-ID` header. Requests that name no realm — `/health`, root discovery, the admin console — are limited per client only. A realm addressed by name on one route and by id on another is counted in two buckets. `0` disables. |
 
-Every in-process rate limiter (this one, the JWKS/discovery, token, admin and export limiters, the login tarpit and CAPTCHA challenge store, and the A-3/A-4/A-50 detectors) keeps its per-key state in a bounded map: entries are dropped once their window closes, and each limiter holds at most a fixed number of keys (100 000; 16 384 realm buckets; 65 536 per detector dimension), evicting the soonest-expiring entries when full. Per-IP limiters all bucket IPv6 per `/64`, like `operational.max_connections_per_ip`.
+Every in-process rate limiter (this one, the JWKS/discovery, token, admin and export limiters, the CAPTCHA challenge store, and the A-3/A-4/A-50 detectors) keeps its per-key state in a bounded map: entries are dropped once their window closes, and each limiter holds at most a fixed number of keys (100 000; 16 384 realm buckets; 65 536 per detector dimension), evicting the soonest-expiring entries when full. Per-IP limiters all bucket IPv6 per `/64`, like `operational.max_connections_per_ip`.
 
 ```yaml
 security:
@@ -975,73 +902,15 @@ security:
 
 ---
 
-#### `security.ip_reputation`
-
-IP reputation integration (P-2). Checks incoming IPs against blocklists and optionally a MaxMind ASN database before processing requests.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `enabled` | bool | `false` | Whether IP reputation checks are active. |
-| `action` | string | `"log"` | Action taken when an IP is flagged: `"block"` (HTTP 403), `"challenge"` (CAPTCHA), or `"log"` (metric + log only). |
-| `maxmind_db_path` | string | — | Path to a MaxMind GeoLite2-ASN or GeoIP2-ASN `.mmdb` file. When absent, MaxMind ASN lookup is disabled. |
-
-```yaml
-security:
-  ip_reputation:
-    enabled: true
-    action: block
-    maxmind_db_path: "/var/lib/hearth/GeoLite2-ASN.mmdb"
-```
-
-##### `security.ip_reputation.spamhaus`
-
-Spamhaus DROP / EDROP IPv4/IPv6 blocklist settings. Lists are fetched at startup and refreshed on the configured interval.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `drop_url` | string | Spamhaus DROP URL | URL for the Spamhaus DROP (IPv4) list. |
-| `dropv6_url` | string | Spamhaus EDROP URL | URL for the Spamhaus EDROP (IPv6) list. |
-| `refresh_interval_secs` | integer | `86400` (24 h) | How often (seconds) the blocklists are re-fetched. |
-
-```yaml
-security:
-  ip_reputation:
-    enabled: true
-    spamhaus:
-      refresh_interval_secs: 86400  # 24 hours
-```
-
----
-
 #### Abuse-prevention guards
 
-Eight guards documented in [`ABUSE.md`](ABUSE.md) are configured here. **Every
+The abuse-prevention guards documented in [`ABUSE.md`](ABUSE.md) are configured here. **Every
 one is off by default** — an existing configuration is unaffected until an
 operator opts in, which is the fail-open posture ABUSE.md §6.1 requires.
 
 Until the keys below existed, `security:` carried `deny_unknown_fields` and none
 of these blocks had a field to land in, so pasting a documented block made the
 server refuse to boot.
-
-##### `security.tarpit` (A-17)
-
-Deterministic per-IP delay on the login form after repeated failures. The delay
-is applied before the Argon2 admission gate, so tarpitted traffic consumes a
-timer rather than hashing capacity.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `threshold` | integer | — | Failures per IP within `window_secs` before delays apply. Absent = disabled. |
-| `window_secs` | integer | `60` | Rolling window for counting failures. |
-| `delay_ms` | integer | `200` | Delay injected per tarpitted request. |
-
-```yaml
-security:
-  tarpit:
-    threshold: 5
-    window_secs: 60
-    delay_ms: 200
-```
 
 ##### `security.captcha` challenge state (A-16)
 
@@ -1082,8 +951,6 @@ Consulted before the self-service verification and password-reset sends.
 | `window` | duration | `"3600s"` | Rolling window. |
 | `email_soft_cap` | integer | `1000` | Distinct email recipients before the send is flagged for operator review. |
 | `email_hard_cap` | integer | `5000` | Distinct email recipients before the send is abandoned. |
-| `sms_soft_cap` | integer | `100` | Distinct SMS recipients before flagging. |
-| `sms_hard_cap` | integer | `500` | Distinct SMS recipients before abandoning. |
 
 ##### `security.cross_realm_aggregation_cap` (A-50)
 
@@ -1097,25 +964,11 @@ many **distinct realms** have reached one recipient.
 | `alert_threshold` | integer | `3` | Distinct realms per recipient before an operator alert. The send still proceeds. |
 | `email_realm_soft_cap` | integer | `5` | Distinct realms per email address before flagging. |
 | `email_realm_hard_cap` | integer | `10` | Distinct realms per email address before abandoning. |
-| `sms_realm_soft_cap` | integer | `3` | Distinct realms per phone number before flagging. |
-| `sms_realm_hard_cap` | integer | `6` | Distinct realms per phone number before abandoning. |
 
-##### `security.risk_scorer` (A-11 / P-4)
+##### `security.risk_scorer` (removed)
 
-Weights for the step-up MFA risk engine. These become the default
-`risk_scorer_config` for every realm, which the refresh-context drift check
-(A-49) reads at token-refresh time.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `enabled` | bool | `false` | Whether scoring is active. `false` always scores `0.0`. |
-| `step_up_threshold` | float | `0.5` | Score at or above which step-up MFA is required. Range `[0.0, 1.0]`. |
-| `new_device_weight` | float | `0.3` | Contribution of an unrecognised device. |
-| `new_country_weight` | float | `0.4` | Contribution of an unrecognised country. |
-| `password_age_weight` | float | `0.2` | Contribution of a password older than the threshold. |
-| `password_age_days_threshold` | integer | `365` | Age in days before `password_age_weight` applies. |
-| `breach_corpus_weight` | float | `1.0` | Contribution of a confirmed breach-corpus hit. Defaults to `1.0` so any hit alone forces step-up. |
-| `refresh_context_delta_weight` | float | `0.35` | Contribution per changed dimension (UA hash, ASN) on refresh. |
+Risk scoring was removed in Hearth 3.0.0; a `security.risk_scorer` block stops startup.
+MFA is a plain per-realm policy (`mfa_required`).
 
 ##### `security.adaptive_backoff` (A-12)
 
@@ -1123,50 +976,6 @@ Weights for the step-up MFA risk engine. These become the default
 |-------|------|---------|-------------|
 | `durations` | list of durations | `["1m", "5m", "30m", "24h"]` | Lockout applied to each successive offence. |
 | `offense_cooldown` | duration | `"7d"` | How long a clean record must persist before the offence counter resets. |
-
-##### `security.providers` (P-3, P-5)
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `bot_signal.enabled` | bool | `false` | Install the built-in UA + JA3/JA4 heuristic adapter in place of the no-op. |
-| `bot_signal.extra_ja3_blocklist` | list of strings | `[]` | Extra JA3 hashes beyond the built-in list. |
-| `bot_signal.extra_ja4_blocklist` | list of strings | `[]` | Extra JA4 hashes or prefixes beyond the built-in list. |
-| `email_reputation.enabled` | bool | `false` | Install the built-in disposable-domain / role-address adapter in place of the no-op. |
-| `email_reputation.extra_disposable_domains` | list of strings | `[]` | Extra disposable domains beyond the built-in list. |
-
-Only the disposable-domain signal refuses a registration. A role address
-(`admin@`, `support@`) is recorded and allowed — it is legitimate in plenty of
-tenants. Hearth performs no DNS or MX lookup of the email domain; an address
-whose domain does not receive mail is caught by email verification, not here.
-
-```yaml
-security:
-  providers:
-    bot_signal:
-      enabled: true
-      extra_ja3_blocklist:
-        - "deadbeef00000000deadbeef00000000"
-    email_reputation:
-      enabled: true
-      extra_disposable_domains:
-        - "my-internal-throwaway.example"
-```
-
----
-
-#### `security.grpc`
-
-gRPC-specific security settings (A-43).
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `reflection_enabled` | bool | `false` (prod), `true` (dev) | Whether the gRPC server reflection service is exposed. Reflection reveals the full API schema to unauthenticated callers — keep disabled in production. Enabling in production also requires the `--allow-reflection-in-prod` CLI flag; the server refuses to start without it. |
-
-```yaml
-security:
-  grpc:
-    reflection_enabled: false
-```
 
 ---
 
@@ -1215,7 +1024,7 @@ measuring the rate limiter.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `load_test_unthrottled` | bool | `false` | When `true`, disables ALL request-rate limiters: token endpoint, admin API, export, and the per-IP/per-realm request shaper. Refused at startup unless **both** conditions are met: the server is running in `--dev` mode (`hearth serve --dev`) **and** every bind address (HTTP and gRPC) is loopback (127.0.0.0/8 or ::1). |
+| `load_test_unthrottled` | bool | `false` | When `true`, disables ALL request-rate limiters: token endpoint, admin API, export, and the per-IP/per-realm request shaper. Refused at startup unless **both** conditions are met: the server is running in `--dev` mode (`hearth serve --dev`) **and** the HTTP bind address is loopback (127.0.0.0/8 or ::1). |
 
 > **Security warning:** Never enable on a production or externally-reachable
 > bind. This removes brute-force, credential-stuffing, and abuse protection.
@@ -1225,9 +1034,8 @@ measuring the rate limiter.
 >    (nginx, Caddy, Cloudflare) is still reachable from the internet. Requiring
 >    `--dev` ensures unthrottled load testing is impossible on any binary
 >    started with a production config.
-> 2. **Every bind must be loopback.** Both the HTTP listener (`server.bind_address`)
->    and the gRPC listener (`server.grpc_bind_address`, when enabled) must resolve
->    to 127.0.0.0/8 or ::1. A wildcard (`0.0.0.0` / `::`) is not loopback and
+> 2. **The bind must be loopback.** The HTTP listener (`server.bind_address`) must
+>    resolve to 127.0.0.0/8 or ::1. A wildcard (`0.0.0.0` / `::`) is not loopback and
 >    causes the server to refuse the flag and keep all limiters on.
 
 When `load_test_unthrottled` is active the server emits an observable signal so
@@ -1255,7 +1063,7 @@ Staged capability gate for agent authentication. Features are enabled per-capabi
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `capabilities.identity` | bool | `false` | **Phase A.** Agent identity surface: `POST/GET/PATCH/DELETE /v1/agents`, credential management (`/v1/agents/{id}/credentials/keys`, `/v1/agents/{id}/credentials`), `GET /.well-known/agent.json`, and gRPC agent methods on `IdentityAdminService`. |
+| `capabilities.identity` | bool | `false` | **Phase A.** Agent identity surface: `POST/GET/PATCH/DELETE /v1/agents`, credential management (`/v1/agents/{id}/credentials/keys`, `/v1/agents/{id}/credentials`), and `GET /.well-known/agent.json`. |
 | `capabilities.approval` | bool | `false` | **Phase B+C.** Approval request lifecycle and tool-level permissions. Adds `POST/GET /v1/approval-requests`, `POST /v1/approval-requests/{id}/approve`, `POST /v1/approval-requests/{id}/deny`, and `POST /v1/tools/invoke`. Requires `identity: true`. |
 | `capabilities.advanced` | bool | `false` | **Phase D.** Attenuating Authorization Tokens (AATs), transaction tokens, cross-realm trust policies, and SPIFFE/mTLS workload identity. Adds `/v1/aats`, `/v1/transaction-tokens`, `/v1/spiffe-mappings`, `/v1/cross-realm-policies`. Requires `identity: true`. |
 
@@ -1321,7 +1129,6 @@ Each realm entry supports:
 | `auth` | object | — | Per-realm auth policy (MFA, password policy, rate limits, token TTLs, self-registration, and DCR). |
 | `applications` | map | — | Declarative OAuth 2.0 client definitions. |
 | `organizations` | map | — | Declarative organization definitions. |
-| `fapi_profile` | string | — | FAPI 2.0 Security Profile for the realm: `"baseline"` or `"advanced"`. When set, all clients in the realm must comply. `"baseline"` requires PAR + PKCE (S256). `"advanced"` adds JAR + JARM and accepts `private_key_jwt` client authentication only: an application of an `"advanced"` realm that is `confidential` or carries a `client_secret` fails `hearth config validate`, startup and reload, naming the realm and the application (declare `jwks` instead). Absent means standard OAuth 2.0 / OIDC rules apply. Can also be set at runtime via `PATCH /admin/realms/{id}/config`. |
 | `breach_check` | object | — | HIBP k-anonymity breach check on every password set/change. See below. |
 
 ### `realms.<name>.email`
@@ -1391,9 +1198,9 @@ Per-realm authentication policy. These are policy declarations stored in `RealmC
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `mfa_required` | bool | `false` | Whether MFA is required for all users in this realm. |
+| `mfa_required` | bool | inherits `auth.mfa_required`; `true` when both are unset | Whether MFA is required for all users in this realm. The realm value wins over the global value. MFA is required by default; set `false` to opt out. The YAML loader records `mfa_required: true` on a realm when both values are absent. This holds under `serve --dev` too. When it is `false`, startup logs one `WARN` that names the realm, and the realm page in the admin console shows "MFA is disabled for this realm". The system realm always requires MFA. Only a user-verified passkey, a TOTP code or a recovery code satisfies MFA. Email OTP and magic links do not. After a password and email OTP, the user must enrol a passkey or TOTP (`ENROLL_MFA`). |
 | `passkey_requires_mfa` | bool | `false` | Whether passkey (WebAuthn) login still requires a TOTP challenge. Passkeys are inherently multi-factor, but regulated environments (healthcare, finance) may require an additional TOTP step. When `true` and the user has TOTP enrolled, passkey login redirects to the MFA challenge page. When `true` but the user has no TOTP enrolled, login proceeds normally. |
-| `mfa_methods` | list | inherits `auth.mfa_methods` | Allowed MFA methods: `"totp"`, `"webauthn"`, `"email_otp"`, `"sms"`. When set, only the listed methods may be **enrolled or presented**; a request to enrol or verify a method not in the list is refused with `HEARTH_MFA_METHOD_NOT_ALLOWED` (HTTP 403). This applies to factors users already hold — dropping a method from the list stops it working for them, so check the list names every factor in use before narrowing it. Absent (here and globally) = all methods allowed. `"sms"` requires a working `sms:` transport block and `HEARTH_SMS_OTP_HMAC_KEY`. |
+| `mfa_methods` | list | inherits `auth.mfa_methods` | Allowed MFA methods: `"totp"`, `"webauthn"`, `"email_otp"`. When set, only the listed methods may be **enrolled or presented**; a request to enrol or verify a method not in the list is refused with `HEARTH_MFA_METHOD_NOT_ALLOWED` (HTTP 403). This applies to factors users already hold — dropping a method from the list stops it working for them, so check the list names every factor in use before narrowing it. Absent (here and globally) = all methods allowed. Unknown method names (including `"sms"`, removed in 3.0.0) are refused. When the realm requires MFA and the list is set (here or inherited), it must include `"totp"` or `"webauthn"`. A list with only `"email_otp"` is a validation error that stops startup. |
 | `allowed_auth_methods` | list | — | Allowed login methods: `"password"`, `"magic_link"`, `"passkey"`. |
 | `webauthn_required` | bool | inherits `auth.webauthn_required` | Whether every user in this realm must hold a passkey **and** use it. When `true`, a user with no registered WebAuthn credential is intercepted by the `ENROLL_MFA` required action, which registers a user-verified passkey during login (the realm's `mfa_methods`, when set, must include `webauthn`), and `create_session` refuses any authentication whose second factor was not a user-verified WebAuthn assertion. A TOTP secret does **not** satisfy it, at enrolment or at use — the key names a passkey, and an operator setting it after a phishing incident is asking for a phishing-resistant factor specifically. |
 | `webauthn_resident_key` | string | inherits `auth.webauthn_resident_key` | `residentKey` preference sent in `authenticatorSelection` during registration: `"required"`, `"preferred"` or `"discouraged"`. An unrecognised value is refused at startup — the browser would silently ignore it and fall back to `"preferred"`. |
@@ -1401,7 +1208,6 @@ Per-realm authentication policy. These are policy declarations stored in `RealmC
 | `password_policy` | object | — | Password complexity requirements (see below). |
 | `token` | object | — | Per-realm token TTL overrides. |
 | `rate_limit` | object | — | Per-realm rate limit overrides. |
-| `adaptive_mfa` | object | — | Risk-based step-up MFA using device fingerprinting. See below. |
 
 #### `realms.<name>.auth.password_policy`
 
@@ -1429,35 +1235,6 @@ Per-realm authentication policy. These are policy declarations stored in `RealmC
 |-------|------|---------|-------------|
 | `max_failed_logins` | integer | — | Maximum failed login attempts before lockout. |
 | `lockout_duration` | duration | — | How long to lock out after exceeding max failed logins. |
-
-#### `realms.<name>.auth.adaptive_mfa`
-
-> **Not settable in `hearth.yaml`, and not settable via the admin API.** The realm
-> YAML schema has no `adaptive_mfa` key — a config file containing one is rejected at
-> startup by `deny_unknown_fields`. The feature is real and enforced at runtime, but the
-> only way to populate it today is programmatically, by constructing `RealmConfig`
-> in-process (embedded use and tests). The YAML block below is **illustrative of the
-> shape only**. See `tests/docs_config_snippets.rs`.
-
-When enabled, Hearth computes a per-device fingerprint from `{user_id, ip_/24, user_agent_normalized}` using HMAC-SHA256. Devices that have not been seen within `recognition_window_days` trigger an additional MFA challenge — a step-up — regardless of the realm's base `mfa_required` setting.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `enabled` | bool | `false` | Enable risk-based step-up MFA for this realm. When `true`, `fingerprint_hmac_secret` is required. |
-| `recognition_window_days` | integer | `30` | Days a recognised device fingerprint remains valid. After this window expires the device is treated as unrecognised again and triggers a fresh MFA challenge. |
-| `fingerprint_hmac_secret` | string | — | **Required when `enabled: true`.** HMAC-SHA256 key for deriving device fingerprints. Must be at least 32 bytes. Supply via an environment variable — never commit a plaintext value. |
-
-```yaml
-realms:
-  customer-portal:
-    auth:
-      adaptive_mfa:
-        enabled: true
-        recognition_window_days: 30   # default: 30
-        fingerprint_hmac_secret: "${HEARTH_REALM_CUSTOMER_PORTAL_FINGERPRINT_HMAC_SECRET}"
-```
-
-> **Key management:** See [Device fingerprint HMAC secret](../guides/security-hardening.md#device-fingerprint-hmac-secret) for key generation, minimum-length enforcement, Kubernetes injection, and the 9-step rotation runbook.
 
 #### `realms.<name>.auth.webauthn_attestation`
 
@@ -1578,13 +1355,13 @@ Declarative OAuth 2.0 client definitions. Keyed by a **slug** (used to derive a 
 | `client_secret` | string | — | Client secret. Supports `${ENV_VAR}` substitution. **Required** when `confidential: true`. Hashed with Argon2id before storage: a configured secret is caller-chosen, so its entropy is unknown (Hearth-generated secrets use a fast SHA-256 format instead; see `docs/guides/security-hardening.md`). |
 | `access_token_authorization` | *not a YAML key* | `embedded` | **Admin API / admin UI only — not settable in `hearth.yaml`.** Controls how resource servers resolve RBAC permissions for tokens issued to this client. One of: `embedded`, `introspection`, `decision`. Set it via `POST /admin/applications` / `PATCH /admin/applications/{id}` or the client edit form. Putting it under `applications.<slug>` in a config file is rejected at startup by `deny_unknown_fields`. See [Token Authorization Modes](../guides/rbac.md#token-authorization-modes). |
 | `require_consent` | bool | `true` | Whether users must approve the OAuth consent screen before tokens are issued. Set `false` only for first-party clients you control. |
-| `profile` | string | `"standard"` | Security profile for this client: `"fapi2"` or `"standard"` (anything else fails `hearth config validate` and startup). Setting `"fapi2"` subjects this client to FAPI 2.0 constraints (DPoP sender-constrained tokens, PAR, PKCE S256, `private_key_jwt` client authentication) regardless of the realm-level `fapi_profile`. A `"fapi2"` application **requires** `jwks` and must not be `confidential` or carry a `client_secret`. |
-| `jwks` | mapping or string | — | The client's public JWK Set (RFC 7517), inline: a YAML mapping `{keys: [...]}` or the same object as a JSON string. Its keys verify the client's `private_key_jwt` assertions and signed request objects (JAR). **Required** with `profile: "fapi2"`. Public keys only. YAML is authoritative: removing the key removes the client's JWKS on the next reconcile — unless that would leave the client with no credential at all (no secret, no JWKS, not FAPI 2.0), which would make it a public client: that change is refused with a warning, reported in the reconcile report, and the application is left unchanged. The REST admin API refuses runtime changes to `jwks`, `assertion_public_key` and `profile` of a YAML-declared application (`409`). |
-| `id_token_signed_response_alg` | string | `"EdDSA"` | Algorithm this client's **ID tokens** are signed with: `"EdDSA"` or `"RS256"` (case-sensitive; anything else fails `hearth config validate` and startup). `RS256` is for relying parties that only verify the OpenID Connect default; it creates the realm's RSA-3072 ID-token key on first use and publishes it in the realm JWKS. Access and refresh tokens are always EdDSA. `RS256` is refused under FAPI 2.0 — with `profile: fapi2`, or in a realm with `fapi_profile` — since FAPI 2.0 permits only PS256, ES256 and EdDSA. Clients registered through Dynamic Client Registration default to `RS256` instead (`EdDSA` in a FAPI realm) — see [OIDC.md §1.2](OIDC.md#12-signing). |
+| `jwks` | mapping or string | — | The client's public JWK Set (RFC 7517), inline: a YAML mapping `{keys: [...]}` or the same object as a JSON string. Its keys verify the client's `private_key_jwt` assertions and signed request objects (JAR). Public keys only. YAML is authoritative: removing the key removes the client's JWKS on the next reconcile — unless that would leave the client with no credential at all (no secret, no JWKS), which would make it a public client: that change is refused with a warning, reported in the reconcile report, and the application is left unchanged. The REST admin API refuses runtime changes to `jwks`, `assertion_public_key` and `dpop_bound_access_tokens` of a YAML-declared application (`409`). |
+| `dpop_bound_access_tokens` | bool | `false` | RFC 9449 §5.2 client metadata. When `true`, every token request from this client — `authorization_code`, `refresh_token`, `client_credentials`, `jwt-bearer` and `device_code` — must carry a `DPoP` proof, or it is refused with `invalid_dpop_proof`; the issued tokens are bound to the proof key (`cnf.jkt`, `token_type: DPoP`). YAML is authoritative: the value is re-applied on every reconcile. |
+| `id_token_signed_response_alg` | string | `"EdDSA"` | Algorithm this client's **ID tokens** are signed with: `"EdDSA"` or `"RS256"` (case-sensitive; anything else fails `hearth config validate` and startup). `RS256` is for relying parties that only verify the OpenID Connect default; it creates the realm's RSA-3072 ID-token key on first use and publishes it in the realm JWKS. Access and refresh tokens are always EdDSA. Clients registered through Dynamic Client Registration default to `RS256` instead — see [OIDC.md §1.2](OIDC.md#12-signing). |
 
 Reconciliation:
 - New slug → client **created** with deterministic UUID
-- Existing slug → `name`, `redirect_uris`, `post_logout_redirect_uris`, `grant_types`, `id_token_signed_response_alg` **updated** if changed
+- Existing slug → `name`, `redirect_uris`, `post_logout_redirect_uris`, `grant_types`, `id_token_signed_response_alg`, `dpop_bound_access_tokens` **updated** if changed
 - Removed slug → client **archived**
 
 ```yaml
@@ -1618,6 +1395,7 @@ Declarative organization definitions. Keyed by **slug**. Members and invitations
 | `name` | string | *required* | Human-readable organization name. |
 | `description` | string | — | Optional description. |
 | `config.max_members` | integer | — | Maximum number of members allowed. `null`/omitted means unlimited. |
+| `config.mfa_required` | bool | `false` | Whether every member of this organization must use MFA. It can only tighten the realm policy. It cannot turn MFA off. |
 
 Reconciliation:
 - New slug → organization **created**
@@ -1633,6 +1411,7 @@ realms:
         description: "Enterprise customer"
         config:
           max_members: 500
+          mfa_required: true
       beta-testers:
         name: "Beta Testers"
 ```
@@ -1721,44 +1500,59 @@ realms:
 
 ---
 
-### `realms.<name>.saml_service_providers`
+### `realms.<name>.saml_service_providers` — removed in 3.0.0
 
-Declarative SAML 2.0 Service Provider (SP) registrations where **Hearth acts as the IdP**. Keyed by an operator-assigned slug that identifies the SP. Reconciled at startup — runtime SPs not present in YAML are removed.
+This key registered SAML service providers for Hearth to act as a SAML **IdP**.
+The IdP side was removed in 3.0.0; Hearth is a SAML service provider only
+(see `realms.<name>.federation`). A configuration that still sets the key refuses
+to start:
 
-Each entry configures one SP:
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `entity_id` | string | *required* | SP entity ID (a URI, e.g. `https://app.example.com/saml/metadata`). Must match the `Issuer` in AuthnRequests from this SP. |
-| `acs_url` | string | *required* | Assertion Consumer Service URL — where Hearth posts the SAML response. |
-| `slo_url` | string | — | Single Logout Service URL. When present, Hearth sends a `<LogoutRequest>` here on user logout. |
-| `sp_certificate_pem` | string | — | PEM-encoded SP certificate. Verifies signed AuthnRequests and signed `<LogoutRequest>`s from this SP. Required when `want_authn_requests_signed: true`. The server refuses to start if the PEM does not parse as an RSA certificate. |
-| `sign_assertions` | bool | `true` | Whether Hearth signs individual `<Assertion>` elements. |
-| `sign_responses` | bool | `false` | Whether Hearth signs the outer `<Response>` envelope in addition to assertions. |
-| `want_authn_requests_signed` | bool | `false` | Require incoming AuthnRequests from this SP to carry a valid XML signature; the SSO endpoint answers `403` otherwise. `sp_certificate_pem` is required alongside it — the server refuses to start without one. The HTTP-Redirect binding carries its signature in query parameters, not in the XML, so an SP with this flag set must use the HTTP-POST binding. When any SP in the realm sets it, the realm's IdP metadata advertises `WantAuthnRequestsSigned="true"`. |
-| `nameid_format` | string | `emailAddress` | NameID format to use in assertions: `emailAddress`, `persistent`, `transient`, or `unspecified`. |
-| `attribute_map` | map | `{}` | Custom SAML attribute statements. Keys are attribute names; values are Hearth claim paths (e.g. `user.email`, `user.display_name`, `roles`). |
-
-```yaml
-realms:
-  corp:
-    saml_service_providers:
-      salesforce:
-        entity_id: "https://myorg.my.salesforce.com"
-        acs_url: "https://myorg.my.salesforce.com/sso/saml"
-        slo_url: "https://myorg.my.salesforce.com/slo/saml"
-        sign_assertions: true
-        sign_responses: false
-        nameid_format: emailAddress
-        attribute_map:
-          email: user.email
-          displayName: user.display_name
-          groups: roles
+```
+configuration key 'realms.corp.saml_service_providers' is no longer supported: the SAML IdP side (Hearth issuing assertions to service providers) was removed in Hearth 3.0.0. Remove the key from the configuration. Instead: Hearth stays a SAML service provider; connect applications to Hearth over OpenID Connect.
 ```
 
-The SAML IdP metadata (public signing key, SSO endpoint) for a realm is available at:
+---
+
+### `realms.<name>.fapi_profile`, `realms.<name>.applications.<app>.profile` — removed in 3.0.0
+
+The FAPI 2.0 profile was removed in 3.0.0. PAR, signed request objects (JAR), PKCE S256,
+`private_key_jwt` and DPoP remain available to every client; to require sender-constrained
+tokens for one client, set `dpop_bound_access_tokens: true` on the application. A
+configuration that still sets either key refuses to start:
+
 ```
-GET /realms/{realm-name}/saml/idp-metadata.xml
+configuration key 'realms.corp.fapi_profile' is no longer supported: the FAPI 2.0 profile was removed in Hearth 3.0.0. Remove the key from the configuration. Instead: to require sender-constrained tokens, set dpop_bound_access_tokens: true on the application.
+```
+
+---
+
+### `server.grpc_port`, `server.grpc_bind_address`, `server.grpc_allow_plaintext`, `security.grpc` — removed in 3.0.0
+
+These keys configured the public gRPC management API and its listener (and, under
+`security.grpc`, the reflection service). The public gRPC API was removed in 3.0.0;
+every admin operation is available over the REST admin API under `/admin`. The
+`hearth serve --allow-reflection-in-prod` flag went with it. A configuration that
+still sets any of these keys refuses to start:
+
+```
+configuration key 'server.grpc_port' is no longer supported: the public gRPC API was removed in Hearth 3.0.0. Remove the key from the configuration. Instead: use the REST admin API under /admin.
+```
+
+Cluster nodes still talk to each other over an internal gRPC transport
+(`cluster.peer_address`); that is not affected.
+
+---
+
+### `security.ip_reputation`, `security.providers`, `security.tarpit` — removed in 3.0.0
+
+IP reputation (Spamhaus DROP/EDROP, MaxMind ASN), the signal-provider block (bot
+signals and email reputation) and the A-17 login tarpit were removed in 3.0.0. Use the
+per-IP and per-account rate limits (`security.rate_limiting`), the A-12 adaptive backoff
+and the CAPTCHA challenge (`security.captcha`) instead. A configuration that still sets
+any of these keys refuses to start:
+
+```
+configuration key 'security.tarpit' is no longer supported: the A-17 login tarpit was removed in Hearth 3.0.0. Remove the key from the configuration. Instead: use the per-IP and per-account rate limits and the CAPTCHA challenge (security.captcha).
 ```
 
 ---
@@ -2074,13 +1868,13 @@ Hearth (equivalent to Auth0 Actions / Keycloak Token Mappers via HTTP).
 |-------|------|---------|-------------|
 | `url` | string | *required* | HTTPS endpoint to POST to. Hearth rejects non-HTTPS URLs in production. |
 | `timeout_ms` | integer | `1000` | Request timeout in milliseconds. Exceeded requests are treated as errors and handled per `on_error`. |
-| `on_error` | string | `fail_open` | `fail_open` — token issuance continues without the extra claims; `fail_closed` — token issuance is rejected with an error. |
+| `on_error` | string | `fail_closed` | `fail_closed` — token issuance is rejected with an error. `fail_open` — token issuance continues without the extra claims, and a warning is logged. |
 | `hmac_secret` | string | — | HMAC-SHA256 signing key. When set, the request body is signed and `X-Hearth-Signature-256: sha256=<hex>` is added so the endpoint can verify the request is authentic. |
 
 **Security requirements:**
 
 - `hmac_secret` **MUST** be set in production. Without it, any party that can reach your webhook endpoint can forge enrichment responses and inject arbitrary claims into issued tokens.
-- Use `on_error: fail_closed` together with `hmac_secret` for defense in depth. `fail_open` is the default only to avoid blocking token issuance during initial rollout.
+- `on_error` defaults to `fail_closed`: a webhook failure stops token issuance. Set `on_error: fail_open` only when a token without the extra claims is acceptable.
 - Supply `hmac_secret` via an environment variable — never commit a plaintext secret.
 - The webhook cannot overwrite reserved JWT claims. Keys silently dropped from `extra_claims`: `sub`, `iss`, `aud`, `exp`, `iat`, `nbf`, `jti`, `sid`, `nonce`, `roles`, `permissions`, `required_actions`, `amr`, `cnf`, `sv`, `oid`, `act`, `azp`, `client_id`, `auth_time`, `acr`. The `act`, `azp`, and `client_id` keys are blocked specifically to prevent a compromised enrichment endpoint from injecting a delegation chain or misrepresenting the authorized party.
 
@@ -2219,9 +2013,6 @@ security:
   request_shaper:
     ip_rps: 100
     realm_rps: 1000
-  ip_reputation:
-    enabled: true
-    action: block
   rate_limiting:
     login_per_ip:
       max_attempts: 10
@@ -2324,15 +2115,13 @@ Every field's default value at a glance.
 | `token` | `access_token_ttl` | `"15m"` |
 | `token` | `refresh_token_ttl` | `"7d"` |
 | `auth` | `session_ttl` | `"24h"` |
-| `auth` | `mfa_required` | `false` |
+| `auth` | `mfa_required` | `true` (MFA required; set `false` to opt out) |
 | `auth` | `passkey_requires_mfa` | `false` |
 | `auth` | `password_memory_cost` | `19456` (19 MiB) |
 | `auth` | `password_time_cost` | `2` |
 | `auth` | `webauthn_required` | *(unset)* — no passkey requirement |
 | `auth` | `webauthn_resident_key` | *(unset)* — the WebAuthn default, `"preferred"` |
 | `auth` | `webauthn_user_verification` | *(unset)* — the WebAuthn default, `"preferred"` |
-| `realms.<name>.auth.adaptive_mfa` | `enabled` | `false` |
-| `realms.<name>.auth.adaptive_mfa` | `recognition_window_days` | `30` |
 | `realms.<name>.auth.webauthn_attestation` | `allow_none` | `true` |
 | `realms.<name>.auth.webauthn_attestation` | `require_prf` | `false` |
 | `realms.<name>.auth.webauthn_attestation` | `require_large_blob` | `false` |
@@ -2369,10 +2158,6 @@ Every field's default value at a glance.
 | `security.captcha.turnstile` | `verify_url` | Cloudflare default |
 | `security.http2` | `max_concurrent_streams` | `100` |
 | `security.http2` | `max_pending_reset_streams` | `10` |
-| `security.ip_reputation` | `enabled` | `false` |
-| `security.ip_reputation` | `action` | `"log"` |
-| `security.ip_reputation.spamhaus` | `refresh_interval_secs` | `86400` (24 h) |
-| `security.grpc` | `reflection_enabled` | `false` (prod), `true` (--dev) |
 | `security` | `load_test_unthrottled` | `false` |
 | `security.rate_limiting.login_per_ip` | `max_attempts` | `10` |
 | `security.rate_limiting.login_per_ip` | `window_seconds` | `60` |
@@ -2383,9 +2168,6 @@ Every field's default value at a glance.
 | `security.captcha` | `challenge_threshold` | *(unset)* — A-16 challenge disabled |
 | `security.captcha` | `window_secs` | `60` |
 | `security.captcha` | `challenge_ttl_secs` | `1800` (30 min) |
-| `security.tarpit` | `threshold` | *(unset)* — A-17 tarpit disabled |
-| `security.tarpit` | `window_secs` | `60` |
-| `security.tarpit` | `delay_ms` | `200` |
 | `security.distributed_attack_detector` | `enabled` | `false` |
 | `security.distributed_attack_detector` | `window` | `"300s"` |
 | `security.distributed_attack_detector` | `username_per_ip_threshold` | `20` |
@@ -2393,24 +2175,12 @@ Every field's default value at a glance.
 | `security.outbound_volume_shield` | `enabled` | `false` |
 | `security.outbound_volume_shield` | `window` | `"3600s"` |
 | `security.outbound_volume_shield` | `email_soft_cap` / `email_hard_cap` | `1000` / `5000` |
-| `security.outbound_volume_shield` | `sms_soft_cap` / `sms_hard_cap` | `100` / `500` |
 | `security.cross_realm_aggregation_cap` | `enabled` | `false` |
 | `security.cross_realm_aggregation_cap` | `window` | `"3600s"` |
 | `security.cross_realm_aggregation_cap` | `alert_threshold` | `3` |
 | `security.cross_realm_aggregation_cap` | `email_realm_soft_cap` / `email_realm_hard_cap` | `5` / `10` |
-| `security.cross_realm_aggregation_cap` | `sms_realm_soft_cap` / `sms_realm_hard_cap` | `3` / `6` |
-| `security.risk_scorer` | `enabled` | `false` |
-| `security.risk_scorer` | `step_up_threshold` | `0.5` |
-| `security.risk_scorer` | `new_device_weight` | `0.3` |
-| `security.risk_scorer` | `new_country_weight` | `0.4` |
-| `security.risk_scorer` | `password_age_weight` | `0.2` |
-| `security.risk_scorer` | `password_age_days_threshold` | `365` |
-| `security.risk_scorer` | `breach_corpus_weight` | `1.0` |
-| `security.risk_scorer` | `refresh_context_delta_weight` | `0.35` |
 | `security.adaptive_backoff` | `durations` | `["1m", "5m", "30m", "24h"]` |
 | `security.adaptive_backoff` | `offense_cooldown` | `"7d"` |
-| `security.providers.bot_signal` | `enabled` | `false` |
-| `security.providers.email_reputation` | `enabled` | `false` |
 | `realms.<name>.security.cidr_policy` | `allow` / `deny` | `[]` / `[]` (no network restriction) |
 | `realms.<name>.auth` | `webauthn_required` | inherits `auth.webauthn_required` |
 | `realms.<name>.auth` | `webauthn_resident_key` | inherits `auth.webauthn_resident_key` |

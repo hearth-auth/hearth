@@ -185,7 +185,7 @@ Hearth makes decisions so you don't have to. The configuration surface is delibe
 
 What Hearth explicitly **does**:
 - OIDC / OAuth 2.0 (authorization code, client credentials, device authorization)
-- SAML 2.0 (SP-initiated and IdP-initiated)
+- SAML 2.0 as a service provider (SP-initiated and IdP-initiated login)
 - WebAuthn / Passkeys
 - Magic links / passwordless email
 - TOTP / authenticator apps
@@ -197,7 +197,7 @@ What Hearth explicitly **does**:
 - Password hashing with Argon2id default, support for bcrypt/PBKDF2/scrypt verification (for migration), automatic upgrade-on-login, and enforced minimum parameters
 
 What Hearth explicitly **does not do**:
-- LDAP server (legacy protocol; provide a migration path in, not ongoing support)
+- LDAP, as a server or as a directory connector (legacy protocol; directory users come in through SCIM provisioning, OIDC/SAML federation, or the offline importers)
 - RADIUS (not in scope; different domain)
 - Custom authentication flow scripting (opinionated flows are the product)
 - Generic policy engines or arbitrary scripting (not OPA/Rego; one permission model, not a framework for inventing your own)
@@ -266,7 +266,7 @@ Hearth compiles to a single binary (dynamically linked against the system C libr
 └─────────────────────────────────────────────────────────┘
 ```
 
-**Protocol Layer**: Speaks OIDC, OAuth 2.0, SAML 2.0, SCIM 2.0, and WebAuthn natively. Each protocol is implemented as a thin adapter over the Identity Engine. The protocol layer also exposes a gRPC and REST management API for operations that don't map to a standard protocol (realm configuration, migration, admin operations).
+**Protocol Layer**: Speaks OIDC, OAuth 2.0, SAML 2.0, SCIM 2.0, and WebAuthn natively. Each protocol is implemented as a thin adapter over the Identity Engine. The protocol layer also exposes a REST management API for operations that don't map to a standard protocol (realm configuration, migration, admin operations).
 
 **Identity Engine**: The core logic layer. Handles user lifecycle, credential management, session management, token issuance and validation, and multi-realm isolation. This is where authentication flows are orchestrated and where the opinionated decisions about supported flows are enforced.
 
@@ -291,19 +291,11 @@ All data types except the audit log participate in a **hot/cold tiered storage m
 
 > **Note (Hearth 1.x):** Multi-node clustering is present but experimental. Known limitations: follower cache invalidation is partial — RBAC, audit, revoked-token and control-epoch rows are forwarded, other cached types are not proven coherent (C-5); cluster membership is set at bootstrap and cannot be changed without a full-cluster restart (C-6, `add_learner`/`change_membership` not implemented); writes and logins on follower nodes are forwarded to the leader (H-3, fixed). These are tracked for resolution in the Wave 5 roadmap. The supported production deployment for Hearth 1.x is single-node. See [Clustering Guide](../guides/clustering.md) for the full list of current limitations.
 
-### 6.2 Embedded vs. Server Modes
+### 6.2 One Deployment Mode: Server
 
-Like SQLite and DuckDB, Hearth supports two deployment modes:
+Hearth runs as a standalone server process, and that is the only supported deployment. The server manages its own storage, clustering and protocol endpoints.
 
-**Server mode** (primary): Hearth runs as a standalone server process, accepting connections over the network. This is the default for production deployments. The server manages its own storage, clustering, and protocol endpoints.
-
-**Embedded mode** (library): Hearth is linked directly into the application process as a library (via C ABI or language-specific bindings). The application calls Hearth functions directly, with no network overhead. This mode is ideal for:
-- Edge deployments where a separate server process is impractical
-- Testing and development where operational simplicity is paramount
-- Applications where sub-microsecond auth latency is critical
-- CLI tools and single-process applications
-
-Embedded mode uses the same storage engine and provides the same durability guarantees as server mode. The only difference is the absence of the network layer and the cluster layer.
+There is no embedded (library) mode. An earlier draft of this document promised one, like SQLite or DuckDB, but nothing was ever built to support it: no C ABI, no language bindings, no stable library API. Hearth 3.0.0 removed the promise. The test suite runs the engines inside the test process (the in-process harness, `TestHarness::in_process`), but that is a test tool, not a deployment mode.
 
 ### 6.3 Language Choice: Rust
 
@@ -311,7 +303,7 @@ Hearth is written in Rust. This is a deliberate choice, not a trend-following on
 
 **Why Rust over Go:**
 - Go's garbage collector introduces unpredictable latency spikes that are fundamentally incompatible with sub-millisecond p99 targets. You can tune GC, but you can't eliminate it.
-- Go's runtime has a memory overhead floor (~5–10MB) that matters for embedded mode and edge deployments.
+- Go's runtime has a memory overhead floor (~5–10MB) that matters for small deployments.
 - Rust's ownership model provides compile-time guarantees about memory safety and data race freedom that are especially valuable in a security-critical system handling credentials and tokens.
 - The Rust database ecosystem (sled, rocksdb bindings, tokio, tower) is more mature for this specific use case than Go's.
 
@@ -476,12 +468,13 @@ SDKs are the primary interface between application developers and Hearth. They m
 1. **TypeScript/JavaScript** (Next.js, Express, Hono) — largest developer population, highest impact
 2. **Go** — primary language for backend infrastructure, natural fit for the target audience
 3. **Python** (Django, FastAPI) — massive ecosystem, growing in backend development
-4. **Rust** — native language, important for credibility and embedded mode
-5. **PHP** (Laravel) — massive web ecosystem, widespread hosting infrastructure
-6. **Java/Kotlin** (Spring Boot) — enterprise adoption, Keycloak migration path
-7. **C#/.NET** — enterprise adoption
-8. **Ruby** (Rails) — smaller but passionate community
-9. **Elixir/Phoenix** — smaller but influential community
+4. **PHP** (Laravel) — massive web ecosystem, widespread hosting infrastructure
+5. **C#/.NET** — enterprise adoption
+6. **Ruby** (Rails) — smaller but passionate community
+7. **Elixir/Phoenix** — smaller but influential community
+
+The first four ship today as the official SDKs. Rust and Java/Kotlin SDKs were built earlier and
+removed in the 2026-10 scope trim.
 
 ### 8.3 Migration Paths
 
@@ -509,7 +502,7 @@ Migration is the highest-friction part of adopting new infrastructure. Hearth ad
 
 ### 8.4 Drop-In Protocol Compatibility
 
-Hearth's OIDC, OAuth 2.0, SAML, and SCIM endpoints are built to their respective RFCs and specifications, and are exercised by in-repo conformance suites (`tests/oidc_conformance.rs`, `fapi_conformance.rs`, `fapi2_conformance.rs`, `rfc8693_conformance.rs`, `rfc8707_conformance.rs`, `rfc9728_conformance.rs`, `federation_conformance.rs`, plus `scripts/check-sdk-conformance.sh`). Any client library that speaks standard OIDC (e.g., `openid-client` in Node.js, `golang.org/x/oauth2` in Go) should work with Hearth without modification, which means teams can adopt Hearth server-side without changing their application's auth client code — just point the OIDC discovery URL at Hearth instead of Auth0/Keycloak.
+Hearth's OIDC, OAuth 2.0, SAML, and SCIM endpoints are built to their respective RFCs and specifications, and are exercised by in-repo conformance suites (`tests/oidc_conformance.rs`, `rfc8693_conformance.rs`, `rfc8707_conformance.rs`, `rfc9728_conformance.rs`, `federation_conformance.rs`, plus `scripts/check-sdk-conformance.sh`). Any client library that speaks standard OIDC (e.g., `openid-client` in Node.js, `golang.org/x/oauth2` in Go) should work with Hearth without modification, which means teams can adopt Hearth server-side without changing their application's auth client code — just point the OIDC discovery URL at Hearth instead of Auth0/Keycloak.
 
 > **No certifying body's suite has been run.** The suites above are written and maintained in this repository; the OpenID Foundation certification suite, a SAML interop suite and a SCIM compliance suite have never been executed against Hearth. Do not represent Hearth as certified or as "strictly conformant" — the honest statement is that it implements these specifications and tests itself against them. See `docs/specs/TESTING.md` §7.
 
@@ -578,7 +571,6 @@ This path is not the only option. The project could remain community-funded and 
 - Single-node only, no clustering
 - CLI management tool
 - Benchmark suite demonstrating performance targets
-- Embedded mode (library) API
 
 **Exit criteria**: A developer can run Hearth, create users, authenticate via OIDC, manage sessions, and observe sub-millisecond p99 on the hot path. Benchmark results are published and reproducible.
 
@@ -591,7 +583,7 @@ This path is not the only option. The project could remain community-funded and 
 - Magic link / passwordless email authentication
 - TOTP / MFA support
 - Multi-tenancy (realm isolation, per-realm configuration)
-- Admin API (REST + gRPC)
+- Admin API (REST)
 - Admin web console
 - Claims-based RBAC authorization engine (roles, groups, permissions, JWT claims, scope narrowing)
 - Audit logging
@@ -635,7 +627,6 @@ This path is not the only option. The project could remain community-funded and 
 - Remaining SDKs (C#, Ruby, Elixir)
 - Remaining import tools (Cognito, Firebase Auth, Okta)
 - Plugin system for custom identity providers (constrained, not arbitrary scripting)
-- Edge deployment mode (embedded Hearth at the CDN edge)
 - Community ecosystem: third-party integrations, contributed SDKs, deployment guides
 
 ---
@@ -671,7 +662,7 @@ This is a reasonable objection, and the honest answer is: you *can* build a good
 The argument for purpose-built:
 - **Performance ceiling**: Postgres will always have overhead that a purpose-built system doesn't — query parsing, plan optimization, transaction management for a general-purpose transaction model, MVCC overhead. These costs are small individually but compound on a hot path that handles millions of requests per second.
 - **Operational coupling**: depending on Postgres means inheriting Postgres's operational requirements — major version upgrades, vacuum tuning, connection pool management, replication configuration. These are well-understood but non-trivial.
-- **Architecture constraints**: a Postgres-backed system cannot offer embedded mode, cannot achieve zero-allocation hot paths, and cannot co-locate the authorization graph with the session store in the same process without significant complexity.
+- **Architecture constraints**: a Postgres-backed system cannot achieve zero-allocation hot paths, and cannot co-locate the authorization graph with the session store in the same process without significant complexity.
 
 The honest acknowledgment: if you already have a well-operated Postgres cluster and your auth performance requirements are modest (< 10K requests/second), building on Postgres is a reasonable choice. Hearth's value proposition is strongest for teams that need higher performance, want simpler operations, or are starting from scratch.
 

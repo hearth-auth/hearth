@@ -227,6 +227,15 @@ pub(crate) fn generate_provisioning_uri(
     )
 }
 
+/// The TOTP code for a base32 `secret` at `unix_secs`, or `None` when the
+/// secret does not decode. Used by the dev bootstrap, which enrols a factor on
+/// the dev admins' behalf and must prove it like any enrolment.
+#[cfg(feature = "dev-endpoints")]
+pub(crate) fn code_at(secret_base32: &str, unix_secs: u64) -> Option<String> {
+    let secret = TotpSecret::from_base32(secret_base32).ok()?;
+    Some(compute_totp(secret.as_bytes(), unix_secs / TOTP_PERIOD))
+}
+
 /// Computes a TOTP code for the given secret and time step.
 ///
 /// Implements RFC 4226 dynamic truncation on HMAC-SHA1 output.

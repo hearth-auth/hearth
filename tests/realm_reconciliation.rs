@@ -23,7 +23,7 @@ fn config_with_realms(realms: Option<HashMap<String, RealmYamlConfig>>) -> Confi
 
 #[tokio::test]
 async fn creates_default_realm_when_no_yaml_and_no_storage() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let config = config_with_realms(None);
@@ -56,7 +56,7 @@ async fn creates_default_realm_when_no_yaml_and_no_storage() {
 
 #[tokio::test]
 async fn skips_reconciliation_when_realms_exist_and_no_yaml_key() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     // Pre-create a realm
@@ -86,7 +86,7 @@ async fn skips_reconciliation_when_realms_exist_and_no_yaml_key() {
 
 #[tokio::test]
 async fn creates_realm_from_yaml() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let mut realms = HashMap::new();
@@ -108,7 +108,7 @@ async fn creates_realm_from_yaml() {
 
 #[tokio::test]
 async fn updates_realm_config_from_yaml() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     // Pre-create a realm with old config
@@ -151,7 +151,7 @@ async fn updates_realm_config_from_yaml() {
 
 #[tokio::test]
 async fn archives_realm_removed_from_yaml() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     // Create two realms
@@ -195,7 +195,7 @@ async fn archives_realm_removed_from_yaml() {
 
 #[tokio::test]
 async fn unarchives_realm_that_reappears_in_yaml() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     // Create and archive a realm
@@ -235,7 +235,7 @@ async fn unarchives_realm_that_reappears_in_yaml() {
 
 #[tokio::test]
 async fn idempotent_reconciliation() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let mut realms = HashMap::new();
@@ -259,7 +259,7 @@ async fn idempotent_reconciliation() {
 async fn reconcile_federation_wires_claim_mappings_to_idp() {
     use hearth::config::{FederationProviderYaml, FederationYamlConfig};
 
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let mut claim_mappings = std::collections::BTreeMap::new();
@@ -343,7 +343,7 @@ async fn reconcile_federation_wires_claim_mappings_to_idp() {
 async fn reconcile_saml_federation_wires_want_assertions_signed_to_idp() {
     use hearth::config::{FederationProviderYaml, FederationYamlConfig};
 
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     // Two SAML connectors: one requiring signed assertions, one not, so we
@@ -425,7 +425,7 @@ async fn reconcile_saml_federation_wires_want_assertions_signed_to_idp() {
 /// configured through the admin API.
 #[tokio::test]
 async fn reconcile_applies_post_logout_redirect_uris_from_yaml() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let dir = tempfile::tempdir().expect("tempdir");
@@ -478,7 +478,7 @@ realms:
 /// EdDSA default on the next reconcile.
 #[tokio::test]
 async fn reconcile_applies_id_token_signed_response_alg_from_yaml() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("hearth.yaml");
@@ -557,7 +557,7 @@ realms:
 async fn reconcile_federation_carries_trust_asserted_email_to_the_idp() {
     use hearth::config::{FederationProviderYaml, FederationYamlConfig};
 
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let mut providers = std::collections::HashMap::new();
@@ -622,13 +622,12 @@ async fn reconcile_federation_carries_trust_asserted_email_to_the_idp() {
     );
 }
 
-/// `profile: fapi2` in `hearth.yaml` used to set the profile on a client with
-/// no keys, which then counted as PUBLIC (`/as/par` accepted it on its
-/// `client_id` alone). A FAPI 2.0 application now declares its `jwks`, which
-/// reconcile stores, and one without keys is refused before startup.
+/// An application declares its `jwks` and `dpop_bound_access_tokens` in
+/// `hearth.yaml`; reconcile stores both, and a client holding keys is never
+/// PUBLIC (`/as/par` must not accept it on its `client_id` alone).
 #[tokio::test]
-async fn reconcile_fapi2_application_carries_its_jwks() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+async fn reconcile_application_carries_its_jwks_and_dpop_flag() {
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("hearth.yaml");
@@ -638,7 +637,7 @@ async fn reconcile_fapi2_application_carries_its_jwks() {
             format!(
                 r#"
 realms:
-  fapidemo:
+  jwksdemo:
     applications:
       bank-rp:
         name: "Bank RP"
@@ -646,7 +645,7 @@ realms:
           - "https://rp.example.com/callback"
         grant_types:
           - authorization_code
-        profile: fapi2
+        dpop_bound_access_tokens: true
 {app_lines}
 "#
             ),
@@ -654,10 +653,6 @@ realms:
         .expect("write config");
         Config::from_file_as_dev(&path)
     };
-
-    let err = write("").expect_err("a keyless fapi2 application must be refused");
-    let msg = err.to_string();
-    assert!(msg.contains("jwks"), "the refusal must name jwks: {msg}");
 
     let config = write(
         r"        jwks:
@@ -669,10 +664,10 @@ realms:
               use: sig
               x: 11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo",
     )
-    .expect("fapi2 with an inline JWKS is valid");
+    .expect("an inline JWKS is valid");
     reconcile_realms(identity, harness.authz(), &config).expect("reconcile");
     let realm = identity
-        .get_realm_by_name("fapidemo")
+        .get_realm_by_name("jwksdemo")
         .expect("lookup realm")
         .expect("realm exists");
     let client = identity
@@ -682,11 +677,14 @@ realms:
         .into_iter()
         .find(|c| c.client_name() == "Bank RP")
         .expect("client exists");
-    assert!(client.profile().is_fapi2());
+    assert!(
+        client.dpop_bound_access_tokens(),
+        "dpop_bound_access_tokens is stored"
+    );
     let jwks: serde_json::Value =
         serde_json::from_str(client.jwks().expect("the JWKS is stored")).expect("JSON");
     assert_eq!(jwks["keys"][0]["kid"], "k1");
-    assert!(!client.is_public(), "a FAPI 2.0 client is never public");
+    assert!(!client.is_public(), "a client holding keys is never public");
 
     // Idempotent: a second reconcile changes nothing and does not fail.
     reconcile_realms(identity, harness.authz(), &config).expect("reconcile again");

@@ -482,26 +482,6 @@ fn federation_errors_have_no_source() {
 }
 
 #[test]
-fn display_invalid_sms_otp() {
-    let err = IdentityError::InvalidSmsOtp;
-    let display = format!("{err}");
-    assert!(display.contains("SMS OTP"), "got: {display}");
-}
-
-#[test]
-fn display_sms_resend_limit_exceeded() {
-    let err = IdentityError::SmsResendLimitExceeded;
-    let display = format!("{err}");
-    assert!(display.contains("resend limit"), "got: {display}");
-}
-
-#[test]
-fn sms_errors_have_no_source() {
-    assert!(IdentityError::InvalidSmsOtp.source().is_none());
-    assert!(IdentityError::SmsResendLimitExceeded.source().is_none());
-}
-
-#[test]
 fn source_others_none() {
     assert!(IdentityError::RealmNotFound.source().is_none());
     assert!(IdentityError::UserNotFound.source().is_none());

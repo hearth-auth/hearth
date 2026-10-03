@@ -19,7 +19,7 @@ use ring::rand::SecureRandom;
 
 #[tokio::test]
 async fn developer_onramp_realm_app_oidc_login() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
 
@@ -98,7 +98,6 @@ async fn developer_onramp_realm_app_oidc_login() {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize");
@@ -137,7 +136,7 @@ async fn developer_onramp_realm_app_oidc_login() {
 
 #[tokio::test]
 async fn user_lifecycle_register_authenticate_session_token() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -222,7 +221,7 @@ async fn user_lifecycle_register_authenticate_session_token() {
 
 #[tokio::test]
 async fn auth_plus_rbac_permission_grant_and_check() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -341,7 +340,7 @@ async fn auth_plus_rbac_permission_grant_and_check() {
 
 #[tokio::test]
 async fn cascading_invalidation_delete_user_invalidates_everything() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();

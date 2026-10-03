@@ -288,7 +288,7 @@ The following Keycloak features do not migrate automatically. They require manua
 | **Client roles** | Not imported | Recreate as realm roles manually if needed |
 | **Groups** (used as RBAC containers) | Not imported | Recreate as Hearth RBAC groups in `hearth.yaml` |
 | **Identity provider connectors** (Google, OIDC, SAML) | Not imported | Declare each connector in `hearth.yaml` under `realms.<name>.federation.providers` — see [How to Configure Federation](federation.md). Users' existing links to an upstream IdP are not imported. With the default `link_existing_accounts: confirm` (see [Account-linking policy](federation.md#account-linking-policy)), linking asks for the migrated account's local password or passkey, so a user who only ever signed in through the IdP must reset their password before their first federated login. |
-| **LDAP / Active Directory user federation** | Not available | Import the directory's users, or put an OIDC/SAML IdP in front of the directory and federate to it |
+| **LDAP / Active Directory user federation** | Not supported (LDAP removed in 3.0.0) | Import the directory's users, provision them over SCIM, or put an OIDC/SAML IdP in front of the directory and federate to it |
 | **Custom authentication flows / SPI** | Not applicable | Hearth uses a built-in auth policy engine; SPI extensions do not port |
 | **TOTP / WebAuthn credentials** | Not exported by Keycloak | Users must re-enroll after migration |
 | **Session tokens** | Not migrated | All users must log in again after switchover |

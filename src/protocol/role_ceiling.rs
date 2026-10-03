@@ -1,13 +1,13 @@
-//! Privilege ceiling for role definitions, shared by the REST and gRPC admin
-//! surfaces (GA audit 2026-09-28 M6).
+//! Privilege ceiling for role definitions on the REST admin surface (GA audit
+//! 2026-09-28 M6).
 //!
 //! A sub-admin (a caller without `hearth.admin`) may define or edit a role
 //! only when every permission the role would grant is one the caller holds.
 //! Without the check a `hearth.realm.admin` sub-admin could add a permission it
 //! lacks to a role that is already assigned to it — raising its own authority
-//! without the assignment-time ceiling ever running. gRPC checked the role's
-//! direct permissions; REST checked nothing. Both surfaces now call this one
-//! function, which also covers `parent_roles`: naming a parent grants the
+//! without the assignment-time ceiling ever running. The removed gRPC API
+//! checked the role's direct permissions; REST checked nothing. REST now calls
+//! this one function, which also covers `parent_roles`: naming a parent grants the
 //! parent's (transitively resolved) permissions too.
 
 use crate::core::RealmId;

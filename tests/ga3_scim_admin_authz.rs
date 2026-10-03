@@ -213,7 +213,7 @@ fn group_payload(name: &str) -> serde_json::Value {
 /// `POST /admin/users` answers 403 to the same token).
 #[tokio::test]
 async fn clients_admin_cannot_create_user_via_scim_fallback() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = jwt_realm(&h);
     let app = build_app(&h);
     let token = token_with_role(&h, &realm, "hearth.clients.admin");
@@ -245,7 +245,7 @@ async fn clients_admin_cannot_create_user_via_scim_fallback() {
 /// `hearth.users.admin` — the permission REST requires — still provisions.
 #[tokio::test]
 async fn users_admin_can_create_user_via_scim_fallback() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = jwt_realm(&h);
     let app = build_app(&h);
     let token = token_with_role(&h, &realm, "hearth.users.admin");
@@ -273,7 +273,7 @@ async fn users_admin_can_create_user_via_scim_fallback() {
 /// the superuser must be untouched.
 #[tokio::test]
 async fn clients_admin_cannot_modify_or_delete_superuser_via_scim_fallback() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = jwt_realm(&h);
     let app = build_app(&h);
     let superuser = user_with_role(&h, &realm, "root@ga3.test", "realm.admin");
@@ -315,7 +315,7 @@ async fn clients_admin_cannot_modify_or_delete_superuser_via_scim_fallback() {
 /// clients-admin may not enumerate the directory over SCIM either.
 #[tokio::test]
 async fn clients_admin_cannot_list_users_via_scim_fallback() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = jwt_realm(&h);
     let app = build_app(&h);
     let token = token_with_role(&h, &realm, "hearth.clients.admin");
@@ -329,7 +329,7 @@ async fn clients_admin_cannot_list_users_via_scim_fallback() {
 /// requires `hearth.realm.admin`. A users-admin may not create or delete them.
 #[tokio::test]
 async fn groups_require_realm_admin_via_scim_fallback() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = jwt_realm(&h);
     let app = build_app(&h);
     let users_admin = token_with_role(&h, &realm, "hearth.users.admin");
@@ -364,7 +364,7 @@ async fn groups_require_realm_admin_via_scim_fallback() {
 /// any admin-grade permission — including the three the guard used to miss.
 #[tokio::test]
 async fn scim_token_cannot_act_on_any_sub_admin_principal() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, token) = scim_token_realm(&h);
     let app = build_app(&h);
 
@@ -416,7 +416,7 @@ async fn scim_token_cannot_act_on_any_sub_admin_principal() {
 /// Regression guard: the provisioning token still manages ordinary users.
 #[tokio::test]
 async fn scim_token_still_manages_plain_users() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, token) = scim_token_realm(&h);
     let app = build_app(&h);
     let plain = create_user(&h, &realm, "plain@ga3.test");
@@ -453,7 +453,7 @@ const DISCOVERY: [&str; 3] = [
 /// to be accepted only as an admin JWT, so the realm's own SCIM token got 401.
 #[tokio::test]
 async fn scim_token_reads_discovery_endpoints() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, token) = scim_token_realm(&h);
     let app = build_app(&h);
 
@@ -467,7 +467,7 @@ async fn scim_token_reads_discovery_endpoints() {
 /// without — and a wrong bearer is still refused.
 #[tokio::test]
 async fn discovery_accepts_admin_tokens_and_refuses_a_wrong_bearer() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (token_realm, _token) = scim_token_realm(&h);
     let fallback_realm = jwt_realm(&h);
     let app = build_app(&h);

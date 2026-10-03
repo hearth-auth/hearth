@@ -161,14 +161,6 @@ server:
   # tls_client_ca_path: "./tls/clients-ca.crt"
   # tls_require_client_cert: false
 
-  # gRPC management API (off unless grpc_port is set). With tls_cert_path set
-  # it serves TLS with the SAME certificate. Without one it is plaintext, and a
-  # non-loopback gRPC bind is refused outside --dev unless grpc_allow_plaintext
-  # is true (only when a proxy/mesh terminates TLS for gRPC).
-  # grpc_port: 9090
-  # grpc_bind_address: "127.0.0.1"   # default: bind_address
-  # grpc_allow_plaintext: false
-
 storage:
   data_dir: "./data"                      # WAL + SST files live here
   wal_max_size_bytes: 268435456           # 256 MiB — WAL rotation threshold
@@ -304,39 +296,6 @@ email:
   # Directory containing Tera templates that override the compiled defaults.
   # templates_dir: "./templates/email"
 
-# --- SMS (OTP / transactional) ----------------------------------------------
-# Outbound SMS for OTP codes and transactional messages.
-# Supported: log | twilio | awssns
-#
-# REQUIRED env var: HEARTH_SMS_OTP_HMAC_KEY
-#   Must be set in the environment (not here), at least 32 bytes. Startup fails
-#   without it when transport is not 'log'. There is no fallback key: under
-#   --dev with no key a random per-process key is generated; outside --dev with
-#   no key every SMS OTP fails closed (no code is issued, an SMS second factor
-#   cannot be passed). Outside --dev, 'sms' MFA cannot be enabled at all while
-#   transport is 'log'. Generate with:
-#     openssl rand -hex 32
-
-sms:
-  transport: log        # default: log (no network I/O)
-
-  # --- Twilio -----------------------------------------------------------------
-  # sms:
-  #   transport: twilio
-  #   twilio:
-  #     account_sid: "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-  #     auth_token: "${TWILIO_AUTH_TOKEN}"   # loaded from the environment
-  #     from: "+15550001111"                 # E.164 or Messaging Service SID
-
-  # --- AWS SNS ----------------------------------------------------------------
-  # sms:
-  #   transport: awssns
-  #   aws_sns:
-  #     region: "us-east-1"
-  #     access_key_id: "${AWS_ACCESS_KEY_ID}"
-  #     secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
-  #     sender_id: "MyBrand"    # optional, up to 11 alphanumeric chars
-
 # --- OIDC / OAuth 2.0 -------------------------------------------------------
 # Controls the OIDC Discovery document and authorization code behaviour.
 
@@ -378,7 +337,7 @@ oidc:
 #     # measurement then reports the limiter instead of the server. A 0 emits a
 #     # startup WARN and raises hearth_rate_limiters_disabled{reason="config_zero"}.
 #     # Never set 0 on a production bind.
-#     admin_per_minute: 100   # default: 100; per admin user, REST + gRPC
+#     admin_per_minute: 100   # default: 100; per admin user
 #     token_per_minute: 200   # default: 200; per (realm, client) on /token,
 #                             #   /introspect, /device_authorization
 
@@ -430,26 +389,6 @@ oidc:
 #   request_shaper:
 #     ip_rps: 100       # default: 100 req/s per source IP
 #     realm_rps: 1000   # default: 1000 req/s per realm
-
-# --- IP reputation (P-2) ----------------------------------------------------
-# Block or challenge IPs on the Spamhaus DROP/EDROP list, or from flagged ASNs
-# via MaxMind. action: "block" | "challenge" (CAPTCHA) | "log" (metrics only).
-# Requires a MaxMind MMDB for ASN lookups (download free GeoLite2-ASN.mmdb).
-#
-# security:
-#   ip_reputation:
-#     enabled: true
-#     action: block
-#     maxmind_db_path: "/var/lib/hearth/GeoLite2-ASN.mmdb"  # optional
-#     spamhaus:
-#       refresh_interval_secs: 86400  # default: 24 hours
-
-# --- gRPC reflection gate (A-43) --------------------------------------------
-# Disabled in production by default. Enabling also requires --allow-reflection-in-prod.
-#
-# security:
-#   grpc:
-#     reflection_enabled: false
 
 # --- mTLS certificate revocation (A-44) ------------------------------------
 # PEM-encoded CRL files checked on every TLS handshake. Reloaded on SIGHUP.
@@ -609,17 +548,6 @@ oidc:
 #       rate_limit:
 #         max_failed_logins: 5
 #         lockout_duration: "15m"
-#       # Adaptive (risk-based) step-up MFA — see HEA-836.
-#       # When enabled, unrecognised device/IP combinations trigger an extra
-#       # MFA challenge. The HMAC secret derives device fingerprints and MUST
-#       # be supplied from the environment — never commit a plaintext value.
-#       # See docs/guides/security-hardening.md#device-fingerprint-hmac-secret
-#       # for generation, storage, and rotation procedures.
-#       adaptive_mfa:
-#         enabled: true
-#         recognition_window_days: 30                                       # default: 30
-#         fingerprint_hmac_secret: "${HEARTH_REALM_CUSTOMER_PORTAL_FINGERPRINT_HMAC_SECRET}"
-#
 #   internal-tools:
 #     session_ttl: "8h"
 #     password_memory_cost: 131072      # stricter for internal use
@@ -992,7 +920,7 @@ onboarding:
 #
 # agent_auth:
 #   capabilities:
-#     identity: true   # enables /v1/agents, /.well-known/agent.json, gRPC stubs
+#     identity: true   # enables /v1/agents and /.well-known/agent.json
 #     approval: true   # enables /v1/approval-requests + webhook delivery (Phase C)
 #                      # requires: identity = true
 #     advanced: true   # enables Phase D: AATs, transaction tokens, cross-realm trust,

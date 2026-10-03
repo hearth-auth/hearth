@@ -16,10 +16,9 @@ use hearth::core::{PageRequest, RealmId, SessionId};
 use hearth::identity::email::{EmailBranding, EmailService, LoggingEmailSender};
 use hearth::identity::onboarding::OnboardingService;
 use hearth::identity::{
-    CleartextPassword, ClientProfile, CreateRealmRequest, CreateUserRequest, CredentialConfig,
-    EmbeddedIdentityEngine, FapiProfile, IdTokenSigningAlg, IdentityConfig, IdentityEngine,
-    OAuthClient, RealmConfig, RegisterClientRequest, UpdateRealmRequest, UpdateUserRequest,
-    UserStatus,
+    CleartextPassword, CreateRealmRequest, CreateUserRequest, CredentialConfig,
+    EmbeddedIdentityEngine, IdTokenSigningAlg, IdentityConfig, IdentityEngine, OAuthClient,
+    RegisterClientRequest, UpdateUserRequest, UserStatus,
 };
 use hearth::protocol::web::{self, CookieSecret, WebState};
 use hearth::rbac::{EmbeddedRbacEngine, RbacEngine};
@@ -1493,6 +1492,67 @@ async fn admin_realm_detail_renders() {
     assert!(body.contains("Active"));
 }
 
+async fn realm_detail_body(rig: &TestRig, cookie: String) -> String {
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/ui/admin/realms/acme")
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body_bytes = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    String::from_utf8(body_bytes.to_vec()).expect("utf-8")
+}
+
+/// scope-trim-trusted-core, spec `mfa-policy`: a realm whose MFA is off
+/// shows a persistent warning naming the setting; a realm that requires MFA
+/// shows none.
+#[tokio::test]
+async fn admin_realm_detail_warns_when_mfa_is_off() {
+    let rig = build_rig();
+    let body = realm_detail_body(&rig, admin_cookie(&rig, "csrf-mfa-off")).await;
+    assert!(
+        body.contains("MFA is disabled for this realm"),
+        "banner missing"
+    );
+    assert!(
+        body.contains("auth.mfa_required"),
+        "the banner names the setting"
+    );
+
+    let mut config = rig
+        .identity
+        .get_realm(&rig.realm_id)
+        .expect("get")
+        .expect("realm")
+        .config()
+        .clone();
+    config.mfa_required = Some(true);
+    rig.identity
+        .update_realm(
+            &rig.realm_id,
+            &hearth::identity::UpdateRealmRequest {
+                config: Some(config),
+                ..Default::default()
+            },
+        )
+        .expect("require MFA");
+    let body = realm_detail_body(&rig, admin_cookie(&rig, "csrf-mfa-on")).await;
+    assert!(
+        !body.contains("MFA is disabled for this realm"),
+        "no banner when required"
+    );
+}
+
 // NOTE: admin_edit_realm_succeeds removed — realms are now managed
 // via hearth.yaml; the /admin/realms/{id}/edit route no longer exists.
 
@@ -1667,45 +1727,20 @@ async fn admin_app_detail_renders() {
 }
 
 // ===========================================================================
-// ID-token signing algorithm under FAPI 2.0 (task 26.55)
+// ID-token signing algorithm in the console (task 26.55)
 // ===========================================================================
 //
-// FAPI 2.0 Security Profile §5.4.1 permits only PS256, ES256 and EdDSA, so the
-// engine refuses RS256 ID tokens for a client with the FAPI 2.0 profile and
-// for every client of a realm with a `fapi_profile` (`FapiViolation`). The
-// console must report that refusal on the form, not as a 500 or a generic
-// message; must not re-assert an unchanged RS256 on an unrelated edit (the
-// edit form always posts the radio, while an omitted field means "unchanged"
-// on the REST and gRPC update paths); and must not offer RS256 where the
-// engine would refuse it.
+// The console offers RS256 next to EdDSA, and an unrelated edit of an RS256
+// application saves without touching the algorithm (the edit form always
+// posts the radio, while an omitted field means "unchanged" on the REST
+// update path).
 
 /// Application form fields shared by the create and edit posts below.
 const RP_FORM: &str = "redirect_uris=https%3A%2F%2Frp.example.com%2Fcb\
                        &grant_authorization_code=1&trust_level=third_party";
 
-/// Turns a FAPI 2.0 profile on for the rig's `acme` realm.
-fn enable_realm_fapi(rig: &TestRig) {
-    rig.identity
-        .update_realm(
-            &rig.realm_id,
-            &UpdateRealmRequest {
-                config: Some(RealmConfig {
-                    fapi_profile: Some(FapiProfile::Baseline),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-        )
-        .expect("turn fapi_profile on");
-}
-
-/// Registers an `acme` client whose ID tokens use `alg`. A FAPI 2.0 client
-/// registers the JWKS its `private_key_jwt` authentication requires.
-fn register_rp(rig: &TestRig, alg: &str, profile: ClientProfile) -> OAuthClient {
-    let jwks = profile.is_fapi2().then(|| {
-        r#"{"keys":[{"kty":"OKP","use":"sig","alg":"EdDSA","crv":"Ed25519","x":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo","kid":"fapi2-rp"}]}"#
-            .to_string()
-    });
+/// Registers an `acme` client whose ID tokens use `alg`.
+fn register_rp(rig: &TestRig, alg: &str) -> OAuthClient {
     rig.identity
         .register_client(
             &rig.realm_id,
@@ -1713,8 +1748,6 @@ fn register_rp(rig: &TestRig, alg: &str, profile: ClientProfile) -> OAuthClient 
                 client_name: "Console RP".to_string(),
                 redirect_uris: vec!["https://rp.example.com/cb".to_string()],
                 grant_types: vec!["authorization_code".to_string()],
-                jwks,
-                profile,
                 id_token_signed_response_alg: Some(alg.to_string()),
                 ..Default::default()
             },
@@ -1779,16 +1812,6 @@ fn id_token_alg_radio(body: &str, alg: &str) -> Vec<String> {
 /// boolean attribute `name`.
 fn has_flag(attributes: &[String], name: &str) -> bool {
     attributes.iter().any(|attribute| attribute == name)
-}
-
-/// The engine's FAPI refusal reaches the form: it names FAPI 2.0 and RS256.
-fn assert_fapi_rs256_refusal(status: StatusCode, body: &str) {
-    assert_eq!(status, StatusCode::OK, "the refusal re-renders the form");
-    let error = form_error(body).expect("the form shows an error");
-    assert!(
-        error.contains("FAPI 2.0") && error.contains("RS256"),
-        "the form must say why RS256 was refused, got: {error}"
-    );
 }
 
 /// Creating a confidential application redirects (post/redirect/get) to its
@@ -1927,65 +1950,13 @@ async fn console_regenerate_shows_the_new_secret_once_after_a_redirect() {
     assert!(!again.contains(SHOWN), "and only once");
 }
 
-/// Creating an RS256 application in a FAPI realm shows the engine's reason on
-/// the form and stores nothing; the same form with EdDSA registers.
+/// An RS256 application can be edited. The form posts the stored RS256
+/// back, which is no change, so an unrelated edit saves, as it does over
+/// REST, and the algorithm stays as it was.
 #[tokio::test]
-async fn console_create_reports_the_fapi_refusal_of_rs256() {
+async fn console_edit_of_an_rs256_client_saves_unrelated_changes() {
     let rig = build_rig();
-    enable_realm_fapi(&rig);
-    let uri = "/ui/admin/realms/acme/applications/new";
-
-    let (status, _, body) = console_request(
-        &rig,
-        uri,
-        Some(&format!(
-            "client_name=Refused+RP&{RP_FORM}&id_token_signed_response_alg=RS256"
-        )),
-    )
-    .await;
-    assert_fapi_rs256_refusal(status, &body);
-    let stored = rig
-        .identity
-        .list_clients(&rig.realm_id, &PageRequest::default())
-        .expect("list_clients");
-    assert!(
-        stored
-            .items
-            .iter()
-            .all(|client| client.client_name() != "Refused RP"),
-        "a refused registration stores nothing"
-    );
-
-    // Control: RS256 is the only thing refused.
-    let (status, location, body) = console_request(
-        &rig,
-        uri,
-        Some(&format!(
-            "client_name=EdDSA+RP&{RP_FORM}&id_token_signed_response_alg=EdDSA"
-        )),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::SEE_OTHER,
-        "EdDSA registers in a FAPI realm, got: {:?}",
-        form_error(&body)
-    );
-    assert!(
-        location.starts_with("/ui/admin/realms/acme/applications/"),
-        "expected the new application's page, got: {location}"
-    );
-}
-
-/// An RS256 application whose realm has since turned FAPI on can still be
-/// edited. The form posts the stored RS256 back, which is no change, so an
-/// unrelated edit saves, as it does over REST and gRPC, and the algorithm
-/// stays as it was.
-#[tokio::test]
-async fn console_edit_of_an_rs256_client_in_a_fapi_realm_saves_unrelated_changes() {
-    let rig = build_rig();
-    let client = register_rp(&rig, "RS256", ClientProfile::Standard);
-    enable_realm_fapi(&rig);
+    let client = register_rp(&rig, "RS256");
     let cid = client.client_id().as_uuid();
 
     let (status, location, body) = console_request(
@@ -2019,104 +1990,117 @@ async fn console_edit_of_an_rs256_client_in_a_fapi_realm_saves_unrelated_changes
     );
 }
 
-/// Posts the edit form of an EdDSA `client` with RS256 selected and asserts
-/// the FAPI refusal reaches the form and nothing changed.
-async fn assert_console_edit_refuses_rs256(rig: &TestRig, client: &OAuthClient) {
-    let cid = client.client_id().as_uuid();
-    let (status, _, body) = console_request(
-        rig,
-        &format!("/ui/admin/realms/acme/applications/{cid}/edit"),
-        Some(&format!(
-            "client_name=Console+RP&{RP_FORM}&id_token_signed_response_alg=RS256"
-        )),
-    )
-    .await;
-    assert_fapi_rs256_refusal(status, &body);
-    let stored = rig
-        .identity
-        .get_client(&rig.realm_id, client.client_id())
-        .expect("get_client")
-        .expect("the client exists");
-    assert_eq!(
-        stored.id_token_signed_response_alg(),
-        IdTokenSigningAlg::EdDsa,
-        "a refused edit changes nothing"
-    );
-}
-
-/// Selecting RS256 on the edit form where FAPI 2.0 applies, through the
-/// application's own FAPI 2.0 profile or through its realm's `fapi_profile`,
-/// shows the engine's reason and changes nothing.
+/// Both forms offer RS256: a new application may pick it, and the edit page
+/// of an RS256 application shows it selected and selectable, with no notice
+/// that its ID-token grants are refused.
 #[tokio::test]
-async fn console_edit_reports_the_fapi_refusal_of_rs256() {
-    let rig = build_rig();
-    let fapi2_client = register_rp(&rig, "EdDSA", ClientProfile::Fapi2);
-    let standard_client = register_rp(&rig, "EdDSA", ClientProfile::Standard);
-
-    // The application's own profile, while the realm has no FAPI profile ...
-    assert_console_edit_refuses_rs256(&rig, &fapi2_client).await;
-    // ... and the realm's.
-    enable_realm_fapi(&rig);
-    assert_console_edit_refuses_rs256(&rig, &standard_client).await;
-}
-
-/// The forms do not offer RS256 where FAPI 2.0 forbids it, and the edit page
-/// of an RS256 application in a FAPI realm says its ID-token grants are
-/// refused until it is switched to EdDSA.
-#[tokio::test]
-async fn console_forms_do_not_offer_rs256_under_fapi() {
+async fn console_forms_offer_rs256() {
     const REFUSED_NOTICE: &str = "until it is switched to EdDSA";
     let rig = build_rig();
-    let new_uri = "/ui/admin/realms/acme/applications/new";
-    let edit_uri = |client: &OAuthClient| {
-        format!(
-            "/ui/admin/realms/acme/applications/{}/edit",
-            client.client_id().as_uuid()
-        )
-    };
-    let rs256_client = register_rp(&rig, "RS256", ClientProfile::Standard);
-    let fapi2_client = register_rp(&rig, "EdDSA", ClientProfile::Fapi2);
+    let rs256_client = register_rp(&rig, "RS256");
 
-    // Control: without FAPI, both forms offer RS256.
-    let (_, _, body) = console_request(&rig, new_uri, None).await;
+    let (_, _, body) = console_request(&rig, "/ui/admin/realms/acme/applications/new", None).await;
     let rs256 = id_token_alg_radio(&body, "RS256");
     assert!(!has_flag(&rs256, "disabled"), "got: {rs256:?}");
-    let (_, _, body) = console_request(&rig, &edit_uri(&rs256_client), None).await;
+    let (_, _, body) = console_request(
+        &rig,
+        &format!(
+            "/ui/admin/realms/acme/applications/{}/edit",
+            rs256_client.client_id().as_uuid()
+        ),
+        None,
+    )
+    .await;
     let rs256 = id_token_alg_radio(&body, "RS256");
     assert!(
         has_flag(&rs256, "checked") && !has_flag(&rs256, "disabled"),
         "got: {rs256:?}"
     );
     assert!(!body.contains(REFUSED_NOTICE));
+}
 
-    // An application with the FAPI 2.0 profile is not offered RS256.
-    let (_, _, body) = console_request(&rig, &edit_uri(&fapi2_client), None).await;
-    let rs256 = id_token_alg_radio(&body, "RS256");
-    assert!(has_flag(&rs256, "disabled"), "got: {rs256:?}");
+// ===========================================================================
+// Application form errors and delete
+// ===========================================================================
+//
+// The FAPI refusal tests used to be the only ones that reached the
+// invalid-input branches of the create and edit handlers. Any invalid input
+// reaches them, so a redirect URI with a fragment stands in.
 
-    // Nor is a new application of a FAPI realm; EdDSA stays the default.
-    enable_realm_fapi(&rig);
-    let (_, _, body) = console_request(&rig, new_uri, None).await;
-    let rs256 = id_token_alg_radio(&body, "RS256");
-    assert!(has_flag(&rs256, "disabled"), "got: {rs256:?}");
-    let eddsa = id_token_alg_radio(&body, "EdDSA");
-    assert!(
-        has_flag(&eddsa, "checked") && !has_flag(&eddsa, "disabled"),
-        "got: {eddsa:?}"
-    );
+/// Application form fields with a redirect URI the engine refuses.
+const FRAGMENT_FORM: &str = "redirect_uris=https%3A%2F%2Frp.example.com%2Fcb%23frag\
+                             &grant_authorization_code=1&trust_level=third_party";
 
-    // An RS256 application registered before the realm turned FAPI on shows
-    // its algorithm, cannot re-select it, and is flagged.
-    let (_, _, body) = console_request(&rig, &edit_uri(&rs256_client), None).await;
-    let rs256 = id_token_alg_radio(&body, "RS256");
-    assert!(
-        has_flag(&rs256, "checked") && has_flag(&rs256, "disabled"),
-        "got: {rs256:?}"
-    );
-    assert!(
-        body.contains(REFUSED_NOTICE),
-        "the edit page must say the application's ID-token grants are refused"
-    );
+/// A create the engine refuses re-renders the form with the reason, keeps the
+/// typed values, and registers nothing.
+#[tokio::test]
+async fn console_create_with_invalid_input_rerenders_with_the_reason() {
+    let rig = build_rig();
+    let (status, location, body) = console_request(
+        &rig,
+        "/ui/admin/realms/acme/applications/new",
+        Some(&format!("client_name=Fragment+RP&{FRAGMENT_FORM}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "location: {location}");
+    let error = form_error(&body).expect("the form shows an error");
+    assert!(error.contains("fragment"), "got: {error}");
+    assert!(body.contains("Fragment RP"), "the typed name is kept");
+    let names: Vec<String> = rig
+        .identity
+        .list_clients(&rig.realm_id, &PageRequest::default())
+        .expect("list_clients")
+        .items
+        .iter()
+        .map(|c| c.client_name().to_string())
+        .collect();
+    assert!(!names.iter().any(|n| n == "Fragment RP"), "got: {names:?}");
+}
+
+/// An edit the engine refuses re-renders the form with the reason and leaves
+/// the stored client unchanged.
+#[tokio::test]
+async fn console_edit_with_invalid_input_rerenders_with_the_reason() {
+    let rig = build_rig();
+    let client = register_rp(&rig, "EdDSA");
+    let cid = client.client_id().as_uuid();
+    let (status, location, body) = console_request(
+        &rig,
+        &format!("/ui/admin/realms/acme/applications/{cid}/edit"),
+        Some(&format!("client_name=Renamed+RP&{FRAGMENT_FORM}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "location: {location}");
+    let error = form_error(&body).expect("the form shows an error");
+    assert!(error.contains("fragment"), "got: {error}");
+    let stored = rig
+        .identity
+        .get_client(&rig.realm_id, client.client_id())
+        .expect("get_client")
+        .expect("the client exists");
+    assert_eq!(stored.client_name(), "Console RP", "nothing was saved");
+    assert_eq!(stored.redirect_uris(), ["https://rp.example.com/cb"]);
+}
+
+/// The delete form removes the client and returns to the application list.
+#[tokio::test]
+async fn console_delete_removes_the_application() {
+    let rig = build_rig();
+    let client = register_rp(&rig, "EdDSA");
+    let cid = client.client_id().as_uuid();
+    let (status, location, _) = console_request(
+        &rig,
+        &format!("/ui/admin/realms/acme/applications/{cid}/delete"),
+        Some(""),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(location, "/ui/admin/realms/acme/applications");
+    let stored = rig
+        .identity
+        .get_client(&rig.realm_id, client.client_id())
+        .expect("get_client");
+    assert!(stored.is_none(), "the client is gone");
 }
 
 // ===========================================================================

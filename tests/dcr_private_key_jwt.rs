@@ -1,23 +1,21 @@
 #![allow(clippy::unwrap_used)]
 //! Dynamic Client Registration (RFC 7591) registers clients that can
-//! authenticate — including `private_key_jwt` clients and clients of a FAPI
-//! 2.0 Advanced realm.
+//! authenticate — including `private_key_jwt` clients.
 //!
 //! `POST /register` always minted a secret and answered
 //! `token_endpoint_auth_method: client_secret_basic`, and both DCR routes
-//! dropped `jwks`: in a FAPI 2.0 Advanced realm, which refuses every secret
-//! and every public client, DCR handed out clients that could never
-//! authenticate. Now both routes read `jwks` (RFC 7591 §2, validated) and
+//! dropped `jwks`, so DCR could not hand out a `private_key_jwt` client. Now
+//! both routes read `jwks` (RFC 7591 §2, validated) and
 //! `token_endpoint_auth_method`; a client registering keys defaults to
-//! `private_key_jwt` (no secret), the response states the method that works,
-//! and an Advanced realm refuses anything else with `invalid_client_metadata`.
+//! `private_key_jwt` (no secret), and the response states the method that
+//! works.
 
 mod common;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use hearth::core::{ClientId, RealmId};
-use hearth::identity::{CreateRealmRequest, DcrPolicy, FapiProfile, RealmConfig};
+use hearth::identity::{CreateRealmRequest, DcrPolicy, RealmConfig};
 use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair};
 
@@ -71,7 +69,7 @@ struct Env {
     issuer: String,
 }
 
-async fn env(fapi: Option<FapiProfile>) -> Env {
+async fn env() -> Env {
     let h = common::TestHarness::server().await.expect("server harness");
     let base = h.base_url().expect("base_url").to_string();
     let realm_name = format!("dcr-pkjwt-{}", uuid::Uuid::new_v4());
@@ -81,7 +79,6 @@ async fn env(fapi: Option<FapiProfile>) -> Env {
             name: realm_name.clone(),
             config: Some(RealmConfig {
                 dcr_policy: Some(DcrPolicy::Open),
-                fapi_profile: fapi,
                 ..Default::default()
             }),
         })
@@ -174,7 +171,7 @@ fn assert_invalid_metadata(status: u16, body: &serde_json::Value, what: &str) {
 /// authenticates with an assertion.
 #[tokio::test]
 async fn dcr_registers_a_private_key_jwt_client() {
-    let env = env(None).await;
+    let env = env().await;
     for route in ROUTES {
         for explicit in [false, true] {
             let what = format!("{route:?} explicit={explicit}");
@@ -207,10 +204,10 @@ async fn dcr_registers_a_private_key_jwt_client() {
     }
 }
 
-/// A secret-based registration still works outside FAPI Advanced and says so.
+/// A secret-based registration still works and says so.
 #[tokio::test]
 async fn dcr_secret_registration_states_its_method() {
-    let env = env(None).await;
+    let env = env().await;
     for route in ROUTES {
         for method in ["client_secret_basic", "client_secret_post"] {
             let (status, body) = env
@@ -237,7 +234,7 @@ async fn dcr_secret_registration_states_its_method() {
 /// Invalid key metadata is refused as `invalid_client_metadata`.
 #[tokio::test]
 async fn dcr_refuses_unusable_keys() {
-    let env = env(None).await;
+    let env = env().await;
     let key = ClientKey::new();
     let mut private = key.jwks();
     private["keys"][0]["d"] = serde_json::json!("nWGxne_9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A");
@@ -270,39 +267,5 @@ async fn dcr_refuses_unusable_keys() {
             let (status, body) = env.register(route, extra).await;
             assert_invalid_metadata(status, &body, &format!("{route:?} {what}"));
         }
-    }
-}
-
-/// A FAPI 2.0 Advanced realm accepts `private_key_jwt` registrations only.
-#[tokio::test]
-async fn dcr_in_a_fapi_advanced_realm_requires_private_key_jwt() {
-    let env = env(Some(FapiProfile::Advanced)).await;
-    for route in ROUTES {
-        for (what, extra) in [
-            ("no keys (default method)", serde_json::json!({})),
-            (
-                "client_secret_basic",
-                serde_json::json!({ "token_endpoint_auth_method": "client_secret_basic" }),
-            ),
-            (
-                "none",
-                serde_json::json!({ "token_endpoint_auth_method": "none" }),
-            ),
-        ] {
-            let (status, body) = env.register(route, extra).await;
-            assert_invalid_metadata(status, &body, &format!("{route:?} {what}"));
-        }
-        let key = ClientKey::new();
-        let (status, body) = env
-            .register(route, serde_json::json!({ "jwks": key.jwks() }))
-            .await;
-        assert_eq!(status, 201, "{route:?} with jwks: {body}");
-        assert_eq!(body["token_endpoint_auth_method"], "private_key_jwt");
-        let client_id = body["client_id"].as_str().unwrap();
-        assert_eq!(
-            env.introspect_with_assertion(route, client_id, &key).await,
-            200,
-            "{route:?}: the Advanced-realm client authenticates"
-        );
     }
 }

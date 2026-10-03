@@ -66,7 +66,7 @@ fn config_with_seeding(
 
 #[tokio::test]
 async fn seeding_creates_users_sharing_demo_password() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let rbac = harness.rbac();
 
@@ -123,7 +123,7 @@ async fn seeding_creates_users_sharing_demo_password() {
 
 #[tokio::test]
 async fn seeding_skipped_when_demo_disabled() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let rbac = harness.rbac();
 
@@ -151,7 +151,7 @@ async fn seeding_skipped_when_demo_disabled() {
 
 #[tokio::test]
 async fn seeding_is_idempotent_and_resumable() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let rbac = harness.rbac();
 
@@ -204,7 +204,7 @@ async fn seeding_is_idempotent_and_resumable() {
 
 #[tokio::test]
 async fn seeding_large_count_crosses_flush_boundary() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let rbac = harness.rbac();
 

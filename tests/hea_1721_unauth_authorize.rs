@@ -9,7 +9,6 @@
 //! - `authed_authorize_issues_code_for_token_subject` — valid Bearer for user A
 //!   with a decoy `user_id=B` in the body → code issued for A (the token
 //!   subject), never B; proves the body `user_id` cannot impersonate
-//! - `grpc_unauth_authorize_rejected` — gRPC authorize without Authorization metadata → UNAUTHENTICATED
 
 #![allow(clippy::unwrap_used)]
 
@@ -20,13 +19,8 @@ use std::sync::Arc;
 use hearth::identity::{
     CreateRealmRequest, CreateUserRequest, RegisterClientRequest, SessionContext,
 };
-use hearth::protocol::admin_auth::AdminRateLimiter;
-use hearth::protocol::grpc::oauth::OAuthSvc;
-use hearth::protocol::grpc::GrpcState;
 use hearth::protocol::http::{router, AppState};
-use hearth::protocol::proto::identity::v1::{self as pb, o_auth_service_server::OAuthService};
 use tokio::net::TcpListener;
-use tonic::{Code, Request};
 
 const REDIRECT_URI: &str = "https://app.example.com/callback";
 const PKCE_CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
@@ -42,7 +36,7 @@ struct TestEnv {
 }
 
 async fn setup() -> TestEnv {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let realm = harness
         .identity()
@@ -252,88 +246,5 @@ async fn authed_authorize_issues_code_for_token_subject() {
         claims["sub"].as_str(),
         Some(expected_sub.as_str()),
         "token sub must match the authenticated user (from Bearer token), not the body's user_id"
-    );
-}
-
-/// HEA-1721 gRPC parity: gRPC Authorize without an Authorization metadata header
-/// must return UNAUTHENTICATED — no code is issued.
-#[tokio::test]
-async fn grpc_unauth_authorize_rejected() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
-
-    let realm = harness
-        .identity()
-        .create_realm(&CreateRealmRequest {
-            name: format!("hea-1721-grpc-{}", uuid::Uuid::new_v4()),
-            config: None,
-        })
-        .expect("create realm");
-    let realm_id = realm.id().clone();
-
-    let client = harness
-        .identity()
-        .register_client(
-            &realm_id,
-            &RegisterClientRequest {
-                client_name: "HEA-1721 gRPC Client".to_string(),
-                redirect_uris: vec![REDIRECT_URI.to_string()],
-                client_secret: None,
-                require_consent: false,
-                trust_level: hearth::identity::ClientTrustLevel::FirstParty,
-                grant_types: vec!["authorization_code".to_string()],
-                ..Default::default()
-            },
-        )
-        .expect("register client");
-
-    let user = harness
-        .identity()
-        .create_user(
-            &realm_id,
-            &CreateUserRequest {
-                email: format!("hea1721-grpc-{}@test.invalid", uuid::Uuid::new_v4()),
-                display_name: "HEA-1721 gRPC User".to_string(),
-                ..Default::default()
-            },
-        )
-        .expect("create user");
-
-    let svc = OAuthSvc::new(GrpcState::new(
-        harness.identity_arc(),
-        harness.rbac_arc(),
-        harness.audit_arc(),
-        Arc::new(AdminRateLimiter::new()),
-    ));
-
-    // Build a gRPC request with NO authorization metadata — the attack vector.
-    let mut req = Request::new(pb::AuthorizationRequest {
-        client_id: client.client_id().as_uuid().to_string(),
-        redirect_uri: REDIRECT_URI.to_string(),
-        scope: "openid".to_string(),
-        state: "grpc-attack-state".to_string(),
-        response_type: "code".to_string(),
-        user_id: user.id().as_uuid().to_string(),
-        code_challenge: Some(PKCE_CHALLENGE.to_string()),
-        code_challenge_method: Some("S256".to_string()),
-        ..Default::default()
-    });
-    req.metadata_mut().insert(
-        "x-realm-id",
-        realm_id
-            .as_uuid()
-            .to_string()
-            .parse()
-            .expect("valid header"),
-    );
-    // Intentionally omit "authorization" metadata.
-
-    let err = svc
-        .authorize(req)
-        .await
-        .expect_err("gRPC authorize without auth must fail");
-    assert_eq!(
-        err.code(),
-        Code::Unauthenticated,
-        "must return UNAUTHENTICATED, not a different error code"
     );
 }

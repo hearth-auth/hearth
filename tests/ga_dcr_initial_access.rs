@@ -27,7 +27,7 @@ struct Env {
 }
 
 async fn env() -> Env {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm_name = format!("dcr-iat-{}", uuid::Uuid::new_v4());
     let realm = h
         .identity()

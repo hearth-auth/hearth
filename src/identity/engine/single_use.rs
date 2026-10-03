@@ -112,7 +112,7 @@ impl EmbeddedIdentityEngine {
     }
 
     /// A pending OTP's expiry as a [`Timestamp`], for dating its marker.
-    pub(super) fn otp_expiry(stored: &crate::identity::sms::otp::StoredOtp) -> Timestamp {
+    pub(super) fn otp_expiry(stored: &crate::identity::otp::StoredOtp) -> Timestamp {
         let secs = i64::try_from(stored.expiry_unix_ts).unwrap_or(i64::MAX / 1_000_000);
         Timestamp::from_micros(secs.saturating_mul(1_000_000))
     }

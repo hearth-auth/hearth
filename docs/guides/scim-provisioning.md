@@ -36,7 +36,7 @@ A realm with no SCIM bearer token accepts an admin access token for the same rea
 | Resource | Required permission | Same rule as |
 |----------|---------------------|--------------|
 | `/scim/v2/Users` (every method, reads included) | `hearth.users.admin` | REST `/admin/users*` |
-| `/scim/v2/Groups` (every method, reads included) | `hearth.realm.admin` | gRPC organization RPCs |
+| `/scim/v2/Groups` (every method, reads included) | `hearth.realm.admin` | REST `/admin/organizations*` |
 
 Any other admin permission (`hearth.clients.admin`, `hearth.agents.admin`, or the wrong one of the two above) is refused with `403 Forbidden`.
 

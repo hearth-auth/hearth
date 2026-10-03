@@ -157,6 +157,9 @@ struct RealmAdminView {
 #[template(path = "ui/admin/realms/detail.html")]
 struct RealmDetailTemplate {
     realm: Realm,
+    /// The realm's MFA requirement is off: the page shows a persistent
+    /// warning (spec `mfa-policy`).
+    mfa_off: bool,
     /// Pre-formatted access token TTL (e.g. "15m", "1h").
     access_token_ttl_display: Option<String>,
     /// Pre-formatted refresh token TTL.
@@ -205,8 +208,10 @@ pub async fn admin_realm_detail(
             let password_memory_cost_display = cfg.password_memory_cost.map(format_kib_human);
             let admins = resolve_realm_admins(&state, realm.id());
             let product_name = state.product_name_for(realm.id());
+            let mfa_off = !crate::identity::realm_requires_mfa(realm.config());
             render(&RealmDetailTemplate {
                 realm,
+                mfa_off,
                 access_token_ttl_display,
                 refresh_token_ttl_display,
                 lockout_duration_display,
@@ -446,6 +451,7 @@ fn action_label(action: &crate::audit::AuditAction) -> &'static str {
         A::InvitationCreated => "Invitation Created",
         A::InvitationAccepted => "Invitation Accepted",
         A::InvitationRevoked => "Invitation Revoked",
+        A::MfaRequirementChanged => "MFA Requirement Changed",
         A::GroupCreated => "Group Created",
         A::GroupUpdated => "Group Updated",
         A::GroupDeleted => "Group Deleted",
@@ -496,15 +502,6 @@ fn action_label(action: &crate::audit::AuditAction) -> &'static str {
         A::BreachCheckUnavailable => "Breach Check Unavailable",
         A::MfaEnabled => "MFA Enabled",
         A::MfaDisabled => "MFA Disabled",
-        A::StepUpMfaTriggered => "Step-Up MFA Triggered",
-        A::StepUpMfaCompleted => "Step-Up MFA Completed",
-        A::SmsOtpEnrollmentStarted => "SMS OTP Enrollment Started",
-        A::SmsOtpEnrollmentVerified => "SMS OTP Enrollment Verified",
-        A::SmsOtpEnrollmentFailed => "SMS OTP Enrollment Failed",
-        A::SmsMfaChallengeSucceeded => "SMS MFA Challenge Succeeded",
-        A::SmsMfaChallengeFailed => "SMS MFA Challenge Failed",
-        A::SmsMfaLocked => "SMS MFA Locked",
-        A::DeviceFingerprintsErased => "Device Fingerprints Erased",
         A::SessionLimitEnforced => "Session Limit Enforced",
         A::SessionsRevoked => "All Sessions Revoked",
         A::RealmExportWatermarked => "Realm Export (Watermarked)",
@@ -615,17 +612,9 @@ fn action_category(action: &crate::audit::AuditAction) -> &'static str {
         | A::OrphanedReferenceSkipped
         | A::PasswordCompromisedRejected
         | A::BreachCheckUnavailable
-        | A::StepUpMfaTriggered
-        | A::StepUpMfaCompleted
-        | A::SmsOtpEnrollmentStarted
-        | A::SmsOtpEnrollmentVerified
-        | A::SmsOtpEnrollmentFailed
-        | A::SmsMfaChallengeSucceeded
-        | A::SmsMfaChallengeFailed
-        | A::SmsMfaLocked
-        | A::DeviceFingerprintsErased
         | A::MfaEnabled
-        | A::MfaDisabled => "Security",
+        | A::MfaDisabled
+        | A::MfaRequirementChanged => "Security",
         // System — realm config, federation/SAML/SCIM integrations,
         // backup/restore, and internal cleanup jobs.
         A::RealmCreated
@@ -2744,17 +2733,10 @@ pub struct PatchRealmConfigBody {
     /// `"UPDATE_PASSWORD"`); unknown values return 400.
     #[serde(default)]
     pub default_required_actions: Option<Vec<String>>,
-    /// Replaces the realm's allowed MFA methods list (e.g. `["totp","sms"]`).
+    /// Replaces the realm's allowed MFA methods list (e.g. `["totp","webauthn"]`).
     ///
     /// `null` / absent leaves the field unchanged. Pass `[]` to clear.
-    /// The value `"sms"` enables SMS OTP as an MFA method for this realm.
     pub mfa_methods: Option<Vec<String>>,
-    /// Per-realm SMS OTP expiry in seconds. `null` clears the override
-    /// (reverts to the engine default of 600 s).
-    pub sms_otp_expiry_seconds: Option<u64>,
-    /// Per-realm SMS OTP maximum verification attempts. `null` clears
-    /// the override (reverts to the engine default of 5).
-    pub sms_otp_max_attempts: Option<u32>,
     /// Per-realm Email OTP expiry in seconds. `null` clears the override
     /// (reverts to the engine default of 600 s).
     pub email_otp_expiry_seconds: Option<u64>,
@@ -2766,8 +2748,8 @@ pub struct PatchRealmConfigBody {
 /// `PATCH /admin/realms/{realm}/config`
 ///
 /// Updates mutable realm config fields. Currently exposed:
-/// `default_required_actions`, `mfa_methods`, `sms_otp_expiry_seconds`,
-/// `sms_otp_max_attempts`.
+/// `default_required_actions`, `mfa_methods`, `email_otp_expiry_seconds`,
+/// `email_otp_max_attempts`.
 ///
 /// Requires realm-admin token; returns 403 otherwise.
 /// Unknown action type strings return 400.
@@ -2827,10 +2809,8 @@ pub async fn admin_api_realm_config_patch(
     }
     if let Some(methods) = body.mfa_methods {
         // The same rule the YAML validator and the JSON admin API apply:
-        // known names only, and no `sms` on a transport that cannot deliver.
-        if let Err(reason) =
-            crate::config::check_mfa_methods(&methods, state.sms_transport, state.dev_mode)
-        {
+        // known names only.
+        if let Err(reason) = crate::config::check_mfa_methods(&methods) {
             return (
                 axum::http::StatusCode::BAD_REQUEST,
                 axum::Json(serde_json::json!({ "error": reason })),
@@ -2848,12 +2828,6 @@ pub async fn admin_api_realm_config_patch(
     // the field (None → leave unchanged) or passes a value (Some(v) → set).
     // Passing JSON `null` is not supported for these numeric fields; omit to
     // leave unchanged.
-    if let Some(v) = body.sms_otp_expiry_seconds {
-        config.sms_otp_expiry_seconds = Some(v);
-    }
-    if let Some(v) = body.sms_otp_max_attempts {
-        config.sms_otp_max_attempts = Some(v);
-    }
     if let Some(v) = body.email_otp_expiry_seconds {
         config.email_otp_expiry_seconds = Some(v);
     }
@@ -3198,12 +3172,6 @@ mod action_category_tests {
             A::OrphanedReferenceSkipped,
             A::PasswordCompromisedRejected,
             A::BreachCheckUnavailable,
-            A::SmsOtpEnrollmentStarted,
-            A::SmsOtpEnrollmentVerified,
-            A::SmsOtpEnrollmentFailed,
-            A::SmsMfaChallengeSucceeded,
-            A::SmsMfaChallengeFailed,
-            A::SmsMfaLocked,
         ] {
             assert_eq!(action_category(&a), "Security", "{a:?}");
         }

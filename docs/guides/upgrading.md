@@ -137,7 +137,7 @@ This procedure replaces the binary while the service is managed by systemd. Tota
    sudo systemctl stop hearth
    ```
 
-   `systemctl stop` sends SIGTERM. Hearth catches SIGTERM and drains in-flight HTTP and gRPC requests before exiting cleanly (controlled by `operational.shutdown_timeout_secs`, default 10 s). Wait for the service to reach the `inactive` state before continuing:
+   `systemctl stop` sends SIGTERM. Hearth catches SIGTERM and drains in-flight HTTP requests before exiting cleanly (controlled by `operational.shutdown_timeout_secs`, default 10 s). Wait for the service to reach the `inactive` state before continuing:
 
    ```bash
    sudo systemctl is-active hearth

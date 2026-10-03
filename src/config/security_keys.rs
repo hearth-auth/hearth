@@ -182,14 +182,6 @@ pub(crate) const SECURITY_KEYS: &[SecurityKey] = &[
         "src/abuse/runtime.rs (CrossRealmAggregationCap, A-50)",
     ),
     key(
-        "security.cross_realm_aggregation_cap.sms_realm_hard_cap",
-        "src/abuse/runtime.rs (CrossRealmAggregationCap, A-50)",
-    ),
-    key(
-        "security.cross_realm_aggregation_cap.sms_realm_soft_cap",
-        "src/abuse/runtime.rs (CrossRealmAggregationCap, A-50)",
-    ),
-    key(
         "security.cross_realm_aggregation_cap.window",
         "src/abuse/runtime.rs (CrossRealmAggregationCap, A-50)",
     ),
@@ -229,10 +221,6 @@ pub(crate) const SECURITY_KEYS: &[SecurityKey] = &[
         "security.dpop_nonce_secret",
         "src/main.rs (DPoP nonce HMAC key)",
     ),
-    key(
-        "security.grpc.reflection_enabled",
-        "src/protocol/grpc/server.rs",
-    ),
     // Wired by 22.12: `main.rs` installs these through
     // `protocol::http::limits::init_server_limits`, and BOTH accept loops
     // (`serve_router_on` and `serve_tls_router`) read them. They were
@@ -244,30 +232,6 @@ pub(crate) const SECURITY_KEYS: &[SecurityKey] = &[
     key(
         "security.http2.max_pending_reset_streams",
         "src/protocol/http/limits.rs (both accept loops)",
-    ),
-    key(
-        "security.ip_reputation.action",
-        "src/abuse/ip_reputation/mod.rs",
-    ),
-    key(
-        "security.ip_reputation.enabled",
-        "src/abuse/ip_reputation/mod.rs",
-    ),
-    key(
-        "security.ip_reputation.maxmind_db_path",
-        "src/abuse/ip_reputation/maxmind.rs, src/abuse/runtime.rs",
-    ),
-    key(
-        "security.ip_reputation.spamhaus.drop_url",
-        "src/abuse/ip_reputation/spamhaus.rs",
-    ),
-    key(
-        "security.ip_reputation.spamhaus.dropv6_url",
-        "src/abuse/ip_reputation/spamhaus.rs",
-    ),
-    key(
-        "security.ip_reputation.spamhaus.refresh_interval_secs",
-        "src/abuse/ip_reputation/spamhaus.rs",
     ),
     key(
         "security.jwks_rps_limit",
@@ -291,14 +255,6 @@ pub(crate) const SECURITY_KEYS: &[SecurityKey] = &[
     ),
     key(
         "security.outbound_volume_shield.enabled",
-        "src/abuse/runtime.rs (OutboundVolumeShield, A-4)",
-    ),
-    key(
-        "security.outbound_volume_shield.sms_hard_cap",
-        "src/abuse/runtime.rs (OutboundVolumeShield, A-4)",
-    ),
-    key(
-        "security.outbound_volume_shield.sms_soft_cap",
         "src/abuse/runtime.rs (OutboundVolumeShield, A-4)",
     ),
     key(
@@ -342,26 +298,6 @@ pub(crate) const SECURITY_KEYS: &[SecurityKey] = &[
         "src/config/validate.rs::resolve_pepper -> src/identity/credentials.rs",
     ),
     key(
-        "security.providers.bot_signal.enabled",
-        "src/abuse/runtime.rs (HeuristicBotSignalProvider, P-3)",
-    ),
-    key(
-        "security.providers.bot_signal.extra_ja3_blocklist",
-        "src/abuse/runtime.rs (HeuristicBotSignalProvider, P-3)",
-    ),
-    key(
-        "security.providers.bot_signal.extra_ja4_blocklist",
-        "src/abuse/runtime.rs (HeuristicBotSignalProvider, P-3)",
-    ),
-    key(
-        "security.providers.email_reputation.enabled",
-        "src/abuse/runtime.rs (BuiltinEmailReputation, P-5)",
-    ),
-    key(
-        "security.providers.email_reputation.extra_disposable_domains",
-        "src/abuse/runtime.rs (BuiltinEmailReputation, P-5)",
-    ),
-    key(
         "security.rate_limiting.admin_per_minute",
         "src/protocol/admin_auth.rs (AdminRateLimiter), src/main.rs",
     ),
@@ -392,52 +328,8 @@ pub(crate) const SECURITY_KEYS: &[SecurityKey] = &[
         "src/identity/engine/mod.rs (slug reservation)",
     ),
     key(
-        "security.risk_scorer.breach_corpus_weight",
-        "src/identity/reconcile.rs -> RealmConfig::risk_scorer_config -> src/abuse/risk_scorer.rs",
-    ),
-    key(
-        "security.risk_scorer.enabled",
-        "src/identity/reconcile.rs -> RealmConfig::risk_scorer_config -> src/abuse/risk_scorer.rs",
-    ),
-    key(
-        "security.risk_scorer.new_country_weight",
-        "src/identity/reconcile.rs -> RealmConfig::risk_scorer_config -> src/abuse/risk_scorer.rs",
-    ),
-    key(
-        "security.risk_scorer.new_device_weight",
-        "src/identity/reconcile.rs -> RealmConfig::risk_scorer_config -> src/abuse/risk_scorer.rs",
-    ),
-    key(
-        "security.risk_scorer.password_age_days_threshold",
-        "src/identity/reconcile.rs -> RealmConfig::risk_scorer_config -> src/abuse/risk_scorer.rs",
-    ),
-    key(
-        "security.risk_scorer.password_age_weight",
-        "src/identity/reconcile.rs -> RealmConfig::risk_scorer_config -> src/abuse/risk_scorer.rs",
-    ),
-    key(
-        "security.risk_scorer.refresh_context_delta_weight",
-        "src/identity/reconcile.rs -> RealmConfig::risk_scorer_config -> src/abuse/risk_scorer.rs",
-    ),
-    key(
-        "security.risk_scorer.step_up_threshold",
-        "src/identity/reconcile.rs -> RealmConfig::risk_scorer_config -> src/abuse/risk_scorer.rs",
-    ),
-    key(
         "security.slug_cooldown_days",
         "src/identity/keys.rs (slug reservation key TTL), src/main.rs",
-    ),
-    key(
-        "security.tarpit.delay_ms",
-        "src/abuse/runtime.rs (TarpitStore, A-17)",
-    ),
-    key(
-        "security.tarpit.threshold",
-        "src/abuse/runtime.rs (TarpitStore, A-17)",
-    ),
-    key(
-        "security.tarpit.window_secs",
-        "src/abuse/runtime.rs (TarpitStore, A-17)",
     ),
     key("security.tls.crl_paths", "src/protocol/tls.rs"),
     key(
@@ -459,8 +351,6 @@ pub(crate) const SECRET_KEYS_OUTSIDE_SECURITY: &[&str] = &[
     "email.mailgun.api_key",
     "email.postmark.server_token",
     "email.mailtrap.api_token",
-    "sms.twilio.auth_token",
-    "sms.sns.secret_access_key",
     "realms.*.scim.bearer_token",
     // `applications` and `federation.providers` are YAML *maps* keyed by client
     // id, so their leaf paths are `realms.<realm>.applications.<id>.<field>`.

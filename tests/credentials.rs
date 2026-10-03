@@ -46,7 +46,7 @@ fn load_stored_credential(
 
 #[tokio::test]
 async fn credential_lifecycle_set_verify_change() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -114,7 +114,7 @@ async fn credential_lifecycle_set_verify_change() {
 
 #[tokio::test]
 async fn change_password_flow() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -176,7 +176,7 @@ async fn change_password_flow() {
 
 #[tokio::test]
 async fn credentials_are_realm_isolated() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm_a = harness.create_realm();
@@ -212,7 +212,7 @@ async fn not_username_policy_rejected() {
         CreateRealmRequest, PasswordPolicy, RealmConfig, RegisterUserRequest, RegistrationPolicy,
     };
 
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness
@@ -277,7 +277,7 @@ async fn not_email_policy_rejected() {
         CreateRealmRequest, PasswordPolicy, RealmConfig, RegisterUserRequest, RegistrationPolicy,
     };
 
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness
@@ -343,7 +343,7 @@ async fn not_email_policy_rejected() {
 async fn history_depth_prevents_reuse() {
     use hearth::identity::{CreateRealmRequest, PasswordPolicy, RealmConfig, RegistrationPolicy};
 
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness
@@ -522,7 +522,7 @@ async fn password_expiry_enforced() {
 async fn set_password_uses_realm_argon2_parameters() {
     use hearth::identity::{CreateRealmRequest, RealmConfig};
 
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
 
@@ -571,7 +571,7 @@ async fn legacy_verify_rehash_uses_realm_argon2_parameters_and_keeps_age() {
     };
     use std::collections::BTreeMap;
 
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
 
@@ -647,7 +647,7 @@ async fn legacy_verify_rehash_uses_realm_argon2_parameters_and_keeps_age() {
 async fn change_and_reset_paths_enforce_realm_password_policy() {
     use hearth::identity::{CreateRealmRequest, PasswordPolicy, RealmConfig, RegistrationPolicy};
 
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness
@@ -717,7 +717,7 @@ async fn change_and_reset_paths_enforce_realm_password_policy() {
 
 #[tokio::test]
 async fn delete_user_removes_credential() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -752,7 +752,7 @@ async fn delete_user_removes_credential() {
 async fn argon2_param_change_triggers_lazy_rehash_on_login() {
     use hearth::identity::{CreateRealmRequest, RealmConfig, UpdateRealmRequest};
 
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
 

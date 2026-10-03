@@ -1711,11 +1711,19 @@ async fn a_cluster_seeded_from_one_offline_restored_directory_serves_it_on_every
         );
     }
 
-    // Sessions are not restored: sign in again on the leader.
+    // Sessions are not restored: sign in again on the leader. The realm
+    // `hearth.yaml` declares requires MFA, so the sign-in proves TOTP.
     let leader = cluster.leader();
     let session = leader
         .identity
-        .create_session(&realm_id, &user_id, &SessionContext::default())
+        .create_session(
+            &realm_id,
+            &user_id,
+            &SessionContext {
+                mfa_proof: hearth::identity::MfaProof::Proved,
+                ..SessionContext::default()
+            },
+        )
         .unwrap();
     let token = leader
         .identity
@@ -2056,7 +2064,6 @@ async fn an_authorization_code_is_redeemed_once_across_a_leader_change() {
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .unwrap()
@@ -2258,7 +2265,6 @@ fn issue_refresh_token(
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .unwrap()
@@ -2314,7 +2320,6 @@ async fn a_refresh_token_rotates_once_across_a_leader_change() {
                 None,
                 Some(&hearth::identity::RefreshBindContext {
                     authenticated_client_id: Some(client.clone()),
-                    ..Default::default()
                 }),
             )
             .is_ok()
@@ -2424,7 +2429,6 @@ async fn a_consent_revocation_is_not_undone_by_a_rotation_across_a_leader_change
                 None,
                 Some(&hearth::identity::RefreshBindContext {
                     authenticated_client_id: Some(bound_client.clone()),
-                    ..Default::default()
                 }),
             )
             .ok()
@@ -2454,7 +2458,6 @@ async fn a_consent_revocation_is_not_undone_by_a_rotation_across_a_leader_change
                 None,
                 Some(&hearth::identity::RefreshBindContext {
                     authenticated_client_id: Some(client.clone()),
-                    ..Default::default()
                 }),
             )
             .is_ok();
@@ -2644,6 +2647,98 @@ async fn an_invitation_is_accepted_once_across_a_leader_change() {
         ),
         "a removed member was re-admitted by a spent invitation"
     );
+
+    cluster.shutdown();
+}
+
+/// scope-trim-trusted-core, task 6.8: the leader and both followers reach the
+/// same MFA decision for the same user, before and after an organization's
+/// requirement changes on the leader (spec `mfa-policy`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn every_node_reaches_the_same_mfa_decision() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(
+        1_700_000_000_000_000,
+    )));
+    let cluster = ThreeNodeCluster::build(&clock).await;
+    let leader = cluster.leader();
+
+    let realm = leader
+        .identity
+        .create_realm(&hearth::identity::CreateRealmRequest {
+            name: "mfa-coherence".to_string(),
+            config: Some(hearth::identity::RealmConfig {
+                mfa_required: Some(false),
+                ..Default::default()
+            }),
+        })
+        .unwrap();
+    let org = leader
+        .identity
+        .create_organization(
+            realm.id(),
+            &hearth::identity::CreateOrganizationRequest {
+                name: "Strict".to_string(),
+                slug: "strict".to_string(),
+                description: None,
+                config: Some(hearth::identity::OrganizationConfig {
+                    mfa_required: true,
+                    ..Default::default()
+                }),
+                attributes: Default::default(),
+            },
+        )
+        .unwrap();
+    let user = leader
+        .identity
+        .create_user(
+            realm.id(),
+            &hearth::identity::CreateUserRequest {
+                email: "member@mfa-coherence.test".to_string(),
+                display_name: "Member".to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    leader
+        .identity
+        .add_member(
+            realm.id(),
+            org.id(),
+            user.id(),
+            hearth::identity::OrganizationRole::Member,
+        )
+        .unwrap();
+    clock.advance(1_000_000);
+    cluster.converge().await;
+
+    let decisions = |cluster: &ThreeNodeCluster| -> Vec<bool> {
+        cluster
+            .nodes
+            .iter()
+            .map(|node| {
+                node.identity
+                    .effective_mfa_requirement(realm.id(), user.id(), None)
+                    .unwrap_or_else(|e| panic!("node {}: {e:?}", node.id()))
+            })
+            .collect()
+    };
+    assert_eq!(decisions(&cluster), vec![true; 3], "the org requires MFA");
+
+    leader
+        .identity
+        .update_organization(
+            realm.id(),
+            org.id(),
+            &hearth::identity::UpdateOrganizationRequest {
+                config: Some(hearth::identity::OrganizationConfig::default()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    clock.advance(1_000_000);
+    cluster.converge().await;
+    assert_eq!(decisions(&cluster), vec![false; 3], "the org dropped it");
 
     cluster.shutdown();
 }

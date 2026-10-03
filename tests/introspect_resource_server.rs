@@ -30,6 +30,8 @@ const SECRET: &str = "rs-introspect-secret-0123456789!";
 fn yaml(introspection_client: &str) -> String {
     format!(
         r#"
+auth:
+  mfa_required: false
 realms:
   {REALM}:
     applications:
@@ -174,7 +176,7 @@ fn active_for(h: &common::TestHarness, realm: &RealmId, token: &str, caller: &Cl
 
 #[tokio::test]
 async fn the_resource_server_named_in_aud_can_introspect_an_audience_only_token() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = reconciled(&h);
     let token = audience_only_token(&h, &realm);
     let rs = app(&h, &realm, "MCP resource server");
@@ -186,7 +188,7 @@ async fn the_resource_server_named_in_aud_can_introspect_an_audience_only_token(
 
 #[tokio::test]
 async fn another_resource_server_cannot_introspect_it() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = reconciled(&h);
     let token = audience_only_token(&h, &realm);
     let other = app(&h, &realm, "Another resource server");

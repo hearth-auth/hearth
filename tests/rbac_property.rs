@@ -117,7 +117,7 @@ proptest! {
     #[test]
     fn random_role_dag_produces_correct_union(dag in arb_role_dag(6)) {
         let rt = make_rt();
-        let h = rt.block_on(common::TestHarness::embedded()).expect("harness");
+        let h = rt.block_on(common::TestHarness::in_process()).expect("harness");
         let realm = RealmId::generate();
         let user = UserId::generate();
 
@@ -201,7 +201,7 @@ proptest! {
     #[test]
     fn random_group_graph_transitive_membership_resolves_role(dag in arb_group_dag(5)) {
         let rt = make_rt();
-        let h = rt.block_on(common::TestHarness::embedded()).expect("harness");
+        let h = rt.block_on(common::TestHarness::in_process()).expect("harness");
         let realm = RealmId::generate();
         let user = UserId::generate();
 
@@ -323,7 +323,7 @@ proptest! {
         unassign_mask in 0u8..32,
     ) {
         let rt = make_rt();
-        let h = rt.block_on(common::TestHarness::embedded()).expect("harness");
+        let h = rt.block_on(common::TestHarness::in_process()).expect("harness");
         let realm_a = RealmId::generate();
         let realm_b = RealmId::generate();
         let user = UserId::generate();

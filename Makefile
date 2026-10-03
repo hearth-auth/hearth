@@ -13,7 +13,7 @@ BUF := buf
 ## with `--workspace`.
 DEV_FEATURES ?= --features hearth/dev-endpoints
 
-.PHONY: setup build test test-detached test-no-dev-endpoints clippy fmt miri asan heap-check unsafe-check loadtest loadtest-check loadtest-smoke seed check coverage css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test sdk-lint test-quality abuse-check auth-discard-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template scratch-prune scratch-prune-dry-run scratch-timer-install
+.PHONY: setup build test test-detached test-no-dev-endpoints clippy fmt miri asan heap-check unsafe-check loadtest loadtest-check loadtest-smoke seed check coverage css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test sdk-lint test-quality abuse-check auth-discard-check mfa-resolver-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template scratch-prune scratch-prune-dry-run scratch-timer-install
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -310,7 +310,7 @@ abuse-check:
 
 ## Guard: auth results in protocol handler files must never be discarded (HEA-1657).
 ## Fails on `let _auth`, `let _ = extract_admin_auth(...)`, or unbound auth calls in
-## src/protocol/http/admin.rs and src/protocol/grpc/*.rs.
+## src/protocol/http/admin.rs and src/protocol/http/admin/*.rs.
 auth-discard-check: ## Lint for discarded authentication results (HEA-1657)
 	@bash scripts/check-auth-discard.sh
 
@@ -326,6 +326,11 @@ security-gate: ## Assert the ROPC password grant is unreachable (HEA-1814/1816/1
 ## leave a stale cached resolution live — a privilege-escalation bug.
 rbac-storage-check: ## Lint for un-invalidating RBAC storage writes (HEA-1781)
 	@bash scripts/check-rbac-storage-writes.sh
+
+## Guard: every "does this sign-in need MFA?" decision goes through the one
+## resolver, IdentityEngine::effective_mfa_requirement (spec mfa-policy).
+mfa-resolver-check: ## Lint for direct reads of mfa_required outside the resolver
+	@bash scripts/check-mfa-resolver.sh
 
 ## Guard: every publish job must wait for a green verdict on its own commit
 ## (audit 2026-08-28 blockers B2 §4.8#1 and B6 §4.12#1). The container image,
@@ -529,14 +534,12 @@ sdk-test:
 
 ## Run every SDK's linter and formatter check — the lint steps of CI's sdk-* jobs.
 ## Needs each SDK's dev dependencies installed (npm ci, composer install,
-## pip install -e '.[dev]') and golangci-lint v2.12.2 on PATH. Kotlin has none.
+## pip install -e '.[dev]') and golangci-lint v2.12.2 on PATH.
 sdk-lint:
-	cd sdks/rust && cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings
 	cd sdks/go && golangci-lint run ./...
 	cd sdks/python && ruff check . && ruff format --check .
 	cd sdks/php && composer analyse
 	cd sdks/typescript && npm run lint && npm run format:check
-	cd sdks/node && npm run lint && npm run format:check
 
 # ── CI Tiers ──────────────────────────────────────────
 
@@ -617,6 +620,7 @@ ci-local-fast: ## Run host-side checks that mirror PR-blocking CI (~5 min)
 	@echo "==> abuse-check (§3.41)"       && $(MAKE) abuse-check
 	@echo "==> auth-discard-check (HEA-1657)" && $(MAKE) auth-discard-check
 	@echo "==> rbac-storage-check (HEA-1781)" && $(MAKE) rbac-storage-check
+	@echo "==> mfa-resolver-check"        && $(MAKE) mfa-resolver-check
 	@echo "==> check (clippy + fmt + nextest)" && $(MAKE) check
 	@echo "==> test-no-dev-endpoints"     && $(MAKE) test-no-dev-endpoints
 	@echo "==> miri + asan (unsafe-check/, §9.2)" && $(MAKE) miri asan

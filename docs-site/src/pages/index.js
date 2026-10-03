@@ -56,68 +56,61 @@ function AdminPage() {
 // ── Node.js ───────────────────────────────────────────────────────────────────
 
 const NODE_SNIPPET = `\
-import { HearthClient } from '@hearth-auth/node';
+import { HearthClient } from '@hearth-auth/sdk';
 
 const client = new HearthClient({
-  issuer_url: 'http://localhost:8420',
-  client_id:  '<client-id>',
+  issuerUrl: 'http://localhost:8420',
+  clientId:  '<client-id>',
 });
 
 // Login route — generate PKCE and build the redirect URL
 app.get('/login', async (req, res) => {
   const { authorizationUrl, state, codeVerifier } = await client.beginLogin(
     'http://localhost:3000/callback', 'openid');
-  req.session.oauthState   = state;
-  req.session.codeVerifier = codeVerifier;
+  req.session.oauth = { state, codeVerifier };
   res.redirect(authorizationUrl);
 });
 
-// Callback route — exchange the code for tokens
+// Callback route — check state, then exchange the code for tokens
 app.get('/callback', async (req, res) => {
+  if (req.query.state !== req.session.oauth.state) return res.status(400).end();
   const tokens = await client.completeLogin(
-    req.query.code, req.session.codeVerifier, 'http://localhost:3000/callback');
-  // store tokens.accessToken in your session, then redirect
+    req.query.code, req.session.oauth.codeVerifier, 'http://localhost:3000/callback');
+  // keep tokens.access_token in your session, then redirect
   res.redirect('/');
 });
 `;
 
 const NODE_EXPRESS_SNIPPET = `\
 import express from 'express';
-import { hearthMiddleware } from '@hearth-auth/node';
+import { HearthClient, hearthMiddleware } from '@hearth-auth/sdk';
 
+const client = new HearthClient({ issuerUrl: 'http://localhost:8420', clientId: 'my-api' });
 const app = express();
 
-// Mount once to attach a verified token to every request
-app.use(hearthMiddleware({
-  issuer_url:   'http://localhost:8420',
-  expectedMode: 'embedded',
-}));
+// Mount once to verify the token and attach its claims to every request
+app.use(hearthMiddleware({ client, mode: 'embedded' }));
 
 // Require a permission on a single route — 401 on missing token, 403 on denied
-app.get('/admin', hearthMiddleware({
-  issuer_url:         'http://localhost:8420',
-  expectedMode:       'embedded',
-  requiredPermission: 'hearth.admin',
-}), (req, res) => {
-  res.json({ sub: req.hearthToken?.subject() });
-});
+app.get('/admin', hearthMiddleware({ client, requiredPermission: 'hearth.admin' }),
+  (req, res) => {
+    res.json({ sub: req.hearthClaims.subject() });
+  });
 `;
 
 const NODE_NEXTJS_SNIPPET = `\
 // middleware.ts — runs in the Edge Runtime (V8 isolate, no Node.js APIs)
-import { NextResponse } from 'next/server';
-import type { NextRequest } from 'next/server';
-import { hearthEdgeMiddleware } from '@hearth-auth/node/nextjs/edge';
+import { NextResponse, type NextRequest } from 'next/server';
+import { HearthClient } from '@hearth-auth/sdk';
+import { hearthEdgeMiddleware } from '@hearth-auth/sdk/nextjs/edge';
 
 const guard = hearthEdgeMiddleware({
-  issuerUrl: process.env.HEARTH_ISSUER_URL!,
-  jwksUri:   \`\${process.env.HEARTH_ISSUER_URL}/.well-known/jwks.json\`,
+  client: new HearthClient({ issuerUrl: process.env.HEARTH_ISSUER_URL! }),
 });
 
 export async function middleware(request: NextRequest) {
-  const result = await guard(request);
-  if (result) return result;   // 401 or 403 — return to client
-  return NextResponse.next();
+  // undefined: go on; otherwise a 401 or 403 Response
+  return (await guard(request)) ?? NextResponse.next();
 }
 
 export const config = { matcher: ['/api/:path*'] };
@@ -281,127 +274,6 @@ public function show(Request $request): JsonResponse {
 }
 `;
 
-// ── Rust ──────────────────────────────────────────────────────────────────────
-
-const RUST_SNIPPET = `\
-use hearth_sdk::HearthClient;
-
-let client = HearthClient::new("http://localhost:8420", "<realm-id>");
-
-// 1. Redirect the user to log in (store verifier + state in the session).
-// challenge = BASE64URL(SHA256(verifier))
-let auth_url = format!("http://localhost:8420/realms/dev-realm/authorize?response_type=code\
-&client_id=<client-id>&redirect_uri=http://localhost:3000/callback&scope=openid\
-&state={state}&code_challenge={challenge}&code_challenge_method=S256");
-
-// 2. On your /callback, exchange the code ("" = public client, no secret):
-let tokens = client.exchange_code(
-    &code, "<client-id>", "", "http://localhost:3000/callback", Some(&verifier)).await?;
-`;
-
-const RUST_ACTIX_SNIPPET = `\
-use hearth_sdk::{AccessTokenAuthorization, HearthClient};
-use hearth_sdk::actix::{HearthActixMiddleware, RequirePermission};
-use actix_web::{web, App, HttpServer};
-
-#[actix_web::main]
-async fn main() -> std::io::Result<()> {
-    let client = HearthClient::new("https://hearth.example.com", "<realm-id>");
-
-    HttpServer::new(move || {
-        App::new().service(
-            web::scope("/admin")
-                .wrap(HearthActixMiddleware::new(
-                    client.clone(), AccessTokenAuthorization::Embedded))
-                .wrap(RequirePermission::new("hearth.admin"))
-                .route("/data", web::get().to(handler)),
-        )
-    })
-    .bind("0.0.0.0:8080")?.run().await
-}
-`;
-
-// ── Kotlin ────────────────────────────────────────────────────────────────────
-
-const KOTLIN_SNIPPET = `\
-import io.hearth.sdk.HearthClient
-
-val client = HearthClient(
-    issuerUrl    = "https://hearth.example.com",
-    realmId      = "<realm-id>",
-    clientId     = "<client-id>",
-)
-
-// Login handler — generate PKCE and return the redirect URL
-suspend fun handleLogin(session: YourSessionStore): String {
-    val result = client.beginLogin(
-        redirectUri = "https://myapp.com/callback",
-        scopes      = "openid profile email",
-    )
-    session["state"]        = result.state
-    session["codeVerifier"] = result.codeVerifier
-    return result.authorizationUrl   // redirect the browser here
-}
-
-// Callback handler — exchange the code for tokens
-suspend fun handleCallback(code: String, session: YourSessionStore) =
-    client.completeLogin(code, session["codeVerifier"]!!, "https://myapp.com/callback")
-`;
-
-const KOTLIN_KTOR_SNIPPET = `\
-// build.gradle.kts
-// implementation("io.hearth:hearth-ktor:1.0.0")
-
-import io.hearth.sdk.ktor.hearth
-import io.hearth.sdk.ktor.HearthPrincipal
-import io.ktor.server.application.*
-import io.ktor.server.auth.*
-
-fun Application.configureAuth() {
-    install(Authentication) {
-        hearth("hearth") {
-            issuerUrl = System.getenv("HEARTH_ISSUER_URL")
-            realmId   = System.getenv("HEARTH_REALM_ID")
-        }
-    }
-
-    routing {
-        authenticate("hearth") {
-            get("/admin") {
-                val principal = call.principal<HearthPrincipal>()!!
-                call.respond(mapOf(
-                    "sub"         to principal.claims.subject(),
-                    "permissions" to principal.claims.permissions(),
-                ))
-            }
-        }
-    }
-}
-`;
-
-const KOTLIN_SPRING_SNIPPET = `\
-// build.gradle.kts
-// implementation("io.hearth:hearth-spring:1.0.0")
-
-// application.yml — HearthJwtAuthenticationFilter is auto-configured by Spring Boot
-// hearth:
-//   issuer-url: https://hearth.example.com
-//   realm-id: <realm-id>
-
-// Wire the filter into your SecurityFilterChain:
-http.addFilterBefore(hearthFilter, UsernamePasswordAuthenticationFilter::class.java)
-    .authorizeHttpRequests { it.anyRequest().authenticated() }
-
-// Use @AuthenticationPrincipal to access the verified HearthAuthentication:
-@GetMapping("/admin")
-fun admin(@AuthenticationPrincipal auth: HearthAuthentication) = mapOf(
-    "sub"         to auth.claims.subject(),
-    "permissions" to auth.claims.permissions(),
-)
-`;
-
-// ── curl ──────────────────────────────────────────────────────────────────────
-
 const CURL_SNIPPET = `\
 # 1. Generate an S256 PKCE pair, then open the login URL in a browser:
 VERIFIER=$(openssl rand -hex 32)
@@ -453,7 +325,7 @@ function QuickstartTeaser() {
       <div className="container">
         <h2 className={styles.sectionHeading}>First authenticated request in 5 minutes</h2>
         <p className={styles.sectionSub}>
-          Drop Hearth into your stack — TypeScript, Node, Go, Python, PHP, Rust, Kotlin, or plain
+          Drop Hearth into your stack — TypeScript (browser or Node.js), Go, Python, PHP, or plain
           HTTP. Select your language then your framework; full guides live on the SDK pages.
         </p>
         <div className={styles.quickstartTabs}>
@@ -475,7 +347,7 @@ function QuickstartTeaser() {
             </TabItem>
 
             {/* ── Node.js ── */}
-            <TabItem value="node" label="Node">
+            <TabItem value="node" label="Node.js">
               <Tabs groupId="framework">
                 <TabItem value="raw" label="Raw" default>
                   <CodeBlock language="ts">{NODE_SNIPPET}</CodeBlock>
@@ -488,9 +360,9 @@ function QuickstartTeaser() {
                 </TabItem>
               </Tabs>
               <p style={{ marginTop: '0.5rem', fontSize: '0.875rem' }}>
-                <Link to="/docs/sdks/node">Node SDK</Link>
+                <Link to="/docs/sdks/typescript#server-side-nodejs">Server-side guide</Link>
                 {' · '}
-                <Link to="/docs/sdks/node-nextjs">Next.js adapter →</Link>
+                <Link to="/docs/sdks/typescript-nextjs">Next.js guide →</Link>
               </p>
             </TabItem>
 
@@ -552,45 +424,6 @@ function QuickstartTeaser() {
                 <Link to="/docs/sdks/go-gin">Gin</Link>
                 {' · '}
                 <Link to="/docs/sdks/go-echo">Echo →</Link>
-              </p>
-            </TabItem>
-
-            {/* ── Rust ── */}
-            <TabItem value="rust" label="Rust">
-              <Tabs groupId="framework">
-                <TabItem value="raw" label="Raw" default>
-                  <CodeBlock language="rust">{RUST_SNIPPET}</CodeBlock>
-                </TabItem>
-                <TabItem value="actix" label="Actix-web">
-                  <CodeBlock language="rust">{RUST_ACTIX_SNIPPET}</CodeBlock>
-                </TabItem>
-              </Tabs>
-              <p style={{ marginTop: '0.5rem', fontSize: '0.875rem' }}>
-                <Link to="/docs/sdks/rust">Rust SDK</Link>
-                {' · '}
-                <Link to="/docs/sdks/rust-actix">Actix-web adapter →</Link>
-              </p>
-            </TabItem>
-
-            {/* ── Kotlin ── */}
-            <TabItem value="kotlin" label="Kotlin">
-              <Tabs groupId="framework">
-                <TabItem value="raw" label="Raw" default>
-                  <CodeBlock language="kotlin">{KOTLIN_SNIPPET}</CodeBlock>
-                </TabItem>
-                <TabItem value="ktor" label="Ktor">
-                  <CodeBlock language="kotlin">{KOTLIN_KTOR_SNIPPET}</CodeBlock>
-                </TabItem>
-                <TabItem value="spring" label="Spring Boot">
-                  <CodeBlock language="kotlin">{KOTLIN_SPRING_SNIPPET}</CodeBlock>
-                </TabItem>
-              </Tabs>
-              <p style={{ marginTop: '0.5rem', fontSize: '0.875rem' }}>
-                <Link to="/docs/sdks/kotlin">Kotlin SDK</Link>
-                {' · '}
-                <Link to="/docs/sdks/kotlin-ktor">Ktor</Link>
-                {' · '}
-                <Link to="/docs/sdks/kotlin-spring">Spring Boot →</Link>
               </p>
             </TabItem>
 

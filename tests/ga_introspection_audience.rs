@@ -90,7 +90,7 @@ fn active_for(h: &common::TestHarness, realm: &RealmId, token: &str, caller: &Cl
 
 #[tokio::test]
 async fn an_unrelated_client_cannot_introspect_another_clients_user_token() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let owner = client(&h, &realm, AccessTokenAuthorization::Embedded);
     let stranger = client(&h, &realm, AccessTokenAuthorization::Embedded);
@@ -108,7 +108,7 @@ async fn an_unrelated_client_cannot_introspect_another_clients_user_token() {
 
 #[tokio::test]
 async fn an_unrelated_client_cannot_introspect_a_first_party_session_token() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let stranger = client(&h, &realm, AccessTokenAuthorization::Embedded);
     let token = user_token(&h, &realm, None);
@@ -117,7 +117,7 @@ async fn an_unrelated_client_cannot_introspect_a_first_party_session_token() {
 
 #[tokio::test]
 async fn a_declared_resource_server_can_introspect_user_tokens() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let owner = client(&h, &realm, AccessTokenAuthorization::Embedded);
     let rs = client(&h, &realm, AccessTokenAuthorization::Introspection);

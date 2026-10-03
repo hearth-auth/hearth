@@ -29,7 +29,7 @@ fn proved() -> SessionContext {
 /// `create_session`; this test verifies the engine correctly removes it.
 #[tokio::test]
 async fn a41_pre_planted_session_revoked_on_re_auth() {
-    let harness = common::TestHarness::embedded().await.expect("setup");
+    let harness = common::TestHarness::in_process().await.expect("setup");
     let realm = harness.create_realm();
     let pw = CleartextPassword::from_string("Hunter2!!abcd".to_string());
 
@@ -110,7 +110,7 @@ async fn a41_pre_planted_session_revoked_on_re_auth() {
 /// Mass-revocation without a `keep` parameter revokes every live session.
 #[tokio::test]
 async fn a42_revoke_all_user_sessions_revokes_all() {
-    let harness = common::TestHarness::embedded().await.expect("setup");
+    let harness = common::TestHarness::in_process().await.expect("setup");
     let realm = harness.create_realm();
 
     let user = harness
@@ -159,7 +159,7 @@ async fn a42_revoke_all_user_sessions_revokes_all() {
 /// Mass-revocation with a `keep` session-ID spares that session.
 #[tokio::test]
 async fn a42_revoke_all_user_sessions_keeps_specified_session() {
-    let harness = common::TestHarness::embedded().await.expect("setup");
+    let harness = common::TestHarness::in_process().await.expect("setup");
     let realm = harness.create_realm();
 
     let user = harness
@@ -216,7 +216,7 @@ async fn a42_revoke_all_user_sessions_keeps_specified_session() {
 /// Mass-revocation on a user with no sessions returns `Ok(0)`.
 #[tokio::test]
 async fn a42_revoke_all_user_sessions_no_sessions_is_noop() {
-    let harness = common::TestHarness::embedded().await.expect("setup");
+    let harness = common::TestHarness::in_process().await.expect("setup");
     let realm = harness.create_realm();
 
     let user = harness
@@ -245,7 +245,7 @@ async fn a42_revoke_all_user_sessions_no_sessions_is_noop() {
 /// `set_password` revokes all sessions for the user.
 #[tokio::test]
 async fn a42_set_password_revokes_all_sessions() {
-    let harness = common::TestHarness::embedded().await.expect("setup");
+    let harness = common::TestHarness::in_process().await.expect("setup");
     let realm = harness.create_realm();
     let pw_a = CleartextPassword::from_string("OldPass1!abc".to_string());
     let pw_b = CleartextPassword::from_string("NewPass2!xyz".to_string());
@@ -295,7 +295,7 @@ async fn a42_set_password_revokes_all_sessions() {
 /// `change_password` revokes all sessions for the user.
 #[tokio::test]
 async fn a42_change_password_revokes_all_sessions() {
-    let harness = common::TestHarness::embedded().await.expect("setup");
+    let harness = common::TestHarness::in_process().await.expect("setup");
     let realm = harness.create_realm();
     let old_pw = CleartextPassword::from_string("OldSecret1!abc".to_string());
     let new_pw = CleartextPassword::from_string("NewSecret2!xyz".to_string());
@@ -345,7 +345,7 @@ async fn a42_change_password_revokes_all_sessions() {
 /// `disable_mfa` revokes all sessions for the user.
 #[tokio::test]
 async fn a42_disable_mfa_revokes_all_sessions() {
-    let harness = common::TestHarness::embedded().await.expect("setup");
+    let harness = common::TestHarness::in_process().await.expect("setup");
     let realm = harness.create_realm();
 
     let user = harness
@@ -412,7 +412,7 @@ async fn a42_disable_mfa_revokes_all_sessions() {
 /// Email change (via `update_user`) revokes all sessions for the user.
 #[tokio::test]
 async fn a42_email_change_revokes_all_sessions() {
-    let harness = common::TestHarness::embedded().await.expect("setup");
+    let harness = common::TestHarness::in_process().await.expect("setup");
     let realm = harness.create_realm();
 
     let user = harness
@@ -466,7 +466,7 @@ async fn a42_email_change_revokes_all_sessions() {
 /// A display-name-only `update_user` (no email change) must NOT revoke sessions.
 #[tokio::test]
 async fn a42_non_email_update_user_does_not_revoke_sessions() {
-    let harness = common::TestHarness::embedded().await.expect("setup");
+    let harness = common::TestHarness::in_process().await.expect("setup");
     let realm = harness.create_realm();
 
     let user = harness

@@ -84,7 +84,7 @@ fn default_opts(move_semantics: bool) -> CrossRealmMigrateOptions {
 
 #[tokio::test]
 async fn move_copies_users_and_deletes_source() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let identity = h.identity();
     let rbac = h.rbac();
     let storage = h.storage();
@@ -151,7 +151,7 @@ async fn move_copies_users_and_deletes_source() {
 
 #[tokio::test]
 async fn copy_leaves_source_intact() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let identity = h.identity();
     let rbac = h.rbac();
     let storage = h.storage();
@@ -198,7 +198,7 @@ async fn copy_leaves_source_intact() {
 
 #[tokio::test]
 async fn rbac_assignments_translated_by_role_name() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let identity = h.identity();
     let rbac = h.rbac();
     let storage = h.storage();
@@ -278,7 +278,7 @@ async fn rbac_assignments_translated_by_role_name() {
 
 #[tokio::test]
 async fn org_scoped_assignments_stripped_when_orgs_false() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let identity = h.identity();
     let rbac = h.rbac();
     let storage = h.storage();
@@ -354,7 +354,7 @@ async fn org_scoped_assignments_stripped_when_orgs_false() {
 
 #[tokio::test]
 async fn on_conflict_error_fails_with_conflict_list() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let identity = h.identity();
     let rbac = h.rbac();
     let storage = h.storage();
@@ -395,7 +395,7 @@ async fn on_conflict_error_fails_with_conflict_list() {
 
 #[tokio::test]
 async fn on_conflict_skip_migrates_non_conflicting() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let identity = h.identity();
     let rbac = h.rbac();
     let storage = h.storage();
@@ -468,7 +468,7 @@ async fn on_conflict_skip_migrates_non_conflicting() {
 async fn progress_and_completion_markers_written() {
     use hearth::core::RealmId;
 
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let identity = h.identity();
     let rbac = h.rbac();
     let storage = h.storage();
@@ -516,7 +516,7 @@ async fn progress_and_completion_markers_written() {
 
 #[tokio::test]
 async fn completed_migration_is_idempotent() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let identity = h.identity();
     let rbac = h.rbac();
     let storage = h.storage();

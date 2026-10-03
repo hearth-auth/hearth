@@ -1,6 +1,6 @@
 //! Concurrency guards for one-time codes (audit 2026-08-28 §4.18#4).
 //!
-//! A TOTP, recovery, SMS-OTP or email-OTP code MUST be redeemable exactly
+//! A TOTP, recovery or email-OTP code MUST be redeemable exactly
 //! once, including when two submissions of the same code race.
 //!
 //! Every verifier is an unsynchronised read-modify-write on storage: load the
@@ -16,47 +16,17 @@ use std::sync::{Arc, Barrier, Mutex};
 use hearth::core::{RealmId, UserId};
 use hearth::identity::{
     CreateRealmRequest, CreateUserRequest, EmailBranding, EmailError, EmailMessage, EmailSender,
-    IdentityEngine, RealmConfig, SmsError, SmsMessage, SmsSender, UpdateUserRequest,
+    IdentityEngine, RealmConfig,
 };
 
 /// Number of racing submissions of the same code.
 const CONCURRENCY: usize = 6;
 
-const SMS_HMAC_KEY: &[u8] = b"test-sms-otp-hmac-key-not-for-prod";
 const EMAIL_HMAC_KEY: &[u8] = b"test-email-otp-hmac-key-not-for-prod";
-const TEST_PHONE: &str = "+15555550142";
 
 // ---------------------------------------------------------------------------
 // Test-only capturing senders
 // ---------------------------------------------------------------------------
-
-struct CapturingSmsSender {
-    messages: Mutex<Vec<SmsMessage>>,
-}
-
-impl CapturingSmsSender {
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            messages: Mutex::new(Vec::new()),
-        })
-    }
-
-    fn last_otp_code(&self) -> Option<String> {
-        #[allow(clippy::unwrap_used)]
-        let guard = self.messages.lock().unwrap();
-        let body = guard.last()?.body.clone();
-        body.rsplit_once(": ")
-            .map(|(_, code)| code.trim().to_string())
-    }
-}
-
-impl SmsSender for CapturingSmsSender {
-    fn send(&self, message: &SmsMessage) -> Result<(), SmsError> {
-        #[allow(clippy::unwrap_used)]
-        self.messages.lock().unwrap().push(message.clone());
-        Ok(())
-    }
-}
 
 struct CapturingEmailSender {
     messages: Mutex<Vec<EmailMessage>>,
@@ -105,11 +75,7 @@ fn create_realm(harness: &common::TestHarness, prefix: &str) -> RealmId {
             config: Some(RealmConfig {
                 // Canonical names per VALID_MFA_METHODS; "email" is not one of
                 // them, and task 19.15 made the gate actually enforce the list.
-                mfa_methods: Some(vec![
-                    "totp".to_string(),
-                    "sms".to_string(),
-                    "email_otp".to_string(),
-                ]),
+                mfa_methods: Some(vec!["totp".to_string(), "email_otp".to_string()]),
                 ..RealmConfig::default()
             }),
         })
@@ -191,7 +157,7 @@ where
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn totp_code_is_redeemable_once_under_concurrency() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm(&harness, "totp-race");
     let user = create_user(&harness, &realm);
 
@@ -225,7 +191,7 @@ async fn totp_code_is_redeemable_once_under_concurrency() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn recovery_code_is_redeemable_once_under_concurrency() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm(&harness, "recovery-race");
     let user = create_user(&harness, &realm);
 
@@ -254,54 +220,12 @@ async fn recovery_code_is_redeemable_once_under_concurrency() {
 }
 
 // ---------------------------------------------------------------------------
-// SMS OTP
-// ---------------------------------------------------------------------------
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn sms_otp_is_redeemable_once_under_concurrency() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
-    let realm = create_realm(&harness, "sms-race");
-    let user = create_user(&harness, &realm);
-    harness
-        .identity()
-        .update_user(
-            &realm,
-            &user,
-            &UpdateUserRequest {
-                phone_number: Some(Some(TEST_PHONE.to_string())),
-                phone_verified: Some(true),
-                ..UpdateUserRequest::default()
-            },
-        )
-        .expect("set phone");
-
-    let sender = CapturingSmsSender::new();
-    let now = now_unix_ts();
-    let nonce = harness
-        .identity()
-        .issue_sms_otp(&realm, TEST_PHONE, SMS_HMAC_KEY, sender.as_ref(), now)
-        .expect("issue_sms_otp");
-    let code = sender.last_otp_code().expect("OTP sent");
-
-    let engine = harness.identity_arc();
-    let successes = count_concurrent_successes(&engine, move |e| {
-        e.verify_sms_otp(&realm, &nonce, TEST_PHONE, &code, SMS_HMAC_KEY, now)
-    })
-    .await;
-
-    assert_eq!(
-        successes, 1,
-        "one SMS OTP must be redeemable exactly once, got {successes} successes"
-    );
-}
-
-// ---------------------------------------------------------------------------
 // Email OTP
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn email_otp_is_redeemable_once_under_concurrency() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm(&harness, "email-race");
 
     let sender = CapturingEmailSender::new();

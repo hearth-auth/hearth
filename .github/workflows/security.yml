@@ -327,9 +327,7 @@ jobs:
             --lockfile=package-lock.json
             --lockfile=docs-site/package-lock.json
             --lockfile=sdks/go/go.mod
-            --lockfile=sdks/node/package-lock.json
             --lockfile=sdks/php/composer.lock
-            --lockfile=sdks/rust/Cargo.lock
             --lockfile=sdks/typescript/package-lock.json
             --format=sarif
             --output-file=osv.sarif

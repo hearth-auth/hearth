@@ -471,8 +471,7 @@ async fn require_bearer_token(req: Request, next: Next) -> Response {
 /// Applied to every matched route via [`Router::route_layer`] so 404 paths
 /// do not consume shaper budget.  Returns `429 Too Many Requests` with a
 /// `Retry-After: 1` hint when the per-IP (or per-realm) sliding-window limit
-/// is exceeded.  The shaper is shared with the gRPC surface via `Arc` so
-/// a caller cannot evade the limit by switching protocols.
+/// is exceeded.
 ///
 /// The realm dimension is keyed by [`shaper_realm_key`]. It used to be the
 /// constant `""` for every request, which made the per-realm budget one

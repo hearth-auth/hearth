@@ -43,7 +43,7 @@ fn make_user(email: &str, display_name: &str) -> CreateUserRequest {
 
 #[tokio::test]
 async fn wildcard_suffix_matches_domain() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
     let rid = realm(id);
 
@@ -71,7 +71,7 @@ async fn wildcard_suffix_matches_domain() {
 
 #[tokio::test]
 async fn wildcard_prefix_matches_start_of_email() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
     let rid = realm(id);
 
@@ -96,7 +96,7 @@ async fn wildcard_prefix_matches_start_of_email() {
 
 #[tokio::test]
 async fn wildcard_question_matches_single_char() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
     let rid = realm(id);
 
@@ -128,7 +128,7 @@ async fn wildcard_question_matches_single_char() {
 
 #[tokio::test]
 async fn exact_query_matches_only_whole_field() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
     let rid = realm(id);
 
@@ -152,7 +152,7 @@ async fn exact_query_matches_only_whole_field() {
 
 #[tokio::test]
 async fn exact_query_case_insensitive() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
     let rid = realm(id);
 
@@ -177,7 +177,7 @@ async fn exact_query_case_insensitive() {
 
 #[tokio::test]
 async fn substring_search_matches_email_and_name() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
     let rid = realm(id);
 
@@ -207,7 +207,7 @@ async fn substring_search_matches_email_and_name() {
 
 #[tokio::test]
 async fn sort_by_email_asc_orders_alphabetically() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
     let rid = realm(id);
 
@@ -237,7 +237,7 @@ async fn sort_by_email_asc_orders_alphabetically() {
 
 #[tokio::test]
 async fn sort_by_email_desc_reverses_order() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
     let rid = realm(id);
 
@@ -267,7 +267,7 @@ async fn sort_by_email_desc_reverses_order() {
 
 #[tokio::test]
 async fn sort_by_name_asc_orders_by_display_name() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
     let rid = realm(id);
 
@@ -293,7 +293,7 @@ async fn sort_by_name_asc_orders_by_display_name() {
 
 #[tokio::test]
 async fn sort_by_created_desc_newest_first() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
     let rid = realm(id);
 
@@ -328,7 +328,7 @@ async fn sort_by_created_desc_newest_first() {
 
 #[tokio::test]
 async fn sort_and_search_combined_applies_filter_before_sort() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
     let rid = realm(id);
 
@@ -359,7 +359,7 @@ async fn sort_and_search_combined_applies_filter_before_sort() {
 
 #[tokio::test]
 async fn sort_pagination_stable_across_pages() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
     let rid = realm(id);
 
@@ -403,7 +403,7 @@ async fn sort_pagination_stable_across_pages() {
 
 #[tokio::test]
 async fn sort_pagination_no_overlap_no_gap() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
     let rid = realm(id);
 
@@ -454,7 +454,7 @@ async fn sort_pagination_no_overlap_no_gap() {
 
 #[tokio::test]
 async fn bare_star_glob_matches_all() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
     let rid = realm(id);
 
@@ -480,7 +480,7 @@ async fn bare_star_glob_matches_all() {
 async fn exact_empty_inner_matches_empty_fields_only() {
     // `""` (two quotes) = Exact("") which matches only fields equal to "".
     // No user should have an empty email, so result must be empty.
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
     let rid = realm(id);
 
@@ -501,7 +501,7 @@ async fn exact_empty_inner_matches_empty_fields_only() {
 
 #[tokio::test]
 async fn unicode_query_matches_correctly() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let id = h.identity();
     let rid = realm(id);
 

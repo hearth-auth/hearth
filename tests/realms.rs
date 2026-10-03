@@ -17,7 +17,7 @@ use hearth::identity::{
 
 #[tokio::test]
 async fn full_realm_lifecycle() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     // 1. Create realm
@@ -106,7 +106,7 @@ async fn full_realm_lifecycle() {
 
 #[tokio::test]
 async fn multi_realm_token_isolation() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     // Create two realms
@@ -180,7 +180,7 @@ async fn multi_realm_token_isolation() {
 
 #[tokio::test]
 async fn realm_scoped_oidc_discovery_and_jwks() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let realm_a = identity
@@ -228,7 +228,7 @@ async fn realm_scoped_oidc_discovery_and_jwks() {
 
 #[tokio::test]
 async fn adversarial_cross_realm_session_injection() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let realm_a = identity
@@ -287,7 +287,7 @@ async fn adversarial_cross_realm_session_injection() {
 
 #[tokio::test]
 async fn adversarial_realm_id_spoofing() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let realm = identity
@@ -366,7 +366,7 @@ async fn adversarial_realm_id_spoofing() {
 
 #[tokio::test]
 async fn adversarial_realm_enumeration_resistance() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let real_realm = identity
@@ -454,7 +454,7 @@ async fn set_realm_status(
 
 #[tokio::test]
 async fn suspended_realm_blocks_create_user() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let realm = identity
@@ -496,7 +496,7 @@ async fn suspended_realm_blocks_create_user() {
 
 #[tokio::test]
 async fn archived_realm_blocks_create_user() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let realm = identity
@@ -526,7 +526,7 @@ async fn archived_realm_blocks_create_user() {
 
 #[tokio::test]
 async fn suspended_realm_blocks_update_user() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let realm = identity
@@ -567,7 +567,7 @@ async fn suspended_realm_blocks_update_user() {
 
 #[tokio::test]
 async fn suspended_realm_blocks_create_session() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let realm = identity
@@ -605,7 +605,7 @@ async fn suspended_realm_blocks_create_session() {
 
 #[tokio::test]
 async fn suspended_realm_blocks_create_organization() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let realm = identity
@@ -637,7 +637,7 @@ async fn suspended_realm_blocks_create_organization() {
 
 #[tokio::test]
 async fn archived_realm_blocks_create_organization() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let realm = identity
@@ -670,7 +670,7 @@ async fn archived_realm_blocks_create_organization() {
 /// Reads (non-mutating) on suspended realms remain permitted.
 #[tokio::test]
 async fn suspended_realm_allows_reads() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let realm = identity

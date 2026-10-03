@@ -17,21 +17,18 @@ call answers `403` with `"error_description": "the target user holds admin permi
 lacks"`, and `503` when the target's permissions cannot be resolved. A user's admin permissions
 include those it holds only through an organization-scoped role or grant. The rule covers:
 
-- modification: `PATCH`/`DELETE /admin/users/{id}`, `DELETE /admin/users/{id}/device-fingerprints`,
-  the `disable` operation of `POST /admin/users/bulk` (a batch naming any such user is refused
-  whole), `PATCH /admin/realms/{realm_id}/users/{user_id}/required-actions`, gRPC `UpdateUser` /
-  `DeleteUser`, SCIM `/scim/v2/Users`;
+- modification: `PATCH`/`DELETE /admin/users/{id}`, the `disable` operation of `POST /admin/users/bulk` (a batch naming any such user is refused
+  whole), `PATCH /admin/realms/{realm_id}/users/{user_id}/required-actions`, SCIM `/scim/v2/Users`;
 - demotion: `DELETE /admin/assignments/{id}` (for a group assignment, every member of the group
   and of groups nested in it), `DELETE /admin/groups/{id}/members/{member_id}`,
-  `DELETE /admin/groups/{id}`, gRPC `UnassignUserRole`, `UnassignGroupRole`,
-  `RevokeUserPermission`, `RemoveAdditionalRole`, `RemoveGroupMember`, `DeleteGroup`;
+  `DELETE /admin/groups/{id}`, `DELETE /admin/users/{id}/permissions/{permission}`,
+  `DELETE /admin/organizations/{id}/members/{user_id}/roles/{role_name}`;
 - sign-out and consents: `DELETE /admin/sessions/{id}`, `POST /admin/sessions/{id}/sv-bump`,
-  `DELETE /admin/users/{id}/consents/{client_id}`, gRPC `RevokeConsent`;
-- organizations: gRPC `DeleteOrganization` and SCIM `DELETE /scim/v2/Groups/{id}` (every member
+  `DELETE /admin/users/{id}/consents/{client_id}`;
+- organizations: `DELETE /admin/organizations/{id}` and SCIM `DELETE /scim/v2/Groups/{id}` (every member
   of the organization), and SCIM `PUT`/`PATCH /scim/v2/Groups/{id}` (every member the change
   removes). Leaving an organization strips the admin permissions a user holds only in it;
-- role definitions: `PATCH /admin/roles/{id}`, `DELETE /admin/roles/{id}`, gRPC `UpdateRole` /
-  `DeleteRole`, when the change removes an admin permission from the role's effective set — by
+- role definitions: `PATCH /admin/roles/{id}`, `DELETE /admin/roles/{id}`, when the change removes an admin permission from the role's effective set — by
   replacing its permissions or parents, by deleting it, or by renaming it (an extra organization
   role is stored by name). Every holder is checked: users assigned the role or a role that
   inherits from it, members of groups assigned one, and users holding one as an extra
@@ -152,7 +149,7 @@ Returns a single user record by UUID.
 }
 ```
 
-`required_actions` is omitted from the response when the array is empty. Possible values: `VERIFY_EMAIL`, `UPDATE_PASSWORD`, `ENROLL_MFA`, `ENROLL_PHONE_OTP`.
+`required_actions` is omitted from the response when the array is empty. Possible values: `VERIFY_EMAIL`, `UPDATE_PASSWORD`, `ENROLL_MFA`, `ENROLL_EMAIL_OTP`.
 
 ---
 
@@ -224,7 +221,7 @@ Adds or removes required actions on a specific user. The body uses a diff model 
 }
 ```
 
-Both `add` and `remove` accept any combination of `VERIFY_EMAIL`, `UPDATE_PASSWORD`, `ENROLL_MFA`, and `ENROLL_PHONE_OTP`. Unknown action strings return `400`. Duplicates in `add` are silently ignored.
+Both `add` and `remove` accept any combination of `VERIFY_EMAIL`, `UPDATE_PASSWORD`, `ENROLL_MFA`, and `ENROLL_EMAIL_OTP`. Unknown action strings return `400`. Duplicates in `add` are silently ignored.
 
 **Response (200 OK):** The updated user object (same shape as `GET /admin/users/{id}`).
 
@@ -248,15 +245,15 @@ Each change emits an audit event. Assignments are logged as `RequiredActionAssig
 
 ### List organizations
 
-`GET /admin/orgs`
+`GET /admin/organizations`
 
-Returns a paginated list of organizations.
+Returns a page of organizations.
 
 **Query parameters:**
 
 | Parameter | Description |
 |---|---|
-| `cursor` | Opaque pagination cursor from a previous response |
+| `cursor` | The `next_cursor` value from the previous page (a decimal offset) |
 | `limit` | Page size, 1–100 (default 20) |
 
 **Response:**
@@ -267,45 +264,50 @@ Returns a paginated list of organizations.
     {
       "id": "<uuid>",
       "slug": "acme-corp",
-      "name": "Acme Corporation",
-      "description": "Main enterprise customer",
+      "display_name": "Acme Corporation",
       "status": "active",
-      "config": { "max_members": 500 },
-      "attributes": { "crm_id": "SF-00123", "contract_tier": "enterprise" }
+      "member_limit": 500,
+      "mfa_required": false,
+      "attributes": { "crm_id": "SF-00123", "contract_tier": "enterprise" },
+      "created_at": 1759363200000000,
+      "updated_at": 1759363200000000
     }
   ],
-  "next_cursor": "<opaque-string-or-null>"
+  "next_cursor": "20"
 }
 ```
+
+`next_cursor` is `null` on the last page. `status` is `active`, `suspended` or `archived`.
+`created_at` and `updated_at` are microseconds since the Unix epoch.
 
 ---
 
 ### Get organization
 
-`GET /admin/orgs/{id}`
+`GET /admin/organizations/{id}`
 
-Returns a single organization by UUID.
+Returns one organization by UUID, in the same shape as a list item.
 
 ---
 
 ### Create organization
 
-`POST /admin/orgs`
+`POST /admin/organizations`
 
 Body fields:
 
 | Field | Required | Description |
 |---|---|---|
-| `slug` | ✅ | URL-safe identifier, 3–63 lowercase alphanumeric/hyphen chars |
-| `name` | ✅ | Human-readable display name |
-| `description` | — | Optional description |
-| `config.max_members` | — | Member limit (omit for unlimited) |
+| `slug` | ✅ | URL-safe identifier, 3–63 lowercase alphanumeric/hyphen chars. It cannot be changed later |
+| `display_name` | ✅ | Human-readable name |
+| `member_limit` | — | Maximum number of members (omit for no limit) |
+| `mfa_required` | — | `true` requires MFA for every member. Default `false`. It can only tighten the realm policy |
 | `attributes` | — | Key-value metadata map |
 
 ```json
 {
   "slug": "acme-corp",
-  "name": "Acme Corporation",
+  "display_name": "Acme Corporation",
   "attributes": {
     "crm_id": "SF-00123",
     "contract_tier": "enterprise"
@@ -313,15 +315,17 @@ Body fields:
 }
 ```
 
-Returns the created organization object.
+Answers `201 Created` with the new organization.
 
 ---
 
 ### Update organization
 
-`PATCH /admin/orgs/{id}`
+`PATCH /admin/organizations/{id}`
 
-Partially updates an organization. All fields are optional; omitted fields are unchanged.
+Changes only the fields you send. Accepted fields: `display_name`, `status` (`active` or
+`suspended`), `member_limit`, `mfa_required` and `attributes`. A request that sends `slug` is
+refused with `400`, because the slug cannot change.
 
 To replace the attribute map:
 
@@ -334,15 +338,28 @@ To replace the attribute map:
 }
 ```
 
-Attributes are replaced atomically — the entire map is overwritten. To clear all attributes, pass `"attributes": {}`.
+`attributes` replaces the whole map. To clear all attributes, send `"attributes": {}`.
 
 ---
 
 ### Delete organization
 
-`DELETE /admin/orgs/{id}`
+`DELETE /admin/organizations/{id}`
 
-Permanently deletes the organization and cascades to all membership records, pending invitations, and SCIM `externalId` mappings. Members themselves are not deleted.
+Answers `204 No Content`. Deletes the organization and its membership records, pending
+invitations and SCIM `externalId` mappings. The member users are not deleted.
+
+---
+
+### Extra organization roles
+
+An organization member can hold extra roles that apply only inside that organization.
+
+| Method and path | What it does |
+|---|---|
+| `GET /admin/organizations/{id}/members/{user_id}/roles` | Lists the member's extra role names (`{"items": [...]}`) |
+| `POST /admin/organizations/{id}/members/{user_id}/roles` | Adds one. Body: `{"role_name": "<name>"}` |
+| `DELETE /admin/organizations/{id}/members/{user_id}/roles/{role_name}` | Removes one |
 
 ---
 
@@ -582,8 +599,7 @@ To provision a realm:
 3. To freeze a realm during an incident, suspend it with `POST /admin/realms/{id}/suspend`
    and reinstate it with `POST /admin/realms/{id}/unsuspend` (see [Suspend and unsuspend a
    realm](#suspend-and-unsuspend-a-realm)). Suspension is runtime state: `hearth.yaml` has no
-   realm `status:` key, and reconciliation never clears a suspension. gRPC `CreateRealm` /
-   `UpdateRealm` answer `FAILED_PRECONDITION` with the same message as the REST `405`.
+   realm `status:` key, and reconciliation never clears a suspension.
 4. To permanently delete a realm, remove it from `hearth.yaml` and restart. Hearth archives it automatically. Then call `DELETE /admin/realms/{id}` to purge the archived realm's data.
 
 → See [Configuration reference](../specs/CONFIGURATION.md#realmsname) for the full `realms.<name>` YAML schema.
@@ -708,7 +724,6 @@ new logins until it is reinstated. Unsuspend restores service; users sign in aga
 - **Audited** in the target realm as `realm_updated`, attributed to the caller, with
   `previous_status` and `status` in the metadata.
 - **Survives reloads:** YAML reconciliation (startup or `SIGHUP`) never clears a suspension.
-- gRPC twins: `IdentityAdminService/SuspendRealm` and `/UnsuspendRealm`.
 
 ```bash
 curl -s -X POST \
@@ -746,7 +761,7 @@ curl -s -X DELETE \
 | `404` | Realm not found |
 | `409` | Realm is not archived — remove it from `hearth.yaml` and restart first |
 
-`GET` and `DELETE /admin/realms/{realm_id}` and their gRPC twins (`GetRealm`, `DeleteRealm`)
+`GET` and `DELETE /admin/realms/{realm_id}`
 apply the same realm-scope rule, trust policies included.
 
 ---

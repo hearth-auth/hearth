@@ -98,7 +98,7 @@ async fn setup_admin(h: &common::TestHarness, realm: &RealmId) -> (String, Strin
 /// identity engine (actor="system") and one from the handler (actor=admin_id).
 #[tokio::test]
 async fn admin_create_user_emits_exactly_one_user_created_with_actor() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed realm");
     let (token, admin_id) = setup_admin(&h, &realm).await;
@@ -168,7 +168,7 @@ async fn admin_create_user_emits_exactly_one_user_created_with_actor() {
 /// the real admin actor — not "system".
 #[tokio::test]
 async fn admin_update_user_emits_exactly_one_user_updated_with_actor() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed realm");
     let (token, admin_id) = setup_admin(&h, &realm).await;
@@ -239,7 +239,7 @@ async fn admin_update_user_emits_exactly_one_user_updated_with_actor() {
 /// the real admin actor — not "system".
 #[tokio::test]
 async fn admin_delete_user_emits_exactly_one_user_deleted_with_actor() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed realm");
     let (token, admin_id) = setup_admin(&h, &realm).await;
@@ -309,7 +309,7 @@ async fn admin_delete_user_emits_exactly_one_user_deleted_with_actor() {
 /// attributed to the admin actor with `metadata.via = "user_api"`.
 #[tokio::test]
 async fn post_users_admin_emits_exactly_one_user_created() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed realm");
     let (token, admin_id) = setup_admin(&h, &realm).await;

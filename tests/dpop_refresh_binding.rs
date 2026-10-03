@@ -40,7 +40,7 @@ fn decode_claims_json(token: &str) -> serde_json::Value {
 }
 
 async fn setup() -> (common::TestHarness, RealmId, hearth::core::UserId, ClientId) {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
 
     let realm = h
         .identity()
@@ -112,7 +112,6 @@ fn exchange_code(
                 amr_values: vec![],
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize");

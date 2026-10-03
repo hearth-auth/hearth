@@ -5,19 +5,18 @@
 //! Reconcile treats YAML as authoritative for `jwks`: an application whose
 //! YAML declares none has its JWKS cleared at the next restart or SIGHUP.
 //! `PATCH /admin/applications/{id}` (and gRPC `UpdateApplication`) accepted
-//! `jwks`, `profile` and `assertion_public_key` on YAML-managed applications —
+//! `jwks` and `assertion_public_key` on YAML-managed applications —
 //! only the admin console refused — so keys given to a secretless YAML app
 //! over REST vanished at the next reload and the app became PUBLIC.
 //!
-//! 1. Credential and profile changes on a YAML-managed application are
+//! 1. Credential changes on a YAML-managed application are
 //!    refused on every runtime surface (the engine gate both REST and gRPC go
 //!    through), the way a runtime delete already was.
 //! 2. Reconcile refuses — and reports — a YAML change that would remove the
 //!    last credential of a client that has one, leaving the client unchanged.
-//! 3. Reconcile creates an application in ONE write carrying its profile and
-//!    JWKS. It used to write a public Standard client first and apply the
-//!    profile/JWKS in a second write; when that second write failed, the
-//!    public client stayed behind.
+//! 3. Reconcile creates an application in ONE write carrying its JWKS. It
+//!    used to write a public client first and apply the JWKS in a second
+//!    write; when that second write failed, the public client stayed behind.
 
 mod common;
 
@@ -29,8 +28,7 @@ use hearth::config::Config;
 use hearth::core::{ClientId, RealmId};
 use hearth::identity::reconcile::{reconcile_realms, AppReconcileAction, ReconcileReport};
 use hearth::identity::{
-    ClientProfile, CreateUserRequest, IdentityError, OAuthClient, SessionContext,
-    UpdateClientRequest,
+    CreateUserRequest, IdentityError, OAuthClient, SessionContext, UpdateClientRequest,
 };
 use hearth::protocol::http::{router, AppState};
 use hearth::rbac::{AssignRoleRequest, Scope, Subject};
@@ -52,6 +50,8 @@ const JWKS_JSON: &str = r#"{"keys":[{"kty":"OKP","crv":"Ed25519","kid":"k2","alg
 fn config(app_lines: &str) -> Config {
     let yaml = format!(
         r#"
+auth:
+  mfa_required: false
 realms:
   yamlcreds:
     applications:
@@ -171,12 +171,12 @@ async fn patch(
     )
 }
 
-/// `PATCH /admin/applications/{id}` refuses `jwks`, `profile` and
+/// `PATCH /admin/applications/{id}` refuses `jwks` and
 /// `assertion_public_key` on a YAML-managed application with `409`, naming
 /// `hearth.yaml`, and changes nothing. A non-credential edit still works.
 #[tokio::test]
 async fn rest_refuses_credential_changes_on_a_yaml_managed_application() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     reconcile(&h, &config("")).expect("reconcile");
     let realm = realm(&h);
     let client = find_client(&h).expect("client");
@@ -185,7 +185,6 @@ async fn rest_refuses_credential_changes_on_a_yaml_managed_application() {
 
     for body in [
         serde_json::json!({ "jwks": JWKS_JSON }),
-        serde_json::json!({ "profile": "fapi2", "jwks": JWKS_JSON }),
         serde_json::json!({ "assertion_public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc" }),
     ] {
         let (status, resp) = patch(&h, &token, &realm, client.client_id(), body.clone()).await;
@@ -198,7 +197,6 @@ async fn rest_refuses_credential_changes_on_a_yaml_managed_application() {
     let after = find_client(&h).expect("client");
     assert_eq!(after.jwks(), None);
     assert_eq!(after.assertion_public_key(), None);
-    assert_eq!(after.profile(), ClientProfile::Standard);
 
     let (status, resp) = patch(
         &h,
@@ -214,17 +212,13 @@ async fn rest_refuses_credential_changes_on_a_yaml_managed_application() {
 /// The engine gate every runtime surface (REST and gRPC) goes through.
 #[tokio::test]
 async fn the_engine_refuses_credential_changes_on_a_yaml_managed_application() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     reconcile(&h, &config("")).expect("reconcile");
     let realm = realm(&h);
     let client = find_client(&h).expect("client");
     for request in [
         UpdateClientRequest {
             jwks: Some(Some(JWKS_JSON.to_string())),
-            ..Default::default()
-        },
-        UpdateClientRequest {
-            profile: Some(ClientProfile::Fapi2),
             ..Default::default()
         },
         UpdateClientRequest {
@@ -250,7 +244,7 @@ async fn the_engine_refuses_credential_changes_on_a_yaml_managed_application() {
 /// it, reports it, and leaves the client unchanged.
 #[tokio::test]
 async fn reconcile_refuses_to_remove_the_last_credential() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     reconcile(&h, &config(JWKS_YAML)).expect("reconcile v1");
     let before = find_client(&h).expect("client");
     assert!(before.jwks().is_some() && !before.is_public());
@@ -266,24 +260,11 @@ async fn reconcile_refuses_to_remove_the_last_credential() {
     assert!(reason.contains("public"), "{reason}");
 }
 
-/// Same for a FAPI 2.0 application whose YAML drops both the profile and
-/// the JWKS.
-#[tokio::test]
-async fn reconcile_refuses_to_strip_a_fapi2_application() {
-    let h = common::TestHarness::embedded().await.expect("harness");
-    reconcile(&h, &config(&format!("        profile: fapi2\n{JWKS_YAML}"))).expect("v1");
-    let report = reconcile(&h, &config("")).expect("v2");
-    let after = find_client(&h).expect("client");
-    assert!(after.profile().is_fapi2() && after.jwks().is_some());
-    assert!(!after.is_public());
-    assert!(refused(&report).is_some());
-}
-
 /// Control: a confidential application (it holds a secret) may drop its
 /// JWKS — it stays confidential.
 #[tokio::test]
 async fn reconcile_still_removes_a_jwks_that_is_not_the_last_credential() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let secret =
         "        confidential: true\n        client_secret: \"yaml-secret-0123456789abcdef\"";
     reconcile(&h, &config(&format!("{secret}\n{JWKS_YAML}"))).expect("v1");
@@ -296,24 +277,18 @@ async fn reconcile_still_removes_a_jwks_that_is_not_the_last_credential() {
 
 // ── 3. atomic creation ───────────────────────────────────────────────────────
 
-/// A FAPI 2.0 application whose JWKS the engine refuses (here: it carries a
-/// private key member) is not created at all — no public Standard client is
-/// left behind by a failed second write.
+/// An application whose JWKS the engine refuses (here: it carries a private
+/// key member) is not created at all — no public client is left behind by a
+/// failed second write.
 #[tokio::test]
 async fn reconcile_creates_an_application_in_one_write_or_not_at_all() {
-    let h = common::TestHarness::embedded().await.expect("harness");
-    let bad_jwks = format!("        profile: fapi2\n{JWKS_YAML}\n              d: 11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo");
+    let h = common::TestHarness::in_process().await.expect("harness");
+    let bad_jwks =
+        format!("{JWKS_YAML}\n              d: 11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo");
     let err = reconcile(&h, &config(&bad_jwks)).expect_err("an invalid JWKS must be refused");
     assert!(err.to_string().contains("jwks"), "{err}");
     assert!(
         find_client(&h).is_none(),
         "a failed creation must not leave a (public) client behind"
     );
-
-    // Also: FAPI 2.0 with RS256 ID tokens (§5.4.1) is refused whole.
-    let h = common::TestHarness::embedded().await.expect("harness");
-    let rs256 =
-        format!("        profile: fapi2\n        id_token_signed_response_alg: RS256\n{JWKS_YAML}");
-    reconcile(&h, &config(&rs256)).expect_err("FAPI 2.0 + RS256 must be refused");
-    assert!(find_client(&h).is_none());
 }

@@ -105,7 +105,7 @@ fn make_subject_token(
 // M2-01: Token exchange without any client credentials → 401 invalid_client.
 #[tokio::test]
 async fn m2_01_token_exchange_without_client_auth_is_rejected() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let (realm_id, client_id, _secret, user_id) = setup_realm_and_client(&h).await;
     let subject_token = make_subject_token(&h, &realm_id, &user_id);
 
@@ -154,7 +154,7 @@ async fn m2_01_token_exchange_without_client_auth_is_rejected() {
 // M2-02: Token exchange with wrong client secret → 401.
 #[tokio::test]
 async fn m2_02_token_exchange_with_wrong_secret_is_rejected() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let (realm_id, client_id, _correct_secret, user_id) = setup_realm_and_client(&h).await;
     let subject_token = make_subject_token(&h, &realm_id, &user_id);
 
@@ -191,7 +191,7 @@ async fn m2_02_token_exchange_with_wrong_secret_is_rejected() {
 // M2-03: Token exchange with correct credentials → 200, act.sub is the authenticated client.
 #[tokio::test]
 async fn m2_03_token_exchange_with_correct_credentials_succeeds() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let (realm_id, client_id, secret, user_id) = setup_realm_and_client(&h).await;
     let subject_token = make_subject_token(&h, &realm_id, &user_id);
 
@@ -252,7 +252,7 @@ async fn m2_03_token_exchange_with_correct_credentials_succeeds() {
 // M2-04: Token exchange via HTTP Basic Auth also works correctly.
 #[tokio::test]
 async fn m2_04_token_exchange_via_basic_auth_succeeds() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let (realm_id, client_id, secret, user_id) = setup_realm_and_client(&h).await;
     let subject_token = make_subject_token(&h, &realm_id, &user_id);
 

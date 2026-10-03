@@ -276,7 +276,7 @@ pass — that was the old behaviour.
 The gate sits at two levels.
 
 **Level 1 — tag creation.** `semantic-release.yml` runs on every push to `main`. It
-creates the seven SDK Release objects and pushes the `v*` and `sdk-*-v*` tags that
+creates the four SDK Release objects and pushes the `v*` and `sdk-*-v*` tags that
 trigger every other workflow. It now waits for `required-summary` on that commit. A red
 commit produces no tag, so no downstream channel is ever triggered.
 
@@ -291,11 +291,8 @@ Level 1 can be bypassed by a hand-pushed tag; level 2 cannot.
 | SLSA provenance | `release.yml` | `validation` (same workflow) | Blocks |
 | Container image | `docker.yml` | `Release validation (test matrix + bench gate)` | Blocks |
 | Helm chart | `helm.yml` | `Release validation (test matrix + bench gate)` | Blocks |
-| npm `@hearth-auth/node` | `sdk-publish-node.yml` | `required-summary` | Blocks |
 | npm `@hearth-auth/sdk` | `sdk-publish-typescript.yml` | `required-summary` | Blocks |
-| crates.io `hearth-sdk` | `sdk-publish-rust.yml` | `required-summary` | Blocks |
 | PyPI `hearth-sdk` | `sdk-publish-python.yml` | `required-summary` | Blocks |
-| Maven Central `io.hearth` | `sdk-publish-kotlin.yml` | `required-summary` | Blocks |
 | Go module proxy | `sdk-publish-go.yml` | `required-summary` | Alarms at level 2 |
 | Packagist `hearth-auth/php-sdk` | `sdk-publish-php.yml` | `required-summary` | Alarms at level 2 |
 

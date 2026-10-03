@@ -24,7 +24,7 @@ const SEED_ROLE_NAMES: &[&str] = &[
 
 #[tokio::test]
 async fn fresh_realm_has_seed_roles() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
     h.rbac().seed_realm(&realm).expect("seed");
 
@@ -40,7 +40,7 @@ async fn fresh_realm_has_seed_roles() {
 
 #[tokio::test]
 async fn realm_admin_role_has_hearth_admin_permission() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
     h.rbac().seed_realm(&realm).expect("seed");
 
@@ -60,7 +60,7 @@ async fn realm_admin_role_has_hearth_admin_permission() {
 /// without seeding — i.e. the "silent failure" scenario this bug describes.
 #[tokio::test]
 async fn reconcile_rbac_seeds_repairs_unseeded_realm() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
 
     // Create a realm WITHOUT calling seed_realm — simulates a creation-time
     // seed failure that was previously only warn!()-logged.
@@ -99,7 +99,7 @@ async fn reconcile_rbac_seeds_repairs_unseeded_realm() {
 
 #[tokio::test]
 async fn seed_is_idempotent() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
     h.rbac().seed_realm(&realm).expect("seed #1");
     // Capture role IDs after the first seed.

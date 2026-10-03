@@ -40,9 +40,9 @@ struct Env {
 }
 
 async fn setup() -> Env {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
-        .expect("embedded harness");
+        .expect("in-process harness");
 
     let realm = harness
         .identity()
@@ -107,7 +107,6 @@ fn auth_request(env: &Env) -> AuthorizationRequest {
         amr_values: vec![],
         response_mode: None,
         request: None,
-        via_par: false,
     }
 }
 

@@ -647,7 +647,6 @@ async fn post_expired_ra_token_redirects_to_root() {
                 prompt: String::new(),
                 mfa_proof: hearth::identity::MfaProof::None,
                 resource: None,
-                via_par: false,
             },
             None,
             past,

@@ -110,7 +110,7 @@ async fn recovery_codes_are_checked_inside_the_kdf_gate() {
         "init_gate must win the OnceLock"
     );
 
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {

@@ -29,6 +29,17 @@ pub enum ConfigError {
         /// Description of why the value is invalid.
         reason: String,
     },
+    /// The configuration sets a key of a feature that was removed.
+    RemovedKey {
+        /// The full dotted path of the key, with concrete realm/client names.
+        key: String,
+        /// The removed feature the key belonged to.
+        feature: &'static str,
+        /// The release that removed the feature.
+        removed_in: &'static str,
+        /// What to use instead, when there is a replacement.
+        replacement: Option<&'static str>,
+    },
 }
 
 impl fmt::Display for ConfigError {
@@ -45,6 +56,22 @@ impl fmt::Display for ConfigError {
             Self::ValidationError { field, reason } => {
                 write!(f, "invalid configuration for '{field}': {reason}")
             }
+            Self::RemovedKey {
+                key,
+                feature,
+                removed_in,
+                replacement,
+            } => {
+                write!(
+                    f,
+                    "configuration key '{key}' is no longer supported: {feature} was removed \
+                     in Hearth {removed_in}. Remove the key from the configuration."
+                )?;
+                if let Some(replacement) = replacement {
+                    write!(f, " Instead: {replacement}.")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -56,7 +83,8 @@ impl std::error::Error for ConfigError {
             Self::ParseError(_)
             | Self::MissingEnvVar { .. }
             | Self::DotenvParse { .. }
-            | Self::ValidationError { .. } => None,
+            | Self::ValidationError { .. }
+            | Self::RemovedKey { .. } => None,
         }
     }
 }

@@ -7,8 +7,7 @@
 //! refused". §2.2 lets the refusal be the ordinary `200`, so it reveals
 //! nothing about the token.
 //!
-//! Before this check `/revoke`, `/realms/{realm}/revoke` and gRPC `Revoke`
-//! revoked any valid token for any authenticated caller — and a public client
+//! Before this check `/revoke` and `/realms/{realm}/revoke` revoked any valid token for any authenticated caller — and a public client
 //! authenticates on its `client_id` alone. Anyone holding a user's token (a
 //! resource server that legitimately received it, or anyone who found a
 //! leaked one) could therefore end the user's whole session, or a refresh
@@ -25,8 +24,6 @@
 
 mod common;
 
-use std::sync::Arc;
-
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use hearth::core::{ClientId, RealmId};
@@ -37,12 +34,6 @@ use hearth::identity::{
     SessionContext, SigningKey, TokenIntrospectionRequest, TokenIssuanceContext,
     UpdateClientRequest,
 };
-use hearth::protocol::admin_auth::AdminRateLimiter;
-use hearth::protocol::grpc::oauth::OAuthSvc;
-use hearth::protocol::grpc::server::GrpcState;
-use hearth::protocol::proto::identity::v1 as id_pb;
-use hearth::protocol::proto::identity::v1::o_auth_service_server::OAuthService;
-use tonic::{Code, Request as TonicRequest};
 
 const SECRET: &str = "revoke-ownership-secret-1!";
 
@@ -353,63 +344,6 @@ async fn no_client_can_revoke_a_first_party_session_token() {
     assert!(
         is_active(&env.h, &env.realm_id, &access),
         "a token issued to no OAuth client was issued to neither caller"
-    );
-}
-
-// ===== gRPC Revoke applies the same rule =====
-
-fn grpc_state(h: &common::TestHarness) -> GrpcState {
-    GrpcState::new(
-        h.identity_arc(),
-        h.rbac_arc(),
-        h.audit_arc(),
-        Arc::new(AdminRateLimiter::new()),
-    )
-}
-
-fn grpc_revoke_request(
-    realm: &RealmId,
-    token: &str,
-    client: &ClientId,
-) -> TonicRequest<id_pb::TokenRevocationRequest> {
-    let mut r = TonicRequest::new(id_pb::TokenRevocationRequest {
-        token: token.to_string(),
-        token_type_hint: None,
-    });
-    r.metadata_mut().insert(
-        "x-realm-id",
-        realm.as_uuid().to_string().parse().expect("realm meta"),
-    );
-    r.metadata_mut().insert(
-        "x-hearth-client-id",
-        client.as_uuid().to_string().parse().expect("client meta"),
-    );
-    r
-}
-
-#[tokio::test]
-async fn grpc_revoke_only_revokes_the_callers_own_tokens() {
-    let h = common::TestHarness::embedded().await.expect("harness");
-    let realm = h.create_realm();
-    let owner = register(&h, &realm, None);
-    let attacker = register(&h, &realm, None);
-    let (access, _) = user_pair(&h, &realm, Some(&owner));
-    let svc = OAuthSvc::new(grpc_state(&h));
-
-    svc.revoke(grpc_revoke_request(&realm, &access, &attacker))
-        .await
-        .expect("a foreign revoke still answers OK (RFC 7009 §2.2)");
-    assert!(
-        is_active(&h, &realm, &access),
-        "gRPC Revoke must not revoke a token issued to another client"
-    );
-
-    svc.revoke(grpc_revoke_request(&realm, &access, &owner))
-        .await
-        .expect("owner revokes");
-    assert!(
-        !is_active(&h, &realm, &access),
-        "the owning client revokes its own token over gRPC"
     );
 }
 
@@ -975,22 +909,6 @@ async fn revoke_refuses_an_assertion_combined_with_a_secret() {
         "RFC 6749 §2.3: more than one client authentication method is invalid_request"
     );
     assert!(is_active(&env.h, &env.realm_id, &access));
-}
-
-#[tokio::test]
-async fn grpc_revoke_refuses_a_private_key_jwt_client_by_client_id_alone() {
-    let h = common::TestHarness::embedded().await.expect("harness");
-    let realm = h.create_realm();
-    let (client, _key) = register_pkjwt(&h, &realm);
-    let (access, _) = user_pair(&h, &realm, Some(&client));
-    let svc = OAuthSvc::new(grpc_state(&h));
-
-    let err = svc
-        .revoke(grpc_revoke_request(&realm, &access, &client))
-        .await
-        .expect_err("a private_key_jwt client_id alone must not authenticate over gRPC");
-    assert_eq!(err.code(), Code::Unauthenticated);
-    assert!(is_active(&h, &realm, &access));
 }
 
 #[tokio::test]

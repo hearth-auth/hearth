@@ -86,7 +86,7 @@ proptest! {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all().build().unwrap();
         rt.block_on(async {
-            let h = TestHarness::embedded().await.unwrap();
+            let h = TestHarness::in_process().await.unwrap();
             let realm = h.identity().create_realm(&CreateRealmRequest {
                 name: "p".to_string(), config: Default::default(),
             }).unwrap().id().clone();
@@ -125,7 +125,7 @@ proptest! {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all().build().unwrap();
         rt.block_on(async {
-            let h = TestHarness::embedded().await.unwrap();
+            let h = TestHarness::in_process().await.unwrap();
             let realm = h.identity().create_realm(&CreateRealmRequest {
                 name: "p".to_string(), config: Default::default(),
             }).unwrap().id().clone();
@@ -172,7 +172,7 @@ proptest! {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all().build().unwrap();
         rt.block_on(async {
-            let h = TestHarness::embedded().await.unwrap();
+            let h = TestHarness::in_process().await.unwrap();
             let realm = h.identity().create_realm(&CreateRealmRequest {
                 name: "p".to_string(), config: Default::default(),
             }).unwrap().id().clone();

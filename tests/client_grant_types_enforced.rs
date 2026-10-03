@@ -98,7 +98,6 @@ fn authorize(
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .map(|r| r.code().to_string())
@@ -135,7 +134,7 @@ fn code_grant(
 
 #[tokio::test]
 async fn authorize_refuses_a_client_not_registered_for_authorization_code() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let user = user(&h, &realm);
     let client = register(&h, &realm, &["client_credentials"], Some(SECRET));
@@ -150,7 +149,7 @@ async fn authorize_refuses_a_client_not_registered_for_authorization_code() {
 
 #[tokio::test]
 async fn code_exchange_issues_no_refresh_token_without_the_refresh_token_grant() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let user = user(&h, &realm);
     let client = register(&h, &realm, &["authorization_code"], None);
@@ -165,7 +164,7 @@ async fn code_exchange_issues_no_refresh_token_without_the_refresh_token_grant()
 
 #[tokio::test]
 async fn refresh_is_refused_once_the_refresh_token_grant_is_removed() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let user = user(&h, &realm);
     let client = register(&h, &realm, &["authorization_code", "refresh_token"], None);
@@ -204,7 +203,7 @@ async fn refresh_is_refused_once_the_refresh_token_grant_is_removed() {
 
 #[tokio::test]
 async fn a_client_registered_without_grant_types_defaults_to_code_and_refresh() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let user = user(&h, &realm);
     let client = register(&h, &realm, &[], None);
@@ -225,7 +224,7 @@ async fn a_client_registered_without_grant_types_defaults_to_code_and_refresh() 
 
 #[tokio::test]
 async fn device_grant_refuses_a_client_not_registered_for_it() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let client = register(&h, &realm, &["authorization_code"], None);
     let outcome = h.identity().device_authorize(

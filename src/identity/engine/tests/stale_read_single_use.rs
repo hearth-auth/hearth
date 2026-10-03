@@ -185,11 +185,7 @@ fn fixture() -> Fixture {
         .create_realm(&CreateRealmRequest {
             name: format!("stale-{}", uuid::Uuid::new_v4()),
             config: Some(crate::identity::RealmConfig {
-                mfa_methods: Some(vec![
-                    "sms".to_string(),
-                    "email_otp".to_string(),
-                    "totp".to_string(),
-                ]),
+                mfa_methods: Some(vec!["email_otp".to_string(), "totp".to_string()]),
                 ..crate::identity::RealmConfig::default()
             }),
         })
@@ -386,9 +382,7 @@ fn a_pending_authorization_ticket_is_taken_once_despite_a_stale_read() {
                 code_challenge_method: None,
                 nonce: None,
                 response_mode: None,
-                authorization_signed_response_alg: None,
                 resource: None,
-                via_par: false,
                 amr_values: Vec::new(),
                 created_at: now,
                 expires_at: now.add_micros(600_000_000),
@@ -499,43 +493,6 @@ fn a_transaction_token_is_consumed_once_despite_a_stale_read() {
             .consume_transaction_token(&f.realm, &issued.token)
             .is_err(),
         "a stale read of the consumed marker let a transaction token be consumed twice"
-    );
-}
-
-struct CapturingSms(Mutex<Vec<String>>);
-
-impl crate::identity::SmsSender for CapturingSms {
-    fn send(&self, message: &crate::identity::SmsMessage) -> Result<(), crate::identity::SmsError> {
-        self.0.lock().expect("sms").push(message.body.clone());
-        Ok(())
-    }
-}
-
-#[test]
-fn an_sms_otp_is_redeemed_once_despite_a_stale_read() {
-    const KEY: &[u8] = b"stale-read-sms-otp-hmac-key";
-    const PHONE: &str = "+15555550142";
-    let f = fixture();
-    let sender = CapturingSms(Mutex::new(Vec::new()));
-    let now = u64::try_from(now_secs(&f)).expect("now");
-    let nonce = f
-        .engine
-        .issue_sms_otp(&f.realm, PHONE, KEY, &sender, now)
-        .expect("issue");
-    let body = sender.0.lock().expect("sms").last().cloned().expect("sent");
-    let code = body
-        .rsplit_once(": ")
-        .map(|(_, c)| c.trim().to_string())
-        .expect("code");
-    f.storage.arm("sms:pending_otp:");
-    f.engine
-        .verify_sms_otp(&f.realm, &nonce, PHONE, &code, KEY, now)
-        .expect("first verify");
-    assert!(
-        f.engine
-            .verify_sms_otp(&f.realm, &nonce, PHONE, &code, KEY, now)
-            .is_err(),
-        "a stale read of the pending OTP let one SMS code be redeemed twice"
     );
 }
 
@@ -728,14 +685,6 @@ fn the_totp_guess_budget_is_shared_by_every_node() {
     );
 }
 
-/// The code an SMS body carries.
-fn sms_code(sender: &CapturingSms) -> String {
-    let body = sender.0.lock().expect("sms").last().cloned().expect("sent");
-    body.rsplit_once(": ")
-        .map(|(_, c)| c.trim().to_string())
-        .expect("code")
-}
-
 /// A six-digit guess that is not `code`.
 fn wrong_guess(code: &str) -> &'static str {
     if code == "000000" {
@@ -743,33 +692,6 @@ fn wrong_guess(code: &str) -> &'static str {
     } else {
         "000000"
     }
-}
-
-#[test]
-fn an_sms_otp_guess_budget_holds_despite_a_stale_read() {
-    const KEY: &[u8] = b"stale-read-sms-budget-hmac-key";
-    const PHONE: &str = "+15555550143";
-    let f = fixture();
-    let sender = CapturingSms(Mutex::new(Vec::new()));
-    let now = u64::try_from(now_secs(&f)).expect("now");
-    let nonce = f
-        .engine
-        .issue_sms_otp(&f.realm, PHONE, KEY, &sender, now)
-        .expect("issue");
-    let code = sms_code(&sender);
-    f.storage.arm("sms:pending_otp:");
-    for _ in 0..crate::identity::sms::otp::OTP_MAX_ATTEMPTS {
-        assert!(f
-            .engine
-            .verify_sms_otp(&f.realm, &nonce, PHONE, wrong_guess(&code), KEY, now)
-            .is_err());
-    }
-    assert!(
-        f.engine
-            .verify_sms_otp(&f.realm, &nonce, PHONE, &code, KEY, now)
-            .is_err(),
-        "a stale read of the attempt count granted a guess past the SMS OTP budget"
-    );
 }
 
 #[test]
@@ -804,7 +726,7 @@ fn an_email_otp_guess_budget_holds_despite_a_stale_read() {
         .map(|(_, rest)| rest.trim().chars().take(6).collect())
         .expect("code");
     f.storage.arm("email:pending_otp:");
-    for _ in 0..crate::identity::sms::otp::OTP_MAX_ATTEMPTS {
+    for _ in 0..crate::identity::otp::OTP_MAX_ATTEMPTS {
         assert!(f
             .engine
             .verify_email_otp(&f.realm, &nonce, ADDRESS, wrong_guess(&code), KEY, now)

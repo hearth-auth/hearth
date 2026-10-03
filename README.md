@@ -150,11 +150,15 @@ The bootstrap call returns a realm, an admin user, and a signed JWT — everythi
   "quickstart":          "# ready-to-paste shell commands (dev only)",
   "admin_password":      "HearthTest123!",
   "system_access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJFZERTQSJ9...",
-  "system_realm_id":     "00000000-0000-0000-0000-000000000000"
+  "system_realm_id":     "00000000-0000-0000-0000-000000000000",
+  "totp_secret":         "JBSWY3DPEHPK3PXP...",
+  "admin_totp_secret":   "KRUGS4ZANFZSAYJA..."
 }
 ```
 
 `admin_password` is only populated on the **first** bootstrap call — store it securely, it is never returned again. Re-bootstrap (when the dev-realm already exists) requires the `Authorization: Bearer <access_token>` header from the first bootstrap and returns `"admin_password": null` (JSON null, not `""` — `jq -r .admin_password` prints the string `null`).
+
+The `dev-realm` requires MFA. The first bootstrap call enrols TOTP for both admins. It returns `totp_secret` (base32, for `admin@dev.local`) and `admin_totp_secret` (base32, for `admin@hearth.test`) once. Both are empty on re-bootstrap. The returned tokens work without a code.
 
 > **No Docker, no Postgres, no config required** — `--dev` mode is fully self-contained. The bootstrap endpoint is disabled in production (`404 Not Found`).
 
@@ -213,10 +217,9 @@ Apache 2.0, self-hosted, no per-seat pricing, no vendor lock-in, no phone-home t
 **Protocols**
 - OIDC Core 1.0 + Discovery 1.0 + Dynamic Client Registration (RFC 7591; RFC 7592 management endpoints are roadmap)
 - Token Introspection (RFC 7662), Revocation (RFC 7009), RP-initiated logout
-- SAML 2.0 in **both** roles: Service Provider (inbound federation — SP-initiated and IdP-initiated SSO, plus Single Logout) and Identity Provider (Hearth asserts to third-party SPs at `/realms/{realm}/saml/sso`). Encrypted assertions are not supported — see [docs/specs/SAML.md](docs/specs/SAML.md)
+- SAML 2.0 as a Service Provider (inbound federation from your corporate IdP — SP-initiated and IdP-initiated SSO). Hearth is not a SAML IdP; applications connect over OIDC. Encrypted assertions and Single Logout are not supported — see [docs/specs/SAML.md](docs/specs/SAML.md)
 - SCIM 2.0 provisioning (Users, Groups, Service Provider Config)
 - Signed webhook subscriptions for auth and admin events
-- gRPC management API (RBAC admin surface)
 - REST/JSON over HTTP/1.1 and HTTP/2
 
 **Operations**
@@ -306,14 +309,14 @@ Identity infrastructure has zero tolerance for data loss and low tolerance for i
 4. **Fuzz** — `cargo-fuzz` against wire parsers (CBOR, protobuf, JWT, authenticator data).
 5. **Crash-recovery simulation** — real-thread tests against real temp directories with oracle-checked invariants and a `FaultFs` I/O fault hook: [`realm_crash`](simulation/src/tests/realm_crash.rs), [`audit_crash`](simulation/src/tests/audit_crash.rs), [`realm_concurrent_io`](simulation/src/tests/realm_concurrent_io.rs), [`rbac_concurrent_assignments`](simulation/src/tests/rbac_concurrent_assignments.rs).
 6. **Adversarial** — timing attacks, brute-force lockout, enumeration resistance, TLS downgrade, privilege escalation.
-7. **Conformance** — in-repo suites for OIDC Core 1.0, Discovery 1.0, Dynamic Client Registration, FAPI 2.0, RFC 8693/8707/9728, and the WebAuthn Level 2 ceremony. These are Hearth's own tests read against the specs. The OpenID Foundation conformance suite (`v5.3.1`, Config OP profile) was run locally on 2026-09-21 and **failed**: 38 conditions passed, 1 failed (a Discovery 1.0 §3 deviation), 1 warned; the authorization-flow profiles were not run ([`reports/conformance-suite-run-2026-09-21.md`](reports/conformance-suite-run-2026-09-21.md)). **Hearth is not certified** against any standard.
+7. **Conformance** — in-repo suites for OIDC Core 1.0, Discovery 1.0, Dynamic Client Registration, PAR/JAR/DPoP, RFC 8693/8707/9728, and the WebAuthn Level 2 ceremony. These are Hearth's own tests read against the specs. The OpenID Foundation conformance suite (`v5.3.1`, Config OP profile) was run locally on 2026-09-21 and **failed**: 38 conditions passed, 1 failed (a Discovery 1.0 §3 deviation), 1 warned; the authorization-flow profiles were not run ([`reports/conformance-suite-run-2026-09-21.md`](reports/conformance-suite-run-2026-09-21.md)). **Hearth is not certified** against any standard.
 8. **Benchmarks** — `criterion`, with regression gating in CI.
 
 **Crash-survival is part of the spec.** The storage engine must survive `kill -9` at any point and recover to a consistent state. Every WAL invariant has a crash-recovery scenario that exercises it.
 
 **CI tiers:** Fast (every commit) · Standard (merge) · Extended (nightly) · Full (weekly).
 
-**Current status.** Phase 0 (148/148 scenarios) and Phase 1 (134/135 scenarios). **The full Rust suite (`make test`, `hearth` lib + bin, `tests/` and the `hearth-simulation` crash-recovery crate) ran 6,056 tests at `060d4541`, plus 14 `#[ignore]` tests that do not run by default** (live-LDAP cases, two waiting on an abuse facade, two on external attestation, a manual WAL measurement, a slow restore baseline and the unfinished tenant-enumeration acceptance test). The count moves with every PR — reproduce it with `cargo nextest list --workspace --features hearth/dev-endpoints` rather than taking the number on faith.
+**Current status.** Phase 0 (148/148 scenarios) and Phase 1 (134/135 scenarios). **The full Rust suite (`make test`, `hearth` lib + bin, `tests/` and the `hearth-simulation` crash-recovery crate) ran 6,056 tests at `060d4541`, plus 14 `#[ignore]` tests that do not run by default** (seven live-LDAP cases, since removed with LDAP support in 3.0.0; two waiting on an abuse facade, two on external attestation, a manual WAL measurement, a slow restore baseline and the unfinished tenant-enumeration acceptance test). The count moves with every PR — reproduce it with `cargo nextest list --workspace --features hearth/dev-endpoints` rather than taking the number on faith.
 
 The Rust suite, the seven SDK suites and the SDK conformance check are all in the `needs:` list of the `required-summary` job in [`.github/workflows/ci.yml`](.github/workflows/ci.yml), so a red suite blocks merge. This README does not assert a green result for any particular commit: look at the CI badge above, or at the `validation-summary.txt` asset on a given release.
 
@@ -326,7 +329,7 @@ The Rust suite, the seven SDK suites and the SDK conformance check are all in th
 ### Prerequisites
 
 - **Rust 1.88.0+** (see [`Cargo.toml`](Cargo.toml) `rust-version`)
-- **`protoc`** — `build.rs` runs it on every build to generate the gRPC types.
+- **`protoc`** — `build.rs` runs it on every build to generate the API message types from `proto/`.
   Install it (`brew install protobuf`, `apt install protobuf-compiler`, or a
   release from [protobuf/releases](https://github.com/protocolbuffers/protobuf/releases))
   and make sure it is on `PATH`, or set `PROTOC=/path/to/protoc`.
@@ -400,7 +403,9 @@ Response (JSON):
   "quickstart":          "<shell snippet with realm_id and token interpolated>",
   "admin_password":      "<randomly generated — non-empty on first call only>",
   "system_access_token": "<jwt scoped to the system realm for cross-realm admin ops>",
-  "system_realm_id":     "00000000-0000-0000-0000-000000000000"
+  "system_realm_id":     "00000000-0000-0000-0000-000000000000",
+  "totp_secret":         "<base32 TOTP secret for admin@dev.local — first call only>",
+  "admin_totp_secret":   "<base32 TOTP secret for admin@hearth.test — first call only>"
 }
 ```
 
@@ -413,7 +418,9 @@ Bootstrap creates **two** admin identities that share the returned `admin_passwo
 | `admin@dev.local` | the `dev-realm` it just created | the REST/OIDC walkthrough below — this is the `sub` behind `access_token` |
 | `admin@hearth.test` | the system realm (`00000000-…-0000`) | the browser admin console at `/ui/admin/login` |
 
-Signing in at `/ui/admin/login` as `admin@dev.local` answers `401`: operators live in the system realm, so use `admin@hearth.test`. A successful login answers `303` to `/ui`; `/ui/admin` then redirects to `/ui/admin/realms`. There is no `/admin` HTML page — that prefix is the JSON admin API.
+Bootstrap enrols TOTP for both identities on the first call. `totp_secret` belongs to `admin@dev.local`. `admin_totp_secret` belongs to `admin@hearth.test`. Both are empty on re-bootstrap, so store them with the password.
+
+Signing in at `/ui/admin/login` as `admin@dev.local` answers `401`: operators live in the system realm, so use `admin@hearth.test`. The system realm always requires MFA, so the console asks for a TOTP code after the password. Add `admin_totp_secret` to an authenticator app, or compute a code with `oathtool --totp -b "$ADMIN_TOTP_SECRET"`. A successful login answers `303` to `/ui`; `/ui/admin` then redirects to `/ui/admin/realms`. There is no `/admin` HTML page — that prefix is the JSON admin API.
 
 Every `/admin/*` JSON route is realm-scoped and requires an **`X-Realm-ID` header** alongside the bearer token. Without it the call answers `400 {"error":"missing X-Realm-ID header"}`, not `401`:
 
@@ -522,9 +529,7 @@ Secrets are supplied through the environment rather than the YAML file so they n
 | `HEARTH_MASTER_KEY` | **Required in production** | 64 lowercase hex chars (32 bytes) | `openssl rand -hex 32` | Host key that encrypts every realm's Key Encryption Key (KEK) at rest. The **only** host-key source in production: without it **startup aborts** with `HEARTH_MASTER_KEY is not set. Production takes the storage host key only from HEARTH_MASTER_KEY …`, and a `${data_dir}/hearth.host_key` file is ignored even when present (that file is generated and read only under `--dev`). `hearth config validate` warns when it is unset but still exits 0. |
 | `HEARTH_PREVIOUS_MASTER_KEY` | Rotation only | 64 lowercase hex chars (32 bytes) | *(the prior key)* | The previous `HEARTH_MASTER_KEY` value, set **only during a master-key rotation** so the existing KEKs in `hearth.keys` can be re-encrypted under the new key. Remove it once the next clean start succeeds. |
 | `HEARTH_KEK` | Optional | 64 lowercase hex chars (32 bytes / AES-256) | `openssl rand -hex 32` | Storage key-encryption key; overrides `security.key_encryption_key`. Must not be the all-zero key. |
-| `HEARTH_SMS_OTP_HMAC_KEY` | Only with real SMS | ≥ 32 bytes | `openssl rand -base64 32` | Cryptographically binds SMS OTP codes to the server. Required **only when `sms.transport` is a real transport** (`twilio`, `awssns`). There is no fallback key: under `--dev` with no key a random per-process key is generated; outside `--dev` with no key, SMS OTP fails closed (no code is issued, and a user whose second factor is SMS cannot finish logging in). Outside `--dev`, `sms` MFA cannot be enabled at all while `sms.transport` is `log`. When set, it also seeds the email OTP key; otherwise email OTP codes are keyed from a random per-process secret. |
 | `HEARTH_TURNSTILE_SECRET_KEY` | With Turnstile | Cloudflare secret string | *(Cloudflare dashboard)* | Cloudflare Turnstile secret; overrides `abuse.captcha.turnstile.secret_key`. When Turnstile is enabled and this is unset, every challenge is rejected. |
-| `HEARTH_REALM_<REALM>_FINGERPRINT_HMAC_SECRET` | Per configured realm | ≥ 32 bytes | `openssl rand -base64 32` | Per-realm device-fingerprint HMAC secret. `<REALM>` is the SCREAMING_SNAKE_CASE realm name (e.g. `HEARTH_REALM_CUSTOMER_PORTAL_FINGERPRINT_HMAC_SECRET`). See [security hardening](docs/guides/security-hardening.md). |
 | `HEARTH_DEV_DATA_DIR` | Dev only | filesystem path | — | Overrides the data directory used under `--dev` (env > config `storage.data_dir` > temp dir). Ignored outside dev mode. |
 | `HEARTH_MAILCATCHER_PASSWORD` | Dev only | string | `openssl rand -base64 24` | Password for the in-process mailcatcher UI (`/dev/mail`) when `email.transport: mailcatcher`. Auto-generated (and logged) if unset. |
 
@@ -635,7 +640,7 @@ Production deployment (containerised, persistent storage, real email) lives in [
 ## CLI Reference
 
 ```text
-hearth serve [--dev] [-c, --config <path>] [--port <u16>] [--bind <addr>] [-v] [--allow-reflection-in-prod]
+hearth serve [--dev] [-c, --config <path>] [--port <u16>] [--bind <addr>] [-v]
 hearth realm create
 hearth app create --server <url> --realm-id <uuid> --name <name> --redirect-uri <url> --token <admin-bearer-token>
 hearth migrate keycloak --file <export.json> [--data-dir <path>] [--realm <uuid>] [--dry-run]
@@ -698,7 +703,7 @@ echo "Realm: $REALM_ID"
 echo "User:  $USER_ID"
 ```
 
-The bootstrap endpoint is available only in `--dev` mode. It creates a realm, an admin user, assigns the `realm.admin` role (which carries the `hearth.admin` permission), and returns short-lived tokens. The `admin_password` field is **non-empty on the first call only** — store it securely. Re-bootstrap (to refresh expired tokens) requires `Authorization: Bearer <access_token>` from the initial bootstrap. In production it returns `404 Not Found`.
+The bootstrap endpoint is available only in `--dev` mode. It creates a realm, an admin user, assigns the `realm.admin` role (which carries the `hearth.admin` permission), and returns short-lived tokens. The `admin_password`, `totp_secret` and `admin_totp_secret` fields are **non-empty on the first call only** — store them securely. Re-bootstrap (to refresh expired tokens) requires `Authorization: Bearer <access_token>` from the initial bootstrap. In production it returns `404 Not Found`.
 
 ### 2. Register a client
 
@@ -1001,19 +1006,16 @@ Per-realm variants of the core OAuth/OIDC endpoints are available at `/realms/{r
 
 ## Client SDKs
 
-Seven first-party SDKs live under [`sdks/`](sdks): TypeScript, Node.js, Go, Python, Rust,
-PHP and Kotlin. Registry status, checked 2026-09-28 — not every SDK is installable from its
+Four first-party SDKs live under [`sdks/`](sdks): TypeScript (browser and Node.js, including
+Express, Fastify and Next.js helpers), Go, Python and PHP. Registry status, checked 2026-09-28 — not every SDK is installable from its
 registry yet, and the published versions lag the source tree:
 
 | SDK | Package | Registry status |
 |---|---|---|
 | TypeScript | `@hearth-auth/sdk` | npm, **1.6.2** |
-| Node.js | `@hearth-auth/node` | npm, **1.6.2** |
 | Go | `github.com/hearth-auth/hearth/sdks/go` | Go module proxy, **v1.6.11** |
 | Python | `hearth-sdk` | PyPI, **1.6.8** |
-| Rust | `hearth-sdk` | crates.io, **1.6.11** |
 | PHP | `hearth-auth/php-sdk` | Packagist, **`dev-main` only** (no tagged release) |
-| Kotlin / JVM | `io.hearth:hearth-core` (+ `hearth-ktor`, `hearth-spring`) | **not published** — build from source |
 
 See [docs/guides/sdks/overview.md](docs/guides/sdks/overview.md) for per-SDK install notes.
 Two examples:
@@ -1099,7 +1101,7 @@ Hearth administrators live in an invisible **system realm** — distinct from an
 
 - **Admin sign-in:** `GET /ui/admin/login`. The session cookie is bound to the system realm, not any app realm.
 - **Admin email verification:** `GET /ui/admin/verify-email?token=...` — the link embedded in the first-run setup email.
-- **The system realm is read-only through public APIs.** `realms: { system: {} }` in YAML is a config error at parse time (`src/config/validate.rs`). Fifteen engine entry points reject the reserved realm with a 403 `SystemRealmProtected` — by nil UUID where the request is id-addressed, and by the reserved name `system` where it is name-addressed: `create_realm`, `update_realm`, `delete_realm`, `create_user`, `create_user_attributed`, `register_user`, `register_client`, `create_organization`, `update_organization`, `create_agent`, `import_realm`, `import_user`, `import_client`, `seed_demo_users`, and realm reconciliation. **RBAC writes are gated at the protocol edge instead**, not in the engine: `reject_system_realm_write` guards ten REST admin routes (`src/protocol/http/admin.rs`) and seventeen gRPC `RbacAdmin` RPCs (`src/protocol/grpc/rbac_admin.rs`), because the operator console legitimately writes system-realm roles through the engine directly. The realm does not appear in `list_realms()` or `search_realms()`, `get_realm_by_name("system")` returns `None`, and `/ui/realms/system/...` URLs return 404.
+- **The system realm is read-only through public APIs.** `realms: { system: {} }` in YAML is a config error at parse time (`src/config/validate.rs`). Fifteen engine entry points reject the reserved realm with a 403 `SystemRealmProtected` — by nil UUID where the request is id-addressed, and by the reserved name `system` where it is name-addressed: `create_realm`, `update_realm`, `delete_realm`, `create_user`, `create_user_attributed`, `register_user`, `register_client`, `create_organization`, `update_organization`, `create_agent`, `import_realm`, `import_user`, `import_client`, `seed_demo_users`, and realm reconciliation. **RBAC writes are gated at the protocol edge instead**, not in the engine: `reject_system_realm_write` guards the REST admin RBAC write routes (`src/protocol/http/admin.rs` and `src/protocol/http/admin/`), because the operator console legitimately writes system-realm roles through the engine directly. The realm does not appear in `list_realms()` or `search_realms()`, `get_realm_by_name("system")` returns `None`, and `/ui/realms/system/...` URLs return 404.
 - **Operators run the first-run setup exactly once**, regardless of how many application realms they've declared. The admin user is always placed in the system realm; tenant realms stay empty of operators.
 
 Admins administer tenant realms via a `?realm=<name>` query parameter on admin URLs, which persists for the session via the `hearth_ui_admin_target` cookie. Switching realms is done either by visiting `/ui/admin/realms` and clicking "Administer this realm" next to the target, or by typing `?realm=<name>` in the URL. The admin's session cookie is always bound to the system realm; the target realm is orthogonal.
@@ -1170,7 +1172,7 @@ See the [full Auth0 migration guide](docs/guides/migrating-from-auth0.md) for bu
 │                     Single binary process                     │
 │                                                              │
 │  ┌─────────────────────────────────────────────────────────┐ │
-│  │  Protocol   REST · gRPC · OIDC · SAML · SCIM · WebUI   │ │
+│  │  Protocol   REST · OIDC · SAML · SCIM · WebUI          │ │
 │  └────────────────────────┬────────────────────────────────┘ │
 │                            │                                  │
 │  ┌─────────────────────────▼──────────────────────────────┐  │
@@ -1194,7 +1196,7 @@ See the [full Auth0 migration guide](docs/guides/migrating-from-auth0.md) for bu
 | Layer | Path | Role |
 |---|---|---|
 | Core | `src/core/` | Shared types and traits only. No logic, no state. |
-| Protocol | `src/protocol/` | Stateless wire adapters (REST, gRPC, OIDC, SAML, SCIM). |
+| Protocol | `src/protocol/` | Stateless wire adapters (REST, OIDC, SAML, SCIM). |
 | Identity | `src/identity/` | Users, credentials, sessions, realms, tokens. |
 | RBAC | `src/rbac/` | Roles, groups, assignments, permission resolution into JWT claims. |
 | Cluster | `src/cluster/` | Raft consensus (`openraft`). Invisible in single-node mode. **Experimental in 1.x — not production-supported.** |

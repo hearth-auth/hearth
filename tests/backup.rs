@@ -1,7 +1,7 @@
 //! Integration tests for the backup and restore engine (HEA-624).
 //!
 //! Exercises [`BackupExporter`], [`BackupImporter`], [`BackupArchive`], and the
-//! passphrase encryption layer end-to-end using embedded harnesses.
+//! passphrase encryption layer end-to-end using in-process harnesses.
 
 mod common;
 
@@ -167,7 +167,9 @@ fn realm_slug(h: &common::TestHarness, realm: &hearth::core::RealmId) -> String 
 #[tokio::test]
 async fn full_roundtrip() {
     // Source harness — realm A
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let (realm_a, email, password) = seeded_realm(&src);
 
     // Assign admin role to the user so we can verify RBAC survives.
@@ -197,7 +199,9 @@ async fn full_roundtrip() {
     let slug = realm_slug(&src, &realm_a);
 
     // Destination harness — fresh engine
-    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let dst = common::TestHarness::in_process()
+        .await
+        .expect("dst harness");
     let reader = BackupArchive::open(tmp.path()).expect("open archive");
     let importer = make_importer(&dst);
     let report = importer
@@ -273,7 +277,7 @@ async fn test_restore_preserves_signing_keys() {
     use hearth::identity::tokens::{verify_token_signature, Audience, SigningKey, TokenClaims};
 
     // ── Source harness: realm + user + per-realm-signed JWT ────────────
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process().await.expect("src");
     let (realm_src, _email, _password) = seeded_realm(&src);
 
     // Snapshot the source realm's per-realm signing key (PKCS#8 bytes).
@@ -337,7 +341,7 @@ async fn test_restore_preserves_signing_keys() {
     let slug = realm_slug(&src, &realm_src);
 
     // ── Destination harness: restore into a fresh data dir ─────────────
-    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let dst = common::TestHarness::in_process().await.expect("dst");
     let reader = BackupArchive::open(tmp.path()).expect("open archive");
     let importer = make_importer(&dst);
     let report = importer
@@ -405,7 +409,9 @@ async fn test_restore_preserves_signing_keys() {
 /// harness that already has `realm_b` seeded — `realm_b` must be untouched.
 #[tokio::test]
 async fn realm_scoped_backup() {
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let (realm_a, email_a, _) = seeded_realm(&src);
     let (realm_b, email_b, _) = seeded_realm(&src);
 
@@ -413,7 +419,9 @@ async fn realm_scoped_backup() {
     let slug_a = realm_slug(&src, &realm_a);
 
     // Build a fresh harness that already holds realm_b's users.
-    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let dst = common::TestHarness::in_process()
+        .await
+        .expect("dst harness");
     let (realm_b_dst, email_b_dst, _) = seeded_realm(&dst);
     let _ = (realm_b, email_b); // realm_b is source only
 
@@ -451,7 +459,7 @@ async fn realm_scoped_backup() {
 /// verifies that `verify_checksums` detects the corruption.
 #[tokio::test]
 async fn integrity_check_detects_corruption() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, _, _) = seeded_realm(&h);
     let tmp = export_realm_to_file(&h, &realm, &ExportOptions::default());
 
@@ -488,12 +496,16 @@ async fn integrity_check_detects_corruption() {
 /// must produce no duplicates and report a skipped realm (not errored).
 #[tokio::test]
 async fn skip_mode_idempotency() {
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let (realm, email, _) = seeded_realm(&src);
     let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
     let slug = realm_slug(&src, &realm);
 
-    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let dst = common::TestHarness::in_process()
+        .await
+        .expect("dst harness");
     let opts = ImportOptions {
         mode: RestoreMode::Skip,
         ..import_opts_with_passphrase()
@@ -542,12 +554,16 @@ async fn skip_mode_idempotency() {
 /// users) but the report must reflect what *would* have been written.
 #[tokio::test]
 async fn dry_run_no_writes() {
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let (realm, _, _) = seeded_realm(&src);
     let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
     let slug = realm_slug(&src, &realm);
 
-    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let dst = common::TestHarness::in_process()
+        .await
+        .expect("dst harness");
     let opts = ImportOptions {
         dry_run: true,
         ..import_opts_with_passphrase()
@@ -583,7 +599,9 @@ async fn dry_run_no_writes() {
 /// work.
 #[tokio::test]
 async fn encrypted_roundtrip() {
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let (realm, email, password) = seeded_realm(&src);
     let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
     let slug = realm_slug(&src, &realm);
@@ -597,7 +615,9 @@ async fn encrypted_roundtrip() {
     let restored_tmp = NamedTempFile::new().expect("tempfile");
     std::fs::write(restored_tmp.path(), &decrypted).expect("write decrypted");
 
-    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let dst = common::TestHarness::in_process()
+        .await
+        .expect("dst harness");
     let reader = BackupArchive::open(restored_tmp.path()).expect("open");
     let importer = make_importer(&dst);
     let report = importer
@@ -628,7 +648,9 @@ async fn encrypted_roundtrip() {
 /// and leave the destination storage untouched.
 #[tokio::test]
 async fn encrypted_wrong_passphrase() {
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let (realm, _, _) = seeded_realm(&src);
     let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
 
@@ -670,12 +692,16 @@ async fn encrypted_wrong_passphrase() {
 /// cascade path.
 #[tokio::test]
 async fn overwrite_mode_refuses_over_a_live_realm() {
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let (realm, email, _) = seeded_realm(&src);
     let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
     let slug = realm_slug(&src, &realm);
 
-    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let dst = common::TestHarness::in_process()
+        .await
+        .expect("dst harness");
     let reader = BackupArchive::open(tmp.path()).expect("open");
     let importer = make_importer(&dst);
 
@@ -753,7 +779,7 @@ async fn overwrite_mode_refuses_over_a_live_realm() {
 /// manifest matches the events found in that file.
 #[tokio::test]
 async fn audit_included_flag() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, _, _) = seeded_realm(&h);
     let slug = realm_slug(&h, &realm);
 
@@ -837,7 +863,9 @@ async fn roundtrip_restores_full_authorization_model() {
     };
 
     // ── Source: realm seeded with custom authz entities ────────────────
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let (realm, email, _password) = seeded_realm(&src);
     let user = src
         .identity()
@@ -939,7 +967,9 @@ async fn roundtrip_restores_full_authorization_model() {
     let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
     let slug = realm_slug(&src, &realm);
 
-    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let dst = common::TestHarness::in_process()
+        .await
+        .expect("dst harness");
     let reader = BackupArchive::open(tmp.path()).expect("open");
     let importer = make_importer(&dst);
     let report = importer
@@ -1026,7 +1056,9 @@ async fn roundtrip_restores_full_authorization_model() {
 async fn audit_events_restored_when_included() {
     use std::collections::HashSet;
 
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     // seeded_realm creates a realm + user, which emit audit events.
     let (realm, _email, _password) = seeded_realm(&src);
 
@@ -1050,7 +1082,9 @@ async fn audit_events_restored_when_included() {
     );
     let slug = realm_slug(&src, &realm);
 
-    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let dst = common::TestHarness::in_process()
+        .await
+        .expect("dst harness");
     let reader = BackupArchive::open(tmp.path()).expect("open");
     let importer = make_importer(&dst);
     let report = importer
@@ -1106,7 +1140,9 @@ async fn audit_events_restored_when_included() {
 /// path must fail the restore.
 #[tokio::test]
 async fn restore_refuses_an_archive_whose_declared_chain_material_is_missing() {
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let (realm, _email, _password) = seeded_realm(&src);
     let tmp = export_realm_to_file(
         &src,
@@ -1123,7 +1159,9 @@ async fn restore_refuses_an_archive_whose_declared_chain_material_is_missing() {
     let reader = BackupArchive::open(tmp.path()).expect("open");
     let stripped = strip_member(tmp.path(), &format!("realms/{slug}/audit_chain.json"));
 
-    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let dst = common::TestHarness::in_process()
+        .await
+        .expect("dst harness");
     let stripped_reader = BackupArchive::open(stripped.path()).expect("open stripped");
     assert!(
         reader.realms()[0].audit_chain_included,
@@ -1245,12 +1283,12 @@ mod proptests {
             .enable_all()
             .build()
             .expect("rt")
-            .block_on(common::TestHarness::embedded())
+            .block_on(common::TestHarness::in_process())
             .expect("harness")
     }
 
     proptest! {
-        // 8 cases: each case creates a full TestHarness::embedded() (tokio runtime + WAL init),
+        // 8 cases: each case creates a full TestHarness::in_process() (tokio runtime + WAL init),
         // which is expensive. 32 cases exceeded the 60s nextest terminate-after on CI runners.
         #![proptest_config(ProptestConfig::with_cases(8))]
 
@@ -1359,7 +1397,9 @@ async fn large_realm_restore_under_60s() {
 
     // Use fast Argon2id params (already set via CredentialConfig::fast_for_testing)
     // to keep the test focused on I/O and serialization, not hashing.
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let realm = src.create_realm();
     src.rbac().seed_realm(&realm).expect("seed");
 
@@ -1381,7 +1421,9 @@ async fn large_realm_restore_under_60s() {
     let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
     let slug = realm_slug(&src, &realm);
 
-    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let dst = common::TestHarness::in_process()
+        .await
+        .expect("dst harness");
     let reader = BackupArchive::open(tmp.path()).expect("open");
     let importer = make_importer(&dst);
 
@@ -1461,7 +1503,7 @@ async fn export_is_referentially_consistent_under_concurrent_writes() {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
 
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed rbac");
     let admin_role = h
@@ -1606,7 +1648,9 @@ fn compute_totp_code(secret_base32: &str, unix_secs: u64) -> String {
 /// restored a realm silently lost every second factor (audit §4.18#5).
 #[tokio::test]
 async fn restore_carries_totp_factor() {
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let (realm_a, email, _password) = seeded_realm(&src);
     let user_a = src
         .identity()
@@ -1637,7 +1681,9 @@ async fn restore_carries_totp_factor() {
     let tmp = export_realm_to_file(&src, &realm_a, &ExportOptions::default());
     let slug = realm_slug(&src, &realm_a);
 
-    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let dst = common::TestHarness::in_process()
+        .await
+        .expect("dst harness");
     let reader = BackupArchive::open(tmp.path()).expect("open archive");
     let importer = make_importer(&dst);
     let report = importer
@@ -1682,7 +1728,9 @@ async fn restore_carries_totp_factor() {
 async fn restore_carries_passkey_factor() {
     use hearth::identity::MfaFactorExport;
 
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let (realm_a, email, _password) = seeded_realm(&src);
     let user_a = src
         .identity()
@@ -1720,7 +1768,9 @@ async fn restore_carries_passkey_factor() {
     let tmp = export_realm_to_file(&src, &realm_a, &ExportOptions::default());
     let slug = realm_slug(&src, &realm_a);
 
-    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let dst = common::TestHarness::in_process()
+        .await
+        .expect("dst harness");
     let reader = BackupArchive::open(tmp.path()).expect("open archive");
     let importer = make_importer(&dst);
     let report = importer
@@ -1772,7 +1822,9 @@ async fn restore_carries_group_memberships_and_the_permissions_they_grant() {
         Subject,
     };
 
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let (realm, email, _password) = seeded_realm(&src);
     let user = src
         .identity()
@@ -1835,7 +1887,9 @@ async fn restore_carries_group_memberships_and_the_permissions_they_grant() {
 
     let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
     let slug = realm_slug(&src, &realm);
-    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let dst = common::TestHarness::in_process()
+        .await
+        .expect("dst harness");
     let reader = BackupArchive::open(tmp.path()).expect("open");
     let report = make_importer(&dst)
         .import_realm(&slug, &reader, &import_opts_with_passphrase())
@@ -1875,7 +1929,9 @@ async fn restore_carries_group_memberships_and_the_permissions_they_grant() {
 async fn restore_carries_organization_memberships_in_both_directions() {
     use hearth::identity::{CreateOrganizationRequest, OrganizationRole};
 
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let (realm, email, _password) = seeded_realm(&src);
     let user = src
         .identity()
@@ -1901,7 +1957,9 @@ async fn restore_carries_organization_memberships_in_both_directions() {
 
     let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
     let slug = realm_slug(&src, &realm);
-    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let dst = common::TestHarness::in_process()
+        .await
+        .expect("dst harness");
     let reader = BackupArchive::open(tmp.path()).expect("open");
     let report = make_importer(&dst)
         .import_realm(&slug, &reader, &import_opts_with_passphrase())
@@ -1944,7 +2002,9 @@ async fn restore_carries_organization_memberships_in_both_directions() {
 /// A restored user must not be re-prompted for consent they already granted.
 #[tokio::test]
 async fn restore_carries_user_consents() {
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let (realm, email, _password) = seeded_realm(&src);
     let user = src
         .identity()
@@ -1979,7 +2039,9 @@ async fn restore_carries_user_consents() {
 
     let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
     let slug = realm_slug(&src, &realm);
-    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let dst = common::TestHarness::in_process()
+        .await
+        .expect("dst harness");
     let reader = BackupArchive::open(tmp.path()).expect("open");
     let report = make_importer(&dst)
         .import_realm(&slug, &reader, &import_opts_with_passphrase())
@@ -2032,7 +2094,9 @@ fn restore_into(
 /// backup still **authenticates** afterwards — not that a row came back.
 #[tokio::test]
 async fn restore_carries_agents_whose_api_keys_still_authenticate() {
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let (realm, email, _password) = seeded_realm(&src);
     let owner = src
         .identity()
@@ -2075,7 +2139,9 @@ async fn restore_carries_agents_whose_api_keys_still_authenticate() {
 
     let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
     let slug = realm_slug(&src, &realm);
-    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let dst = common::TestHarness::in_process()
+        .await
+        .expect("dst harness");
     let (restored_realm, report) = restore_into(&dst, &tmp, &slug);
 
     let restored_agent = dst
@@ -2119,7 +2185,9 @@ async fn restore_carries_agents_whose_api_keys_still_authenticate() {
 async fn restore_carries_identity_providers_and_their_federation_links() {
     use std::collections::BTreeMap;
 
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let (realm, email, _password) = seeded_realm(&src);
     let user = src
         .identity()
@@ -2159,7 +2227,9 @@ async fn restore_carries_identity_providers_and_their_federation_links() {
 
     let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
     let slug = realm_slug(&src, &realm);
-    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let dst = common::TestHarness::in_process()
+        .await
+        .expect("dst harness");
     let (restored_realm, report) = restore_into(&dst, &tmp, &slug);
 
     let restored_idp = dst
@@ -2203,7 +2273,9 @@ async fn restore_carries_identity_providers_and_their_federation_links() {
 /// fails the receiver's signature check.
 #[tokio::test]
 async fn restore_carries_webhooks_with_their_signing_secret() {
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let (realm, _email, _password) = seeded_realm(&src);
     let created = src
         .identity()
@@ -2220,7 +2292,9 @@ async fn restore_carries_webhooks_with_their_signing_secret() {
 
     let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
     let slug = realm_slug(&src, &realm);
-    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let dst = common::TestHarness::in_process()
+        .await
+        .expect("dst harness");
     let (restored_realm, report) = restore_into(&dst, &tmp, &slug);
 
     let restored = dst
@@ -2240,70 +2314,44 @@ async fn restore_carries_webhooks_with_their_signing_secret() {
     assert_eq!(report.webhooks.created, 1);
 }
 
-/// SAML SPs and the per-realm RSA key whose certificate they pinned.
+/// The per-realm SAML RSA key, whose certificate the SP metadata publishes to
+/// every upstream IdP.
 ///
 /// Source and destination are sealed under **different** KEKs, which is the
 /// whole point: a naive round-trip would copy ciphertext the destination
 /// cannot open, and it would look like it worked until the first SAML login.
 #[tokio::test]
-async fn restore_carries_saml_service_providers_and_a_usable_signing_key() {
-    use std::collections::BTreeMap;
-
-    let src = common::TestHarness::embedded_with_kek([7u8; 32])
+async fn restore_carries_a_usable_saml_signing_key() {
+    let src = common::TestHarness::in_process_with_kek([7u8; 32])
         .await
         .expect("src harness");
     let (realm, _email, _password) = seeded_realm(&src);
     let source_key = src
         .identity()
-        .get_or_create_saml_signing_key(&realm, "hearth-test-idp")
+        .get_or_create_saml_signing_key(&realm, "hearth-test-sp")
         .expect("create saml key");
     let source_cert = source_key.cert_der().to_vec();
-
-    let sp = hearth::identity::federation::saml::SamlServiceProvider {
-        sp_key: "my-crm".to_string(),
-        entity_id: "https://crm.example".to_string(),
-        acs_url: "https://crm.example/acs".to_string(),
-        slo_url: None,
-        sp_certificate_pem: None,
-        sign_assertions: true,
-        sign_responses: true,
-        want_authn_requests_signed: false,
-        nameid_format: hearth::identity::federation::saml::SamlNameIdFormat::EmailAddress,
-        attribute_map: BTreeMap::new(),
-    };
-    src.identity()
-        .register_saml_sp(&realm, &sp)
-        .expect("register sp");
 
     let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
     let slug = realm_slug(&src, &realm);
     // A DIFFERENT KEK: the destination cannot open the source's envelopes.
-    let dst = common::TestHarness::embedded_with_kek([9u8; 32])
+    let dst = common::TestHarness::in_process_with_kek([9u8; 32])
         .await
         .expect("dst harness");
-    let (restored_realm, report) = restore_into(&dst, &tmp, &slug);
-
-    let restored_sp = dst
-        .identity()
-        .get_saml_sp_by_entity_id(&restored_realm, "https://crm.example")
-        .expect("get sp")
-        .expect("the SP registration must survive the restore");
-    assert_eq!(restored_sp.acs_url, sp.acs_url);
-    assert!(restored_sp.sign_assertions);
-    assert_eq!(report.saml_service_providers.created, 1);
+    let (restored_realm, _report) = restore_into(&dst, &tmp, &slug);
 
     // `get_or_create` would silently GENERATE a fresh key if the restored one
     // were unreadable, so an equal certificate is proof the restored key was
     // decrypted under the destination's own KEK and is usable.
     let restored_key = dst
         .identity()
-        .get_or_create_saml_signing_key(&restored_realm, "hearth-test-idp")
+        .get_or_create_saml_signing_key(&restored_realm, "hearth-test-sp")
         .expect("load restored saml key");
     assert_eq!(
         restored_key.cert_der(),
         source_cert.as_slice(),
         "the restored SAML key must be the ORIGINAL one, re-sealed under the destination's KEK — \
-         a freshly generated key hands every SP a certificate it does not trust"
+         a freshly generated key hands every upstream IdP a certificate it does not trust"
     );
 }
 
@@ -2311,7 +2359,9 @@ async fn restore_carries_saml_service_providers_and_a_usable_signing_key() {
 /// provisioned instead of updating it.
 #[tokio::test]
 async fn restore_carries_scim_external_id_mappings() {
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let (realm, email, _password) = seeded_realm(&src);
     let user = src
         .identity()
@@ -2340,7 +2390,9 @@ async fn restore_carries_scim_external_id_mappings() {
 
     let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
     let slug = realm_slug(&src, &realm);
-    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let dst = common::TestHarness::in_process()
+        .await
+        .expect("dst harness");
     let (restored_realm, report) = restore_into(&dst, &tmp, &slug);
 
     let resolved_user = dst
@@ -2372,7 +2424,9 @@ async fn restore_carries_scim_external_id_mappings() {
 /// it would 404.
 #[tokio::test]
 async fn restore_carries_invitations_that_still_redeem() {
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let (realm, email, _password) = seeded_realm(&src);
     let inviter = src
         .identity()
@@ -2407,7 +2461,9 @@ async fn restore_carries_invitations_that_still_redeem() {
 
     let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
     let slug = realm_slug(&src, &realm);
-    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let dst = common::TestHarness::in_process()
+        .await
+        .expect("dst harness");
     let (restored_realm, report) = restore_into(&dst, &tmp, &slug);
     assert_eq!(report.invitations.created, 1);
 
@@ -2448,7 +2504,7 @@ async fn restore_carries_retiring_signing_keys_still_inside_their_grace_window()
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use hearth::identity::tokens::{verify_token_signature, Audience, SigningKey, TokenClaims};
 
-    let src = common::TestHarness::embedded_with_kek([3u8; 32])
+    let src = common::TestHarness::in_process_with_kek([3u8; 32])
         .await
         .expect("src harness");
     let (realm, _email, _password) = seeded_realm(&src);
@@ -2510,7 +2566,7 @@ async fn restore_carries_retiring_signing_keys_still_inside_their_grace_window()
     let slug = realm_slug(&src, &realm);
     // A DIFFERENT KEK at the destination: the key must be unsealed on export
     // and re-sealed here, not copied as ciphertext nothing here can open.
-    let dst = common::TestHarness::embedded_with_kek([5u8; 32])
+    let dst = common::TestHarness::in_process_with_kek([5u8; 32])
         .await
         .expect("dst harness");
     let (restored_realm, report) = restore_into(&dst, &tmp, &slug);
@@ -2598,7 +2654,6 @@ fn rs256_id_token(
                 amr_values: Vec::new(),
                 response_mode: None,
                 request: None,
-                via_par: false,
             },
         )
         .expect("authorize")
@@ -2682,7 +2737,7 @@ fn verifies_against(token: &str, jwks: &hearth::identity::JwksDocument) -> bool 
 /// rather than a freshly provisioned one.
 #[tokio::test]
 async fn restore_carries_the_rs256_id_token_key_and_its_retiring_predecessor() {
-    let src = common::TestHarness::embedded_with_kek([3u8; 32])
+    let src = common::TestHarness::in_process_with_kek([3u8; 32])
         .await
         .expect("src harness");
     let (realm, _email, _password) = seeded_realm(&src);
@@ -2710,7 +2765,7 @@ async fn restore_carries_the_rs256_id_token_key_and_its_retiring_predecessor() {
 
     let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
     let slug = realm_slug(&src, &realm);
-    let dst = common::TestHarness::embedded_with_kek([5u8; 32])
+    let dst = common::TestHarness::in_process_with_kek([5u8; 32])
         .await
         .expect("dst harness");
     let (restored, report) = restore_into(&dst, &tmp, &slug);
@@ -2762,7 +2817,9 @@ async fn restore_carries_the_rs256_id_token_key_and_its_retiring_predecessor() {
 /// to restore by default, and proceeds only on the explicit override.
 #[tokio::test]
 async fn restore_refuses_rs256_clients_without_their_id_token_key() {
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let (realm, _email, _password) = seeded_realm(&src);
     register_rs256_client(&src, &realm);
     let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
@@ -2773,7 +2830,9 @@ async fn restore_refuses_rs256_clients_without_their_id_token_key() {
     );
     let reader = BackupArchive::open(stripped.path()).expect("open stripped");
 
-    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let dst = common::TestHarness::in_process()
+        .await
+        .expect("dst harness");
     let err = make_importer(&dst)
         .import_realm(&slug, &reader, &import_opts_with_passphrase())
         .expect_err("RS256 clients without their key must not restore by default");
@@ -2805,141 +2864,6 @@ async fn restore_refuses_rs256_clients_without_their_id_token_key() {
     );
 }
 
-/// Runs an authorization-code grant that satisfies FAPI 2.0 Baseline (PAR,
-/// PKCE S256 and a DPoP binding) for `client`, so the only thing left for a
-/// FAPI realm to refuse is an RS256 ID token.
-fn fapi_code_grant(
-    h: &common::TestHarness,
-    realm: &hearth::core::RealmId,
-    client: &hearth::core::ClientId,
-) -> Result<hearth::identity::OidcTokenResponse, hearth::identity::IdentityError> {
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use hearth::identity::{AuthorizationRequest, CodeChallengeMethod, TokenExchangeRequest};
-
-    let user = h
-        .identity()
-        .create_user(
-            realm,
-            &CreateUserRequest {
-                email: format!("fapi-{}@backup-test.example", uuid::Uuid::new_v4()),
-                display_name: "FAPI User".into(),
-                first_name: "F".into(),
-                last_name: "A".into(),
-                attributes: Default::default(),
-            },
-        )
-        .expect("create user");
-    let verifier = "backup-fapi-verifier-abcdefghijklmnopqrstuvwxyz-0123456789";
-    let challenge = URL_SAFE_NO_PAD
-        .encode(ring::digest::digest(&ring::digest::SHA256, verifier.as_bytes()).as_ref());
-    let code = h
-        .identity()
-        .authorize(
-            realm,
-            &AuthorizationRequest {
-                client_id: client.clone(),
-                redirect_uri: "https://rp.example.com/cb".to_string(),
-                scope: "openid".to_string(),
-                state: "st".to_string(),
-                response_type: "code".to_string(),
-                user_id: user.id().clone(),
-                code_challenge: Some(challenge),
-                code_challenge_method: Some(CodeChallengeMethod::S256),
-                nonce: Some("n-fapi".to_string()),
-                resource: None,
-                amr_values: Vec::new(),
-                response_mode: None,
-                request: None,
-                via_par: true,
-            },
-        )
-        .expect("a PAR + PKCE request satisfies FAPI 2.0 Baseline")
-        .code()
-        .to_string();
-    h.identity().exchange_authorization_code(
-        realm,
-        &TokenExchangeRequest {
-            client_id: client.clone(),
-            code,
-            redirect_uri: "https://rp.example.com/cb".to_string(),
-            code_verifier: Some(verifier.to_string()),
-            dpop_jkt: Some("0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I".to_string()),
-            client_assertion_type: None,
-            client_assertion: None,
-        },
-    )
-}
-
-/// A realm that turns `fapi_profile` on after an RS256 client registered keeps
-/// that client: FAPI 2.0 refuses its ID-token grants, but the client, its
-/// other grants and its settings remain. A backup of that realm must restore
-/// the client as it was, not drop it. Refusing RS256 under FAPI is a rule for
-/// choosing an algorithm; a restore chooses nothing, and the restored realm
-/// refuses the client's ID-token grants just as the source did.
-#[tokio::test]
-async fn restore_keeps_an_rs256_client_of_a_realm_that_turned_fapi_on() {
-    let src = common::TestHarness::embedded().await.expect("src harness");
-    let (realm, _email, _password) = seeded_realm(&src);
-    let client = register_rs256_client(&src, &realm);
-    let mut config = src
-        .identity()
-        .get_realm(&realm)
-        .expect("get realm")
-        .expect("realm exists")
-        .config()
-        .clone();
-    config.fapi_profile = Some(hearth::identity::FapiProfile::Baseline);
-    src.identity()
-        .update_realm(
-            &realm,
-            &hearth::identity::UpdateRealmRequest {
-                config: Some(config),
-                ..Default::default()
-            },
-        )
-        .expect("turn fapi_profile on");
-
-    let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
-    let slug = realm_slug(&src, &realm);
-    let dst = common::TestHarness::embedded().await.expect("dst harness");
-    let (restored, report) = restore_into(&dst, &tmp, &slug);
-
-    assert!(
-        dst.identity()
-            .get_realm(&restored)
-            .expect("get restored realm")
-            .expect("realm restored")
-            .config()
-            .fapi_profile
-            .is_some(),
-        "precondition: the restored realm has its FAPI profile"
-    );
-    assert_eq!(report.clients.errored, 0, "no client may fail to restore");
-    let restored_client = dst
-        .identity()
-        .get_client(&restored, &client)
-        .expect("get client")
-        .expect("the RS256 client of a FAPI realm must be restored, not dropped");
-    assert_eq!(
-        restored_client.id_token_signed_response_alg(),
-        hearth::identity::IdTokenSigningAlg::Rs256,
-        "the client must come back as it was"
-    );
-
-    // FAPI still governs issuance, in the source and in the restored realm.
-    for (h, realm_id, side) in [(&src, &realm, "source"), (&dst, &restored, "restored")] {
-        let refused = fapi_code_grant(h, realm_id, &client);
-        assert!(
-            matches!(
-                &refused,
-                Err(hearth::identity::IdentityError::FapiViolation { reason })
-                    if reason.contains("RS256")
-            ),
-            "the {side} realm must refuse the RS256 ID token, got {refused:?}"
-        );
-    }
-}
-
 // ── Retired keys never come back (M1) ─────────────────────────────────────────
 
 /// Every `kid` of type `kty` the realm's JWKS publishes — the keys that verify
@@ -2966,7 +2890,7 @@ fn jwks_kids(
 #[tokio::test]
 async fn a_revoked_tenant_retiring_key_is_not_reinstated_by_a_skip_or_merge_restore() {
     for mode in [RestoreMode::Skip, RestoreMode::Merge] {
-        let h = common::TestHarness::embedded().await.expect("harness");
+        let h = common::TestHarness::in_process().await.expect("harness");
         let (realm, _email, _password) = seeded_realm(&h);
         register_rs256_client(&h, &realm);
         let revoked_ed = jwks_kids(&h, &realm, "OKP");
@@ -3041,7 +2965,7 @@ async fn a_revoked_tenant_retiring_key_is_not_reinstated_by_a_skip_or_merge_rest
 /// rotation is not a reason to refuse a key the realm still trusts.
 #[tokio::test]
 async fn a_restore_leaves_a_live_retiring_key_alone() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, _email, _password) = seeded_realm(&h);
     register_rs256_client(&h, &realm);
     h.identity()
@@ -3078,7 +3002,7 @@ async fn a_restore_leaves_a_live_retiring_key_alone() {
 /// mint. The record of the rotation outlives the realm.
 #[tokio::test]
 async fn a_deleted_realm_is_not_restored_with_a_key_it_revoked() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, _email, _password) = seeded_realm(&h);
     register_rs256_client(&h, &realm);
     let archive = export_realm_to_file(&h, &realm, &ExportOptions::default());
@@ -3141,7 +3065,7 @@ async fn export_releases_the_write_barrier_before_writing_the_archive() {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let identity = h.identity_arc();
 
@@ -3257,7 +3181,9 @@ async fn restore_keeps_revoked_jtis_and_blocked_dpop_keys() {
     const SECRET: &str = "m3-restore-secret-1!";
     const JKT: &str = "OKVsYiUkGsOrgWxWpGpzDRzZpISBgekj0RvDqxNYors";
 
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let (realm, _email, _password) = seeded_realm(&src);
     let client = src
         .identity()
@@ -3320,7 +3246,9 @@ async fn restore_keeps_revoked_jtis_and_blocked_dpop_keys() {
 
     let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
     let slug = realm_slug(&src, &realm);
-    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let dst = common::TestHarness::in_process()
+        .await
+        .expect("dst harness");
     let reader = BackupArchive::open(tmp.path()).expect("open archive");
     let report = make_importer(&dst)
         .import_realm(&slug, &reader, &import_opts_with_passphrase())
@@ -3702,7 +3630,9 @@ async fn restore_keeps_required_action_generations() {
     use hearth::identity::ra_token::RaTokenError;
     use hearth::identity::{MfaProof, RequiredAction};
 
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let (realm, email, _password) = seeded_realm(&src);
     let user = src
         .identity()
@@ -3746,7 +3676,9 @@ async fn restore_keeps_required_action_generations() {
 
     let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
     let slug = realm_slug(&src, &realm);
-    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let dst = common::TestHarness::in_process()
+        .await
+        .expect("dst harness");
     let reader = BackupArchive::open(tmp.path()).expect("open archive");
     let opts = ImportOptions {
         mode: RestoreMode::Skip,
@@ -3796,7 +3728,9 @@ async fn restore_keeps_ended_required_action_flows() {
     use hearth::core::Timestamp;
     use hearth::identity::{IdentityError, MfaProof, RequiredAction};
 
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let (realm, email, password) = seeded_realm(&src);
     let user = src
         .identity()
@@ -3870,7 +3804,9 @@ async fn restore_keeps_ended_required_action_flows() {
 
     let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
     let slug = realm_slug(&src, &realm);
-    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let dst = common::TestHarness::in_process()
+        .await
+        .expect("dst harness");
     let reader = BackupArchive::open(tmp.path()).expect("open archive");
     make_importer(&dst)
         .import_realm(&slug, &reader, &import_opts_with_passphrase())

@@ -58,8 +58,8 @@ struct Rig {
     user_id: UserId,
 }
 
-/// Builds a router over a realm whose `mfa_methods` offers email OTP, with a
-/// user who has it enrolled and no TOTP.
+/// Builds a router over a realm whose `mfa_methods` offers TOTP and email
+/// OTP, with a user who has email OTP enrolled and no TOTP.
 fn build_rig(mfa_required: bool) -> Rig {
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().to_path_buf();
@@ -95,7 +95,9 @@ fn build_rig(mfa_required: bool) -> Rig {
             name: format!("otp-login-{}", uuid::Uuid::new_v4()),
             config: Some(RealmConfig {
                 mfa_required: Some(mfa_required),
-                mfa_methods: Some(vec!["email_otp".to_string()]),
+                // Email OTP does not satisfy MFA (spec `mfa-policy`), so a
+                // realm that requires MFA must also offer a factor that does.
+                mfa_methods: Some(vec!["totp".to_string(), "email_otp".to_string()]),
                 ..RealmConfig::default()
             }),
         })
@@ -294,12 +296,9 @@ async fn login_challenges_an_email_otp_factor_even_when_the_realm_does_not_requi
 }
 
 /// Control: a user with no OTP factor lands somewhere *else*, so the two
-/// assertions above are not simply observing "every login redirects".
-///
-/// The realm here offers `email_otp` only, so the enrolment branch is the
-/// email-OTP required action rather than forced TOTP — a realm that does not
-/// offer TOTP must not be sent to a TOTP enrolment page it would then refuse
-/// (§4.18#10).
+/// assertions above are not simply observing "every login redirects". The
+/// realm offers TOTP, so a user holding nothing is sent to forced TOTP
+/// enrolment.
 #[tokio::test]
 async fn login_without_any_factor_routes_to_enrolment_not_to_the_otp_challenge() {
     let rig = build_rig(/* mfa_required */ true);
@@ -385,4 +384,36 @@ async fn otp_challenge_page_renders_a_verifiable_form() {
         !html.contains(r#"name="otp_nonce""#) && !html.contains(r#"name="factor""#),
         "the pending-OTP handle and the factor are server state, not form fields"
     );
+}
+
+/// A user who has not verified their email is told so after the password,
+/// before any second-factor step. With MFA required by default, the login
+/// used to send such a user to forced TOTP enrolment, and the enrolment's
+/// session then failed with a 500.
+#[tokio::test]
+async fn an_unverified_user_is_told_to_verify_before_any_second_factor() {
+    let rig = build_rig(/* mfa_required */ true);
+    rig.identity
+        .update_user(
+            &rig.realm_id,
+            &rig.user_id,
+            &UpdateUserRequest {
+                email_otp_enabled: Some(false),
+                status: Some(UserStatus::PendingVerification),
+                ..Default::default()
+            },
+        )
+        .expect("mark unverified");
+
+    let resp = post_login(&rig).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert!(
+        header_str(&resp, header::LOCATION).is_none(),
+        "no redirect to a second-factor step"
+    );
+    let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .expect("body");
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("not verified"), "the verify-your-email page");
 }

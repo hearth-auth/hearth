@@ -6,12 +6,8 @@
 //! field, a panic message, an `expect` on a `Result` that holds it — wrote the
 //! secret out in clear.
 
-use hearth::config::{
-    MailgunConfig, MailtrapConfig, PostmarkConfig, SendgridConfig, SmtpConfig, SnsSmsConfig,
-    TwilioConfig,
-};
+use hearth::config::{MailgunConfig, MailtrapConfig, PostmarkConfig, SendgridConfig, SmtpConfig};
 use hearth::core::FormSecret;
-use hearth::identity::{PasswordGrantRequest, StepUpMfaGrantRequest};
 use hearth::protocol::web::account::ChangePasswordForm;
 use hearth::protocol::web::handlers::{LoginForm, RegisterForm, ResetPasswordFormData};
 
@@ -82,36 +78,6 @@ fn web_forms_do_not_print_passwords() {
 }
 
 #[test]
-fn grant_requests_do_not_print_credentials() {
-    assert_redacted(
-        "PasswordGrantRequest",
-        &format!(
-            "{:?}",
-            PasswordGrantRequest {
-                email: "user@example.com".to_string(),
-                password: SECRET.to_string(),
-                ..Default::default()
-            }
-        ),
-    );
-    assert_redacted(
-        "StepUpMfaGrantRequest",
-        &format!(
-            "{:?}",
-            StepUpMfaGrantRequest {
-                email: "user@example.com".to_string(),
-                password: SECRET.to_string(),
-                mfa_code: SECRET.to_string(),
-                scope: None,
-                client_ip: None,
-                user_agent: None,
-                dpop_jkt: None,
-            }
-        ),
-    );
-}
-
-#[test]
 fn email_provider_configs_do_not_print_credentials() {
     let smtp: SmtpConfig = serde_norway::from_str(&format!(
         "host: smtp.example.com\nport: 587\nusername: mailer\npassword: {SECRET}\n"
@@ -131,20 +97,6 @@ fn email_provider_configs_do_not_print_credentials() {
     let mailtrap: MailtrapConfig =
         serde_norway::from_str(&format!("api_key: {SECRET}\n")).expect("mailtrap config");
     assert_redacted("MailtrapConfig", &format!("{mailtrap:?}"));
-}
-
-#[test]
-fn sms_provider_configs_do_not_print_credentials() {
-    let twilio: TwilioConfig = serde_norway::from_str(&format!(
-        "account_sid: AC123\nauth_token: {SECRET}\nfrom: \"+15550000000\"\n"
-    ))
-    .expect("twilio config");
-    assert_redacted("TwilioConfig", &format!("{twilio:?}"));
-    let sns: SnsSmsConfig = serde_norway::from_str(&format!(
-        "region: us-east-1\naccess_key_id: AKIAEXAMPLE\nsecret_access_key: {SECRET}\n"
-    ))
-    .expect("sns config");
-    assert_redacted("SnsSmsConfig", &format!("{sns:?}"));
 }
 
 #[test]

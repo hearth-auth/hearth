@@ -277,44 +277,6 @@ pub enum AuditAction {
     /// Failure policy: `LogOnly`. The password was accepted (fail-open).
     /// Metadata carries `user_id` and `reason`.
     BreachCheckUnavailable,
-    /// Adaptive MFA step-up was triggered because the login arrived from an
-    /// unrecognised device or IP subnet.
-    ///
-    /// Failure policy: `LogOnly` — the login continues with an MFA challenge or
-    /// enrollment redirect; the step-up event itself is informational.
-    /// Metadata carries `user_id` and `reason` (e.g. `"unrecognised_device"`).
-    StepUpMfaTriggered,
-    /// A step-up MFA challenge was successfully completed — the user passed
-    /// the MFA check after an unrecognised-device trigger.
-    /// Metadata carries `user_id`.
-    StepUpMfaCompleted,
-    /// An SMS OTP was generated and sent to a user's phone to begin
-    /// phone-number enrollment. Metadata carries `phone_suffix` (last 4 digits,
-    /// never full number).
-    SmsOtpEnrollmentStarted,
-    /// A user successfully verified their phone number via SMS OTP during
-    /// enrollment. Metadata carries `phone_suffix`.
-    SmsOtpEnrollmentVerified,
-    /// A phone enrollment SMS OTP verification attempt failed (wrong code,
-    /// expired, or max attempts). Metadata carries `phone_suffix` and
-    /// `reason` (`"wrong_code"` / `"expired"` / `"exhausted"`).
-    SmsOtpEnrollmentFailed,
-    /// An SMS MFA challenge was satisfied — the user entered the correct OTP
-    /// during the OIDC login pipeline. Metadata carries `user_id`.
-    SmsMfaChallengeSucceeded,
-    /// An SMS MFA challenge attempt failed (wrong code or expired).
-    /// Metadata carries `user_id` and `reason`.
-    SmsMfaChallengeFailed,
-    /// An SMS MFA challenge was locked because the maximum number of
-    /// incorrect attempts was exceeded. Metadata carries `user_id` and
-    /// `attempt_count`.
-    SmsMfaLocked,
-    /// All device fingerprints for a user were erased — either as part of
-    /// `delete_user` (GDPR Art. 17 cascade) or via the admin erasure API
-    /// (`DELETE /admin/users/{id}/device-fingerprints`).
-    ///
-    /// Metadata carries `user_id` and `count` (number of records removed).
-    DeviceFingerprintsErased,
     /// The per-realm concurrent session limit was enforced.
     ///
     /// Emitted whenever `max_concurrent_sessions` is set and a new session
@@ -470,6 +432,13 @@ pub enum AuditAction {
     /// every other revocation here, a security control must not be applied
     /// without a record of it.
     InvitationRevoked,
+    /// A realm's or organization's effective MFA requirement changed — by
+    /// reconcile, by startup applying the system realm's policy, or by an
+    /// admin action (spec `mfa-policy`). `resource_type` is `realm` or
+    /// `organization`; metadata carries `old` and `new` (booleans).
+    /// Failure policy: `FailOperation` — a security control must not change
+    /// without a record of it.
+    MfaRequirementChanged,
 }
 
 impl AuditAction {
@@ -538,6 +507,7 @@ impl AuditAction {
             Self::InvitationCreated,
             Self::InvitationAccepted,
             Self::InvitationRevoked,
+            Self::MfaRequirementChanged,
             Self::RoleAssigned,
             Self::RoleRevoked,
             Self::OrphanedReferenceSkipped,
@@ -558,15 +528,6 @@ impl AuditAction {
             Self::RequiredActionAutoCleared,
             Self::PasswordCompromisedRejected,
             Self::BreachCheckUnavailable,
-            Self::StepUpMfaTriggered,
-            Self::StepUpMfaCompleted,
-            Self::SmsOtpEnrollmentStarted,
-            Self::SmsOtpEnrollmentVerified,
-            Self::SmsOtpEnrollmentFailed,
-            Self::SmsMfaChallengeSucceeded,
-            Self::SmsMfaChallengeFailed,
-            Self::SmsMfaLocked,
-            Self::DeviceFingerprintsErased,
             Self::SessionLimitEnforced,
             Self::SessionsRevoked,
             Self::AbuseDetected,
@@ -645,6 +606,7 @@ impl AuditAction {
             Self::InvitationCreated => "invitation_created",
             Self::InvitationAccepted => "invitation_accepted",
             Self::InvitationRevoked => "invitation_revoked",
+            Self::MfaRequirementChanged => "mfa_requirement_changed",
             Self::GroupCreated => "group_created",
             Self::GroupUpdated => "group_updated",
             Self::GroupDeleted => "group_deleted",
@@ -693,15 +655,6 @@ impl AuditAction {
             Self::RequiredActionAutoCleared => "required_action_auto_cleared",
             Self::PasswordCompromisedRejected => "password_compromised_rejected",
             Self::BreachCheckUnavailable => "breach_check_unavailable",
-            Self::StepUpMfaTriggered => "step_up_mfa_triggered",
-            Self::StepUpMfaCompleted => "step_up_mfa_completed",
-            Self::SmsOtpEnrollmentStarted => "sms_otp_enrollment_started",
-            Self::SmsOtpEnrollmentVerified => "sms_otp_enrollment_verified",
-            Self::SmsOtpEnrollmentFailed => "sms_otp_enrollment_failed",
-            Self::SmsMfaChallengeSucceeded => "sms_mfa_challenge_succeeded",
-            Self::SmsMfaChallengeFailed => "sms_mfa_challenge_failed",
-            Self::SmsMfaLocked => "sms_mfa_locked",
-            Self::DeviceFingerprintsErased => "device_fingerprints_erased",
             Self::SessionLimitEnforced => "session_limit_enforced",
             Self::SessionsRevoked => "sessions_revoked",
             Self::AbuseDetected => "abuse_detected",
@@ -778,6 +731,7 @@ impl std::str::FromStr for AuditAction {
             "invitation_created" => Ok(Self::InvitationCreated),
             "invitation_accepted" => Ok(Self::InvitationAccepted),
             "invitation_revoked" => Ok(Self::InvitationRevoked),
+            "mfa_requirement_changed" => Ok(Self::MfaRequirementChanged),
             "group_created" => Ok(Self::GroupCreated),
             "group_updated" => Ok(Self::GroupUpdated),
             "group_deleted" => Ok(Self::GroupDeleted),
@@ -826,15 +780,6 @@ impl std::str::FromStr for AuditAction {
             "required_action_auto_cleared" => Ok(Self::RequiredActionAutoCleared),
             "password_compromised_rejected" => Ok(Self::PasswordCompromisedRejected),
             "breach_check_unavailable" => Ok(Self::BreachCheckUnavailable),
-            "step_up_mfa_triggered" => Ok(Self::StepUpMfaTriggered),
-            "step_up_mfa_completed" => Ok(Self::StepUpMfaCompleted),
-            "sms_otp_enrollment_started" => Ok(Self::SmsOtpEnrollmentStarted),
-            "sms_otp_enrollment_verified" => Ok(Self::SmsOtpEnrollmentVerified),
-            "sms_otp_enrollment_failed" => Ok(Self::SmsOtpEnrollmentFailed),
-            "sms_mfa_challenge_succeeded" => Ok(Self::SmsMfaChallengeSucceeded),
-            "sms_mfa_challenge_failed" => Ok(Self::SmsMfaChallengeFailed),
-            "sms_mfa_locked" => Ok(Self::SmsMfaLocked),
-            "device_fingerprints_erased" => Ok(Self::DeviceFingerprintsErased),
             "session_limit_enforced" => Ok(Self::SessionLimitEnforced),
             "sessions_revoked" => Ok(Self::SessionsRevoked),
             "abuse_detected" => Ok(Self::AbuseDetected),
@@ -968,11 +913,6 @@ impl AuditAction {
             | Self::RequiredActionCompleted
             | Self::RequiredActionAutoCleared
             | Self::BreachCheckUnavailable
-            | Self::StepUpMfaTriggered
-            | Self::StepUpMfaCompleted
-            | Self::SmsOtpEnrollmentStarted
-            | Self::SmsOtpEnrollmentVerified
-            | Self::SmsMfaChallengeSucceeded
             | Self::SessionLimitEnforced
             | Self::SessionEvicted
             | Self::AbuseDetected
@@ -1016,6 +956,7 @@ impl AuditAction {
             // Revoking an invitation is a security control; this table makes
             // every revocation mandatory to record.
             | Self::InvitationRevoked
+            | Self::MfaRequirementChanged
             | Self::BulkUsersDisabled
             | Self::ConsentRevoked
             | Self::ConsentDenied
@@ -1027,10 +968,6 @@ impl AuditAction {
             | Self::ClientConsentRevoked
             | Self::LoginLocked
             | Self::PasswordCompromisedRejected
-            | Self::SmsOtpEnrollmentFailed
-            | Self::SmsMfaChallengeFailed
-            | Self::SmsMfaLocked
-            | Self::DeviceFingerprintsErased
             | Self::SessionsRevoked
             // Email-change confirmation revokes all sessions — security-sensitive.
             | Self::EmailChangeConfirmed

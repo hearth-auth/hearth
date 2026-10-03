@@ -255,7 +255,7 @@ async fn submit_code(app: &axum::Router, cookies: &str, code: &str) -> axum::res
 /// does per phone.
 #[tokio::test]
 async fn email_otp_issuance_is_throttled_per_address() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, _) = create_realm(&h, RealmConfig::default());
     let sender = Arc::new(CapturingEmailSender::default());
     let service = email_service(&sender);
@@ -291,7 +291,7 @@ async fn email_otp_issuance_is_throttled_per_address() {
 /// the one it already issued is outstanding. An explicit resend does.
 #[tokio::test]
 async fn revisiting_the_otp_challenge_reuses_the_outstanding_code() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, realm_name) = create_realm(&h, RealmConfig::default());
     let user = email_otp_user(&h, &realm);
     let sender = Arc::new(CapturingEmailSender::default());
@@ -320,7 +320,7 @@ async fn revisiting_the_otp_challenge_reuses_the_outstanding_code() {
 /// once it is spent, even the right code is refused.
 #[tokio::test]
 async fn otp_failures_across_codes_spend_one_per_user_budget() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, realm_name) = create_realm(&h, RealmConfig::default());
     let user = email_otp_user(&h, &realm);
     let sender = Arc::new(CapturingEmailSender::default());
@@ -387,7 +387,7 @@ async fn request_link(app: &axum::Router, realm_name: &str, email: &str) -> Stat
 /// the limiter instead of mailing without end.
 #[tokio::test]
 async fn magic_link_requests_count_against_the_ip_limit() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (_, realm_name) = create_realm(&h, RealmConfig::default());
     let sender = Arc::new(CapturingEmailSender::default());
     let app = rest_app(&h, email_service(&sender));
@@ -411,7 +411,7 @@ async fn magic_link_requests_count_against_the_ip_limit() {
 /// address with no account is not mailed: the endpoint is not a relay.
 #[tokio::test]
 async fn magic_link_is_not_mailed_to_an_address_that_cannot_sign_in() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, realm_name) = create_realm(
         &h,
         RealmConfig {
@@ -468,7 +468,7 @@ impl EmailSender for RejectingSender {
 /// caller, so it must not repeat the full address the server named.
 #[tokio::test]
 async fn an_email_otp_delivery_failure_masks_the_recipient() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, _) = create_realm(&h, RealmConfig::default());
     let service = EmailService::new(
         Arc::new(RejectingSender),

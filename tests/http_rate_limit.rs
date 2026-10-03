@@ -25,7 +25,7 @@ use tower::ServiceExt as _;
 /// HTTP 429 with `{"error":"too_many_requests"}` and a `Retry-After: 1` header.
 #[tokio::test]
 async fn http_rate_limit_ip_exceeded_returns_429() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
 
     // ip_rps = 1: the second request in the same second must be rejected.
     let shaper = Arc::new(RequestShaper::with_config(ShaperConfig {
@@ -90,7 +90,7 @@ async fn http_rate_limit_ip_exceeded_returns_429() {
 /// requests should all succeed without spurious 429 responses.
 #[tokio::test]
 async fn http_rate_limit_within_limit_passes() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
 
     // ip_rps = 100 (default): a handful of requests must all succeed.
     let state = Arc::new(AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()));
@@ -129,7 +129,7 @@ async fn http_rate_limit_within_limit_passes() {
 /// third request triggers 429 without waiting for the real 100-req/min cap.
 #[tokio::test]
 async fn admin_endpoint_rate_limit_exceeded_returns_429() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed rbac");
 

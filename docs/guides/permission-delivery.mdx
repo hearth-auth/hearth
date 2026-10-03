@@ -68,9 +68,9 @@ const canEdit = useHasPermission('docs.edit');
 ```
 
 ```typescript
-// Node.js — after verifyToken()
-const token = await client.verifyToken(bearer);
-if (!token.hasPermission('docs.edit')) {
+// Server side (Node.js) — after verifyToken(); reads the claim locally, no network call
+const claims = await client.verifyToken(bearer);
+if (!claims.hasPermission('docs.edit')) {
   res.status(403).end();
 }
 ```
@@ -109,47 +109,6 @@ if (!$claims->hasPermission('docs.edit')) {
 ```
 
 </TabItem>
-<TabItem value="rust" label="Rust">
-
-```rust
-// Verifies the token against the cached JWKS, then reads its claims
-let allowed = client.has_permission(&access_token, "docs.edit").await?;
-if !allowed {
-    return StatusCode::FORBIDDEN.into_response();
-}
-```
-
-</TabItem>
-<TabItem value="node" label="Node">
-
-```typescript
-import { HearthClient } from '@hearth-auth/node';
-
-const client = new HearthClient({ issuer_url: process.env.HEARTH_ISSUER_URL! });
-
-// After verifyToken() — reads embedded JWT claims locally, no network call
-const token = await client.verifyToken(bearerToken);
-if (!token.hasPermission('docs.edit')) {
-  res.status(403).end();
-}
-```
-
-</TabItem>
-<TabItem value="kotlin" label="Kotlin">
-
-```kotlin
-import io.hearth.sdk.HearthClient
-
-val client = HearthClient(issuerUrl = System.getenv("HEARTH_URL"))
-
-// Reads embedded JWT claims locally — no network call
-val claims = client.verifyToken(accessToken)
-if (!claims.hasPermission("docs.edit")) {
-    throw ResponseStatusException(HttpStatus.FORBIDDEN)
-}
-```
-
-</TabItem>
 </Tabs>
 
 ### `introspection`
@@ -164,12 +123,12 @@ The resource server must authenticate as a **confidential client** — `client_s
 <TabItem value="ts" label="TypeScript" default>
 
 ```typescript
-import { HearthClient } from '@hearth-auth/node';
+import { HearthClient } from '@hearth-auth/sdk';
 
 const client = new HearthClient({
-  issuer_url:    process.env.HEARTH_ISSUER_URL!,
-  client_id:     '<resource-server-client-id>',
-  client_secret: '<secret>',
+  issuerUrl:    process.env.HEARTH_ISSUER_URL!,
+  clientId:     '<resource-server-client-id>',
+  clientSecret: '<secret>',
 });
 
 const result = await client.introspect(rawBearerToken);
@@ -231,49 +190,6 @@ if (!in_array('docs.edit', $result->permissions ?? [], strict: true)) {
 ```
 
 </TabItem>
-<TabItem value="rust" label="Rust">
-
-```rust
-let result = client
-    .introspect(&access_token, "<resource-server-client-id>", &client_secret)
-    .await?;
-if !result.active {
-    return StatusCode::UNAUTHORIZED.into_response();
-}
-if !result.permissions.contains(&"docs.edit".to_string()) {
-    return StatusCode::FORBIDDEN.into_response();
-}
-```
-
-</TabItem>
-<TabItem value="node" label="Node">
-
-```typescript
-import { HearthClient } from '@hearth-auth/node';
-
-const client = new HearthClient({
-  issuer_url:    process.env.HEARTH_ISSUER_URL!,
-  client_id:     '<resource-server-client-id>',
-  client_secret: '<secret>',
-});
-
-const result = await client.introspect(rawBearerToken);
-if (!result.active) { res.status(401).end(); return; }
-if (!result.permissions?.includes('docs.edit')) { res.status(403).end(); return; }
-```
-
-</TabItem>
-<TabItem value="kotlin" label="Kotlin">
-
-```kotlin
-import io.hearth.sdk.HearthClient
-
-val result = client.introspect(accessToken, clientSecret = System.getenv("HEARTH_CLIENT_SECRET"))
-if (!result.active) throw ResponseStatusException(HttpStatus.UNAUTHORIZED)
-if (!result.permissions.contains("docs.edit")) throw ResponseStatusException(HttpStatus.FORBIDDEN)
-```
-
-</TabItem>
 </Tabs>
 
 Hearth includes RBAC claims in introspection responses **only** when the requesting client has `access_token_authorization: introspection` configured. See [Configuring the mode](#configuring-the-mode).
@@ -288,12 +204,17 @@ The JWT carries only identity claims. Resource servers call `POST /oauth/authori
 <TabItem value="ts" label="TypeScript" default>
 
 ```typescript
-// Use the middleware with expectedMode: 'decision'
-import { hearthMiddleware } from '@hearth-auth/node';
+// Use the middleware with mode: 'decision' (the client needs realmId)
+import { HearthClient, hearthMiddleware } from '@hearth-auth/sdk';
+
+const client = new HearthClient({
+  issuerUrl: process.env.HEARTH_ISSUER_URL!,
+  realmId:   '<realm-id>',
+});
 
 app.get('/docs', hearthMiddleware({
-  issuer_url:         process.env.HEARTH_ISSUER_URL!,
-  expectedMode:       'decision',
+  client,
+  mode:               'decision',
   requiredPermission: 'docs.edit',
 }), handler);
 ```
@@ -333,47 +254,6 @@ if (!$result->allowed) {
 ```
 
 </TabItem>
-<TabItem value="rust" label="Rust">
-
-```rust
-use hearth_sdk::{AccessTokenAuthorization, CheckPermissionOpts};
-
-let allowed = client.check_permission(
-    &access_token,
-    "docs.edit",
-    AccessTokenAuthorization::Decision,
-    CheckPermissionOpts::default(),
-).await?;
-if !allowed {
-    return StatusCode::FORBIDDEN.into_response();
-}
-```
-
-</TabItem>
-<TabItem value="node" label="Node">
-
-```typescript
-import { hearthMiddleware } from '@hearth-auth/node';
-
-app.get('/docs', hearthMiddleware({
-  issuer_url:         process.env.HEARTH_ISSUER_URL!,
-  expectedMode:       'decision',
-  requiredPermission: 'docs.edit',
-}), handler);
-```
-
-</TabItem>
-<TabItem value="kotlin" label="Kotlin">
-
-```kotlin
-import io.hearth.sdk.HearthClient
-import io.hearth.sdk.AccessTokenAuthorization
-
-val result = client.checkPermission(accessToken, "docs.edit", AccessTokenAuthorization.Decision)
-if (!result.allowed) throw ResponseStatusException(HttpStatus.FORBIDDEN)
-```
-
-</TabItem>
 </Tabs>
 
 ## Refresh-token revocation caveat
@@ -382,7 +262,7 @@ In `embedded` mode, revoking a session or role takes effect only after the acces
 
 - Use `decision` or `introspection` mode on affected clients, or
 - Shorten the access token TTL (`access_token_ttl` in client config), or
-- Use the session-version revocation mechanism (Kotlin SDK: `SessionVersionCache`; Node/Go: subscribe to `session_revoked` webhooks and maintain a local blocklist).
+- Use the session-version feed: the TypeScript SDK's `SessionVersionCache` follows it and refuses a token whose `sv` claim is below the session's minimum. Without it, subscribe to `session_revoked` webhooks and keep a local blocklist.
 
 ## Configuring the mode
 
@@ -441,11 +321,9 @@ The resulting token's `permissions` claim reflects only org-scoped assignments f
 ## SDK cross-references
 
 - [Go SDK](sdks/go.mdx) — `HasPermission`, `RequirePermission` middleware, `ModeEmbedded`/`ModeIntrospection`/`ModeDecision`
-- [Node.js SDK](sdks/node.mdx) — `hearthMiddleware({ expectedMode })`, `introspect()`
+- [TypeScript SDK](sdks/typescript.md#permission-delivery-modes) — `hearthMiddleware({ client, mode })`, `introspect()`
 - [Python SDK](sdks/python.mdx) — `verify_token()`, `introspect()`, `check_permission()`
 - [PHP SDK](sdks/php.mdx) — `verifyToken()`, `introspect()`, `checkPermission()`
-- [Kotlin SDK](sdks/kotlin.mdx) — `verifyToken()`, `mePermissions()`, `RequirePermissionOptions(mode)`
-- [Rust SDK](sdks/rust.mdx) — `check_permission()`, `AccessTokenAuthorization::Embedded/Introspection/Decision`
 
 ## Reference
 

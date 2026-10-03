@@ -5,11 +5,77 @@
  * the entire category with a single `instanceof HearthSdkError` check.
  */
 
-/** Base class for all Hearth SDK errors. */
+const REDACTED = "[redacted]";
+
+/** True for the base64url alphabet: `A-Z a-z 0-9 _ -`. */
+function isB64UrlCode(code: number): boolean {
+  return (
+    (code >= 65 && code <= 90) ||
+    (code >= 97 && code <= 122) ||
+    (code >= 48 && code <= 57) ||
+    code === 95 ||
+    code === 45
+  );
+}
+
+/**
+ * Replace JWT-shaped substrings (`eyJ<seg>.<seg>.<seg>`) with `[redacted]`, so a
+ * token that ends up in an error message is not written to logs.
+ *
+ * A single linear scan: a backtracking regex would be open to ReDoS on input
+ * such as `"eyJeyJeyJ…"`.
+ */
+function redactTokens(value: string): string {
+  let out = "";
+  let i = 0;
+  while (i < value.length) {
+    if (value.startsWith("eyJ", i)) {
+      const start = i;
+      i += 3;
+      while (i < value.length && isB64UrlCode(value.charCodeAt(i))) i++;
+      if (value[i] === ".") {
+        const dot1 = i++;
+        const seg2Start = i;
+        while (i < value.length && isB64UrlCode(value.charCodeAt(i))) i++;
+        if (i > seg2Start && value[i] === ".") {
+          i++;
+          while (i < value.length && isB64UrlCode(value.charCodeAt(i))) i++;
+          out += REDACTED;
+          continue;
+        }
+        // Two segments only: not a JWT. Emit through the first dot and rescan.
+        out += value.slice(start, dot1 + 1);
+        i = dot1 + 1;
+        continue;
+      }
+      out += value.slice(start, i);
+      continue;
+    }
+    out += value[i++];
+  }
+  return out;
+}
+
+/**
+ * Base class for all Hearth SDK errors.
+ *
+ * JWT-shaped substrings in the message are replaced with `[redacted]`.
+ */
 export class HearthSdkError extends Error {
   constructor(message: string) {
-    super(message);
+    super(redactTokens(message));
     this.name = this.constructor.name;
+  }
+}
+
+/**
+ * Base class for every token verification failure: expired, not yet valid,
+ * bad signature or structure, wrong issuer, wrong audience. Catch this to
+ * handle all of them at once.
+ */
+export class TokenVerificationError extends HearthSdkError {
+  constructor(message: string) {
+    super(message);
   }
 }
 
@@ -41,7 +107,7 @@ export class JWKSFetchError extends HearthSdkError {
 }
 
 /** Thrown when a token's `exp` claim is in the past. */
-export class TokenExpiredError extends HearthSdkError {
+export class TokenExpiredError extends TokenVerificationError {
   constructor(
     public readonly expiredAt: Date,
     message = `Token expired at ${expiredAt.toISOString()}`,
@@ -51,7 +117,7 @@ export class TokenExpiredError extends HearthSdkError {
 }
 
 /** Thrown when a token's `nbf` claim is in the future. */
-export class TokenNotYetValidError extends HearthSdkError {
+export class TokenNotYetValidError extends TokenVerificationError {
   constructor(
     public readonly notBefore: Date,
     message = `Token not yet valid until ${notBefore.toISOString()}`,
@@ -61,14 +127,14 @@ export class TokenNotYetValidError extends HearthSdkError {
 }
 
 /** Thrown when a token fails signature or structural validation. */
-export class TokenInvalidError extends HearthSdkError {
+export class TokenInvalidError extends TokenVerificationError {
   constructor(message: string) {
     super(message);
   }
 }
 
 /** Thrown when the token's `iss` claim does not match the expected issuer. */
-export class TokenIssuerError extends HearthSdkError {
+export class TokenIssuerError extends TokenVerificationError {
   constructor(
     public readonly expected: string,
     public readonly actual: string,
@@ -79,7 +145,7 @@ export class TokenIssuerError extends HearthSdkError {
 }
 
 /** Thrown when the token's `aud` claim does not include the expected audience. */
-export class TokenAudienceError extends HearthSdkError {
+export class TokenAudienceError extends TokenVerificationError {
   constructor(
     public readonly expected: string,
     public readonly actual: string[],

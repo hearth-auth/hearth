@@ -8,13 +8,10 @@ name: Semantic Release
 # neither the sdk-<lang>-v* triggers nor Go's module-version scheme.
 # The tags trigger the downstream publish workflows:
 #   v*             → release.yml (binaries), helm.yml (Helm OCI)
-#   sdk-node-v*    → sdk-publish-node.yml
 #   sdk-ts-v*      → sdk-publish-typescript.yml
 #   sdks/go/v*     → sdk-publish-go.yml
-#   sdk-rust-v*    → sdk-publish-rust.yml
 #   sdk-python-v*  → sdk-publish-python.yml
 #   sdk-php-v*     → sdk-publish-php.yml
-#   sdk-kotlin-v*  → sdk-publish-kotlin.yml
 #
 # Prerequisites (repository secrets that must be configured before enabling):
 #   SEMANTIC_RELEASE_PAT — a Personal Access Token or GitHub App token with
@@ -85,7 +82,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pkg: [node, typescript, go, rust, python, php, kotlin]
+        pkg: [typescript, go, python, php]
     steps:
       # Fetch full history so semantic-release can walk all commits.
       # Use the PAT so tags pushed back trigger the downstream publish workflows.

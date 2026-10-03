@@ -1,5 +1,5 @@
-//! Administrative OAuth-client operations shared by the REST and gRPC admin
-//! surfaces, so the two cannot drift (a per-surface copy is how the gRPC
+//! Administrative OAuth-client operations kept in one place so the admin
+//! surfaces cannot drift (a per-surface copy is how the since-removed gRPC
 //! create path came to accept caller-chosen secrets that REST refused).
 
 use crate::audit::{AuditAction, AuditEngine, CreateAuditEvent};
@@ -29,9 +29,7 @@ pub(crate) fn created_client_record(
 ///
 /// # Errors
 /// [`IdentityError::ClientNotFound`] for an unknown client;
-/// [`IdentityError::InvalidInput`] for a public client;
-/// [`IdentityError::FapiViolation`] for a FAPI 2.0 client or in a FAPI 2.0
-/// Advanced realm.
+/// [`IdentityError::InvalidInput`] for a public client.
 pub(crate) fn regenerate_client_secret(
     identity: &dyn IdentityEngine,
     audit: &dyn AuditEngine,

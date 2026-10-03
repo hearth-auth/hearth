@@ -71,15 +71,10 @@ rejected unconditionally — algorithm downgrade is a common SAML attack vector.
 
 The following behaviors are enforced unconditionally and cannot be disabled via configuration:
 
-- **IdP SSO requires an authenticated session.** `GET`/`POST /ui/realms/{realm}/saml/sso` and
-  `GET /ui/realms/{realm}/saml/sso/init` require a valid Hearth UI session in the same realm.
-  Unauthenticated callers are redirected to login. This prevents Hearth's SP from acting as a
-  signing oracle — before this restriction, any unauthenticated caller could mint a signed SAML
-  assertion using a fixed placeholder subject.
-
-- **DEFLATE decompression bomb protection.** Inbound `SAMLRequest`/`SAMLResponse` payloads
-  on the HTTP-Redirect binding are limited to 1 MiB of decompressed output. Payloads that
-  expand beyond this limit are rejected before reaching the XML parser.
+- **Hearth is a SAML service provider only.** It does not act as a SAML IdP (removed in
+  3.0.0), so it signs no assertions and serves no SSO endpoint that could become a signing
+  oracle. The Assertion Consumer Service accepts the HTTP-POST binding only; Hearth receives
+  no DEFLATE-compressed HTTP-Redirect payloads.
 
 - **Audience/destination validated against `onboarding.base_url`.** When `onboarding.base_url`
   is set in `hearth.yaml`, SAML assertion audience and destination are validated against that
@@ -148,8 +143,7 @@ OAuth client secrets are never stored in plaintext. How they are hashed depends 
   (`$hearth-sha256$v=1$…`). Against a 256-bit random preimage a single SHA-256 is already
   infeasible to invert, so a slow KDF adds nothing — and it would make every authenticated
   introspection cost a full Argon2id run. Verification is one SHA-256 plus a constant-time compare.
-- **Caller-chosen** secrets (gRPC `RegisterClient`/`CreateApplication`, `hearth.yaml`
-  `applications[].client_secret`, migration import) may be low-entropy, so they are stored as
+- **Caller-chosen** secrets (`hearth.yaml` `applications[].client_secret`, migration import) may be low-entropy, so they are stored as
   Argon2id hashes, like passwords. Secrets stored before the SHA-256 format existed are Argon2id
   too and keep verifying. They are never re-hashed automatically — Hearth cannot tell from the hash
   whether the secret was random. Regenerate the secret to move a client onto the fast format.
@@ -159,12 +153,12 @@ OAuth client secrets are never stored in plaintext. How they are hashed depends 
 **The remaining Argon2id cost is an amplification vector, bounded by the KDF gate.** Anyone who
 knows an Argon2id-hashed client's `client_id` can make the server run one Argon2id verification
 per request by presenting any secret at `/token`, `/as/par`, `/introspect`, `/revoke` or
-`/device_authorization` (their `/realms/{realm}/…` twins, and the gRPC OAuth service). Client ids are not secret: they
+`/device_authorization` (or their `/realms/{realm}/…` twins). Client ids are not secret: they
 travel in browser authorization requests, and a `hearth.yaml` application's id is a UUID v5 that
 anyone can compute from the realm and the application key. Every such verification therefore runs
 behind the same process-wide admission gate as password hashing
 (`security.password.kdf.max_in_flight`), on the blocking pool; when the gate is saturated the
-request is shed with `503` and `Retry-After` (gRPC: `UNAVAILABLE`), exactly like a login. The gate
+request is shed with `503` and `Retry-After`, exactly like a login. The gate
 caps the CPU and memory this can consume, but under such a flood legitimate Argon2id clients and
 password logins share the shed. Rotate config-managed and legacy clients to Hearth-generated
 secrets (*Regenerate secret* on the client's page in the admin console), after which their
@@ -176,217 +170,10 @@ Treat client secrets like passwords:
 - Rotate them immediately if compromised (Hearth supports multiple active secrets per client
   for zero-downtime rotation).
 
-### Device fingerprint HMAC secret
+### Device fingerprint HMAC secret (removed)
 
-Adaptive MFA (`adaptive_mfa.enabled = true` on a realm) derives a per-device fingerprint by
-computing `HMAC-SHA256(secret, "{user_id}:{ip_/24}:{user_agent_normalized}")` and storing
-the hex digest in Hearth's embedded key-value store under the key schema
-`dfp:user:{user_uuid}:{hmac_hex}` (see `src/identity/keys.rs`). The `fingerprint_hmac_secret`
-is the HMAC key for that derivation. **A weak or compromised secret allows an attacker who
-knows a victim's `{user_id, ip_/24, user_agent}` tuple to forge the fingerprint and bypass
-step-up MFA on an unrecognised device.** Treat it accordingly.
-
-**Scope:** the secret is **per-realm** — each realm has its own value. Rotating one realm's
-secret does not affect any other realm. There is no global Hearth-level fingerprint secret.
-
-**Generation.** Hearth enforces a **hard 32-byte minimum** on this field (NIST SP 800-107:
-HMAC keys ≥ hash output length, i.e. ≥ 32 bytes for SHA-256). A secret shorter than 32
-bytes with `adaptive_mfa.enabled = true` is a configuration error — Hearth fails closed at
-load time with a message naming the actual length, *not* fail-open. See HEA-861. Use a
-CSPRNG to produce ≥ 32 bytes of randomness, encoded as Base64 or hex for transport
-through env vars / Helm `secret.env`:
-
-```sh
-# 32 random bytes, Base64 (44 chars including padding) — recommended
-openssl rand -base64 32
-
-# 32 random bytes, hex (64 chars) — equivalent entropy, longer encoding
-openssl rand -hex 32
-```
-
-Note: both encodings shown above produce strings longer than 32 bytes (Base64 → 44 chars,
-hex → 64 chars), so they clear the minimum-length check trivially. The encoded length —
-not the underlying entropy — is what `len() < 32` measures.
-
-**Storage and injection.** The secret MUST come from an external secret store at deploy
-time, never from a committed file. The supported chain is:
-
-1. **External secret store** (HashiCorp Vault, AWS Secrets Manager, GCP Secret Manager,
-   1Password Connect) — the authoritative copy.
-2. **Kubernetes Secret**, populated by External Secrets Operator / sealed-secrets / SOPS, or
-   for non-K8s deployments a systemd `EnvironmentFile` with mode `0400` root-owned.
-3. **Pod env var**, by convention named
-   `HEARTH_REALM_<SCREAMING_SNAKE_REALM_NAME>_FINGERPRINT_HMAC_SECRET`. The Helm chart's
-   `secret.env` map (see `deploy/helm/hearth/values.yaml`) wires this through.
-4. **YAML substitution.** Reference the env var from your realm config — Hearth's config
-   loader (`src/config/env.rs`) supports `${VAR}` substitution at load time:
-
-   ```yaml
-   realms:
-     customer-portal:
-       adaptive_mfa:
-         enabled: true
-         recognition_window_days: 30
-         fingerprint_hmac_secret: "${HEARTH_REALM_CUSTOMER_PORTAL_FINGERPRINT_HMAC_SECRET}"
-   ```
-
-   The substituted value lives only in memory inside the Hearth process and is never
-   written back to disk. To prevent accidental disclosure through structured logs, the
-   field is held as a `secrecy::SecretString` and `AdaptiveMfaConfig` provides a custom
-   `Debug` impl that prints the field as `[REDACTED]` (see [HEA-869](/HEA/issues/HEA-869)).
-   Note that this protects only Hearth's own `tracing` output — the underlying value is
-   still present in the pod's environment block, so log aggregators that capture
-   `/proc/<pid>/environ` or systemd's `EnvironmentFile` content via diagnostics tooling
-   can still see it. Restrict that access at the platform layer.
-
-**Fail-secure behaviour.** When `adaptive_mfa.enabled = true` but the substituted secret
-fails the length check (env var unset → empty substitution + load warning, or value
-shorter than 32 bytes → length error), Hearth returns a hard configuration error on any
-code path that would derive a fingerprint. There is no silent fail-open. See
-`src/identity/engine/mod.rs` (HEA-836 BLK-2 fix + HEA-861 LOW-1 hardening); the engine was
-split from a single `engine.rs` into the `engine/` module after that note was written.
-
-#### Rotation runbook
-
-Use this procedure for scheduled rotation (recommended every 12 months) or in response to
-suspected compromise. Plan the rotation per-realm — there is no atomic multi-realm rotation.
-
-**Blast radius.** Rotating the secret renders every stored device fingerprint for that
-realm unreachable via normal lookup: the previous-secret HMAC and the new-secret HMAC
-produce different `hmac_hex` values, so the stored key (`dfp:user:{uuid}:{old_hmac}`) no
-longer matches what `derive_hmac(new_secret, …)` computes. For the `recognition_window_days`
-window after rotation, every active user appears as an "unrecognised device" exactly once
-and is challenged with step-up MFA on their next login. The stale `dfp:user:*` entries
-created under the old secret remain in the embedded KV but are unreachable and are removed
-by the background sweeper (`identity.cleanup.dfp_sweeper_interval_secs`, default 6 hours;
-see HEA-862). This is the intended behaviour but causes a short-lived support-ticket spike
-— schedule rotations outside peak hours and pre-notify support.
-
-**Pre-flight checklist**
-
-- Confirm the user is `realm-admin` for the target realm (or company-level admin).
-- Verify all Hearth replicas in the target deployment are ready (`/readyz` 200, confirming
-  storage is accessible) and on the same release. A rotation against a mixed-version fleet or
-  a replica whose storage has not yet completed WAL replay can produce inconsistent fingerprint
-  behaviour until all replicas are fully ready.
-- Locate the current secret in the source of truth (Vault path, AWS Secrets Manager ARN, …)
-  and the env-var name it maps to (e.g. `HEARTH_REALM_CUSTOMER_PORTAL_FINGERPRINT_HMAC_SECRET`).
-- Snapshot or version the secret store entry so you can roll back.
-- Pre-notify support of the expected step-up-MFA spike window.
-
-**Procedure**
-
-1. **Generate the replacement secret.**
-
-   ```sh
-   NEW_SECRET="$(openssl rand -base64 32)"
-   ```
-
-   Do not echo `$NEW_SECRET` to a shell with command logging enabled and do not pipe it
-   anywhere except the secret store CLI.
-
-2. **Write the new secret to the secret store.** Use the store's versioning so the old
-   value is retained as an automatic rollback point. Examples:
-
-   ```sh
-   # HashiCorp Vault (KV v2 — automatic versioning)
-   vault kv put secret/hearth/customer-portal fingerprint_hmac_secret="$NEW_SECRET"
-
-   # AWS Secrets Manager — VersionStage: AWSCURRENT becomes the new value
-   aws secretsmanager put-secret-value \
-     --secret-id hearth/customer-portal/fingerprint-hmac-secret \
-     --secret-string "$NEW_SECRET"
-
-   # GCP Secret Manager
-   gcloud secrets versions add hearth-customer-portal-fingerprint-hmac-secret \
-     --data-file=<(printf '%s' "$NEW_SECRET")
-   ```
-
-3. **Trigger a refresh of the in-cluster Kubernetes Secret.** External Secrets Operator
-   picks the new value up on its next refresh interval — force a sync if you do not want to
-   wait:
-
-   ```sh
-   kubectl annotate externalsecret hearth-customer-portal-fingerprint-hmac-secret \
-     force-sync="$(date +%s)" --overwrite
-   ```
-
-4. **Roll the Hearth pods so they pick up the new env var.** A standard Helm-managed
-   `kubectl rollout restart deploy/hearth` is sufficient; the deployment's pod template
-   already has `checksum/secret` and `checksum/config` annotations, so any change to the
-   underlying Secret triggers a rolling restart on the next `helm upgrade` as well.
-
-   ```sh
-   kubectl rollout restart deployment/hearth -n <namespace>
-   kubectl rollout status  deployment/hearth -n <namespace> --timeout=5m
-   ```
-
-5. **Verify the new secret is in effect.** From a workstation with a configured Hearth
-   admin token, log in as a test user that already has a recognised device. You should be
-   challenged with step-up MFA — confirming the previous-secret HMAC no longer matches.
-   After successful MFA, repeat the login: it should now be silent (the new-secret HMAC has
-   been cached).
-
-6. **Confirm there is no plaintext leak.** Check the rolling logs for the substituted
-   value:
-
-   ```sh
-   kubectl logs -n <namespace> deploy/hearth --since=10m | grep -F "$NEW_SECRET" && \
-     echo "FAIL: secret material found in logs" || \
-     echo "OK: no plaintext secret in recent logs"
-   ```
-
-   (`grep` exits 0 on match, so the `&&` branch fires only on the failure case.)
-
-7. **Secondary verification — audit-event surface.** As a durable check that survives
-   `unset NEW_SECRET`, query the `StepUpMfaTriggered` audit event count for the rotated
-   realm and confirm a fresh spike correlated with the pod restart. The spike confirms the
-   new-secret HMAC is in effect (every previously-recognised device is briefly treated as
-   unrecognised). This gate is more reliable than log scraping once the shell variable is
-   gone and works equally well from monitoring dashboards.
-
-   ```sh
-   # Replace the example with your audit-query mechanism (Hearth admin API,
-   # SIEM, or the durable audit log) — the shape of the check is what matters.
-   hearth-admin audit-events --realm customer-portal --type StepUpMfaTriggered \
-     --since "$ROTATION_START_TS"
-   ```
-
-8. **Delete the temporary shell variable.**
-
-   ```sh
-   unset NEW_SECRET
-   history -d $((HISTCMD-1)) 2>/dev/null || true
-   ```
-
-9. **Mark the rotation in your audit log.** Hearth emits a `StepUpMfaTriggered` audit event
-   whenever a user is challenged — the rotation window will show a spike in those events.
-   Tag the operational change in your change-management system with the realm name, the new
-   secret store version id, and the operator who performed the rotation.
-
-**Rollback.** If the new secret causes unexpected behaviour, restore the previous version
-in the secret store and repeat steps 3–4. Devices last recognised under the old secret
-become reachable again immediately (the stored `dfp:user:*` entries were never deleted —
-only orphaned by the HMAC key change), so users on previously-known devices stop being
-challenged for step-up MFA again.
-
-**Compromise response.** If you suspect the secret has leaked, run the rotation
-immediately. **Cache invalidation is self-contained** — there is no separate flush step.
-Rotating the secret changes the HMAC derivation key, so every subsequent fingerprint
-lookup resolves to a different storage key (`dfp:user:{uuid}:{new_hmac}`) than what was
-stored with the old secret. Old entries become unreachable on first use of the new secret
-and are removed by the background sweeper (`identity.cleanup.dfp_sweeper_interval_secs`,
-default 6 hours; HEA-862). Device fingerprints live in Hearth's embedded key-value store,
-not Redis or another external cache — there is no `redis-cli` or equivalent flush command
-to run, and Hearth currently exposes no admin endpoint to force an immediate sweep.
-Attempting to use a Redis CLI in this position would silently succeed against an
-unrelated Redis instance, leaving you with false confidence during an active incident.
-Do not do that.
-
-For forced immediate re-authentication of all users in the affected realm, revoke active
-sessions through the admin sessions endpoint and review credential-stuffing rate-limit
-metrics (`security.rate_limiting`). Tighten the rate-limit thresholds for the duration of
-the incident if attacker traffic is observed.
+Adaptive MFA and device fingerprinting were removed in Hearth 3.0.0, so there is no
+fingerprint secret to manage. MFA is a plain per-realm policy (`mfa_required`).
 
 ### SCIM bearer tokens
 
@@ -517,7 +304,7 @@ startup.
 
 | Config key | Default | Effect |
 |---|---|---|
-| `admin_per_minute` | `100` | Requests/minute per admin user (REST + gRPC shared) |
+| `admin_per_minute` | `100` | Requests/minute per admin user |
 
 Requests beyond the cap receive `429 Too Many Requests`. Set to `0` to disable (logs a `WARN`
 at startup and emits `hearth_rate_limiters_disabled{reason="config_zero"} 1`; never set `0`
@@ -585,15 +372,15 @@ Hearth's audit log uses a per-realm HMAC-SHA256 hash chain for tamper evidence. 
 
 ## Auth-Boundary PR Review Checklist
 
-Any PR that touches `src/protocol/http/admin.rs`, `src/protocol/grpc/*.rs`, or the
-auth helpers (`src/protocol/http/auth.rs`, `src/protocol/grpc/auth.rs`) is an
+Any PR that touches `src/protocol/http/admin.rs`, `src/protocol/http/admin/*.rs`, or the
+auth helpers (`src/protocol/http/auth.rs`) is an
 **auth-boundary PR** and must pass the following checks before merge.
 
 ### Automated backstops (enforced in CI)
 
 | Check | Mechanism | Catches |
 |---|---|---|
-| `#[must_use]` on `extract_admin_auth` / `authenticate_admin` | Rust compiler + `clippy -D warnings` | Unbound calls (result dropped as statement) |
+| `#[must_use]` on `extract_admin_auth` | Rust compiler + `clippy -D warnings` | Unbound calls (result dropped as statement) |
 | `scripts/check-auth-discard.sh` | `filter` job, runs on every PR | `let _auth`, `let _ = auth-call(...)`, unbound calls |
 | `make auth-discard-check` | `ci-local-fast` | Same as above, runs pre-push |
 
@@ -609,7 +396,7 @@ Reviewers MUST verify the following for every handler in scope:
       these, but human review is the second line of defense.
 
 - [ ] **`?` or explicit error-return is used** immediately after the auth call.
-      The `Result` must be propagated so an auth failure returns an HTTP/gRPC error
+      The `Result` must be propagated so an auth failure returns an HTTP error
       rather than falling through to handler logic.
 
 - [ ] **`scoped_realm(auth, path_realm_id)` is called** for any handler that accepts a
@@ -618,14 +405,11 @@ Reviewers MUST verify the following for every handler in scope:
 
 - [ ] **No new handler omits the auth call entirely.** Grep for `async fn` in scope
       and confirm every handler body contains at least one of:
-      `extract_admin_auth`, `authenticate_admin`, or an explicit `scoped_realm` call.
-
-- [ ] **gRPC service methods return `?` on the auth result**, not just log/ignore it.
-      Tonic methods that return `Result<Response<_>, Status>` must propagate `Status::unauthenticated`.
+      `extract_admin_auth` or an explicit `scoped_realm` call.
 
 ### Why this matters
 
-The HEA-1629 audit found 11 REST handlers and 30+ gRPC handlers where the auth extractor
+The HEA-1629 audit found 11 REST handlers and 30+ gRPC handlers (the gRPC API was removed in 3.0.0) where the auth extractor
 was called but its `Result` was either silently dropped or the handler continued even on
 auth failure. This is Broken Object-Level Authorization (BOLA): an attacker in one realm
 could read or mutate resources in another realm by supplying a different `{realm_id}` path

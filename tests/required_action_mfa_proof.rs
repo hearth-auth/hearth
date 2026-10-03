@@ -4,10 +4,8 @@
 //! A login that hit a pending required action used to resume with
 //! `MfaProof::Inherited`, which satisfies both `mfa_required` and
 //! `webauthn_required`. So password + TOTP (or a UV-less passkey, or the
-//! password alone) plus ANY pending action — and a realm listing `sms` in
-//! `mfa_methods` makes `ENROLL_PHONE_OTP` pending for every user without a
-//! verified phone — opened a session the same login was refused without the
-//! detour. The detour now carries what the login proved, raised only by a
+//! password alone) plus ANY pending action opened a session the same login
+//! was refused without the detour. The detour now carries what the login proved, raised only by a
 //! factor the flow itself proves, and a flow that cannot end in a session is
 //! not started at all.
 //!
@@ -30,8 +28,7 @@ use hearth::identity::onboarding::OnboardingService;
 use hearth::identity::{
     CleartextPassword, CreateRealmRequest, CreateUserRequest, CredentialConfig,
     EmbeddedIdentityEngine, IdentityConfig, IdentityEngine, MfaProof, RealmConfig,
-    RegistrationOptions, RequiredAction, SmsError, SmsMessage, SmsSender, UpdateUserRequest,
-    UserStatus,
+    RegistrationOptions, RequiredAction, UpdateUserRequest, UserStatus,
 };
 use hearth::protocol::web::{self, CookieSecret, WebState};
 use hearth::rbac::{EmbeddedRbacEngine, RbacEngine};
@@ -43,15 +40,6 @@ const PASSWORD: &str = "ra-proof-password-1";
 const ORIGIN: &str = "http://localhost";
 const RP_ID: &str = "localhost";
 const PASSKEY_CHALLENGE: &str = "/ui/mfa-passkey-challenge";
-
-/// An SMS transport that delivers nothing: these flows never get as far as
-/// sending one once the fix is in place, and must not need to.
-struct DroppedSms;
-impl SmsSender for DroppedSms {
-    fn send(&self, _message: &SmsMessage) -> Result<(), SmsError> {
-        Ok(())
-    }
-}
 
 struct Rig {
     app: axum::Router,
@@ -122,11 +110,7 @@ fn build_rig(config: RealmConfig) -> Rig {
         CookieSecret::from_bytes(COOKIE_SECRET),
         Some(email),
     )
-    .with_dev_mode(false)
-    .with_sms(
-        Arc::new(DroppedSms) as _,
-        Some(b"ra-proof-sms-key".to_vec()),
-    );
+    .with_dev_mode(false);
     Rig {
         app: web::router(state),
         identity,
@@ -277,27 +261,22 @@ fn session_proof(rig: &Rig, browser: &Browser) -> MfaProof {
         .mfa_proof()
 }
 
-fn phone_verified(rig: &Rig, user: &UserId) -> bool {
-    rig.identity
-        .get_user(&rig.realm_id, user)
-        .expect("lookup")
-        .expect("user")
-        .phone_verified()
-}
-
-/// D-1: a passkey realm, a user holding a passkey AND TOTP, and `sms` offered
-/// (so `ENROLL_PHONE_OTP` is pending for this phone-less user). The password
-/// login owes the passkey; whoever relays the password and one TOTP code must
-/// not reach a session — nor enrol a phone of their own on the way — by
-/// answering the TOTP challenge instead.
+/// D-1: a passkey realm, a user holding a passkey AND TOTP, and a pending
+/// `UPDATE_PASSWORD`. The password login owes the passkey; whoever relays the
+/// password and one TOTP code must not reach a session — nor run the pending
+/// action on the way — by answering the TOTP challenge instead.
 #[tokio::test]
 async fn a_totp_code_cannot_detour_a_passkey_login_through_a_required_action() {
     let rig = build_rig(RealmConfig {
-        mfa_methods: methods(&["webauthn", "totp", "sms"]),
+        mfa_methods: methods(&["webauthn", "totp"]),
         webauthn_required: Some(true),
         ..Default::default()
     });
-    let user = create_user(&rig, "d1-victim@example.com", vec![]);
+    let user = create_user(
+        &rig,
+        "d1-victim@example.com",
+        vec![RequiredAction::UpdatePassword],
+    );
     let secret = enrol_totp(&rig, &user);
     enrol_passkey(&rig, &user, true);
 
@@ -324,10 +303,6 @@ async fn a_totp_code_cannot_detour_a_passkey_login_through_a_required_action() {
         !browser.has_cookie("hearth_ui_session"),
         "no session is issued"
     );
-    assert!(
-        !phone_verified(&rig, &user),
-        "and no phone is enrolled on the account"
-    );
 }
 
 /// I-2 (A): a UV-less passkey proves possession only. On a passkey realm it
@@ -339,11 +314,15 @@ async fn a_uv_less_passkey_cannot_detour_a_login_through_a_required_action() {
     use base64::Engine as _;
 
     let rig = build_rig(RealmConfig {
-        mfa_methods: methods(&["webauthn", "sms"]),
+        mfa_methods: methods(&["webauthn"]),
         webauthn_required: Some(true),
         ..Default::default()
     });
-    let user = create_user(&rig, "i2-uvless@example.com", vec![]);
+    let user = create_user(
+        &rig,
+        "i2-uvless@example.com",
+        vec![RequiredAction::UpdatePassword],
+    );
     let authenticator = enrol_passkey(&rig, &user, false);
 
     let mut browser = Browser::new(rig.app.clone());
@@ -385,13 +364,13 @@ async fn a_uv_less_passkey_cannot_detour_a_login_through_a_required_action() {
     );
     assert!(!browser.has_cookie("hearth_ra_session"));
     assert!(!browser.has_cookie("hearth_ui_session"));
-    assert!(!phone_verified(&rig, &user));
 }
 
 /// I-2 (B): an `mfa_required` realm whose only method is a passkey, and a
-/// password-only user with an operator-forced password change. Without the
-/// pending action the password alone is refused; with it, completing the
-/// action must not open a session either.
+/// password-only user with an operator-forced password change. The pending
+/// action must not stand in for the second factor: the flow it starts also
+/// queues `ENROLL_MFA` (spec `mfa-policy`: the user enrols a passkey or TOTP
+/// before the sign-in completes), and no session is opened on the way.
 #[tokio::test]
 async fn a_required_action_does_not_stand_in_for_the_second_factor_a_realm_requires() {
     let rig = build_rig(RealmConfig {
@@ -406,16 +385,26 @@ async fn a_required_action_does_not_stand_in_for_the_second_factor_a_realm_requi
     );
 
     let (browser, resp) = post_password(&rig, "i2-pw-only@example.com").await;
-    let status = resp.status();
     let next = location(&resp);
     assert_eq!(
-        status,
-        StatusCode::FORBIDDEN,
-        "the login proved no second factor and no pending action can prove one \
-         (redirected to {next:?})"
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "the flow starts (redirected to {next:?})"
     );
-    assert!(!browser.has_cookie("hearth_ra_session"));
-    assert!(!browser.has_cookie("hearth_ui_session"));
+    assert_eq!(next.as_deref(), Some("/required-action/UPDATE_PASSWORD"));
+    assert!(!browser.has_cookie("hearth_ui_session"), "no session yet");
+    let ra = browser.cookie("hearth_ra_session").expect("RA cookie");
+    let payload = ra.split('.').nth(1).expect("JWT payload");
+    let claims = String::from_utf8(
+        data_encoding::BASE64URL_NOPAD
+            .decode(payload.as_bytes())
+            .expect("base64url"),
+    )
+    .expect("utf-8");
+    assert!(
+        claims.contains("ENROLL_MFA"),
+        "the flow must also enrol a qualifying factor: {claims}"
+    );
 }
 
 /// The session a completed detour opens records the factor the login
@@ -591,7 +580,7 @@ async fn assert_no_required_action_flow(rig: &Rig, email: &str) {
 }
 
 /// GA audit round 3, D-11: a disabled account holder who knows the password
-/// could still run required actions (change the password, bind a phone).
+/// could still run required actions (change the password, enrol a factor).
 #[tokio::test]
 async fn a_disabled_account_is_not_handed_a_required_action_flow() {
     let rig = build_rig(RealmConfig::default());
@@ -801,4 +790,39 @@ async fn the_session_after_a_required_action_records_the_client() {
         .expect("session");
     assert_eq!(session.ip_address(), Some("127.0.0.1"));
     assert_eq!(session.user_agent_raw(), Some("RaProofAgent/1.0"));
+}
+
+/// The inline TOTP form the password step renders posts straight to
+/// `/ui/mfa-challenge`. It must carry the CSRF token: without it, the
+/// browser's first code was refused with 422 ("Your session has expired"),
+/// on every sign-in now that MFA is required by default.
+#[tokio::test]
+async fn the_inline_totp_form_completes_the_login_on_the_first_submit() {
+    let rig = build_rig(RealmConfig {
+        mfa_methods: methods(&["totp"]),
+        ..Default::default()
+    });
+    let user = create_user(&rig, "inline-totp@example.com", vec![]);
+    let secret = enrol_totp(&rig, &user);
+
+    let (mut browser, login) = post_password(&rig, "inline-totp@example.com").await;
+    assert_eq!(
+        login.status(),
+        StatusCode::OK,
+        "the TOTP step renders inline"
+    );
+    let html = body_text(login).await;
+    let mut fields = hidden_fields(&html, "/ui/mfa-challenge");
+    assert!(
+        fields.iter().any(|(k, v)| k == "_csrf" && !v.is_empty()),
+        "the inline form carries the CSRF token: {fields:?}"
+    );
+    fields.push(("code".to_string(), totp_code(&secret, 1)));
+    let resp = browser.post_form("/ui/mfa-challenge", &fields).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "the first submit signs in"
+    );
+    assert!(browser.has_cookie("hearth_ui_session"));
 }

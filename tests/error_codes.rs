@@ -50,9 +50,9 @@ async fn start_server() -> (
     Arc<dyn IdentityEngine>,
     tokio::sync::oneshot::Sender<()>,
 ) {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
-        .expect("embedded harness");
+        .expect("in-process harness");
 
     let identity = harness.identity_arc();
 

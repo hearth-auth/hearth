@@ -9,8 +9,6 @@ pub mod claims_config;
 pub(crate) mod cleanup;
 pub mod client_auth;
 pub(crate) mod credentials;
-pub mod device_fingerprint;
-pub mod device_fp;
 pub mod dpop;
 pub mod email;
 mod engine;
@@ -20,21 +18,20 @@ pub mod hibp;
 pub mod kdf_gate;
 pub mod key_encryption;
 pub(crate) mod keys;
-pub mod ldap;
 pub(crate) mod magic_link;
 pub mod mcp;
+pub mod mfa_policy;
 pub mod migration;
 pub mod oidc;
 pub mod onboarding;
 pub mod operator_token;
+pub(crate) mod otp;
 pub mod pre_token_webhook;
 pub mod ra_token;
 pub mod reconcile;
-pub mod risk;
 pub mod search;
 pub mod session_version;
 pub mod sessions;
-pub mod sms;
 pub mod step_up;
 pub mod tokens;
 pub mod tool_permissions;
@@ -94,27 +91,23 @@ pub use kdf_gate::{
     KdfGateError, DEFAULT_ADMIN_MAX_IN_FLIGHT, DEFAULT_ADMIN_MAX_QUEUE_WAIT_MS,
 };
 pub use magic_link::MagicLinkResponse;
+pub use mfa_policy::{realm_requires_mfa, realms_with_mfa_off};
 pub use oidc::{
     fuzz_parse_token_exchange, AccessTokenAuthorization, ApplicationStatus, AuthorizationRequest,
-    AuthorizationResponse, ClientCredentialsRequest, ClientCredentialsResponse, ClientProfile,
-    ClientTrustLevel, CodeChallengeMethod, DecidePermissionRequest, DecidePermissionResponse,
+    AuthorizationResponse, ClientCredentialsRequest, ClientCredentialsResponse, ClientTrustLevel,
+    CodeChallengeMethod, DecidePermissionRequest, DecidePermissionResponse,
     DeviceAuthorizationRequest, DeviceAuthorizationResponse, DeviceCodeStatus,
     GeneratedClientSecret, IdTokenSigningAlg, IntrospectionResponse, JarClaims, JwtBearerRequest,
     LiveTokenAuthority, OAuthClient, OidcConfig, OidcDiscoveryDocument, OidcTokenResponse,
-    PasswordGrantRequest, PasswordGrantResponse, PushedAuthorizationRequest,
-    PushedAuthorizationResponse, RefreshBindContext, RegisterClientRequest, ResponseMode,
-    StepUpMfaGrantRequest, TokenExchangeRequest, TokenIntrospectionRequest, TokenRevocationRequest,
-    UpdateClientRequest, UserInfoResponse,
+    PushedAuthorizationRequest, PushedAuthorizationResponse, RefreshBindContext,
+    RegisterClientRequest, ResponseMode, TokenExchangeRequest, TokenIntrospectionRequest,
+    TokenRevocationRequest, UpdateClientRequest, UserInfoResponse,
 };
 pub use operator_token::{
     OperatorToken, OperatorTokenIssuer, OPERATOR_TOKEN_DEFAULT_TTL, OPERATOR_TOKEN_MAX_TTL,
     OPERATOR_TOKEN_MIN_TTL,
 };
 pub use session_version::{SessionVersionStore, SvDeltaEntry, SvDeltaResponse, SvSnapshotResponse};
-pub use sms::{
-    LoggingSmsSender, SharedSmsSender, SmsError, SmsMessage, SmsSecret, SmsSender, SnsSmsSender,
-    StubSmsHttpTransport, TwilioSmsSender,
-};
 pub use step_up::{
     has_step_up_credential, password_retry_after, totp_retry_after, verify_operator_step_up,
     verify_step_up, SecondFactorProof, StepUpAssertion, StepUpError, StepUpProof,
@@ -127,18 +120,17 @@ pub use tokens::{
 };
 pub use totp::{RecoveryCodes, TotpEnrollment};
 pub use types::{
-    canonicalize_scopes, AdaptiveMfaConfig, ApprovalWebhookConfig, AttributeDefinition,
-    AttributeDefinitions, AttributeType, BreachCheckConfig, BulkResult, CidrPolicy,
-    ConsentDecision, ConsentExport, ConsentListEntry, ConsentRecord, CreateInvitationRequest,
-    CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest, CreateWebhookRequest,
-    CredentialExport, DcrPolicy, DemoSeedOutcome, DemoSeedSpec, FapiProfile, FederationLinkExport,
-    ImportClientRequest, ImportUserRequest, InvitationStatus, MfaFactorExport, MfaProof,
-    MigrationReport, Organization, OrganizationConfig, OrganizationInvitation,
-    OrganizationMembership, OrganizationRole, OrganizationStatus, Page, PasswordPolicy,
-    PendingAuthorizationRequest, PreTokenWebhookConfig, PreTokenWebhookErrorPolicy, RawCredential,
-    Realm, RealmConfig, RealmQuotaConfig, RealmStatus, RegisterUserRequest, RegisterUserResponse,
-    RegistrationPolicy, RequiredAction, ScimMappingExport, ScimMappingKind, Session,
-    SessionContext, SessionLimitPolicy, SessionVersionConfig, UpdateOrganizationRequest,
+    canonicalize_scopes, ApprovalWebhookConfig, AttributeDefinition, AttributeDefinitions,
+    AttributeType, BreachCheckConfig, BulkResult, CidrPolicy, ConsentDecision, ConsentExport,
+    ConsentListEntry, ConsentRecord, CreateInvitationRequest, CreateOrganizationRequest,
+    CreateRealmRequest, CreateUserRequest, CreateWebhookRequest, CredentialExport, DcrPolicy,
+    DemoSeedOutcome, DemoSeedSpec, FederationLinkExport, ImportClientRequest, ImportUserRequest,
+    InvitationStatus, MfaFactorExport, MfaProof, MigrationReport, Organization, OrganizationConfig,
+    OrganizationInvitation, OrganizationMembership, OrganizationRole, OrganizationStatus, Page,
+    PasswordPolicy, PendingAuthorizationRequest, PreTokenWebhookConfig, PreTokenWebhookErrorPolicy,
+    RawCredential, Realm, RealmConfig, RealmQuotaConfig, RealmStatus, RegisterUserRequest,
+    RegisterUserResponse, RegistrationPolicy, RequiredAction, ScimMappingExport, ScimMappingKind,
+    Session, SessionContext, SessionLimitPolicy, SessionVersionConfig, UpdateOrganizationRequest,
     UpdateRealmRequest, UpdateUserRequest, UpdateWebhookRequest, User, UserStatus,
     VerificationOrigin, WebAuthnAttestationPolicy, Webhook,
 };
@@ -234,6 +226,31 @@ pub trait IdentityEngine: Send + Sync {
         realm_id: &RealmId,
         request: &UpdateRealmRequest,
     ) -> Result<Realm, IdentityError>;
+
+    /// Whether signing `user_id` in needs a qualifying second factor (a
+    /// passkey, a TOTP code or a recovery code) — the one MFA resolver (spec
+    /// `mfa-policy`). It is the logical OR of the realm policy, any
+    /// organization of the user that requires MFA, the client named by
+    /// `client_id` (its `mfa_required`), and the user's roles listed in the
+    /// realm's `mfa_required_roles`. Nothing loosens another's requirement.
+    ///
+    /// # Errors
+    /// A realm, client, role or membership lookup failed; the caller refuses.
+    fn effective_mfa_requirement(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        client_id: Option<&ClientId>,
+    ) -> Result<bool, IdentityError>;
+
+    /// Records `required` as the system realm's `mfa_required` — the one
+    /// write the system realm accepts, made at startup from the configured
+    /// policy (spec `mfa-policy`). A change is audited as
+    /// `MfaRequirementChanged`. Returns whether the stored value changed.
+    ///
+    /// # Errors
+    /// A storage or audit failure.
+    fn apply_system_realm_mfa_required(&self, required: bool) -> Result<bool, IdentityError>;
 
     /// Suspends (`suspended = true`) or reinstates a realm — the
     /// incident-response freeze control.
@@ -420,20 +437,6 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// Returns `IdentityError::UserNotFound` if the user does not exist.
     fn delete_user(&self, realm_id: &RealmId, user_id: &UserId) -> Result<(), IdentityError>;
-
-    /// Deletes all device fingerprints for a user (GDPR Art. 17 / AC-11).
-    ///
-    /// Used by the admin erasure endpoint
-    /// (`DELETE /admin/users/{id}/device-fingerprints`) to satisfy DSAR
-    /// erasure demands without deleting the entire account.
-    ///
-    /// Returns the number of fingerprint records removed. Does not error if
-    /// the user has no fingerprints — returns `Ok(0)`.
-    fn delete_user_device_fingerprints(
-        &self,
-        realm_id: &RealmId,
-        user_id: &UserId,
-    ) -> Result<usize, IdentityError>;
 
     /// Creates a new user and emits exactly one `UserCreated` audit event
     /// attributed to the provided actor.
@@ -796,8 +799,8 @@ pub trait IdentityEngine: Send + Sync {
     /// [`IdentityError::TokenRevoked`].
     ///
     /// `dpop_jkt` is the JWK thumbprint extracted from the DPoP proof header on
-    /// the current request (RFC 9449). FAPI 2.0 clients require it; the
-    /// refreshed access token will carry `cnf.jkt` bound to this thumbprint.
+    /// the current request (RFC 9449). A client registered with
+    /// `dpop_bound_access_tokens` requires it; the refreshed access token will carry `cnf.jkt` bound to this thumbprint.
     fn refresh_tokens(
         &self,
         realm_id: &RealmId,
@@ -850,8 +853,8 @@ pub trait IdentityEngine: Send + Sync {
     ) -> Result<AuthorizationResponse, IdentityError>;
 
     /// [`Self::authorize`] for a surface that cannot show a consent screen —
-    /// JSON `POST /authorize`, `POST /realms/{realm}/authorize` and gRPC
-    /// `Authorize`, which mint a code from a bearer token alone.
+    /// JSON `POST /authorize` and `POST /realms/{realm}/authorize`, which mint
+    /// a code from a bearer token alone.
     ///
     /// `bearer` is the validated claims of the caller's bearer token, which
     /// must belong to `request.user_id` and name a session. A token issued
@@ -920,30 +923,6 @@ pub trait IdentityEngine: Send + Sync {
     ) -> Result<OidcDiscoveryDocument, IdentityError>;
 
     // ===== OAuth 2.0 Extended (Step 22) =====
-
-    /// Issues tokens via the Resource Owner Password Credentials Grant (RFC 6749 §4.3).
-    ///
-    /// Looks up the user by email, verifies the password (enforcing per-account
-    /// rate limits), creates a session, and issues an access + refresh token pair.
-    /// Returns `Err(InvalidCredential)` for wrong email or password (intentionally
-    /// vague for enumeration resistance).
-    fn password_grant_token(
-        &self,
-        realm_id: &RealmId,
-        request: &PasswordGrantRequest,
-    ) -> Result<PasswordGrantResponse, IdentityError>;
-
-    /// Completes a step-up MFA challenge and issues tokens (HEA-836).
-    ///
-    /// Used with `grant_type = urn:hearth:params:grant-type:step-up-mfa`.
-    /// Re-verifies the user's password, validates the MFA code (TOTP or
-    /// recovery), records the device fingerprint as trusted, and returns a
-    /// full token pair.
-    fn step_up_mfa_grant_token(
-        &self,
-        realm_id: &RealmId,
-        request: &StepUpMfaGrantRequest,
-    ) -> Result<PasswordGrantResponse, IdentityError>;
 
     /// Issues an access token via the Client Credentials Grant (RFC 6749 §4.4).
     ///
@@ -1076,9 +1055,9 @@ pub trait IdentityEngine: Send + Sync {
     /// already validated on the token request. When present, the access and
     /// refresh tokens carry `cnf.jkt`, the grant family is bound to that key
     /// and the response's `token_type` is `DPoP` — as for the
-    /// authorization-code grant. In a realm with a `fapi_profile`, or for a
-    /// FAPI 2.0 client, `None` is refused with
-    /// [`IdentityError::FapiViolation`] and the approved code stays
+    /// authorization-code grant. For a client registered with
+    /// `dpop_bound_access_tokens`, `None` is refused with
+    /// [`IdentityError::InvalidDPopProof`] and the approved code stays
     /// redeemable.
     fn poll_device_token(
         &self,
@@ -1233,10 +1212,9 @@ pub trait IdentityEngine: Send + Sync {
 
     /// Returns whether the user holds a second factor this realm can challenge.
     ///
-    /// True for an enabled TOTP enrolment, for a verified phone number when the
-    /// realm offers `sms`, for an email-OTP enrolment when the realm offers
-    /// `email_otp`, and for a registered passkey when the realm offers
-    /// `webauthn` (GA audit B5). An absent `mfa_methods` offers every method.
+    /// True for an enabled TOTP enrolment, for an email-OTP enrolment when the
+    /// realm offers `email_otp`, and for a registered passkey when the realm
+    /// offers `webauthn` (GA audit B5). An absent `mfa_methods` offers every method.
     /// Login paths use it to choose between a challenge and forced enrolment:
     /// forced enrolment is only ever offered when this is `false`. It MUST NOT
     /// be used to decide whether the `mfa_required` policy is met — that gate
@@ -1251,7 +1229,7 @@ pub trait IdentityEngine: Send + Sync {
     /// spent (the budget TOTP and recovery codes already share: five failures,
     /// then a five-minute lockout).
     ///
-    /// Login paths that verify an SMS or email OTP call this before the
+    /// Login paths that verify an email OTP call this before the
     /// verify, and record each failure with
     /// [`Self::record_second_factor_failure`]: an OTP record allows five
     /// guesses of its own, but a new code can be requested, so without a
@@ -1753,7 +1731,7 @@ pub trait IdentityEngine: Send + Sync {
     ) -> Result<(), IdentityError>;
 
     /// Updates an existing OAuth client's fields — the runtime surfaces
-    /// (REST, gRPC, admin console).
+    /// (REST, admin console).
     ///
     /// Only non-`None` fields in the request are applied. A change to the
     /// credentials or security profile (`jwks`, `assertion_public_key`,
@@ -2090,22 +2068,6 @@ pub trait IdentityEngine: Send + Sync {
         ticket: &str,
     ) -> Result<Option<PendingAuthorizationRequest>, IdentityError>;
 
-    /// Signs a JARM error response JWT for mandatory-JARM clients (JARM §4.3).
-    ///
-    /// Called from the authorization endpoint when an error must be returned to
-    /// a client whose `authorization_signed_response_alg` is set. The resulting
-    /// JWT carries `error` + `error_description` + `state` so the client can
-    /// verify the error with the same signature check it applies to success
-    /// responses. The `typ` header is `oauth-authz-resp+jwt`.
-    fn sign_jarm_error_jwt(
-        &self,
-        realm_id: &RealmId,
-        client_id: &str,
-        error: &str,
-        error_description: &str,
-        state_param: &str,
-    ) -> Result<String, IdentityError>;
-
     /// Issues an authorization code for a previously-approved authorization
     /// request. Unlike [`IdentityEngine::authorize`], this variant skips
     /// the consent gating and is called only after consent has been
@@ -2129,7 +2091,6 @@ pub trait IdentityEngine: Send + Sync {
         amr_values: Vec<String>,
         response_mode: Option<ResponseMode>,
         jar_request: Option<String>,
-        via_par: bool,
     ) -> Result<AuthorizationResponse, IdentityError>;
 
     // ===== External IdP federation (Phase 2: Gap #5) =====
@@ -2241,7 +2202,7 @@ pub trait IdentityEngine: Send + Sync {
     // ===== SAML 2.0 =====
 
     /// Returns (or lazily creates) this realm's RSA signing key used for
-    /// SAML metadata and `<Response>`/`<Assertion>` signing.
+    /// the realm's SAML SP metadata (its certificate is published there).
     ///
     /// Off the hot path: RSA keygen is slow and happens once per realm.
     fn get_or_create_saml_signing_key(
@@ -2249,36 +2210,6 @@ pub trait IdentityEngine: Send + Sync {
         realm_id: &RealmId,
         issuer_cn: &str,
     ) -> Result<std::sync::Arc<crate::identity::tokens::RsaSigningKey>, IdentityError>;
-
-    /// Registers (or updates) a SAML Service Provider in a realm.
-    fn register_saml_sp(
-        &self,
-        realm_id: &RealmId,
-        sp: &federation::saml::SamlServiceProvider,
-    ) -> Result<(), IdentityError>;
-
-    /// Resolves a registered SP by its entity ID.
-    fn get_saml_sp_by_entity_id(
-        &self,
-        realm_id: &RealmId,
-        entity_id: &str,
-    ) -> Result<Option<federation::saml::SamlServiceProvider>, IdentityError>;
-
-    /// Resolves a registered SP by operator-assigned key.
-    fn get_saml_sp_by_key(
-        &self,
-        realm_id: &RealmId,
-        sp_key: &str,
-    ) -> Result<Option<federation::saml::SamlServiceProvider>, IdentityError>;
-
-    /// Lists all registered SPs in a realm.
-    fn list_saml_sps(
-        &self,
-        realm_id: &RealmId,
-    ) -> Result<Vec<federation::saml::SamlServiceProvider>, IdentityError>;
-
-    /// Deletes a registered SP.
-    fn delete_saml_sp(&self, realm_id: &RealmId, sp_key: &str) -> Result<(), IdentityError>;
 
     /// Persists a SAML state bag (SP-initiated login; 10-minute TTL).
     ///
@@ -2310,21 +2241,6 @@ pub trait IdentityEngine: Send + Sync {
         assertion_id: &str,
         expires_at_secs: i64,
     ) -> Result<(), IdentityError>;
-
-    /// Records that the IdP issued an assertion to an SP for a user session.
-    /// Enables SLO fan-out at logout time.
-    fn record_saml_sp_session(
-        &self,
-        realm_id: &RealmId,
-        registration: &federation::saml::SamlSessionRegistration,
-    ) -> Result<(), IdentityError>;
-
-    /// Enumerates an IdP-issued session's SP registrations for SLO.
-    fn list_saml_sp_sessions(
-        &self,
-        realm_id: &RealmId,
-        session_id: &SessionId,
-    ) -> Result<Vec<federation::saml::SamlSessionRegistration>, IdentityError>;
 
     // ===== Migration / import (Phase 1 Step 30) =====
 
@@ -2767,17 +2683,6 @@ pub trait IdentityEngine: Send + Sync {
     /// this runs on a background tick and must not take the task down.
     fn flush_approval_webhook_outbox(&self, realm_id: &RealmId) -> (u64, u64);
 
-    /// Proactively evicts expired device-fingerprint entries from `realm_id`.
-    ///
-    /// Scans all `dfp:user:*` keys and deletes any whose 8-byte LE i64 expiry
-    /// (Unix seconds) is <= `now_secs`. Returns `(evicted, active)` counts.
-    /// Called by the background dfp sweeper task on a configurable interval.
-    fn sweep_expired_fingerprints(
-        &self,
-        realm_id: &RealmId,
-        now_secs: i64,
-    ) -> Result<(u64, u64), IdentityError>;
-
     /// Probes the underlying storage engine for basic liveness.
     ///
     /// Performs a minimal read (`get` on a probe key) and returns `true`
@@ -2818,9 +2723,9 @@ pub trait IdentityEngine: Send + Sync {
     /// (audit 2026-08-28 §4.18#5).
     ///
     /// Covers TOTP/recovery-code state (decrypted — the archive encrypts it)
-    /// and `WebAuthn` passkeys. SMS-OTP and email-OTP factors have no
-    /// separate durable record: they ride on the user record's phone and
-    /// email fields, which the user export already carries.
+    /// and `WebAuthn` passkeys. The email-OTP factor has no
+    /// separate durable record: it rides on the user record's email fields,
+    /// which the user export already carries.
     fn export_all_mfa_factors(
         &self,
         realm_id: &RealmId,
@@ -2935,23 +2840,9 @@ pub trait IdentityEngine: Send + Sync {
         overwrite: bool,
     ) -> Result<ImportOutcome, IdentityError>;
 
-    /// Returns every registered SAML service provider in a realm.
-    fn export_all_saml_service_providers(
-        &self,
-        realm_id: &RealmId,
-    ) -> Result<Vec<crate::identity::federation::saml::SamlServiceProvider>, IdentityError>;
-
-    /// Restores one SAML service-provider registration.
-    fn import_saml_service_provider(
-        &self,
-        realm_id: &RealmId,
-        sp: &crate::identity::federation::saml::SamlServiceProvider,
-        overwrite: bool,
-    ) -> Result<ImportOutcome, IdentityError>;
-
     /// Returns the realm's SAML signing key as plaintext JSON
-    /// (`{"pkcs8":…,"cert":…}`), or `None` when the realm has never acted as a
-    /// SAML IdP.
+    /// (`{"pkcs8":…,"cert":…}`), or `None` when the realm has none yet — the
+    /// key is created the first time the realm's SAML SP metadata is served.
     ///
     /// At rest the key is sealed under the node's KEK. The bytes returned here
     /// are **unsealed**, because the destination's KEK is a different key: an
@@ -3122,87 +3013,6 @@ pub trait IdentityEngine: Send + Sync {
     fn backup_barrier(&self) -> Option<std::sync::Arc<std::sync::RwLock<()>>> {
         None
     }
-
-    // ===== Adaptive MFA — device fingerprint (HEA-839) =====
-
-    /// Checks whether the device described by `(ip, user_agent)` is recognised
-    /// for this user in this realm.
-    ///
-    /// If the realm's `adaptive_mfa.enabled` is `false`, or if the
-    /// `fingerprint_hmac_secret` is empty, returns
-    /// [`DeviceFingerprintOutcome::Skipped`] immediately.
-    ///
-    /// On an unrecognised device:
-    /// - If the user has an enrolled MFA factor → [`DeviceFingerprintOutcome::StepUpRequired`].
-    /// - If the user has **no** enrolled factor → [`DeviceFingerprintOutcome::EnrollMfaRequired`].
-    ///
-    /// The TTL of an existing recognised fingerprint is refreshed in-place on
-    /// every call (AC-9 rolling window).
-    ///
-    /// An audit event (`StepUpMfaTriggered`) is emitted on every step-up.
-    fn check_device_fingerprint(
-        &self,
-        realm_id: &RealmId,
-        user_id: &UserId,
-        ip: &str,
-        user_agent: &str,
-    ) -> Result<device_fp::DeviceFingerprintOutcome, IdentityError>;
-
-    /// Records `(ip, user_agent)` as a trusted device for this user, resetting
-    /// the rolling window to `realm.config.adaptive_mfa.recognition_window_days`.
-    ///
-    /// Call this after a successful step-up MFA challenge to mark the device.
-    /// No-ops when adaptive MFA is disabled or the HMAC secret is empty.
-    fn record_device_fingerprint(
-        &self,
-        realm_id: &RealmId,
-        user_id: &UserId,
-        ip: &str,
-        user_agent: &str,
-    ) -> Result<(), IdentityError>;
-
-    // =========================================================================
-    // SMS OTP (HEA-829)
-    // =========================================================================
-
-    /// Issues a 6-digit SMS OTP to `phone` and returns the opaque nonce.
-    ///
-    /// Checks the per-phone resend throttle (15-minute window, max 5 sends),
-    /// generates a CSPRNG nonce and code via rejection sampling, stores
-    /// HMAC-SHA256(key, digits) under `sms:pending_otp:{nonce}`, and sends
-    /// the SMS. Returns `SmsResendLimitExceeded` on throttle breach.
-    fn issue_sms_otp(
-        &self,
-        realm_id: &RealmId,
-        phone: &str,
-        otp_hmac_key_bytes: &[u8],
-        sender: &dyn sms::SmsSender,
-        now_unix_ts: u64,
-    ) -> Result<String, IdentityError>;
-
-    /// Verifies an SMS OTP previously issued by `issue_sms_otp`.
-    ///
-    /// `phone` is the number the caller expects the code to have been sent
-    /// to — the challenged user's own verified number, or the number being
-    /// enrolled. The code verifies only if it was issued to that same number,
-    /// so a genuine nonce + code obtained for one phone cannot prove
-    /// possession of another. Never pass a number taken from the request
-    /// when a stored one exists.
-    ///
-    /// Loads the pending record, checks expiry and attempt count, increments
-    /// attempts, verifies HMAC in constant time via `ring::hmac::verify`.
-    /// On success deletes the record (replay prevention). Returns
-    /// `InvalidSmsOtp` for any failure (not-found, expired, wrong code,
-    /// wrong recipient, exhausted).
-    fn verify_sms_otp(
-        &self,
-        realm_id: &RealmId,
-        nonce: &str,
-        phone: &str,
-        candidate_code: &str,
-        otp_hmac_key_bytes: &[u8],
-        now_unix_ts: u64,
-    ) -> Result<(), IdentityError>;
 
     // =========================================================================
     // Email OTP (HEA-1329)

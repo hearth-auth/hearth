@@ -136,7 +136,7 @@ async fn body_json(resp: axum::response::Response) -> serde_json::Value {
 
 #[tokio::test]
 async fn assign_adds_action_to_user() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = admin_token(&h, &realm).await;
@@ -173,7 +173,7 @@ async fn assign_adds_action_to_user() {
 
 #[tokio::test]
 async fn remove_removes_action_from_user() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = admin_token(&h, &realm).await;
@@ -228,7 +228,7 @@ async fn remove_removes_action_from_user() {
 
 #[tokio::test]
 async fn non_admin_gets_403() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = non_admin_token(&h, &realm).await;
@@ -261,7 +261,7 @@ async fn non_admin_gets_403() {
 
 #[tokio::test]
 async fn unknown_action_type_returns_400() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = admin_token(&h, &realm).await;
@@ -304,7 +304,7 @@ async fn unknown_action_type_returns_400() {
 
 #[tokio::test]
 async fn patch_realm_config_sets_default_required_actions() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = admin_token(&h, &realm).await;
@@ -345,7 +345,7 @@ async fn patch_realm_config_sets_default_required_actions() {
 
 #[tokio::test]
 async fn patch_realm_config_unknown_action_returns_400() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = admin_token(&h, &realm).await;
@@ -375,7 +375,7 @@ async fn patch_realm_config_unknown_action_returns_400() {
 /// event for each added action with the correct action_type in the metadata.
 #[tokio::test]
 async fn assign_action_emits_required_action_assigned_audit_event() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = admin_token(&h, &realm).await;
@@ -431,7 +431,7 @@ async fn assign_action_emits_required_action_assigned_audit_event() {
 #[tokio::test]
 #[allow(clippy::similar_names)]
 async fn cross_realm_patch_user_required_actions_is_forbidden() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
 
     let realm_a = h.create_realm();
     h.rbac().seed_realm(&realm_a).expect("seed realm_a");
@@ -474,7 +474,7 @@ async fn cross_realm_patch_user_required_actions_is_forbidden() {
 #[tokio::test]
 #[allow(clippy::similar_names)]
 async fn cross_realm_patch_realm_config_is_forbidden() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
 
     let realm_a = h.create_realm();
     h.rbac().seed_realm(&realm_a).expect("seed realm_a");
@@ -520,7 +520,7 @@ async fn cross_realm_patch_realm_config_is_forbidden() {
 /// over `POST /register`, then flips it back to `disabled` (HEA-2003).
 #[tokio::test]
 async fn patch_realm_config_sets_dcr_policy() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = admin_token(&h, &realm).await;
@@ -595,7 +595,7 @@ async fn patch_realm_config_sets_dcr_policy() {
 /// An unknown `dcr_policy` value must be rejected with 400, not silently ignored.
 #[tokio::test]
 async fn patch_realm_config_unknown_dcr_policy_returns_400() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = admin_token(&h, &realm).await;
@@ -625,7 +625,7 @@ async fn patch_realm_config_unknown_dcr_policy_returns_400() {
 /// saturation harness exercises at run time — with no dev-only endpoint.
 #[tokio::test]
 async fn dcr_client_credentials_issuance_path_works_end_to_end() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = admin_token(&h, &realm).await;

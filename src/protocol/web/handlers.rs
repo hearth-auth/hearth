@@ -576,8 +576,6 @@ impl MfaOtpChallengeTemplate {
 /// Which OTP second factor a realm offers *and* this user actually holds.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum OtpFactor {
-    /// SMS OTP to the user's verified phone number.
-    Sms,
     /// Email OTP to the user's address.
     Email,
 }
@@ -586,14 +584,12 @@ impl OtpFactor {
     /// The wire name, matching the `mfa_methods` vocabulary.
     fn as_str(self) -> &'static str {
         match self {
-            Self::Sms => "sms",
             Self::Email => "email_otp",
         }
     }
 
     fn parse(s: &str) -> Option<Self> {
         match s {
-            "sms" => Some(Self::Sms),
             "email_otp" => Some(Self::Email),
             _ => None,
         }
@@ -619,16 +615,11 @@ pub(super) fn otp_factor_for(
     // simply never configured the key could never route to an OTP challenge.
     let methods = realm.config().mfa_methods.clone();
     let offers = |name: &str| methods.as_ref().is_none_or(|m| m.iter().any(|x| x == name));
-    let holds_sms = offers("sms") && user.phone_verified();
     // An email OTP proves the inbox a magic link already proved: after a
     // magic link it is not a second factor at all (GA audit round 3, D-4).
     let holds_email = offers("email_otp") && user.email_otp_enabled() && first.allows_email_otp();
-    let sms_deliverable = state.sms.is_some() && state.sms_otp_hmac_key.is_some();
     let email_deliverable = state.email.is_some();
     // Prefer a factor we can actually send a code for.
-    if holds_sms && sms_deliverable {
-        return Some(OtpFactor::Sms);
-    }
     if holds_email && email_deliverable {
         return Some(OtpFactor::Email);
     }
@@ -637,9 +628,6 @@ pub(super) fn otp_factor_for(
     // Returning `None` here used to let the login issue the session on the
     // password alone, i.e. an unreachable transport or a missing OTP HMAC key
     // silently removed the user's second factor.
-    if holds_sms {
-        return Some(OtpFactor::Sms);
-    }
     if holds_email {
         return Some(OtpFactor::Email);
     }
@@ -658,22 +646,6 @@ fn issue_login_otp(
         .map(|d| d.as_secs())
         .unwrap_or(0);
     match factor {
-        OtpFactor::Sms => {
-            let sender = state.sms.as_ref().ok_or(IdentityError::MfaNotEnabled)?;
-            let phone = user.phone_number().ok_or(IdentityError::MfaNotEnabled)?;
-            // No key ⇒ no code: fail closed rather than HMAC under a
-            // guessable key. The caller renders an error; no session issues.
-            let key = super::required_action::sms_otp_hmac_key_bytes(state)
-                .ok_or(IdentityError::MfaNotEnabled)?;
-            let nonce =
-                state
-                    .identity
-                    .issue_sms_otp(realm_id, phone, &key, sender.as_ref(), now_ts)?;
-            let masked = user
-                .masked_phone_number()
-                .unwrap_or_else(|| "your phone".to_string());
-            Ok((nonce, format!("We sent a 6-digit code to {masked}.")))
-        }
         OtpFactor::Email => {
             let email_service = state.email.as_ref().ok_or(IdentityError::MfaNotEnabled)?;
             let key = super::required_action::email_otp_hmac_key_bytes(state);
@@ -702,13 +674,8 @@ pub struct MfaOtpChallengeQuery {
 }
 
 /// The prompt for a code already sent for `factor`.
-fn otp_sent_prompt(user: &crate::identity::User, factor: OtpFactor) -> String {
+fn otp_sent_prompt(factor: OtpFactor) -> String {
     match factor {
-        OtpFactor::Sms => format!(
-            "Enter the 6-digit code we sent to {}.",
-            user.masked_phone_number()
-                .unwrap_or_else(|| "your phone".to_string())
-        ),
         OtpFactor::Email => "Enter the 6-digit code we sent to your email address.".to_string(),
     }
 }
@@ -766,7 +733,7 @@ pub async fn mfa_otp_challenge_form(
     if outstanding {
         let mut tmpl = MfaOtpChallengeTemplate::new(
             None,
-            otp_sent_prompt(&user, factor),
+            otp_sent_prompt(factor),
             state.product_name.clone(),
             state.logo_url.clone(),
         );
@@ -794,7 +761,7 @@ pub async fn mfa_otp_challenge_form(
     };
     let (nonce, prompt) = match issued {
         Ok(v) => v,
-        Err(IdentityError::RateLimited | IdentityError::SmsResendLimitExceeded) => {
+        Err(IdentityError::RateLimited) => {
             let mut tmpl = MfaOtpChallengeTemplate::new(
                 Some(
                     "Too many codes were requested. Wait a few minutes, then ask for a new one."
@@ -1004,10 +971,10 @@ pub async fn mfa_otp_challenge_submit(
         &pending.realm_id,
         &pending.user_id,
         pending.return_to.as_deref(),
-        // The OTP just verified is a proved second factor, as in
-        // `finish_otp_login`; the RA flow carries it to the session.
+        // What the OTP just verified, as in `finish_otp_login`; the RA flow
+        // carries it to the session.
         &SessionContext {
-            mfa_proof: MfaProof::Proved,
+            mfa_proof: pending.first_factor.proof_after_email_otp(),
             ..session_ctx.clone()
         },
         pending.first_factor,
@@ -1031,8 +998,8 @@ pub async fn mfa_otp_challenge_submit(
 /// `otp_nonce` and `factor` MUST come from the server-signed challenge cookie,
 /// never from the request body. Each verify also names the recipient the
 /// user's code must have been sent to: the OTP record itself names nobody, so
-/// without that a genuine nonce + code someone obtained for THEIR OWN phone or
-/// inbox passed this user's challenge.
+/// without that a genuine nonce + code someone obtained for THEIR OWN inbox
+/// passed this user's challenge.
 fn verify_login_otp(
     state: &Arc<WebState>,
     realm_id: &RealmId,
@@ -1043,17 +1010,6 @@ fn verify_login_otp(
     now_ts: u64,
 ) -> Result<(), IdentityError> {
     match factor {
-        OtpFactor::Sms => match (
-            user.phone_number(),
-            super::required_action::sms_otp_hmac_key_bytes(state),
-        ) {
-            (Some(phone), Some(key)) => state
-                .identity
-                .verify_sms_otp(realm_id, otp_nonce, phone, code, &key, now_ts),
-            // No number or no key: nothing can verify, so the factor is not
-            // proved.
-            _ => Err(IdentityError::MfaNotEnabled),
-        },
         OtpFactor::Email => state.identity.verify_email_otp(
             realm_id,
             otp_nonce,
@@ -1077,11 +1033,11 @@ fn finish_otp_login(
 ) -> Response {
     revoke_prior_session_cookie(state.identity.as_ref(), headers, &state.cookie_secret);
 
-    // An OTP the realm delivered out of band and the user typed back is a
-    // proved second factor — the `mfa_required` gate reads exactly this
-    // (audit 2026-08-28 §4.18#3, §4.18#6).
+    // An email OTP the user typed back proves the inbox, not MFA (spec
+    // `mfa-policy`); after a user-verified passkey the login keeps the
+    // passkey's proof. The engine's gates read exactly this.
     let session_ctx = SessionContext {
-        mfa_proof: MfaProof::Proved,
+        mfa_proof: pending.first_factor.proof_after_email_otp(),
         ..session_ctx
     };
 
@@ -1932,10 +1888,6 @@ struct PreparedLogin {
     /// Parsed client IP for the abuse guards (task 20.13). `None` when no IP
     /// could be determined — every guard skips in that case.
     guard_ip: Option<std::net::IpAddr>,
-    /// A-17 tarpit delay owed by this attempt. Awaited by
-    /// [`login_submit_gated`] **before** the KDF gate; it must not be slept on
-    /// synchronously, which would park an executor thread.
-    tarpit_delay: Option<std::time::Duration>,
 }
 
 /// Orchestrates a login submission across the bounded KDF admission gate
@@ -1966,13 +1918,6 @@ async fn login_submit_gated(
         // Rejected pre-gate: no KDF permit was ever acquired.
         Err(response) => return response,
     };
-
-    // A-17 tarpit: the delay is owed before any further work and is awaited,
-    // never slept on, so a tarpitted flood costs the server a timer rather
-    // than an executor thread.
-    if let Some(delay) = prepared.tarpit_delay {
-        tokio::time::sleep(delay).await;
-    }
 
     let is_admin = prepared.is_admin;
     // Extract shed context before all values are moved into the closure.
@@ -2109,9 +2054,8 @@ fn login_prepare(
         return Err(render_ctx.generic_error(&email));
     }
 
-    // Abuse guards (task 20.13, audit §4.17#9). A-9 tenant CIDR, P-2 IP
-    // reputation, P-3 bot signal, A-16 challenge, A-3 cardinality and A-17
-    // tarpit all run here, before a KDF permit is acquired, for the same
+    // Abuse guards (task 20.13, audit §4.17#9). A-9 tenant CIDR, A-16
+    // challenge and A-3 cardinality all run here, before a KDF permit is acquired, for the same
     // reason the rate limit does: rejected traffic must not consume admission
     // capacity. Every arm collapses into the one generic page, so login
     // enumeration properties are unchanged. All are fail-open until the
@@ -2120,15 +2064,10 @@ fn login_prepare(
         .ip_address
         .as_deref()
         .and_then(|s| s.parse::<std::net::IpAddr>().ok());
-    let mut tarpit_delay = None;
-    match state.abuse_guards.pre_auth_login(
-        guard_ip,
-        &email,
-        headers
-            .get(header::USER_AGENT)
-            .and_then(|v| v.to_str().ok()),
-        realm.config().cidr_policy.as_ref(),
-    ) {
+    match state
+        .abuse_guards
+        .pre_auth_login(guard_ip, &email, realm.config().cidr_policy.as_ref())
+    {
         PreAuthVerdict::Allow => {}
         PreAuthVerdict::Deny { reason } => {
             tracing::warn!(ip = %client_ip, guard = reason, "login: refused by abuse guard");
@@ -2143,7 +2082,6 @@ fn login_prepare(
             tracing::warn!(ip = %client_ip, guard = reason, "login: challenged by abuse guard");
             return Err(render_ctx.generic_error(&email));
         }
-        PreAuthVerdict::Delay(d) => tarpit_delay = Some(d),
     }
 
     Ok(PreparedLogin {
@@ -2154,7 +2092,6 @@ fn login_prepare(
         email,
         is_admin,
         guard_ip,
-        tarpit_delay,
     })
 }
 
@@ -2181,7 +2118,6 @@ fn login_finish(
         email,
         is_admin: _,
         guard_ip,
-        tarpit_delay: _,
     } = prepared;
     let return_to = render_ctx.return_to.clone();
 
@@ -2260,6 +2196,18 @@ fn login_finish(
     // Forced enrolment is now chosen only for a user who holds no factor.
     // Neither branch decides whether the policy is met: the engine gate reads
     // factor use from `SessionContext::mfa_proof` (§4.18#3).
+    //
+    // An unverified account cannot open a session, so it is told so before
+    // any second-factor step: with MFA required by default, it used to reach
+    // forced enrolment and fail there with a 500.
+    if user.status() == crate::identity::UserStatus::PendingVerification {
+        return render_ctx.error_page(
+            "Your email is not verified yet. Check your inbox (or the server \
+             logs) for the verification link and click it before signing in.",
+            StatusCode::FORBIDDEN,
+            Some(&email),
+        );
+    }
     let secure = state.is_secure_request(&headers);
     let step = match super::second_factor::second_factor_step(
         &state,
@@ -2302,8 +2250,25 @@ fn login_finish(
             tmpl.realm_theme_url.clone_from(&render_ctx.realm_theme);
             tmpl.inline_theme_css
                 .clone_from(&render_ctx.inline_theme_css);
+            // The inline form posts to `/ui/mfa-challenge`, which checks the
+            // CSRF double-submit: echo the token this request carried, or mint
+            // one (the `--dev` path admits a request without the cookie).
+            let fresh_csrf = match super::auth::csrf_cookie_value_from_headers(&headers) {
+                Some(existing) => {
+                    tmpl.csrf = Some(existing.to_string());
+                    None
+                }
+                None => {
+                    let (value, csrf_cookie) = super::auth::fresh_csrf_cookie(secure);
+                    tmpl.csrf = Some(value);
+                    Some(csrf_cookie)
+                }
+            };
             let mut response = render(&tmpl);
             append_cookie(&mut response, &cookie);
+            if let Some(csrf_cookie) = fresh_csrf {
+                append_cookie(&mut response, &csrf_cookie);
+            }
             return response;
         }
         Some(other) => {
@@ -2666,7 +2631,6 @@ fn passkey_second_factor_gate(
     secure: bool,
 ) -> Option<Response> {
     let require_mfa_after_passkey = realm.config().passkey_requires_mfa.unwrap_or(false);
-    let realm_requires_mfa = realm.config().mfa_required.unwrap_or(false);
 
     if user_verified && !require_mfa_after_passkey {
         return None;
@@ -2681,12 +2645,29 @@ fn passkey_second_factor_gate(
             return Some(refuse());
         }
     };
-    let owed = match super::second_factor::non_passkey_factor_step(
-        state,
-        realm,
-        &user,
-        super::auth::FirstFactor::Credential,
-    ) {
+    let mfa_required = match state
+        .identity
+        .effective_mfa_requirement(realm.id(), user_id, None)
+    {
+        Ok(required) => required,
+        Err(e) => {
+            tracing::warn!(error = %e, "passkey-login: MFA-requirement lookup failed");
+            return Some(refuse());
+        }
+    };
+    let first = if user_verified {
+        super::auth::FirstFactor::VerifiedPasskey
+    } else {
+        super::auth::FirstFactor::Credential
+    };
+    let owed = match super::second_factor::non_passkey_factor_step(state, realm, &user, first) {
+        // A UV-less passkey plus an email OTP is still not MFA: where MFA is
+        // required, only TOTP can complete this sign-in.
+        Ok(Some(super::second_factor::SecondFactorStep::Otp(_)))
+            if !user_verified && mfa_required =>
+        {
+            None
+        }
         Ok(step) => step,
         Err(e) => {
             // The user's factors are unknown: refuse rather than skip one.
@@ -2701,7 +2682,7 @@ fn passkey_second_factor_gate(
             realm.id(),
             user_id,
             step,
-            super::auth::FirstFactor::Credential,
+            first,
             None, // no return_to for passkey flow
             secure,
         );
@@ -2718,9 +2699,9 @@ fn passkey_second_factor_gate(
         return Some(response);
     }
 
-    // Nothing else to challenge. A UV-less passkey on a realm that mandates
-    // a second factor cannot stand in for one.
-    if !user_verified && realm_requires_mfa {
+    // Nothing else to challenge. A UV-less passkey cannot stand in for a
+    // second factor the MFA policy mandates.
+    if !user_verified && mfa_required {
         return Some(
             (
                 StatusCode::FORBIDDEN,
@@ -5465,27 +5446,6 @@ fn register_submit_impl(
         );
     }
 
-    // P-5 email reputation (task 20.13). The adapter was never constructed on
-    // a production path, so `security.providers.email_reputation` did nothing
-    // at all. It is opt-in and only the disposable-domain signal refuses:
-    // role addresses (`admin@`, `support@`) are legitimate in plenty of
-    // tenants and are recorded, not blocked (§6.1 fail-open). No DNS/MX
-    // lookup is performed.
-    let reputation = state.abuse_guards.check_email_reputation(form.email.trim());
-    if reputation.is_disposable {
-        tracing::warn!("register_submit: refused a disposable email domain");
-        return render_err(
-            "That email provider is not accepted. Please use a different address.".to_string(),
-            form.email,
-        );
-    }
-    if reputation.is_role_address {
-        tracing::info!(
-            role_address = reputation.is_role_address,
-            "register_submit: email reputation signal recorded"
-        );
-    }
-
     let request = crate::identity::RegisterUserRequest {
         email: form.email.clone(),
         display_name: form.display_name.clone(),
@@ -6183,19 +6143,6 @@ pub async fn device_approve_submit(
     ) {
         return ra_response;
     }
-    // 2. The SMS factor. Fails closed (no transport, no key, lookup error)
-    //    exactly like the authorize intercept; on success the challenge POST
-    //    approves the code via `finish_device_approval`.
-    if let Some(sms_response) = super::sms_challenge::sms_mfa_device_gate(
-        &state,
-        &session.realm_id,
-        &session.user_id,
-        &code,
-        state.is_secure_request(&headers),
-    ) {
-        return sms_response;
-    }
-
     finish_device_approval(
         &state,
         &session.realm_id,
@@ -6209,8 +6156,7 @@ pub async fn device_approve_submit(
 /// charging a wrong code to the brute-force guard, and redirects to the
 /// device page with the outcome.
 ///
-/// Called by `device_approve_submit` and, when the realm requires the SMS
-/// factor, by `POST /ui/sms-challenge` after the OTP verifies.
+/// Called by `device_approve_submit`.
 pub(super) fn finish_device_approval(
     state: &Arc<WebState>,
     realm: &RealmId,
@@ -6314,19 +6260,11 @@ fn device_mfa_use_gate(
     else {
         return None;
     };
-    let realm_config = match state.identity.get_realm(&session.realm_id) {
-        Ok(r) => r.map(|r| r.config().clone()),
-        Err(e) => {
-            tracing::warn!(error = %e, "device_approve: realm lookup failed at the MFA-use gate");
-            return Some(super::handlers_common::server_error());
-        }
-    };
     let client_id = pending.client_id.as_uuid().to_string();
-    match super::required_action::client_or_role_requires_mfa(
+    match super::required_action::mfa_requirement_for(
         state,
         &session.realm_id,
         &session.user_id,
-        realm_config.as_ref(),
         Some(&client_id),
     ) {
         Ok(false) => return None,

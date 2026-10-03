@@ -1,12 +1,12 @@
 ---
 title: SDKs
 sidebar_label: Overview
-description: Official Hearth client SDKs — TypeScript, Node.js, Go, Python, Rust, PHP, and Kotlin.
+description: Official Hearth client SDKs — TypeScript, Go, Python, and PHP.
 ---
 
 # Hearth SDKs
 
-Hearth ships official client SDKs for integrating authentication and RBAC into your application. Every SDK implements the same contract: **auth code + PKCE flow**, zero-network RBAC checks decoded from the JWT, transparent token refresh, and the Hearth Admin API.
+Hearth ships four official client SDKs — TypeScript, Go, Python and PHP — for integrating authentication and RBAC into your application. Every SDK implements the same contract: **auth code + PKCE flow**, zero-network RBAC checks decoded from the JWT, transparent token refresh, and the Hearth Admin API.
 
 ## SDK catalogue
 
@@ -15,45 +15,43 @@ the published versions lag the source on `main` — check the registry before pi
 
 | Language / Runtime | Package | Install | Registry status |
 |--------------------|---------|---------|-----------------|
-| [TypeScript / React](./typescript.md) | `@hearth-auth/sdk` | `npm install @hearth-auth/sdk` | npm — **1.6.2** |
-| [Node.js (server)](./node.md) | `@hearth-auth/node` | `npm install @hearth-auth/node` | npm — **1.6.2** |
-| [Go](./go.md) | `github.com/hearth-auth/hearth/sdks/go` | `go get github.com/hearth-auth/hearth/sdks/go` | Go module proxy — **v1.6.11** |
-| [Python](./python.md) | `hearth-sdk` | `pip install hearth-sdk` | PyPI — **1.6.8** |
-| [Rust](./rust.md) | `hearth-sdk` | `cargo add hearth-sdk` — see [install](./rust.md#install) | crates.io — **1.6.11** |
-| [PHP](./php.md) | `hearth-auth/php-sdk` | `composer require hearth-auth/php-sdk:dev-main` | Packagist — **`dev-main` only**; no tagged release, so `^1.0` does not resolve |
-| [Kotlin / JVM](./kotlin.md) | `io.hearth:hearth-core` | build from source — see [install](./kotlin.md#install) | **Not published** (Maven Central has no `io.hearth` group) |
+| [TypeScript (browser, React, Node.js, Next.js)](./typescript.md) | `@hearth-auth/sdk` | `npm install @hearth-auth/sdk` | npm — **1.6.2** |
+| [Go](./go.mdx) | `github.com/hearth-auth/hearth/sdks/go` | `go get github.com/hearth-auth/hearth/sdks/go` | Go module proxy — **v1.6.11** |
+| [Python](./python.mdx) | `hearth-sdk` | `pip install hearth-sdk` | PyPI — **1.6.8** |
+| [PHP](./php.mdx) | `hearth-auth/php-sdk` | `composer require hearth-auth/php-sdk:dev-main` | Packagist — **`dev-main` only**; no tagged release, so `^1.0` does not resolve |
 
-## TypeScript vs Node.js — which should I use?
+## One TypeScript package for browser and server
 
-Both packages are published under `@hearth-auth/*` but serve different roles:
+`@hearth-auth/sdk` covers both sides of a JavaScript app:
 
-| | TypeScript (`@hearth-auth/sdk`) | Node.js (`@hearth-auth/node`) |
-|--|--|--|
-| **Use for** | Browser SPAs, React apps, Next.js | Node.js servers that verify incoming tokens |
-| **PKCE flow** | ✓ — full authorization-code + PKCE | ✗ — resource-server only |
-| **React hooks** | ✓ `useHasPermission`, `HearthProvider` | ✗ |
-| **Middleware** | ✗ | ✓ Express, Fastify |
-| **Min runtime** | Node 18 / any browser | Node 18 |
+| Side | What you use |
+|--|--|
+| **Browser and React** | `startLogin()` / `createHearthAuth()` for PKCE, `HearthProvider` and `useHasPermission` hooks |
+| **Node.js server** | `HearthClient` (`beginLogin`, `completeLogin`, `verifyToken`), Express `hearthMiddleware`, Fastify `hearthFastifyHook` |
+| **Next.js** | `@hearth-auth/sdk/nextjs` (`withHearthAuth`, `getHearthClaims`) and `@hearth-auth/sdk/nextjs/edge` (`hearthEdgeMiddleware`) |
 
-A typical full-stack setup uses **both**: the TypeScript SDK in the browser to run the PKCE flow and get tokens, and the Node.js SDK on the server to verify those tokens on every API request.
+It needs Node.js 18 or later on the server. The former `@hearth-auth/node` package is
+retired: its features are in `@hearth-auth/sdk`. See the
+[TypeScript guide](./typescript.md#server-side-nodejs) and the
+[Next.js guide](./typescript-nextjs.md).
 
 ## Common patterns
 
 All SDKs expose the same surface (method names vary by language convention). See the [full symbol-name mapping table](../../specs/SDK.md#25-per-sdk-symbol-name-mapping) for a complete SDK-by-SDK reference, including platform exceptions.
 
-| Pattern | TypeScript | Node.js | Go | Python | Rust | PHP | Kotlin |
-|---------|-----------|---------|-----|--------|------|-----|--------|
-| Auth code + PKCE — begin | `startLogin()` | `client.beginLogin()` | `client.BeginLogin()` | `client.begin_login()` | `client.begin_login().await` | `$client->beginLogin()` | `client.beginLogin()` |
-| Auth code + PKCE — complete | — (browser flow) | `client.completeLogin()` | `client.CompleteLogin()` | `client.complete_login()` | `client.complete_login().await` | `$client->completeLogin()` | `client.completeLogin()` |
-| Verify token (EdDSA) | `client.verifyToken()` | `client.verifyToken()` | `client.VerifyToken()` | `client.verify_token()` | `client.verify_token().await` | `$client->verifyToken()` | `client.verifyToken()` |
-| M2M (client credentials) | `client.clientCredentials()` | `client.clientCredentials()` | `client.ClientCredentials()` | `client.client_credentials()` | `client.client_credentials().await` | `$client->clientCredentials()` | `client.clientCredentials()` |
-| Device flow — start | `client.startDeviceFlow()` | `client.startDeviceFlow()` | `client.StartDeviceFlow()` | `client.start_device_flow()` | `client.start_device_flow().await` | `$client->startDeviceFlow()` | `client.deviceAuthorization()` ⚠ |
-| Device flow — poll | `client.pollDeviceToken()` | `client.pollDeviceToken()` | `client.PollDeviceToken()` ⚠ | `client.poll_device_token()` | `client.poll_device_token().await` | `$client->pollDeviceToken()` | `client.pollDeviceToken()` ⚠ |
-| Magic-link initiation | `client.requestMagicLink()` | `client.requestMagicLink()` | `client.RequestMagicLink()` | `client.request_magic_link()` | `client.initiate_magic_link().await` ⚠ | `$client->requestMagicLink()` | — ⚠ |
-| Role check (from claims) | `claims.hasRole()` | `token.hasRole()` | `client.HasRole(ctx, …)` | `claims.has_role()` | `client.has_role().await` | `$claims->hasRole()` | `client.hasRole()` |
-| Permission check (from claims) | `claims.hasPermission()` | `token.hasPermission()` | `client.HasPermission(ctx, …)` | `claims.has_permission()` | `client.has_permission().await` | `$claims->hasPermission()` | `client.hasPermission()` |
-| Group check (local) | `claims.inGroup()` | `token.inGroup()` | `client.InGroup()` | `claims.in_group()` | `HearthClient::in_group()` | `$claims->inGroup()` | `client.hasRole()` → `inGroup` |
-| Token refresh | `client.refreshTokens()` | — | `client.RefreshTokens()` | `client.refresh_tokens()` | `client.refresh_tokens().await` | `$client->refreshToken()` | `client.refreshTokens()` |
+| Pattern | TypeScript | Go | Python | PHP |
+|---------|-----------|-----|--------|-----|
+| Auth code + PKCE — begin | `startLogin()` (browser), `client.beginLogin()` (server) | `client.BeginLogin()` | `client.begin_login()` | `$client->beginLogin()` |
+| Auth code + PKCE — complete | `client.completeLogin()` | `client.CompleteLogin()` | `client.complete_login()` | `$client->completeLogin()` |
+| Verify token (EdDSA) | `client.verifyToken()` | `client.VerifyToken()` | `client.verify_token()` | `$client->verifyToken()` |
+| M2M (client credentials) | `client.clientCredentials()` | `client.ClientCredentials()` | `client.client_credentials()` | `$client->clientCredentials()` |
+| Device flow — start | `client.startDeviceFlow()` | `client.StartDeviceFlow()` | `client.start_device_flow()` | `$client->startDeviceFlow()` |
+| Device flow — poll | `client.pollDeviceToken()` | `client.PollDeviceToken()` ⚠ | `client.poll_device_token()` | `$client->pollDeviceToken()` |
+| Magic-link initiation | `client.requestMagicLink()` | `client.RequestMagicLink()` | `client.request_magic_link()` | `$client->requestMagicLink()` |
+| Role check (from claims) | `claims.hasRole()` | `client.HasRole(ctx, …)` | `claims.has_role()` | `$claims->hasRole()` |
+| Permission check (from claims) | `claims.hasPermission()` | `client.HasPermission(ctx, …)` | `claims.has_permission()` | `$claims->hasPermission()` |
+| Group check (local) | `claims.inGroup()` | `client.InGroup()` | `claims.in_group()` | `$claims->inGroup()` |
+| Token refresh | `client.refreshTokens()` | `client.RefreshTokens()` | `client.refresh_tokens()` | `$client->refreshToken()` |
 
 > ⚠ marks a [platform exception](../../specs/SDK.md#platform-exceptions). Read the linked spec section before using these methods.
 

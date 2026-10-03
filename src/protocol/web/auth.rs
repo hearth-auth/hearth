@@ -155,14 +155,31 @@ impl std::fmt::Debug for CookieSecret {
 /// round 3, D-4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FirstFactor {
-    /// A password, a passkey or an upstream identity provider.
+    /// A password, a passkey without user verification, or an upstream
+    /// identity provider.
     Credential,
     /// A magic link: control of the user's inbox. An email OTP proves the
     /// same inbox, so it cannot be this login's second factor.
     Inbox,
+    /// A passkey that proved user verification. That alone satisfies MFA
+    /// (spec `mfa-policy`), so the factor a realm's `passkey_requires_mfa`
+    /// adds on top keeps the login's [`crate::identity::MfaProof::ProvedWebAuthn`].
+    VerifiedPasskey,
 }
 
 impl FirstFactor {
+    /// The proof a login that started with this factor holds once an email
+    /// OTP is typed back: [`crate::identity::MfaProof::ProvedWebAuthn`] after
+    /// a user-verified passkey, otherwise
+    /// [`crate::identity::MfaProof::EmailOtp`] — an inbox, not MFA.
+    #[must_use]
+    pub fn proof_after_email_otp(self) -> crate::identity::MfaProof {
+        match self {
+            Self::VerifiedPasskey => crate::identity::MfaProof::ProvedWebAuthn,
+            Self::Credential | Self::Inbox => crate::identity::MfaProof::EmailOtp,
+        }
+    }
+
     /// Whether an email OTP can be this login's second factor.
     #[must_use]
     pub fn allows_email_otp(self) -> bool {
@@ -173,6 +190,7 @@ impl FirstFactor {
         match self {
             Self::Credential => "c",
             Self::Inbox => "i",
+            Self::VerifiedPasskey => "v",
         }
     }
 
@@ -180,6 +198,7 @@ impl FirstFactor {
         match s {
             "c" => Some(Self::Credential),
             "i" => Some(Self::Inbox),
+            "v" => Some(Self::VerifiedPasskey),
             _ => None,
         }
     }
@@ -353,7 +372,7 @@ pub fn clear_mfa_pending_cookie(secure: bool) -> String {
 
 /// Name of the cookie binding a login OTP challenge to its MFA pending cookie.
 ///
-/// Set by `GET /ui/mfa-otp-challenge` when it issues an SMS or email OTP.
+/// Set by `GET /ui/mfa-otp-challenge` when it issues an email OTP.
 /// The value is `{factor}.{otp_nonce}.{mac}` where MAC =
 /// HMAC-SHA256(secret, `hearth-mfa-otp|user_id|realm_id|pending_nonce|factor|otp_nonce`).
 /// The factor the user is challenged on and the pending OTP record the typed
@@ -366,7 +385,7 @@ pub const MFA_OTP_COOKIE: &str = "hearth_ui_mfa_otp";
 /// [`MFA_OTP_COOKIE`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct MfaOtpChallenge {
-    /// Factor wire name (`"sms"` or `"email_otp"`).
+    /// Factor wire name (`"email_otp"`).
     pub factor: String,
     /// Handle of the pending OTP record returned at issuance.
     pub otp_nonce: String,
@@ -1429,13 +1448,13 @@ mod tests {
     fn mfa_otp_cookie_round_trips_for_its_own_pending_login() {
         let secret = CookieSecret::from_bytes([5u8; 32]);
         let pending = pending_for_otp("pending-a");
-        let set = issue_mfa_otp_cookie(&secret, &pending, "sms", "00ff", true);
+        let set = issue_mfa_otp_cookie(&secret, &pending, "email_otp", "00ff", true);
         assert!(set.contains("HttpOnly") && set.contains("; Secure"));
         let parsed = parse_mfa_otp_cookie(&secret, &pending, otp_cookie_value(&set));
         assert_eq!(
             parsed,
             Some(MfaOtpChallenge {
-                factor: "sms".to_string(),
+                factor: "email_otp".to_string(),
                 otp_nonce: "00ff".to_string(),
             })
         );
@@ -1444,8 +1463,13 @@ mod tests {
     #[test]
     fn mfa_otp_cookie_is_bound_to_one_password_step() {
         let secret = CookieSecret::from_bytes([5u8; 32]);
-        let set =
-            issue_mfa_otp_cookie(&secret, &pending_for_otp("pending-a"), "sms", "00ff", false);
+        let set = issue_mfa_otp_cookie(
+            &secret,
+            &pending_for_otp("pending-a"),
+            "email_otp",
+            "00ff",
+            false,
+        );
         let value = otp_cookie_value(&set);
         // Another login of the same user (fresh pending nonce).
         assert_eq!(
@@ -1471,14 +1495,14 @@ mod tests {
     fn mfa_otp_cookie_rejects_a_swapped_factor_or_nonce() {
         let secret = CookieSecret::from_bytes([5u8; 32]);
         let pending = pending_for_otp("pending-a");
-        let set = issue_mfa_otp_cookie(&secret, &pending, "sms", "00ff", false);
+        let set = issue_mfa_otp_cookie(&secret, &pending, "totp", "00ff", false);
         let mac = otp_cookie_value(&set).rsplit_once('.').expect("mac").1;
         for forged in [
             format!("email_otp.00ff.{mac}"),
-            format!("sms.11ee.{mac}"),
-            format!("sms..{mac}"),
+            format!("totp.11ee.{mac}"),
+            format!("totp..{mac}"),
             format!(".00ff.{mac}"),
-            "sms.00ff".to_string(),
+            "totp.00ff".to_string(),
             String::new(),
         ] {
             assert_eq!(

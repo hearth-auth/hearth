@@ -2,16 +2,15 @@
 //!
 //! The device grant validated a DPoP proof at the token endpoint, burned its
 //! `jti`, and then minted plain Bearer tokens: no `cnf` on the access token,
-//! no key on the grant family, `token_type: Bearer`. In a realm with a
-//! `fapi_profile`, or for a FAPI 2.0 client, it minted them with no proof at
-//! all, although every other user grant requires sender-constrained tokens
-//! there (OIDC.md §2.1/§2.2).
+//! no key on the grant family, `token_type: Bearer`. For a client registered
+//! with `dpop_bound_access_tokens` (RFC 9449 §5.2) it must mint none without a
+//! proof, as every other grant does.
 //!
 //! These tests pin the device grant to the authorization-code grant's rules:
 //! - a proof binds the access token (`cnf.jkt`), the refresh token and the
 //!   grant family, and the response says `token_type: DPoP`;
 //! - the bound refresh token rotates only with the same key;
-//! - a FAPI realm or a FAPI 2.0 client gets no tokens without a proof, and
+//! - a `dpop_bound_access_tokens` client gets no tokens without a proof, and
 //!   the refusal leaves the approved code redeemable with one;
 //! - the tokens carry the approved `scope`.
 
@@ -23,8 +22,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use hearth::core::{ClientId, RealmId, UserId};
 use hearth::identity::{
-    ClientProfile, CreateRealmRequest, CreateUserRequest, DeviceAuthorizationRequest, FapiProfile,
-    IdentityError, RegisterClientRequest, UpdateRealmRequest,
+    CreateRealmRequest, CreateUserRequest, DeviceAuthorizationRequest, IdentityError,
+    RegisterClientRequest,
 };
 use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair};
@@ -43,7 +42,7 @@ struct Fx {
     user: UserId,
 }
 
-async fn fixture(h: common::TestHarness, fapi: Option<FapiProfile>) -> Fx {
+async fn fixture(h: common::TestHarness) -> Fx {
     let realm_name = format!("device-dpop-{}", uuid::Uuid::new_v4());
     let rec = h
         .identity()
@@ -53,19 +52,6 @@ async fn fixture(h: common::TestHarness, fapi: Option<FapiProfile>) -> Fx {
         })
         .expect("create realm");
     let realm = rec.id().clone();
-    if let Some(profile) = fapi {
-        let mut config = rec.config().clone();
-        config.fapi_profile = Some(profile);
-        h.identity()
-            .update_realm(
-                &realm,
-                &UpdateRealmRequest {
-                    config: Some(config),
-                    ..Default::default()
-                },
-            )
-            .expect("set fapi profile");
-    }
     let user = h
         .identity()
         .create_user(
@@ -88,8 +74,9 @@ async fn fixture(h: common::TestHarness, fapi: Option<FapiProfile>) -> Fx {
 }
 
 impl Fx {
-    /// A public device client with the refresh grant.
-    fn device_client(&self, profile: ClientProfile) -> ClientId {
+    /// A public device client with the refresh grant; `dpop_bound` registers
+    /// it with `dpop_bound_access_tokens`.
+    fn device_client(&self, dpop_bound: bool) -> ClientId {
         self.h
             .identity()
             .register_client(
@@ -100,9 +87,7 @@ impl Fx {
                     client_secret: None,
                     grant_types: vec![DEVICE_GRANT.to_string(), "refresh_token".to_string()],
                     require_consent: false,
-                    // A FAPI 2.0 client must register its keys inline.
-                    jwks: (profile == ClientProfile::Fapi2).then(|| DpopKey::new().jwks()),
-                    profile,
+                    dpop_bound_access_tokens: dpop_bound,
                     ..Default::default()
                 },
             )
@@ -139,8 +124,8 @@ impl Fx {
 /// response's `token_type`, and the tokens carry the approved scope.
 #[tokio::test]
 async fn device_poll_with_dpop_binds_the_token_pair() {
-    let fx = fixture(common::TestHarness::embedded().await.unwrap(), None).await;
-    let client = fx.device_client(ClientProfile::Standard);
+    let fx = fixture(common::TestHarness::in_process().await.unwrap()).await;
+    let client = fx.device_client(false);
     let code = fx.approved_device_code(&client);
 
     let resp =
@@ -173,8 +158,8 @@ async fn device_poll_with_dpop_binds_the_token_pair() {
 /// that was proven at the poll.
 #[tokio::test]
 async fn device_bound_refresh_token_rotates_only_with_the_same_key() {
-    let fx = fixture(common::TestHarness::embedded().await.unwrap(), None).await;
-    let client = fx.device_client(ClientProfile::Standard);
+    let fx = fixture(common::TestHarness::in_process().await.unwrap()).await;
+    let client = fx.device_client(false);
     let code = fx.approved_device_code(&client);
     let resp =
         fx.h.identity()
@@ -206,8 +191,8 @@ async fn device_bound_refresh_token_rotates_only_with_the_same_key() {
 /// Without a proof, a standard realm still issues Bearer tokens.
 #[tokio::test]
 async fn device_poll_without_dpop_in_a_standard_realm_stays_bearer() {
-    let fx = fixture(common::TestHarness::embedded().await.unwrap(), None).await;
-    let client = fx.device_client(ClientProfile::Standard);
+    let fx = fixture(common::TestHarness::in_process().await.unwrap()).await;
+    let client = fx.device_client(false);
     let code = fx.approved_device_code(&client);
     let resp =
         fx.h.identity()
@@ -220,54 +205,6 @@ async fn device_poll_without_dpop_in_a_standard_realm_stays_bearer() {
             .expect("validates");
     assert!(access.cnf.is_none(), "no proof, no binding");
     assert_eq!(access.scope.as_deref(), Some(SCOPE));
-}
-
-// ── engine: FAPI gate ────────────────────────────────────────────────────────
-
-/// A FAPI realm (either profile) refuses the device grant without a proof;
-/// the refusal does not consume the code, so the device can retry with one.
-#[tokio::test]
-async fn fapi_realm_requires_dpop_on_the_device_grant() {
-    for profile in [FapiProfile::Baseline, FapiProfile::Advanced] {
-        let fx = fixture(
-            common::TestHarness::embedded().await.unwrap(),
-            Some(profile),
-        )
-        .await;
-        let client = fx.device_client(ClientProfile::Standard);
-        let code = fx.approved_device_code(&client);
-
-        let err =
-            fx.h.identity()
-                .poll_device_token(&fx.realm, &code, &client, None)
-                .expect_err("FAPI realm must refuse an unbound device grant");
-        assert!(
-            matches!(err, IdentityError::FapiViolation { .. }),
-            "{profile:?}: expected FapiViolation, got {err:?}"
-        );
-
-        let resp =
-            fx.h.identity()
-                .poll_device_token(&fx.realm, &code, &client, Some(JKT))
-                .expect("the same code redeems with a proof");
-        assert_eq!(resp.token_type(), "DPoP", "{profile:?}");
-    }
-}
-
-/// A FAPI 2.0 client is held to the same rule in a standard realm.
-#[tokio::test]
-async fn fapi2_client_requires_dpop_on_the_device_grant() {
-    let fx = fixture(common::TestHarness::embedded().await.unwrap(), None).await;
-    let client = fx.device_client(ClientProfile::Fapi2);
-    let code = fx.approved_device_code(&client);
-    let err =
-        fx.h.identity()
-            .poll_device_token(&fx.realm, &code, &client, None)
-            .expect_err("a FAPI 2.0 client must not get unbound tokens");
-    assert!(
-        matches!(err, IdentityError::FapiViolation { .. }),
-        "expected FapiViolation, got {err:?}"
-    );
 }
 
 // ── HTTP: /token device arm, both routes ─────────────────────────────────────
@@ -298,15 +235,6 @@ impl DpopKey {
 
     fn x(&self) -> String {
         URL_SAFE_NO_PAD.encode(self.0.public_key().as_ref())
-    }
-
-    /// A one-key JWKS for client registration.
-    fn jwks(&self) -> String {
-        serde_json::json!({"keys": [{
-            "kty": "OKP", "crv": "Ed25519", "x": self.x(),
-            "kid": "device-key", "alg": "EdDSA", "use": "sig",
-        }]})
-        .to_string()
     }
 
     /// RFC 7638 thumbprint, computed by the server's own function.
@@ -406,9 +334,9 @@ impl Fx {
 /// both token routes.
 #[tokio::test]
 async fn http_device_poll_with_dpop_returns_a_bound_pair() {
-    let fx = fixture(common::TestHarness::server().await.unwrap(), None).await;
+    let fx = fixture(common::TestHarness::server().await.unwrap()).await;
     for route in [Route::Header, Route::Realm] {
-        let client = fx.device_client(ClientProfile::Standard);
+        let client = fx.device_client(false);
         let code = fx.approved_device_code(&client);
         let key = DpopKey::new();
         let (status, body) = fx.poll(route, &client, &code, Some(&key)).await;
@@ -424,21 +352,19 @@ async fn http_device_poll_with_dpop_returns_a_bound_pair() {
     }
 }
 
-/// Over HTTP, a FAPI realm refuses the device grant without a proof and
-/// honours it with one.
+/// Over HTTP, a `dpop_bound_access_tokens` client is refused the device
+/// grant without a proof and honoured with one.
 #[tokio::test]
-async fn http_fapi_realm_requires_dpop_on_the_device_grant() {
-    let fx = fixture(
-        common::TestHarness::server().await.unwrap(),
-        Some(FapiProfile::Baseline),
-    )
-    .await;
+async fn http_dpop_bound_client_requires_dpop_on_the_device_grant() {
+    let fx = fixture(common::TestHarness::server().await.unwrap()).await;
     for route in [Route::Header, Route::Realm] {
-        let client = fx.device_client(ClientProfile::Standard);
+        let client = fx.device_client(true);
         let code = fx.approved_device_code(&client);
         let (status, body) = fx.poll(route, &client, &code, None).await;
-        assert_eq!(status, 400, "{route:?}: unbound device grant: {body}");
-        assert_eq!(body["error"], "invalid_request", "{route:?}: {body}");
+        // The token endpoint answers `InvalidDPopProof` with 401 (as for a
+        // malformed proof), not the 400 the removed FAPI gate used.
+        assert_eq!(status, 401, "{route:?}: unbound device grant: {body}");
+        assert_eq!(body["error"], "invalid_dpop_proof", "{route:?}: {body}");
         assert!(body.get("access_token").is_none(), "{route:?}: {body}");
 
         let key = DpopKey::new();

@@ -26,7 +26,7 @@
 #
 # Scope:
 #   src/protocol/http/admin.rs
-#   src/protocol/grpc/*.rs
+#   src/protocol/http/admin/*.rs   (the routes that were gRPC-only until 3.0.0)
 #
 # Suppress a specific line with an inline comment:  // auth-discard-lint-allow
 #
@@ -35,7 +35,7 @@
 
 set -euo pipefail
 
-SCOPE_FILES="$(git ls-files -- 'src/protocol/http/admin.rs' 'src/protocol/grpc/*.rs' 2>/dev/null)"
+SCOPE_FILES="$(git ls-files --cached --others --exclude-standard -- 'src/protocol/http/admin.rs' 'src/protocol/http/admin/*.rs' 2>/dev/null)"
 
 if [[ -z "$SCOPE_FILES" ]]; then
     echo "WARN: auth-discard scope matched no tracked files; check working directory."

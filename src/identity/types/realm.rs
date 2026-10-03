@@ -10,7 +10,6 @@ use crate::identity::claims_config::ClaimProfile;
 use crate::identity::email::stored_templates::LocalizedEmailTemplate;
 use crate::identity::email::EmailBranding;
 use crate::identity::federation::LinkMode;
-use crate::identity::risk::RiskScorerConfig;
 use crate::rbac::{Group, PermissionDefinition, ProtectedResource, Role, ScopeBundle};
 
 use super::user::RequiredAction;
@@ -236,13 +235,8 @@ pub struct RealmConfig {
     /// This is orthogonal to `mfa_required` (which applies to all users).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mfa_required_roles: Option<Vec<String>>,
-    /// Allowed MFA methods (e.g. `["totp", "webauthn", "sms"]`).
+    /// Allowed MFA methods (e.g. `["totp", "webauthn", "email_otp"]`).
     pub mfa_methods: Option<Vec<String>>,
-    /// Per-realm SMS OTP expiry in seconds. `None` falls back to the module default (600 s / 10 min).
-    pub sms_otp_expiry_seconds: Option<u64>,
-    /// Per-realm SMS OTP maximum verification attempts before the record is discarded.
-    /// `None` falls back to the module default (5).
-    pub sms_otp_max_attempts: Option<u32>,
     /// Per-realm Email OTP expiry in seconds. `None` falls back to the module default (600 s / 10 min).
     pub email_otp_expiry_seconds: Option<u64>,
     /// Per-realm Email OTP maximum verification attempts before the record is discarded.
@@ -331,13 +325,6 @@ pub struct RealmConfig {
     /// `enabled = true` explicitly in their configuration.
     #[serde(default)]
     pub breach_check: BreachCheckConfig,
-    /// Adaptive (risk-based) MFA configuration.
-    ///
-    /// Existing realms deserialised without this field get the safe migration
-    /// default (`enabled = false`). Set `enabled = true` and supply a
-    /// `fingerprint_hmac_secret` to activate device-recognition step-up.
-    #[serde(default)]
-    pub adaptive_mfa: AdaptiveMfaConfig,
     /// Session-version (`sv`) revocation tracking.
     ///
     /// When enabled, access tokens carry an `sv` claim that resource servers
@@ -353,17 +340,6 @@ pub struct RealmConfig {
     /// Defaults to `RejectNew`. Set to `EvictOldest` to opt in to eviction.
     #[serde(default)]
     pub session_over_limit_policy: SessionLimitPolicy,
-    /// FAPI 2.0 Security Profile enforcement level for this realm.
-    ///
-    /// When set, the authorization server enforces the corresponding FAPI profile
-    /// on all authorization requests in this realm:
-    ///
-    /// - `baseline` — requires PAR + PKCE (S256) on every request.
-    /// - `advanced` — additionally requires JAR, JARM, and `private_key_jwt`.
-    ///
-    /// `None` (default) means standard OAuth 2.0 / OIDC rules apply.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fapi_profile: Option<FapiProfile>,
     /// Idle session timeout in seconds (A-18).
     ///
     /// A session whose `last_refreshed_at` is older than this window is evicted
@@ -377,11 +353,6 @@ pub struct RealmConfig {
     /// `None` = no hard cap (fail-open; standard TTL governs).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub absolute_timeout_secs: Option<u32>,
-    /// Per-realm risk scorer configuration (A-11 / A-49).
-    ///
-    /// `None` → scorer disabled (fail-open per §6.1).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub risk_scorer_config: Option<RiskScorerConfig>,
     /// A-9 tenant-managed CIDR allow/deny lists for this realm.
     ///
     /// `None` → no network restriction (fail-open per §6.1). Populated from
@@ -451,13 +422,15 @@ pub struct RealmConfig {
 #[serde(rename_all = "snake_case")]
 pub enum PreTokenWebhookErrorPolicy {
     /// Token is issued without extra claims; a warning is logged and a
-    /// `PreTokenWebhookFailed` audit event is emitted. This is the safe
-    /// default — Auth availability takes precedence over enrichment.
-    #[default]
+    /// `PreTokenWebhookFailed` audit event is emitted. Choose it explicitly
+    /// when availability matters more than the enrichment.
     FailOpen,
     /// Token issuance is rejected with `IdentityError::PreTokenWebhookFailed`.
-    /// Use when the enrichment data is required for authorization decisions
-    /// downstream and issuing a token without it would be a security risk.
+    /// The default (scope-trim-trusted-core, spec `pre-token-webhook-failure`):
+    /// claims a webhook adds can drive authorization downstream, so a token
+    /// issued without them must be an explicit choice, not an outage's side
+    /// effect.
+    #[default]
     FailClosed,
 }
 
@@ -476,7 +449,7 @@ pub struct PreTokenWebhookConfig {
     /// Request timeout in milliseconds. Defaults to `1000`.
     #[serde(default = "default_webhook_timeout_ms")]
     pub timeout_ms: u64,
-    /// What to do when the webhook call fails. Defaults to `fail_open`.
+    /// What to do when the webhook call fails. Defaults to `fail_closed`.
     #[serde(default)]
     pub on_error: PreTokenWebhookErrorPolicy,
     /// HMAC-SHA256 signing secret.
@@ -583,26 +556,6 @@ impl Default for WebAuthnAttestationPolicy {
             require_large_blob: false,
         }
     }
-}
-
-/// FAPI 2.0 Security Profile enforcement level.
-///
-/// Activates when set on a `RealmConfig`. Controls which FAPI 2.0 constraints
-/// the AS enforces for all authorization requests in the realm.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-#[serde(rename_all = "snake_case")]
-pub enum FapiProfile {
-    /// FAPI 2.0 Baseline Security Profile.
-    ///
-    /// Requires: PAR (RFC 9126), PKCE with S256 (RFC 7636), `iss` in responses
-    /// (RFC 9207). All authorization requests must be submitted as PAR.
-    Baseline,
-    /// FAPI 2.0 Advanced Security Profile.
-    ///
-    /// Requires all Baseline constraints plus: JAR (RFC 9101), JARM
-    /// (OAuth 2.0 JARM), and `private_key_jwt` client authentication.
-    Advanced,
 }
 
 /// Per-realm session-version (`sv`) tracking configuration.
@@ -743,7 +696,7 @@ pub struct RealmQuotaConfig {
 
 // ── SecretString serde helpers ────────────────────────────────────────────────
 //
-// Used by BreachCheckConfig and AdaptiveMfaConfig to safely round-trip secret
+// Used by BreachCheckConfig to safely round-trip secret
 // fields through storage without relying on SecretString's missing Serialize impl.
 mod secret_string_serde {
     use secrecy::{ExposeSecret, SecretString};
@@ -825,65 +778,6 @@ impl Default for BreachCheckConfig {
             enabled: true,
             timeout_ms: 3000,
             hibp_api_key: SecretString::new(String::new()),
-        }
-    }
-}
-
-/// Adaptive MFA configuration for a realm.
-///
-/// Controls device-fingerprint–based step-up MFA injection. When `enabled`,
-/// every login from an unrecognised device triggers a step-up challenge or
-/// an MFA-enrollment required-action. Only the HMAC output is stored —
-/// never raw IP or User-Agent strings (AC-11 / GDPR).
-#[derive(Clone, Serialize, Deserialize)]
-pub struct AdaptiveMfaConfig {
-    /// Whether adaptive MFA is active for this realm.
-    ///
-    /// Defaults to `false` for existing realms (safe migration default).
-    /// New realms should set this to `true` explicitly.
-    pub enabled: bool,
-    /// Number of days a recognised device is trusted before requiring re-verification.
-    pub recognition_window_days: u32,
-    /// HMAC-SHA256 key used to derive device fingerprints.
-    ///
-    /// Should be at least 32 bytes of cryptographically-random data. When empty,
-    /// the feature behaves as if `enabled = false` to prevent accidentally
-    /// treating every device as unrecognised due to a trivially-guessable key.
-    #[serde(
-        default = "default_secret_string",
-        skip_serializing_if = "is_empty_secret",
-        serialize_with = "secret_string_serde::serialize",
-        deserialize_with = "secret_string_serde::deserialize"
-    )]
-    pub fingerprint_hmac_secret: SecretString,
-}
-
-impl fmt::Debug for AdaptiveMfaConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AdaptiveMfaConfig")
-            .field("enabled", &self.enabled)
-            .field("recognition_window_days", &self.recognition_window_days)
-            .field("fingerprint_hmac_secret", &"[REDACTED]")
-            .finish()
-    }
-}
-
-impl PartialEq for AdaptiveMfaConfig {
-    fn eq(&self, other: &Self) -> bool {
-        self.enabled == other.enabled
-            && self.recognition_window_days == other.recognition_window_days
-            && self.fingerprint_hmac_secret.expose_secret()
-                == other.fingerprint_hmac_secret.expose_secret()
-    }
-}
-
-impl Default for AdaptiveMfaConfig {
-    fn default() -> Self {
-        Self {
-            // Safe migration default: disabled so existing realms are unaffected.
-            enabled: false,
-            recognition_window_days: 30,
-            fingerprint_hmac_secret: SecretString::new(String::new()),
         }
     }
 }
@@ -1028,6 +922,85 @@ mod tests {
             err.contains("hmac_secret"),
             "error must mention hmac_secret, got: {err}"
         );
+    }
+
+    #[test]
+    fn pre_token_webhook_config_validate_rejects_plain_http() {
+        let cfg = PreTokenWebhookConfig {
+            url: "http://localhost:9999/enrich".to_string(),
+            timeout_ms: 1000,
+            on_error: PreTokenWebhookErrorPolicy::FailClosed,
+            hmac_secret: Some("s".repeat(32)),
+        };
+        let err = cfg.validate().expect_err("http:// must be rejected");
+        assert!(err.contains("https://"), "got: {err}");
+    }
+
+    #[test]
+    fn breach_check_config_debug_redacts_the_api_key() {
+        let cfg = BreachCheckConfig {
+            hibp_api_key: SecretString::new("hibp-key-value".to_string()),
+            ..BreachCheckConfig::default()
+        };
+        let debug = format!("{cfg:?}");
+        assert!(!debug.contains("hibp-key-value"), "got: {debug}");
+        assert!(debug.contains("[REDACTED]"), "got: {debug}");
+    }
+
+    #[test]
+    fn breach_check_config_round_trips_the_api_key_and_omits_an_empty_one() {
+        let with_key = BreachCheckConfig {
+            hibp_api_key: SecretString::new("hibp-key-value".to_string()),
+            ..BreachCheckConfig::default()
+        };
+        let json = serde_json::to_string(&with_key).expect("serialize");
+        let back: BreachCheckConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, with_key);
+
+        let json = serde_json::to_string(&BreachCheckConfig::default()).expect("serialize");
+        assert!(!json.contains("hibp_api_key"), "got: {json}");
+        let back: BreachCheckConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, BreachCheckConfig::default());
+    }
+
+    fn attribute(key: &str, type_: AttributeType) -> AttributeDefinition {
+        AttributeDefinition {
+            key: key.to_string(),
+            label: None,
+            type_,
+            required: false,
+            description: None,
+            enum_values: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn attribute_definition_template_helpers() {
+        let mut def = attribute("tier", AttributeType::Enum);
+        assert_eq!(
+            def.display_label(),
+            "tier",
+            "no label falls back to the key"
+        );
+        assert_eq!(def.description_str(), None);
+        def.label = Some("Tier".to_string());
+        def.description = Some("Billing tier".to_string());
+        assert_eq!(def.display_label(), "Tier");
+        assert_eq!(def.description_str(), Some("Billing tier"));
+
+        assert!(def.is_enum() && !def.is_boolean() && !def.is_number());
+        assert!(attribute("vip", AttributeType::Boolean).is_boolean());
+        assert!(attribute("seats", AttributeType::Number).is_number());
+        let text = attribute("note", AttributeType::String);
+        assert!(!text.is_enum() && !text.is_boolean() && !text.is_number());
+
+        let attrs = vec![
+            ("other".to_string(), "x".to_string()),
+            ("tier".to_string(), "gold".to_string()),
+            ("tier".to_string(), "silver".to_string()),
+        ];
+        assert_eq!(def.find_value(&attrs), "gold", "the first match wins");
+        assert_eq!(text.find_value(&attrs), "", "a missing key gives \"\"");
     }
 
     #[test]
