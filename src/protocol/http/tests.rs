@@ -599,6 +599,65 @@ async fn dev_probe_user_returns_user_id_for_known_email() {
     );
 }
 
+/// The seed endpoints mint a session for a user who ran no ceremony at all.
+/// Every realm requires MFA by default (3.0.0), so a seed that states no
+/// proof is refused, and the load-test seeder can build no token corpus.
+/// They state `MfaProof::Proved`, as `/admin/bootstrap` does: the endpoint is
+/// dev-only and already more powerful than any second factor.
+#[cfg(feature = "dev-endpoints")]
+#[tokio::test]
+async fn dev_seed_token_and_session_work_in_a_realm_that_requires_mfa() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state_dev(temp_dir.path());
+    let realm = state
+        .identity
+        .create_realm(&crate::identity::CreateRealmRequest {
+            name: "seed-mfa-realm".to_string(),
+            // The bootstrap dev realm sets the same policy.
+            config: Some(crate::identity::RealmConfig {
+                mfa_required: Some(true),
+                ..Default::default()
+            }),
+        })
+        .expect("create realm");
+    let user = state
+        .identity
+        .create_user(
+            realm.id(),
+            &crate::identity::CreateUserRequest {
+                email: "seed@seed.test".to_string(),
+                display_name: "Seed User".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("create user");
+    assert!(
+        state
+            .identity
+            .effective_mfa_requirement(realm.id(), user.id(), None)
+            .expect("mfa requirement"),
+        "precondition: the default realm policy requires MFA"
+    );
+
+    for path in ["/dev/seed-token", "/dev/seed-session"] {
+        let resp = router(Arc::clone(&state))
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .header("x-realm-id", realm.id().as_uuid().to_string())
+                    .body(axum::body::Body::from(
+                        serde_json::json!({"user_id": user.id().as_uuid().to_string()}).to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::CREATED, "{path}");
+    }
+}
+
 /// HEA-2143: an unknown email still returns 200 (the C8 latency sweep depends
 /// on found/not-found being indistinguishable in status), with a null id.
 #[cfg(feature = "dev-endpoints")]

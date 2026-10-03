@@ -896,7 +896,7 @@ const file_hearth_events_v1_audit_proto_rawDesc = "" +
 	"\x12broken_at_event_id\x18\x02 \x01(\tH\x00R\x0fbrokenAtEventId\x88\x01\x01\x12\x1f\n" +
 	"\vevent_count\x18\x03 \x01(\x04R\n" +
 	"eventCountB\x15\n" +
-	"\x13_broken_at_event_id*\xab!\n" +
+	"\x13_broken_at_event_id*\x8b$\n" +
 	"\vAuditAction\x12\x1c\n" +
 	"\x18AUDIT_ACTION_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19AUDIT_ACTION_USER_CREATED\x10\x01\x12\x1d\n" +
@@ -1012,7 +1012,7 @@ const file_hearth_events_v1_audit_proto_rawDesc = "" +
 	"\x1fAUDIT_ACTION_INVITATION_CREATED\x10w\x12$\n" +
 	" AUDIT_ACTION_INVITATION_ACCEPTED\x10x\x12#\n" +
 	"\x1fAUDIT_ACTION_INVITATION_REVOKED\x10y\x12(\n" +
-	"$AUDIT_ACTION_MFA_REQUIREMENT_CHANGED\x10z2\xda\x01\n" +
+	"$AUDIT_ACTION_MFA_REQUIREMENT_CHANGED\x10z\"\x04\bK\x10S*\"AUDIT_ACTION_STEP_UP_MFA_TRIGGERED*\"AUDIT_ACTION_STEP_UP_MFA_COMPLETED*'AUDIT_ACTION_SMS_OTP_ENROLLMENT_STARTED*(AUDIT_ACTION_SMS_OTP_ENROLLMENT_VERIFIED*&AUDIT_ACTION_SMS_OTP_ENROLLMENT_FAILED*(AUDIT_ACTION_SMS_MFA_CHALLENGE_SUCCEEDED*%AUDIT_ACTION_SMS_MFA_CHALLENGE_FAILED*\x1bAUDIT_ACTION_SMS_MFA_LOCKED*'AUDIT_ACTION_DEVICE_FINGERPRINTS_ERASED2\xda\x01\n" +
 	"\fAuditService\x12b\n" +
 	"\n" +
 	"ListEvents\x12\x1c.hearth.events.v1.AuditQuery\x1a .hearth.events.v1.AuditEventPage\"\x14\x82\xd3\xe4\x93\x02\x0e\x12\f/admin/audit\x12f\n" +

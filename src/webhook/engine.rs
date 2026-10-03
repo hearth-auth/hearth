@@ -151,7 +151,7 @@ impl WebhookEngine for EmbeddedWebhookEngine {
         // Default to 1000 to avoid unbounded allocations when no limit is supplied.
         let limit = query.limit.unwrap_or(1_000);
 
-        let mut deliveries = Vec::with_capacity(entries.len().min(limit));
+        let mut deliveries = Vec::new();
         for entry in entries.into_iter().rev().take(limit) {
             let d: WebhookDelivery =
                 serde_json::from_slice(&entry.value).map_err(|e| WebhookError::Serialization {

@@ -3403,7 +3403,7 @@ pub async fn admin_api_user_required_actions_patch(
     };
 
     // Validate and parse action strings.
-    let mut add_actions: Vec<RequiredAction> = Vec::with_capacity(body.add.len());
+    let mut add_actions: Vec<RequiredAction> = Vec::new();
     for s in &body.add {
         match serde_json::from_value::<RequiredAction>(serde_json::Value::String(s.clone())) {
             Ok(a) => add_actions.push(a),
@@ -3416,7 +3416,7 @@ pub async fn admin_api_user_required_actions_patch(
             }
         }
     }
-    let mut remove_actions: Vec<RequiredAction> = Vec::with_capacity(body.remove.len());
+    let mut remove_actions: Vec<RequiredAction> = Vec::new();
     for s in &body.remove {
         match serde_json::from_value::<RequiredAction>(serde_json::Value::String(s.clone())) {
             Ok(a) => remove_actions.push(a),

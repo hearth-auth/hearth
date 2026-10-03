@@ -38,7 +38,7 @@ function cachedSecret(field: 'totp_secret' | 'admin_totp_secret'): string {
 }
 
 /** The system admin's TOTP secret: from bootstrap, or from a forced enrolment. */
-function adminTotpSecret(): string {
+export function adminTotpSecret(): string {
   const fromBootstrap = cachedSecret('admin_totp_secret');
   if (fromBootstrap) return fromBootstrap;
   try {
@@ -55,7 +55,7 @@ function adminTotpSecret(): string {
  * sends the user to forced TOTP enrolment. Returns the secret it used, so a
  * secret learned at enrolment can be saved. Does nothing when neither appears.
  */
-async function passSecondFactor(page: Page, secret: string): Promise<string> {
+export async function passSecondFactor(page: Page, secret: string): Promise<string> {
   const inline = page.locator('#totp_code');
   await Promise.race([
     inline.waitFor({ state: 'visible', timeout: 10_000 }).catch(() => undefined),

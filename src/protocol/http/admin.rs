@@ -820,7 +820,7 @@ async fn admin_import_users(
 
     let mut imported = 0u32;
     let mut failed = 0u32;
-    let mut results = Vec::with_capacity(body.users.len());
+    let mut results = Vec::new();
 
     for entry in &body.users {
         let status = match entry.status.as_deref().unwrap_or("active") {
@@ -3213,10 +3213,13 @@ pub(super) async fn dev_seed_session(
         }
     };
     let user_id = UserId::new(user_uuid);
+    // A seeded user ran no ceremony. This dev-only endpoint already mints a
+    // session with no authentication, so it states a proved second factor, as
+    // bootstrap does; otherwise every realm that requires MFA refuses it.
     match state.identity.create_session(
         &realm_id,
         &user_id,
-        &crate::identity::SessionContext::default(),
+        &dev_session_context(crate::identity::MfaProof::Proved),
     ) {
         Ok(session) => (
             StatusCode::CREATED,
@@ -3264,10 +3267,11 @@ pub(super) async fn dev_seed_token(
         }
     };
     let user_id = UserId::new(user_uuid);
+    // Same proof as `dev_seed_session`, for the same reason.
     let session = match state.identity.create_session(
         &realm_id,
         &user_id,
-        &crate::identity::SessionContext::default(),
+        &dev_session_context(crate::identity::MfaProof::Proved),
     ) {
         Ok(s) => s,
         Err(e) => return identity_error_to_response(&e).into_response(),
@@ -3471,8 +3475,8 @@ fn dev_enrol_totp(
     Ok(enrolment.secret_base32.clone())
 }
 
-/// The session context for a bootstrap session: it records `proof`, the
-/// second factor the authentication behind this bootstrap call proved.
+/// The session context for a dev-endpoint session (bootstrap and the seed
+/// endpoints): it records `proof`, the second factor the caller states.
 #[cfg(feature = "dev-endpoints")]
 fn dev_session_context(proof: crate::identity::MfaProof) -> crate::identity::SessionContext {
     crate::identity::SessionContext {

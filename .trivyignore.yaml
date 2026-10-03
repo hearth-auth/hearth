@@ -63,3 +63,15 @@ vulnerabilities:
     paths:
       - "package-lock.json"
     statement: "undici bundled in the npm CLI for node-gyp (release tooling); WebSocket DoS unused; no npm 11.x bundles the fix yet."
+  # braces 3.0.3 and http-cache-semantics 4.2.0: newest releases, no patched
+  # version for either advisory (checked 2026-10-03). Docusaurus build tooling
+  # only; never in the server binary or an SDK. Same assessment as the
+  # osv-scanner.toml entries. Revisit when a patched release exists.
+  - id: CVE-2026-93687
+    paths:
+      - "docs-site/package-lock.json"
+    statement: "braces via Docusaurus build tooling; expands only repo-authored globs; no patched release."
+  - id: CVE-2026-93748
+    paths:
+      - "docs-site/package-lock.json"
+    statement: "http-cache-semantics via Docusaurus update-notifier; no shared HTTP cache in CI; no patched release."

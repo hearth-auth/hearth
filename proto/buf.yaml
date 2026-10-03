@@ -23,5 +23,13 @@ lint:
 breaking:
   use:
     - FILE
+    # A deleted enum value must reserve its number and its name, so a removed
+    # value can never be reused for a different meaning (archived audit records
+    # keep the old numbers).
+    - ENUM_VALUE_NO_DELETE_UNLESS_NUMBER_RESERVED
+    - ENUM_VALUE_NO_DELETE_UNLESS_NAME_RESERVED
+  except:
+    # Replaced by the two *_UNLESS_*_RESERVED rules above.
+    - ENUM_VALUE_NO_DELETE
   ignore:
     - google
