@@ -21,7 +21,14 @@ plugins:
     out: ../sdks/go/generated
     opt:
       - paths=source_relative
-  # OpenAPI generation is NOT part of buf generate. It is handled separately
-  # by `make openapi` (scripts/merge_openapi.py) which merges the proto-derived
-  # Swagger 2.0 JSON with the hand-written supplement. Run `make openapi-check`
-  # to verify docs/api/openapi.json is up to date (HEA-972).
+  # The proto-derived Swagger 2.0 document. `make openapi`
+  # (scripts/merge_openapi.py) merges it with the hand-written supplement into
+  # docs/api/openapi.json, which the SDK admin-client generators consume.
+  # Before this plugin was wired in, the Swagger file was edited by hand and
+  # drifted from the proto (wrong verbs, 35 missing schemas).
+  - remote: buf.build/grpc-ecosystem/openapiv2:v2.27.3
+    out: ../docs/api
+    opt:
+      - allow_merge=true
+      - merge_file_name=openapi_proto_derived
+      - json_names_for_fields=true

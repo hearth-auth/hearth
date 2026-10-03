@@ -453,7 +453,7 @@ proto-breaking:
 proto-check:
 	@echo "Checking generated code is up-to-date..."
 	cd proto && $(BUF) generate
-	@if git diff --quiet sdks/typescript/src/generated sdks/go/generated; then \
+	@if git diff --quiet sdks/typescript/src/generated sdks/go/generated docs/api/openapi_proto_derived.swagger.json; then \
 		echo "Generated code is up-to-date."; \
 	else \
 		echo "ERROR: Generated code is out of date. Run 'make proto-gen' and commit."; \

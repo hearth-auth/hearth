@@ -14,7 +14,7 @@ Hearth has **no public gRPC API** — it was removed in 3.0.0. The API protos
 - `build.rs` compiles them with `prost` into the Rust request/response types the REST
   handlers serialize, using the `pbjson` JSON codec (proto3 JSON mapping, `json_name`).
 - `buf generate` derives the TypeScript and Go SDK types and the OpenAPI document
-  (`docs/api/openapi.proto-derived.json`) from them.
+  (`docs/api/openapi_proto_derived.swagger.json`) from them.
 
 Their `service` blocks are **schema only**. `build.rs` sets `build_server(false)` and
 `build_client(false)`, so no gRPC server or client code is generated, and nothing

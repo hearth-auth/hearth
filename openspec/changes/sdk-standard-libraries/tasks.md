@@ -1,18 +1,26 @@
 ## 0. Precondition
 
-- [ ] 0.1 Archive `scope-trim-trusted-core` first, so the `sdk-support-contract` capability exists in `openspec/specs/` (this change only adds requirements to it)
+- [ ] 0.1 Archive `scope-trim-trusted-core` first, so the `sdk-support-contract` capability exists in `openspec/specs/` (this change only adds requirements to it) **Deferred during apply (owner, 2026-10-03):** scope-trim still has 14.3 (cut v3.0.0) open. The code tasks do not need the archive; archive scope-trim after the release cut and before archiving this change
 
 ## 1. Spikes
 
-- [ ] 1.1 Generator spike per SDK (design decision 2): generate the admin client for `/admin/users`, `/admin/clients` and `/admin/roles`; record the chosen generator, and each gap in `docs/api/openapi.json` it hit
-- [ ] 1.2 Fix the gaps from 1.1 in the server's OpenAPI derivation (`scripts/merge_openapi.py` or the proto annotations), with `make openapi-check` green
+- [x] 1.1 Generator spike per SDK (design decision 2): generate the admin client for `/admin/users`, `/admin/clients` and `/admin/roles`; record the chosen generator, and each gap in `docs/api/openapi.json` it hit **Changed during apply:** the design's recommended generators all work, so they are the choice: `openapi-typescript` 7 (+ `openapi-fetch`), `oapi-codegen` v2 (`types,client`), `openapi-python-client`, `jane-php/open-api-3` 7 (no Java needed). "Clients" is `/admin/applications`. Gaps hit:
+  1. Converted query/path parameters kept the Swagger 2.0 inline `type` — 62 errors, the document was not valid OpenAPI 3.0.
+  2. Two unquoted supplement `description`s containing a comma parsed as YAML mappings.
+  3. `{member.id}` path parameter (proto `RemoveGroupMember`) — `openapi-python-client` dropped the endpoint. The handler also reads query `type` (not `member.type`) and answers `204`, not a typed `200`.
+  4. `/admin/assignments/{assignmentId}` (proto) and `/admin/assignments/{id}` (supplement) — the same route twice; the handler answers `204`.
+  5. **Root cause of most drift:** `docs/api/openapi.proto-derived.json` had no producer — `buf.gen.yaml` had no OpenAPI plugin, so it was hand-edited and stale: update role/group was `PUT` (proto and router: `PATCH`), 35 proto schemas were missing (organizations, permissions, agents), and 10 served `/v1/agents` and realm suspend operations were absent.
+  6. Organization routes had no request or response schemas, and the proto `v1Organization` messages do not match the handler's snake_case JSON.
+  7. Known, not blocking (no SDK admin client calls them yet): 30 supplement admin operations (webhooks, permissions, backup, cluster, branding, email templates…) have no typed 2xx; the router serves `/admin/realms/{realm_id}/cross-realm-policies`, `/admin/sessions/{id}` and `/admin/users/{id}/sessions` that the spec omits; proto-derived operations are not checked against the handlers' real status codes
+- [x] 1.2 Fix the gaps from 1.1 in the server's OpenAPI derivation (`scripts/merge_openapi.py` or the proto annotations), with `make openapi-check` green **Changed during apply:** `proto/buf.gen.yaml` now runs the pinned `grpc-ecosystem/openapiv2` plugin, writing `docs/api/openapi_proto_derived.swagger.json` (replaces the hand-edited `openapi.proto-derived.json`; `make proto-check` and the CI `proto` filter cover it). `merge_openapi.py` converts parameters to OpenAPI 3.0 and gains two supplement keys that fail the merge when stale: `x-hearth-created-operations` (the three `201` creates) and `x-hearth-schema-patches` (the `token_endpoint_auth_method` enum). The supplement omits the two wrong proto operations (gaps 3–4) and documents the served shapes, and types the six organization operations (`AdminOrganization*` schemas). `openapi-spec-validator`: 0 errors; `tests/openapi.rs` 10/10
 
 ## 2. JOSE-library verification (one PR per SDK is fine)
 
-- [ ] 2.1 TypeScript: red tests (Ed25519 token validates; tampered payload, `alg:none`, wrong `kid` fail); remove any handwritten claim check that `jwtVerify` options already cover
-- [ ] 2.2 Go: red tests first; add `github.com/go-jose/go-jose/v4`; replace `hearth/verify.go`'s `ed25519.Verify` path; keep the error taxonomy
-- [ ] 2.3 Python: red tests first; verify with `jwt.decode(..., algorithms=["EdDSA"])` and `PyJWK`; delete the `Ed25519PublicKey.verify` path in `client.py` and the key cache in `jwks.py` it fed
-- [ ] 2.4 PHP: red tests first; verify with `lcobucci/jwt` `Signer\Eddsa` and the validation constraints; delete the `sodium_crypto_sign_verify_detached` path in `TokenVerifier.php`
+- [x] 2.1 TypeScript: red tests (Ed25519 token validates; tampered payload, `alg:none`, wrong `kid` fail); remove any handwritten claim check that `jwtVerify` options already cover
+- [x] 2.2 Go: red tests first; add `github.com/go-jose/go-jose/v4`; replace `hearth/verify.go`'s `ed25519.Verify` path; keep the error taxonomy
+- [x] 2.3 Python: red tests first; verify with `jwt.decode(..., algorithms=["EdDSA"])` and `PyJWK`; delete the `Ed25519PublicKey.verify` path in `client.py` and the key cache in `jwks.py` it fed
+- [x] 2.4 PHP: red tests first; verify with `lcobucci/jwt` `Signer\Eddsa` and the validation constraints; delete the `sodium_crypto_sign_verify_detached` path in `TokenVerifier.php`
+  - Changed during apply (owner decision 2026-10-03): the JOSE libraries apply one clock skew to `exp`, `nbf` and `iat`, so all four SDKs now use one 5 s allowance (Go and PHP/Python were 0 s on `exp`; TypeScript defaulted to 60 s). `SDK.md` §2 must say so (task 5.1). Open: `jose` (TypeScript) refuses a future `iat` only when `maxTokenAge` is set, so TypeScript does not refuse it
 - [ ] 2.5 Add a CI grep that fails on a direct Ed25519 verify call in `sdks/` (the "No handwritten signature check remains" scenario)
 
 ## 3. Generated admin clients

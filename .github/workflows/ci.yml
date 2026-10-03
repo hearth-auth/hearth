@@ -182,9 +182,10 @@ jobs:
             proto:
               # Inputs: buf.yaml, buf.gen.yaml and buf.lock all live under proto/.
               - 'proto/**'
-              # Outputs: the two directories `make proto-check` diffs.
+              # Outputs: the files `make proto-check` diffs.
               - 'sdks/typescript/src/generated/**'
               - 'sdks/go/generated/**'
+              - 'docs/api/openapi_proto_derived.swagger.json'
               - 'Makefile'
               - '.github/workflows/ci.yml'
             # Reproduces loadtest-smoke.yml's old pull_request paths exactly,
