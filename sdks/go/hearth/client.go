@@ -444,6 +444,13 @@ func (c *Client) postWithToken(ctx context.Context, path string, body, result an
 
 func doRequest(client *http.Client, req *http.Request, result any) error {
 	resp, err := client.Do(req)
+	return decodeResponse(resp, err, result)
+}
+
+// decodeResponse maps an HTTP response onto the SDK error taxonomy (any
+// status >= 400 is an *APIError) and decodes a JSON body into result.
+// It closes the body.
+func decodeResponse(resp *http.Response, err error, result any) error {
 	if err != nil {
 		return err
 	}
