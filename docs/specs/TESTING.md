@@ -736,6 +736,6 @@ make test-quality          # or: bash scripts/check-test-quality.sh
 ### Phase 2+ (Clustering, SAML, SCIM)
 - Simulation tests with network partitions (Raft consensus, leader election, split-brain)
 - Multi-node black box tests (replication consistency, failover behavior)
-- SAML conformance tests — **not done.** SAML ships (SP and IdP); coverage is `tests/saml*.rs` and `tests/abuse_*` adversarial tests, not a conformance suite
+- SAML conformance tests — **not done.** SAML ships as a service provider only (the IdP side was removed in 3.0.0); coverage is `tests/saml_sp.rs` (with the XSW1–XSW8 corpus), `tests/saml_web_hardening.rs` and `tests/abuse_scim_saml.rs`, not a conformance suite
 - SCIM compliance tests — **not done.** SCIM ships; coverage is `tests/scim*.rs`, not a compliance suite
 - Benchmarks for clustered operations (cross-node permission check, replicated session lookup)

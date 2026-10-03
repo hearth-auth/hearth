@@ -10,6 +10,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
      scope-trim-trusted-core). Ships as 3.0.0; removals have no deprecation window because
      Hearth has no production users yet (see VERSIONING.md). -->
 
+**Next after 3.0.0.** The server is in a feature freeze (see `CONTRIBUTING.md`). Two OpenSpec
+changes are open: `sdk-standard-libraries` (the four SDKs verify tokens through standard JOSE
+libraries, admin clients generated from OpenAPI, one conformance harness for all SDKs) and
+`trusted-core-confidence` (external OIDC conformance, entry-point invariant tests, mutation
+testing, an external pentest). Hearth is not yet production-ready until the second one is done.
+
 ### Added
 - **REST routes for every admin operation that was gRPC-only**, ahead of the public gRPC API's
   removal: organization CRUD (`GET`/`POST /admin/organizations`, `GET`/`PATCH`/`DELETE

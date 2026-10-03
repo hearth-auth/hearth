@@ -137,6 +137,7 @@ Features removed in 3.0.0 are not roadmap items.
 
 | Feature | Evidence it is absent | Design doc |
 |---------|----------------------|------------|
+| Confidence gates before the production-readiness claim: OpenID Foundation conformance (Basic, Config, Dynamic OP), entry-point invariant tests, mutation budget, external pentest. The server is in a feature freeze until they pass | Planned, not started | OpenSpec [`trusted-core-confidence`](../openspec/changes/trusted-core-confidence/proposal.md) |
 | SDKs on standard JOSE/OIDC libraries, OpenAPI-generated admin clients, SDK conformance harness | Planned, not started | OpenSpec [`sdk-standard-libraries`](../openspec/changes/sdk-standard-libraries/proposal.md) |
 | RFC 7592 Dynamic Client Registration **management** (`GET`/`PUT`/`DELETE /register/{client_id}`) | No `/register/{client_id}` route is registered; registration (`POST /register`, RFC 7591) ships | [docs/specs/OIDC.md](specs/OIDC.md) §1 |
 | SAML encrypted assertions / encrypted NameIDs (`EncryptedAssertion`, `EncryptedID`) | No decryption path; neither name appears in `src/` | [docs/specs/SAML.md](specs/SAML.md) §7 |
