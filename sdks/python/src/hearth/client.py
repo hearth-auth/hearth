@@ -81,6 +81,17 @@ class HearthClient:
             timeout=timeout,
         )
 
+    def _post_realm_path(self, url: str, **kwargs: Any) -> httpx.Response:
+        """POST to a ``/realms/{realm}/...`` endpoint without ``X-Realm-ID``.
+
+        The path names the realm. The server refuses an ``X-Realm-ID`` that
+        does not resolve to that realm (``400 realm_mismatch``), and
+        ``realm_id`` here is the realm name, not its UUID.
+        """
+        request = self._http.build_request("POST", url, **kwargs)
+        del request.headers["X-Realm-ID"]
+        return self._http.send(request)
+
     # ------------------------------------------------------------------
     # Static bootstrap (dev-only)
     # ------------------------------------------------------------------
@@ -412,7 +423,7 @@ class HearthClient:
         }
         if token_type_hint is not None:
             body["token_type_hint"] = token_type_hint
-        resp = self._http.post(
+        resp = self._post_realm_path(
             f"{self._base}/realms/{self._realm}/introspect",
             json=body,
         )
@@ -538,7 +549,8 @@ class HearthClient:
         :raises TokenIssuerError: ``iss`` does not match.
         :raises TokenAudienceError: ``aud`` does not include the expected value.
         :raises TokenNotYetValidError: ``nbf`` or ``iat`` is more than 5 s in the future.
-        :raises JWKSFetchError: JWKS endpoint unreachable.
+        :raises TokenInvalidError: also when the token's ``kid`` is not published.
+        :raises JWKSFetchError: JWKS endpoint unreachable or invalid.
         """
         try:
             header = jwt.get_unverified_header(token)
@@ -634,7 +646,7 @@ class HearthClient:
         if scope is not None:
             body["scope"] = scope
 
-        resp = self._http.post(
+        resp = self._post_realm_path(
             f"{self._base}/realms/{self._realm}/token",
             data=body,
         )
@@ -664,7 +676,7 @@ class HearthClient:
         if scope is not None:
             body["scope"] = scope
 
-        resp = self._http.post(
+        resp = self._post_realm_path(
             f"{self._base}/realms/{self._realm}/device/authorize",
             data=body,
         )
@@ -699,7 +711,7 @@ class HearthClient:
         if self._client_secret:
             body["client_secret"] = self._client_secret
 
-        resp = self._http.post(
+        resp = self._post_realm_path(
             f"{self._base}/realms/{self._realm}/token",
             data=body,
         )
@@ -760,7 +772,7 @@ class HearthClient:
         if self._client_id:
             body["client_id"] = self._client_id
 
-        resp = self._http.post(
+        resp = self._post_realm_path(
             f"{self._base}/realms/{self._realm}/token",
             data=body,
         )

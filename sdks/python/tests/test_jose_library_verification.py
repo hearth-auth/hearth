@@ -89,9 +89,9 @@ def test_alg_none_fails(jwks):
 
 
 def test_unknown_kid_fails(jwks, private_key):
-    from hearth.errors import JWKSFetchError
+    from hearth.errors import TokenInvalidError
 
-    with pytest.raises(JWKSFetchError):
+    with pytest.raises(TokenInvalidError):
         _client().verify_token(_sign(private_key, _payload(), kid="not-published"))
 
 

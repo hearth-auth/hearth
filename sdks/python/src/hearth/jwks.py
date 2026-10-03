@@ -4,7 +4,9 @@ Caches Ed25519/OKP public keys by ``kid`` as PyJWT :class:`jwt.PyJWK` objects, s
 signature check itself is PyJWT's (``jwt.decode``), never SDK code.  Respects
 ``Cache-Control: max-age``
 from the server, capped at 24 hours.  Re-fetches once on a cache miss before
-raising :exc:`~hearth.errors.JWKSFetchError`.
+raising :exc:`~hearth.errors.TokenInvalidError` (an unknown ``kid``);
+:exc:`~hearth.errors.JWKSFetchError` is kept for an unreachable or invalid
+endpoint.
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ import time
 import httpx
 import jwt
 
-from .errors import JWKSFetchError
+from .errors import JWKSFetchError, TokenInvalidError
 
 #: Default TTL when the server provides no Cache-Control header (5 minutes).
 _DEFAULT_TTL = 300.0
@@ -52,9 +54,11 @@ class JwksCache:
         """Return the cached Ed25519 key for *kid*.
 
         Fetches the JWKS endpoint if the cache is stale.  On a cache miss,
-        re-fetches once before raising :exc:`~hearth.errors.JWKSFetchError`.
+        re-fetches once before raising :exc:`~hearth.errors.TokenInvalidError`.
 
-        :raises JWKSFetchError: if the key cannot be found after re-fetching.
+        :raises JWKSFetchError: if the JWKS endpoint is unreachable or invalid.
+        :raises TokenInvalidError: if *kid* is not published after re-fetching
+            (SDK.md §5: an unknown ``kid`` is a bad token, not a fetch failure).
         """
         if self._is_stale():
             self._fetch()
@@ -64,7 +68,7 @@ class JwksCache:
             self._fetch()
 
         if kid not in self._keys:
-            raise JWKSFetchError(f"Key not found in JWKS: kid={kid!r}", url=self._url)
+            raise TokenInvalidError(f"no JWKS key for kid={kid!r}")
         return self._keys[kid]
 
     # ------------------------------------------------------------------
