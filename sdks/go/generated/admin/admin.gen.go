@@ -17,6 +17,42 @@ import (
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
+// Defines values for AdminAddGroupMemberRequestType.
+const (
+	AdminAddGroupMemberRequestTypeGroup AdminAddGroupMemberRequestType = "group"
+	AdminAddGroupMemberRequestTypeUser  AdminAddGroupMemberRequestType = "user"
+)
+
+// Valid indicates whether the value is a known member of the AdminAddGroupMemberRequestType enum.
+func (e AdminAddGroupMemberRequestType) Valid() bool {
+	switch e {
+	case AdminAddGroupMemberRequestTypeGroup:
+		return true
+	case AdminAddGroupMemberRequestTypeUser:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for AdminAssignmentScopeType.
+const (
+	AdminAssignmentScopeTypeOrg   AdminAssignmentScopeType = "org"
+	AdminAssignmentScopeTypeRealm AdminAssignmentScopeType = "realm"
+)
+
+// Valid indicates whether the value is a known member of the AdminAssignmentScopeType enum.
+func (e AdminAssignmentScopeType) Valid() bool {
+	switch e {
+	case AdminAssignmentScopeTypeOrg:
+		return true
+	case AdminAssignmentScopeTypeRealm:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for AdminOrganizationStatus.
 const (
 	AdminOrganizationStatusActive    AdminOrganizationStatus = "active"
@@ -32,6 +68,63 @@ func (e AdminOrganizationStatus) Valid() bool {
 	case AdminOrganizationStatusArchived:
 		return true
 	case AdminOrganizationStatusSuspended:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for AdminRoleScopeKind.
+const (
+	AdminRoleScopeKindAny          AdminRoleScopeKind = "any"
+	AdminRoleScopeKindOrganization AdminRoleScopeKind = "organization"
+	AdminRoleScopeKindRealm        AdminRoleScopeKind = "realm"
+)
+
+// Valid indicates whether the value is a known member of the AdminRoleScopeKind enum.
+func (e AdminRoleScopeKind) Valid() bool {
+	switch e {
+	case AdminRoleScopeKindAny:
+		return true
+	case AdminRoleScopeKindOrganization:
+		return true
+	case AdminRoleScopeKindRealm:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for AdminRoleStatus.
+const (
+	AdminRoleStatusActive   AdminRoleStatus = "active"
+	AdminRoleStatusArchived AdminRoleStatus = "archived"
+)
+
+// Valid indicates whether the value is a known member of the AdminRoleStatus enum.
+func (e AdminRoleStatus) Valid() bool {
+	switch e {
+	case AdminRoleStatusActive:
+		return true
+	case AdminRoleStatusArchived:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for AdminSubjectType.
+const (
+	AdminSubjectTypeGroup AdminSubjectType = "group"
+	AdminSubjectTypeUser  AdminSubjectType = "user"
+)
+
+// Valid indicates whether the value is a known member of the AdminSubjectType enum.
+func (e AdminSubjectType) Valid() bool {
+	switch e {
+	case AdminSubjectTypeGroup:
+		return true
+	case AdminSubjectTypeUser:
 		return true
 	default:
 		return false
@@ -77,360 +170,6 @@ func (e V1AccessTokenAuthorization) Valid() bool {
 	}
 }
 
-// Defines values for V1AuditAction.
-const (
-	V1AuditActionAUDITACTIONAATISSUED                   V1AuditAction = "AUDIT_ACTION_AAT_ISSUED"
-	V1AuditActionAUDITACTIONAATREVOKED                  V1AuditAction = "AUDIT_ACTION_AAT_REVOKED"
-	V1AuditActionAUDITACTIONABUSEDETECTED               V1AuditAction = "AUDIT_ACTION_ABUSE_DETECTED"
-	V1AuditActionAUDITACTIONAGENTCREATED                V1AuditAction = "AUDIT_ACTION_AGENT_CREATED"
-	V1AuditActionAUDITACTIONAGENTCREDENTIALCREATED      V1AuditAction = "AUDIT_ACTION_AGENT_CREDENTIAL_CREATED"
-	V1AuditActionAUDITACTIONAGENTCREDENTIALREVOKED      V1AuditAction = "AUDIT_ACTION_AGENT_CREDENTIAL_REVOKED"
-	V1AuditActionAUDITACTIONAGENTDELEGATION             V1AuditAction = "AUDIT_ACTION_AGENT_DELEGATION"
-	V1AuditActionAUDITACTIONAGENTDELETED                V1AuditAction = "AUDIT_ACTION_AGENT_DELETED"
-	V1AuditActionAUDITACTIONAGENTREACTIVATED            V1AuditAction = "AUDIT_ACTION_AGENT_REACTIVATED"
-	V1AuditActionAUDITACTIONAGENTREVOKED                V1AuditAction = "AUDIT_ACTION_AGENT_REVOKED"
-	V1AuditActionAUDITACTIONAGENTSUSPENDED              V1AuditAction = "AUDIT_ACTION_AGENT_SUSPENDED"
-	V1AuditActionAUDITACTIONAGENTTOKENREVOKED           V1AuditAction = "AUDIT_ACTION_AGENT_TOKEN_REVOKED"
-	V1AuditActionAUDITACTIONAGENTTOOLINVOCATION         V1AuditAction = "AUDIT_ACTION_AGENT_TOOL_INVOCATION"
-	V1AuditActionAUDITACTIONAGENTUPDATED                V1AuditAction = "AUDIT_ACTION_AGENT_UPDATED"
-	V1AuditActionAUDITACTIONAPPROVALDENIED              V1AuditAction = "AUDIT_ACTION_APPROVAL_DENIED"
-	V1AuditActionAUDITACTIONAPPROVALGRANTED             V1AuditAction = "AUDIT_ACTION_APPROVAL_GRANTED"
-	V1AuditActionAUDITACTIONAPPROVALREQUESTED           V1AuditAction = "AUDIT_ACTION_APPROVAL_REQUESTED"
-	V1AuditActionAUDITACTIONAUDITLOGPRUNED              V1AuditAction = "AUDIT_ACTION_AUDIT_LOG_PRUNED"
-	V1AuditActionAUDITACTIONAUTHORIZATIONCODEEXCHANGED  V1AuditAction = "AUDIT_ACTION_AUTHORIZATION_CODE_EXCHANGED"
-	V1AuditActionAUDITACTIONAUTHORIZATIONCODEISSUED     V1AuditAction = "AUDIT_ACTION_AUTHORIZATION_CODE_ISSUED"
-	V1AuditActionAUDITACTIONBACKUPCREATED               V1AuditAction = "AUDIT_ACTION_BACKUP_CREATED"
-	V1AuditActionAUDITACTIONBACKUPRESTORED              V1AuditAction = "AUDIT_ACTION_BACKUP_RESTORED"
-	V1AuditActionAUDITACTIONBREACHCHECKUNAVAILABLE      V1AuditAction = "AUDIT_ACTION_BREACH_CHECK_UNAVAILABLE"
-	V1AuditActionAUDITACTIONBULKUSERSCREATED            V1AuditAction = "AUDIT_ACTION_BULK_USERS_CREATED"
-	V1AuditActionAUDITACTIONBULKUSERSDISABLED           V1AuditAction = "AUDIT_ACTION_BULK_USERS_DISABLED"
-	V1AuditActionAUDITACTIONCLEANUP                     V1AuditAction = "AUDIT_ACTION_CLEANUP"
-	V1AuditActionAUDITACTIONCLIENTCONSENTGRANTED        V1AuditAction = "AUDIT_ACTION_CLIENT_CONSENT_GRANTED"
-	V1AuditActionAUDITACTIONCLIENTCONSENTREVOKED        V1AuditAction = "AUDIT_ACTION_CLIENT_CONSENT_REVOKED"
-	V1AuditActionAUDITACTIONCLIENTDELETED               V1AuditAction = "AUDIT_ACTION_CLIENT_DELETED"
-	V1AuditActionAUDITACTIONCLIENTREGISTERED            V1AuditAction = "AUDIT_ACTION_CLIENT_REGISTERED"
-	V1AuditActionAUDITACTIONCLIENTUPDATED               V1AuditAction = "AUDIT_ACTION_CLIENT_UPDATED"
-	V1AuditActionAUDITACTIONCONSENTDENIED               V1AuditAction = "AUDIT_ACTION_CONSENT_DENIED"
-	V1AuditActionAUDITACTIONCONSENTGRANTED              V1AuditAction = "AUDIT_ACTION_CONSENT_GRANTED"
-	V1AuditActionAUDITACTIONCONSENTREQUIREDONREFRESH    V1AuditAction = "AUDIT_ACTION_CONSENT_REQUIRED_ON_REFRESH"
-	V1AuditActionAUDITACTIONCONSENTREVOKED              V1AuditAction = "AUDIT_ACTION_CONSENT_REVOKED"
-	V1AuditActionAUDITACTIONCREDENTIALCHANGED           V1AuditAction = "AUDIT_ACTION_CREDENTIAL_CHANGED"
-	V1AuditActionAUDITACTIONCREDENTIALSET               V1AuditAction = "AUDIT_ACTION_CREDENTIAL_SET"
-	V1AuditActionAUDITACTIONCREDENTIALVERIFIED          V1AuditAction = "AUDIT_ACTION_CREDENTIAL_VERIFIED"
-	V1AuditActionAUDITACTIONCROSSREALMTOKENISSUED       V1AuditAction = "AUDIT_ACTION_CROSS_REALM_TOKEN_ISSUED"
-	V1AuditActionAUDITACTIONCROSSREALMTRUSTCREATED      V1AuditAction = "AUDIT_ACTION_CROSS_REALM_TRUST_CREATED"
-	V1AuditActionAUDITACTIONCROSSREALMTRUSTREVOKED      V1AuditAction = "AUDIT_ACTION_CROSS_REALM_TRUST_REVOKED"
-	V1AuditActionAUDITACTIONEMAILCHANGECONFIRMED        V1AuditAction = "AUDIT_ACTION_EMAIL_CHANGE_CONFIRMED"
-	V1AuditActionAUDITACTIONEMAILCHANGEINITIATED        V1AuditAction = "AUDIT_ACTION_EMAIL_CHANGE_INITIATED"
-	V1AuditActionAUDITACTIONFEDERATIONACCOUNTLINKED     V1AuditAction = "AUDIT_ACTION_FEDERATION_ACCOUNT_LINKED"
-	V1AuditActionAUDITACTIONFEDERATIONACCOUNTUNLINKED   V1AuditAction = "AUDIT_ACTION_FEDERATION_ACCOUNT_UNLINKED"
-	V1AuditActionAUDITACTIONFEDERATIONJITPROVISIONED    V1AuditAction = "AUDIT_ACTION_FEDERATION_JIT_PROVISIONED"
-	V1AuditActionAUDITACTIONFEDERATIONLOGINCOMPLETED    V1AuditAction = "AUDIT_ACTION_FEDERATION_LOGIN_COMPLETED"
-	V1AuditActionAUDITACTIONFEDERATIONLOGINSTARTED      V1AuditAction = "AUDIT_ACTION_FEDERATION_LOGIN_STARTED"
-	V1AuditActionAUDITACTIONGROUPCREATED                V1AuditAction = "AUDIT_ACTION_GROUP_CREATED"
-	V1AuditActionAUDITACTIONGROUPDELETED                V1AuditAction = "AUDIT_ACTION_GROUP_DELETED"
-	V1AuditActionAUDITACTIONGROUPMEMBERADDED            V1AuditAction = "AUDIT_ACTION_GROUP_MEMBER_ADDED"
-	V1AuditActionAUDITACTIONGROUPMEMBERREMOVED          V1AuditAction = "AUDIT_ACTION_GROUP_MEMBER_REMOVED"
-	V1AuditActionAUDITACTIONGROUPMEMBERROLECHANGED      V1AuditAction = "AUDIT_ACTION_GROUP_MEMBER_ROLE_CHANGED"
-	V1AuditActionAUDITACTIONGROUPUPDATED                V1AuditAction = "AUDIT_ACTION_GROUP_UPDATED"
-	V1AuditActionAUDITACTIONINVITATIONACCEPTED          V1AuditAction = "AUDIT_ACTION_INVITATION_ACCEPTED"
-	V1AuditActionAUDITACTIONINVITATIONCREATED           V1AuditAction = "AUDIT_ACTION_INVITATION_CREATED"
-	V1AuditActionAUDITACTIONINVITATIONREVOKED           V1AuditAction = "AUDIT_ACTION_INVITATION_REVOKED"
-	V1AuditActionAUDITACTIONIPLOGINLIMITEXCEEDED        V1AuditAction = "AUDIT_ACTION_IP_LOGIN_LIMIT_EXCEEDED"
-	V1AuditActionAUDITACTIONLOGINFAILED                 V1AuditAction = "AUDIT_ACTION_LOGIN_FAILED"
-	V1AuditActionAUDITACTIONLOGINLOCKED                 V1AuditAction = "AUDIT_ACTION_LOGIN_LOCKED"
-	V1AuditActionAUDITACTIONMFADISABLED                 V1AuditAction = "AUDIT_ACTION_MFA_DISABLED"
-	V1AuditActionAUDITACTIONMFAENABLED                  V1AuditAction = "AUDIT_ACTION_MFA_ENABLED"
-	V1AuditActionAUDITACTIONMFAREQUIREMENTCHANGED       V1AuditAction = "AUDIT_ACTION_MFA_REQUIREMENT_CHANGED"
-	V1AuditActionAUDITACTIONOIDCSILENTAUTHPROBED        V1AuditAction = "AUDIT_ACTION_OIDC_SILENT_AUTH_PROBED"
-	V1AuditActionAUDITACTIONORGCREATED                  V1AuditAction = "AUDIT_ACTION_ORG_CREATED"
-	V1AuditActionAUDITACTIONORGDELETED                  V1AuditAction = "AUDIT_ACTION_ORG_DELETED"
-	V1AuditActionAUDITACTIONORGUPDATED                  V1AuditAction = "AUDIT_ACTION_ORG_UPDATED"
-	V1AuditActionAUDITACTIONORPHANEDREFERENCESKIPPED    V1AuditAction = "AUDIT_ACTION_ORPHANED_REFERENCE_SKIPPED"
-	V1AuditActionAUDITACTIONPASSWORDCOMPROMISEDREJECTED V1AuditAction = "AUDIT_ACTION_PASSWORD_COMPROMISED_REJECTED"
-	V1AuditActionAUDITACTIONPROTECTEDRESOURCEDELETED    V1AuditAction = "AUDIT_ACTION_PROTECTED_RESOURCE_DELETED"
-	V1AuditActionAUDITACTIONPROTECTEDRESOURCEREGISTERED V1AuditAction = "AUDIT_ACTION_PROTECTED_RESOURCE_REGISTERED"
-	V1AuditActionAUDITACTIONPROTECTEDRESOURCEUPDATED    V1AuditAction = "AUDIT_ACTION_PROTECTED_RESOURCE_UPDATED"
-	V1AuditActionAUDITACTIONREALMCREATED                V1AuditAction = "AUDIT_ACTION_REALM_CREATED"
-	V1AuditActionAUDITACTIONREALMDELETED                V1AuditAction = "AUDIT_ACTION_REALM_DELETED"
-	V1AuditActionAUDITACTIONREALMEXPORTWATERMARKED      V1AuditAction = "AUDIT_ACTION_REALM_EXPORT_WATERMARKED"
-	V1AuditActionAUDITACTIONREALMUPDATED                V1AuditAction = "AUDIT_ACTION_REALM_UPDATED"
-	V1AuditActionAUDITACTIONREQUIREDACTIONASSIGNED      V1AuditAction = "AUDIT_ACTION_REQUIRED_ACTION_ASSIGNED"
-	V1AuditActionAUDITACTIONREQUIREDACTIONAUTOCLEARED   V1AuditAction = "AUDIT_ACTION_REQUIRED_ACTION_AUTO_CLEARED"
-	V1AuditActionAUDITACTIONREQUIREDACTIONCOMPLETED     V1AuditAction = "AUDIT_ACTION_REQUIRED_ACTION_COMPLETED"
-	V1AuditActionAUDITACTIONREQUIREDACTIONREMOVED       V1AuditAction = "AUDIT_ACTION_REQUIRED_ACTION_REMOVED"
-	V1AuditActionAUDITACTIONROLEASSIGNED                V1AuditAction = "AUDIT_ACTION_ROLE_ASSIGNED"
-	V1AuditActionAUDITACTIONROLEREVOKED                 V1AuditAction = "AUDIT_ACTION_ROLE_REVOKED"
-	V1AuditActionAUDITACTIONSAMLIDPAUTHNREQUESTRECEIVED V1AuditAction = "AUDIT_ACTION_SAML_IDP_AUTHN_REQUEST_RECEIVED"
-	V1AuditActionAUDITACTIONSAMLIDPINITIATEDSSO         V1AuditAction = "AUDIT_ACTION_SAML_IDP_INITIATED_SSO"
-	V1AuditActionAUDITACTIONSAMLIDPRESPONSEISSUED       V1AuditAction = "AUDIT_ACTION_SAML_IDP_RESPONSE_ISSUED"
-	V1AuditActionAUDITACTIONSAMLLOGINCOMPLETED          V1AuditAction = "AUDIT_ACTION_SAML_LOGIN_COMPLETED"
-	V1AuditActionAUDITACTIONSAMLLOGINFAILED             V1AuditAction = "AUDIT_ACTION_SAML_LOGIN_FAILED"
-	V1AuditActionAUDITACTIONSAMLLOGININITIATED          V1AuditAction = "AUDIT_ACTION_SAML_LOGIN_INITIATED"
-	V1AuditActionAUDITACTIONSAMLSLOCOMPLETED            V1AuditAction = "AUDIT_ACTION_SAML_SLO_COMPLETED"
-	V1AuditActionAUDITACTIONSAMLSLOREQUESTED            V1AuditAction = "AUDIT_ACTION_SAML_SLO_REQUESTED"
-	V1AuditActionAUDITACTIONSCIMGROUPCREATED            V1AuditAction = "AUDIT_ACTION_SCIM_GROUP_CREATED"
-	V1AuditActionAUDITACTIONSCIMGROUPDELETED            V1AuditAction = "AUDIT_ACTION_SCIM_GROUP_DELETED"
-	V1AuditActionAUDITACTIONSCIMGROUPUPDATED            V1AuditAction = "AUDIT_ACTION_SCIM_GROUP_UPDATED"
-	V1AuditActionAUDITACTIONSCIMUSERCREATED             V1AuditAction = "AUDIT_ACTION_SCIM_USER_CREATED"
-	V1AuditActionAUDITACTIONSCIMUSERDELETED             V1AuditAction = "AUDIT_ACTION_SCIM_USER_DELETED"
-	V1AuditActionAUDITACTIONSCIMUSERUPDATED             V1AuditAction = "AUDIT_ACTION_SCIM_USER_UPDATED"
-	V1AuditActionAUDITACTIONSESSIONCREATED              V1AuditAction = "AUDIT_ACTION_SESSION_CREATED"
-	V1AuditActionAUDITACTIONSESSIONEVICTED              V1AuditAction = "AUDIT_ACTION_SESSION_EVICTED"
-	V1AuditActionAUDITACTIONSESSIONLIMITENFORCED        V1AuditAction = "AUDIT_ACTION_SESSION_LIMIT_ENFORCED"
-	V1AuditActionAUDITACTIONSESSIONREVOKED              V1AuditAction = "AUDIT_ACTION_SESSION_REVOKED"
-	V1AuditActionAUDITACTIONSESSIONSREVOKED             V1AuditAction = "AUDIT_ACTION_SESSIONS_REVOKED"
-	V1AuditActionAUDITACTIONSPIFFEAUTHSUCCESS           V1AuditAction = "AUDIT_ACTION_SPIFFE_AUTH_SUCCESS"
-	V1AuditActionAUDITACTIONSPIFFEIDMAPPED              V1AuditAction = "AUDIT_ACTION_SPIFFE_ID_MAPPED"
-	V1AuditActionAUDITACTIONTOKENISSUED                 V1AuditAction = "AUDIT_ACTION_TOKEN_ISSUED"
-	V1AuditActionAUDITACTIONTOKENREFRESHED              V1AuditAction = "AUDIT_ACTION_TOKEN_REFRESHED"
-	V1AuditActionAUDITACTIONTRANSACTIONTOKENISSUED      V1AuditAction = "AUDIT_ACTION_TRANSACTION_TOKEN_ISSUED"
-	V1AuditActionAUDITACTIONTUPLEDELETED                V1AuditAction = "AUDIT_ACTION_TUPLE_DELETED"
-	V1AuditActionAUDITACTIONTUPLEWRITTEN                V1AuditAction = "AUDIT_ACTION_TUPLE_WRITTEN"
-	V1AuditActionAUDITACTIONUNSPECIFIED                 V1AuditAction = "AUDIT_ACTION_UNSPECIFIED"
-	V1AuditActionAUDITACTIONUSERCREATED                 V1AuditAction = "AUDIT_ACTION_USER_CREATED"
-	V1AuditActionAUDITACTIONUSERDELETED                 V1AuditAction = "AUDIT_ACTION_USER_DELETED"
-	V1AuditActionAUDITACTIONUSERPERMISSIONGRANTED       V1AuditAction = "AUDIT_ACTION_USER_PERMISSION_GRANTED"
-	V1AuditActionAUDITACTIONUSERPERMISSIONREVOKED       V1AuditAction = "AUDIT_ACTION_USER_PERMISSION_REVOKED"
-	V1AuditActionAUDITACTIONUSERUPDATED                 V1AuditAction = "AUDIT_ACTION_USER_UPDATED"
-)
-
-// Valid indicates whether the value is a known member of the V1AuditAction enum.
-func (e V1AuditAction) Valid() bool {
-	switch e {
-	case V1AuditActionAUDITACTIONAATISSUED:
-		return true
-	case V1AuditActionAUDITACTIONAATREVOKED:
-		return true
-	case V1AuditActionAUDITACTIONABUSEDETECTED:
-		return true
-	case V1AuditActionAUDITACTIONAGENTCREATED:
-		return true
-	case V1AuditActionAUDITACTIONAGENTCREDENTIALCREATED:
-		return true
-	case V1AuditActionAUDITACTIONAGENTCREDENTIALREVOKED:
-		return true
-	case V1AuditActionAUDITACTIONAGENTDELEGATION:
-		return true
-	case V1AuditActionAUDITACTIONAGENTDELETED:
-		return true
-	case V1AuditActionAUDITACTIONAGENTREACTIVATED:
-		return true
-	case V1AuditActionAUDITACTIONAGENTREVOKED:
-		return true
-	case V1AuditActionAUDITACTIONAGENTSUSPENDED:
-		return true
-	case V1AuditActionAUDITACTIONAGENTTOKENREVOKED:
-		return true
-	case V1AuditActionAUDITACTIONAGENTTOOLINVOCATION:
-		return true
-	case V1AuditActionAUDITACTIONAGENTUPDATED:
-		return true
-	case V1AuditActionAUDITACTIONAPPROVALDENIED:
-		return true
-	case V1AuditActionAUDITACTIONAPPROVALGRANTED:
-		return true
-	case V1AuditActionAUDITACTIONAPPROVALREQUESTED:
-		return true
-	case V1AuditActionAUDITACTIONAUDITLOGPRUNED:
-		return true
-	case V1AuditActionAUDITACTIONAUTHORIZATIONCODEEXCHANGED:
-		return true
-	case V1AuditActionAUDITACTIONAUTHORIZATIONCODEISSUED:
-		return true
-	case V1AuditActionAUDITACTIONBACKUPCREATED:
-		return true
-	case V1AuditActionAUDITACTIONBACKUPRESTORED:
-		return true
-	case V1AuditActionAUDITACTIONBREACHCHECKUNAVAILABLE:
-		return true
-	case V1AuditActionAUDITACTIONBULKUSERSCREATED:
-		return true
-	case V1AuditActionAUDITACTIONBULKUSERSDISABLED:
-		return true
-	case V1AuditActionAUDITACTIONCLEANUP:
-		return true
-	case V1AuditActionAUDITACTIONCLIENTCONSENTGRANTED:
-		return true
-	case V1AuditActionAUDITACTIONCLIENTCONSENTREVOKED:
-		return true
-	case V1AuditActionAUDITACTIONCLIENTDELETED:
-		return true
-	case V1AuditActionAUDITACTIONCLIENTREGISTERED:
-		return true
-	case V1AuditActionAUDITACTIONCLIENTUPDATED:
-		return true
-	case V1AuditActionAUDITACTIONCONSENTDENIED:
-		return true
-	case V1AuditActionAUDITACTIONCONSENTGRANTED:
-		return true
-	case V1AuditActionAUDITACTIONCONSENTREQUIREDONREFRESH:
-		return true
-	case V1AuditActionAUDITACTIONCONSENTREVOKED:
-		return true
-	case V1AuditActionAUDITACTIONCREDENTIALCHANGED:
-		return true
-	case V1AuditActionAUDITACTIONCREDENTIALSET:
-		return true
-	case V1AuditActionAUDITACTIONCREDENTIALVERIFIED:
-		return true
-	case V1AuditActionAUDITACTIONCROSSREALMTOKENISSUED:
-		return true
-	case V1AuditActionAUDITACTIONCROSSREALMTRUSTCREATED:
-		return true
-	case V1AuditActionAUDITACTIONCROSSREALMTRUSTREVOKED:
-		return true
-	case V1AuditActionAUDITACTIONEMAILCHANGECONFIRMED:
-		return true
-	case V1AuditActionAUDITACTIONEMAILCHANGEINITIATED:
-		return true
-	case V1AuditActionAUDITACTIONFEDERATIONACCOUNTLINKED:
-		return true
-	case V1AuditActionAUDITACTIONFEDERATIONACCOUNTUNLINKED:
-		return true
-	case V1AuditActionAUDITACTIONFEDERATIONJITPROVISIONED:
-		return true
-	case V1AuditActionAUDITACTIONFEDERATIONLOGINCOMPLETED:
-		return true
-	case V1AuditActionAUDITACTIONFEDERATIONLOGINSTARTED:
-		return true
-	case V1AuditActionAUDITACTIONGROUPCREATED:
-		return true
-	case V1AuditActionAUDITACTIONGROUPDELETED:
-		return true
-	case V1AuditActionAUDITACTIONGROUPMEMBERADDED:
-		return true
-	case V1AuditActionAUDITACTIONGROUPMEMBERREMOVED:
-		return true
-	case V1AuditActionAUDITACTIONGROUPMEMBERROLECHANGED:
-		return true
-	case V1AuditActionAUDITACTIONGROUPUPDATED:
-		return true
-	case V1AuditActionAUDITACTIONINVITATIONACCEPTED:
-		return true
-	case V1AuditActionAUDITACTIONINVITATIONCREATED:
-		return true
-	case V1AuditActionAUDITACTIONINVITATIONREVOKED:
-		return true
-	case V1AuditActionAUDITACTIONIPLOGINLIMITEXCEEDED:
-		return true
-	case V1AuditActionAUDITACTIONLOGINFAILED:
-		return true
-	case V1AuditActionAUDITACTIONLOGINLOCKED:
-		return true
-	case V1AuditActionAUDITACTIONMFADISABLED:
-		return true
-	case V1AuditActionAUDITACTIONMFAENABLED:
-		return true
-	case V1AuditActionAUDITACTIONMFAREQUIREMENTCHANGED:
-		return true
-	case V1AuditActionAUDITACTIONOIDCSILENTAUTHPROBED:
-		return true
-	case V1AuditActionAUDITACTIONORGCREATED:
-		return true
-	case V1AuditActionAUDITACTIONORGDELETED:
-		return true
-	case V1AuditActionAUDITACTIONORGUPDATED:
-		return true
-	case V1AuditActionAUDITACTIONORPHANEDREFERENCESKIPPED:
-		return true
-	case V1AuditActionAUDITACTIONPASSWORDCOMPROMISEDREJECTED:
-		return true
-	case V1AuditActionAUDITACTIONPROTECTEDRESOURCEDELETED:
-		return true
-	case V1AuditActionAUDITACTIONPROTECTEDRESOURCEREGISTERED:
-		return true
-	case V1AuditActionAUDITACTIONPROTECTEDRESOURCEUPDATED:
-		return true
-	case V1AuditActionAUDITACTIONREALMCREATED:
-		return true
-	case V1AuditActionAUDITACTIONREALMDELETED:
-		return true
-	case V1AuditActionAUDITACTIONREALMEXPORTWATERMARKED:
-		return true
-	case V1AuditActionAUDITACTIONREALMUPDATED:
-		return true
-	case V1AuditActionAUDITACTIONREQUIREDACTIONASSIGNED:
-		return true
-	case V1AuditActionAUDITACTIONREQUIREDACTIONAUTOCLEARED:
-		return true
-	case V1AuditActionAUDITACTIONREQUIREDACTIONCOMPLETED:
-		return true
-	case V1AuditActionAUDITACTIONREQUIREDACTIONREMOVED:
-		return true
-	case V1AuditActionAUDITACTIONROLEASSIGNED:
-		return true
-	case V1AuditActionAUDITACTIONROLEREVOKED:
-		return true
-	case V1AuditActionAUDITACTIONSAMLIDPAUTHNREQUESTRECEIVED:
-		return true
-	case V1AuditActionAUDITACTIONSAMLIDPINITIATEDSSO:
-		return true
-	case V1AuditActionAUDITACTIONSAMLIDPRESPONSEISSUED:
-		return true
-	case V1AuditActionAUDITACTIONSAMLLOGINCOMPLETED:
-		return true
-	case V1AuditActionAUDITACTIONSAMLLOGINFAILED:
-		return true
-	case V1AuditActionAUDITACTIONSAMLLOGININITIATED:
-		return true
-	case V1AuditActionAUDITACTIONSAMLSLOCOMPLETED:
-		return true
-	case V1AuditActionAUDITACTIONSAMLSLOREQUESTED:
-		return true
-	case V1AuditActionAUDITACTIONSCIMGROUPCREATED:
-		return true
-	case V1AuditActionAUDITACTIONSCIMGROUPDELETED:
-		return true
-	case V1AuditActionAUDITACTIONSCIMGROUPUPDATED:
-		return true
-	case V1AuditActionAUDITACTIONSCIMUSERCREATED:
-		return true
-	case V1AuditActionAUDITACTIONSCIMUSERDELETED:
-		return true
-	case V1AuditActionAUDITACTIONSCIMUSERUPDATED:
-		return true
-	case V1AuditActionAUDITACTIONSESSIONCREATED:
-		return true
-	case V1AuditActionAUDITACTIONSESSIONEVICTED:
-		return true
-	case V1AuditActionAUDITACTIONSESSIONLIMITENFORCED:
-		return true
-	case V1AuditActionAUDITACTIONSESSIONREVOKED:
-		return true
-	case V1AuditActionAUDITACTIONSESSIONSREVOKED:
-		return true
-	case V1AuditActionAUDITACTIONSPIFFEAUTHSUCCESS:
-		return true
-	case V1AuditActionAUDITACTIONSPIFFEIDMAPPED:
-		return true
-	case V1AuditActionAUDITACTIONTOKENISSUED:
-		return true
-	case V1AuditActionAUDITACTIONTOKENREFRESHED:
-		return true
-	case V1AuditActionAUDITACTIONTRANSACTIONTOKENISSUED:
-		return true
-	case V1AuditActionAUDITACTIONTUPLEDELETED:
-		return true
-	case V1AuditActionAUDITACTIONTUPLEWRITTEN:
-		return true
-	case V1AuditActionAUDITACTIONUNSPECIFIED:
-		return true
-	case V1AuditActionAUDITACTIONUSERCREATED:
-		return true
-	case V1AuditActionAUDITACTIONUSERDELETED:
-		return true
-	case V1AuditActionAUDITACTIONUSERPERMISSIONGRANTED:
-		return true
-	case V1AuditActionAUDITACTIONUSERPERMISSIONREVOKED:
-		return true
-	case V1AuditActionAUDITACTIONUSERUPDATED:
-		return true
-	default:
-		return false
-	}
-}
-
 // Defines values for V1ClientTrustLevel.
 const (
 	CLIENTTRUSTLEVELFIRSTPARTY  V1ClientTrustLevel = "CLIENT_TRUST_LEVEL_FIRST_PARTY"
@@ -446,27 +185,6 @@ func (e V1ClientTrustLevel) Valid() bool {
 	case CLIENTTRUSTLEVELTHIRDPARTY:
 		return true
 	case CLIENTTRUSTLEVELUNSPECIFIED:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for V1GroupMemberType.
-const (
-	TYPEGROUP       V1GroupMemberType = "TYPE_GROUP"
-	TYPEUNSPECIFIED V1GroupMemberType = "TYPE_UNSPECIFIED"
-	TYPEUSER        V1GroupMemberType = "TYPE_USER"
-)
-
-// Valid indicates whether the value is a known member of the V1GroupMemberType enum.
-func (e V1GroupMemberType) Valid() bool {
-	switch e {
-	case TYPEGROUP:
-		return true
-	case TYPEUNSPECIFIED:
-		return true
-	case TYPEUSER:
 		return true
 	default:
 		return false
@@ -542,372 +260,18 @@ func (e V1UserStatus) Valid() bool {
 	}
 }
 
-// Defines values for AuditServiceListEventsParamsAction.
-const (
-	AuditServiceListEventsParamsActionAUDITACTIONAATISSUED                   AuditServiceListEventsParamsAction = "AUDIT_ACTION_AAT_ISSUED"
-	AuditServiceListEventsParamsActionAUDITACTIONAATREVOKED                  AuditServiceListEventsParamsAction = "AUDIT_ACTION_AAT_REVOKED"
-	AuditServiceListEventsParamsActionAUDITACTIONABUSEDETECTED               AuditServiceListEventsParamsAction = "AUDIT_ACTION_ABUSE_DETECTED"
-	AuditServiceListEventsParamsActionAUDITACTIONAGENTCREATED                AuditServiceListEventsParamsAction = "AUDIT_ACTION_AGENT_CREATED"
-	AuditServiceListEventsParamsActionAUDITACTIONAGENTCREDENTIALCREATED      AuditServiceListEventsParamsAction = "AUDIT_ACTION_AGENT_CREDENTIAL_CREATED"
-	AuditServiceListEventsParamsActionAUDITACTIONAGENTCREDENTIALREVOKED      AuditServiceListEventsParamsAction = "AUDIT_ACTION_AGENT_CREDENTIAL_REVOKED"
-	AuditServiceListEventsParamsActionAUDITACTIONAGENTDELEGATION             AuditServiceListEventsParamsAction = "AUDIT_ACTION_AGENT_DELEGATION"
-	AuditServiceListEventsParamsActionAUDITACTIONAGENTDELETED                AuditServiceListEventsParamsAction = "AUDIT_ACTION_AGENT_DELETED"
-	AuditServiceListEventsParamsActionAUDITACTIONAGENTREACTIVATED            AuditServiceListEventsParamsAction = "AUDIT_ACTION_AGENT_REACTIVATED"
-	AuditServiceListEventsParamsActionAUDITACTIONAGENTREVOKED                AuditServiceListEventsParamsAction = "AUDIT_ACTION_AGENT_REVOKED"
-	AuditServiceListEventsParamsActionAUDITACTIONAGENTSUSPENDED              AuditServiceListEventsParamsAction = "AUDIT_ACTION_AGENT_SUSPENDED"
-	AuditServiceListEventsParamsActionAUDITACTIONAGENTTOKENREVOKED           AuditServiceListEventsParamsAction = "AUDIT_ACTION_AGENT_TOKEN_REVOKED"
-	AuditServiceListEventsParamsActionAUDITACTIONAGENTTOOLINVOCATION         AuditServiceListEventsParamsAction = "AUDIT_ACTION_AGENT_TOOL_INVOCATION"
-	AuditServiceListEventsParamsActionAUDITACTIONAGENTUPDATED                AuditServiceListEventsParamsAction = "AUDIT_ACTION_AGENT_UPDATED"
-	AuditServiceListEventsParamsActionAUDITACTIONAPPROVALDENIED              AuditServiceListEventsParamsAction = "AUDIT_ACTION_APPROVAL_DENIED"
-	AuditServiceListEventsParamsActionAUDITACTIONAPPROVALGRANTED             AuditServiceListEventsParamsAction = "AUDIT_ACTION_APPROVAL_GRANTED"
-	AuditServiceListEventsParamsActionAUDITACTIONAPPROVALREQUESTED           AuditServiceListEventsParamsAction = "AUDIT_ACTION_APPROVAL_REQUESTED"
-	AuditServiceListEventsParamsActionAUDITACTIONAUDITLOGPRUNED              AuditServiceListEventsParamsAction = "AUDIT_ACTION_AUDIT_LOG_PRUNED"
-	AuditServiceListEventsParamsActionAUDITACTIONAUTHORIZATIONCODEEXCHANGED  AuditServiceListEventsParamsAction = "AUDIT_ACTION_AUTHORIZATION_CODE_EXCHANGED"
-	AuditServiceListEventsParamsActionAUDITACTIONAUTHORIZATIONCODEISSUED     AuditServiceListEventsParamsAction = "AUDIT_ACTION_AUTHORIZATION_CODE_ISSUED"
-	AuditServiceListEventsParamsActionAUDITACTIONBACKUPCREATED               AuditServiceListEventsParamsAction = "AUDIT_ACTION_BACKUP_CREATED"
-	AuditServiceListEventsParamsActionAUDITACTIONBACKUPRESTORED              AuditServiceListEventsParamsAction = "AUDIT_ACTION_BACKUP_RESTORED"
-	AuditServiceListEventsParamsActionAUDITACTIONBREACHCHECKUNAVAILABLE      AuditServiceListEventsParamsAction = "AUDIT_ACTION_BREACH_CHECK_UNAVAILABLE"
-	AuditServiceListEventsParamsActionAUDITACTIONBULKUSERSCREATED            AuditServiceListEventsParamsAction = "AUDIT_ACTION_BULK_USERS_CREATED"
-	AuditServiceListEventsParamsActionAUDITACTIONBULKUSERSDISABLED           AuditServiceListEventsParamsAction = "AUDIT_ACTION_BULK_USERS_DISABLED"
-	AuditServiceListEventsParamsActionAUDITACTIONCLEANUP                     AuditServiceListEventsParamsAction = "AUDIT_ACTION_CLEANUP"
-	AuditServiceListEventsParamsActionAUDITACTIONCLIENTCONSENTGRANTED        AuditServiceListEventsParamsAction = "AUDIT_ACTION_CLIENT_CONSENT_GRANTED"
-	AuditServiceListEventsParamsActionAUDITACTIONCLIENTCONSENTREVOKED        AuditServiceListEventsParamsAction = "AUDIT_ACTION_CLIENT_CONSENT_REVOKED"
-	AuditServiceListEventsParamsActionAUDITACTIONCLIENTDELETED               AuditServiceListEventsParamsAction = "AUDIT_ACTION_CLIENT_DELETED"
-	AuditServiceListEventsParamsActionAUDITACTIONCLIENTREGISTERED            AuditServiceListEventsParamsAction = "AUDIT_ACTION_CLIENT_REGISTERED"
-	AuditServiceListEventsParamsActionAUDITACTIONCLIENTUPDATED               AuditServiceListEventsParamsAction = "AUDIT_ACTION_CLIENT_UPDATED"
-	AuditServiceListEventsParamsActionAUDITACTIONCONSENTDENIED               AuditServiceListEventsParamsAction = "AUDIT_ACTION_CONSENT_DENIED"
-	AuditServiceListEventsParamsActionAUDITACTIONCONSENTGRANTED              AuditServiceListEventsParamsAction = "AUDIT_ACTION_CONSENT_GRANTED"
-	AuditServiceListEventsParamsActionAUDITACTIONCONSENTREQUIREDONREFRESH    AuditServiceListEventsParamsAction = "AUDIT_ACTION_CONSENT_REQUIRED_ON_REFRESH"
-	AuditServiceListEventsParamsActionAUDITACTIONCONSENTREVOKED              AuditServiceListEventsParamsAction = "AUDIT_ACTION_CONSENT_REVOKED"
-	AuditServiceListEventsParamsActionAUDITACTIONCREDENTIALCHANGED           AuditServiceListEventsParamsAction = "AUDIT_ACTION_CREDENTIAL_CHANGED"
-	AuditServiceListEventsParamsActionAUDITACTIONCREDENTIALSET               AuditServiceListEventsParamsAction = "AUDIT_ACTION_CREDENTIAL_SET"
-	AuditServiceListEventsParamsActionAUDITACTIONCREDENTIALVERIFIED          AuditServiceListEventsParamsAction = "AUDIT_ACTION_CREDENTIAL_VERIFIED"
-	AuditServiceListEventsParamsActionAUDITACTIONCROSSREALMTOKENISSUED       AuditServiceListEventsParamsAction = "AUDIT_ACTION_CROSS_REALM_TOKEN_ISSUED"
-	AuditServiceListEventsParamsActionAUDITACTIONCROSSREALMTRUSTCREATED      AuditServiceListEventsParamsAction = "AUDIT_ACTION_CROSS_REALM_TRUST_CREATED"
-	AuditServiceListEventsParamsActionAUDITACTIONCROSSREALMTRUSTREVOKED      AuditServiceListEventsParamsAction = "AUDIT_ACTION_CROSS_REALM_TRUST_REVOKED"
-	AuditServiceListEventsParamsActionAUDITACTIONEMAILCHANGECONFIRMED        AuditServiceListEventsParamsAction = "AUDIT_ACTION_EMAIL_CHANGE_CONFIRMED"
-	AuditServiceListEventsParamsActionAUDITACTIONEMAILCHANGEINITIATED        AuditServiceListEventsParamsAction = "AUDIT_ACTION_EMAIL_CHANGE_INITIATED"
-	AuditServiceListEventsParamsActionAUDITACTIONFEDERATIONACCOUNTLINKED     AuditServiceListEventsParamsAction = "AUDIT_ACTION_FEDERATION_ACCOUNT_LINKED"
-	AuditServiceListEventsParamsActionAUDITACTIONFEDERATIONACCOUNTUNLINKED   AuditServiceListEventsParamsAction = "AUDIT_ACTION_FEDERATION_ACCOUNT_UNLINKED"
-	AuditServiceListEventsParamsActionAUDITACTIONFEDERATIONJITPROVISIONED    AuditServiceListEventsParamsAction = "AUDIT_ACTION_FEDERATION_JIT_PROVISIONED"
-	AuditServiceListEventsParamsActionAUDITACTIONFEDERATIONLOGINCOMPLETED    AuditServiceListEventsParamsAction = "AUDIT_ACTION_FEDERATION_LOGIN_COMPLETED"
-	AuditServiceListEventsParamsActionAUDITACTIONFEDERATIONLOGINSTARTED      AuditServiceListEventsParamsAction = "AUDIT_ACTION_FEDERATION_LOGIN_STARTED"
-	AuditServiceListEventsParamsActionAUDITACTIONGROUPCREATED                AuditServiceListEventsParamsAction = "AUDIT_ACTION_GROUP_CREATED"
-	AuditServiceListEventsParamsActionAUDITACTIONGROUPDELETED                AuditServiceListEventsParamsAction = "AUDIT_ACTION_GROUP_DELETED"
-	AuditServiceListEventsParamsActionAUDITACTIONGROUPMEMBERADDED            AuditServiceListEventsParamsAction = "AUDIT_ACTION_GROUP_MEMBER_ADDED"
-	AuditServiceListEventsParamsActionAUDITACTIONGROUPMEMBERREMOVED          AuditServiceListEventsParamsAction = "AUDIT_ACTION_GROUP_MEMBER_REMOVED"
-	AuditServiceListEventsParamsActionAUDITACTIONGROUPMEMBERROLECHANGED      AuditServiceListEventsParamsAction = "AUDIT_ACTION_GROUP_MEMBER_ROLE_CHANGED"
-	AuditServiceListEventsParamsActionAUDITACTIONGROUPUPDATED                AuditServiceListEventsParamsAction = "AUDIT_ACTION_GROUP_UPDATED"
-	AuditServiceListEventsParamsActionAUDITACTIONINVITATIONACCEPTED          AuditServiceListEventsParamsAction = "AUDIT_ACTION_INVITATION_ACCEPTED"
-	AuditServiceListEventsParamsActionAUDITACTIONINVITATIONCREATED           AuditServiceListEventsParamsAction = "AUDIT_ACTION_INVITATION_CREATED"
-	AuditServiceListEventsParamsActionAUDITACTIONINVITATIONREVOKED           AuditServiceListEventsParamsAction = "AUDIT_ACTION_INVITATION_REVOKED"
-	AuditServiceListEventsParamsActionAUDITACTIONIPLOGINLIMITEXCEEDED        AuditServiceListEventsParamsAction = "AUDIT_ACTION_IP_LOGIN_LIMIT_EXCEEDED"
-	AuditServiceListEventsParamsActionAUDITACTIONLOGINFAILED                 AuditServiceListEventsParamsAction = "AUDIT_ACTION_LOGIN_FAILED"
-	AuditServiceListEventsParamsActionAUDITACTIONLOGINLOCKED                 AuditServiceListEventsParamsAction = "AUDIT_ACTION_LOGIN_LOCKED"
-	AuditServiceListEventsParamsActionAUDITACTIONMFADISABLED                 AuditServiceListEventsParamsAction = "AUDIT_ACTION_MFA_DISABLED"
-	AuditServiceListEventsParamsActionAUDITACTIONMFAENABLED                  AuditServiceListEventsParamsAction = "AUDIT_ACTION_MFA_ENABLED"
-	AuditServiceListEventsParamsActionAUDITACTIONMFAREQUIREMENTCHANGED       AuditServiceListEventsParamsAction = "AUDIT_ACTION_MFA_REQUIREMENT_CHANGED"
-	AuditServiceListEventsParamsActionAUDITACTIONOIDCSILENTAUTHPROBED        AuditServiceListEventsParamsAction = "AUDIT_ACTION_OIDC_SILENT_AUTH_PROBED"
-	AuditServiceListEventsParamsActionAUDITACTIONORGCREATED                  AuditServiceListEventsParamsAction = "AUDIT_ACTION_ORG_CREATED"
-	AuditServiceListEventsParamsActionAUDITACTIONORGDELETED                  AuditServiceListEventsParamsAction = "AUDIT_ACTION_ORG_DELETED"
-	AuditServiceListEventsParamsActionAUDITACTIONORGUPDATED                  AuditServiceListEventsParamsAction = "AUDIT_ACTION_ORG_UPDATED"
-	AuditServiceListEventsParamsActionAUDITACTIONORPHANEDREFERENCESKIPPED    AuditServiceListEventsParamsAction = "AUDIT_ACTION_ORPHANED_REFERENCE_SKIPPED"
-	AuditServiceListEventsParamsActionAUDITACTIONPASSWORDCOMPROMISEDREJECTED AuditServiceListEventsParamsAction = "AUDIT_ACTION_PASSWORD_COMPROMISED_REJECTED"
-	AuditServiceListEventsParamsActionAUDITACTIONPROTECTEDRESOURCEDELETED    AuditServiceListEventsParamsAction = "AUDIT_ACTION_PROTECTED_RESOURCE_DELETED"
-	AuditServiceListEventsParamsActionAUDITACTIONPROTECTEDRESOURCEREGISTERED AuditServiceListEventsParamsAction = "AUDIT_ACTION_PROTECTED_RESOURCE_REGISTERED"
-	AuditServiceListEventsParamsActionAUDITACTIONPROTECTEDRESOURCEUPDATED    AuditServiceListEventsParamsAction = "AUDIT_ACTION_PROTECTED_RESOURCE_UPDATED"
-	AuditServiceListEventsParamsActionAUDITACTIONREALMCREATED                AuditServiceListEventsParamsAction = "AUDIT_ACTION_REALM_CREATED"
-	AuditServiceListEventsParamsActionAUDITACTIONREALMDELETED                AuditServiceListEventsParamsAction = "AUDIT_ACTION_REALM_DELETED"
-	AuditServiceListEventsParamsActionAUDITACTIONREALMEXPORTWATERMARKED      AuditServiceListEventsParamsAction = "AUDIT_ACTION_REALM_EXPORT_WATERMARKED"
-	AuditServiceListEventsParamsActionAUDITACTIONREALMUPDATED                AuditServiceListEventsParamsAction = "AUDIT_ACTION_REALM_UPDATED"
-	AuditServiceListEventsParamsActionAUDITACTIONREQUIREDACTIONASSIGNED      AuditServiceListEventsParamsAction = "AUDIT_ACTION_REQUIRED_ACTION_ASSIGNED"
-	AuditServiceListEventsParamsActionAUDITACTIONREQUIREDACTIONAUTOCLEARED   AuditServiceListEventsParamsAction = "AUDIT_ACTION_REQUIRED_ACTION_AUTO_CLEARED"
-	AuditServiceListEventsParamsActionAUDITACTIONREQUIREDACTIONCOMPLETED     AuditServiceListEventsParamsAction = "AUDIT_ACTION_REQUIRED_ACTION_COMPLETED"
-	AuditServiceListEventsParamsActionAUDITACTIONREQUIREDACTIONREMOVED       AuditServiceListEventsParamsAction = "AUDIT_ACTION_REQUIRED_ACTION_REMOVED"
-	AuditServiceListEventsParamsActionAUDITACTIONROLEASSIGNED                AuditServiceListEventsParamsAction = "AUDIT_ACTION_ROLE_ASSIGNED"
-	AuditServiceListEventsParamsActionAUDITACTIONROLEREVOKED                 AuditServiceListEventsParamsAction = "AUDIT_ACTION_ROLE_REVOKED"
-	AuditServiceListEventsParamsActionAUDITACTIONSAMLIDPAUTHNREQUESTRECEIVED AuditServiceListEventsParamsAction = "AUDIT_ACTION_SAML_IDP_AUTHN_REQUEST_RECEIVED"
-	AuditServiceListEventsParamsActionAUDITACTIONSAMLIDPINITIATEDSSO         AuditServiceListEventsParamsAction = "AUDIT_ACTION_SAML_IDP_INITIATED_SSO"
-	AuditServiceListEventsParamsActionAUDITACTIONSAMLIDPRESPONSEISSUED       AuditServiceListEventsParamsAction = "AUDIT_ACTION_SAML_IDP_RESPONSE_ISSUED"
-	AuditServiceListEventsParamsActionAUDITACTIONSAMLLOGINCOMPLETED          AuditServiceListEventsParamsAction = "AUDIT_ACTION_SAML_LOGIN_COMPLETED"
-	AuditServiceListEventsParamsActionAUDITACTIONSAMLLOGINFAILED             AuditServiceListEventsParamsAction = "AUDIT_ACTION_SAML_LOGIN_FAILED"
-	AuditServiceListEventsParamsActionAUDITACTIONSAMLLOGININITIATED          AuditServiceListEventsParamsAction = "AUDIT_ACTION_SAML_LOGIN_INITIATED"
-	AuditServiceListEventsParamsActionAUDITACTIONSAMLSLOCOMPLETED            AuditServiceListEventsParamsAction = "AUDIT_ACTION_SAML_SLO_COMPLETED"
-	AuditServiceListEventsParamsActionAUDITACTIONSAMLSLOREQUESTED            AuditServiceListEventsParamsAction = "AUDIT_ACTION_SAML_SLO_REQUESTED"
-	AuditServiceListEventsParamsActionAUDITACTIONSCIMGROUPCREATED            AuditServiceListEventsParamsAction = "AUDIT_ACTION_SCIM_GROUP_CREATED"
-	AuditServiceListEventsParamsActionAUDITACTIONSCIMGROUPDELETED            AuditServiceListEventsParamsAction = "AUDIT_ACTION_SCIM_GROUP_DELETED"
-	AuditServiceListEventsParamsActionAUDITACTIONSCIMGROUPUPDATED            AuditServiceListEventsParamsAction = "AUDIT_ACTION_SCIM_GROUP_UPDATED"
-	AuditServiceListEventsParamsActionAUDITACTIONSCIMUSERCREATED             AuditServiceListEventsParamsAction = "AUDIT_ACTION_SCIM_USER_CREATED"
-	AuditServiceListEventsParamsActionAUDITACTIONSCIMUSERDELETED             AuditServiceListEventsParamsAction = "AUDIT_ACTION_SCIM_USER_DELETED"
-	AuditServiceListEventsParamsActionAUDITACTIONSCIMUSERUPDATED             AuditServiceListEventsParamsAction = "AUDIT_ACTION_SCIM_USER_UPDATED"
-	AuditServiceListEventsParamsActionAUDITACTIONSESSIONCREATED              AuditServiceListEventsParamsAction = "AUDIT_ACTION_SESSION_CREATED"
-	AuditServiceListEventsParamsActionAUDITACTIONSESSIONEVICTED              AuditServiceListEventsParamsAction = "AUDIT_ACTION_SESSION_EVICTED"
-	AuditServiceListEventsParamsActionAUDITACTIONSESSIONLIMITENFORCED        AuditServiceListEventsParamsAction = "AUDIT_ACTION_SESSION_LIMIT_ENFORCED"
-	AuditServiceListEventsParamsActionAUDITACTIONSESSIONREVOKED              AuditServiceListEventsParamsAction = "AUDIT_ACTION_SESSION_REVOKED"
-	AuditServiceListEventsParamsActionAUDITACTIONSESSIONSREVOKED             AuditServiceListEventsParamsAction = "AUDIT_ACTION_SESSIONS_REVOKED"
-	AuditServiceListEventsParamsActionAUDITACTIONSPIFFEAUTHSUCCESS           AuditServiceListEventsParamsAction = "AUDIT_ACTION_SPIFFE_AUTH_SUCCESS"
-	AuditServiceListEventsParamsActionAUDITACTIONSPIFFEIDMAPPED              AuditServiceListEventsParamsAction = "AUDIT_ACTION_SPIFFE_ID_MAPPED"
-	AuditServiceListEventsParamsActionAUDITACTIONTOKENISSUED                 AuditServiceListEventsParamsAction = "AUDIT_ACTION_TOKEN_ISSUED"
-	AuditServiceListEventsParamsActionAUDITACTIONTOKENREFRESHED              AuditServiceListEventsParamsAction = "AUDIT_ACTION_TOKEN_REFRESHED"
-	AuditServiceListEventsParamsActionAUDITACTIONTRANSACTIONTOKENISSUED      AuditServiceListEventsParamsAction = "AUDIT_ACTION_TRANSACTION_TOKEN_ISSUED"
-	AuditServiceListEventsParamsActionAUDITACTIONTUPLEDELETED                AuditServiceListEventsParamsAction = "AUDIT_ACTION_TUPLE_DELETED"
-	AuditServiceListEventsParamsActionAUDITACTIONTUPLEWRITTEN                AuditServiceListEventsParamsAction = "AUDIT_ACTION_TUPLE_WRITTEN"
-	AuditServiceListEventsParamsActionAUDITACTIONUNSPECIFIED                 AuditServiceListEventsParamsAction = "AUDIT_ACTION_UNSPECIFIED"
-	AuditServiceListEventsParamsActionAUDITACTIONUSERCREATED                 AuditServiceListEventsParamsAction = "AUDIT_ACTION_USER_CREATED"
-	AuditServiceListEventsParamsActionAUDITACTIONUSERDELETED                 AuditServiceListEventsParamsAction = "AUDIT_ACTION_USER_DELETED"
-	AuditServiceListEventsParamsActionAUDITACTIONUSERPERMISSIONGRANTED       AuditServiceListEventsParamsAction = "AUDIT_ACTION_USER_PERMISSION_GRANTED"
-	AuditServiceListEventsParamsActionAUDITACTIONUSERPERMISSIONREVOKED       AuditServiceListEventsParamsAction = "AUDIT_ACTION_USER_PERMISSION_REVOKED"
-	AuditServiceListEventsParamsActionAUDITACTIONUSERUPDATED                 AuditServiceListEventsParamsAction = "AUDIT_ACTION_USER_UPDATED"
-)
-
-// Valid indicates whether the value is a known member of the AuditServiceListEventsParamsAction enum.
-func (e AuditServiceListEventsParamsAction) Valid() bool {
-	switch e {
-	case AuditServiceListEventsParamsActionAUDITACTIONAATISSUED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONAATREVOKED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONABUSEDETECTED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONAGENTCREATED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONAGENTCREDENTIALCREATED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONAGENTCREDENTIALREVOKED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONAGENTDELEGATION:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONAGENTDELETED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONAGENTREACTIVATED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONAGENTREVOKED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONAGENTSUSPENDED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONAGENTTOKENREVOKED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONAGENTTOOLINVOCATION:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONAGENTUPDATED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONAPPROVALDENIED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONAPPROVALGRANTED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONAPPROVALREQUESTED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONAUDITLOGPRUNED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONAUTHORIZATIONCODEEXCHANGED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONAUTHORIZATIONCODEISSUED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONBACKUPCREATED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONBACKUPRESTORED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONBREACHCHECKUNAVAILABLE:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONBULKUSERSCREATED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONBULKUSERSDISABLED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONCLEANUP:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONCLIENTCONSENTGRANTED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONCLIENTCONSENTREVOKED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONCLIENTDELETED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONCLIENTREGISTERED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONCLIENTUPDATED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONCONSENTDENIED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONCONSENTGRANTED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONCONSENTREQUIREDONREFRESH:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONCONSENTREVOKED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONCREDENTIALCHANGED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONCREDENTIALSET:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONCREDENTIALVERIFIED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONCROSSREALMTOKENISSUED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONCROSSREALMTRUSTCREATED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONCROSSREALMTRUSTREVOKED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONEMAILCHANGECONFIRMED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONEMAILCHANGEINITIATED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONFEDERATIONACCOUNTLINKED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONFEDERATIONACCOUNTUNLINKED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONFEDERATIONJITPROVISIONED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONFEDERATIONLOGINCOMPLETED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONFEDERATIONLOGINSTARTED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONGROUPCREATED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONGROUPDELETED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONGROUPMEMBERADDED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONGROUPMEMBERREMOVED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONGROUPMEMBERROLECHANGED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONGROUPUPDATED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONINVITATIONACCEPTED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONINVITATIONCREATED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONINVITATIONREVOKED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONIPLOGINLIMITEXCEEDED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONLOGINFAILED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONLOGINLOCKED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONMFADISABLED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONMFAENABLED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONMFAREQUIREMENTCHANGED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONOIDCSILENTAUTHPROBED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONORGCREATED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONORGDELETED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONORGUPDATED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONORPHANEDREFERENCESKIPPED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONPASSWORDCOMPROMISEDREJECTED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONPROTECTEDRESOURCEDELETED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONPROTECTEDRESOURCEREGISTERED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONPROTECTEDRESOURCEUPDATED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONREALMCREATED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONREALMDELETED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONREALMEXPORTWATERMARKED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONREALMUPDATED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONREQUIREDACTIONASSIGNED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONREQUIREDACTIONAUTOCLEARED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONREQUIREDACTIONCOMPLETED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONREQUIREDACTIONREMOVED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONROLEASSIGNED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONROLEREVOKED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONSAMLIDPAUTHNREQUESTRECEIVED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONSAMLIDPINITIATEDSSO:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONSAMLIDPRESPONSEISSUED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONSAMLLOGINCOMPLETED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONSAMLLOGINFAILED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONSAMLLOGININITIATED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONSAMLSLOCOMPLETED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONSAMLSLOREQUESTED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONSCIMGROUPCREATED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONSCIMGROUPDELETED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONSCIMGROUPUPDATED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONSCIMUSERCREATED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONSCIMUSERDELETED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONSCIMUSERUPDATED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONSESSIONCREATED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONSESSIONEVICTED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONSESSIONLIMITENFORCED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONSESSIONREVOKED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONSESSIONSREVOKED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONSPIFFEAUTHSUCCESS:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONSPIFFEIDMAPPED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONTOKENISSUED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONTOKENREFRESHED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONTRANSACTIONTOKENISSUED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONTUPLEDELETED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONTUPLEWRITTEN:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONUNSPECIFIED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONUSERCREATED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONUSERDELETED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONUSERPERMISSIONGRANTED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONUSERPERMISSIONREVOKED:
-		return true
-	case AuditServiceListEventsParamsActionAUDITACTIONUSERUPDATED:
-		return true
-	default:
-		return false
-	}
-}
-
 // Defines values for AdminRemoveGroupMemberParamsType.
 const (
-	Group AdminRemoveGroupMemberParamsType = "group"
-	User  AdminRemoveGroupMemberParamsType = "user"
+	AdminRemoveGroupMemberParamsTypeGroup AdminRemoveGroupMemberParamsType = "group"
+	AdminRemoveGroupMemberParamsTypeUser  AdminRemoveGroupMemberParamsType = "user"
 )
 
 // Valid indicates whether the value is a known member of the AdminRemoveGroupMemberParamsType enum.
 func (e AdminRemoveGroupMemberParamsType) Valid() bool {
 	switch e {
-	case Group:
+	case AdminRemoveGroupMemberParamsTypeGroup:
 		return true
-	case User:
+	case AdminRemoveGroupMemberParamsTypeUser:
 		return true
 	default:
 		return false
@@ -919,6 +283,62 @@ type AdminAddAdditionalRoleRequest struct {
 	RoleName string `json:"role_name"`
 }
 
+// AdminAddGroupMemberRequest defines model for AdminAddGroupMemberRequest.
+type AdminAddGroupMemberRequest struct {
+	Id   openapi_types.UUID             `json:"id"`
+	Type AdminAddGroupMemberRequestType `json:"type"`
+}
+
+// AdminAddGroupMemberRequestType defines model for AdminAddGroupMemberRequest.Type.
+type AdminAddGroupMemberRequestType string
+
+// AdminAssignRoleRequest defines model for AdminAssignRoleRequest.
+type AdminAssignRoleRequest struct {
+	// OrgId Assign inside this organization only; absent or null assigns realm-wide.
+	OrgId  *openapi_types.UUID `json:"org_id,omitempty"`
+	RoleId openapi_types.UUID  `json:"role_id"`
+}
+
+// AdminAssignmentScope defines model for AdminAssignmentScope.
+type AdminAssignmentScope struct {
+	// OrgId Present when `type` is `org`.
+	OrgId *openapi_types.UUID      `json:"org_id,omitempty"`
+	Type  AdminAssignmentScopeType `json:"type"`
+}
+
+// AdminAssignmentScopeType defines model for AdminAssignmentScope.Type.
+type AdminAssignmentScopeType string
+
+// AdminAuditEvent defines model for AdminAuditEvent.
+type AdminAuditEvent struct {
+	// Action The audit action name, e.g. `UserCreated`.
+	Action        string `json:"action"`
+	Actor         string `json:"actor"`
+	Id            string `json:"id"`
+	IntegrityHash string `json:"integrity_hash"`
+
+	// Metadata Present only when the event carries metadata.
+	Metadata     *map[string]interface{} `json:"metadata,omitempty"`
+	RealmId      openapi_types.UUID      `json:"realm_id"`
+	ResourceId   string                  `json:"resource_id"`
+	ResourceType string                  `json:"resource_type"`
+
+	// Timestamp Microseconds since the Unix epoch.
+	Timestamp int64 `json:"timestamp"`
+}
+
+// AdminAuditEventList defines model for AdminAuditEventList.
+type AdminAuditEventList struct {
+	Events []AdminAuditEvent `json:"events"`
+}
+
+// AdminCreateGroupRequest defines model for AdminCreateGroupRequest.
+type AdminCreateGroupRequest struct {
+	Description *string `json:"description,omitempty"`
+	Name        string  `json:"name"`
+	Slug        string  `json:"slug"`
+}
+
 // AdminCreateOrganizationRequest defines model for AdminCreateOrganizationRequest.
 type AdminCreateOrganizationRequest struct {
 	Attributes  *map[string]string `json:"attributes,omitempty"`
@@ -926,6 +346,52 @@ type AdminCreateOrganizationRequest struct {
 	MemberLimit *int32             `json:"member_limit,omitempty"`
 	MfaRequired *bool              `json:"mfa_required,omitempty"`
 	Slug        string             `json:"slug"`
+}
+
+// AdminCreateRoleRequest defines model for AdminCreateRoleRequest.
+type AdminCreateRoleRequest struct {
+	Description *string               `json:"description,omitempty"`
+	Name        string                `json:"name"`
+	ParentRoles *[]openapi_types.UUID `json:"parent_roles,omitempty"`
+	Permissions *[]string             `json:"permissions,omitempty"`
+}
+
+// AdminGroup defines model for AdminGroup.
+type AdminGroup struct {
+	// CreatedAt Microseconds since the Unix epoch.
+	CreatedAt   int64              `json:"created_at"`
+	Description *string            `json:"description"`
+	Id          openapi_types.UUID `json:"id"`
+	Name        string             `json:"name"`
+	RealmId     openapi_types.UUID `json:"realm_id"`
+	Slug        string             `json:"slug"`
+
+	// UpdatedAt Microseconds since the Unix epoch.
+	UpdatedAt int64 `json:"updated_at"`
+}
+
+// AdminGroupMemberPage defines model for AdminGroupMemberPage.
+type AdminGroupMemberPage struct {
+	Items      []AdminSubject `json:"items"`
+	NextCursor *string        `json:"next_cursor"`
+}
+
+// AdminGroupMembership defines model for AdminGroupMembership.
+type AdminGroupMembership struct {
+	// AddedAt Microseconds since the Unix epoch.
+	AddedAt int64               `json:"added_at"`
+	AddedBy *openapi_types.UUID `json:"added_by"`
+	GroupId openapi_types.UUID  `json:"group_id"`
+
+	// Member A user or a group, as a group member or a role-assignment subject.
+	Member AdminSubject `json:"member"`
+}
+
+// AdminGroupPage defines model for AdminGroupPage.
+type AdminGroupPage struct {
+	Items      []AdminGroup `json:"items"`
+	NextCursor *string      `json:"next_cursor"`
+	Total      int64        `json:"total"`
 }
 
 // AdminOrganization defines model for AdminOrganization.
@@ -956,9 +422,77 @@ type AdminOrganizationPage struct {
 	NextCursor *string             `json:"next_cursor,omitempty"`
 }
 
+// AdminRole defines model for AdminRole.
+type AdminRole struct {
+	// CreatedAt Microseconds since the Unix epoch.
+	CreatedAt   int64                `json:"created_at"`
+	Description *string              `json:"description"`
+	Id          openapi_types.UUID   `json:"id"`
+	Name        string               `json:"name"`
+	ParentRoles []openapi_types.UUID `json:"parent_roles"`
+	Permissions []string             `json:"permissions"`
+	RealmId     openapi_types.UUID   `json:"realm_id"`
+	ScopeKind   AdminRoleScopeKind   `json:"scope_kind"`
+	Status      AdminRoleStatus      `json:"status"`
+
+	// UpdatedAt Microseconds since the Unix epoch.
+	UpdatedAt int64 `json:"updated_at"`
+
+	// YamlManaged Declared in hearth.yaml; the admin API cannot change it.
+	YamlManaged bool `json:"yaml_managed"`
+}
+
+// AdminRoleScopeKind defines model for AdminRole.ScopeKind.
+type AdminRoleScopeKind string
+
+// AdminRoleStatus defines model for AdminRole.Status.
+type AdminRoleStatus string
+
+// AdminRoleAssignment defines model for AdminRoleAssignment.
+type AdminRoleAssignment struct {
+	// AssignedAt Microseconds since the Unix epoch.
+	AssignedAt int64                `json:"assigned_at"`
+	AssignedBy *openapi_types.UUID  `json:"assigned_by"`
+	Id         openapi_types.UUID   `json:"id"`
+	RealmId    openapi_types.UUID   `json:"realm_id"`
+	RoleId     openapi_types.UUID   `json:"role_id"`
+	Scope      AdminAssignmentScope `json:"scope"`
+
+	// Subject A user or a group, as a group member or a role-assignment subject.
+	Subject AdminSubject `json:"subject"`
+}
+
+// AdminRoleAssignmentList defines model for AdminRoleAssignmentList.
+type AdminRoleAssignmentList struct {
+	Items []AdminRoleAssignment `json:"items"`
+}
+
 // AdminRoleNameList defines model for AdminRoleNameList.
 type AdminRoleNameList struct {
 	Items []string `json:"items"`
+}
+
+// AdminRolePage defines model for AdminRolePage.
+type AdminRolePage struct {
+	Items      []AdminRole `json:"items"`
+	NextCursor *string     `json:"next_cursor"`
+}
+
+// AdminSubject A user or a group, as a group member or a role-assignment subject.
+type AdminSubject struct {
+	Id   openapi_types.UUID `json:"id"`
+	Type AdminSubjectType   `json:"type"`
+}
+
+// AdminSubjectType defines model for AdminSubject.Type.
+type AdminSubjectType string
+
+// AdminUpdateGroupRequest Absent fields are unchanged.
+type AdminUpdateGroupRequest struct {
+	// Description null clears the description.
+	Description *string `json:"description,omitempty"`
+	Name        *string `json:"name,omitempty"`
+	Slug        *string `json:"slug,omitempty"`
 }
 
 // AdminUpdateOrganizationRequest Absent fields are unchanged. `slug` is immutable and is refused with 400.
@@ -974,36 +508,13 @@ type AdminUpdateOrganizationRequest struct {
 // AdminUpdateOrganizationRequestStatus defines model for AdminUpdateOrganizationRequest.Status.
 type AdminUpdateOrganizationRequestStatus string
 
-// RbacAdminServiceAddGroupMemberBody defines model for RbacAdminServiceAddGroupMemberBody.
-type RbacAdminServiceAddGroupMemberBody struct {
-	Member  *V1GroupMember `json:"member,omitempty"`
-	RealmId *string        `json:"realmId,omitempty"`
-}
-
-// RbacAdminServiceAssignUserRoleBody defines model for RbacAdminServiceAssignUserRoleBody.
-type RbacAdminServiceAssignUserRoleBody struct {
-	RealmId *string  `json:"realmId,omitempty"`
-	RoleId  *string  `json:"roleId,omitempty"`
-	Scope   *V1Scope `json:"scope,omitempty"`
-}
-
-// RbacAdminServiceUpdateGroupBody defines model for RbacAdminServiceUpdateGroupBody.
-type RbacAdminServiceUpdateGroupBody struct {
-	Description *string `json:"description,omitempty"`
-	Name        *string `json:"name,omitempty"`
-	RealmId     *string `json:"realmId,omitempty"`
-	Slug        *string `json:"slug,omitempty"`
-}
-
-// RbacAdminServiceUpdateRoleBody defines model for RbacAdminServiceUpdateRoleBody.
-type RbacAdminServiceUpdateRoleBody struct {
-	Description *string `json:"description,omitempty"`
-
-	// Name Fields left empty = unchanged.
-	Name          *string   `json:"name,omitempty"`
-	ParentRoleIds *[]string `json:"parentRoleIds,omitempty"`
-	Permissions   *[]string `json:"permissions,omitempty"`
-	RealmId       *string   `json:"realmId,omitempty"`
+// AdminUpdateRoleRequest Absent fields are unchanged.
+type AdminUpdateRoleRequest struct {
+	// Description null clears the description.
+	Description *string               `json:"description,omitempty"`
+	Name        *string               `json:"name,omitempty"`
+	ParentRoles *[]openapi_types.UUID `json:"parent_roles,omitempty"`
+	Permissions *[]string             `json:"permissions,omitempty"`
 }
 
 // ProtobufAny defines model for protobufAny.
@@ -1026,62 +537,6 @@ type RpcStatus struct {
 //   - DECISION: JWT carries only identity claims; resource servers call POST /oauth/authorize.
 type V1AccessTokenAuthorization string
 
-// V1AuditAction Categories of security-critical actions recorded in the audit log.
-//
-//   - AUDIT_ACTION_GROUP_CREATED: RBAC group management
-//   - AUDIT_ACTION_ORPHANED_REFERENCE_SKIPPED: Permission management
-//   - AUDIT_ACTION_LOGIN_FAILED: Login events
-//   - AUDIT_ACTION_BACKUP_CREATED: Backup and export
-//   - AUDIT_ACTION_REQUIRED_ACTION_ASSIGNED: Required actions
-//   - AUDIT_ACTION_PASSWORD_COMPROMISED_REJECTED: Password security
-//   - AUDIT_ACTION_SESSION_LIMIT_ENFORCED: Session management
-//   - AUDIT_ACTION_ABUSE_DETECTED: Abuse detection
-//   - AUDIT_ACTION_EMAIL_CHANGE_INITIATED: Email change
-//   - AUDIT_ACTION_OIDC_SILENT_AUTH_PROBED: OIDC silent auth
-//   - AUDIT_ACTION_AGENT_CREATED: Agent lifecycle
-//   - AUDIT_ACTION_AGENT_DELEGATION: Agent delegation and MCP (M2)
-//   - AUDIT_ACTION_AAT_ISSUED: Phase D — advanced agent surface
-//   - AUDIT_ACTION_MFA_ENABLED: MFA lifecycle
-//   - AUDIT_ACTION_INVITATION_CREATED: Organization invitation lifecycle
-type V1AuditAction string
-
-// V1AuditEvent A recorded audit event in the append-only log.
-type V1AuditEvent struct {
-	// Action Categories of security-critical actions recorded in the audit log.
-	//
-	//  - AUDIT_ACTION_GROUP_CREATED: RBAC group management
-	//  - AUDIT_ACTION_ORPHANED_REFERENCE_SKIPPED: Permission management
-	//  - AUDIT_ACTION_LOGIN_FAILED: Login events
-	//  - AUDIT_ACTION_BACKUP_CREATED: Backup and export
-	//  - AUDIT_ACTION_REQUIRED_ACTION_ASSIGNED: Required actions
-	//  - AUDIT_ACTION_PASSWORD_COMPROMISED_REJECTED: Password security
-	//  - AUDIT_ACTION_SESSION_LIMIT_ENFORCED: Session management
-	//  - AUDIT_ACTION_ABUSE_DETECTED: Abuse detection
-	//  - AUDIT_ACTION_EMAIL_CHANGE_INITIATED: Email change
-	//  - AUDIT_ACTION_OIDC_SILENT_AUTH_PROBED: OIDC silent auth
-	//  - AUDIT_ACTION_AGENT_CREATED: Agent lifecycle
-	//  - AUDIT_ACTION_AGENT_DELEGATION: Agent delegation and MCP (M2)
-	//  - AUDIT_ACTION_AAT_ISSUED: Phase D — advanced agent surface
-	//  - AUDIT_ACTION_MFA_ENABLED: MFA lifecycle
-	//  - AUDIT_ACTION_INVITATION_CREATED: Organization invitation lifecycle
-	Action        *V1AuditAction `json:"action,omitempty"`
-	Actor         *string        `json:"actor,omitempty"`
-	Id            *string        `json:"id,omitempty"`
-	IntegrityHash *string        `json:"integrityHash,omitempty"`
-
-	// Metadata Optional additional context (JSON-encoded).
-	Metadata     *string `json:"metadata,omitempty"`
-	RealmId      *string `json:"realmId,omitempty"`
-	ResourceId   *string `json:"resourceId,omitempty"`
-	ResourceType *string `json:"resourceType,omitempty"`
-	Timestamp    *string `json:"timestamp,omitempty"`
-}
-
-// V1AuditEventPage A page of audit events.
-type V1AuditEventPage struct {
-	Events *[]V1AuditEvent `json:"events,omitempty"`
-}
-
 // V1ClientTrustLevel Controls whether a client is trusted as a first-party application.
 //
 // FirstParty clients skip the consent screen and receive the full
@@ -1094,98 +549,24 @@ type V1ClientTrustLevel string
 
 // V1ConsentEntry defines model for v1ConsentEntry.
 type V1ConsentEntry struct {
-	ClientId      *string   `json:"clientId,omitempty"`
-	ClientName    *string   `json:"clientName,omitempty"`
-	GrantedAt     *string   `json:"grantedAt,omitempty"`
-	GrantedScopes *[]string `json:"grantedScopes,omitempty"`
-	UpdatedAt     *string   `json:"updatedAt,omitempty"`
-}
-
-// V1CreateGroupRequest defines model for v1CreateGroupRequest.
-type V1CreateGroupRequest struct {
-	Description *string `json:"description,omitempty"`
-	Name        *string `json:"name,omitempty"`
-	RealmId     *string `json:"realmId,omitempty"`
-	Slug        *string `json:"slug,omitempty"`
-}
-
-// V1CreateRoleRequest defines model for v1CreateRoleRequest.
-type V1CreateRoleRequest struct {
-	Description   *string   `json:"description,omitempty"`
-	Name          *string   `json:"name,omitempty"`
-	ParentRoleIds *[]string `json:"parentRoleIds,omitempty"`
-	Permissions   *[]string `json:"permissions,omitempty"`
-	RealmId       *string   `json:"realmId,omitempty"`
+	ClientId      *string   `json:"client_id,omitempty"`
+	ClientName    *string   `json:"client_name,omitempty"`
+	GrantedAt     *int64    `json:"granted_at,omitempty"`
+	GrantedScopes *[]string `json:"granted_scopes,omitempty"`
+	UpdatedAt     *int64    `json:"updated_at,omitempty"`
 }
 
 // V1CreateUserRequest Request to create a new user.
 type V1CreateUserRequest struct {
 	Attributes  *map[string]string `json:"attributes,omitempty"`
-	DisplayName *string            `json:"displayName,omitempty"`
+	DisplayName *string            `json:"display_name,omitempty"`
 	Email       *string            `json:"email,omitempty"`
-	FirstName   *string            `json:"firstName,omitempty"`
-	LastName    *string            `json:"lastName,omitempty"`
+	FirstName   *string            `json:"first_name,omitempty"`
+	LastName    *string            `json:"last_name,omitempty"`
 }
-
-// V1DeleteGroupResponse defines model for v1DeleteGroupResponse.
-type V1DeleteGroupResponse = map[string]interface{}
-
-// V1DeleteRoleResponse defines model for v1DeleteRoleResponse.
-type V1DeleteRoleResponse = map[string]interface{}
 
 // V1Empty Empty response type for delete RPCs.
 type V1Empty = map[string]interface{}
-
-// V1Group defines model for v1Group.
-type V1Group struct {
-	CreatedAtMicros *string `json:"createdAtMicros,omitempty"`
-	Description     *string `json:"description,omitempty"`
-	Id              *string `json:"id,omitempty"`
-	Name            *string `json:"name,omitempty"`
-	RealmId         *string `json:"realmId,omitempty"`
-	Slug            *string `json:"slug,omitempty"`
-	UpdatedAtMicros *string `json:"updatedAtMicros,omitempty"`
-}
-
-// V1GroupMember defines model for v1GroupMember.
-type V1GroupMember struct {
-	Id   *string            `json:"id,omitempty"`
-	Type *V1GroupMemberType `json:"type,omitempty"`
-}
-
-// V1GroupMemberType defines model for v1GroupMemberType.
-type V1GroupMemberType string
-
-// V1GroupMembership defines model for v1GroupMembership.
-type V1GroupMembership struct {
-	AddedAtMicros *string        `json:"addedAtMicros,omitempty"`
-	AddedByUserId *string        `json:"addedByUserId,omitempty"`
-	GroupId       *string        `json:"groupId,omitempty"`
-	Member        *V1GroupMember `json:"member,omitempty"`
-}
-
-// V1ListGroupMembersResponse defines model for v1ListGroupMembersResponse.
-type V1ListGroupMembersResponse struct {
-	Members    *[]V1GroupMember `json:"members,omitempty"`
-	NextCursor *string          `json:"nextCursor,omitempty"`
-}
-
-// V1ListGroupsResponse defines model for v1ListGroupsResponse.
-type V1ListGroupsResponse struct {
-	Groups     *[]V1Group `json:"groups,omitempty"`
-	NextCursor *string    `json:"nextCursor,omitempty"`
-}
-
-// V1ListRolesResponse defines model for v1ListRolesResponse.
-type V1ListRolesResponse struct {
-	NextCursor *string   `json:"nextCursor,omitempty"`
-	Roles      *[]V1Role `json:"roles,omitempty"`
-}
-
-// V1ListUserAssignmentsResponse defines model for v1ListUserAssignmentsResponse.
-type V1ListUserAssignmentsResponse struct {
-	Assignments *[]V1RoleAssignment `json:"assignments,omitempty"`
-}
 
 // V1ListUserConsentsResponse defines model for v1ListUserConsentsResponse.
 type V1ListUserConsentsResponse struct {
@@ -1199,9 +580,9 @@ type V1OAuthClient struct {
 	//  - EMBEDDED: Permissions, roles, and groups are embedded in the JWT at issuance (default).
 	//  - INTROSPECTION: JWT carries only identity claims; resource servers call /introspect.
 	//  - DECISION: JWT carries only identity claims; resource servers call POST /oauth/authorize.
-	AccessTokenAuthorization *V1AccessTokenAuthorization `json:"accessTokenAuthorization,omitempty"`
-	ClientId                 *string                     `json:"clientId,omitempty"`
-	ClientName               *string                     `json:"clientName,omitempty"`
+	AccessTokenAuthorization *V1AccessTokenAuthorization `json:"access_token_authorization,omitempty"`
+	ClientId                 *string                     `json:"client_id,omitempty"`
+	ClientName               *string                     `json:"client_name,omitempty"`
 
 	// ClientSecret The client secret Hearth generated for a confidential client. Present
 	// only in the response that created the client (token_endpoint_auth_method
@@ -1209,62 +590,50 @@ type V1OAuthClient struct {
 	// Store it on receipt: Hearth keeps only its hash. Also set, once, by
 	// RegenerateApplicationSecret.
 	ClientSecret *string `json:"client_secret,omitempty"`
-	CreatedAt    *string `json:"createdAt,omitempty"`
+	CreatedAt    *int64  `json:"created_at,omitempty"`
 
 	// DpopBoundAccessTokens RFC 9449 s5.2: when true, every token request from this client must carry
 	// a DPoP proof, and every token it gets is bound to the proof's key.
 	DpopBoundAccessTokens *bool     `json:"dpop_bound_access_tokens,omitempty"`
-	GrantTypes            *[]string `json:"grantTypes,omitempty"`
+	GrantTypes            *[]string `json:"grant_types,omitempty"`
 
 	// IdTokenSignedResponseAlg The algorithm this client's ID tokens are signed with: "RS256" or "EdDSA".
 	IdTokenSignedResponseAlg *string   `json:"id_token_signed_response_alg,omitempty"`
-	IsConfidential           *bool     `json:"isConfidential,omitempty"`
-	RedirectUris             *[]string `json:"redirectUris,omitempty"`
+	IsConfidential           *bool     `json:"is_confidential,omitempty"`
+	RedirectUris             *[]string `json:"redirect_uris,omitempty"`
 }
 
 // V1OAuthClientPage A cursor-based page of OAuth clients.
 type V1OAuthClientPage struct {
 	Items      *[]V1OAuthClient `json:"items,omitempty"`
-	NextCursor *string          `json:"nextCursor,omitempty"`
-}
-
-// V1OAuthEmpty Empty response type for delete RPCs (local to oauth.proto to avoid
-// cross-file service dependencies that complicate generated code).
-type V1OAuthEmpty = map[string]interface{}
-
-// V1OrgScope defines model for v1OrgScope.
-type V1OrgScope struct {
-	OrgId *string `json:"orgId,omitempty"`
+	NextCursor *string          `json:"next_cursor,omitempty"`
 }
 
 // V1Realm A realm record.
 type V1Realm struct {
 	// Config Per-realm configuration overrides.
 	Config    *V1RealmConfig `json:"config,omitempty"`
-	CreatedAt *string        `json:"createdAt,omitempty"`
+	CreatedAt *int64         `json:"created_at,omitempty"`
 	Id        *string        `json:"id,omitempty"`
 	Name      *string        `json:"name,omitempty"`
 
 	// Status The lifecycle status of a realm.
 	Status    *V1RealmStatus `json:"status,omitempty"`
-	UpdatedAt *string        `json:"updatedAt,omitempty"`
+	UpdatedAt *int64         `json:"updated_at,omitempty"`
 }
 
 // V1RealmConfig Per-realm configuration overrides.
 type V1RealmConfig struct {
-	PasswordMemoryCost *int64  `json:"passwordMemoryCost,omitempty"`
-	PasswordTimeCost   *int64  `json:"passwordTimeCost,omitempty"`
-	SessionTtlMicros   *string `json:"sessionTtlMicros,omitempty"`
+	PasswordMemoryCost *int64 `json:"password_memory_cost,omitempty"`
+	PasswordTimeCost   *int64 `json:"password_time_cost,omitempty"`
+	SessionTtlMicros   *int64 `json:"session_ttl_micros,omitempty"`
 }
 
 // V1RealmPage A cursor-based page of realms.
 type V1RealmPage struct {
 	Items      *[]V1Realm `json:"items,omitempty"`
-	NextCursor *string    `json:"nextCursor,omitempty"`
+	NextCursor *string    `json:"next_cursor,omitempty"`
 }
-
-// V1RealmScope defines model for v1RealmScope.
-type V1RealmScope = map[string]interface{}
 
 // V1RealmStatus The lifecycle status of a realm.
 type V1RealmStatus string
@@ -1276,13 +645,13 @@ type V1RegisterClientRequest struct {
 	//  - EMBEDDED: Permissions, roles, and groups are embedded in the JWT at issuance (default).
 	//  - INTROSPECTION: JWT carries only identity claims; resource servers call /introspect.
 	//  - DECISION: JWT carries only identity claims; resource servers call POST /oauth/authorize.
-	AccessTokenAuthorization *V1AccessTokenAuthorization `json:"accessTokenAuthorization,omitempty"`
-	ClientName               *string                     `json:"clientName,omitempty"`
+	AccessTokenAuthorization *V1AccessTokenAuthorization `json:"access_token_authorization,omitempty"`
+	ClientName               *string                     `json:"client_name,omitempty"`
 
 	// ClientSecret Not accepted on the admin create paths (REST and gRPC refuse it): Hearth
 	// generates client secrets. Request one with token_endpoint_auth_method.
-	ClientSecret *string   `json:"clientSecret,omitempty"`
-	GrantTypes   *[]string `json:"grantTypes,omitempty"`
+	ClientSecret *string   `json:"client_secret,omitempty"`
+	GrantTypes   *[]string `json:"grant_types,omitempty"`
 
 	// IdTokenSignedResponseAlg JWS algorithm for this client's ID tokens (OIDC Dynamic Client
 	// Registration 1.0 s2): "RS256" or "EdDSA"; anything else is rejected.
@@ -1290,7 +659,7 @@ type V1RegisterClientRequest struct {
 	// and EdDSA on the authenticated admin path. Only ID tokens are affected;
 	// access and refresh tokens are always EdDSA.
 	IdTokenSignedResponseAlg *string   `json:"id_token_signed_response_alg,omitempty"`
-	RedirectUris             *[]string `json:"redirectUris,omitempty"`
+	RedirectUris             *[]string `json:"redirect_uris,omitempty"`
 
 	// TokenEndpointAuthMethod How the client authenticates at the token endpoint (RFC 7591 s2):
 	// "client_secret_basic", "client_secret_post", "private_key_jwt" or "none".
@@ -1311,7 +680,7 @@ type V1RegisterClientRequest struct {
 	// Unspecified defaults to ThirdParty on the DCR path; on the authenticated
 	// admin path the caller must pass FIRST_PARTY explicitly to grant first-party
 	// trust.
-	TrustLevel *V1ClientTrustLevel `json:"trustLevel,omitempty"`
+	TrustLevel *V1ClientTrustLevel `json:"trust_level,omitempty"`
 }
 
 // V1RegisterClientRequestTokenEndpointAuthMethod How the client authenticates at the token endpoint (RFC 7591 s2):
@@ -1335,36 +704,6 @@ type V1ResolveEffectivePermissionsResponse struct {
 // V1RevokeConsentResponse defines model for v1RevokeConsentResponse.
 type V1RevokeConsentResponse = map[string]interface{}
 
-// V1Role defines model for v1Role.
-type V1Role struct {
-	CreatedAtMicros *string   `json:"createdAtMicros,omitempty"`
-	Description     *string   `json:"description,omitempty"`
-	Id              *string   `json:"id,omitempty"`
-	Name            *string   `json:"name,omitempty"`
-	ParentRoleIds   *[]string `json:"parentRoleIds,omitempty"`
-	Permissions     *[]string `json:"permissions,omitempty"`
-	RealmId         *string   `json:"realmId,omitempty"`
-	UpdatedAtMicros *string   `json:"updatedAtMicros,omitempty"`
-}
-
-// V1RoleAssignment defines model for v1RoleAssignment.
-type V1RoleAssignment struct {
-	AssignedAtMicros *string            `json:"assignedAtMicros,omitempty"`
-	AssignedByUserId *string            `json:"assignedByUserId,omitempty"`
-	Id               *string            `json:"id,omitempty"`
-	RealmId          *string            `json:"realmId,omitempty"`
-	RoleId           *string            `json:"roleId,omitempty"`
-	Scope            *V1Scope           `json:"scope,omitempty"`
-	SubjectId        *string            `json:"subjectId,omitempty"`
-	SubjectType      *V1GroupMemberType `json:"subjectType,omitempty"`
-}
-
-// V1Scope defines model for v1Scope.
-type V1Scope struct {
-	Org   *V1OrgScope   `json:"org,omitempty"`
-	Realm *V1RealmScope `json:"realm,omitempty"`
-}
-
 // V1UpdateClientRequest Request to update an existing OAuth 2.0 client.
 type V1UpdateClientRequest struct {
 	// AccessTokenAuthorization Controls how access-token authorization data is exposed to resource servers.
@@ -1372,13 +711,13 @@ type V1UpdateClientRequest struct {
 	//  - EMBEDDED: Permissions, roles, and groups are embedded in the JWT at issuance (default).
 	//  - INTROSPECTION: JWT carries only identity claims; resource servers call /introspect.
 	//  - DECISION: JWT carries only identity claims; resource servers call POST /oauth/authorize.
-	AccessTokenAuthorization *V1AccessTokenAuthorization `json:"accessTokenAuthorization,omitempty"`
-	ClientName               *string                     `json:"clientName,omitempty"`
-	GrantTypes               *[]string                   `json:"grantTypes,omitempty"`
+	AccessTokenAuthorization *V1AccessTokenAuthorization `json:"access_token_authorization,omitempty"`
+	ClientName               *string                     `json:"client_name,omitempty"`
+	GrantTypes               *[]string                   `json:"grant_types,omitempty"`
 
 	// IdTokenSignedResponseAlg ID-token signing algorithm: "RS256" or "EdDSA". Omit to leave unchanged.
 	IdTokenSignedResponseAlg *string   `json:"id_token_signed_response_alg,omitempty"`
-	RedirectUris             *[]string `json:"redirectUris,omitempty"`
+	RedirectUris             *[]string `json:"redirect_uris,omitempty"`
 
 	// TrustLevel Controls whether a client is trusted as a first-party application.
 	//
@@ -1388,7 +727,7 @@ type V1UpdateClientRequest struct {
 	// Unspecified defaults to ThirdParty on the DCR path; on the authenticated
 	// admin path the caller must pass FIRST_PARTY explicitly to grant first-party
 	// trust.
-	TrustLevel *V1ClientTrustLevel `json:"trustLevel,omitempty"`
+	TrustLevel *V1ClientTrustLevel `json:"trust_level,omitempty"`
 }
 
 // V1UpdateUserRequest Request to update an existing user.
@@ -1398,11 +737,11 @@ type V1UpdateUserRequest struct {
 	Attributes *map[string]string `json:"attributes,omitempty"`
 
 	// ClearAttributes When true and attributes is empty, clears all custom attributes.
-	ClearAttributes *bool   `json:"clearAttributes,omitempty"`
-	DisplayName     *string `json:"displayName,omitempty"`
+	ClearAttributes *bool   `json:"clear_attributes,omitempty"`
+	DisplayName     *string `json:"display_name,omitempty"`
 	Email           *string `json:"email,omitempty"`
-	FirstName       *string `json:"firstName,omitempty"`
-	LastName        *string `json:"lastName,omitempty"`
+	FirstName       *string `json:"first_name,omitempty"`
+	LastName        *string `json:"last_name,omitempty"`
 
 	// Status The lifecycle status of a user account.
 	Status *V1UserStatus `json:"status,omitempty"`
@@ -1410,26 +749,26 @@ type V1UpdateUserRequest struct {
 
 // V1User A user record within a realm.
 type V1User struct {
-	CreatedAt   *string `json:"createdAt,omitempty"`
-	DisplayName *string `json:"displayName,omitempty"`
+	CreatedAt   *int64  `json:"created_at,omitempty"`
+	DisplayName *string `json:"display_name,omitempty"`
 	Email       *string `json:"email,omitempty"`
-	FirstName   *string `json:"firstName,omitempty"`
+	FirstName   *string `json:"first_name,omitempty"`
 	Id          *string `json:"id,omitempty"`
-	LastName    *string `json:"lastName,omitempty"`
+	LastName    *string `json:"last_name,omitempty"`
 
 	// RequiredActions Actions the user must complete before full access is granted.
 	// Values: "VERIFY_EMAIL", "UPDATE_PASSWORD".
-	RequiredActions *[]string `json:"requiredActions,omitempty"`
+	RequiredActions *[]string `json:"required_actions,omitempty"`
 
 	// Status The lifecycle status of a user account.
 	Status    *V1UserStatus `json:"status,omitempty"`
-	UpdatedAt *string       `json:"updatedAt,omitempty"`
+	UpdatedAt *int64        `json:"updated_at,omitempty"`
 }
 
 // V1UserPage A cursor-based page of users.
 type V1UserPage struct {
 	Items      *[]V1User `json:"items,omitempty"`
-	NextCursor *string   `json:"nextCursor,omitempty"`
+	NextCursor *string   `json:"next_cursor,omitempty"`
 }
 
 // V1UserStatus The lifecycle status of a user account.
@@ -1441,57 +780,33 @@ type ApplicationAdminServiceListApplicationsParams struct {
 	Limit  *int64  `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
-// AuditServiceListEventsParams defines parameters for AuditServiceListEvents.
-type AuditServiceListEventsParams struct {
-	RealmId   *string `form:"realmId,omitempty" json:"realmId,omitempty"`
-	StartTime *string `form:"startTime,omitempty" json:"startTime,omitempty"`
-	EndTime   *string `form:"endTime,omitempty" json:"endTime,omitempty"`
-	Actor     *string `form:"actor,omitempty" json:"actor,omitempty"`
+// AdminListAuditEventsParams defines parameters for AdminListAuditEvents.
+type AdminListAuditEventsParams struct {
+	Actor *string `form:"actor,omitempty" json:"actor,omitempty"`
 
-	// Action  - AUDIT_ACTION_GROUP_CREATED: RBAC group management
-	//  - AUDIT_ACTION_ORPHANED_REFERENCE_SKIPPED: Permission management
-	//  - AUDIT_ACTION_LOGIN_FAILED: Login events
-	//  - AUDIT_ACTION_BACKUP_CREATED: Backup and export
-	//  - AUDIT_ACTION_REQUIRED_ACTION_ASSIGNED: Required actions
-	//  - AUDIT_ACTION_PASSWORD_COMPROMISED_REJECTED: Password security
-	//  - AUDIT_ACTION_SESSION_LIMIT_ENFORCED: Session management
-	//  - AUDIT_ACTION_ABUSE_DETECTED: Abuse detection
-	//  - AUDIT_ACTION_EMAIL_CHANGE_INITIATED: Email change
-	//  - AUDIT_ACTION_OIDC_SILENT_AUTH_PROBED: OIDC silent auth
-	//  - AUDIT_ACTION_AGENT_CREATED: Agent lifecycle
-	//  - AUDIT_ACTION_AGENT_DELEGATION: Agent delegation and MCP (M2)
-	//  - AUDIT_ACTION_AAT_ISSUED: Phase D — advanced agent surface
-	//  - AUDIT_ACTION_MFA_ENABLED: MFA lifecycle
-	//  - AUDIT_ACTION_INVITATION_CREATED: Organization invitation lifecycle
-	Action *AuditServiceListEventsParamsAction `form:"action,omitempty" json:"action,omitempty"`
-	Limit  *int64                              `form:"limit,omitempty" json:"limit,omitempty"`
+	// Action An audit action name, e.g. `UserCreated`.
+	Action *string `form:"action,omitempty" json:"action,omitempty"`
+
+	// StartTime Microseconds since the Unix epoch.
+	StartTime *int64 `form:"start_time,omitempty" json:"start_time,omitempty"`
+
+	// EndTime Microseconds since the Unix epoch.
+	EndTime *int64 `form:"end_time,omitempty" json:"end_time,omitempty"`
+
+	// Limit Default 50, at most 200.
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
-// AuditServiceListEventsParamsAction defines parameters for AuditServiceListEvents.
-type AuditServiceListEventsParamsAction string
-
-// RbacAdminServiceListGroupsParams defines parameters for RbacAdminServiceListGroups.
-type RbacAdminServiceListGroupsParams struct {
-	RealmId *string `form:"realmId,omitempty" json:"realmId,omitempty"`
-	Cursor  *string `form:"cursor,omitempty" json:"cursor,omitempty"`
-	Limit   *int64  `form:"limit,omitempty" json:"limit,omitempty"`
+// AdminListGroupsParams defines parameters for AdminListGroups.
+type AdminListGroupsParams struct {
+	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+	Limit  *int    `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
-// RbacAdminServiceDeleteGroupParams defines parameters for RbacAdminServiceDeleteGroup.
-type RbacAdminServiceDeleteGroupParams struct {
-	RealmId *string `form:"realmId,omitempty" json:"realmId,omitempty"`
-}
-
-// RbacAdminServiceGetGroupParams defines parameters for RbacAdminServiceGetGroup.
-type RbacAdminServiceGetGroupParams struct {
-	RealmId *string `form:"realmId,omitempty" json:"realmId,omitempty"`
-}
-
-// RbacAdminServiceListGroupMembersParams defines parameters for RbacAdminServiceListGroupMembers.
-type RbacAdminServiceListGroupMembersParams struct {
-	RealmId *string `form:"realmId,omitempty" json:"realmId,omitempty"`
-	Cursor  *string `form:"cursor,omitempty" json:"cursor,omitempty"`
-	Limit   *int64  `form:"limit,omitempty" json:"limit,omitempty"`
+// AdminListGroupMembersParams defines parameters for AdminListGroupMembers.
+type AdminListGroupMembersParams struct {
+	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+	Limit  *int    `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
 // AdminRemoveGroupMemberParams defines parameters for AdminRemoveGroupMember.
@@ -1533,28 +848,22 @@ type AdminPatchRealmConfigJSONBody = map[string]interface{}
 // AdminPatchUserRequiredActionsJSONBody defines parameters for AdminPatchUserRequiredActions.
 type AdminPatchUserRequiredActionsJSONBody = map[string]interface{}
 
-// RbacAdminServiceListRolesParams defines parameters for RbacAdminServiceListRoles.
-type RbacAdminServiceListRolesParams struct {
-	RealmId *string `form:"realmId,omitempty" json:"realmId,omitempty"`
-	Cursor  *string `form:"cursor,omitempty" json:"cursor,omitempty"`
-	Limit   *int64  `form:"limit,omitempty" json:"limit,omitempty"`
+// AdminListRolesParams defines parameters for AdminListRoles.
+type AdminListRolesParams struct {
+	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+	Limit  *int    `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// AdminDeleteRoleParams defines parameters for AdminDeleteRole.
+type AdminDeleteRoleParams struct {
+	// Cascade Also remove the role's assignments, parent links and extra org-role rows. Without it a referenced role answers `409 role_in_use`.
+	Cascade *bool `form:"cascade,omitempty" json:"cascade,omitempty"`
 }
 
 // AdminListRoleMembersParams defines parameters for AdminListRoleMembers.
 type AdminListRoleMembersParams struct {
 	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
 	Limit  *int    `form:"limit,omitempty" json:"limit,omitempty"`
-}
-
-// RbacAdminServiceDeleteRoleParams defines parameters for RbacAdminServiceDeleteRole.
-type RbacAdminServiceDeleteRoleParams struct {
-	RealmId *string `form:"realmId,omitempty" json:"realmId,omitempty"`
-	Cascade *bool   `form:"cascade,omitempty" json:"cascade,omitempty"`
-}
-
-// RbacAdminServiceGetRoleParams defines parameters for RbacAdminServiceGetRole.
-type RbacAdminServiceGetRoleParams struct {
-	RealmId *string `form:"realmId,omitempty" json:"realmId,omitempty"`
 }
 
 // IdentityAdminServiceListUsersParams defines parameters for IdentityAdminServiceListUsers.
@@ -1576,28 +885,23 @@ type AdminRevokeUserPermissionParams struct {
 
 // RbacAdminServiceListUserConsentsParams defines parameters for RbacAdminServiceListUserConsents.
 type RbacAdminServiceListUserConsentsParams struct {
-	RealmId *string `form:"realmId,omitempty" json:"realmId,omitempty"`
+	RealmId *string `form:"realm_id,omitempty" json:"realm_id,omitempty"`
 }
 
 // RbacAdminServiceRevokeConsentParams defines parameters for RbacAdminServiceRevokeConsent.
 type RbacAdminServiceRevokeConsentParams struct {
-	RealmId *string `form:"realmId,omitempty" json:"realmId,omitempty"`
+	RealmId *string `form:"realm_id,omitempty" json:"realm_id,omitempty"`
 }
 
 // RbacAdminServiceResolveEffectivePermissionsParams defines parameters for RbacAdminServiceResolveEffectivePermissions.
 type RbacAdminServiceResolveEffectivePermissionsParams struct {
-	RealmId *string `form:"realmId,omitempty" json:"realmId,omitempty"`
+	RealmId *string `form:"realm_id,omitempty" json:"realm_id,omitempty"`
 
 	// OrgId optional; empty means realm-only
-	OrgId *string `form:"orgId,omitempty" json:"orgId,omitempty"`
+	OrgId *string `form:"org_id,omitempty" json:"org_id,omitempty"`
 
 	// Scope optional; empty means no narrowing
 	Scope *string `form:"scope,omitempty" json:"scope,omitempty"`
-}
-
-// RbacAdminServiceListUserAssignmentsParams defines parameters for RbacAdminServiceListUserAssignments.
-type RbacAdminServiceListUserAssignmentsParams struct {
-	RealmId *string `form:"realmId,omitempty" json:"realmId,omitempty"`
 }
 
 // AdminCreateWebhookJSONBody defines parameters for AdminCreateWebhook.
@@ -1612,14 +916,14 @@ type ApplicationAdminServiceCreateApplicationJSONRequestBody = V1RegisterClientR
 // ApplicationAdminServiceUpdateApplicationJSONRequestBody defines body for ApplicationAdminServiceUpdateApplication for application/json ContentType.
 type ApplicationAdminServiceUpdateApplicationJSONRequestBody = V1UpdateClientRequest
 
-// RbacAdminServiceCreateGroupJSONRequestBody defines body for RbacAdminServiceCreateGroup for application/json ContentType.
-type RbacAdminServiceCreateGroupJSONRequestBody = V1CreateGroupRequest
+// AdminCreateGroupJSONRequestBody defines body for AdminCreateGroup for application/json ContentType.
+type AdminCreateGroupJSONRequestBody = AdminCreateGroupRequest
 
-// RbacAdminServiceUpdateGroupJSONRequestBody defines body for RbacAdminServiceUpdateGroup for application/json ContentType.
-type RbacAdminServiceUpdateGroupJSONRequestBody = RbacAdminServiceUpdateGroupBody
+// AdminUpdateGroupJSONRequestBody defines body for AdminUpdateGroup for application/json ContentType.
+type AdminUpdateGroupJSONRequestBody = AdminUpdateGroupRequest
 
-// RbacAdminServiceAddGroupMemberJSONRequestBody defines body for RbacAdminServiceAddGroupMember for application/json ContentType.
-type RbacAdminServiceAddGroupMemberJSONRequestBody = RbacAdminServiceAddGroupMemberBody
+// AdminAddGroupMemberJSONRequestBody defines body for AdminAddGroupMember for application/json ContentType.
+type AdminAddGroupMemberJSONRequestBody = AdminAddGroupMemberRequest
 
 // AdminCreateOrganizationJSONRequestBody defines body for AdminCreateOrganization for application/json ContentType.
 type AdminCreateOrganizationJSONRequestBody = AdminCreateOrganizationRequest
@@ -1642,11 +946,11 @@ type AdminPatchRealmConfigJSONRequestBody = AdminPatchRealmConfigJSONBody
 // AdminPatchUserRequiredActionsJSONRequestBody defines body for AdminPatchUserRequiredActions for application/json ContentType.
 type AdminPatchUserRequiredActionsJSONRequestBody = AdminPatchUserRequiredActionsJSONBody
 
-// RbacAdminServiceCreateRoleJSONRequestBody defines body for RbacAdminServiceCreateRole for application/json ContentType.
-type RbacAdminServiceCreateRoleJSONRequestBody = V1CreateRoleRequest
+// AdminCreateRoleJSONRequestBody defines body for AdminCreateRole for application/json ContentType.
+type AdminCreateRoleJSONRequestBody = AdminCreateRoleRequest
 
-// RbacAdminServiceUpdateRoleJSONRequestBody defines body for RbacAdminServiceUpdateRole for application/json ContentType.
-type RbacAdminServiceUpdateRoleJSONRequestBody = RbacAdminServiceUpdateRoleBody
+// AdminUpdateRoleJSONRequestBody defines body for AdminUpdateRole for application/json ContentType.
+type AdminUpdateRoleJSONRequestBody = AdminUpdateRoleRequest
 
 // IdentityAdminServiceCreateUserJSONRequestBody defines body for IdentityAdminServiceCreateUser for application/json ContentType.
 type IdentityAdminServiceCreateUserJSONRequestBody = V1CreateUserRequest
@@ -1660,8 +964,8 @@ type AdminImportUsersJSONRequestBody = AdminImportUsersJSONBody
 // IdentityAdminServiceUpdateUserJSONRequestBody defines body for IdentityAdminServiceUpdateUser for application/json ContentType.
 type IdentityAdminServiceUpdateUserJSONRequestBody = V1UpdateUserRequest
 
-// RbacAdminServiceAssignUserRoleJSONRequestBody defines body for RbacAdminServiceAssignUserRole for application/json ContentType.
-type RbacAdminServiceAssignUserRoleJSONRequestBody = RbacAdminServiceAssignUserRoleBody
+// AdminAssignUserRoleJSONRequestBody defines body for AdminAssignUserRole for application/json ContentType.
+type AdminAssignUserRoleJSONRequestBody = AdminAssignRoleRequest
 
 // AdminCreateWebhookJSONRequestBody defines body for AdminCreateWebhook for application/json ContentType.
 type AdminCreateWebhookJSONRequestBody = AdminCreateWebhookJSONBody
@@ -1822,17 +1126,17 @@ type ClientInterface interface {
 	// Takes a body of the `application/json` content type.
 	ApplicationAdminServiceCreateApplication(ctx context.Context, body ApplicationAdminServiceCreateApplicationJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// ApplicationAdminServiceDeleteApplication performs a DELETE /admin/applications/{clientId} (the `ApplicationAdminServiceDeleteApplication` operationId) request.
+	// ApplicationAdminServiceDeleteApplication performs a DELETE /admin/applications/{client_id} (the `ApplicationAdminServiceDeleteApplication` operationId) request.
 	ApplicationAdminServiceDeleteApplication(ctx context.Context, clientId string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// ApplicationAdminServiceGetApplication performs a GET /admin/applications/{clientId} (the `ApplicationAdminServiceGetApplication` operationId) request.
+	// ApplicationAdminServiceGetApplication performs a GET /admin/applications/{client_id} (the `ApplicationAdminServiceGetApplication` operationId) request.
 	ApplicationAdminServiceGetApplication(ctx context.Context, clientId string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// ApplicationAdminServiceUpdateApplicationWithBody performs a PATCH /admin/applications/{clientId} (the `ApplicationAdminServiceUpdateApplication` operationId) request,
+	// ApplicationAdminServiceUpdateApplicationWithBody performs a PATCH /admin/applications/{client_id} (the `ApplicationAdminServiceUpdateApplication` operationId) request,
 	// with any type of body and a specified content type.
 	ApplicationAdminServiceUpdateApplicationWithBody(ctx context.Context, clientId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// ApplicationAdminServiceUpdateApplication performs a PATCH /admin/applications/{clientId} (the `ApplicationAdminServiceUpdateApplication` operationId) request.
+	// ApplicationAdminServiceUpdateApplication performs a PATCH /admin/applications/{client_id} (the `ApplicationAdminServiceUpdateApplication` operationId) request.
 	// Takes a body of the `application/json` content type.
 	ApplicationAdminServiceUpdateApplication(ctx context.Context, clientId string, body ApplicationAdminServiceUpdateApplicationJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -1841,7 +1145,7 @@ type ClientInterface interface {
 	// returned once, in the response's client_secret; the old one stops
 	// authenticating at once. Refused for a public client. Audited.
 	//
-	// Corresponds with POST /admin/applications/{clientId}/regenerate-secret (the `ApplicationAdminServiceRegenerateApplicationSecret` operationId).
+	// Corresponds with POST /admin/applications/{client_id}/regenerate-secret (the `ApplicationAdminServiceRegenerateApplicationSecret` operationId).
 	ApplicationAdminServiceRegenerateApplicationSecret(ctx context.Context, clientId string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// AdminUnassignRole Delete a role assignment
@@ -1849,10 +1153,12 @@ type ClientInterface interface {
 	// Corresponds with DELETE /admin/assignments/{id} (the `AdminUnassignRole` operationId).
 	AdminUnassignRole(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// AuditServiceListEvents Query audit events with optional filters. Maps to GET /admin/audit.
+	// AdminListAuditEvents List audit events
 	//
-	// Corresponds with GET /admin/audit (the `AuditServiceListEvents` operationId).
-	AuditServiceListEvents(ctx context.Context, params *AuditServiceListEventsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// Requires `hearth.realm.admin`. Newest first.
+	//
+	// Corresponds with GET /admin/audit (the `AdminListAuditEvents` operationId).
+	AdminListAuditEvents(ctx context.Context, params *AdminListAuditEventsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// AdminVerifyAudit Verify the realm's audit hash chain
 	//
@@ -1899,41 +1205,73 @@ type ClientInterface interface {
 	// Corresponds with POST /admin/cluster/transfer-leadership (the `AdminClusterTransferLeadership` operationId).
 	AdminClusterTransferLeadership(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// RbacAdminServiceListGroups performs a GET /admin/groups (the `RbacAdminServiceListGroups` operationId) request.
-	RbacAdminServiceListGroups(ctx context.Context, params *RbacAdminServiceListGroupsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// AdminListGroups List groups
+	//
+	// `cursor` is a decimal offset; follow `next_cursor` until it is null.
+	//
+	// Corresponds with GET /admin/groups (the `AdminListGroups` operationId).
+	AdminListGroups(ctx context.Context, params *AdminListGroupsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// RbacAdminServiceCreateGroupWithBody performs a POST /admin/groups (the `RbacAdminServiceCreateGroup` operationId) request,
-	// with any type of body and a specified content type.
-	RbacAdminServiceCreateGroupWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// AdminCreateGroupWithBody Create a group
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /admin/groups (the `AdminCreateGroup` operationId).
+	AdminCreateGroupWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// RbacAdminServiceCreateGroup performs a POST /admin/groups (the `RbacAdminServiceCreateGroup` operationId) request.
+	// AdminCreateGroup Create a group
+	//
 	// Takes a body of the `application/json` content type.
-	RbacAdminServiceCreateGroup(ctx context.Context, body RbacAdminServiceCreateGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	//
+	// Corresponds with POST /admin/groups (the `AdminCreateGroup` operationId).
+	AdminCreateGroup(ctx context.Context, body AdminCreateGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// RbacAdminServiceDeleteGroup performs a DELETE /admin/groups/{groupId} (the `RbacAdminServiceDeleteGroup` operationId) request.
-	RbacAdminServiceDeleteGroup(ctx context.Context, groupId string, params *RbacAdminServiceDeleteGroupParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// AdminDeleteGroup Delete a group
+	//
+	// Corresponds with DELETE /admin/groups/{id} (the `AdminDeleteGroup` operationId).
+	AdminDeleteGroup(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// RbacAdminServiceGetGroup performs a GET /admin/groups/{groupId} (the `RbacAdminServiceGetGroup` operationId) request.
-	RbacAdminServiceGetGroup(ctx context.Context, groupId string, params *RbacAdminServiceGetGroupParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// AdminGetGroup Get a group
+	//
+	// Corresponds with GET /admin/groups/{id} (the `AdminGetGroup` operationId).
+	AdminGetGroup(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// RbacAdminServiceUpdateGroupWithBody performs a PATCH /admin/groups/{groupId} (the `RbacAdminServiceUpdateGroup` operationId) request,
-	// with any type of body and a specified content type.
-	RbacAdminServiceUpdateGroupWithBody(ctx context.Context, groupId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// AdminUpdateGroupWithBody Update a group
+	//
+	// Absent fields are unchanged; `description` null clears it.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with PATCH /admin/groups/{id} (the `AdminUpdateGroup` operationId).
+	AdminUpdateGroupWithBody(ctx context.Context, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// RbacAdminServiceUpdateGroup performs a PATCH /admin/groups/{groupId} (the `RbacAdminServiceUpdateGroup` operationId) request.
+	// AdminUpdateGroup Update a group
+	//
+	// Absent fields are unchanged; `description` null clears it.
+	//
 	// Takes a body of the `application/json` content type.
-	RbacAdminServiceUpdateGroup(ctx context.Context, groupId string, body RbacAdminServiceUpdateGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	//
+	// Corresponds with PATCH /admin/groups/{id} (the `AdminUpdateGroup` operationId).
+	AdminUpdateGroup(ctx context.Context, id string, body AdminUpdateGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// RbacAdminServiceListGroupMembers performs a GET /admin/groups/{groupId}/members (the `RbacAdminServiceListGroupMembers` operationId) request.
-	RbacAdminServiceListGroupMembers(ctx context.Context, groupId string, params *RbacAdminServiceListGroupMembersParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// AdminListGroupMembers List a group's members
+	//
+	// Corresponds with GET /admin/groups/{id}/members (the `AdminListGroupMembers` operationId).
+	AdminListGroupMembers(ctx context.Context, id string, params *AdminListGroupMembersParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// RbacAdminServiceAddGroupMemberWithBody performs a POST /admin/groups/{groupId}/members (the `RbacAdminServiceAddGroupMember` operationId) request,
-	// with any type of body and a specified content type.
-	RbacAdminServiceAddGroupMemberWithBody(ctx context.Context, groupId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// AdminAddGroupMemberWithBody Add a member to a group
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /admin/groups/{id}/members (the `AdminAddGroupMember` operationId).
+	AdminAddGroupMemberWithBody(ctx context.Context, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// RbacAdminServiceAddGroupMember performs a POST /admin/groups/{groupId}/members (the `RbacAdminServiceAddGroupMember` operationId) request.
+	// AdminAddGroupMember Add a member to a group
+	//
 	// Takes a body of the `application/json` content type.
-	RbacAdminServiceAddGroupMember(ctx context.Context, groupId string, body RbacAdminServiceAddGroupMemberJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	//
+	// Corresponds with POST /admin/groups/{id}/members (the `AdminAddGroupMember` operationId).
+	AdminAddGroupMember(ctx context.Context, id string, body AdminAddGroupMemberJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// AdminRemoveGroupMember Remove a member from a group
 	//
@@ -2151,35 +1489,59 @@ type ClientInterface interface {
 	// Corresponds with PATCH /admin/realms/{realm_id}/users/{user_id}/required-actions (the `AdminPatchUserRequiredActions` operationId).
 	AdminPatchUserRequiredActions(ctx context.Context, realmId string, userId string, body AdminPatchUserRequiredActionsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// RbacAdminServiceListRoles performs a GET /admin/roles (the `RbacAdminServiceListRoles` operationId) request.
-	RbacAdminServiceListRoles(ctx context.Context, params *RbacAdminServiceListRolesParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// AdminListRoles List roles
+	//
+	// Requires `hearth.realm.admin`. Follow `next_cursor` until it is null.
+	//
+	// Corresponds with GET /admin/roles (the `AdminListRoles` operationId).
+	AdminListRoles(ctx context.Context, params *AdminListRolesParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// RbacAdminServiceCreateRoleWithBody performs a POST /admin/roles (the `RbacAdminServiceCreateRole` operationId) request,
-	// with any type of body and a specified content type.
-	RbacAdminServiceCreateRoleWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// AdminCreateRoleWithBody Create a role
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /admin/roles (the `AdminCreateRole` operationId).
+	AdminCreateRoleWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// RbacAdminServiceCreateRole performs a POST /admin/roles (the `RbacAdminServiceCreateRole` operationId) request.
+	// AdminCreateRole Create a role
+	//
 	// Takes a body of the `application/json` content type.
-	RbacAdminServiceCreateRole(ctx context.Context, body RbacAdminServiceCreateRoleJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	//
+	// Corresponds with POST /admin/roles (the `AdminCreateRole` operationId).
+	AdminCreateRole(ctx context.Context, body AdminCreateRoleJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// AdminDeleteRole Delete a role
+	//
+	// Corresponds with DELETE /admin/roles/{id} (the `AdminDeleteRole` operationId).
+	AdminDeleteRole(ctx context.Context, id string, params *AdminDeleteRoleParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// AdminGetRole Get a role
+	//
+	// Corresponds with GET /admin/roles/{id} (the `AdminGetRole` operationId).
+	AdminGetRole(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// AdminUpdateRoleWithBody Update a role
+	//
+	// Absent fields are unchanged; `description` null clears it.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with PATCH /admin/roles/{id} (the `AdminUpdateRole` operationId).
+	AdminUpdateRoleWithBody(ctx context.Context, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// AdminUpdateRole Update a role
+	//
+	// Absent fields are unchanged; `description` null clears it.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with PATCH /admin/roles/{id} (the `AdminUpdateRole` operationId).
+	AdminUpdateRole(ctx context.Context, id string, body AdminUpdateRoleJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// AdminListRoleMembers List the users and groups holding a role
 	//
 	// Corresponds with GET /admin/roles/{id}/members (the `AdminListRoleMembers` operationId).
 	AdminListRoleMembers(ctx context.Context, id string, params *AdminListRoleMembersParams, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// RbacAdminServiceDeleteRole performs a DELETE /admin/roles/{roleId} (the `RbacAdminServiceDeleteRole` operationId) request.
-	RbacAdminServiceDeleteRole(ctx context.Context, roleId string, params *RbacAdminServiceDeleteRoleParams, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// RbacAdminServiceGetRole performs a GET /admin/roles/{roleId} (the `RbacAdminServiceGetRole` operationId) request.
-	RbacAdminServiceGetRole(ctx context.Context, roleId string, params *RbacAdminServiceGetRoleParams, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// RbacAdminServiceUpdateRoleWithBody performs a PATCH /admin/roles/{roleId} (the `RbacAdminServiceUpdateRole` operationId) request,
-	// with any type of body and a specified content type.
-	RbacAdminServiceUpdateRoleWithBody(ctx context.Context, roleId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// RbacAdminServiceUpdateRole performs a PATCH /admin/roles/{roleId} (the `RbacAdminServiceUpdateRole` operationId) request.
-	// Takes a body of the `application/json` content type.
-	RbacAdminServiceUpdateRole(ctx context.Context, roleId string, body RbacAdminServiceUpdateRoleJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// AdminSvBumpSession Bump session version (invalidates existing tokens)
 	//
@@ -2265,29 +1627,41 @@ type ClientInterface interface {
 	// Corresponds with DELETE /admin/users/{id}/permissions/{permission} (the `AdminRevokeUserPermission` operationId).
 	AdminRevokeUserPermission(ctx context.Context, id string, permission string, params *AdminRevokeUserPermissionParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// AdminListUserAssignments List a user's role assignments
+	//
+	// Corresponds with GET /admin/users/{id}/roles (the `AdminListUserAssignments` operationId).
+	AdminListUserAssignments(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// AdminAssignUserRoleWithBody Assign a role to a user
+	//
+	// Realm-wide, or inside one organization when `org_id` is set.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with POST /admin/users/{id}/roles (the `AdminAssignUserRole` operationId).
+	AdminAssignUserRoleWithBody(ctx context.Context, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// AdminAssignUserRole Assign a role to a user
+	//
+	// Realm-wide, or inside one organization when `org_id` is set.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with POST /admin/users/{id}/roles (the `AdminAssignUserRole` operationId).
+	AdminAssignUserRole(ctx context.Context, id string, body AdminAssignUserRoleJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// RbacAdminServiceListUserConsents List all active consents for a user.
 	//
-	// Corresponds with GET /admin/users/{userId}/consents (the `RbacAdminServiceListUserConsents` operationId).
+	// Corresponds with GET /admin/users/{user_id}/consents (the `RbacAdminServiceListUserConsents` operationId).
 	RbacAdminServiceListUserConsents(ctx context.Context, userId string, params *RbacAdminServiceListUserConsentsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// RbacAdminServiceRevokeConsent Revoke OAuth consent for a specific (user, client) pair.
 	//
-	// Corresponds with DELETE /admin/users/{userId}/consents/{clientId} (the `RbacAdminServiceRevokeConsent` operationId).
+	// Corresponds with DELETE /admin/users/{user_id}/consents/{client_id} (the `RbacAdminServiceRevokeConsent` operationId).
 	RbacAdminServiceRevokeConsent(ctx context.Context, userId string, clientId string, params *RbacAdminServiceRevokeConsentParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// RbacAdminServiceResolveEffectivePermissions performs a GET /admin/users/{userId}/effective-permissions (the `RbacAdminServiceResolveEffectivePermissions` operationId) request.
+	// RbacAdminServiceResolveEffectivePermissions performs a GET /admin/users/{user_id}/effective-permissions (the `RbacAdminServiceResolveEffectivePermissions` operationId) request.
 	RbacAdminServiceResolveEffectivePermissions(ctx context.Context, userId string, params *RbacAdminServiceResolveEffectivePermissionsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// RbacAdminServiceListUserAssignments performs a GET /admin/users/{userId}/roles (the `RbacAdminServiceListUserAssignments` operationId) request.
-	RbacAdminServiceListUserAssignments(ctx context.Context, userId string, params *RbacAdminServiceListUserAssignmentsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// RbacAdminServiceAssignUserRoleWithBody performs a POST /admin/users/{userId}/roles (the `RbacAdminServiceAssignUserRole` operationId) request,
-	// with any type of body and a specified content type.
-	RbacAdminServiceAssignUserRoleWithBody(ctx context.Context, userId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// RbacAdminServiceAssignUserRole performs a POST /admin/users/{userId}/roles (the `RbacAdminServiceAssignUserRole` operationId) request.
-	// Takes a body of the `application/json` content type.
-	RbacAdminServiceAssignUserRole(ctx context.Context, userId string, body RbacAdminServiceAssignUserRoleJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// AdminListWebhooks List webhooks
 	//
@@ -2379,7 +1753,7 @@ func (c *Client) ApplicationAdminServiceCreateApplication(ctx context.Context, b
 	return c.Client.Do(req)
 }
 
-// ApplicationAdminServiceDeleteApplication performs a DELETE /admin/applications/{clientId} (the `ApplicationAdminServiceDeleteApplication` operationId) request.
+// ApplicationAdminServiceDeleteApplication performs a DELETE /admin/applications/{client_id} (the `ApplicationAdminServiceDeleteApplication` operationId) request.
 func (c *Client) ApplicationAdminServiceDeleteApplication(ctx context.Context, clientId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewApplicationAdminServiceDeleteApplicationRequest(c.Server, clientId)
 	if err != nil {
@@ -2392,7 +1766,7 @@ func (c *Client) ApplicationAdminServiceDeleteApplication(ctx context.Context, c
 	return c.Client.Do(req)
 }
 
-// ApplicationAdminServiceGetApplication performs a GET /admin/applications/{clientId} (the `ApplicationAdminServiceGetApplication` operationId) request.
+// ApplicationAdminServiceGetApplication performs a GET /admin/applications/{client_id} (the `ApplicationAdminServiceGetApplication` operationId) request.
 func (c *Client) ApplicationAdminServiceGetApplication(ctx context.Context, clientId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewApplicationAdminServiceGetApplicationRequest(c.Server, clientId)
 	if err != nil {
@@ -2405,7 +1779,7 @@ func (c *Client) ApplicationAdminServiceGetApplication(ctx context.Context, clie
 	return c.Client.Do(req)
 }
 
-// ApplicationAdminServiceUpdateApplicationWithBody performs a PATCH /admin/applications/{clientId} (the `ApplicationAdminServiceUpdateApplication` operationId) request,
+// ApplicationAdminServiceUpdateApplicationWithBody performs a PATCH /admin/applications/{client_id} (the `ApplicationAdminServiceUpdateApplication` operationId) request,
 // with any type of body and a specified content type.
 func (c *Client) ApplicationAdminServiceUpdateApplicationWithBody(ctx context.Context, clientId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewApplicationAdminServiceUpdateApplicationRequestWithBody(c.Server, clientId, contentType, body)
@@ -2419,7 +1793,7 @@ func (c *Client) ApplicationAdminServiceUpdateApplicationWithBody(ctx context.Co
 	return c.Client.Do(req)
 }
 
-// ApplicationAdminServiceUpdateApplication performs a PATCH /admin/applications/{clientId} (the `ApplicationAdminServiceUpdateApplication` operationId) request.
+// ApplicationAdminServiceUpdateApplication performs a PATCH /admin/applications/{client_id} (the `ApplicationAdminServiceUpdateApplication` operationId) request.
 // Takes a body of the `application/json` content type.
 func (c *Client) ApplicationAdminServiceUpdateApplication(ctx context.Context, clientId string, body ApplicationAdminServiceUpdateApplicationJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewApplicationAdminServiceUpdateApplicationRequest(c.Server, clientId, body)
@@ -2438,7 +1812,7 @@ func (c *Client) ApplicationAdminServiceUpdateApplication(ctx context.Context, c
 // returned once, in the response's client_secret; the old one stops
 // authenticating at once. Refused for a public client. Audited.
 //
-// Corresponds with POST /admin/applications/{clientId}/regenerate-secret (the `ApplicationAdminServiceRegenerateApplicationSecret` operationId).
+// Corresponds with POST /admin/applications/{client_id}/regenerate-secret (the `ApplicationAdminServiceRegenerateApplicationSecret` operationId).
 func (c *Client) ApplicationAdminServiceRegenerateApplicationSecret(ctx context.Context, clientId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewApplicationAdminServiceRegenerateApplicationSecretRequest(c.Server, clientId)
 	if err != nil {
@@ -2466,11 +1840,13 @@ func (c *Client) AdminUnassignRole(ctx context.Context, id string, reqEditors ..
 	return c.Client.Do(req)
 }
 
-// AuditServiceListEvents Query audit events with optional filters. Maps to GET /admin/audit.
+// AdminListAuditEvents List audit events
 //
-// Corresponds with GET /admin/audit (the `AuditServiceListEvents` operationId).
-func (c *Client) AuditServiceListEvents(ctx context.Context, params *AuditServiceListEventsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewAuditServiceListEventsRequest(c.Server, params)
+// Requires `hearth.realm.admin`. Newest first.
+//
+// Corresponds with GET /admin/audit (the `AdminListAuditEvents` operationId).
+func (c *Client) AdminListAuditEvents(ctx context.Context, params *AdminListAuditEventsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminListAuditEventsRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -2596,9 +1972,13 @@ func (c *Client) AdminClusterTransferLeadership(ctx context.Context, reqEditors 
 	return c.Client.Do(req)
 }
 
-// RbacAdminServiceListGroups performs a GET /admin/groups (the `RbacAdminServiceListGroups` operationId) request.
-func (c *Client) RbacAdminServiceListGroups(ctx context.Context, params *RbacAdminServiceListGroupsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRbacAdminServiceListGroupsRequest(c.Server, params)
+// AdminListGroups List groups
+//
+// `cursor` is a decimal offset; follow `next_cursor` until it is null.
+//
+// Corresponds with GET /admin/groups (the `AdminListGroups` operationId).
+func (c *Client) AdminListGroups(ctx context.Context, params *AdminListGroupsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminListGroupsRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -2609,10 +1989,13 @@ func (c *Client) RbacAdminServiceListGroups(ctx context.Context, params *RbacAdm
 	return c.Client.Do(req)
 }
 
-// RbacAdminServiceCreateGroupWithBody performs a POST /admin/groups (the `RbacAdminServiceCreateGroup` operationId) request,
-// with any type of body and a specified content type.
-func (c *Client) RbacAdminServiceCreateGroupWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRbacAdminServiceCreateGroupRequestWithBody(c.Server, contentType, body)
+// AdminCreateGroupWithBody Create a group
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /admin/groups (the `AdminCreateGroup` operationId).
+func (c *Client) AdminCreateGroupWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminCreateGroupRequestWithBody(c.Server, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -2623,10 +2006,13 @@ func (c *Client) RbacAdminServiceCreateGroupWithBody(ctx context.Context, conten
 	return c.Client.Do(req)
 }
 
-// RbacAdminServiceCreateGroup performs a POST /admin/groups (the `RbacAdminServiceCreateGroup` operationId) request.
+// AdminCreateGroup Create a group
+//
 // Takes a body of the `application/json` content type.
-func (c *Client) RbacAdminServiceCreateGroup(ctx context.Context, body RbacAdminServiceCreateGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRbacAdminServiceCreateGroupRequest(c.Server, body)
+//
+// Corresponds with POST /admin/groups (the `AdminCreateGroup` operationId).
+func (c *Client) AdminCreateGroup(ctx context.Context, body AdminCreateGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminCreateGroupRequest(c.Server, body)
 	if err != nil {
 		return nil, err
 	}
@@ -2637,9 +2023,11 @@ func (c *Client) RbacAdminServiceCreateGroup(ctx context.Context, body RbacAdmin
 	return c.Client.Do(req)
 }
 
-// RbacAdminServiceDeleteGroup performs a DELETE /admin/groups/{groupId} (the `RbacAdminServiceDeleteGroup` operationId) request.
-func (c *Client) RbacAdminServiceDeleteGroup(ctx context.Context, groupId string, params *RbacAdminServiceDeleteGroupParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRbacAdminServiceDeleteGroupRequest(c.Server, groupId, params)
+// AdminDeleteGroup Delete a group
+//
+// Corresponds with DELETE /admin/groups/{id} (the `AdminDeleteGroup` operationId).
+func (c *Client) AdminDeleteGroup(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminDeleteGroupRequest(c.Server, id)
 	if err != nil {
 		return nil, err
 	}
@@ -2650,9 +2038,11 @@ func (c *Client) RbacAdminServiceDeleteGroup(ctx context.Context, groupId string
 	return c.Client.Do(req)
 }
 
-// RbacAdminServiceGetGroup performs a GET /admin/groups/{groupId} (the `RbacAdminServiceGetGroup` operationId) request.
-func (c *Client) RbacAdminServiceGetGroup(ctx context.Context, groupId string, params *RbacAdminServiceGetGroupParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRbacAdminServiceGetGroupRequest(c.Server, groupId, params)
+// AdminGetGroup Get a group
+//
+// Corresponds with GET /admin/groups/{id} (the `AdminGetGroup` operationId).
+func (c *Client) AdminGetGroup(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminGetGroupRequest(c.Server, id)
 	if err != nil {
 		return nil, err
 	}
@@ -2663,10 +2053,15 @@ func (c *Client) RbacAdminServiceGetGroup(ctx context.Context, groupId string, p
 	return c.Client.Do(req)
 }
 
-// RbacAdminServiceUpdateGroupWithBody performs a PATCH /admin/groups/{groupId} (the `RbacAdminServiceUpdateGroup` operationId) request,
-// with any type of body and a specified content type.
-func (c *Client) RbacAdminServiceUpdateGroupWithBody(ctx context.Context, groupId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRbacAdminServiceUpdateGroupRequestWithBody(c.Server, groupId, contentType, body)
+// AdminUpdateGroupWithBody Update a group
+//
+// Absent fields are unchanged; `description` null clears it.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with PATCH /admin/groups/{id} (the `AdminUpdateGroup` operationId).
+func (c *Client) AdminUpdateGroupWithBody(ctx context.Context, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminUpdateGroupRequestWithBody(c.Server, id, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -2677,10 +2072,15 @@ func (c *Client) RbacAdminServiceUpdateGroupWithBody(ctx context.Context, groupI
 	return c.Client.Do(req)
 }
 
-// RbacAdminServiceUpdateGroup performs a PATCH /admin/groups/{groupId} (the `RbacAdminServiceUpdateGroup` operationId) request.
+// AdminUpdateGroup Update a group
+//
+// Absent fields are unchanged; `description` null clears it.
+//
 // Takes a body of the `application/json` content type.
-func (c *Client) RbacAdminServiceUpdateGroup(ctx context.Context, groupId string, body RbacAdminServiceUpdateGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRbacAdminServiceUpdateGroupRequest(c.Server, groupId, body)
+//
+// Corresponds with PATCH /admin/groups/{id} (the `AdminUpdateGroup` operationId).
+func (c *Client) AdminUpdateGroup(ctx context.Context, id string, body AdminUpdateGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminUpdateGroupRequest(c.Server, id, body)
 	if err != nil {
 		return nil, err
 	}
@@ -2691,9 +2091,11 @@ func (c *Client) RbacAdminServiceUpdateGroup(ctx context.Context, groupId string
 	return c.Client.Do(req)
 }
 
-// RbacAdminServiceListGroupMembers performs a GET /admin/groups/{groupId}/members (the `RbacAdminServiceListGroupMembers` operationId) request.
-func (c *Client) RbacAdminServiceListGroupMembers(ctx context.Context, groupId string, params *RbacAdminServiceListGroupMembersParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRbacAdminServiceListGroupMembersRequest(c.Server, groupId, params)
+// AdminListGroupMembers List a group's members
+//
+// Corresponds with GET /admin/groups/{id}/members (the `AdminListGroupMembers` operationId).
+func (c *Client) AdminListGroupMembers(ctx context.Context, id string, params *AdminListGroupMembersParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminListGroupMembersRequest(c.Server, id, params)
 	if err != nil {
 		return nil, err
 	}
@@ -2704,10 +2106,13 @@ func (c *Client) RbacAdminServiceListGroupMembers(ctx context.Context, groupId s
 	return c.Client.Do(req)
 }
 
-// RbacAdminServiceAddGroupMemberWithBody performs a POST /admin/groups/{groupId}/members (the `RbacAdminServiceAddGroupMember` operationId) request,
-// with any type of body and a specified content type.
-func (c *Client) RbacAdminServiceAddGroupMemberWithBody(ctx context.Context, groupId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRbacAdminServiceAddGroupMemberRequestWithBody(c.Server, groupId, contentType, body)
+// AdminAddGroupMemberWithBody Add a member to a group
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /admin/groups/{id}/members (the `AdminAddGroupMember` operationId).
+func (c *Client) AdminAddGroupMemberWithBody(ctx context.Context, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminAddGroupMemberRequestWithBody(c.Server, id, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -2718,10 +2123,13 @@ func (c *Client) RbacAdminServiceAddGroupMemberWithBody(ctx context.Context, gro
 	return c.Client.Do(req)
 }
 
-// RbacAdminServiceAddGroupMember performs a POST /admin/groups/{groupId}/members (the `RbacAdminServiceAddGroupMember` operationId) request.
+// AdminAddGroupMember Add a member to a group
+//
 // Takes a body of the `application/json` content type.
-func (c *Client) RbacAdminServiceAddGroupMember(ctx context.Context, groupId string, body RbacAdminServiceAddGroupMemberJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRbacAdminServiceAddGroupMemberRequest(c.Server, groupId, body)
+//
+// Corresponds with POST /admin/groups/{id}/members (the `AdminAddGroupMember` operationId).
+func (c *Client) AdminAddGroupMember(ctx context.Context, id string, body AdminAddGroupMemberJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminAddGroupMemberRequest(c.Server, id, body)
 	if err != nil {
 		return nil, err
 	}
@@ -3278,9 +2686,13 @@ func (c *Client) AdminPatchUserRequiredActions(ctx context.Context, realmId stri
 	return c.Client.Do(req)
 }
 
-// RbacAdminServiceListRoles performs a GET /admin/roles (the `RbacAdminServiceListRoles` operationId) request.
-func (c *Client) RbacAdminServiceListRoles(ctx context.Context, params *RbacAdminServiceListRolesParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRbacAdminServiceListRolesRequest(c.Server, params)
+// AdminListRoles List roles
+//
+// Requires `hearth.realm.admin`. Follow `next_cursor` until it is null.
+//
+// Corresponds with GET /admin/roles (the `AdminListRoles` operationId).
+func (c *Client) AdminListRoles(ctx context.Context, params *AdminListRolesParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminListRolesRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -3291,10 +2703,13 @@ func (c *Client) RbacAdminServiceListRoles(ctx context.Context, params *RbacAdmi
 	return c.Client.Do(req)
 }
 
-// RbacAdminServiceCreateRoleWithBody performs a POST /admin/roles (the `RbacAdminServiceCreateRole` operationId) request,
-// with any type of body and a specified content type.
-func (c *Client) RbacAdminServiceCreateRoleWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRbacAdminServiceCreateRoleRequestWithBody(c.Server, contentType, body)
+// AdminCreateRoleWithBody Create a role
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /admin/roles (the `AdminCreateRole` operationId).
+func (c *Client) AdminCreateRoleWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminCreateRoleRequestWithBody(c.Server, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -3305,10 +2720,81 @@ func (c *Client) RbacAdminServiceCreateRoleWithBody(ctx context.Context, content
 	return c.Client.Do(req)
 }
 
-// RbacAdminServiceCreateRole performs a POST /admin/roles (the `RbacAdminServiceCreateRole` operationId) request.
+// AdminCreateRole Create a role
+//
 // Takes a body of the `application/json` content type.
-func (c *Client) RbacAdminServiceCreateRole(ctx context.Context, body RbacAdminServiceCreateRoleJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRbacAdminServiceCreateRoleRequest(c.Server, body)
+//
+// Corresponds with POST /admin/roles (the `AdminCreateRole` operationId).
+func (c *Client) AdminCreateRole(ctx context.Context, body AdminCreateRoleJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminCreateRoleRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// AdminDeleteRole Delete a role
+//
+// Corresponds with DELETE /admin/roles/{id} (the `AdminDeleteRole` operationId).
+func (c *Client) AdminDeleteRole(ctx context.Context, id string, params *AdminDeleteRoleParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminDeleteRoleRequest(c.Server, id, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// AdminGetRole Get a role
+//
+// Corresponds with GET /admin/roles/{id} (the `AdminGetRole` operationId).
+func (c *Client) AdminGetRole(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminGetRoleRequest(c.Server, id)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// AdminUpdateRoleWithBody Update a role
+//
+// Absent fields are unchanged; `description` null clears it.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with PATCH /admin/roles/{id} (the `AdminUpdateRole` operationId).
+func (c *Client) AdminUpdateRoleWithBody(ctx context.Context, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminUpdateRoleRequestWithBody(c.Server, id, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// AdminUpdateRole Update a role
+//
+// Absent fields are unchanged; `description` null clears it.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with PATCH /admin/roles/{id} (the `AdminUpdateRole` operationId).
+func (c *Client) AdminUpdateRole(ctx context.Context, id string, body AdminUpdateRoleJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminUpdateRoleRequest(c.Server, id, body)
 	if err != nil {
 		return nil, err
 	}
@@ -3324,60 +2810,6 @@ func (c *Client) RbacAdminServiceCreateRole(ctx context.Context, body RbacAdminS
 // Corresponds with GET /admin/roles/{id}/members (the `AdminListRoleMembers` operationId).
 func (c *Client) AdminListRoleMembers(ctx context.Context, id string, params *AdminListRoleMembersParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewAdminListRoleMembersRequest(c.Server, id, params)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-// RbacAdminServiceDeleteRole performs a DELETE /admin/roles/{roleId} (the `RbacAdminServiceDeleteRole` operationId) request.
-func (c *Client) RbacAdminServiceDeleteRole(ctx context.Context, roleId string, params *RbacAdminServiceDeleteRoleParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRbacAdminServiceDeleteRoleRequest(c.Server, roleId, params)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-// RbacAdminServiceGetRole performs a GET /admin/roles/{roleId} (the `RbacAdminServiceGetRole` operationId) request.
-func (c *Client) RbacAdminServiceGetRole(ctx context.Context, roleId string, params *RbacAdminServiceGetRoleParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRbacAdminServiceGetRoleRequest(c.Server, roleId, params)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-// RbacAdminServiceUpdateRoleWithBody performs a PATCH /admin/roles/{roleId} (the `RbacAdminServiceUpdateRole` operationId) request,
-// with any type of body and a specified content type.
-func (c *Client) RbacAdminServiceUpdateRoleWithBody(ctx context.Context, roleId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRbacAdminServiceUpdateRoleRequestWithBody(c.Server, roleId, contentType, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-// RbacAdminServiceUpdateRole performs a PATCH /admin/roles/{roleId} (the `RbacAdminServiceUpdateRole` operationId) request.
-// Takes a body of the `application/json` content type.
-func (c *Client) RbacAdminServiceUpdateRole(ctx context.Context, roleId string, body RbacAdminServiceUpdateRoleJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRbacAdminServiceUpdateRoleRequest(c.Server, roleId, body)
 	if err != nil {
 		return nil, err
 	}
@@ -3632,9 +3064,62 @@ func (c *Client) AdminRevokeUserPermission(ctx context.Context, id string, permi
 	return c.Client.Do(req)
 }
 
+// AdminListUserAssignments List a user's role assignments
+//
+// Corresponds with GET /admin/users/{id}/roles (the `AdminListUserAssignments` operationId).
+func (c *Client) AdminListUserAssignments(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminListUserAssignmentsRequest(c.Server, id)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// AdminAssignUserRoleWithBody Assign a role to a user
+//
+// Realm-wide, or inside one organization when `org_id` is set.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with POST /admin/users/{id}/roles (the `AdminAssignUserRole` operationId).
+func (c *Client) AdminAssignUserRoleWithBody(ctx context.Context, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminAssignUserRoleRequestWithBody(c.Server, id, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// AdminAssignUserRole Assign a role to a user
+//
+// Realm-wide, or inside one organization when `org_id` is set.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with POST /admin/users/{id}/roles (the `AdminAssignUserRole` operationId).
+func (c *Client) AdminAssignUserRole(ctx context.Context, id string, body AdminAssignUserRoleJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminAssignUserRoleRequest(c.Server, id, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 // RbacAdminServiceListUserConsents List all active consents for a user.
 //
-// Corresponds with GET /admin/users/{userId}/consents (the `RbacAdminServiceListUserConsents` operationId).
+// Corresponds with GET /admin/users/{user_id}/consents (the `RbacAdminServiceListUserConsents` operationId).
 func (c *Client) RbacAdminServiceListUserConsents(ctx context.Context, userId string, params *RbacAdminServiceListUserConsentsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewRbacAdminServiceListUserConsentsRequest(c.Server, userId, params)
 	if err != nil {
@@ -3649,7 +3134,7 @@ func (c *Client) RbacAdminServiceListUserConsents(ctx context.Context, userId st
 
 // RbacAdminServiceRevokeConsent Revoke OAuth consent for a specific (user, client) pair.
 //
-// Corresponds with DELETE /admin/users/{userId}/consents/{clientId} (the `RbacAdminServiceRevokeConsent` operationId).
+// Corresponds with DELETE /admin/users/{user_id}/consents/{client_id} (the `RbacAdminServiceRevokeConsent` operationId).
 func (c *Client) RbacAdminServiceRevokeConsent(ctx context.Context, userId string, clientId string, params *RbacAdminServiceRevokeConsentParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewRbacAdminServiceRevokeConsentRequest(c.Server, userId, clientId, params)
 	if err != nil {
@@ -3662,50 +3147,9 @@ func (c *Client) RbacAdminServiceRevokeConsent(ctx context.Context, userId strin
 	return c.Client.Do(req)
 }
 
-// RbacAdminServiceResolveEffectivePermissions performs a GET /admin/users/{userId}/effective-permissions (the `RbacAdminServiceResolveEffectivePermissions` operationId) request.
+// RbacAdminServiceResolveEffectivePermissions performs a GET /admin/users/{user_id}/effective-permissions (the `RbacAdminServiceResolveEffectivePermissions` operationId) request.
 func (c *Client) RbacAdminServiceResolveEffectivePermissions(ctx context.Context, userId string, params *RbacAdminServiceResolveEffectivePermissionsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewRbacAdminServiceResolveEffectivePermissionsRequest(c.Server, userId, params)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-// RbacAdminServiceListUserAssignments performs a GET /admin/users/{userId}/roles (the `RbacAdminServiceListUserAssignments` operationId) request.
-func (c *Client) RbacAdminServiceListUserAssignments(ctx context.Context, userId string, params *RbacAdminServiceListUserAssignmentsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRbacAdminServiceListUserAssignmentsRequest(c.Server, userId, params)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-// RbacAdminServiceAssignUserRoleWithBody performs a POST /admin/users/{userId}/roles (the `RbacAdminServiceAssignUserRole` operationId) request,
-// with any type of body and a specified content type.
-func (c *Client) RbacAdminServiceAssignUserRoleWithBody(ctx context.Context, userId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRbacAdminServiceAssignUserRoleRequestWithBody(c.Server, userId, contentType, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-// RbacAdminServiceAssignUserRole performs a POST /admin/users/{userId}/roles (the `RbacAdminServiceAssignUserRole` operationId) request.
-// Takes a body of the `application/json` content type.
-func (c *Client) RbacAdminServiceAssignUserRole(ctx context.Context, userId string, body RbacAdminServiceAssignUserRoleJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRbacAdminServiceAssignUserRoleRequest(c.Server, userId, body)
 	if err != nil {
 		return nil, err
 	}
@@ -3956,7 +3400,7 @@ func NewApplicationAdminServiceDeleteApplicationRequest(server string, clientId 
 
 	var pathParam0 string
 
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "clientId", clientId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "client_id", clientId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
 	if err != nil {
 		return nil, err
 	}
@@ -3990,7 +3434,7 @@ func NewApplicationAdminServiceGetApplicationRequest(server string, clientId str
 
 	var pathParam0 string
 
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "clientId", clientId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "client_id", clientId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
 	if err != nil {
 		return nil, err
 	}
@@ -4035,7 +3479,7 @@ func NewApplicationAdminServiceUpdateApplicationRequestWithBody(server string, c
 
 	var pathParam0 string
 
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "clientId", clientId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "client_id", clientId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
 	if err != nil {
 		return nil, err
 	}
@@ -4071,7 +3515,7 @@ func NewApplicationAdminServiceRegenerateApplicationSecretRequest(server string,
 
 	var pathParam0 string
 
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "clientId", clientId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "client_id", clientId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
 	if err != nil {
 		return nil, err
 	}
@@ -4133,8 +3577,8 @@ func NewAdminUnassignRoleRequest(server string, id string) (*http.Request, error
 	return req, nil
 }
 
-// NewAuditServiceListEventsRequest constructs an http.Request for the AuditServiceListEvents method
-func NewAuditServiceListEventsRequest(server string, params *AuditServiceListEventsParams) (*http.Request, error) {
+// NewAdminListAuditEventsRequest constructs an http.Request for the AdminListAuditEvents method
+func NewAdminListAuditEventsRequest(server string, params *AdminListAuditEventsParams) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -4161,42 +3605,6 @@ func NewAuditServiceListEventsRequest(server string, params *AuditServiceListEve
 		// per the OpenAPI spec (e.g. "color=blue,black,brown").
 		var rawQueryFragments []string
 
-		if params.RealmId != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "realmId", *params.RealmId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
-		if params.StartTime != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "startTime", *params.StartTime, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "int64"}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
-		if params.EndTime != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "endTime", *params.EndTime, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: "int64"}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
 		if params.Actor != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "actor", *params.Actor, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
@@ -4221,9 +3629,33 @@ func NewAuditServiceListEventsRequest(server string, params *AuditServiceListEve
 
 		}
 
+		if params.StartTime != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "start_time", *params.StartTime, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.EndTime != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "end_time", *params.EndTime, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
 		if params.Limit != nil {
 
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
 				return nil, err
 			} else {
 				for _, qp := range strings.Split(queryFrag, "&") {
@@ -4438,8 +3870,8 @@ func NewAdminClusterTransferLeadershipRequest(server string) (*http.Request, err
 	return req, nil
 }
 
-// NewRbacAdminServiceListGroupsRequest constructs an http.Request for the RbacAdminServiceListGroups method
-func NewRbacAdminServiceListGroupsRequest(server string, params *RbacAdminServiceListGroupsParams) (*http.Request, error) {
+// NewAdminListGroupsRequest constructs an http.Request for the AdminListGroups method
+func NewAdminListGroupsRequest(server string, params *AdminListGroupsParams) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -4466,18 +3898,6 @@ func NewRbacAdminServiceListGroupsRequest(server string, params *RbacAdminServic
 		// per the OpenAPI spec (e.g. "color=blue,black,brown").
 		var rawQueryFragments []string
 
-		if params.RealmId != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "realmId", *params.RealmId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
 		if params.Cursor != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "cursor", *params.Cursor, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
@@ -4492,7 +3912,7 @@ func NewRbacAdminServiceListGroupsRequest(server string, params *RbacAdminServic
 
 		if params.Limit != nil {
 
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
 				return nil, err
 			} else {
 				for _, qp := range strings.Split(queryFrag, "&") {
@@ -4516,19 +3936,19 @@ func NewRbacAdminServiceListGroupsRequest(server string, params *RbacAdminServic
 	return req, nil
 }
 
-// NewRbacAdminServiceCreateGroupRequest calls the generic RbacAdminServiceCreateGroup builder with application/json body
-func NewRbacAdminServiceCreateGroupRequest(server string, body RbacAdminServiceCreateGroupJSONRequestBody) (*http.Request, error) {
+// NewAdminCreateGroupRequest calls the generic AdminCreateGroup builder with application/json body
+func NewAdminCreateGroupRequest(server string, body AdminCreateGroupJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewRbacAdminServiceCreateGroupRequestWithBody(server, "application/json", bodyReader)
+	return NewAdminCreateGroupRequestWithBody(server, "application/json", bodyReader)
 }
 
-// NewRbacAdminServiceCreateGroupRequestWithBody constructs an http.Request for the RbacAdminServiceCreateGroup method, with any body, and a specified content type
-func NewRbacAdminServiceCreateGroupRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+// NewAdminCreateGroupRequestWithBody constructs an http.Request for the AdminCreateGroup method, with any body, and a specified content type
+func NewAdminCreateGroupRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -4556,13 +3976,13 @@ func NewRbacAdminServiceCreateGroupRequestWithBody(server string, contentType st
 	return req, nil
 }
 
-// NewRbacAdminServiceDeleteGroupRequest constructs an http.Request for the RbacAdminServiceDeleteGroup method
-func NewRbacAdminServiceDeleteGroupRequest(server string, groupId string, params *RbacAdminServiceDeleteGroupParams) (*http.Request, error) {
+// NewAdminDeleteGroupRequest constructs an http.Request for the AdminDeleteGroup method
+func NewAdminDeleteGroupRequest(server string, id string) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
 
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "groupId", groupId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
 	if err != nil {
 		return nil, err
 	}
@@ -4580,33 +4000,6 @@ func NewRbacAdminServiceDeleteGroupRequest(server string, groupId string, params
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
-	}
-
-	if params != nil {
-		// queryValues collects non-styled parameters (passthrough, JSON)
-		// that are safe to round-trip through url.Values.Encode().
-		queryValues := queryURL.Query()
-		// rawQueryFragments collects pre-encoded query fragments from
-		// styled parameters, preserving literal commas as delimiters
-		// per the OpenAPI spec (e.g. "color=blue,black,brown").
-		var rawQueryFragments []string
-
-		if params.RealmId != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "realmId", *params.RealmId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
-		if encoded := queryValues.Encode(); encoded != "" {
-			rawQueryFragments = append(rawQueryFragments, encoded)
-		}
-		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
 	}
 
 	req, err := http.NewRequest(http.MethodDelete, queryURL.String(), nil)
@@ -4617,13 +4010,13 @@ func NewRbacAdminServiceDeleteGroupRequest(server string, groupId string, params
 	return req, nil
 }
 
-// NewRbacAdminServiceGetGroupRequest constructs an http.Request for the RbacAdminServiceGetGroup method
-func NewRbacAdminServiceGetGroupRequest(server string, groupId string, params *RbacAdminServiceGetGroupParams) (*http.Request, error) {
+// NewAdminGetGroupRequest constructs an http.Request for the AdminGetGroup method
+func NewAdminGetGroupRequest(server string, id string) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
 
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "groupId", groupId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
 	if err != nil {
 		return nil, err
 	}
@@ -4643,33 +4036,6 @@ func NewRbacAdminServiceGetGroupRequest(server string, groupId string, params *R
 		return nil, err
 	}
 
-	if params != nil {
-		// queryValues collects non-styled parameters (passthrough, JSON)
-		// that are safe to round-trip through url.Values.Encode().
-		queryValues := queryURL.Query()
-		// rawQueryFragments collects pre-encoded query fragments from
-		// styled parameters, preserving literal commas as delimiters
-		// per the OpenAPI spec (e.g. "color=blue,black,brown").
-		var rawQueryFragments []string
-
-		if params.RealmId != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "realmId", *params.RealmId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
-		if encoded := queryValues.Encode(); encoded != "" {
-			rawQueryFragments = append(rawQueryFragments, encoded)
-		}
-		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
-	}
-
 	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
 	if err != nil {
 		return nil, err
@@ -4678,24 +4044,24 @@ func NewRbacAdminServiceGetGroupRequest(server string, groupId string, params *R
 	return req, nil
 }
 
-// NewRbacAdminServiceUpdateGroupRequest calls the generic RbacAdminServiceUpdateGroup builder with application/json body
-func NewRbacAdminServiceUpdateGroupRequest(server string, groupId string, body RbacAdminServiceUpdateGroupJSONRequestBody) (*http.Request, error) {
+// NewAdminUpdateGroupRequest calls the generic AdminUpdateGroup builder with application/json body
+func NewAdminUpdateGroupRequest(server string, id string, body AdminUpdateGroupJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewRbacAdminServiceUpdateGroupRequestWithBody(server, groupId, "application/json", bodyReader)
+	return NewAdminUpdateGroupRequestWithBody(server, id, "application/json", bodyReader)
 }
 
-// NewRbacAdminServiceUpdateGroupRequestWithBody constructs an http.Request for the RbacAdminServiceUpdateGroup method, with any body, and a specified content type
-func NewRbacAdminServiceUpdateGroupRequestWithBody(server string, groupId string, contentType string, body io.Reader) (*http.Request, error) {
+// NewAdminUpdateGroupRequestWithBody constructs an http.Request for the AdminUpdateGroup method, with any body, and a specified content type
+func NewAdminUpdateGroupRequestWithBody(server string, id string, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
 
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "groupId", groupId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
 	if err != nil {
 		return nil, err
 	}
@@ -4725,13 +4091,13 @@ func NewRbacAdminServiceUpdateGroupRequestWithBody(server string, groupId string
 	return req, nil
 }
 
-// NewRbacAdminServiceListGroupMembersRequest constructs an http.Request for the RbacAdminServiceListGroupMembers method
-func NewRbacAdminServiceListGroupMembersRequest(server string, groupId string, params *RbacAdminServiceListGroupMembersParams) (*http.Request, error) {
+// NewAdminListGroupMembersRequest constructs an http.Request for the AdminListGroupMembers method
+func NewAdminListGroupMembersRequest(server string, id string, params *AdminListGroupMembersParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
 
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "groupId", groupId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
 	if err != nil {
 		return nil, err
 	}
@@ -4760,18 +4126,6 @@ func NewRbacAdminServiceListGroupMembersRequest(server string, groupId string, p
 		// per the OpenAPI spec (e.g. "color=blue,black,brown").
 		var rawQueryFragments []string
 
-		if params.RealmId != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "realmId", *params.RealmId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
 		if params.Cursor != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "cursor", *params.Cursor, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
@@ -4786,7 +4140,7 @@ func NewRbacAdminServiceListGroupMembersRequest(server string, groupId string, p
 
 		if params.Limit != nil {
 
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
 				return nil, err
 			} else {
 				for _, qp := range strings.Split(queryFrag, "&") {
@@ -4810,24 +4164,24 @@ func NewRbacAdminServiceListGroupMembersRequest(server string, groupId string, p
 	return req, nil
 }
 
-// NewRbacAdminServiceAddGroupMemberRequest calls the generic RbacAdminServiceAddGroupMember builder with application/json body
-func NewRbacAdminServiceAddGroupMemberRequest(server string, groupId string, body RbacAdminServiceAddGroupMemberJSONRequestBody) (*http.Request, error) {
+// NewAdminAddGroupMemberRequest calls the generic AdminAddGroupMember builder with application/json body
+func NewAdminAddGroupMemberRequest(server string, id string, body AdminAddGroupMemberJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewRbacAdminServiceAddGroupMemberRequestWithBody(server, groupId, "application/json", bodyReader)
+	return NewAdminAddGroupMemberRequestWithBody(server, id, "application/json", bodyReader)
 }
 
-// NewRbacAdminServiceAddGroupMemberRequestWithBody constructs an http.Request for the RbacAdminServiceAddGroupMember method, with any body, and a specified content type
-func NewRbacAdminServiceAddGroupMemberRequestWithBody(server string, groupId string, contentType string, body io.Reader) (*http.Request, error) {
+// NewAdminAddGroupMemberRequestWithBody constructs an http.Request for the AdminAddGroupMember method, with any body, and a specified content type
+func NewAdminAddGroupMemberRequestWithBody(server string, id string, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
 
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "groupId", groupId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
 	if err != nil {
 		return nil, err
 	}
@@ -5999,8 +5353,8 @@ func NewAdminPatchUserRequiredActionsRequestWithBody(server string, realmId stri
 	return req, nil
 }
 
-// NewRbacAdminServiceListRolesRequest constructs an http.Request for the RbacAdminServiceListRoles method
-func NewRbacAdminServiceListRolesRequest(server string, params *RbacAdminServiceListRolesParams) (*http.Request, error) {
+// NewAdminListRolesRequest constructs an http.Request for the AdminListRoles method
+func NewAdminListRolesRequest(server string, params *AdminListRolesParams) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -6027,18 +5381,6 @@ func NewRbacAdminServiceListRolesRequest(server string, params *RbacAdminService
 		// per the OpenAPI spec (e.g. "color=blue,black,brown").
 		var rawQueryFragments []string
 
-		if params.RealmId != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "realmId", *params.RealmId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
 		if params.Cursor != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "cursor", *params.Cursor, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
@@ -6053,7 +5395,7 @@ func NewRbacAdminServiceListRolesRequest(server string, params *RbacAdminService
 
 		if params.Limit != nil {
 
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
 				return nil, err
 			} else {
 				for _, qp := range strings.Split(queryFrag, "&") {
@@ -6077,19 +5419,19 @@ func NewRbacAdminServiceListRolesRequest(server string, params *RbacAdminService
 	return req, nil
 }
 
-// NewRbacAdminServiceCreateRoleRequest calls the generic RbacAdminServiceCreateRole builder with application/json body
-func NewRbacAdminServiceCreateRoleRequest(server string, body RbacAdminServiceCreateRoleJSONRequestBody) (*http.Request, error) {
+// NewAdminCreateRoleRequest calls the generic AdminCreateRole builder with application/json body
+func NewAdminCreateRoleRequest(server string, body AdminCreateRoleJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewRbacAdminServiceCreateRoleRequestWithBody(server, "application/json", bodyReader)
+	return NewAdminCreateRoleRequestWithBody(server, "application/json", bodyReader)
 }
 
-// NewRbacAdminServiceCreateRoleRequestWithBody constructs an http.Request for the RbacAdminServiceCreateRole method, with any body, and a specified content type
-func NewRbacAdminServiceCreateRoleRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+// NewAdminCreateRoleRequestWithBody constructs an http.Request for the AdminCreateRole method, with any body, and a specified content type
+func NewAdminCreateRoleRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -6108,6 +5450,148 @@ func NewRbacAdminServiceCreateRoleRequestWithBody(server string, contentType str
 	}
 
 	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewAdminDeleteRoleRequest constructs an http.Request for the AdminDeleteRole method
+func NewAdminDeleteRoleRequest(server string, id string, params *AdminDeleteRoleParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/roles/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if params.Cascade != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "cascade", *params.Cascade, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
+	}
+
+	req, err := http.NewRequest(http.MethodDelete, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewAdminGetRoleRequest constructs an http.Request for the AdminGetRole method
+func NewAdminGetRoleRequest(server string, id string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/roles/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewAdminUpdateRoleRequest calls the generic AdminUpdateRole builder with application/json body
+func NewAdminUpdateRoleRequest(server string, id string, body AdminUpdateRoleJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewAdminUpdateRoleRequestWithBody(server, id, "application/json", bodyReader)
+}
+
+// NewAdminUpdateRoleRequestWithBody constructs an http.Request for the AdminUpdateRole method, with any body, and a specified content type
+func NewAdminUpdateRoleRequestWithBody(server string, id string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/roles/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPatch, queryURL.String(), body)
 	if err != nil {
 		return nil, err
 	}
@@ -6186,187 +5670,6 @@ func NewAdminListRoleMembersRequest(server string, id string, params *AdminListR
 	if err != nil {
 		return nil, err
 	}
-
-	return req, nil
-}
-
-// NewRbacAdminServiceDeleteRoleRequest constructs an http.Request for the RbacAdminServiceDeleteRole method
-func NewRbacAdminServiceDeleteRoleRequest(server string, roleId string, params *RbacAdminServiceDeleteRoleParams) (*http.Request, error) {
-	var err error
-
-	var pathParam0 string
-
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "roleId", roleId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
-	if err != nil {
-		return nil, err
-	}
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/admin/roles/%s", pathParam0)
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	if params != nil {
-		// queryValues collects non-styled parameters (passthrough, JSON)
-		// that are safe to round-trip through url.Values.Encode().
-		queryValues := queryURL.Query()
-		// rawQueryFragments collects pre-encoded query fragments from
-		// styled parameters, preserving literal commas as delimiters
-		// per the OpenAPI spec (e.g. "color=blue,black,brown").
-		var rawQueryFragments []string
-
-		if params.RealmId != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "realmId", *params.RealmId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
-		if params.Cascade != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "cascade", *params.Cascade, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
-		if encoded := queryValues.Encode(); encoded != "" {
-			rawQueryFragments = append(rawQueryFragments, encoded)
-		}
-		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
-	}
-
-	req, err := http.NewRequest(http.MethodDelete, queryURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return req, nil
-}
-
-// NewRbacAdminServiceGetRoleRequest constructs an http.Request for the RbacAdminServiceGetRole method
-func NewRbacAdminServiceGetRoleRequest(server string, roleId string, params *RbacAdminServiceGetRoleParams) (*http.Request, error) {
-	var err error
-
-	var pathParam0 string
-
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "roleId", roleId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
-	if err != nil {
-		return nil, err
-	}
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/admin/roles/%s", pathParam0)
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	if params != nil {
-		// queryValues collects non-styled parameters (passthrough, JSON)
-		// that are safe to round-trip through url.Values.Encode().
-		queryValues := queryURL.Query()
-		// rawQueryFragments collects pre-encoded query fragments from
-		// styled parameters, preserving literal commas as delimiters
-		// per the OpenAPI spec (e.g. "color=blue,black,brown").
-		var rawQueryFragments []string
-
-		if params.RealmId != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "realmId", *params.RealmId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
-		if encoded := queryValues.Encode(); encoded != "" {
-			rawQueryFragments = append(rawQueryFragments, encoded)
-		}
-		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
-	}
-
-	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return req, nil
-}
-
-// NewRbacAdminServiceUpdateRoleRequest calls the generic RbacAdminServiceUpdateRole builder with application/json body
-func NewRbacAdminServiceUpdateRoleRequest(server string, roleId string, body RbacAdminServiceUpdateRoleJSONRequestBody) (*http.Request, error) {
-	var bodyReader io.Reader
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	bodyReader = bytes.NewReader(buf)
-	return NewRbacAdminServiceUpdateRoleRequestWithBody(server, roleId, "application/json", bodyReader)
-}
-
-// NewRbacAdminServiceUpdateRoleRequestWithBody constructs an http.Request for the RbacAdminServiceUpdateRole method, with any body, and a specified content type
-func NewRbacAdminServiceUpdateRoleRequestWithBody(server string, roleId string, contentType string, body io.Reader) (*http.Request, error) {
-	var err error
-
-	var pathParam0 string
-
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "roleId", roleId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
-	if err != nil {
-		return nil, err
-	}
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/admin/roles/%s", pathParam0)
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest(http.MethodPatch, queryURL.String(), body)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -6869,13 +6172,94 @@ func NewAdminRevokeUserPermissionRequest(server string, id string, permission st
 	return req, nil
 }
 
+// NewAdminListUserAssignmentsRequest constructs an http.Request for the AdminListUserAssignments method
+func NewAdminListUserAssignmentsRequest(server string, id string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/users/%s/roles", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewAdminAssignUserRoleRequest calls the generic AdminAssignUserRole builder with application/json body
+func NewAdminAssignUserRoleRequest(server string, id string, body AdminAssignUserRoleJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewAdminAssignUserRoleRequestWithBody(server, id, "application/json", bodyReader)
+}
+
+// NewAdminAssignUserRoleRequestWithBody constructs an http.Request for the AdminAssignUserRole method, with any body, and a specified content type
+func NewAdminAssignUserRoleRequestWithBody(server string, id string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/users/%s/roles", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewRbacAdminServiceListUserConsentsRequest constructs an http.Request for the RbacAdminServiceListUserConsents method
 func NewRbacAdminServiceListUserConsentsRequest(server string, userId string, params *RbacAdminServiceListUserConsentsParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
 
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "userId", userId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "user_id", userId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
 	if err != nil {
 		return nil, err
 	}
@@ -6906,7 +6290,7 @@ func NewRbacAdminServiceListUserConsentsRequest(server string, userId string, pa
 
 		if params.RealmId != nil {
 
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "realmId", *params.RealmId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "realm_id", *params.RealmId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
 				return nil, err
 			} else {
 				for _, qp := range strings.Split(queryFrag, "&") {
@@ -6936,14 +6320,14 @@ func NewRbacAdminServiceRevokeConsentRequest(server string, userId string, clien
 
 	var pathParam0 string
 
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "userId", userId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "user_id", userId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
 	if err != nil {
 		return nil, err
 	}
 
 	var pathParam1 string
 
-	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "clientId", clientId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "client_id", clientId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
 	if err != nil {
 		return nil, err
 	}
@@ -6974,7 +6358,7 @@ func NewRbacAdminServiceRevokeConsentRequest(server string, userId string, clien
 
 		if params.RealmId != nil {
 
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "realmId", *params.RealmId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "realm_id", *params.RealmId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
 				return nil, err
 			} else {
 				for _, qp := range strings.Split(queryFrag, "&") {
@@ -7004,7 +6388,7 @@ func NewRbacAdminServiceResolveEffectivePermissionsRequest(server string, userId
 
 	var pathParam0 string
 
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "userId", userId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "user_id", userId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
 	if err != nil {
 		return nil, err
 	}
@@ -7035,7 +6419,7 @@ func NewRbacAdminServiceResolveEffectivePermissionsRequest(server string, userId
 
 		if params.RealmId != nil {
 
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "realmId", *params.RealmId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "realm_id", *params.RealmId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
 				return nil, err
 			} else {
 				for _, qp := range strings.Split(queryFrag, "&") {
@@ -7047,7 +6431,7 @@ func NewRbacAdminServiceResolveEffectivePermissionsRequest(server string, userId
 
 		if params.OrgId != nil {
 
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "orgId", *params.OrgId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "org_id", *params.OrgId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
 				return nil, err
 			} else {
 				for _, qp := range strings.Split(queryFrag, "&") {
@@ -7079,114 +6463,6 @@ func NewRbacAdminServiceResolveEffectivePermissionsRequest(server string, userId
 	if err != nil {
 		return nil, err
 	}
-
-	return req, nil
-}
-
-// NewRbacAdminServiceListUserAssignmentsRequest constructs an http.Request for the RbacAdminServiceListUserAssignments method
-func NewRbacAdminServiceListUserAssignmentsRequest(server string, userId string, params *RbacAdminServiceListUserAssignmentsParams) (*http.Request, error) {
-	var err error
-
-	var pathParam0 string
-
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "userId", userId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
-	if err != nil {
-		return nil, err
-	}
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/admin/users/%s/roles", pathParam0)
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	if params != nil {
-		// queryValues collects non-styled parameters (passthrough, JSON)
-		// that are safe to round-trip through url.Values.Encode().
-		queryValues := queryURL.Query()
-		// rawQueryFragments collects pre-encoded query fragments from
-		// styled parameters, preserving literal commas as delimiters
-		// per the OpenAPI spec (e.g. "color=blue,black,brown").
-		var rawQueryFragments []string
-
-		if params.RealmId != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "realmId", *params.RealmId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-				return nil, err
-			} else {
-				for _, qp := range strings.Split(queryFrag, "&") {
-					rawQueryFragments = append(rawQueryFragments, qp)
-				}
-			}
-
-		}
-
-		if encoded := queryValues.Encode(); encoded != "" {
-			rawQueryFragments = append(rawQueryFragments, encoded)
-		}
-		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
-	}
-
-	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return req, nil
-}
-
-// NewRbacAdminServiceAssignUserRoleRequest calls the generic RbacAdminServiceAssignUserRole builder with application/json body
-func NewRbacAdminServiceAssignUserRoleRequest(server string, userId string, body RbacAdminServiceAssignUserRoleJSONRequestBody) (*http.Request, error) {
-	var bodyReader io.Reader
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	bodyReader = bytes.NewReader(buf)
-	return NewRbacAdminServiceAssignUserRoleRequestWithBody(server, userId, "application/json", bodyReader)
-}
-
-// NewRbacAdminServiceAssignUserRoleRequestWithBody constructs an http.Request for the RbacAdminServiceAssignUserRole method, with any body, and a specified content type
-func NewRbacAdminServiceAssignUserRoleRequestWithBody(server string, userId string, contentType string, body io.Reader) (*http.Request, error) {
-	var err error
-
-	var pathParam0 string
-
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "userId", userId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
-	if err != nil {
-		return nil, err
-	}
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/admin/users/%s/roles", pathParam0)
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -7466,23 +6742,23 @@ type ClientWithResponsesInterface interface {
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	ApplicationAdminServiceCreateApplicationWithResponse(ctx context.Context, body ApplicationAdminServiceCreateApplicationJSONRequestBody, reqEditors ...RequestEditorFn) (*ApplicationAdminServiceCreateApplicationResponse, error)
 
-	// ApplicationAdminServiceDeleteApplicationWithResponse performs a DELETE /admin/applications/{clientId} (the `ApplicationAdminServiceDeleteApplication` operationId) request.
+	// ApplicationAdminServiceDeleteApplicationWithResponse performs a DELETE /admin/applications/{client_id} (the `ApplicationAdminServiceDeleteApplication` operationId) request.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	ApplicationAdminServiceDeleteApplicationWithResponse(ctx context.Context, clientId string, reqEditors ...RequestEditorFn) (*ApplicationAdminServiceDeleteApplicationResponse, error)
 
-	// ApplicationAdminServiceGetApplicationWithResponse performs a GET /admin/applications/{clientId} (the `ApplicationAdminServiceGetApplication` operationId) request.
+	// ApplicationAdminServiceGetApplicationWithResponse performs a GET /admin/applications/{client_id} (the `ApplicationAdminServiceGetApplication` operationId) request.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	ApplicationAdminServiceGetApplicationWithResponse(ctx context.Context, clientId string, reqEditors ...RequestEditorFn) (*ApplicationAdminServiceGetApplicationResponse, error)
 
-	// ApplicationAdminServiceUpdateApplicationWithBodyWithResponse performs a PATCH /admin/applications/{clientId} (the `ApplicationAdminServiceUpdateApplication` operationId) request,
+	// ApplicationAdminServiceUpdateApplicationWithBodyWithResponse performs a PATCH /admin/applications/{client_id} (the `ApplicationAdminServiceUpdateApplication` operationId) request,
 	// with any type of body and a specified content type.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	ApplicationAdminServiceUpdateApplicationWithBodyWithResponse(ctx context.Context, clientId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ApplicationAdminServiceUpdateApplicationResponse, error)
 
-	// ApplicationAdminServiceUpdateApplicationWithResponse performs a PATCH /admin/applications/{clientId} (the `ApplicationAdminServiceUpdateApplication` operationId) request.
+	// ApplicationAdminServiceUpdateApplicationWithResponse performs a PATCH /admin/applications/{client_id} (the `ApplicationAdminServiceUpdateApplication` operationId) request.
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	ApplicationAdminServiceUpdateApplicationWithResponse(ctx context.Context, clientId string, body ApplicationAdminServiceUpdateApplicationJSONRequestBody, reqEditors ...RequestEditorFn) (*ApplicationAdminServiceUpdateApplicationResponse, error)
 
@@ -7493,7 +6769,7 @@ type ClientWithResponsesInterface interface {
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
-	// Corresponds with POST /admin/applications/{clientId}/regenerate-secret (the `ApplicationAdminServiceRegenerateApplicationSecret` operationId).
+	// Corresponds with POST /admin/applications/{client_id}/regenerate-secret (the `ApplicationAdminServiceRegenerateApplicationSecret` operationId).
 	ApplicationAdminServiceRegenerateApplicationSecretWithResponse(ctx context.Context, clientId string, reqEditors ...RequestEditorFn) (*ApplicationAdminServiceRegenerateApplicationSecretResponse, error)
 
 	// AdminUnassignRoleWithResponse Delete a role assignment
@@ -7503,12 +6779,14 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with DELETE /admin/assignments/{id} (the `AdminUnassignRole` operationId).
 	AdminUnassignRoleWithResponse(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*AdminUnassignRoleResponse, error)
 
-	// AuditServiceListEventsWithResponse Query audit events with optional filters. Maps to GET /admin/audit.
+	// AdminListAuditEventsWithResponse List audit events
+	//
+	// Requires `hearth.realm.admin`. Newest first.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
-	// Corresponds with GET /admin/audit (the `AuditServiceListEvents` operationId).
-	AuditServiceListEventsWithResponse(ctx context.Context, params *AuditServiceListEventsParams, reqEditors ...RequestEditorFn) (*AuditServiceListEventsResponse, error)
+	// Corresponds with GET /admin/audit (the `AdminListAuditEvents` operationId).
+	AdminListAuditEventsWithResponse(ctx context.Context, params *AdminListAuditEventsParams, reqEditors ...RequestEditorFn) (*AdminListAuditEventsResponse, error)
 
 	// AdminVerifyAuditWithResponse Verify the realm's audit hash chain
 	//
@@ -7567,55 +6845,81 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with POST /admin/cluster/transfer-leadership (the `AdminClusterTransferLeadership` operationId).
 	AdminClusterTransferLeadershipWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AdminClusterTransferLeadershipResponse, error)
 
-	// RbacAdminServiceListGroupsWithResponse performs a GET /admin/groups (the `RbacAdminServiceListGroups` operationId) request.
+	// AdminListGroupsWithResponse List groups
+	//
+	// `cursor` is a decimal offset; follow `next_cursor` until it is null.
 	//
 	// Returns a wrapper object for the known response body format(s).
-	RbacAdminServiceListGroupsWithResponse(ctx context.Context, params *RbacAdminServiceListGroupsParams, reqEditors ...RequestEditorFn) (*RbacAdminServiceListGroupsResponse, error)
-
-	// RbacAdminServiceCreateGroupWithBodyWithResponse performs a POST /admin/groups (the `RbacAdminServiceCreateGroup` operationId) request,
-	// with any type of body and a specified content type.
 	//
-	// Returns a wrapper object for the known response body format(s).
-	RbacAdminServiceCreateGroupWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RbacAdminServiceCreateGroupResponse, error)
+	// Corresponds with GET /admin/groups (the `AdminListGroups` operationId).
+	AdminListGroupsWithResponse(ctx context.Context, params *AdminListGroupsParams, reqEditors ...RequestEditorFn) (*AdminListGroupsResponse, error)
 
-	// RbacAdminServiceCreateGroupWithResponse performs a POST /admin/groups (the `RbacAdminServiceCreateGroup` operationId) request.
+	// AdminCreateGroupWithBodyWithResponse Create a group
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/groups (the `AdminCreateGroup` operationId).
+	AdminCreateGroupWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AdminCreateGroupResponse, error)
+
+	// AdminCreateGroupWithResponse Create a group
+	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
-	RbacAdminServiceCreateGroupWithResponse(ctx context.Context, body RbacAdminServiceCreateGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*RbacAdminServiceCreateGroupResponse, error)
+	//
+	// Corresponds with POST /admin/groups (the `AdminCreateGroup` operationId).
+	AdminCreateGroupWithResponse(ctx context.Context, body AdminCreateGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*AdminCreateGroupResponse, error)
 
-	// RbacAdminServiceDeleteGroupWithResponse performs a DELETE /admin/groups/{groupId} (the `RbacAdminServiceDeleteGroup` operationId) request.
+	// AdminDeleteGroupWithResponse Delete a group
 	//
 	// Returns a wrapper object for the known response body format(s).
-	RbacAdminServiceDeleteGroupWithResponse(ctx context.Context, groupId string, params *RbacAdminServiceDeleteGroupParams, reqEditors ...RequestEditorFn) (*RbacAdminServiceDeleteGroupResponse, error)
+	//
+	// Corresponds with DELETE /admin/groups/{id} (the `AdminDeleteGroup` operationId).
+	AdminDeleteGroupWithResponse(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*AdminDeleteGroupResponse, error)
 
-	// RbacAdminServiceGetGroupWithResponse performs a GET /admin/groups/{groupId} (the `RbacAdminServiceGetGroup` operationId) request.
+	// AdminGetGroupWithResponse Get a group
 	//
 	// Returns a wrapper object for the known response body format(s).
-	RbacAdminServiceGetGroupWithResponse(ctx context.Context, groupId string, params *RbacAdminServiceGetGroupParams, reqEditors ...RequestEditorFn) (*RbacAdminServiceGetGroupResponse, error)
-
-	// RbacAdminServiceUpdateGroupWithBodyWithResponse performs a PATCH /admin/groups/{groupId} (the `RbacAdminServiceUpdateGroup` operationId) request,
-	// with any type of body and a specified content type.
 	//
-	// Returns a wrapper object for the known response body format(s).
-	RbacAdminServiceUpdateGroupWithBodyWithResponse(ctx context.Context, groupId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RbacAdminServiceUpdateGroupResponse, error)
+	// Corresponds with GET /admin/groups/{id} (the `AdminGetGroup` operationId).
+	AdminGetGroupWithResponse(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*AdminGetGroupResponse, error)
 
-	// RbacAdminServiceUpdateGroupWithResponse performs a PATCH /admin/groups/{groupId} (the `RbacAdminServiceUpdateGroup` operationId) request.
+	// AdminUpdateGroupWithBodyWithResponse Update a group
+	//
+	// Absent fields are unchanged; `description` null clears it.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PATCH /admin/groups/{id} (the `AdminUpdateGroup` operationId).
+	AdminUpdateGroupWithBodyWithResponse(ctx context.Context, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AdminUpdateGroupResponse, error)
+
+	// AdminUpdateGroupWithResponse Update a group
+	//
+	// Absent fields are unchanged; `description` null clears it.
+	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
-	RbacAdminServiceUpdateGroupWithResponse(ctx context.Context, groupId string, body RbacAdminServiceUpdateGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*RbacAdminServiceUpdateGroupResponse, error)
+	//
+	// Corresponds with PATCH /admin/groups/{id} (the `AdminUpdateGroup` operationId).
+	AdminUpdateGroupWithResponse(ctx context.Context, id string, body AdminUpdateGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*AdminUpdateGroupResponse, error)
 
-	// RbacAdminServiceListGroupMembersWithResponse performs a GET /admin/groups/{groupId}/members (the `RbacAdminServiceListGroupMembers` operationId) request.
+	// AdminListGroupMembersWithResponse List a group's members
 	//
 	// Returns a wrapper object for the known response body format(s).
-	RbacAdminServiceListGroupMembersWithResponse(ctx context.Context, groupId string, params *RbacAdminServiceListGroupMembersParams, reqEditors ...RequestEditorFn) (*RbacAdminServiceListGroupMembersResponse, error)
-
-	// RbacAdminServiceAddGroupMemberWithBodyWithResponse performs a POST /admin/groups/{groupId}/members (the `RbacAdminServiceAddGroupMember` operationId) request,
-	// with any type of body and a specified content type.
 	//
-	// Returns a wrapper object for the known response body format(s).
-	RbacAdminServiceAddGroupMemberWithBodyWithResponse(ctx context.Context, groupId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RbacAdminServiceAddGroupMemberResponse, error)
+	// Corresponds with GET /admin/groups/{id}/members (the `AdminListGroupMembers` operationId).
+	AdminListGroupMembersWithResponse(ctx context.Context, id string, params *AdminListGroupMembersParams, reqEditors ...RequestEditorFn) (*AdminListGroupMembersResponse, error)
 
-	// RbacAdminServiceAddGroupMemberWithResponse performs a POST /admin/groups/{groupId}/members (the `RbacAdminServiceAddGroupMember` operationId) request.
+	// AdminAddGroupMemberWithBodyWithResponse Add a member to a group
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/groups/{id}/members (the `AdminAddGroupMember` operationId).
+	AdminAddGroupMemberWithBodyWithResponse(ctx context.Context, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AdminAddGroupMemberResponse, error)
+
+	// AdminAddGroupMemberWithResponse Add a member to a group
+	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
-	RbacAdminServiceAddGroupMemberWithResponse(ctx context.Context, groupId string, body RbacAdminServiceAddGroupMemberJSONRequestBody, reqEditors ...RequestEditorFn) (*RbacAdminServiceAddGroupMemberResponse, error)
+	//
+	// Corresponds with POST /admin/groups/{id}/members (the `AdminAddGroupMember` operationId).
+	AdminAddGroupMemberWithResponse(ctx context.Context, id string, body AdminAddGroupMemberJSONRequestBody, reqEditors ...RequestEditorFn) (*AdminAddGroupMemberResponse, error)
 
 	// AdminRemoveGroupMemberWithResponse Remove a member from a group
 	//
@@ -7871,20 +7175,60 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with PATCH /admin/realms/{realm_id}/users/{user_id}/required-actions (the `AdminPatchUserRequiredActions` operationId).
 	AdminPatchUserRequiredActionsWithResponse(ctx context.Context, realmId string, userId string, body AdminPatchUserRequiredActionsJSONRequestBody, reqEditors ...RequestEditorFn) (*AdminPatchUserRequiredActionsResponse, error)
 
-	// RbacAdminServiceListRolesWithResponse performs a GET /admin/roles (the `RbacAdminServiceListRoles` operationId) request.
+	// AdminListRolesWithResponse List roles
+	//
+	// Requires `hearth.realm.admin`. Follow `next_cursor` until it is null.
 	//
 	// Returns a wrapper object for the known response body format(s).
-	RbacAdminServiceListRolesWithResponse(ctx context.Context, params *RbacAdminServiceListRolesParams, reqEditors ...RequestEditorFn) (*RbacAdminServiceListRolesResponse, error)
-
-	// RbacAdminServiceCreateRoleWithBodyWithResponse performs a POST /admin/roles (the `RbacAdminServiceCreateRole` operationId) request,
-	// with any type of body and a specified content type.
 	//
-	// Returns a wrapper object for the known response body format(s).
-	RbacAdminServiceCreateRoleWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RbacAdminServiceCreateRoleResponse, error)
+	// Corresponds with GET /admin/roles (the `AdminListRoles` operationId).
+	AdminListRolesWithResponse(ctx context.Context, params *AdminListRolesParams, reqEditors ...RequestEditorFn) (*AdminListRolesResponse, error)
 
-	// RbacAdminServiceCreateRoleWithResponse performs a POST /admin/roles (the `RbacAdminServiceCreateRole` operationId) request.
+	// AdminCreateRoleWithBodyWithResponse Create a role
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/roles (the `AdminCreateRole` operationId).
+	AdminCreateRoleWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AdminCreateRoleResponse, error)
+
+	// AdminCreateRoleWithResponse Create a role
+	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
-	RbacAdminServiceCreateRoleWithResponse(ctx context.Context, body RbacAdminServiceCreateRoleJSONRequestBody, reqEditors ...RequestEditorFn) (*RbacAdminServiceCreateRoleResponse, error)
+	//
+	// Corresponds with POST /admin/roles (the `AdminCreateRole` operationId).
+	AdminCreateRoleWithResponse(ctx context.Context, body AdminCreateRoleJSONRequestBody, reqEditors ...RequestEditorFn) (*AdminCreateRoleResponse, error)
+
+	// AdminDeleteRoleWithResponse Delete a role
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with DELETE /admin/roles/{id} (the `AdminDeleteRole` operationId).
+	AdminDeleteRoleWithResponse(ctx context.Context, id string, params *AdminDeleteRoleParams, reqEditors ...RequestEditorFn) (*AdminDeleteRoleResponse, error)
+
+	// AdminGetRoleWithResponse Get a role
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/roles/{id} (the `AdminGetRole` operationId).
+	AdminGetRoleWithResponse(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*AdminGetRoleResponse, error)
+
+	// AdminUpdateRoleWithBodyWithResponse Update a role
+	//
+	// Absent fields are unchanged; `description` null clears it.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PATCH /admin/roles/{id} (the `AdminUpdateRole` operationId).
+	AdminUpdateRoleWithBodyWithResponse(ctx context.Context, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AdminUpdateRoleResponse, error)
+
+	// AdminUpdateRoleWithResponse Update a role
+	//
+	// Absent fields are unchanged; `description` null clears it.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PATCH /admin/roles/{id} (the `AdminUpdateRole` operationId).
+	AdminUpdateRoleWithResponse(ctx context.Context, id string, body AdminUpdateRoleJSONRequestBody, reqEditors ...RequestEditorFn) (*AdminUpdateRoleResponse, error)
 
 	// AdminListRoleMembersWithResponse List the users and groups holding a role
 	//
@@ -7892,26 +7236,6 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with GET /admin/roles/{id}/members (the `AdminListRoleMembers` operationId).
 	AdminListRoleMembersWithResponse(ctx context.Context, id string, params *AdminListRoleMembersParams, reqEditors ...RequestEditorFn) (*AdminListRoleMembersResponse, error)
-
-	// RbacAdminServiceDeleteRoleWithResponse performs a DELETE /admin/roles/{roleId} (the `RbacAdminServiceDeleteRole` operationId) request.
-	//
-	// Returns a wrapper object for the known response body format(s).
-	RbacAdminServiceDeleteRoleWithResponse(ctx context.Context, roleId string, params *RbacAdminServiceDeleteRoleParams, reqEditors ...RequestEditorFn) (*RbacAdminServiceDeleteRoleResponse, error)
-
-	// RbacAdminServiceGetRoleWithResponse performs a GET /admin/roles/{roleId} (the `RbacAdminServiceGetRole` operationId) request.
-	//
-	// Returns a wrapper object for the known response body format(s).
-	RbacAdminServiceGetRoleWithResponse(ctx context.Context, roleId string, params *RbacAdminServiceGetRoleParams, reqEditors ...RequestEditorFn) (*RbacAdminServiceGetRoleResponse, error)
-
-	// RbacAdminServiceUpdateRoleWithBodyWithResponse performs a PATCH /admin/roles/{roleId} (the `RbacAdminServiceUpdateRole` operationId) request,
-	// with any type of body and a specified content type.
-	//
-	// Returns a wrapper object for the known response body format(s).
-	RbacAdminServiceUpdateRoleWithBodyWithResponse(ctx context.Context, roleId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RbacAdminServiceUpdateRoleResponse, error)
-
-	// RbacAdminServiceUpdateRoleWithResponse performs a PATCH /admin/roles/{roleId} (the `RbacAdminServiceUpdateRole` operationId) request.
-	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
-	RbacAdminServiceUpdateRoleWithResponse(ctx context.Context, roleId string, body RbacAdminServiceUpdateRoleJSONRequestBody, reqEditors ...RequestEditorFn) (*RbacAdminServiceUpdateRoleResponse, error)
 
 	// AdminSvBumpSessionWithResponse Bump session version (invalidates existing tokens)
 	//
@@ -8017,39 +7341,49 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with DELETE /admin/users/{id}/permissions/{permission} (the `AdminRevokeUserPermission` operationId).
 	AdminRevokeUserPermissionWithResponse(ctx context.Context, id string, permission string, params *AdminRevokeUserPermissionParams, reqEditors ...RequestEditorFn) (*AdminRevokeUserPermissionResponse, error)
 
+	// AdminListUserAssignmentsWithResponse List a user's role assignments
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /admin/users/{id}/roles (the `AdminListUserAssignments` operationId).
+	AdminListUserAssignmentsWithResponse(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*AdminListUserAssignmentsResponse, error)
+
+	// AdminAssignUserRoleWithBodyWithResponse Assign a role to a user
+	//
+	// Realm-wide, or inside one organization when `org_id` is set.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/users/{id}/roles (the `AdminAssignUserRole` operationId).
+	AdminAssignUserRoleWithBodyWithResponse(ctx context.Context, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AdminAssignUserRoleResponse, error)
+
+	// AdminAssignUserRoleWithResponse Assign a role to a user
+	//
+	// Realm-wide, or inside one organization when `org_id` is set.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/users/{id}/roles (the `AdminAssignUserRole` operationId).
+	AdminAssignUserRoleWithResponse(ctx context.Context, id string, body AdminAssignUserRoleJSONRequestBody, reqEditors ...RequestEditorFn) (*AdminAssignUserRoleResponse, error)
+
 	// RbacAdminServiceListUserConsentsWithResponse List all active consents for a user.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
-	// Corresponds with GET /admin/users/{userId}/consents (the `RbacAdminServiceListUserConsents` operationId).
+	// Corresponds with GET /admin/users/{user_id}/consents (the `RbacAdminServiceListUserConsents` operationId).
 	RbacAdminServiceListUserConsentsWithResponse(ctx context.Context, userId string, params *RbacAdminServiceListUserConsentsParams, reqEditors ...RequestEditorFn) (*RbacAdminServiceListUserConsentsResponse, error)
 
 	// RbacAdminServiceRevokeConsentWithResponse Revoke OAuth consent for a specific (user, client) pair.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	//
-	// Corresponds with DELETE /admin/users/{userId}/consents/{clientId} (the `RbacAdminServiceRevokeConsent` operationId).
+	// Corresponds with DELETE /admin/users/{user_id}/consents/{client_id} (the `RbacAdminServiceRevokeConsent` operationId).
 	RbacAdminServiceRevokeConsentWithResponse(ctx context.Context, userId string, clientId string, params *RbacAdminServiceRevokeConsentParams, reqEditors ...RequestEditorFn) (*RbacAdminServiceRevokeConsentResponse, error)
 
-	// RbacAdminServiceResolveEffectivePermissionsWithResponse performs a GET /admin/users/{userId}/effective-permissions (the `RbacAdminServiceResolveEffectivePermissions` operationId) request.
+	// RbacAdminServiceResolveEffectivePermissionsWithResponse performs a GET /admin/users/{user_id}/effective-permissions (the `RbacAdminServiceResolveEffectivePermissions` operationId) request.
 	//
 	// Returns a wrapper object for the known response body format(s).
 	RbacAdminServiceResolveEffectivePermissionsWithResponse(ctx context.Context, userId string, params *RbacAdminServiceResolveEffectivePermissionsParams, reqEditors ...RequestEditorFn) (*RbacAdminServiceResolveEffectivePermissionsResponse, error)
-
-	// RbacAdminServiceListUserAssignmentsWithResponse performs a GET /admin/users/{userId}/roles (the `RbacAdminServiceListUserAssignments` operationId) request.
-	//
-	// Returns a wrapper object for the known response body format(s).
-	RbacAdminServiceListUserAssignmentsWithResponse(ctx context.Context, userId string, params *RbacAdminServiceListUserAssignmentsParams, reqEditors ...RequestEditorFn) (*RbacAdminServiceListUserAssignmentsResponse, error)
-
-	// RbacAdminServiceAssignUserRoleWithBodyWithResponse performs a POST /admin/users/{userId}/roles (the `RbacAdminServiceAssignUserRole` operationId) request,
-	// with any type of body and a specified content type.
-	//
-	// Returns a wrapper object for the known response body format(s).
-	RbacAdminServiceAssignUserRoleWithBodyWithResponse(ctx context.Context, userId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RbacAdminServiceAssignUserRoleResponse, error)
-
-	// RbacAdminServiceAssignUserRoleWithResponse performs a POST /admin/users/{userId}/roles (the `RbacAdminServiceAssignUserRole` operationId) request.
-	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
-	RbacAdminServiceAssignUserRoleWithResponse(ctx context.Context, userId string, body RbacAdminServiceAssignUserRoleJSONRequestBody, reqEditors ...RequestEditorFn) (*RbacAdminServiceAssignUserRoleResponse, error)
 
 	// AdminListWebhooksWithResponse List webhooks
 	//
@@ -8207,15 +7541,8 @@ func (r ApplicationAdminServiceCreateApplicationResponse) ContentType() string {
 type ApplicationAdminServiceDeleteApplicationResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	// JSON200 the response for an HTTP 200 `application/json` response
-	JSON200 *V1OAuthEmpty
 	// JSONDefault the response for an HTTP default `application/json` response
 	JSONDefault *RpcStatus
-}
-
-// GetJSON200 returns the response for an HTTP 200 `application/json` response
-func (r ApplicationAdminServiceDeleteApplicationResponse) GetJSON200() *V1OAuthEmpty {
-	return r.JSON200
 }
 
 // GetJSONDefault returns the response for an HTTP default `application/json` response
@@ -8430,32 +7757,25 @@ func (r AdminUnassignRoleResponse) ContentType() string {
 	return ""
 }
 
-type AuditServiceListEventsResponse struct {
+type AdminListAuditEventsResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	// JSON200 the response for an HTTP 200 `application/json` response
-	JSON200 *V1AuditEventPage
-	// JSONDefault the response for an HTTP default `application/json` response
-	JSONDefault *RpcStatus
+	JSON200 *AdminAuditEventList
 }
 
 // GetJSON200 returns the response for an HTTP 200 `application/json` response
-func (r AuditServiceListEventsResponse) GetJSON200() *V1AuditEventPage {
+func (r AdminListAuditEventsResponse) GetJSON200() *AdminAuditEventList {
 	return r.JSON200
 }
 
-// GetJSONDefault returns the response for an HTTP default `application/json` response
-func (r AuditServiceListEventsResponse) GetJSONDefault() *RpcStatus {
-	return r.JSONDefault
-}
-
 // GetBody returns the raw response body bytes
-func (r AuditServiceListEventsResponse) GetBody() []byte {
+func (r AdminListAuditEventsResponse) GetBody() []byte {
 	return r.Body
 }
 
 // Status returns HTTPResponse.Status
-func (r AuditServiceListEventsResponse) Status() string {
+func (r AdminListAuditEventsResponse) Status() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Status
 	}
@@ -8463,7 +7783,7 @@ func (r AuditServiceListEventsResponse) Status() string {
 }
 
 // StatusCode returns HTTPResponse.StatusCode
-func (r AuditServiceListEventsResponse) StatusCode() int {
+func (r AdminListAuditEventsResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -8471,7 +7791,7 @@ func (r AuditServiceListEventsResponse) StatusCode() int {
 }
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
-func (r AuditServiceListEventsResponse) ContentType() string {
+func (r AdminListAuditEventsResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -8797,32 +8117,25 @@ func (r AdminClusterTransferLeadershipResponse) ContentType() string {
 	return ""
 }
 
-type RbacAdminServiceListGroupsResponse struct {
+type AdminListGroupsResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	// JSON200 the response for an HTTP 200 `application/json` response
-	JSON200 *V1ListGroupsResponse
-	// JSONDefault the response for an HTTP default `application/json` response
-	JSONDefault *RpcStatus
+	JSON200 *AdminGroupPage
 }
 
 // GetJSON200 returns the response for an HTTP 200 `application/json` response
-func (r RbacAdminServiceListGroupsResponse) GetJSON200() *V1ListGroupsResponse {
+func (r AdminListGroupsResponse) GetJSON200() *AdminGroupPage {
 	return r.JSON200
 }
 
-// GetJSONDefault returns the response for an HTTP default `application/json` response
-func (r RbacAdminServiceListGroupsResponse) GetJSONDefault() *RpcStatus {
-	return r.JSONDefault
-}
-
 // GetBody returns the raw response body bytes
-func (r RbacAdminServiceListGroupsResponse) GetBody() []byte {
+func (r AdminListGroupsResponse) GetBody() []byte {
 	return r.Body
 }
 
 // Status returns HTTPResponse.Status
-func (r RbacAdminServiceListGroupsResponse) Status() string {
+func (r AdminListGroupsResponse) Status() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Status
 	}
@@ -8830,7 +8143,7 @@ func (r RbacAdminServiceListGroupsResponse) Status() string {
 }
 
 // StatusCode returns HTTPResponse.StatusCode
-func (r RbacAdminServiceListGroupsResponse) StatusCode() int {
+func (r AdminListGroupsResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -8838,39 +8151,32 @@ func (r RbacAdminServiceListGroupsResponse) StatusCode() int {
 }
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
-func (r RbacAdminServiceListGroupsResponse) ContentType() string {
+func (r AdminListGroupsResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
 	return ""
 }
 
-type RbacAdminServiceCreateGroupResponse struct {
+type AdminCreateGroupResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	// JSON200 the response for an HTTP 200 `application/json` response
-	JSON200 *V1Group
-	// JSONDefault the response for an HTTP default `application/json` response
-	JSONDefault *RpcStatus
+	// JSON201 the response for an HTTP 201 `application/json` response
+	JSON201 *AdminGroup
 }
 
-// GetJSON200 returns the response for an HTTP 200 `application/json` response
-func (r RbacAdminServiceCreateGroupResponse) GetJSON200() *V1Group {
-	return r.JSON200
-}
-
-// GetJSONDefault returns the response for an HTTP default `application/json` response
-func (r RbacAdminServiceCreateGroupResponse) GetJSONDefault() *RpcStatus {
-	return r.JSONDefault
+// GetJSON201 returns the response for an HTTP 201 `application/json` response
+func (r AdminCreateGroupResponse) GetJSON201() *AdminGroup {
+	return r.JSON201
 }
 
 // GetBody returns the raw response body bytes
-func (r RbacAdminServiceCreateGroupResponse) GetBody() []byte {
+func (r AdminCreateGroupResponse) GetBody() []byte {
 	return r.Body
 }
 
 // Status returns HTTPResponse.Status
-func (r RbacAdminServiceCreateGroupResponse) Status() string {
+func (r AdminCreateGroupResponse) Status() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Status
 	}
@@ -8878,7 +8184,7 @@ func (r RbacAdminServiceCreateGroupResponse) Status() string {
 }
 
 // StatusCode returns HTTPResponse.StatusCode
-func (r RbacAdminServiceCreateGroupResponse) StatusCode() int {
+func (r AdminCreateGroupResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -8886,39 +8192,25 @@ func (r RbacAdminServiceCreateGroupResponse) StatusCode() int {
 }
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
-func (r RbacAdminServiceCreateGroupResponse) ContentType() string {
+func (r AdminCreateGroupResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
 	return ""
 }
 
-type RbacAdminServiceDeleteGroupResponse struct {
+type AdminDeleteGroupResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	// JSON200 the response for an HTTP 200 `application/json` response
-	JSON200 *V1DeleteGroupResponse
-	// JSONDefault the response for an HTTP default `application/json` response
-	JSONDefault *RpcStatus
-}
-
-// GetJSON200 returns the response for an HTTP 200 `application/json` response
-func (r RbacAdminServiceDeleteGroupResponse) GetJSON200() *V1DeleteGroupResponse {
-	return r.JSON200
-}
-
-// GetJSONDefault returns the response for an HTTP default `application/json` response
-func (r RbacAdminServiceDeleteGroupResponse) GetJSONDefault() *RpcStatus {
-	return r.JSONDefault
 }
 
 // GetBody returns the raw response body bytes
-func (r RbacAdminServiceDeleteGroupResponse) GetBody() []byte {
+func (r AdminDeleteGroupResponse) GetBody() []byte {
 	return r.Body
 }
 
 // Status returns HTTPResponse.Status
-func (r RbacAdminServiceDeleteGroupResponse) Status() string {
+func (r AdminDeleteGroupResponse) Status() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Status
 	}
@@ -8926,7 +8218,7 @@ func (r RbacAdminServiceDeleteGroupResponse) Status() string {
 }
 
 // StatusCode returns HTTPResponse.StatusCode
-func (r RbacAdminServiceDeleteGroupResponse) StatusCode() int {
+func (r AdminDeleteGroupResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -8934,39 +8226,32 @@ func (r RbacAdminServiceDeleteGroupResponse) StatusCode() int {
 }
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
-func (r RbacAdminServiceDeleteGroupResponse) ContentType() string {
+func (r AdminDeleteGroupResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
 	return ""
 }
 
-type RbacAdminServiceGetGroupResponse struct {
+type AdminGetGroupResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	// JSON200 the response for an HTTP 200 `application/json` response
-	JSON200 *V1Group
-	// JSONDefault the response for an HTTP default `application/json` response
-	JSONDefault *RpcStatus
+	JSON200 *AdminGroup
 }
 
 // GetJSON200 returns the response for an HTTP 200 `application/json` response
-func (r RbacAdminServiceGetGroupResponse) GetJSON200() *V1Group {
+func (r AdminGetGroupResponse) GetJSON200() *AdminGroup {
 	return r.JSON200
 }
 
-// GetJSONDefault returns the response for an HTTP default `application/json` response
-func (r RbacAdminServiceGetGroupResponse) GetJSONDefault() *RpcStatus {
-	return r.JSONDefault
-}
-
 // GetBody returns the raw response body bytes
-func (r RbacAdminServiceGetGroupResponse) GetBody() []byte {
+func (r AdminGetGroupResponse) GetBody() []byte {
 	return r.Body
 }
 
 // Status returns HTTPResponse.Status
-func (r RbacAdminServiceGetGroupResponse) Status() string {
+func (r AdminGetGroupResponse) Status() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Status
 	}
@@ -8974,7 +8259,7 @@ func (r RbacAdminServiceGetGroupResponse) Status() string {
 }
 
 // StatusCode returns HTTPResponse.StatusCode
-func (r RbacAdminServiceGetGroupResponse) StatusCode() int {
+func (r AdminGetGroupResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -8982,39 +8267,32 @@ func (r RbacAdminServiceGetGroupResponse) StatusCode() int {
 }
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
-func (r RbacAdminServiceGetGroupResponse) ContentType() string {
+func (r AdminGetGroupResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
 	return ""
 }
 
-type RbacAdminServiceUpdateGroupResponse struct {
+type AdminUpdateGroupResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	// JSON200 the response for an HTTP 200 `application/json` response
-	JSON200 *V1Group
-	// JSONDefault the response for an HTTP default `application/json` response
-	JSONDefault *RpcStatus
+	JSON200 *AdminGroup
 }
 
 // GetJSON200 returns the response for an HTTP 200 `application/json` response
-func (r RbacAdminServiceUpdateGroupResponse) GetJSON200() *V1Group {
+func (r AdminUpdateGroupResponse) GetJSON200() *AdminGroup {
 	return r.JSON200
 }
 
-// GetJSONDefault returns the response for an HTTP default `application/json` response
-func (r RbacAdminServiceUpdateGroupResponse) GetJSONDefault() *RpcStatus {
-	return r.JSONDefault
-}
-
 // GetBody returns the raw response body bytes
-func (r RbacAdminServiceUpdateGroupResponse) GetBody() []byte {
+func (r AdminUpdateGroupResponse) GetBody() []byte {
 	return r.Body
 }
 
 // Status returns HTTPResponse.Status
-func (r RbacAdminServiceUpdateGroupResponse) Status() string {
+func (r AdminUpdateGroupResponse) Status() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Status
 	}
@@ -9022,7 +8300,7 @@ func (r RbacAdminServiceUpdateGroupResponse) Status() string {
 }
 
 // StatusCode returns HTTPResponse.StatusCode
-func (r RbacAdminServiceUpdateGroupResponse) StatusCode() int {
+func (r AdminUpdateGroupResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -9030,39 +8308,32 @@ func (r RbacAdminServiceUpdateGroupResponse) StatusCode() int {
 }
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
-func (r RbacAdminServiceUpdateGroupResponse) ContentType() string {
+func (r AdminUpdateGroupResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
 	return ""
 }
 
-type RbacAdminServiceListGroupMembersResponse struct {
+type AdminListGroupMembersResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	// JSON200 the response for an HTTP 200 `application/json` response
-	JSON200 *V1ListGroupMembersResponse
-	// JSONDefault the response for an HTTP default `application/json` response
-	JSONDefault *RpcStatus
+	JSON200 *AdminGroupMemberPage
 }
 
 // GetJSON200 returns the response for an HTTP 200 `application/json` response
-func (r RbacAdminServiceListGroupMembersResponse) GetJSON200() *V1ListGroupMembersResponse {
+func (r AdminListGroupMembersResponse) GetJSON200() *AdminGroupMemberPage {
 	return r.JSON200
 }
 
-// GetJSONDefault returns the response for an HTTP default `application/json` response
-func (r RbacAdminServiceListGroupMembersResponse) GetJSONDefault() *RpcStatus {
-	return r.JSONDefault
-}
-
 // GetBody returns the raw response body bytes
-func (r RbacAdminServiceListGroupMembersResponse) GetBody() []byte {
+func (r AdminListGroupMembersResponse) GetBody() []byte {
 	return r.Body
 }
 
 // Status returns HTTPResponse.Status
-func (r RbacAdminServiceListGroupMembersResponse) Status() string {
+func (r AdminListGroupMembersResponse) Status() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Status
 	}
@@ -9070,7 +8341,7 @@ func (r RbacAdminServiceListGroupMembersResponse) Status() string {
 }
 
 // StatusCode returns HTTPResponse.StatusCode
-func (r RbacAdminServiceListGroupMembersResponse) StatusCode() int {
+func (r AdminListGroupMembersResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -9078,39 +8349,32 @@ func (r RbacAdminServiceListGroupMembersResponse) StatusCode() int {
 }
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
-func (r RbacAdminServiceListGroupMembersResponse) ContentType() string {
+func (r AdminListGroupMembersResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
 	return ""
 }
 
-type RbacAdminServiceAddGroupMemberResponse struct {
+type AdminAddGroupMemberResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	// JSON200 the response for an HTTP 200 `application/json` response
-	JSON200 *V1GroupMembership
-	// JSONDefault the response for an HTTP default `application/json` response
-	JSONDefault *RpcStatus
+	// JSON201 the response for an HTTP 201 `application/json` response
+	JSON201 *AdminGroupMembership
 }
 
-// GetJSON200 returns the response for an HTTP 200 `application/json` response
-func (r RbacAdminServiceAddGroupMemberResponse) GetJSON200() *V1GroupMembership {
-	return r.JSON200
-}
-
-// GetJSONDefault returns the response for an HTTP default `application/json` response
-func (r RbacAdminServiceAddGroupMemberResponse) GetJSONDefault() *RpcStatus {
-	return r.JSONDefault
+// GetJSON201 returns the response for an HTTP 201 `application/json` response
+func (r AdminAddGroupMemberResponse) GetJSON201() *AdminGroupMembership {
+	return r.JSON201
 }
 
 // GetBody returns the raw response body bytes
-func (r RbacAdminServiceAddGroupMemberResponse) GetBody() []byte {
+func (r AdminAddGroupMemberResponse) GetBody() []byte {
 	return r.Body
 }
 
 // Status returns HTTPResponse.Status
-func (r RbacAdminServiceAddGroupMemberResponse) Status() string {
+func (r AdminAddGroupMemberResponse) Status() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Status
 	}
@@ -9118,7 +8382,7 @@ func (r RbacAdminServiceAddGroupMemberResponse) Status() string {
 }
 
 // StatusCode returns HTTPResponse.StatusCode
-func (r RbacAdminServiceAddGroupMemberResponse) StatusCode() int {
+func (r AdminAddGroupMemberResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -9126,7 +8390,7 @@ func (r RbacAdminServiceAddGroupMemberResponse) StatusCode() int {
 }
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
-func (r RbacAdminServiceAddGroupMemberResponse) ContentType() string {
+func (r AdminAddGroupMemberResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -10108,32 +9372,25 @@ func (r AdminPatchUserRequiredActionsResponse) ContentType() string {
 	return ""
 }
 
-type RbacAdminServiceListRolesResponse struct {
+type AdminListRolesResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	// JSON200 the response for an HTTP 200 `application/json` response
-	JSON200 *V1ListRolesResponse
-	// JSONDefault the response for an HTTP default `application/json` response
-	JSONDefault *RpcStatus
+	JSON200 *AdminRolePage
 }
 
 // GetJSON200 returns the response for an HTTP 200 `application/json` response
-func (r RbacAdminServiceListRolesResponse) GetJSON200() *V1ListRolesResponse {
+func (r AdminListRolesResponse) GetJSON200() *AdminRolePage {
 	return r.JSON200
 }
 
-// GetJSONDefault returns the response for an HTTP default `application/json` response
-func (r RbacAdminServiceListRolesResponse) GetJSONDefault() *RpcStatus {
-	return r.JSONDefault
-}
-
 // GetBody returns the raw response body bytes
-func (r RbacAdminServiceListRolesResponse) GetBody() []byte {
+func (r AdminListRolesResponse) GetBody() []byte {
 	return r.Body
 }
 
 // Status returns HTTPResponse.Status
-func (r RbacAdminServiceListRolesResponse) Status() string {
+func (r AdminListRolesResponse) Status() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Status
 	}
@@ -10141,7 +9398,7 @@ func (r RbacAdminServiceListRolesResponse) Status() string {
 }
 
 // StatusCode returns HTTPResponse.StatusCode
-func (r RbacAdminServiceListRolesResponse) StatusCode() int {
+func (r AdminListRolesResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -10149,39 +9406,32 @@ func (r RbacAdminServiceListRolesResponse) StatusCode() int {
 }
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
-func (r RbacAdminServiceListRolesResponse) ContentType() string {
+func (r AdminListRolesResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
 	return ""
 }
 
-type RbacAdminServiceCreateRoleResponse struct {
+type AdminCreateRoleResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	// JSON200 the response for an HTTP 200 `application/json` response
-	JSON200 *V1Role
-	// JSONDefault the response for an HTTP default `application/json` response
-	JSONDefault *RpcStatus
+	// JSON201 the response for an HTTP 201 `application/json` response
+	JSON201 *AdminRole
 }
 
-// GetJSON200 returns the response for an HTTP 200 `application/json` response
-func (r RbacAdminServiceCreateRoleResponse) GetJSON200() *V1Role {
-	return r.JSON200
-}
-
-// GetJSONDefault returns the response for an HTTP default `application/json` response
-func (r RbacAdminServiceCreateRoleResponse) GetJSONDefault() *RpcStatus {
-	return r.JSONDefault
+// GetJSON201 returns the response for an HTTP 201 `application/json` response
+func (r AdminCreateRoleResponse) GetJSON201() *AdminRole {
+	return r.JSON201
 }
 
 // GetBody returns the raw response body bytes
-func (r RbacAdminServiceCreateRoleResponse) GetBody() []byte {
+func (r AdminCreateRoleResponse) GetBody() []byte {
 	return r.Body
 }
 
 // Status returns HTTPResponse.Status
-func (r RbacAdminServiceCreateRoleResponse) Status() string {
+func (r AdminCreateRoleResponse) Status() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Status
 	}
@@ -10189,7 +9439,7 @@ func (r RbacAdminServiceCreateRoleResponse) Status() string {
 }
 
 // StatusCode returns HTTPResponse.StatusCode
-func (r RbacAdminServiceCreateRoleResponse) StatusCode() int {
+func (r AdminCreateRoleResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -10197,7 +9447,123 @@ func (r RbacAdminServiceCreateRoleResponse) StatusCode() int {
 }
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
-func (r RbacAdminServiceCreateRoleResponse) ContentType() string {
+func (r AdminCreateRoleResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type AdminDeleteRoleResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// GetBody returns the raw response body bytes
+func (r AdminDeleteRoleResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r AdminDeleteRoleResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AdminDeleteRoleResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r AdminDeleteRoleResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type AdminGetRoleResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *AdminRole
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r AdminGetRoleResponse) GetJSON200() *AdminRole {
+	return r.JSON200
+}
+
+// GetBody returns the raw response body bytes
+func (r AdminGetRoleResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r AdminGetRoleResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AdminGetRoleResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r AdminGetRoleResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type AdminUpdateRoleResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *AdminRole
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r AdminUpdateRoleResponse) GetJSON200() *AdminRole {
+	return r.JSON200
+}
+
+// GetBody returns the raw response body bytes
+func (r AdminUpdateRoleResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r AdminUpdateRoleResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AdminUpdateRoleResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r AdminUpdateRoleResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -10232,150 +9598,6 @@ func (r AdminListRoleMembersResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r AdminListRoleMembersResponse) ContentType() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Header.Get("Content-Type")
-	}
-	return ""
-}
-
-type RbacAdminServiceDeleteRoleResponse struct {
-	Body         []byte
-	HTTPResponse *http.Response
-	// JSON200 the response for an HTTP 200 `application/json` response
-	JSON200 *V1DeleteRoleResponse
-	// JSONDefault the response for an HTTP default `application/json` response
-	JSONDefault *RpcStatus
-}
-
-// GetJSON200 returns the response for an HTTP 200 `application/json` response
-func (r RbacAdminServiceDeleteRoleResponse) GetJSON200() *V1DeleteRoleResponse {
-	return r.JSON200
-}
-
-// GetJSONDefault returns the response for an HTTP default `application/json` response
-func (r RbacAdminServiceDeleteRoleResponse) GetJSONDefault() *RpcStatus {
-	return r.JSONDefault
-}
-
-// GetBody returns the raw response body bytes
-func (r RbacAdminServiceDeleteRoleResponse) GetBody() []byte {
-	return r.Body
-}
-
-// Status returns HTTPResponse.Status
-func (r RbacAdminServiceDeleteRoleResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r RbacAdminServiceDeleteRoleResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
-func (r RbacAdminServiceDeleteRoleResponse) ContentType() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Header.Get("Content-Type")
-	}
-	return ""
-}
-
-type RbacAdminServiceGetRoleResponse struct {
-	Body         []byte
-	HTTPResponse *http.Response
-	// JSON200 the response for an HTTP 200 `application/json` response
-	JSON200 *V1Role
-	// JSONDefault the response for an HTTP default `application/json` response
-	JSONDefault *RpcStatus
-}
-
-// GetJSON200 returns the response for an HTTP 200 `application/json` response
-func (r RbacAdminServiceGetRoleResponse) GetJSON200() *V1Role {
-	return r.JSON200
-}
-
-// GetJSONDefault returns the response for an HTTP default `application/json` response
-func (r RbacAdminServiceGetRoleResponse) GetJSONDefault() *RpcStatus {
-	return r.JSONDefault
-}
-
-// GetBody returns the raw response body bytes
-func (r RbacAdminServiceGetRoleResponse) GetBody() []byte {
-	return r.Body
-}
-
-// Status returns HTTPResponse.Status
-func (r RbacAdminServiceGetRoleResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r RbacAdminServiceGetRoleResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
-func (r RbacAdminServiceGetRoleResponse) ContentType() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Header.Get("Content-Type")
-	}
-	return ""
-}
-
-type RbacAdminServiceUpdateRoleResponse struct {
-	Body         []byte
-	HTTPResponse *http.Response
-	// JSON200 the response for an HTTP 200 `application/json` response
-	JSON200 *V1Role
-	// JSONDefault the response for an HTTP default `application/json` response
-	JSONDefault *RpcStatus
-}
-
-// GetJSON200 returns the response for an HTTP 200 `application/json` response
-func (r RbacAdminServiceUpdateRoleResponse) GetJSON200() *V1Role {
-	return r.JSON200
-}
-
-// GetJSONDefault returns the response for an HTTP default `application/json` response
-func (r RbacAdminServiceUpdateRoleResponse) GetJSONDefault() *RpcStatus {
-	return r.JSONDefault
-}
-
-// GetBody returns the raw response body bytes
-func (r RbacAdminServiceUpdateRoleResponse) GetBody() []byte {
-	return r.Body
-}
-
-// Status returns HTTPResponse.Status
-func (r RbacAdminServiceUpdateRoleResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r RbacAdminServiceUpdateRoleResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
-func (r RbacAdminServiceUpdateRoleResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -10467,15 +9689,15 @@ func (r IdentityAdminServiceListUsersResponse) ContentType() string {
 type IdentityAdminServiceCreateUserResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	// JSON200 the response for an HTTP 200 `application/json` response
-	JSON200 *V1User
+	// JSON201 the response for an HTTP 201 `application/json` response
+	JSON201 *V1User
 	// JSONDefault the response for an HTTP default `application/json` response
 	JSONDefault *RpcStatus
 }
 
-// GetJSON200 returns the response for an HTTP 200 `application/json` response
-func (r IdentityAdminServiceCreateUserResponse) GetJSON200() *V1User {
-	return r.JSON200
+// GetJSON201 returns the response for an HTTP 201 `application/json` response
+func (r IdentityAdminServiceCreateUserResponse) GetJSON201() *V1User {
+	return r.JSON201
 }
 
 // GetJSONDefault returns the response for an HTTP default `application/json` response
@@ -10617,15 +9839,8 @@ func (r AdminImportUsersResponse) ContentType() string {
 type IdentityAdminServiceDeleteUserResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	// JSON200 the response for an HTTP 200 `application/json` response
-	JSON200 *V1Empty
 	// JSONDefault the response for an HTTP default `application/json` response
 	JSONDefault *RpcStatus
-}
-
-// GetJSON200 returns the response for an HTTP 200 `application/json` response
-func (r IdentityAdminServiceDeleteUserResponse) GetJSON200() *V1Empty {
-	return r.JSON200
 }
 
 // GetJSONDefault returns the response for an HTTP default `application/json` response
@@ -10860,6 +10075,88 @@ func (r AdminRevokeUserPermissionResponse) ContentType() string {
 	return ""
 }
 
+type AdminListUserAssignmentsResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *AdminRoleAssignmentList
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r AdminListUserAssignmentsResponse) GetJSON200() *AdminRoleAssignmentList {
+	return r.JSON200
+}
+
+// GetBody returns the raw response body bytes
+func (r AdminListUserAssignmentsResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r AdminListUserAssignmentsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AdminListUserAssignmentsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r AdminListUserAssignmentsResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type AdminAssignUserRoleResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON201 the response for an HTTP 201 `application/json` response
+	JSON201 *AdminRoleAssignment
+}
+
+// GetJSON201 returns the response for an HTTP 201 `application/json` response
+func (r AdminAssignUserRoleResponse) GetJSON201() *AdminRoleAssignment {
+	return r.JSON201
+}
+
+// GetBody returns the raw response body bytes
+func (r AdminAssignUserRoleResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r AdminAssignUserRoleResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AdminAssignUserRoleResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r AdminAssignUserRoleResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type RbacAdminServiceListUserConsentsResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -10998,102 +10295,6 @@ func (r RbacAdminServiceResolveEffectivePermissionsResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r RbacAdminServiceResolveEffectivePermissionsResponse) ContentType() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Header.Get("Content-Type")
-	}
-	return ""
-}
-
-type RbacAdminServiceListUserAssignmentsResponse struct {
-	Body         []byte
-	HTTPResponse *http.Response
-	// JSON200 the response for an HTTP 200 `application/json` response
-	JSON200 *V1ListUserAssignmentsResponse
-	// JSONDefault the response for an HTTP default `application/json` response
-	JSONDefault *RpcStatus
-}
-
-// GetJSON200 returns the response for an HTTP 200 `application/json` response
-func (r RbacAdminServiceListUserAssignmentsResponse) GetJSON200() *V1ListUserAssignmentsResponse {
-	return r.JSON200
-}
-
-// GetJSONDefault returns the response for an HTTP default `application/json` response
-func (r RbacAdminServiceListUserAssignmentsResponse) GetJSONDefault() *RpcStatus {
-	return r.JSONDefault
-}
-
-// GetBody returns the raw response body bytes
-func (r RbacAdminServiceListUserAssignmentsResponse) GetBody() []byte {
-	return r.Body
-}
-
-// Status returns HTTPResponse.Status
-func (r RbacAdminServiceListUserAssignmentsResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r RbacAdminServiceListUserAssignmentsResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
-func (r RbacAdminServiceListUserAssignmentsResponse) ContentType() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Header.Get("Content-Type")
-	}
-	return ""
-}
-
-type RbacAdminServiceAssignUserRoleResponse struct {
-	Body         []byte
-	HTTPResponse *http.Response
-	// JSON200 the response for an HTTP 200 `application/json` response
-	JSON200 *V1RoleAssignment
-	// JSONDefault the response for an HTTP default `application/json` response
-	JSONDefault *RpcStatus
-}
-
-// GetJSON200 returns the response for an HTTP 200 `application/json` response
-func (r RbacAdminServiceAssignUserRoleResponse) GetJSON200() *V1RoleAssignment {
-	return r.JSON200
-}
-
-// GetJSONDefault returns the response for an HTTP default `application/json` response
-func (r RbacAdminServiceAssignUserRoleResponse) GetJSONDefault() *RpcStatus {
-	return r.JSONDefault
-}
-
-// GetBody returns the raw response body bytes
-func (r RbacAdminServiceAssignUserRoleResponse) GetBody() []byte {
-	return r.Body
-}
-
-// Status returns HTTPResponse.Status
-func (r RbacAdminServiceAssignUserRoleResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r RbacAdminServiceAssignUserRoleResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
-func (r RbacAdminServiceAssignUserRoleResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -11337,7 +10538,7 @@ func (c *ClientWithResponses) ApplicationAdminServiceCreateApplicationWithRespon
 	return ParseApplicationAdminServiceCreateApplicationResponse(rsp)
 }
 
-// ApplicationAdminServiceDeleteApplicationWithResponse performs a DELETE /admin/applications/{clientId} (the `ApplicationAdminServiceDeleteApplication` operationId) request.
+// ApplicationAdminServiceDeleteApplicationWithResponse performs a DELETE /admin/applications/{client_id} (the `ApplicationAdminServiceDeleteApplication` operationId) request.
 //
 // Returns a wrapper object for the known response body format(s).
 func (c *ClientWithResponses) ApplicationAdminServiceDeleteApplicationWithResponse(ctx context.Context, clientId string, reqEditors ...RequestEditorFn) (*ApplicationAdminServiceDeleteApplicationResponse, error) {
@@ -11348,7 +10549,7 @@ func (c *ClientWithResponses) ApplicationAdminServiceDeleteApplicationWithRespon
 	return ParseApplicationAdminServiceDeleteApplicationResponse(rsp)
 }
 
-// ApplicationAdminServiceGetApplicationWithResponse performs a GET /admin/applications/{clientId} (the `ApplicationAdminServiceGetApplication` operationId) request.
+// ApplicationAdminServiceGetApplicationWithResponse performs a GET /admin/applications/{client_id} (the `ApplicationAdminServiceGetApplication` operationId) request.
 //
 // Returns a wrapper object for the known response body format(s).
 func (c *ClientWithResponses) ApplicationAdminServiceGetApplicationWithResponse(ctx context.Context, clientId string, reqEditors ...RequestEditorFn) (*ApplicationAdminServiceGetApplicationResponse, error) {
@@ -11359,7 +10560,7 @@ func (c *ClientWithResponses) ApplicationAdminServiceGetApplicationWithResponse(
 	return ParseApplicationAdminServiceGetApplicationResponse(rsp)
 }
 
-// ApplicationAdminServiceUpdateApplicationWithBodyWithResponse performs a PATCH /admin/applications/{clientId} (the `ApplicationAdminServiceUpdateApplication` operationId) request,
+// ApplicationAdminServiceUpdateApplicationWithBodyWithResponse performs a PATCH /admin/applications/{client_id} (the `ApplicationAdminServiceUpdateApplication` operationId) request,
 // with any type of body and a specified content type.
 //
 // Returns a wrapper object for the known response body format(s).
@@ -11371,7 +10572,7 @@ func (c *ClientWithResponses) ApplicationAdminServiceUpdateApplicationWithBodyWi
 	return ParseApplicationAdminServiceUpdateApplicationResponse(rsp)
 }
 
-// ApplicationAdminServiceUpdateApplicationWithResponse performs a PATCH /admin/applications/{clientId} (the `ApplicationAdminServiceUpdateApplication` operationId) request.
+// ApplicationAdminServiceUpdateApplicationWithResponse performs a PATCH /admin/applications/{client_id} (the `ApplicationAdminServiceUpdateApplication` operationId) request.
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 func (c *ClientWithResponses) ApplicationAdminServiceUpdateApplicationWithResponse(ctx context.Context, clientId string, body ApplicationAdminServiceUpdateApplicationJSONRequestBody, reqEditors ...RequestEditorFn) (*ApplicationAdminServiceUpdateApplicationResponse, error) {
 	rsp, err := c.ApplicationAdminServiceUpdateApplication(ctx, clientId, body, reqEditors...)
@@ -11388,7 +10589,7 @@ func (c *ClientWithResponses) ApplicationAdminServiceUpdateApplicationWithRespon
 //
 // Returns a wrapper object for the known response body format(s).
 //
-// Corresponds with POST /admin/applications/{clientId}/regenerate-secret (the `ApplicationAdminServiceRegenerateApplicationSecret` operationId).
+// Corresponds with POST /admin/applications/{client_id}/regenerate-secret (the `ApplicationAdminServiceRegenerateApplicationSecret` operationId).
 func (c *ClientWithResponses) ApplicationAdminServiceRegenerateApplicationSecretWithResponse(ctx context.Context, clientId string, reqEditors ...RequestEditorFn) (*ApplicationAdminServiceRegenerateApplicationSecretResponse, error) {
 	rsp, err := c.ApplicationAdminServiceRegenerateApplicationSecret(ctx, clientId, reqEditors...)
 	if err != nil {
@@ -11410,17 +10611,19 @@ func (c *ClientWithResponses) AdminUnassignRoleWithResponse(ctx context.Context,
 	return ParseAdminUnassignRoleResponse(rsp)
 }
 
-// AuditServiceListEventsWithResponse Query audit events with optional filters. Maps to GET /admin/audit.
+// AdminListAuditEventsWithResponse List audit events
+//
+// Requires `hearth.realm.admin`. Newest first.
 //
 // Returns a wrapper object for the known response body format(s).
 //
-// Corresponds with GET /admin/audit (the `AuditServiceListEvents` operationId).
-func (c *ClientWithResponses) AuditServiceListEventsWithResponse(ctx context.Context, params *AuditServiceListEventsParams, reqEditors ...RequestEditorFn) (*AuditServiceListEventsResponse, error) {
-	rsp, err := c.AuditServiceListEvents(ctx, params, reqEditors...)
+// Corresponds with GET /admin/audit (the `AdminListAuditEvents` operationId).
+func (c *ClientWithResponses) AdminListAuditEventsWithResponse(ctx context.Context, params *AdminListAuditEventsParams, reqEditors ...RequestEditorFn) (*AdminListAuditEventsResponse, error) {
+	rsp, err := c.AdminListAuditEvents(ctx, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
-	return ParseAuditServiceListEventsResponse(rsp)
+	return ParseAdminListAuditEventsResponse(rsp)
 }
 
 // AdminVerifyAuditWithResponse Verify the realm's audit hash chain
@@ -11522,114 +10725,140 @@ func (c *ClientWithResponses) AdminClusterTransferLeadershipWithResponse(ctx con
 	return ParseAdminClusterTransferLeadershipResponse(rsp)
 }
 
-// RbacAdminServiceListGroupsWithResponse performs a GET /admin/groups (the `RbacAdminServiceListGroups` operationId) request.
+// AdminListGroupsWithResponse List groups
+//
+// `cursor` is a decimal offset; follow `next_cursor` until it is null.
 //
 // Returns a wrapper object for the known response body format(s).
-func (c *ClientWithResponses) RbacAdminServiceListGroupsWithResponse(ctx context.Context, params *RbacAdminServiceListGroupsParams, reqEditors ...RequestEditorFn) (*RbacAdminServiceListGroupsResponse, error) {
-	rsp, err := c.RbacAdminServiceListGroups(ctx, params, reqEditors...)
+//
+// Corresponds with GET /admin/groups (the `AdminListGroups` operationId).
+func (c *ClientWithResponses) AdminListGroupsWithResponse(ctx context.Context, params *AdminListGroupsParams, reqEditors ...RequestEditorFn) (*AdminListGroupsResponse, error) {
+	rsp, err := c.AdminListGroups(ctx, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
-	return ParseRbacAdminServiceListGroupsResponse(rsp)
+	return ParseAdminListGroupsResponse(rsp)
 }
 
-// RbacAdminServiceCreateGroupWithBodyWithResponse performs a POST /admin/groups (the `RbacAdminServiceCreateGroup` operationId) request,
-// with any type of body and a specified content type.
+// AdminCreateGroupWithBodyWithResponse Create a group
 //
-// Returns a wrapper object for the known response body format(s).
-func (c *ClientWithResponses) RbacAdminServiceCreateGroupWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RbacAdminServiceCreateGroupResponse, error) {
-	rsp, err := c.RbacAdminServiceCreateGroupWithBody(ctx, contentType, body, reqEditors...)
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/groups (the `AdminCreateGroup` operationId).
+func (c *ClientWithResponses) AdminCreateGroupWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AdminCreateGroupResponse, error) {
+	rsp, err := c.AdminCreateGroupWithBody(ctx, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
-	return ParseRbacAdminServiceCreateGroupResponse(rsp)
+	return ParseAdminCreateGroupResponse(rsp)
 }
 
-// RbacAdminServiceCreateGroupWithResponse performs a POST /admin/groups (the `RbacAdminServiceCreateGroup` operationId) request.
+// AdminCreateGroupWithResponse Create a group
+//
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
-func (c *ClientWithResponses) RbacAdminServiceCreateGroupWithResponse(ctx context.Context, body RbacAdminServiceCreateGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*RbacAdminServiceCreateGroupResponse, error) {
-	rsp, err := c.RbacAdminServiceCreateGroup(ctx, body, reqEditors...)
+//
+// Corresponds with POST /admin/groups (the `AdminCreateGroup` operationId).
+func (c *ClientWithResponses) AdminCreateGroupWithResponse(ctx context.Context, body AdminCreateGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*AdminCreateGroupResponse, error) {
+	rsp, err := c.AdminCreateGroup(ctx, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
-	return ParseRbacAdminServiceCreateGroupResponse(rsp)
+	return ParseAdminCreateGroupResponse(rsp)
 }
 
-// RbacAdminServiceDeleteGroupWithResponse performs a DELETE /admin/groups/{groupId} (the `RbacAdminServiceDeleteGroup` operationId) request.
+// AdminDeleteGroupWithResponse Delete a group
 //
 // Returns a wrapper object for the known response body format(s).
-func (c *ClientWithResponses) RbacAdminServiceDeleteGroupWithResponse(ctx context.Context, groupId string, params *RbacAdminServiceDeleteGroupParams, reqEditors ...RequestEditorFn) (*RbacAdminServiceDeleteGroupResponse, error) {
-	rsp, err := c.RbacAdminServiceDeleteGroup(ctx, groupId, params, reqEditors...)
+//
+// Corresponds with DELETE /admin/groups/{id} (the `AdminDeleteGroup` operationId).
+func (c *ClientWithResponses) AdminDeleteGroupWithResponse(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*AdminDeleteGroupResponse, error) {
+	rsp, err := c.AdminDeleteGroup(ctx, id, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
-	return ParseRbacAdminServiceDeleteGroupResponse(rsp)
+	return ParseAdminDeleteGroupResponse(rsp)
 }
 
-// RbacAdminServiceGetGroupWithResponse performs a GET /admin/groups/{groupId} (the `RbacAdminServiceGetGroup` operationId) request.
+// AdminGetGroupWithResponse Get a group
 //
 // Returns a wrapper object for the known response body format(s).
-func (c *ClientWithResponses) RbacAdminServiceGetGroupWithResponse(ctx context.Context, groupId string, params *RbacAdminServiceGetGroupParams, reqEditors ...RequestEditorFn) (*RbacAdminServiceGetGroupResponse, error) {
-	rsp, err := c.RbacAdminServiceGetGroup(ctx, groupId, params, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseRbacAdminServiceGetGroupResponse(rsp)
-}
-
-// RbacAdminServiceUpdateGroupWithBodyWithResponse performs a PATCH /admin/groups/{groupId} (the `RbacAdminServiceUpdateGroup` operationId) request,
-// with any type of body and a specified content type.
 //
-// Returns a wrapper object for the known response body format(s).
-func (c *ClientWithResponses) RbacAdminServiceUpdateGroupWithBodyWithResponse(ctx context.Context, groupId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RbacAdminServiceUpdateGroupResponse, error) {
-	rsp, err := c.RbacAdminServiceUpdateGroupWithBody(ctx, groupId, contentType, body, reqEditors...)
+// Corresponds with GET /admin/groups/{id} (the `AdminGetGroup` operationId).
+func (c *ClientWithResponses) AdminGetGroupWithResponse(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*AdminGetGroupResponse, error) {
+	rsp, err := c.AdminGetGroup(ctx, id, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
-	return ParseRbacAdminServiceUpdateGroupResponse(rsp)
+	return ParseAdminGetGroupResponse(rsp)
 }
 
-// RbacAdminServiceUpdateGroupWithResponse performs a PATCH /admin/groups/{groupId} (the `RbacAdminServiceUpdateGroup` operationId) request.
+// AdminUpdateGroupWithBodyWithResponse Update a group
+//
+// Absent fields are unchanged; `description` null clears it.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PATCH /admin/groups/{id} (the `AdminUpdateGroup` operationId).
+func (c *ClientWithResponses) AdminUpdateGroupWithBodyWithResponse(ctx context.Context, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AdminUpdateGroupResponse, error) {
+	rsp, err := c.AdminUpdateGroupWithBody(ctx, id, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAdminUpdateGroupResponse(rsp)
+}
+
+// AdminUpdateGroupWithResponse Update a group
+//
+// Absent fields are unchanged; `description` null clears it.
+//
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
-func (c *ClientWithResponses) RbacAdminServiceUpdateGroupWithResponse(ctx context.Context, groupId string, body RbacAdminServiceUpdateGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*RbacAdminServiceUpdateGroupResponse, error) {
-	rsp, err := c.RbacAdminServiceUpdateGroup(ctx, groupId, body, reqEditors...)
+//
+// Corresponds with PATCH /admin/groups/{id} (the `AdminUpdateGroup` operationId).
+func (c *ClientWithResponses) AdminUpdateGroupWithResponse(ctx context.Context, id string, body AdminUpdateGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*AdminUpdateGroupResponse, error) {
+	rsp, err := c.AdminUpdateGroup(ctx, id, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
-	return ParseRbacAdminServiceUpdateGroupResponse(rsp)
+	return ParseAdminUpdateGroupResponse(rsp)
 }
 
-// RbacAdminServiceListGroupMembersWithResponse performs a GET /admin/groups/{groupId}/members (the `RbacAdminServiceListGroupMembers` operationId) request.
+// AdminListGroupMembersWithResponse List a group's members
 //
 // Returns a wrapper object for the known response body format(s).
-func (c *ClientWithResponses) RbacAdminServiceListGroupMembersWithResponse(ctx context.Context, groupId string, params *RbacAdminServiceListGroupMembersParams, reqEditors ...RequestEditorFn) (*RbacAdminServiceListGroupMembersResponse, error) {
-	rsp, err := c.RbacAdminServiceListGroupMembers(ctx, groupId, params, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseRbacAdminServiceListGroupMembersResponse(rsp)
-}
-
-// RbacAdminServiceAddGroupMemberWithBodyWithResponse performs a POST /admin/groups/{groupId}/members (the `RbacAdminServiceAddGroupMember` operationId) request,
-// with any type of body and a specified content type.
 //
-// Returns a wrapper object for the known response body format(s).
-func (c *ClientWithResponses) RbacAdminServiceAddGroupMemberWithBodyWithResponse(ctx context.Context, groupId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RbacAdminServiceAddGroupMemberResponse, error) {
-	rsp, err := c.RbacAdminServiceAddGroupMemberWithBody(ctx, groupId, contentType, body, reqEditors...)
+// Corresponds with GET /admin/groups/{id}/members (the `AdminListGroupMembers` operationId).
+func (c *ClientWithResponses) AdminListGroupMembersWithResponse(ctx context.Context, id string, params *AdminListGroupMembersParams, reqEditors ...RequestEditorFn) (*AdminListGroupMembersResponse, error) {
+	rsp, err := c.AdminListGroupMembers(ctx, id, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
-	return ParseRbacAdminServiceAddGroupMemberResponse(rsp)
+	return ParseAdminListGroupMembersResponse(rsp)
 }
 
-// RbacAdminServiceAddGroupMemberWithResponse performs a POST /admin/groups/{groupId}/members (the `RbacAdminServiceAddGroupMember` operationId) request.
+// AdminAddGroupMemberWithBodyWithResponse Add a member to a group
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/groups/{id}/members (the `AdminAddGroupMember` operationId).
+func (c *ClientWithResponses) AdminAddGroupMemberWithBodyWithResponse(ctx context.Context, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AdminAddGroupMemberResponse, error) {
+	rsp, err := c.AdminAddGroupMemberWithBody(ctx, id, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAdminAddGroupMemberResponse(rsp)
+}
+
+// AdminAddGroupMemberWithResponse Add a member to a group
+//
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
-func (c *ClientWithResponses) RbacAdminServiceAddGroupMemberWithResponse(ctx context.Context, groupId string, body RbacAdminServiceAddGroupMemberJSONRequestBody, reqEditors ...RequestEditorFn) (*RbacAdminServiceAddGroupMemberResponse, error) {
-	rsp, err := c.RbacAdminServiceAddGroupMember(ctx, groupId, body, reqEditors...)
+//
+// Corresponds with POST /admin/groups/{id}/members (the `AdminAddGroupMember` operationId).
+func (c *ClientWithResponses) AdminAddGroupMemberWithResponse(ctx context.Context, id string, body AdminAddGroupMemberJSONRequestBody, reqEditors ...RequestEditorFn) (*AdminAddGroupMemberResponse, error) {
+	rsp, err := c.AdminAddGroupMember(ctx, id, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
-	return ParseRbacAdminServiceAddGroupMemberResponse(rsp)
+	return ParseAdminAddGroupMemberResponse(rsp)
 }
 
 // AdminRemoveGroupMemberWithResponse Remove a member from a group
@@ -12084,37 +11313,101 @@ func (c *ClientWithResponses) AdminPatchUserRequiredActionsWithResponse(ctx cont
 	return ParseAdminPatchUserRequiredActionsResponse(rsp)
 }
 
-// RbacAdminServiceListRolesWithResponse performs a GET /admin/roles (the `RbacAdminServiceListRoles` operationId) request.
+// AdminListRolesWithResponse List roles
+//
+// Requires `hearth.realm.admin`. Follow `next_cursor` until it is null.
 //
 // Returns a wrapper object for the known response body format(s).
-func (c *ClientWithResponses) RbacAdminServiceListRolesWithResponse(ctx context.Context, params *RbacAdminServiceListRolesParams, reqEditors ...RequestEditorFn) (*RbacAdminServiceListRolesResponse, error) {
-	rsp, err := c.RbacAdminServiceListRoles(ctx, params, reqEditors...)
+//
+// Corresponds with GET /admin/roles (the `AdminListRoles` operationId).
+func (c *ClientWithResponses) AdminListRolesWithResponse(ctx context.Context, params *AdminListRolesParams, reqEditors ...RequestEditorFn) (*AdminListRolesResponse, error) {
+	rsp, err := c.AdminListRoles(ctx, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
-	return ParseRbacAdminServiceListRolesResponse(rsp)
+	return ParseAdminListRolesResponse(rsp)
 }
 
-// RbacAdminServiceCreateRoleWithBodyWithResponse performs a POST /admin/roles (the `RbacAdminServiceCreateRole` operationId) request,
-// with any type of body and a specified content type.
+// AdminCreateRoleWithBodyWithResponse Create a role
 //
-// Returns a wrapper object for the known response body format(s).
-func (c *ClientWithResponses) RbacAdminServiceCreateRoleWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RbacAdminServiceCreateRoleResponse, error) {
-	rsp, err := c.RbacAdminServiceCreateRoleWithBody(ctx, contentType, body, reqEditors...)
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/roles (the `AdminCreateRole` operationId).
+func (c *ClientWithResponses) AdminCreateRoleWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AdminCreateRoleResponse, error) {
+	rsp, err := c.AdminCreateRoleWithBody(ctx, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
-	return ParseRbacAdminServiceCreateRoleResponse(rsp)
+	return ParseAdminCreateRoleResponse(rsp)
 }
 
-// RbacAdminServiceCreateRoleWithResponse performs a POST /admin/roles (the `RbacAdminServiceCreateRole` operationId) request.
+// AdminCreateRoleWithResponse Create a role
+//
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
-func (c *ClientWithResponses) RbacAdminServiceCreateRoleWithResponse(ctx context.Context, body RbacAdminServiceCreateRoleJSONRequestBody, reqEditors ...RequestEditorFn) (*RbacAdminServiceCreateRoleResponse, error) {
-	rsp, err := c.RbacAdminServiceCreateRole(ctx, body, reqEditors...)
+//
+// Corresponds with POST /admin/roles (the `AdminCreateRole` operationId).
+func (c *ClientWithResponses) AdminCreateRoleWithResponse(ctx context.Context, body AdminCreateRoleJSONRequestBody, reqEditors ...RequestEditorFn) (*AdminCreateRoleResponse, error) {
+	rsp, err := c.AdminCreateRole(ctx, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
-	return ParseRbacAdminServiceCreateRoleResponse(rsp)
+	return ParseAdminCreateRoleResponse(rsp)
+}
+
+// AdminDeleteRoleWithResponse Delete a role
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with DELETE /admin/roles/{id} (the `AdminDeleteRole` operationId).
+func (c *ClientWithResponses) AdminDeleteRoleWithResponse(ctx context.Context, id string, params *AdminDeleteRoleParams, reqEditors ...RequestEditorFn) (*AdminDeleteRoleResponse, error) {
+	rsp, err := c.AdminDeleteRole(ctx, id, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAdminDeleteRoleResponse(rsp)
+}
+
+// AdminGetRoleWithResponse Get a role
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/roles/{id} (the `AdminGetRole` operationId).
+func (c *ClientWithResponses) AdminGetRoleWithResponse(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*AdminGetRoleResponse, error) {
+	rsp, err := c.AdminGetRole(ctx, id, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAdminGetRoleResponse(rsp)
+}
+
+// AdminUpdateRoleWithBodyWithResponse Update a role
+//
+// Absent fields are unchanged; `description` null clears it.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PATCH /admin/roles/{id} (the `AdminUpdateRole` operationId).
+func (c *ClientWithResponses) AdminUpdateRoleWithBodyWithResponse(ctx context.Context, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AdminUpdateRoleResponse, error) {
+	rsp, err := c.AdminUpdateRoleWithBody(ctx, id, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAdminUpdateRoleResponse(rsp)
+}
+
+// AdminUpdateRoleWithResponse Update a role
+//
+// Absent fields are unchanged; `description` null clears it.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PATCH /admin/roles/{id} (the `AdminUpdateRole` operationId).
+func (c *ClientWithResponses) AdminUpdateRoleWithResponse(ctx context.Context, id string, body AdminUpdateRoleJSONRequestBody, reqEditors ...RequestEditorFn) (*AdminUpdateRoleResponse, error) {
+	rsp, err := c.AdminUpdateRole(ctx, id, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAdminUpdateRoleResponse(rsp)
 }
 
 // AdminListRoleMembersWithResponse List the users and groups holding a role
@@ -12128,50 +11421,6 @@ func (c *ClientWithResponses) AdminListRoleMembersWithResponse(ctx context.Conte
 		return nil, err
 	}
 	return ParseAdminListRoleMembersResponse(rsp)
-}
-
-// RbacAdminServiceDeleteRoleWithResponse performs a DELETE /admin/roles/{roleId} (the `RbacAdminServiceDeleteRole` operationId) request.
-//
-// Returns a wrapper object for the known response body format(s).
-func (c *ClientWithResponses) RbacAdminServiceDeleteRoleWithResponse(ctx context.Context, roleId string, params *RbacAdminServiceDeleteRoleParams, reqEditors ...RequestEditorFn) (*RbacAdminServiceDeleteRoleResponse, error) {
-	rsp, err := c.RbacAdminServiceDeleteRole(ctx, roleId, params, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseRbacAdminServiceDeleteRoleResponse(rsp)
-}
-
-// RbacAdminServiceGetRoleWithResponse performs a GET /admin/roles/{roleId} (the `RbacAdminServiceGetRole` operationId) request.
-//
-// Returns a wrapper object for the known response body format(s).
-func (c *ClientWithResponses) RbacAdminServiceGetRoleWithResponse(ctx context.Context, roleId string, params *RbacAdminServiceGetRoleParams, reqEditors ...RequestEditorFn) (*RbacAdminServiceGetRoleResponse, error) {
-	rsp, err := c.RbacAdminServiceGetRole(ctx, roleId, params, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseRbacAdminServiceGetRoleResponse(rsp)
-}
-
-// RbacAdminServiceUpdateRoleWithBodyWithResponse performs a PATCH /admin/roles/{roleId} (the `RbacAdminServiceUpdateRole` operationId) request,
-// with any type of body and a specified content type.
-//
-// Returns a wrapper object for the known response body format(s).
-func (c *ClientWithResponses) RbacAdminServiceUpdateRoleWithBodyWithResponse(ctx context.Context, roleId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RbacAdminServiceUpdateRoleResponse, error) {
-	rsp, err := c.RbacAdminServiceUpdateRoleWithBody(ctx, roleId, contentType, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseRbacAdminServiceUpdateRoleResponse(rsp)
-}
-
-// RbacAdminServiceUpdateRoleWithResponse performs a PATCH /admin/roles/{roleId} (the `RbacAdminServiceUpdateRole` operationId) request.
-// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
-func (c *ClientWithResponses) RbacAdminServiceUpdateRoleWithResponse(ctx context.Context, roleId string, body RbacAdminServiceUpdateRoleJSONRequestBody, reqEditors ...RequestEditorFn) (*RbacAdminServiceUpdateRoleResponse, error) {
-	rsp, err := c.RbacAdminServiceUpdateRole(ctx, roleId, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseRbacAdminServiceUpdateRoleResponse(rsp)
 }
 
 // AdminSvBumpSessionWithResponse Bump session version (invalidates existing tokens)
@@ -12374,11 +11623,54 @@ func (c *ClientWithResponses) AdminRevokeUserPermissionWithResponse(ctx context.
 	return ParseAdminRevokeUserPermissionResponse(rsp)
 }
 
+// AdminListUserAssignmentsWithResponse List a user's role assignments
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /admin/users/{id}/roles (the `AdminListUserAssignments` operationId).
+func (c *ClientWithResponses) AdminListUserAssignmentsWithResponse(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*AdminListUserAssignmentsResponse, error) {
+	rsp, err := c.AdminListUserAssignments(ctx, id, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAdminListUserAssignmentsResponse(rsp)
+}
+
+// AdminAssignUserRoleWithBodyWithResponse Assign a role to a user
+//
+// Realm-wide, or inside one organization when `org_id` is set.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/users/{id}/roles (the `AdminAssignUserRole` operationId).
+func (c *ClientWithResponses) AdminAssignUserRoleWithBodyWithResponse(ctx context.Context, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AdminAssignUserRoleResponse, error) {
+	rsp, err := c.AdminAssignUserRoleWithBody(ctx, id, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAdminAssignUserRoleResponse(rsp)
+}
+
+// AdminAssignUserRoleWithResponse Assign a role to a user
+//
+// Realm-wide, or inside one organization when `org_id` is set.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/users/{id}/roles (the `AdminAssignUserRole` operationId).
+func (c *ClientWithResponses) AdminAssignUserRoleWithResponse(ctx context.Context, id string, body AdminAssignUserRoleJSONRequestBody, reqEditors ...RequestEditorFn) (*AdminAssignUserRoleResponse, error) {
+	rsp, err := c.AdminAssignUserRole(ctx, id, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAdminAssignUserRoleResponse(rsp)
+}
+
 // RbacAdminServiceListUserConsentsWithResponse List all active consents for a user.
 //
 // Returns a wrapper object for the known response body format(s).
 //
-// Corresponds with GET /admin/users/{userId}/consents (the `RbacAdminServiceListUserConsents` operationId).
+// Corresponds with GET /admin/users/{user_id}/consents (the `RbacAdminServiceListUserConsents` operationId).
 func (c *ClientWithResponses) RbacAdminServiceListUserConsentsWithResponse(ctx context.Context, userId string, params *RbacAdminServiceListUserConsentsParams, reqEditors ...RequestEditorFn) (*RbacAdminServiceListUserConsentsResponse, error) {
 	rsp, err := c.RbacAdminServiceListUserConsents(ctx, userId, params, reqEditors...)
 	if err != nil {
@@ -12391,7 +11683,7 @@ func (c *ClientWithResponses) RbacAdminServiceListUserConsentsWithResponse(ctx c
 //
 // Returns a wrapper object for the known response body format(s).
 //
-// Corresponds with DELETE /admin/users/{userId}/consents/{clientId} (the `RbacAdminServiceRevokeConsent` operationId).
+// Corresponds with DELETE /admin/users/{user_id}/consents/{client_id} (the `RbacAdminServiceRevokeConsent` operationId).
 func (c *ClientWithResponses) RbacAdminServiceRevokeConsentWithResponse(ctx context.Context, userId string, clientId string, params *RbacAdminServiceRevokeConsentParams, reqEditors ...RequestEditorFn) (*RbacAdminServiceRevokeConsentResponse, error) {
 	rsp, err := c.RbacAdminServiceRevokeConsent(ctx, userId, clientId, params, reqEditors...)
 	if err != nil {
@@ -12400,7 +11692,7 @@ func (c *ClientWithResponses) RbacAdminServiceRevokeConsentWithResponse(ctx cont
 	return ParseRbacAdminServiceRevokeConsentResponse(rsp)
 }
 
-// RbacAdminServiceResolveEffectivePermissionsWithResponse performs a GET /admin/users/{userId}/effective-permissions (the `RbacAdminServiceResolveEffectivePermissions` operationId) request.
+// RbacAdminServiceResolveEffectivePermissionsWithResponse performs a GET /admin/users/{user_id}/effective-permissions (the `RbacAdminServiceResolveEffectivePermissions` operationId) request.
 //
 // Returns a wrapper object for the known response body format(s).
 func (c *ClientWithResponses) RbacAdminServiceResolveEffectivePermissionsWithResponse(ctx context.Context, userId string, params *RbacAdminServiceResolveEffectivePermissionsParams, reqEditors ...RequestEditorFn) (*RbacAdminServiceResolveEffectivePermissionsResponse, error) {
@@ -12409,39 +11701,6 @@ func (c *ClientWithResponses) RbacAdminServiceResolveEffectivePermissionsWithRes
 		return nil, err
 	}
 	return ParseRbacAdminServiceResolveEffectivePermissionsResponse(rsp)
-}
-
-// RbacAdminServiceListUserAssignmentsWithResponse performs a GET /admin/users/{userId}/roles (the `RbacAdminServiceListUserAssignments` operationId) request.
-//
-// Returns a wrapper object for the known response body format(s).
-func (c *ClientWithResponses) RbacAdminServiceListUserAssignmentsWithResponse(ctx context.Context, userId string, params *RbacAdminServiceListUserAssignmentsParams, reqEditors ...RequestEditorFn) (*RbacAdminServiceListUserAssignmentsResponse, error) {
-	rsp, err := c.RbacAdminServiceListUserAssignments(ctx, userId, params, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseRbacAdminServiceListUserAssignmentsResponse(rsp)
-}
-
-// RbacAdminServiceAssignUserRoleWithBodyWithResponse performs a POST /admin/users/{userId}/roles (the `RbacAdminServiceAssignUserRole` operationId) request,
-// with any type of body and a specified content type.
-//
-// Returns a wrapper object for the known response body format(s).
-func (c *ClientWithResponses) RbacAdminServiceAssignUserRoleWithBodyWithResponse(ctx context.Context, userId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RbacAdminServiceAssignUserRoleResponse, error) {
-	rsp, err := c.RbacAdminServiceAssignUserRoleWithBody(ctx, userId, contentType, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseRbacAdminServiceAssignUserRoleResponse(rsp)
-}
-
-// RbacAdminServiceAssignUserRoleWithResponse performs a POST /admin/users/{userId}/roles (the `RbacAdminServiceAssignUserRole` operationId) request.
-// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
-func (c *ClientWithResponses) RbacAdminServiceAssignUserRoleWithResponse(ctx context.Context, userId string, body RbacAdminServiceAssignUserRoleJSONRequestBody, reqEditors ...RequestEditorFn) (*RbacAdminServiceAssignUserRoleResponse, error) {
-	rsp, err := c.RbacAdminServiceAssignUserRole(ctx, userId, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseRbacAdminServiceAssignUserRoleResponse(rsp)
 }
 
 // AdminListWebhooksWithResponse List webhooks
@@ -12628,12 +11887,8 @@ func ParseApplicationAdminServiceDeleteApplicationResponse(rsp *http.Response) (
 	}
 
 	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest V1OAuthEmpty
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
+	case rsp.StatusCode == 204:
+		break // No content-type
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest RpcStatus
@@ -12762,33 +12017,29 @@ func ParseAdminUnassignRoleResponse(rsp *http.Response) (*AdminUnassignRoleRespo
 	return response, nil
 }
 
-// ParseAuditServiceListEventsResponse parses an HTTP response from a AuditServiceListEventsWithResponse call
-func ParseAuditServiceListEventsResponse(rsp *http.Response) (*AuditServiceListEventsResponse, error) {
+// ParseAdminListAuditEventsResponse parses an HTTP response from a AdminListAuditEventsWithResponse call
+func ParseAdminListAuditEventsResponse(rsp *http.Response) (*AdminListAuditEventsResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
 	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
 
-	response := &AuditServiceListEventsResponse{
+	response := &AdminListAuditEventsResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest V1AuditEventPage
+		var dest AdminAuditEventList
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
 		response.JSON200 = &dest
 
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest RpcStatus
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSONDefault = &dest
+	case rsp.StatusCode == 400:
+		break // No content-type
 
 	}
 
@@ -12957,231 +12208,190 @@ func ParseAdminClusterTransferLeadershipResponse(rsp *http.Response) (*AdminClus
 	return response, nil
 }
 
-// ParseRbacAdminServiceListGroupsResponse parses an HTTP response from a RbacAdminServiceListGroupsWithResponse call
-func ParseRbacAdminServiceListGroupsResponse(rsp *http.Response) (*RbacAdminServiceListGroupsResponse, error) {
+// ParseAdminListGroupsResponse parses an HTTP response from a AdminListGroupsWithResponse call
+func ParseAdminListGroupsResponse(rsp *http.Response) (*AdminListGroupsResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
 	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
 
-	response := &RbacAdminServiceListGroupsResponse{
+	response := &AdminListGroupsResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest V1ListGroupsResponse
+		var dest AdminGroupPage
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
 		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest RpcStatus
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSONDefault = &dest
 
 	}
 
 	return response, nil
 }
 
-// ParseRbacAdminServiceCreateGroupResponse parses an HTTP response from a RbacAdminServiceCreateGroupWithResponse call
-func ParseRbacAdminServiceCreateGroupResponse(rsp *http.Response) (*RbacAdminServiceCreateGroupResponse, error) {
+// ParseAdminCreateGroupResponse parses an HTTP response from a AdminCreateGroupWithResponse call
+func ParseAdminCreateGroupResponse(rsp *http.Response) (*AdminCreateGroupResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
 	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
 
-	response := &RbacAdminServiceCreateGroupResponse{
+	response := &AdminCreateGroupResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}
 
 	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest V1Group
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest AdminGroup
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
-		response.JSON200 = &dest
+		response.JSON201 = &dest
 
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest RpcStatus
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSONDefault = &dest
+	case rsp.StatusCode == 409:
+		break // No content-type
 
 	}
 
 	return response, nil
 }
 
-// ParseRbacAdminServiceDeleteGroupResponse parses an HTTP response from a RbacAdminServiceDeleteGroupWithResponse call
-func ParseRbacAdminServiceDeleteGroupResponse(rsp *http.Response) (*RbacAdminServiceDeleteGroupResponse, error) {
+// ParseAdminDeleteGroupResponse parses an HTTP response from a AdminDeleteGroupWithResponse call
+func ParseAdminDeleteGroupResponse(rsp *http.Response) (*AdminDeleteGroupResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
 	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
 
-	response := &RbacAdminServiceDeleteGroupResponse{
+	response := &AdminDeleteGroupResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseAdminGetGroupResponse parses an HTTP response from a AdminGetGroupWithResponse call
+func ParseAdminGetGroupResponse(rsp *http.Response) (*AdminGetGroupResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AdminGetGroupResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest V1DeleteGroupResponse
+		var dest AdminGroup
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
 		response.JSON200 = &dest
 
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest RpcStatus
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSONDefault = &dest
+	case rsp.StatusCode == 404:
+		break // No content-type
 
 	}
 
 	return response, nil
 }
 
-// ParseRbacAdminServiceGetGroupResponse parses an HTTP response from a RbacAdminServiceGetGroupWithResponse call
-func ParseRbacAdminServiceGetGroupResponse(rsp *http.Response) (*RbacAdminServiceGetGroupResponse, error) {
+// ParseAdminUpdateGroupResponse parses an HTTP response from a AdminUpdateGroupWithResponse call
+func ParseAdminUpdateGroupResponse(rsp *http.Response) (*AdminUpdateGroupResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
 	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
 
-	response := &RbacAdminServiceGetGroupResponse{
+	response := &AdminUpdateGroupResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest V1Group
+		var dest AdminGroup
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
 		response.JSON200 = &dest
 
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest RpcStatus
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSONDefault = &dest
+	case rsp.StatusCode == 404:
+		break // No content-type
 
 	}
 
 	return response, nil
 }
 
-// ParseRbacAdminServiceUpdateGroupResponse parses an HTTP response from a RbacAdminServiceUpdateGroupWithResponse call
-func ParseRbacAdminServiceUpdateGroupResponse(rsp *http.Response) (*RbacAdminServiceUpdateGroupResponse, error) {
+// ParseAdminListGroupMembersResponse parses an HTTP response from a AdminListGroupMembersWithResponse call
+func ParseAdminListGroupMembersResponse(rsp *http.Response) (*AdminListGroupMembersResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
 	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
 
-	response := &RbacAdminServiceUpdateGroupResponse{
+	response := &AdminListGroupMembersResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest V1Group
+		var dest AdminGroupMemberPage
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
 		response.JSON200 = &dest
 
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest RpcStatus
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSONDefault = &dest
+	case rsp.StatusCode == 404:
+		break // No content-type
 
 	}
 
 	return response, nil
 }
 
-// ParseRbacAdminServiceListGroupMembersResponse parses an HTTP response from a RbacAdminServiceListGroupMembersWithResponse call
-func ParseRbacAdminServiceListGroupMembersResponse(rsp *http.Response) (*RbacAdminServiceListGroupMembersResponse, error) {
+// ParseAdminAddGroupMemberResponse parses an HTTP response from a AdminAddGroupMemberWithResponse call
+func ParseAdminAddGroupMemberResponse(rsp *http.Response) (*AdminAddGroupMemberResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
 	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
 
-	response := &RbacAdminServiceListGroupMembersResponse{
+	response := &AdminAddGroupMemberResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}
 
 	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest V1ListGroupMembersResponse
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest AdminGroupMembership
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
-		response.JSON200 = &dest
+		response.JSON201 = &dest
 
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest RpcStatus
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSONDefault = &dest
+	case rsp.StatusCode == 400:
+		break // No content-type
 
-	}
-
-	return response, nil
-}
-
-// ParseRbacAdminServiceAddGroupMemberResponse parses an HTTP response from a RbacAdminServiceAddGroupMemberWithResponse call
-func ParseRbacAdminServiceAddGroupMemberResponse(rsp *http.Response) (*RbacAdminServiceAddGroupMemberResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &RbacAdminServiceAddGroupMemberResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest V1GroupMembership
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest RpcStatus
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSONDefault = &dest
+	case rsp.StatusCode == 404:
+		break // No content-type
 
 	}
 
@@ -13755,66 +12965,132 @@ func ParseAdminPatchUserRequiredActionsResponse(rsp *http.Response) (*AdminPatch
 	return response, nil
 }
 
-// ParseRbacAdminServiceListRolesResponse parses an HTTP response from a RbacAdminServiceListRolesWithResponse call
-func ParseRbacAdminServiceListRolesResponse(rsp *http.Response) (*RbacAdminServiceListRolesResponse, error) {
+// ParseAdminListRolesResponse parses an HTTP response from a AdminListRolesWithResponse call
+func ParseAdminListRolesResponse(rsp *http.Response) (*AdminListRolesResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
 	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
 
-	response := &RbacAdminServiceListRolesResponse{
+	response := &AdminListRolesResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest V1ListRolesResponse
+		var dest AdminRolePage
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
 		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest RpcStatus
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSONDefault = &dest
 
 	}
 
 	return response, nil
 }
 
-// ParseRbacAdminServiceCreateRoleResponse parses an HTTP response from a RbacAdminServiceCreateRoleWithResponse call
-func ParseRbacAdminServiceCreateRoleResponse(rsp *http.Response) (*RbacAdminServiceCreateRoleResponse, error) {
+// ParseAdminCreateRoleResponse parses an HTTP response from a AdminCreateRoleWithResponse call
+func ParseAdminCreateRoleResponse(rsp *http.Response) (*AdminCreateRoleResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
 	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
 
-	response := &RbacAdminServiceCreateRoleResponse{
+	response := &AdminCreateRoleResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest AdminRole
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case rsp.StatusCode == 400:
+		break // No content-type
+
+	case rsp.StatusCode == 409:
+		break // No content-type
+
+	}
+
+	return response, nil
+}
+
+// ParseAdminDeleteRoleResponse parses an HTTP response from a AdminDeleteRoleWithResponse call
+func ParseAdminDeleteRoleResponse(rsp *http.Response) (*AdminDeleteRoleResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AdminDeleteRoleResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseAdminGetRoleResponse parses an HTTP response from a AdminGetRoleWithResponse call
+func ParseAdminGetRoleResponse(rsp *http.Response) (*AdminGetRoleResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AdminGetRoleResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest V1Role
+		var dest AdminRole
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
 		response.JSON200 = &dest
 
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest RpcStatus
+	case rsp.StatusCode == 404:
+		break // No content-type
+
+	}
+
+	return response, nil
+}
+
+// ParseAdminUpdateRoleResponse parses an HTTP response from a AdminUpdateRoleWithResponse call
+func ParseAdminUpdateRoleResponse(rsp *http.Response) (*AdminUpdateRoleResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AdminUpdateRoleResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AdminRole
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
-		response.JSONDefault = &dest
+		response.JSON200 = &dest
+
+	case rsp.StatusCode == 404:
+		break // No content-type
 
 	}
 
@@ -13832,105 +13108,6 @@ func ParseAdminListRoleMembersResponse(rsp *http.Response) (*AdminListRoleMember
 	response := &AdminListRoleMembersResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
-	}
-
-	return response, nil
-}
-
-// ParseRbacAdminServiceDeleteRoleResponse parses an HTTP response from a RbacAdminServiceDeleteRoleWithResponse call
-func ParseRbacAdminServiceDeleteRoleResponse(rsp *http.Response) (*RbacAdminServiceDeleteRoleResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &RbacAdminServiceDeleteRoleResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest V1DeleteRoleResponse
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest RpcStatus
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSONDefault = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseRbacAdminServiceGetRoleResponse parses an HTTP response from a RbacAdminServiceGetRoleWithResponse call
-func ParseRbacAdminServiceGetRoleResponse(rsp *http.Response) (*RbacAdminServiceGetRoleResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &RbacAdminServiceGetRoleResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest V1Role
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest RpcStatus
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSONDefault = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseRbacAdminServiceUpdateRoleResponse parses an HTTP response from a RbacAdminServiceUpdateRoleWithResponse call
-func ParseRbacAdminServiceUpdateRoleResponse(rsp *http.Response) (*RbacAdminServiceUpdateRoleResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &RbacAdminServiceUpdateRoleResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest V1Role
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest RpcStatus
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSONDefault = &dest
-
 	}
 
 	return response, nil
@@ -13999,12 +13176,12 @@ func ParseIdentityAdminServiceCreateUserResponse(rsp *http.Response) (*IdentityA
 	}
 
 	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
 		var dest V1User
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
-		response.JSON200 = &dest
+		response.JSON201 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest RpcStatus
@@ -14080,12 +13257,8 @@ func ParseIdentityAdminServiceDeleteUserResponse(rsp *http.Response) (*IdentityA
 	}
 
 	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest V1Empty
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
+	case rsp.StatusCode == 204:
+		break // No content-type
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest RpcStatus
@@ -14213,6 +13386,67 @@ func ParseAdminRevokeUserPermissionResponse(rsp *http.Response) (*AdminRevokeUse
 	return response, nil
 }
 
+// ParseAdminListUserAssignmentsResponse parses an HTTP response from a AdminListUserAssignmentsWithResponse call
+func ParseAdminListUserAssignmentsResponse(rsp *http.Response) (*AdminListUserAssignmentsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AdminListUserAssignmentsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AdminRoleAssignmentList
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case rsp.StatusCode == 404:
+		break // No content-type
+
+	}
+
+	return response, nil
+}
+
+// ParseAdminAssignUserRoleResponse parses an HTTP response from a AdminAssignUserRoleWithResponse call
+func ParseAdminAssignUserRoleResponse(rsp *http.Response) (*AdminAssignUserRoleResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AdminAssignUserRoleResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest AdminRoleAssignment
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case rsp.StatusCode == 403:
+		break // No content-type
+
+	case rsp.StatusCode == 404:
+		break // No content-type
+
+	}
+
+	return response, nil
+}
+
 // ParseRbacAdminServiceListUserConsentsResponse parses an HTTP response from a RbacAdminServiceListUserConsentsWithResponse call
 func ParseRbacAdminServiceListUserConsentsResponse(rsp *http.Response) (*RbacAdminServiceListUserConsentsResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -14295,72 +13529,6 @@ func ParseRbacAdminServiceResolveEffectivePermissionsResponse(rsp *http.Response
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest V1ResolveEffectivePermissionsResponse
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest RpcStatus
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSONDefault = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseRbacAdminServiceListUserAssignmentsResponse parses an HTTP response from a RbacAdminServiceListUserAssignmentsWithResponse call
-func ParseRbacAdminServiceListUserAssignmentsResponse(rsp *http.Response) (*RbacAdminServiceListUserAssignmentsResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &RbacAdminServiceListUserAssignmentsResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest V1ListUserAssignmentsResponse
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest RpcStatus
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSONDefault = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseRbacAdminServiceAssignUserRoleResponse parses an HTTP response from a RbacAdminServiceAssignUserRoleWithResponse call
-func ParseRbacAdminServiceAssignUserRoleResponse(rsp *http.Response) (*RbacAdminServiceAssignUserRoleResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &RbacAdminServiceAssignUserRoleResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest V1RoleAssignment
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

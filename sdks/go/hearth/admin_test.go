@@ -241,7 +241,7 @@ func TestAdminCreateRole(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(Role{ID: "role1", Name: "editor"})
+		_ = json.NewEncoder(w).Encode(Role{ID: "11111111-1111-4111-8111-111111111111", Name: "editor"})
 	}))
 	defer srv.Close()
 
@@ -250,46 +250,46 @@ func TestAdminCreateRole(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateRole: %v", err)
 	}
-	if role.ID != "role1" || role.Name != "editor" {
+	if role.ID != "11111111-1111-4111-8111-111111111111" || role.Name != "editor" {
 		t.Errorf("role: %+v", role)
 	}
 }
 
 func TestAdminGetRole(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/admin/roles/role1" {
+		if r.URL.Path != "/admin/roles/11111111-1111-4111-8111-111111111111" {
 			http.NotFound(w, r)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(Role{ID: "role1", Name: "editor"})
+		_ = json.NewEncoder(w).Encode(Role{ID: "11111111-1111-4111-8111-111111111111", Name: "editor"})
 	}))
 	defer srv.Close()
 
 	admin := newTestAdminClient(srv)
-	role, err := admin.GetRole(context.Background(), "role1")
+	role, err := admin.GetRole(context.Background(), "11111111-1111-4111-8111-111111111111")
 	if err != nil {
 		t.Fatalf("GetRole: %v", err)
 	}
-	if role.ID != "role1" {
+	if role.ID != "11111111-1111-4111-8111-111111111111" {
 		t.Errorf("ID = %q", role.ID)
 	}
 }
 
 func TestAdminUpdateRole(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/admin/roles/role1" || r.Method != "PATCH" {
+		if r.URL.Path != "/admin/roles/11111111-1111-4111-8111-111111111111" || r.Method != "PATCH" {
 			http.NotFound(w, r)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(Role{ID: "role1", Name: "senior-editor"})
+		_ = json.NewEncoder(w).Encode(Role{ID: "11111111-1111-4111-8111-111111111111", Name: "senior-editor"})
 	}))
 	defer srv.Close()
 
 	admin := newTestAdminClient(srv)
 	name := "senior-editor"
-	role, err := admin.UpdateRole(context.Background(), "role1", UpdateRoleRequest{Name: &name})
+	role, err := admin.UpdateRole(context.Background(), "11111111-1111-4111-8111-111111111111", UpdateRoleRequest{Name: &name})
 	if err != nil {
 		t.Fatalf("UpdateRole: %v", err)
 	}
@@ -301,7 +301,7 @@ func TestAdminUpdateRole(t *testing.T) {
 func TestAdminDeleteRole(t *testing.T) {
 	called := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/admin/roles/role1" && r.Method == "DELETE" {
+		if r.URL.Path == "/admin/roles/11111111-1111-4111-8111-111111111111" && r.Method == "DELETE" {
 			called = true
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -311,11 +311,11 @@ func TestAdminDeleteRole(t *testing.T) {
 	defer srv.Close()
 
 	admin := newTestAdminClient(srv)
-	if err := admin.DeleteRole(context.Background(), "role1"); err != nil {
+	if err := admin.DeleteRole(context.Background(), "11111111-1111-4111-8111-111111111111"); err != nil {
 		t.Fatalf("DeleteRole: %v", err)
 	}
 	if !called {
-		t.Error("DELETE /admin/roles/role1 was not called")
+		t.Error("DELETE /admin/roles/11111111-1111-4111-8111-111111111111 was not called")
 	}
 }
 
@@ -327,7 +327,7 @@ func TestAdminListRoles(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(PageResponse[Role]{
-			Items: []Role{{ID: "role1", Name: "editor"}},
+			Items: []Role{{ID: "11111111-1111-4111-8111-111111111111", Name: "editor"}},
 		})
 	}))
 	defer srv.Close()
@@ -351,55 +351,55 @@ func TestAdminCreateGroup(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(Group{ID: "grp1", Name: "engineering"})
+		_ = json.NewEncoder(w).Encode(Group{ID: "22222222-2222-4222-8222-222222222222", Name: "engineering"})
 	}))
 	defer srv.Close()
 
 	admin := newTestAdminClient(srv)
-	grp, err := admin.CreateGroup(context.Background(), CreateGroupRequest{Name: "engineering"})
+	grp, err := admin.CreateGroup(context.Background(), CreateGroupRequest{Name: "engineering", Slug: "engineering"})
 	if err != nil {
 		t.Fatalf("CreateGroup: %v", err)
 	}
-	if grp.ID != "grp1" || grp.Name != "engineering" {
+	if grp.ID != "22222222-2222-4222-8222-222222222222" || grp.Name != "engineering" {
 		t.Errorf("group: %+v", grp)
 	}
 }
 
 func TestAdminGetGroup(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/admin/groups/grp1" {
+		if r.URL.Path != "/admin/groups/22222222-2222-4222-8222-222222222222" {
 			http.NotFound(w, r)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(Group{ID: "grp1", Name: "engineering"})
+		_ = json.NewEncoder(w).Encode(Group{ID: "22222222-2222-4222-8222-222222222222", Name: "engineering"})
 	}))
 	defer srv.Close()
 
 	admin := newTestAdminClient(srv)
-	grp, err := admin.GetGroup(context.Background(), "grp1")
+	grp, err := admin.GetGroup(context.Background(), "22222222-2222-4222-8222-222222222222")
 	if err != nil {
 		t.Fatalf("GetGroup: %v", err)
 	}
-	if grp.ID != "grp1" {
+	if grp.ID != "22222222-2222-4222-8222-222222222222" {
 		t.Errorf("ID = %q", grp.ID)
 	}
 }
 
 func TestAdminUpdateGroup(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/admin/groups/grp1" || r.Method != "PATCH" {
+		if r.URL.Path != "/admin/groups/22222222-2222-4222-8222-222222222222" || r.Method != "PATCH" {
 			http.NotFound(w, r)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(Group{ID: "grp1", Name: "platform-engineering"})
+		_ = json.NewEncoder(w).Encode(Group{ID: "22222222-2222-4222-8222-222222222222", Name: "platform-engineering"})
 	}))
 	defer srv.Close()
 
 	admin := newTestAdminClient(srv)
 	name := "platform-engineering"
-	grp, err := admin.UpdateGroup(context.Background(), "grp1", UpdateGroupRequest{Name: &name})
+	grp, err := admin.UpdateGroup(context.Background(), "22222222-2222-4222-8222-222222222222", UpdateGroupRequest{Name: &name})
 	if err != nil {
 		t.Fatalf("UpdateGroup: %v", err)
 	}
@@ -411,7 +411,7 @@ func TestAdminUpdateGroup(t *testing.T) {
 func TestAdminDeleteGroup(t *testing.T) {
 	called := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/admin/groups/grp1" && r.Method == "DELETE" {
+		if r.URL.Path == "/admin/groups/22222222-2222-4222-8222-222222222222" && r.Method == "DELETE" {
 			called = true
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -421,11 +421,11 @@ func TestAdminDeleteGroup(t *testing.T) {
 	defer srv.Close()
 
 	admin := newTestAdminClient(srv)
-	if err := admin.DeleteGroup(context.Background(), "grp1"); err != nil {
+	if err := admin.DeleteGroup(context.Background(), "22222222-2222-4222-8222-222222222222"); err != nil {
 		t.Fatalf("DeleteGroup: %v", err)
 	}
 	if !called {
-		t.Error("DELETE /admin/groups/grp1 was not called")
+		t.Error("DELETE /admin/groups/22222222-2222-4222-8222-222222222222 was not called")
 	}
 }
 
@@ -437,7 +437,7 @@ func TestAdminListGroups(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(PageResponse[Group]{
-			Items: []Group{{ID: "grp1", Name: "engineering"}},
+			Items: []Group{{ID: "22222222-2222-4222-8222-222222222222", Name: "engineering"}},
 		})
 	}))
 	defer srv.Close()
@@ -451,9 +451,3 @@ func TestAdminListGroups(t *testing.T) {
 		t.Fatalf("items: %v", page.Items)
 	}
 }
-
-// ─── Org Membership CRUD ──────────────────────────────────────────────────────
-//
-// Removed with the methods. Hearth serves no organization route over HTTP, so
-// these tests only ever proved that the SDK could talk to a stub server that
-// the real server does not resemble (audit 2026-08-28 §25.19).
