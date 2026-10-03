@@ -136,8 +136,10 @@ Sixteen admin operations existed only over gRPC (`docs/api/grpc-only.txt`; `Clie
 
 ## 14. Release v3.0.0
 
-- [ ] 14.1 Run `make test-detached` on the release candidate; the full suite is green
-- [ ] 14.2 Compare per-module coverage before and after; the kept modules must not drop
+- [x] 14.1 Run `make test-detached` on the release candidate; the full suite is green
+  - Changed during apply: 6102/6102 on 2026-10-03, on the 14.2 commit (the release candidate). Clippy passes with and without `dev-endpoints`. Re-run if anything lands before the tag.
+- [x] 14.2 Compare per-module coverage before and after; the kept modules must not drop
+  - Changed during apply: `cargo llvm-cov` line coverage, merge base `66e329f3` against `cb1780fe` (both full suites green under instrumentation: 6762/6762 and 6095/6095). Total 83.16% → 83.40%. Three kept modules dropped by more than 0.5 points: `protocol/convert` (85.4 → 79.7), `identity/types` (96.0 → 94.5) and `protocol/web` (67.7 → 66.8). Most of each drop is well-covered code that was deleted. Three files gained uncovered lines, and each is fixed: `web/admin/clients.rs` (the deleted FAPI tests were the only ones on the create and edit error re-render; nothing reached the delete handler) gets three console tests; `identity/types/realm.rs` gets unit tests (pre-token webhook `https://` check, HIBP key redaction and round trip, attribute template helpers); `protocol/convert/oauth.rs` loses four conversions only the public gRPC API used. Each new test was checked to fail against its mutated branch.
 - [ ] 14.3 Cut v3.0.0 with the release-cut procedure in `CLAUDE.md`, and update the README pins
 - [x] 14.4 Declare the feature freeze, and open the follow-up change for the confidence work (external conformance suites, invariant tests across entry points, mutation testing, pentest)
   - Changed during apply: the freeze is declared in `CONTRIBUTING.md` and in the CHANGELOG's Unreleased notes. The follow-up change is `openspec/changes/trusted-core-confidence/` (capability `release-assurance`). Its group 1 also carries the defects found during this change (`amr` has no producer, device grant `401`, `response_mode` errors, JAR `response_mode`, `UPDATE_PASSWORD` then consent, `HEARTH_ABUSE_CHALLENGE_REQUIRED`, `/admin/realms` `405` before auth, `allow_reserved_permissions`, `cargo deny` allowances, the `mfa: optional` warning assertion), so the freeze does not lose them. `docs/STATUS.md` lists it on the roadmap.

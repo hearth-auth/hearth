@@ -104,64 +104,6 @@ impl From<pb::RegisterClientRequest> for domain::RegisterClientRequest {
     }
 }
 
-// ==================== UpdateClientRequest ====================
-
-impl From<pb::UpdateClientRequest> for domain::UpdateClientRequest {
-    fn from(r: pb::UpdateClientRequest) -> Self {
-        Self {
-            client_name: r.client_name,
-            redirect_uris: if r.redirect_uris.is_empty() {
-                None
-            } else {
-                Some(r.redirect_uris)
-            },
-            grant_types: if r.grant_types.is_empty() {
-                None
-            } else {
-                Some(r.grant_types)
-            },
-            require_consent: None,
-            client_logo_url: None,
-            slug: None,
-            trust_level: r
-                .trust_level
-                .and_then(|v| match pb::ClientTrustLevel::try_from(v) {
-                    Ok(pb::ClientTrustLevel::FirstParty) => {
-                        Some(domain::ClientTrustLevel::FirstParty)
-                    }
-                    Ok(pb::ClientTrustLevel::ThirdParty) => {
-                        Some(domain::ClientTrustLevel::ThirdParty)
-                    }
-                    _ => None,
-                }),
-            declared_scopes: None,
-            cors_origins: None,
-            consent_spans_orgs: None,
-            backchannel_logout_uri: None,
-            frontchannel_logout_uri: None,
-            post_logout_redirect_uris: None,
-            status: None,
-            assertion_public_key: None,
-            access_token_authorization: r.access_token_authorization.map(|v| {
-                use domain::AccessTokenAuthorization;
-                match pb::AccessTokenAuthorization::try_from(v) {
-                    Ok(pb::AccessTokenAuthorization::Introspection) => {
-                        AccessTokenAuthorization::Introspection
-                    }
-                    Ok(pb::AccessTokenAuthorization::Decision) => {
-                        AccessTokenAuthorization::Decision
-                    }
-                    _ => AccessTokenAuthorization::Embedded,
-                }
-            }),
-            id_token_signed_response_alg: r.id_token_signed_response_alg,
-            dpop_bound_access_tokens: None,
-            jwks: None,
-            mfa_required: None,
-        }
-    }
-}
-
 // ==================== AuthorizationRequest ====================
 
 /// Converts a proto `AuthorizationRequest` to a domain `AuthorizationRequest`.
@@ -301,36 +243,6 @@ impl From<&domain::DeviceAuthorizationResponse> for pb::DeviceAuthorizationRespo
     }
 }
 
-// ==================== IntrospectionResponse ====================
-
-impl From<&domain::IntrospectionResponse> for pb::IntrospectionResponse {
-    fn from(r: &domain::IntrospectionResponse) -> Self {
-        use domain::AccessTokenAuthorization;
-        let mode = r.mode.map(|m| match m {
-            AccessTokenAuthorization::Embedded => pb::AccessTokenAuthorization::Embedded as i32,
-            AccessTokenAuthorization::Introspection => {
-                pb::AccessTokenAuthorization::Introspection as i32
-            }
-            AccessTokenAuthorization::Decision => pb::AccessTokenAuthorization::Decision as i32,
-        });
-        Self {
-            active: r.active,
-            scope: r.scope.clone(),
-            client_id: r.client_id.clone(),
-            sub: r.sub.clone(),
-            exp: r.exp,
-            iat: r.iat,
-            token_type: r.token_type.clone(),
-            iss: r.iss.clone(),
-            aud: r.aud.clone(),
-            mode,
-            permissions: r.permissions.clone(),
-            roles: r.roles.clone(),
-            groups: r.groups.clone(),
-        }
-    }
-}
-
 // ==================== UserInfoResponse ====================
 
 impl From<&domain::UserInfoResponse> for pb::UserInfoResponse {
@@ -340,62 +252,6 @@ impl From<&domain::UserInfoResponse> for pb::UserInfoResponse {
             email: r.email.clone(),
             email_verified: r.email_verified,
             name: r.name.clone(),
-        }
-    }
-}
-
-// ==================== OidcDiscoveryDocument ====================
-
-impl From<&domain::OidcDiscoveryDocument> for pb::OidcDiscoveryDocument {
-    fn from(d: &domain::OidcDiscoveryDocument) -> Self {
-        Self {
-            issuer: d.issuer.clone(),
-            authorization_endpoint: d.authorization_endpoint.clone(),
-            token_endpoint: d.token_endpoint.clone(),
-            jwks_uri: d.jwks_uri.clone(),
-            userinfo_endpoint: d.userinfo_endpoint.clone(),
-            response_types_supported: d.response_types_supported.clone(),
-            response_modes_supported: d.response_modes_supported.clone(),
-            subject_types_supported: d.subject_types_supported.clone(),
-            id_token_signing_alg_values_supported: d.id_token_signing_alg_values_supported.clone(),
-            scopes_supported: d.scopes_supported.clone(),
-            claims_supported: d.claims_supported.clone(),
-            token_endpoint_auth_methods_supported: d.token_endpoint_auth_methods_supported.clone(),
-            code_challenge_methods_supported: d.code_challenge_methods_supported.clone(),
-            grant_types_supported: d.grant_types_supported.clone(),
-            registration_endpoint: d.registration_endpoint.clone(),
-            device_authorization_endpoint: d.device_authorization_endpoint.clone(),
-            revocation_endpoint: d.revocation_endpoint.clone(),
-            introspection_endpoint: d.introspection_endpoint.clone(),
-        }
-    }
-}
-
-// ==================== JwksDocument ====================
-
-impl From<&domain::Jwk> for pb::JsonWebKey {
-    fn from(j: &domain::Jwk) -> Self {
-        // The proto `JsonWebKey` schema predates multi-algorithm JWKS
-        // and only carries the OKP/Ed25519 field set. RSA `n`/`e` and EC
-        // `y` are not representable here; consumers needing RFC 7517
-        // entries for RS256/ES256 must use the HTTP `/certs` endpoint,
-        // which bypasses this proto and emits the wider `domain::Jwk`
-        // directly as JSON.
-        Self {
-            kty: j.kty.clone(),
-            crv: j.crv.clone().unwrap_or_default(),
-            x: j.x.clone().unwrap_or_default(),
-            kid: j.kid.clone(),
-            r#use: j.use_.clone(),
-            alg: j.alg.clone(),
-        }
-    }
-}
-
-impl From<&domain::JwksDocument> for pb::JwksDocument {
-    fn from(d: &domain::JwksDocument) -> Self {
-        Self {
-            keys: d.keys.iter().map(pb::JsonWebKey::from).collect(),
         }
     }
 }

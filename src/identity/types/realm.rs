@@ -925,6 +925,85 @@ mod tests {
     }
 
     #[test]
+    fn pre_token_webhook_config_validate_rejects_plain_http() {
+        let cfg = PreTokenWebhookConfig {
+            url: "http://localhost:9999/enrich".to_string(),
+            timeout_ms: 1000,
+            on_error: PreTokenWebhookErrorPolicy::FailClosed,
+            hmac_secret: Some("s".repeat(32)),
+        };
+        let err = cfg.validate().expect_err("http:// must be rejected");
+        assert!(err.contains("https://"), "got: {err}");
+    }
+
+    #[test]
+    fn breach_check_config_debug_redacts_the_api_key() {
+        let cfg = BreachCheckConfig {
+            hibp_api_key: SecretString::new("hibp-key-value".to_string()),
+            ..BreachCheckConfig::default()
+        };
+        let debug = format!("{cfg:?}");
+        assert!(!debug.contains("hibp-key-value"), "got: {debug}");
+        assert!(debug.contains("[REDACTED]"), "got: {debug}");
+    }
+
+    #[test]
+    fn breach_check_config_round_trips_the_api_key_and_omits_an_empty_one() {
+        let with_key = BreachCheckConfig {
+            hibp_api_key: SecretString::new("hibp-key-value".to_string()),
+            ..BreachCheckConfig::default()
+        };
+        let json = serde_json::to_string(&with_key).expect("serialize");
+        let back: BreachCheckConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, with_key);
+
+        let json = serde_json::to_string(&BreachCheckConfig::default()).expect("serialize");
+        assert!(!json.contains("hibp_api_key"), "got: {json}");
+        let back: BreachCheckConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, BreachCheckConfig::default());
+    }
+
+    fn attribute(key: &str, type_: AttributeType) -> AttributeDefinition {
+        AttributeDefinition {
+            key: key.to_string(),
+            label: None,
+            type_,
+            required: false,
+            description: None,
+            enum_values: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn attribute_definition_template_helpers() {
+        let mut def = attribute("tier", AttributeType::Enum);
+        assert_eq!(
+            def.display_label(),
+            "tier",
+            "no label falls back to the key"
+        );
+        assert_eq!(def.description_str(), None);
+        def.label = Some("Tier".to_string());
+        def.description = Some("Billing tier".to_string());
+        assert_eq!(def.display_label(), "Tier");
+        assert_eq!(def.description_str(), Some("Billing tier"));
+
+        assert!(def.is_enum() && !def.is_boolean() && !def.is_number());
+        assert!(attribute("vip", AttributeType::Boolean).is_boolean());
+        assert!(attribute("seats", AttributeType::Number).is_number());
+        let text = attribute("note", AttributeType::String);
+        assert!(!text.is_enum() && !text.is_boolean() && !text.is_number());
+
+        let attrs = vec![
+            ("other".to_string(), "x".to_string()),
+            ("tier".to_string(), "gold".to_string()),
+            ("tier".to_string(), "silver".to_string()),
+        ];
+        assert_eq!(def.find_value(&attrs), "gold", "the first match wins");
+        assert_eq!(text.find_value(&attrs), "", "a missing key gives \"\"");
+    }
+
+    #[test]
     fn pre_token_webhook_config_validate_accepts_non_empty_secret() {
         let cfg = PreTokenWebhookConfig {
             url: "https://localhost:9999/enrich".to_string(),

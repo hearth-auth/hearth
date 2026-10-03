@@ -2020,6 +2020,90 @@ async fn console_forms_offer_rs256() {
 }
 
 // ===========================================================================
+// Application form errors and delete
+// ===========================================================================
+//
+// The FAPI refusal tests used to be the only ones that reached the
+// invalid-input branches of the create and edit handlers. Any invalid input
+// reaches them, so a redirect URI with a fragment stands in.
+
+/// Application form fields with a redirect URI the engine refuses.
+const FRAGMENT_FORM: &str = "redirect_uris=https%3A%2F%2Frp.example.com%2Fcb%23frag\
+                             &grant_authorization_code=1&trust_level=third_party";
+
+/// A create the engine refuses re-renders the form with the reason, keeps the
+/// typed values, and registers nothing.
+#[tokio::test]
+async fn console_create_with_invalid_input_rerenders_with_the_reason() {
+    let rig = build_rig();
+    let (status, location, body) = console_request(
+        &rig,
+        "/ui/admin/realms/acme/applications/new",
+        Some(&format!("client_name=Fragment+RP&{FRAGMENT_FORM}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "location: {location}");
+    let error = form_error(&body).expect("the form shows an error");
+    assert!(error.contains("fragment"), "got: {error}");
+    assert!(body.contains("Fragment RP"), "the typed name is kept");
+    let names: Vec<String> = rig
+        .identity
+        .list_clients(&rig.realm_id, &PageRequest::default())
+        .expect("list_clients")
+        .items
+        .iter()
+        .map(|c| c.client_name().to_string())
+        .collect();
+    assert!(!names.iter().any(|n| n == "Fragment RP"), "got: {names:?}");
+}
+
+/// An edit the engine refuses re-renders the form with the reason and leaves
+/// the stored client unchanged.
+#[tokio::test]
+async fn console_edit_with_invalid_input_rerenders_with_the_reason() {
+    let rig = build_rig();
+    let client = register_rp(&rig, "EdDSA");
+    let cid = client.client_id().as_uuid();
+    let (status, location, body) = console_request(
+        &rig,
+        &format!("/ui/admin/realms/acme/applications/{cid}/edit"),
+        Some(&format!("client_name=Renamed+RP&{FRAGMENT_FORM}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "location: {location}");
+    let error = form_error(&body).expect("the form shows an error");
+    assert!(error.contains("fragment"), "got: {error}");
+    let stored = rig
+        .identity
+        .get_client(&rig.realm_id, client.client_id())
+        .expect("get_client")
+        .expect("the client exists");
+    assert_eq!(stored.client_name(), "Console RP", "nothing was saved");
+    assert_eq!(stored.redirect_uris(), ["https://rp.example.com/cb"]);
+}
+
+/// The delete form removes the client and returns to the application list.
+#[tokio::test]
+async fn console_delete_removes_the_application() {
+    let rig = build_rig();
+    let client = register_rp(&rig, "EdDSA");
+    let cid = client.client_id().as_uuid();
+    let (status, location, _) = console_request(
+        &rig,
+        &format!("/ui/admin/realms/acme/applications/{cid}/delete"),
+        Some(""),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(location, "/ui/admin/realms/acme/applications");
+    let stored = rig
+        .identity
+        .get_client(&rig.realm_id, client.client_id())
+        .expect("get_client");
+    assert!(stored.is_none(), "the client is gone");
+}
+
+// ===========================================================================
 // Session tests
 // ===========================================================================
 
