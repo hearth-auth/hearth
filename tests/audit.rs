@@ -15,7 +15,7 @@ use hearth::identity::CreateRealmRequest;
 
 #[tokio::test]
 async fn audit_lifecycle_via_embedded_api() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let audit = harness.audit();
 
     // Create a realm to use
@@ -175,7 +175,7 @@ async fn audit_events_persist_across_engine_recreation() {
 
 #[tokio::test]
 async fn compliance_query_auth_events_by_user_and_date() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let audit = harness.audit();
     let realm_id = RealmId::generate();
 
@@ -247,7 +247,7 @@ async fn compliance_query_auth_events_by_user_and_date() {
 
 #[tokio::test]
 async fn tamper_detection_detects_modified_entries() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let audit = harness.audit();
     let storage = harness.storage();
     let realm_id = RealmId::generate();
@@ -333,7 +333,7 @@ async fn tamper_detection_detects_modified_entries() {
 
 #[tokio::test]
 async fn multi_realm_audit_isolation() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let audit = harness.audit();
 
     let realm_a = RealmId::generate();
@@ -392,7 +392,7 @@ async fn multi_realm_audit_isolation() {
 
 #[tokio::test]
 async fn retention_config_defaults_to_90_days() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let audit = harness.audit();
     let realm_id = RealmId::generate();
 
@@ -405,7 +405,7 @@ async fn retention_config_defaults_to_90_days() {
 
 #[tokio::test]
 async fn retention_config_roundtrip() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let audit = harness.audit();
     let realm_id = RealmId::generate();
 
@@ -567,7 +567,7 @@ async fn prune_before_cutoff_all_leaves_empty() {
 
 /// Verifies the admin_audit_export handler returns NDJSON when no format param.
 /// We test the formatting logic via unit test on the engine since the HTTP
-/// layer is not available in embedded harness mode.
+/// layer is not available in in-process harness mode.
 #[test]
 fn audit_export_ndjson_format_matches_spec() {
     // NDJSON: one valid JSON object per line, no trailing commas/brackets.

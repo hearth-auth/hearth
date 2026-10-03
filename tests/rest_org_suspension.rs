@@ -51,7 +51,7 @@ fn perms(list: &[&str]) -> Vec<Permission> {
 /// and one org-scoped role, and an admin token for the REST admin API.
 #[allow(clippy::too_many_lines)] // Fixture setup: one realm, one org, four roles, two users.
 async fn ctx() -> Ctx {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
 

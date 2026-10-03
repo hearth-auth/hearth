@@ -35,7 +35,7 @@ struct Ctx {
 
 impl Ctx {
     async fn new() -> Self {
-        let h = common::TestHarness::embedded().await.expect("harness");
+        let h = common::TestHarness::in_process().await.expect("harness");
         let realm = h.create_realm();
         h.rbac().seed_realm(&realm).expect("seed");
         let app = router(Arc::new(AppState::new(

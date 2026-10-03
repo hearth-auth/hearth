@@ -70,7 +70,7 @@ fn make_assertion(
 
 #[tokio::test]
 async fn jwt_bearer_valid_assertion_issues_token() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -141,7 +141,7 @@ async fn jwt_bearer_valid_assertion_issues_token() {
 
 #[tokio::test]
 async fn jwt_bearer_expired_assertion_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -210,7 +210,7 @@ async fn jwt_bearer_expired_assertion_rejected() {
 
 #[tokio::test]
 async fn jwt_bearer_jti_replay_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -295,7 +295,7 @@ async fn jwt_bearer_jti_replay_rejected() {
 
 #[tokio::test]
 async fn jwt_bearer_wrong_issuer_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -371,7 +371,7 @@ async fn jwt_bearer_wrong_issuer_rejected() {
 
 #[tokio::test]
 async fn jwt_bearer_wrong_audience_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -439,7 +439,7 @@ async fn jwt_bearer_wrong_audience_rejected() {
 
 #[tokio::test]
 async fn jwt_bearer_no_registered_key_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -496,7 +496,7 @@ async fn jwt_bearer_no_registered_key_rejected() {
 
 #[tokio::test]
 async fn jwt_bearer_tampered_signature_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -569,7 +569,7 @@ async fn jwt_bearer_tampered_signature_rejected() {
 
 #[tokio::test]
 async fn jwt_bearer_no_jti_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -639,7 +639,7 @@ async fn jwt_bearer_no_jti_rejected() {
 
 #[tokio::test]
 async fn jwt_bearer_sub_mismatch_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -715,7 +715,7 @@ async fn jwt_bearer_sub_mismatch_rejected() {
 
 #[tokio::test]
 async fn jwt_bearer_exp_too_far_future_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -787,7 +787,7 @@ async fn jwt_bearer_exp_too_far_future_rejected() {
 
 #[tokio::test]
 async fn jwt_bearer_corrupted_jti_bytes_returns_internal_error() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -879,7 +879,7 @@ async fn jwt_bearer_corrupted_jti_bytes_returns_internal_error() {
 
 #[tokio::test]
 async fn jwt_bearer_grant_in_discovery() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
 

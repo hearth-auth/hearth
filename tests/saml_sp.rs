@@ -31,7 +31,7 @@ fn cert_der_to_pem(der: &[u8]) -> String {
 
 #[tokio::test]
 async fn sp_happy_path_accepts_well_formed_assertion() {
-    let h = TestHarness::embedded().await.expect("harness");
+    let h = TestHarness::in_process().await.expect("harness");
 
     // Set up: create a realm to host the SP side.
     let _realm = h
@@ -100,7 +100,7 @@ async fn sp_happy_path_accepts_well_formed_assertion() {
 
 #[tokio::test]
 async fn sp_rejects_tampered_assertion() {
-    let _h = TestHarness::embedded().await.expect("harness");
+    let _h = TestHarness::in_process().await.expect("harness");
     let idp_key = RsaSigningKey::generate("test-idp", 365).expect("idp key");
     let cert_pem = cert_der_to_pem(idp_key.cert_der());
 
@@ -155,7 +155,7 @@ async fn sp_rejects_tampered_assertion() {
 
 #[tokio::test]
 async fn sp_rejects_audience_mismatch() {
-    let _h = TestHarness::embedded().await.expect("harness");
+    let _h = TestHarness::in_process().await.expect("harness");
     let idp_key = RsaSigningKey::generate("test-idp", 365).expect("idp key");
     let cert_pem = cert_der_to_pem(idp_key.cert_der());
 
@@ -213,7 +213,7 @@ async fn sp_rejects_audience_mismatch() {
 
 #[tokio::test]
 async fn engine_replay_protection_works() {
-    let h = TestHarness::embedded().await.expect("harness");
+    let h = TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -242,7 +242,7 @@ async fn engine_replay_protection_works() {
 
 #[tokio::test]
 async fn engine_lazy_creates_saml_signing_key() {
-    let h = TestHarness::embedded().await.expect("harness");
+    let h = TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -521,7 +521,7 @@ fn sp_idp_config(cert_pem: String) -> SamlIdpConfig {
 /// caused by the rewritten binding and nothing else.
 #[tokio::test]
 async fn sp_accepts_well_bound_subject_confirmation() {
-    let _h = TestHarness::embedded().await.expect("harness");
+    let _h = TestHarness::in_process().await.expect("harness");
     let key = RsaSigningKey::generate("test-idp", 365).expect("key");
     let signed = signed_response_with_rewritten_confirmation(&key, &[]);
     let outcome = SamlSpService::complete(
@@ -543,7 +543,7 @@ async fn sp_accepts_well_bound_subject_confirmation() {
 /// replayed here, even though the outer `<Response Destination=…>` is ours.
 #[tokio::test]
 async fn sp_rejects_assertion_minted_for_another_recipient() {
-    let _h = TestHarness::embedded().await.expect("harness");
+    let _h = TestHarness::in_process().await.expect("harness");
     let key = RsaSigningKey::generate("test-idp", 365).expect("key");
     let signed = signed_response_with_rewritten_confirmation(
         &key,
@@ -581,7 +581,7 @@ async fn sp_rejects_assertion_minted_for_another_recipient() {
 /// refused.
 #[tokio::test]
 async fn sp_rejects_closed_bearer_window() {
-    let _h = TestHarness::embedded().await.expect("harness");
+    let _h = TestHarness::in_process().await.expect("harness");
     let key = RsaSigningKey::generate("test-idp", 365).expect("key");
     // Conditions/NotOnOrAfter stays open; only the bearer copy (inside
     // SubjectConfirmationData) is pulled back into the past. The builder emits
@@ -615,7 +615,7 @@ async fn sp_rejects_closed_bearer_window() {
 /// `AuthnRequest` this SP issued.
 #[tokio::test]
 async fn sp_rejects_signed_in_response_to_mismatch() {
-    let _h = TestHarness::embedded().await.expect("harness");
+    let _h = TestHarness::in_process().await.expect("harness");
     let key = RsaSigningKey::generate("test-idp", 365).expect("key");
     // Rewrite only the copy inside <SubjectConfirmationData>; the
     // <Response InResponseTo="_req1"> envelope still says the right thing,
@@ -673,7 +673,7 @@ fn count_saml_state_rows(h: &TestHarness, realm: &hearth::core::RealmId) -> usiz
 async fn put_saml_state_reclaims_expired_bags() {
     use hearth::identity::federation::saml::SamlStateBag;
 
-    let h = TestHarness::embedded().await.expect("harness");
+    let h = TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&hearth::identity::CreateRealmRequest {
@@ -757,7 +757,7 @@ async fn saml_confirm_link_is_reachable_only_when_the_asserted_email_is_trusted(
     use hearth::identity::CreateUserRequest;
     use std::sync::Arc;
 
-    let h = TestHarness::embedded().await.expect("harness");
+    let h = TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {

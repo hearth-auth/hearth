@@ -105,7 +105,7 @@ fn permission_grammar_max_128_accepted() {
 
 #[tokio::test]
 async fn group_depth_cap_exceeded() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
     let user = UserId::generate();
 
@@ -191,7 +191,7 @@ fn invalid_permission_grammar_rejected_at_construction() {
 
 #[tokio::test]
 async fn create_role_rejects_hearth_namespace_permission() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
 
     let result = h.rbac().create_role(
@@ -212,7 +212,7 @@ async fn create_role_rejects_hearth_namespace_permission() {
 
 #[tokio::test]
 async fn update_role_rejects_hearth_namespace_permission() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
 
     let role = h
@@ -247,7 +247,7 @@ async fn update_role_rejects_hearth_namespace_permission() {
 
 #[tokio::test]
 async fn multiple_hearth_namespace_permissions_rejected() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
 
     let result = h.rbac().create_role(
@@ -275,7 +275,7 @@ async fn multiple_hearth_namespace_permissions_rejected() {
 
 #[tokio::test]
 async fn token_size_cap_permissions_exceeded() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
     let user = UserId::generate();
 
@@ -323,7 +323,7 @@ async fn token_size_cap_permissions_exceeded() {
 
 #[tokio::test]
 async fn token_size_cap_roles_exceeded() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
     let user = UserId::generate();
 
@@ -369,7 +369,7 @@ async fn token_size_cap_roles_exceeded() {
 
 #[tokio::test]
 async fn token_size_within_cap_succeeds() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
     let user = UserId::generate();
 

@@ -301,7 +301,7 @@ Avoid false-confidence anti-patterns (vacuous `is_ok()`/`is_err()` asserts, zero
 - **No doctests — ever.** No `/// ```rust` fenced blocks in doc comments. Use `#[cfg(test)] mod tests` blocks or `tests/`. Runnable examples live under `examples/`.
 - **Property tests**: `proptest` (256 cases dev, 10k+ CI).
 - **Simulation**: real-thread crash-recovery tests (`hearth-simulation` crate) using `FaultFs` fault injection; no deterministic scheduler.
-- **Black box tests**: `TestHarness` (`tests/common/mod.rs`) — embedded + server modes.
+- **Black box tests**: `TestHarness` (`tests/common/mod.rs`) — in-process + server modes.
 
 ## Code Style
 

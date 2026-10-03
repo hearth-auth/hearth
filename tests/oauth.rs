@@ -60,7 +60,7 @@ fn create_user(harness: &common::TestHarness, realm: &RealmId) -> User {
 
 #[tokio::test]
 async fn client_credentials_full_flow() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -164,7 +164,7 @@ async fn client_credentials_full_flow() {
 
 #[tokio::test]
 async fn device_authorization_full_flow() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -254,7 +254,7 @@ async fn device_authorization_full_flow() {
 async fn refresh_token_rotation_e2e() {
     use hearth::identity::{AuthorizationRequest, CodeChallengeMethod, TokenExchangeRequest};
 
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -408,7 +408,7 @@ fn decode_jwt_claims(token: &str) -> serde_json::Value {
 async fn auth_code_flow_iss_matches_discovery_issuer() {
     use hearth::identity::{AuthorizationRequest, CodeChallengeMethod, TokenExchangeRequest};
 
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -533,7 +533,7 @@ async fn conformance_rfc7662_introspection_response() {
         AuthorizationRequest, CodeChallengeMethod, TokenExchangeRequest, TokenIntrospectionRequest,
     };
 
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -698,7 +698,7 @@ async fn conformance_rfc7662_introspection_response() {
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn conformance_rfc8628_device_authorization() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -855,7 +855,7 @@ async fn conformance_rfc8628_device_authorization() {
 /// Archiving a client blocks new OAuth flows; restoring it allows them again.
 #[tokio::test]
 async fn archived_client_blocks_and_restore_allows_authorize() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm(&harness);
     let user = create_user(&harness, &realm);
 
@@ -1052,7 +1052,7 @@ fn per_ip_rate_limit_different_ips_independent() {
 /// has no relationship with that token and must receive `active: false`.
 #[tokio::test]
 async fn introspection_scoped_to_intended_audience() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -1163,7 +1163,7 @@ async fn introspection_scoped_to_intended_audience() {
 async fn session_refresh_token_carries_fid_and_rotates() {
     use hearth::identity::decode_claims_unverified;
 
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm(&harness);
     let user = create_user(&harness, &realm);
     let response = common::user_token_pair(harness.identity(), &realm, user.id());
@@ -1204,7 +1204,7 @@ async fn session_refresh_token_carries_fid_and_rotates() {
 async fn device_grant_refresh_token_carries_fid() {
     use hearth::identity::decode_claims_unverified;
 
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm(&harness);
     let user = create_user(&harness, &realm);
     let client = harness

@@ -133,7 +133,7 @@ fn register_rs(h: &common::TestHarness, realm: &RealmId) {
 
 #[tokio::test]
 async fn a_confidential_client_with_the_grant_may_exchange() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let c = client(&h, &realm, true, &[TE]);
     exchange(&h, &realm, &c, None, None).expect("the policy admits this client");
@@ -141,7 +141,7 @@ async fn a_confidential_client_with_the_grant_may_exchange() {
 
 #[tokio::test]
 async fn a_public_client_may_not_exchange() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let c = client(&h, &realm, false, &[TE]);
     let err = exchange(&h, &realm, &c, None, None).unwrap_err();
@@ -150,7 +150,7 @@ async fn a_public_client_may_not_exchange() {
 
 #[tokio::test]
 async fn a_client_without_the_token_exchange_grant_may_not_exchange() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let c = client(&h, &realm, true, &["client_credentials"]);
     let err = exchange(&h, &realm, &c, None, None).unwrap_err();
@@ -159,7 +159,7 @@ async fn a_client_without_the_token_exchange_grant_may_not_exchange() {
 
 #[tokio::test]
 async fn an_archived_or_unknown_client_may_not_exchange() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let c = client(&h, &realm, true, &[TE]);
     h.identity()
@@ -182,7 +182,7 @@ async fn an_archived_or_unknown_client_may_not_exchange() {
 
 #[tokio::test]
 async fn audience_must_name_a_registered_protected_resource() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let c = client(&h, &realm, true, &[TE]);
     let err = exchange(&h, &realm, &c, Some("https://evil.example.com"), None).unwrap_err();
@@ -198,7 +198,7 @@ async fn audience_must_name_a_registered_protected_resource() {
 /// so it needs no registration.
 #[tokio::test]
 async fn audience_already_in_the_subject_token_is_allowed() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let c = client(&h, &realm, true, &[TE]);
     // The harness issues user tokens for the default Hearth audience.
@@ -211,7 +211,7 @@ async fn audience_already_in_the_subject_token_is_allowed() {
 
 #[tokio::test]
 async fn resource_must_name_a_registered_protected_resource() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let c = client(&h, &realm, true, &[TE]);
     let err = exchange(&h, &realm, &c, None, Some("https://evil.example.com")).unwrap_err();
@@ -225,7 +225,7 @@ async fn resource_must_name_a_registered_protected_resource() {
 /// minted.
 #[tokio::test]
 async fn public_client_token_exchange_over_http_is_refused() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let c = client(&h, &realm, false, &[TE]);
     let form = format!(

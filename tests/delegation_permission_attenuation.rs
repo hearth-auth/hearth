@@ -170,7 +170,7 @@ fn make_actor_token_no_rbac(
 /// allowing any agent to escalate to the subject's authority via delegation.
 #[tokio::test]
 async fn actor_with_no_permissions_yields_empty_delegated_permissions() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
 
     // Subject has significant RBAC grants. Use "openid" as the common scope so
@@ -262,7 +262,7 @@ async fn actor_with_no_permissions_yields_empty_delegated_permissions() {
 /// to subject_permissions, so intersection = subject's permissions).
 #[tokio::test]
 async fn no_actor_token_preserves_subject_permissions() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
 
     let subject_token =

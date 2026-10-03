@@ -301,31 +301,6 @@ impl From<&domain::DeviceAuthorizationResponse> for pb::DeviceAuthorizationRespo
     }
 }
 
-// ==================== TokenRevocationRequest ====================
-
-impl From<pb::TokenRevocationRequest> for domain::TokenRevocationRequest {
-    fn from(r: pb::TokenRevocationRequest) -> Self {
-        Self {
-            token: r.token,
-            token_type_hint: r.token_type_hint,
-            // The gRPC handler sets the authenticated client after conversion.
-            revoking_client_id: None,
-        }
-    }
-}
-
-// ==================== TokenIntrospectionRequest ====================
-
-impl From<pb::TokenIntrospectionRequest> for domain::TokenIntrospectionRequest {
-    fn from(r: pb::TokenIntrospectionRequest) -> Self {
-        Self {
-            token: r.token,
-            token_type_hint: r.token_type_hint,
-            introspecting_client_id: None,
-        }
-    }
-}
-
 // ==================== IntrospectionResponse ====================
 
 impl From<&domain::IntrospectionResponse> for pb::IntrospectionResponse {

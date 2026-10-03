@@ -42,7 +42,7 @@ fn make_resource_request(uri: &str) -> RegisterProtectedResourceRequest {
 
 #[tokio::test]
 async fn protected_resource_register_and_get() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
@@ -69,7 +69,7 @@ async fn protected_resource_register_and_get() {
 
 #[tokio::test]
 async fn protected_resource_list() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
@@ -100,7 +100,7 @@ async fn protected_resource_list() {
 
 #[tokio::test]
 async fn protected_resource_list_empty_initially() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
@@ -116,7 +116,7 @@ async fn protected_resource_list_empty_initially() {
 
 #[tokio::test]
 async fn protected_resource_duplicate_uri_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
@@ -138,7 +138,7 @@ async fn protected_resource_duplicate_uri_rejected() {
 
 #[tokio::test]
 async fn protected_resource_same_uri_allowed_in_different_realms() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
@@ -161,7 +161,7 @@ async fn protected_resource_same_uri_allowed_in_different_realms() {
 
 #[tokio::test]
 async fn protected_resource_update_display_name() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
@@ -192,7 +192,7 @@ async fn protected_resource_update_display_name() {
 
 #[tokio::test]
 async fn protected_resource_update_scopes() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
@@ -224,7 +224,7 @@ async fn protected_resource_update_scopes() {
 
 #[tokio::test]
 async fn protected_resource_update_not_found_returns_error() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
@@ -251,7 +251,7 @@ async fn protected_resource_update_not_found_returns_error() {
 
 #[tokio::test]
 async fn protected_resource_delete() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
@@ -282,7 +282,7 @@ async fn protected_resource_delete() {
 
 #[tokio::test]
 async fn protected_resource_delete_not_found_returns_error() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
@@ -305,7 +305,7 @@ async fn protected_resource_delete_not_found_returns_error() {
 
 #[tokio::test]
 async fn protected_resource_empty_uri_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
@@ -331,7 +331,7 @@ async fn protected_resource_empty_uri_rejected() {
 
 #[tokio::test]
 async fn protected_resource_relative_uri_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
@@ -361,7 +361,7 @@ async fn protected_resource_relative_uri_rejected() {
 
 #[tokio::test]
 async fn protected_resource_realm_isolation() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();

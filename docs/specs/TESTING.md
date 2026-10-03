@@ -31,12 +31,12 @@ src/rbac/resolve.rs        → #[cfg(test)] mod tests { ... }
 
 Black box tests interact with Hearth exclusively through its public API surface. They never import from internal modules — if a refactor breaks these tests, the public contract changed.
 
-Two modes are supported from day one:
+The harness has two modes:
 
-- **Embedded API**: Link against `hearth` as a library, call public functions directly. Available immediately.
-- **Server API**: Spin up a Hearth process on a random port, make HTTP requests to OIDC/SCIM/admin endpoints. Initially stubs/skipped until the HTTP layer exists, but the harness infrastructure is ready.
+- **In-process**: the test builds the engines inside the test process and calls the library's public API directly. This is a test tool, not a deployment mode: Hearth ships only as a server (there is no embedded/library mode).
+- **Server**: the test starts a Hearth server on a random port and sends HTTP requests to the OIDC, SCIM and admin endpoints.
 
-The same test logic runs against both modes via shared async test functions, ensuring the public contract is identical regardless of deployment mode.
+The same test logic can run against both modes through shared async test functions.
 
 **Scope**: Auth flows end-to-end (OAuth2 authorization code, client credentials, device flow), session lifecycle (create, validate, refresh, revoke, expire), authorization (role assignment, token claim population, `hasPermission` semantics, realm/org scoping), user CRUD (create, read, update, delete, list, search), token issuance and validation (JWT signing, verification, claims, expiration).
 
@@ -233,7 +233,7 @@ or explicit threshold assertions in the bench binary. Any threshold breach fails
 | Memory errors | AddressSanitizer (`make asan`), glibc heap checking (`make heap-check`) | ASan over the same `unsafe-check/` tests at full stress size; heap checking (`libc_malloc_debug.so` + `MALLOC_CHECK_=3` + `MALLOC_PERTURB_=165`, via `scripts/heap-check-runner.sh`) over Hearth's tests of the cells built on `EpochCell` |
 | Benchmarks | `criterion` | Statistical benchmarking, regression detection |
 | HTTP testing | `reqwest` (test dependency) | For black box server-mode tests |
-| Test fixtures | Custom `TestHarness` | Spins up embedded or server instance, handles cleanup |
+| Test fixtures | Custom `TestHarness` | Starts an in-process or server instance, handles cleanup |
 | Coverage | `cargo-llvm-cov` | LLVM-based, accurate line/branch coverage |
 | Simulation | `hearth-simulation` crate (`FaultFs`) | Real-thread crash recovery, I/O fault + latency injection |
 | Snapshot testing | `insta` | Serialization format stability, error message stability |
@@ -261,15 +261,15 @@ A repo-wide audit confirmed this approach at scale: all `#[cfg(test)]` blocks in
 ```rust
 // tests/common/mod.rs
 
-/// TestHarness wraps a running Hearth instance (embedded or server mode)
+/// TestHarness wraps a running Hearth instance (in-process or server mode)
 /// and provides only public API access.
 pub struct TestHarness {
     mode: HarnessMode,
 }
 
 enum HarnessMode {
-    /// Direct library access through the public API
-    Embedded {
+    /// The engines run in the test process; calls go through the public API
+    InProcess {
         // Public Hearth client handle
         // Temp directory for data
     },
@@ -283,8 +283,8 @@ enum HarnessMode {
 }
 
 impl TestHarness {
-    /// Start an embedded Hearth instance with an isolated temp directory.
-    pub async fn embedded() -> Self { /* ... */ }
+    /// Start in-process engines with an isolated temp directory.
+    pub async fn in_process() -> Self { /* ... */ }
 
     /// Start a Hearth server process on a random port.
     /// Returns Err if the server binary is not built.
@@ -301,7 +301,7 @@ impl Drop for TestHarness {
 
 ### Dual-Mode Test Pattern
 
-The same test logic runs against both embedded and server modes:
+The same test logic runs against both in-process and server modes:
 
 ```rust
 // tests/sessions.rs
@@ -319,8 +319,8 @@ async fn run_session_lifecycle_test(h: &TestHarness) {
 }
 
 #[tokio::test]
-async fn session_lifecycle_embedded() {
-    let h = TestHarness::embedded().await;
+async fn session_lifecycle_in_process() {
+    let h = TestHarness::in_process().await;
     run_session_lifecycle_test(&h).await;
 }
 
@@ -341,7 +341,7 @@ Server-mode tests are `#[ignore]`-tagged until the HTTP layer exists, but the ha
 hearth/
 ├── Cargo.toml
 ├── src/
-│   ├── lib.rs                  # Public embedded API
+│   ├── lib.rs                  # Public library API (used by the in-process harness)
 │   ├── main.rs                 # Binary entry point
 │   ├── storage/
 │   │   ├── mod.rs

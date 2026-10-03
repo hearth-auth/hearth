@@ -71,7 +71,7 @@ fn compute_totp_code(secret_base32: &str, unix_secs: u64) -> String {
 
 #[tokio::test]
 async fn mfa_enrollment_full_flow() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -194,7 +194,7 @@ async fn mfa_enrollment_full_flow() {
 
 #[tokio::test]
 async fn mfa_recovery_code_flow() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -264,7 +264,7 @@ async fn mfa_recovery_code_flow() {
 
 #[tokio::test]
 async fn mfa_disable_flow() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -348,7 +348,7 @@ async fn mfa_disable_flow() {
 
 #[tokio::test]
 async fn audit_mfa_enabled_on_enrollment_confirm() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -398,7 +398,7 @@ async fn audit_mfa_enabled_on_enrollment_confirm() {
 
 #[tokio::test]
 async fn audit_mfa_disabled_on_disable_mfa() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);

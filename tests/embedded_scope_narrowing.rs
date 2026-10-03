@@ -35,7 +35,7 @@ struct Fixture {
 /// bundle `docs:read` admits `docs.view` only; a first-party client
 /// registered for the code, refresh and device grants.
 async fn setup() -> Fixture {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {

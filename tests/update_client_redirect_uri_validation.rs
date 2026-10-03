@@ -68,7 +68,7 @@ fn patch_redirects(
 /// fragment. Registration refuses this string twice over; the update must too.
 #[tokio::test]
 async fn update_client_rejects_http_non_loopback_uri_with_fragment() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm_id = realm(&h);
     let client = register(&h, &realm_id);
 
@@ -92,7 +92,7 @@ async fn update_client_rejects_http_non_loopback_uri_with_fragment() {
 /// pass by accident.
 #[tokio::test]
 async fn update_client_enforces_every_register_time_redirect_rule() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm_id = realm(&h);
     let client = register(&h, &realm_id);
 
@@ -139,7 +139,7 @@ async fn update_client_enforces_every_register_time_redirect_rule() {
 /// is refused. Loopback http and RFC 8252 native deep links stay valid.
 #[tokio::test]
 async fn update_client_still_accepts_valid_redirect_uris() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm_id = realm(&h);
     let client = register(&h, &realm_id);
 

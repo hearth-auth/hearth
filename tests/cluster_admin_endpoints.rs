@@ -139,7 +139,7 @@ async fn issue_system_token(harness: &common::TestHarness, email: &str) -> Strin
 
 #[tokio::test]
 async fn bootstrap_returns_401_without_auth() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let app = build_app(&h).await;
 
@@ -159,7 +159,7 @@ async fn bootstrap_returns_401_without_auth() {
 
 #[tokio::test]
 async fn status_returns_401_without_auth() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let app = build_app(&h).await;
 
@@ -179,7 +179,7 @@ async fn status_returns_401_without_auth() {
 
 #[tokio::test]
 async fn transfer_leadership_returns_401_without_auth() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let app = build_app(&h).await;
 
@@ -201,7 +201,7 @@ async fn transfer_leadership_returns_401_without_auth() {
 
 #[tokio::test]
 async fn bootstrap_returns_403_for_non_admin() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = issue_token(&h, &realm, "user@example.com", false).await;
@@ -224,7 +224,7 @@ async fn bootstrap_returns_403_for_non_admin() {
 
 #[tokio::test]
 async fn status_returns_403_for_non_admin() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = issue_token(&h, &realm, "user@example.com", false).await;
@@ -247,7 +247,7 @@ async fn status_returns_403_for_non_admin() {
 
 #[tokio::test]
 async fn transfer_leadership_returns_403_for_non_admin() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = issue_token(&h, &realm, "user@example.com", false).await;
@@ -276,7 +276,7 @@ async fn transfer_leadership_returns_403_for_non_admin() {
 
 #[tokio::test]
 async fn bootstrap_returns_403_for_tenant_realm_admin() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = issue_token(&h, &realm, "tenant-admin@example.com", true).await;
@@ -299,7 +299,7 @@ async fn bootstrap_returns_403_for_tenant_realm_admin() {
 
 #[tokio::test]
 async fn status_returns_403_for_tenant_realm_admin() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = issue_token(&h, &realm, "tenant-admin@example.com", true).await;
@@ -322,7 +322,7 @@ async fn status_returns_403_for_tenant_realm_admin() {
 
 #[tokio::test]
 async fn transfer_leadership_returns_403_for_tenant_realm_admin() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = issue_token(&h, &realm, "tenant-admin@example.com", true).await;
@@ -350,7 +350,7 @@ async fn transfer_leadership_returns_403_for_tenant_realm_admin() {
 
 #[tokio::test]
 async fn bootstrap_returns_503_in_single_node_mode() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let system_realm = RealmId::new(Uuid::nil());
     let token = issue_system_token(&h, "admin@example.com").await;
     let app = build_app(&h).await;
@@ -372,7 +372,7 @@ async fn bootstrap_returns_503_in_single_node_mode() {
 
 #[tokio::test]
 async fn status_returns_503_in_single_node_mode() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let system_realm = RealmId::new(Uuid::nil());
     let token = issue_system_token(&h, "admin@example.com").await;
     let app = build_app(&h).await;
@@ -394,7 +394,7 @@ async fn status_returns_503_in_single_node_mode() {
 
 #[tokio::test]
 async fn transfer_leadership_returns_503_in_single_node_mode() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let system_realm = RealmId::new(Uuid::nil());
     let token = issue_system_token(&h, "admin@example.com").await;
     let app = build_app(&h).await;
@@ -446,7 +446,7 @@ async fn post_transfer(app: axum::Router, token: &str, body: &'static str) -> (S
 
 #[tokio::test]
 async fn transfer_leadership_rejects_target_node_id_with_422() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let token = issue_system_token(&h, "admin@example.com").await;
     let app = build_app(&h).await;
 
@@ -468,7 +468,7 @@ async fn transfer_leadership_rejects_target_node_id_with_422() {
 async fn transfer_leadership_without_target_is_not_refused() {
     // `null`, an absent field and an empty body all mean "no target" and must
     // not be refused — they reach the cluster check (503 here: no Raft engine).
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let token = issue_system_token(&h, "admin@example.com").await;
 
     for body in [r#"{"target_node_id": null}"#, "{}", ""] {
@@ -488,7 +488,7 @@ async fn transfer_leadership_rejects_misspelled_target_with_400() {
     // form generated JSON uses, or a guess) must be refused as an unknown
     // field — not dropped, which would step the leader down and answer 200.
     // The check is request parsing, so it fires before the cluster check.
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let token = issue_system_token(&h, "admin@example.com").await;
 
     for body in [

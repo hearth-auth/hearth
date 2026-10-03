@@ -51,7 +51,9 @@ fn create_user(harness: &common::TestHarness, realm: &RealmId) -> hearth::identi
 /// survives a round-trip through storage.
 #[tokio::test]
 async fn client_mfa_required_true_persists() {
-    let harness = common::TestHarness::embedded().await.expect("test harness");
+    let harness = common::TestHarness::in_process()
+        .await
+        .expect("test harness");
     let realm = create_realm(&harness);
 
     let client = harness
@@ -90,7 +92,9 @@ async fn client_mfa_required_true_persists() {
 /// verifies the update is persisted.
 #[tokio::test]
 async fn client_mfa_required_update_persists() {
-    let harness = common::TestHarness::embedded().await.expect("test harness");
+    let harness = common::TestHarness::in_process()
+        .await
+        .expect("test harness");
     let realm = create_realm(&harness);
 
     let client = harness
@@ -156,7 +160,9 @@ async fn client_mfa_required_update_persists() {
 /// storage round-trip via `get_realm`.
 #[tokio::test]
 async fn realm_mfa_required_roles_persists() {
-    let harness = common::TestHarness::embedded().await.expect("test harness");
+    let harness = common::TestHarness::in_process()
+        .await
+        .expect("test harness");
 
     let realm = harness
         .identity()
@@ -191,7 +197,9 @@ async fn realm_mfa_required_roles_persists() {
 /// Updates a realm to set `mfa_required_roles` and verifies the update.
 #[tokio::test]
 async fn realm_mfa_required_roles_update_persists() {
-    let harness = common::TestHarness::embedded().await.expect("test harness");
+    let harness = common::TestHarness::in_process()
+        .await
+        .expect("test harness");
     let realm = create_realm(&harness);
 
     assert!(
@@ -235,7 +243,9 @@ async fn realm_mfa_required_roles_update_persists() {
 /// covered by the web-layer integration tests there.
 #[tokio::test]
 async fn realm_wide_mfa_required_blocks_session_for_any_user_without_mfa() {
-    let harness = common::TestHarness::embedded().await.expect("test harness");
+    let harness = common::TestHarness::in_process()
+        .await
+        .expect("test harness");
     let realm = harness
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -271,7 +281,9 @@ async fn realm_wide_mfa_required_blocks_session_for_any_user_without_mfa() {
 /// that proved no second factor.
 #[tokio::test]
 async fn mfa_required_roles_blocks_engine_create_session() {
-    let harness = common::TestHarness::embedded().await.expect("test harness");
+    let harness = common::TestHarness::in_process()
+        .await
+        .expect("test harness");
     let realm = harness
         .identity()
         .create_realm(&CreateRealmRequest {

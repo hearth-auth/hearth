@@ -177,7 +177,7 @@ fn a_preexisting_plaintext_oidc_rsa_row_is_purged_on_open() {
 /// audit log could not tell that the realm had been re-keyed.
 #[tokio::test]
 async fn config_driven_rotation_emits_an_audit_event() {
-    let harness = common::TestHarness::embedded().await.unwrap();
+    let harness = common::TestHarness::in_process().await.unwrap();
 
     let realm = harness
         .identity()

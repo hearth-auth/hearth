@@ -335,7 +335,7 @@ fn act_claim_depth_counts_chain() {
 
 #[tokio::test]
 async fn token_exchange_requires_access_token_type() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
@@ -386,7 +386,7 @@ async fn token_exchange_requires_access_token_type() {
 
 #[tokio::test]
 async fn token_exchange_rejects_expired_subject_token() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
@@ -440,7 +440,7 @@ async fn token_exchange_rejects_expired_subject_token() {
 
 #[tokio::test]
 async fn token_exchange_empty_scope_intersection_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
@@ -475,7 +475,7 @@ async fn token_exchange_empty_scope_intersection_rejected() {
 
 #[tokio::test]
 async fn token_exchange_produces_act_claim() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
@@ -534,7 +534,7 @@ async fn token_exchange_produces_act_claim() {
 
 #[tokio::test]
 async fn token_exchange_actor_jti_replay_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
@@ -583,7 +583,7 @@ async fn token_exchange_actor_jti_replay_rejected() {
 
 #[tokio::test]
 async fn token_exchange_delegation_depth_enforced() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
@@ -656,7 +656,7 @@ async fn token_exchange_delegation_depth_enforced() {
 
 #[tokio::test]
 async fn token_exchange_lifetime_bounded_by_subject() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
@@ -705,7 +705,7 @@ async fn token_exchange_lifetime_bounded_by_subject() {
 
 #[tokio::test]
 async fn token_exchange_nested_act_chain_two_hops() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
@@ -806,7 +806,7 @@ fn property_scope_only_narrows() {
 /// The resulting token MUST contain only `mcp:tools:list`.
 #[tokio::test]
 async fn token_exchange_actor_scope_limits_result() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
@@ -862,7 +862,7 @@ async fn token_exchange_actor_scope_limits_result() {
 /// zero-permission assertion — it does not fall back to the subject's scope.
 #[tokio::test]
 async fn token_exchange_zero_scope_actor_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
@@ -907,7 +907,7 @@ async fn token_exchange_zero_scope_actor_rejected() {
 /// endpoint and launder the identity across trust boundaries.
 #[tokio::test]
 async fn token_exchange_rejects_cross_realm_subject_tid() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
@@ -958,7 +958,7 @@ async fn token_exchange_rejects_cross_realm_subject_tid() {
 /// this confused-deputy attempt before the JTI replay guard would even fire.
 #[tokio::test]
 async fn token_exchange_actor_sub_mismatch_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
@@ -1008,7 +1008,7 @@ async fn token_exchange_actor_sub_mismatch_rejected() {
 /// not the subject token's original claims.
 #[tokio::test]
 async fn token_exchange_overrides_iss_and_tid_to_serving_realm() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
@@ -1064,7 +1064,7 @@ async fn token_exchange_overrides_iss_and_tid_to_serving_realm() {
 /// and obtain a server-signed token with those claims.  This test pins the fix.
 #[tokio::test]
 async fn token_exchange_rejects_forged_subject_token_bogus_signature() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();

@@ -62,7 +62,7 @@ async fn fetch_jwks(app: &axum::Router, path: &str) -> serde_json::Value {
 
 #[tokio::test]
 async fn certs_publishes_only_the_algorithm_hearth_signs_with() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let app = build_app(&h).await;
 
     let body = fetch_jwks(&app, "/certs").await;
@@ -113,7 +113,7 @@ async fn certs_publishes_only_the_algorithm_hearth_signs_with() {
 /// defence-in-depth.)
 #[tokio::test]
 async fn global_jwks_includes_system_realm_signing_key() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let app = build_app(&h).await;
 
     // System realm is the nil UUID — mirrors identity::keys::system_realm_id()
@@ -140,7 +140,7 @@ async fn global_jwks_includes_system_realm_signing_key() {
 
 #[tokio::test]
 async fn jwks_aliases_return_same_document() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let app = build_app(&h).await;
 
     // Each route must return an identical JWKS document. Stable `kid`s
@@ -161,7 +161,7 @@ async fn jwks_aliases_return_same_document() {
 async fn jwt_kid_header_matches_a_jwks_entry() {
     use hearth::identity::{verify_token_signature, CreateUserRequest, SessionContext};
 
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
 
     // A realm scope is required so the identity engine has a JWKS to
     // hand out. Using a fresh RealmId mirrors the other token tests

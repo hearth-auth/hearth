@@ -853,8 +853,8 @@ pub trait IdentityEngine: Send + Sync {
     ) -> Result<AuthorizationResponse, IdentityError>;
 
     /// [`Self::authorize`] for a surface that cannot show a consent screen —
-    /// JSON `POST /authorize`, `POST /realms/{realm}/authorize` and gRPC
-    /// `Authorize`, which mint a code from a bearer token alone.
+    /// JSON `POST /authorize` and `POST /realms/{realm}/authorize`, which mint
+    /// a code from a bearer token alone.
     ///
     /// `bearer` is the validated claims of the caller's bearer token, which
     /// must belong to `request.user_id` and name a session. A token issued
@@ -1731,7 +1731,7 @@ pub trait IdentityEngine: Send + Sync {
     ) -> Result<(), IdentityError>;
 
     /// Updates an existing OAuth client's fields — the runtime surfaces
-    /// (REST, gRPC, admin console).
+    /// (REST, admin console).
     ///
     /// Only non-`None` fields in the request are applied. A change to the
     /// credentials or security profile (`jwks`, `assertion_public_key`,

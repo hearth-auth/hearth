@@ -37,7 +37,7 @@ struct Env {
 
 /// A server whose token rate limit is [`LIMIT`] requests per client.
 async fn env() -> Env {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let identity = h.identity_arc();
     let mut state = AppState::new_dev(Arc::clone(&identity), h.rbac_arc(), h.audit_arc());
     state.token_rate_limiter = Arc::new(TokenRateLimiter::with_limit(LIMIT));

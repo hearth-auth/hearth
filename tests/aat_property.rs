@@ -137,7 +137,7 @@ proptest! {
         (parent_scope, attenuated_scope) in arb_valid_scope_pair()
     ) {
         let rt = make_rt();
-        let h = rt.block_on(TestHarness::embedded()).expect("harness init");
+        let h = rt.block_on(TestHarness::in_process()).expect("harness init");
         let (realm_id, agent_id) = setup_realm_and_agent(&h);
 
         // Issue root AAT with the full parent scope set.
@@ -184,7 +184,7 @@ proptest! {
         (parent_scope, escalated_scope) in arb_escalation_scope_pair()
     ) {
         let rt = make_rt();
-        let h = rt.block_on(TestHarness::embedded()).expect("harness init");
+        let h = rt.block_on(TestHarness::in_process()).expect("harness init");
         let (realm_id, agent_id) = setup_realm_and_agent(&h);
 
         let root = h

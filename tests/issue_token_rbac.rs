@@ -30,7 +30,7 @@ fn perms(list: &[&str]) -> Vec<Permission> {
 
 #[tokio::test]
 async fn populates_roles_groups_permissions() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
 
     let user = h
@@ -112,7 +112,7 @@ async fn populates_roles_groups_permissions() {
 
 #[tokio::test]
 async fn claims_empty_for_user_with_no_assignments() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let user = h
         .identity()
@@ -147,7 +147,7 @@ async fn claims_empty_for_user_with_no_assignments() {
 
 #[tokio::test]
 async fn permissions_cap_refuses_issuance() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
 
     let user = h
@@ -217,7 +217,7 @@ async fn permissions_cap_refuses_issuance() {
 
 #[tokio::test]
 async fn roles_cap_refuses_issuance() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
 
     let user = h
@@ -286,7 +286,7 @@ async fn roles_cap_refuses_issuance() {
 
 #[tokio::test]
 async fn groups_cap_refuses_issuance() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
 
     let user = h
@@ -345,7 +345,7 @@ async fn groups_cap_refuses_issuance() {
 
 #[tokio::test]
 async fn exact_limit_succeeds() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
 
     let user = h
@@ -459,7 +459,7 @@ async fn exact_limit_succeeds() {
 
 #[tokio::test]
 async fn byte_cap_refuses_issuance() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
 
     let user = h
@@ -538,7 +538,7 @@ async fn byte_cap_refuses_issuance() {
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // TODO: split this function
 async fn oauth_path_permissions_cap_refuses_issuance() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
 
     let user = h
@@ -669,7 +669,7 @@ async fn oauth_path_permissions_cap_refuses_issuance() {
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // full grant → revoke → refresh flow reads better unsplit
 async fn refresh_re_resolves_claims_instead_of_copying() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
 
     let user = h

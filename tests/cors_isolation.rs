@@ -49,7 +49,7 @@ fn open_dcr_realm_config() -> RealmConfig {
 
 #[tokio::test]
 async fn cors_redirect_uri_origin_gets_no_cors_headers() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -117,7 +117,7 @@ async fn cors_redirect_uri_origin_gets_no_cors_headers() {
 
 #[tokio::test]
 async fn cors_explicit_origin_allowed_without_credentials_header() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -191,7 +191,7 @@ async fn cors_explicit_origin_allowed_without_credentials_header() {
 
 #[tokio::test]
 async fn cors_token_post_redirect_uri_origin_gets_no_cors_headers() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {

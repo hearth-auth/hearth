@@ -63,7 +63,7 @@ struct Fixture {
 }
 
 async fn setup() -> Fixture {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {

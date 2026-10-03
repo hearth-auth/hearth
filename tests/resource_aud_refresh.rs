@@ -21,9 +21,9 @@ async fn setup() -> (
     hearth::core::UserId,
     OAuthClient,
 ) {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
-        .expect("embedded harness");
+        .expect("in-process harness");
 
     let realm = harness
         .identity()

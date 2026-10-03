@@ -117,7 +117,7 @@ struct Env {
 }
 
 async fn env() -> Env {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).unwrap();
     let own_role = create_role(&h, &realm, "docs-reader", &["docs.read"]);
@@ -235,7 +235,7 @@ async fn sub_admin_cannot_inherit_permissions_it_lacks_through_parent_roles() {
 
 #[tokio::test]
 async fn full_admin_is_not_bound_by_the_ceiling() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).unwrap();
     let own_role = create_role(&h, &realm, "docs-reader", &["docs.read"]);

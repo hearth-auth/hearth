@@ -139,7 +139,7 @@ async fn post_token(
 /// A confidential client cannot redeem its code without a client_secret.
 #[tokio::test]
 async fn o2_code_exchange_confidential_without_secret_rejected() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -178,7 +178,7 @@ async fn o2_code_exchange_confidential_without_secret_rejected() {
 /// A confidential client cannot redeem its code with the wrong client_secret.
 #[tokio::test]
 async fn o2_code_exchange_confidential_wrong_secret_rejected() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -217,7 +217,7 @@ async fn o2_code_exchange_confidential_wrong_secret_rejected() {
 /// A confidential client redeems its code with the correct client_secret.
 #[tokio::test]
 async fn o2_code_exchange_confidential_correct_secret_succeeds() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -258,7 +258,7 @@ async fn o2_code_exchange_confidential_correct_secret_succeeds() {
 /// Public clients (PKCE, no secret) are unaffected by the O2 fix.
 #[tokio::test]
 async fn o2_code_exchange_public_client_unaffected() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -334,7 +334,7 @@ async fn issue_confidential_refresh(
 /// A confidential client's refresh token cannot be redeemed without client auth.
 #[tokio::test]
 async fn o1_refresh_confidential_without_client_auth_rejected() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -372,7 +372,7 @@ async fn o1_refresh_confidential_without_client_auth_rejected() {
 /// A confidential client's refresh token cannot be redeemed by a different client.
 #[tokio::test]
 async fn o1_refresh_token_bound_to_issuing_client() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -422,7 +422,7 @@ async fn o1_refresh_token_bound_to_issuing_client() {
 /// authenticated client in the bind context.
 #[tokio::test]
 async fn o1_refresh_confidential_engine_requires_authenticated_client() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {

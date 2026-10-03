@@ -6,7 +6,7 @@ mod common;
 
 #[tokio::test]
 async fn sweep_expired_on_empty_realm_returns_zero() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm_id = harness
         .identity()
         .create_realm(&hearth::identity::CreateRealmRequest {
@@ -28,7 +28,7 @@ async fn sweep_expired_on_empty_realm_returns_zero() {
 
 #[tokio::test]
 async fn sweep_expired_does_not_error_on_deleted_realm_id() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     // Use a non-existent realm ID — sweep should still succeed with zero deletions.
     let fake_realm = hearth::core::RealmId::generate();
 

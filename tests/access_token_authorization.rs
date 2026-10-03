@@ -140,7 +140,7 @@ fn register_client(
 
 #[tokio::test]
 async fn embedded_mode_permissions_in_jwt() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = make_realm(&h);
     let user = make_user(&h, &realm);
     grant_permission(&h, &realm, &user, "docs.read");
@@ -175,7 +175,7 @@ async fn embedded_mode_permissions_in_jwt() {
 
 #[tokio::test]
 async fn introspection_mode_no_permissions_in_jwt() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = make_realm(&h);
     let user = make_user(&h, &realm);
     grant_permission(&h, &realm, &user, "docs.write");
@@ -239,7 +239,7 @@ async fn introspection_mode_no_permissions_in_jwt() {
 
 #[tokio::test]
 async fn embedded_mode_scope_filtering_preserved() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = make_realm(&h);
     let user = make_user(&h, &realm);
     // User has two permissions; token issued with no scope restriction → both appear.
@@ -281,7 +281,7 @@ async fn embedded_mode_scope_filtering_preserved() {
 
 #[tokio::test]
 async fn org_scoping_no_cross_org_bleed() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = make_realm(&h);
     let user = make_user(&h, &realm);
 
@@ -371,7 +371,7 @@ async fn org_scoping_no_cross_org_bleed() {
 
 #[tokio::test]
 async fn introspection_mode_revocation_immediate() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = make_realm(&h);
     let user = make_user(&h, &realm);
 
@@ -434,7 +434,7 @@ async fn introspection_mode_revocation_immediate() {
 
 #[tokio::test]
 async fn decision_endpoint_fails_closed_on_missing_permission() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = make_realm(&h);
     let user = make_user(&h, &realm);
     // User has no permissions at all.
@@ -479,7 +479,7 @@ async fn decision_endpoint_fails_closed_on_missing_permission() {
 
 #[tokio::test]
 async fn backward_compat_default_is_embedded() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = make_realm(&h);
     let user = make_user(&h, &realm);
     grant_permission(&h, &realm, &user, "legacy.access");
@@ -534,7 +534,7 @@ async fn backward_compat_default_is_embedded() {
 
 #[tokio::test]
 async fn decision_mode_allow_and_deny() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = make_realm(&h);
     let user = make_user(&h, &realm);
     grant_permission(&h, &realm, &user, "invoices.read");
@@ -592,7 +592,7 @@ async fn decision_mode_allow_and_deny() {
 
 #[tokio::test]
 async fn decision_endpoint_org_scoping() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = make_realm(&h);
     let user = make_user(&h, &realm);
 
@@ -692,7 +692,7 @@ async fn decision_endpoint_org_scoping() {
 
 #[tokio::test]
 async fn introspection_mode_jwt_has_no_rbac_claims() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = make_realm(&h);
     let user = make_user(&h, &realm);
     grant_permission(&h, &realm, &user, "x.read");
@@ -744,7 +744,7 @@ async fn introspection_mode_jwt_has_no_rbac_claims() {
 
 #[tokio::test]
 async fn decision_endpoint_fails_closed_on_invalid_tokens() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = make_realm(&h);
     let user = make_user(&h, &realm);
     grant_permission(&h, &realm, &user, "things.do");
@@ -845,7 +845,7 @@ async fn dpop_token_at_decision_endpoint() {
     // servers are responsible for proving DPoP possession independently.
     // This test confirms the token is still accepted at the decision endpoint
     // even when it carries a cnf claim (i.e., the engine does not reject it).
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = make_realm(&h);
     let user = make_user(&h, &realm);
     grant_permission(&h, &realm, &user, "dpop.resource");
@@ -904,7 +904,7 @@ async fn scope_filter_applied_in_decide() {
     // decision endpoint successfully.  The negative (scope-filtered out) case
     // requires claim-profile scope mappings which are configured per-realm;
     // the absence of a scope string means "no filtering" — all permissions pass.
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = make_realm(&h);
     let user = make_user(&h, &realm);
     grant_permission(&h, &realm, &user, "metrics.export");
@@ -956,7 +956,7 @@ async fn scope_filter_applied_in_decide() {
 
 #[tokio::test]
 async fn update_client_mode_changes_jwt_content() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = make_realm(&h);
     let user = make_user(&h, &realm);
     grant_permission(&h, &realm, &user, "upgrade.test");
@@ -1036,7 +1036,7 @@ async fn update_client_mode_changes_jwt_content() {
 /// token endpoint refuses this species; `decide` must too.
 #[tokio::test]
 async fn decide_refuses_refresh_token_species() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = make_realm(&h);
     let user = make_user(&h, &realm);
     grant_permission(&h, &realm, &user, "docs.read");

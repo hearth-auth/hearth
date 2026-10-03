@@ -150,7 +150,7 @@ fn audit(
 /// (`403`, with `refusal` as the detail) when the target user holds an admin
 /// permission the caller lacks
 /// ([`crate::protocol::admin_auth::check_user_admin_ceiling`], the rule REST
-/// `/admin/users*` and gRPC `UpdateUser` / `DeleteUser` call too).
+/// `/admin/users*` calls too).
 ///
 /// Runs on both credential paths:
 ///

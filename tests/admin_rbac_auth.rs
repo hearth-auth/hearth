@@ -106,7 +106,7 @@ fn forge_admin_permission_claim(token: &str) -> String {
 
 #[tokio::test]
 async fn permission_gated_allows_hearth_admin() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = issue_token_for(&h, &realm, "admin@example.com", true).await;
@@ -129,7 +129,7 @@ async fn permission_gated_allows_hearth_admin() {
 
 #[tokio::test]
 async fn permission_gated_denies_non_admin() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = issue_token_for(&h, &realm, "user@example.com", false).await;
@@ -152,7 +152,7 @@ async fn permission_gated_denies_non_admin() {
 
 #[tokio::test]
 async fn permission_gated_rejects_tampered_unsigned_admin_claim() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let non_admin = issue_token_for(&h, &realm, "user@example.com", false).await;
@@ -176,7 +176,7 @@ async fn permission_gated_rejects_tampered_unsigned_admin_claim() {
 
 #[tokio::test]
 async fn unauthenticated_returns_401() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let app = build_app(&h).await;
 
@@ -268,7 +268,7 @@ async fn http_get(app: axum::Router, token: &str, realm: &RealmId, uri: &str) ->
 /// hearth.users.admin can reach user endpoints.
 #[tokio::test]
 async fn sub_admin_users_can_access_users_endpoint() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token =
@@ -286,7 +286,7 @@ async fn sub_admin_users_can_access_users_endpoint() {
 /// hearth.users.admin is denied on client endpoints.
 #[tokio::test]
 async fn sub_admin_users_denied_clients_endpoint() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token =
@@ -304,7 +304,7 @@ async fn sub_admin_users_denied_clients_endpoint() {
 /// hearth.users.admin is denied on realm-management endpoints.
 #[tokio::test]
 async fn sub_admin_users_denied_realm_endpoint() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token =
@@ -322,7 +322,7 @@ async fn sub_admin_users_denied_realm_endpoint() {
 /// hearth.clients.admin can reach client endpoints.
 #[tokio::test]
 async fn sub_admin_clients_can_access_clients_endpoint() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = issue_sub_admin_token(
@@ -345,7 +345,7 @@ async fn sub_admin_clients_can_access_clients_endpoint() {
 /// hearth.clients.admin is denied on user endpoints.
 #[tokio::test]
 async fn sub_admin_clients_denied_users_endpoint() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = issue_sub_admin_token(
@@ -368,7 +368,7 @@ async fn sub_admin_clients_denied_users_endpoint() {
 /// hearth.realm.admin can reach role-management endpoints.
 #[tokio::test]
 async fn sub_admin_realm_can_access_roles_endpoint() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token =
@@ -386,7 +386,7 @@ async fn sub_admin_realm_can_access_roles_endpoint() {
 /// hearth.realm.admin is denied on user endpoints.
 #[tokio::test]
 async fn sub_admin_realm_denied_users_endpoint() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token =
@@ -427,7 +427,7 @@ async fn build_app_with_agent_routes(harness: &common::TestHarness) -> axum::Rou
 /// (response may be 200; must NOT be 403).
 #[tokio::test]
 async fn agents_admin_passes_outer_gate_to_agent_endpoint() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token =
@@ -445,7 +445,7 @@ async fn agents_admin_passes_outer_gate_to_agent_endpoint() {
 /// `hearth.agents.admin` is denied on `/admin/users` (wrong sub-permission).
 #[tokio::test]
 async fn agents_admin_denied_on_users_endpoint() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = issue_sub_admin_token(
@@ -468,7 +468,7 @@ async fn agents_admin_denied_on_users_endpoint() {
 /// `hearth.agents.admin` is denied on `/admin/roles` (wrong sub-permission).
 #[tokio::test]
 async fn agents_admin_denied_on_realm_endpoint() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = issue_sub_admin_token(
@@ -495,7 +495,7 @@ async fn agents_admin_denied_on_realm_endpoint() {
 /// agent is the operator kill switch, not a clients-admin affordance.
 #[tokio::test]
 async fn clients_admin_denied_on_agent_lifecycle_routes() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = issue_sub_admin_token(
@@ -522,7 +522,7 @@ async fn clients_admin_denied_on_agent_lifecycle_routes() {
 /// hearth.admin (full superuser) still grants access to all domains.
 #[tokio::test]
 async fn full_admin_accesses_all_domains() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = issue_token_for(&h, &realm, "fulladmin@example.com", true).await;
@@ -584,7 +584,7 @@ async fn http_delete(app: axum::Router, token: &str, realm: &RealmId, uri: &str)
 /// A sub-admin must not be able to add themselves to a group and inherit roles.
 #[tokio::test]
 async fn users_admin_denied_add_group_member() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = issue_sub_admin_token(
@@ -618,7 +618,7 @@ async fn users_admin_denied_add_group_member() {
 /// HEA-SEC-12: hearth.users.admin is denied on DELETE /admin/groups/{id}/members/{member_id}.
 #[tokio::test]
 async fn users_admin_denied_remove_group_member() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = issue_sub_admin_token(
@@ -649,7 +649,7 @@ async fn users_admin_denied_remove_group_member() {
 /// HEA-SEC-12: hearth.users.admin is allowed on GET /admin/groups/{id}.
 #[tokio::test]
 async fn users_admin_allowed_get_group() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
 
@@ -691,7 +691,7 @@ async fn users_admin_allowed_get_group() {
 /// HEA-SEC-12: hearth.users.admin is allowed on GET /admin/groups/{id}/members.
 #[tokio::test]
 async fn users_admin_allowed_list_group_members() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
 
@@ -733,7 +733,7 @@ async fn users_admin_allowed_list_group_members() {
 /// HEA-SEC-12: hearth.realm.admin can add a member to a group.
 #[tokio::test]
 async fn realm_admin_allowed_add_group_member() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
 
@@ -798,7 +798,7 @@ async fn realm_admin_allowed_add_group_member() {
 /// does not hold).  Doing so would be a privilege-escalation attack.
 #[tokio::test]
 async fn realm_admin_cannot_assign_role_exceeding_own_permissions() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
 
@@ -853,7 +853,7 @@ async fn realm_admin_cannot_assign_role_exceeding_own_permissions() {
 /// including roles that carry hearth.admin itself.
 #[tokio::test]
 async fn full_admin_can_assign_any_role() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
 

@@ -37,7 +37,7 @@ fn request_from(method: &str, uri: &str, peer: &str, realm_header: Option<&str>)
 }
 
 async fn state_with(shaper: ShaperConfig) -> Arc<AppState> {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     Arc::new(
         AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc())
             .with_request_shaper(Arc::new(RequestShaper::with_config(shaper))),
@@ -236,7 +236,7 @@ async fn e3_two_ipv6_peers_in_one_slash64_share_the_per_ip_bucket() {
 /// were fifty budgets. They are one client.
 #[tokio::test]
 async fn e3_login_per_ip_limit_counts_an_ipv6_slash64_as_one_client() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let identity = h.identity_arc();
 

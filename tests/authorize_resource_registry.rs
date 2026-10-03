@@ -47,7 +47,7 @@ fn declared(uri: &str) -> RegisterProtectedResourceRequest {
 }
 
 async fn setup() -> Env {
-    let harness = Arc::new(common::TestHarness::embedded().await.expect("harness"));
+    let harness = Arc::new(common::TestHarness::in_process().await.expect("harness"));
     let identity = harness.identity();
     let realm_id = identity
         .create_realm(&CreateRealmRequest {

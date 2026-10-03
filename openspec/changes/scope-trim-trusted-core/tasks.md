@@ -128,10 +128,11 @@ Sixteen admin operations existed only over gRPC (`docs/api/grpc-only.txt`; `Clie
 
 ## 13. Vision and spec cleanup (PR 12)
 
-- [ ] 13.1 Delete the embedded-mode promise: `VISION.md` §6.2 and lines 314, 479, 581, 674; `TESTING.md:36, 236–304` (rewrite as "in-process harness"); `TEST_SCENARIOS.md:45`; `IMPLEMENTATION_ORDER.md:23`; `ARCHITECTURE.md:179`. Leave the token-embedded-permissions uses of "embedded" alone
-- [ ] 13.2 Rename `HarnessMode::Embedded` to `HarnessMode::InProcess` and `TestHarness::embedded` to `TestHarness::in_process` (mechanical)
-- [ ] 13.3 Re-derive `docs/STATUS.md` from the tree after groups 2–10
-- [ ] 13.4 Add a note to `VERSIONING.md`: v3.0.0 removes features without a deprecation window, because there were no production users
+- [x] 13.1 Delete the embedded-mode promise: `VISION.md` §6.2 and lines 314, 479, 581, 674; `TESTING.md:36, 236–304` (rewrite as "in-process harness"); `TEST_SCENARIOS.md:45`; `IMPLEMENTATION_ORDER.md:23`; `ARCHITECTURE.md:179`. Leave the token-embedded-permissions uses of "embedded" alone **Changed during apply:** VISION §6.2 now states the one deployment mode (server) and that the in-process harness is a test tool; `ARCHITECTURE.md:693` no longer says embedded mode may come later
+- [x] 13.2 Rename `HarnessMode::InProcess` to `HarnessMode::InProcess` and `TestHarness::in_process` to `TestHarness::in_process` (mechanical) **Changed during apply:** also renamed the `embedded_with_*` constructors to `in_process_with_*` and the harness wording in test comments and `expect` messages; `Embedded*Engine` types keep their names (they are the engine). 6,095/6,095 tests pass
+- [x] 13.3 Re-derive `docs/STATUS.md` from the tree after groups 2–10 (against `3e382f87`; every ✅ row names a path that exists)
+- [x] 13.4 Add a note to `VERSIONING.md`: v3.0.0 removes features without a deprecation window, because there were no production users **Changed during apply:** also replaced the stale "gRPC API" section (public gRPC is gone; proto messages follow the REST rules) and dropped Kotlin/Node from the annotation list
+- [x] 13.5 **Added during apply:** stale public-gRPC comments under `src/` rewritten (53 comments, 20 files); dead code the gRPC API alone used deleted (`AppState::with_shared_rate_limiter`, and the `From<pb::TokenRevocationRequest>` / `From<pb::TokenIntrospectionRequest>` conversions, which defaulted the authenticated client to `None`); `admin-api.md`, `organizations.mdx`, `SDK.md` and `SDK_SURFACE.md` corrected to the real `/admin/organizations` routes and fields (SDK support moved to `sdk-standard-libraries` task 3.2)
 
 ## 14. Release v3.0.0
 

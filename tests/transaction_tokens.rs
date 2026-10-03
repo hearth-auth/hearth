@@ -63,7 +63,7 @@ fn make_agent(h: &TestHarness, realm_id: &RealmId) -> hearth::core::AgentId {
 
 #[tokio::test]
 async fn issue_transaction_token_returns_signed_jwt() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_a = make_agent(&h, &realm_id);
     let agent_b = make_agent(&h, &realm_id);
@@ -97,7 +97,7 @@ async fn issue_transaction_token_returns_signed_jwt() {
 
 #[tokio::test]
 async fn transaction_token_txn_id_is_single_use() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_a = make_agent(&h, &realm_id);
     let agent_b = make_agent(&h, &realm_id);
@@ -141,7 +141,7 @@ async fn transaction_token_txn_id_is_single_use() {
 
 #[tokio::test]
 async fn consume_transaction_token_is_single_use() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_a = make_agent(&h, &realm_id);
     let agent_b = make_agent(&h, &realm_id);
@@ -185,7 +185,7 @@ async fn consume_transaction_token_is_single_use() {
 
 #[tokio::test]
 async fn different_txn_ids_are_independent() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_a = make_agent(&h, &realm_id);
     let agent_b = make_agent(&h, &realm_id);
@@ -216,7 +216,7 @@ async fn different_txn_ids_are_independent() {
 /// either wrote the used marker, yielding two valid tokens from one txn_id.
 #[tokio::test]
 async fn concurrent_issue_same_txn_id_exactly_one_wins() {
-    let h = Arc::new(TestHarness::embedded().await.expect("harness init"));
+    let h = Arc::new(TestHarness::in_process().await.expect("harness init"));
     let realm_id = make_realm(&h);
     let agent_a = make_agent(&h, &realm_id);
     let agent_b = make_agent(&h, &realm_id);

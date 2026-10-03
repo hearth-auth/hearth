@@ -63,7 +63,7 @@ fn create_user_with_email(harness: &common::TestHarness, realm: &RealmId, email:
 
 #[tokio::test]
 async fn magic_link_full_passwordless_flow() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -117,7 +117,7 @@ async fn magic_link_full_passwordless_flow() {
 
 #[tokio::test]
 async fn magic_link_creates_account_for_unknown_email() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     // Task 22.24 made `validate_magic_link` consult the realm's
@@ -187,7 +187,7 @@ async fn magic_link_creates_account_for_unknown_email() {
 /// could request a link.
 #[tokio::test]
 async fn magic_link_refuses_to_create_an_account_when_registration_is_disabled() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm_with_registration(&harness, RegistrationPolicy::Disabled);
@@ -219,7 +219,7 @@ async fn magic_link_refuses_to_create_an_account_when_registration_is_disabled()
 
 #[tokio::test]
 async fn magic_link_rate_limiting() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -253,7 +253,7 @@ async fn magic_link_rate_limiting() {
 
 #[tokio::test]
 async fn magic_link_enumeration_resistance() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
@@ -444,7 +444,7 @@ async fn magic_link_grant_is_accepted_at_the_token_endpoint() {
     use hearth::protocol::http::{router, AppState};
     use tower::ServiceExt as _;
 
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);

@@ -31,7 +31,7 @@ struct Fixture {
 }
 
 async fn fixture() -> Fixture {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm_name = format!("ropc-gone-{}", uuid::Uuid::new_v4());
     let realm = h
         .identity()

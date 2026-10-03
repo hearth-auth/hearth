@@ -77,7 +77,7 @@ async fn register(realm: &Realm, body: serde_json::Value) -> (StatusCode, serde_
 /// the same realm's token endpoint.
 #[tokio::test]
 async fn realm_dcr_client_id_is_accepted_by_the_token_endpoint() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let (realm, realm_id) = open_dcr_realm(&h).await;
 
     let (status, body) = register(
@@ -185,7 +185,7 @@ async fn realm_dcr_client_id_is_accepted_by_the_token_endpoint() {
 /// The handler used to overwrite the request with `["authorization_code"]`.
 #[tokio::test]
 async fn realm_dcr_honours_requested_grant_types() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let (realm, _realm_id) = open_dcr_realm(&h).await;
 
     let (status, body) = register(
@@ -217,7 +217,7 @@ async fn realm_dcr_honours_requested_grant_types() {
 /// to something the caller did not ask for.
 #[tokio::test]
 async fn realm_dcr_rejects_an_unsupported_grant_type() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let (realm, _realm_id) = open_dcr_realm(&h).await;
 
     let (status, body) = register(
@@ -241,7 +241,7 @@ async fn realm_dcr_rejects_an_unsupported_grant_type() {
 /// `["authorization_code"]`.
 #[tokio::test]
 async fn realm_dcr_defaults_to_authorization_code_when_unspecified() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let (realm, _realm_id) = open_dcr_realm(&h).await;
 
     let (status, body) = register(

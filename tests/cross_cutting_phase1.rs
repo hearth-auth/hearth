@@ -78,7 +78,7 @@ fn err_display<T>(result: Result<T, impl std::fmt::Display>) -> String {
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn phase1_error_responses_leak_no_internal_state() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness
@@ -225,7 +225,7 @@ async fn phase1_sensitive_types_zero_on_drop() {
     assert_zeroize_on_drop::<RecoveryCodes>();
 
     // Verify the Debug representation does not reveal code material.
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness

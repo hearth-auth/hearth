@@ -11,7 +11,7 @@ use hearth::identity::{CreateUserRequest, UpdateUserRequest, UserStatus};
 
 #[tokio::test]
 async fn create_and_read_user_by_id() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -43,7 +43,7 @@ async fn create_and_read_user_by_id() {
 
 #[tokio::test]
 async fn create_and_read_user_by_email() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -75,7 +75,7 @@ async fn create_and_read_user_by_email() {
 
 #[tokio::test]
 async fn update_user_fields() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -124,7 +124,7 @@ async fn update_user_fields() {
 /// email-change path through the same reader.
 #[tokio::test]
 async fn email_index_resolves_after_email_change() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -183,7 +183,7 @@ async fn email_index_resolves_after_email_change() {
 
 #[tokio::test]
 async fn delete_user_removes_from_both_indexes() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -221,7 +221,7 @@ async fn delete_user_removes_from_both_indexes() {
 
 #[tokio::test]
 async fn duplicate_email_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -264,7 +264,7 @@ async fn duplicate_email_rejected() {
 
 #[tokio::test]
 async fn delete_frees_email_for_reuse() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -329,7 +329,7 @@ async fn delete_frees_email_for_reuse() {
 
 #[tokio::test]
 async fn cross_realm_isolation() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm_a = harness.create_realm();
@@ -381,7 +381,7 @@ async fn cross_realm_isolation() {
 /// key families must be empty.
 #[tokio::test]
 async fn delete_user_leaves_no_residual_pii() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let identity = harness.identity();
@@ -455,7 +455,7 @@ async fn delete_user_leaves_no_residual_pii() {
 /// tombstones, and device fingerprint entries.  No PII should outlive its realm.
 #[tokio::test]
 async fn delete_realm_leaves_no_residual_pii() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let identity = harness.identity();
@@ -550,7 +550,7 @@ async fn delete_realm_leaves_no_residual_pii() {
 async fn delete_user_leaves_no_key_naming_the_user() {
     use hearth::identity::{CleartextPassword, CreateRealmRequest, PasswordPolicy, RealmConfig};
 
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
 

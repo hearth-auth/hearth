@@ -138,7 +138,7 @@ async fn resp_bytes(resp: axum::response::Response) -> Vec<u8> {
 
 #[tokio::test]
 async fn backup_create_requires_auth() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let app = build_app(&h).await;
@@ -160,7 +160,7 @@ async fn backup_create_requires_auth() {
 
 #[tokio::test]
 async fn backup_create_requires_admin_role() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
 
@@ -217,7 +217,7 @@ async fn backup_create_returns_archive() {
             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
         );
     }
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = make_admin_token(&h, &realm).await;
@@ -296,7 +296,7 @@ async fn backup_create_realm_filter() {
             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
         );
     }
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = make_admin_token(&h, &realm).await;
@@ -336,7 +336,7 @@ async fn backup_create_realm_filter() {
 
 #[tokio::test]
 async fn backup_restore_requires_auth() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let app = build_app(&h).await;
@@ -414,7 +414,7 @@ async fn make_realm_admin_token_no_export(h: &common::TestHarness, realm: &Realm
 /// required — the response must be 403 regardless of the request body.
 #[tokio::test]
 async fn backup_restore_requires_export_capability() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
 
@@ -458,7 +458,7 @@ async fn backup_restore_requires_export_capability() {
 #[tokio::test]
 async fn backup_restore_emits_pre_restore_audit_event() {
     set_master_key();
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = make_admin_token(&h, &realm).await;
@@ -514,7 +514,7 @@ async fn backup_restore_emits_pre_restore_audit_event() {
 
 #[tokio::test]
 async fn backup_restore_missing_file_field_returns_400() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = make_admin_token(&h, &realm).await;
@@ -669,7 +669,7 @@ fn multipart_body(archive_bytes: &[u8]) -> (String, Vec<u8>) {
 #[tokio::test]
 async fn backup_restore_dry_run_returns_counts() {
     set_master_key();
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = make_admin_token(&h, &realm).await;
@@ -701,7 +701,7 @@ async fn backup_restore_dry_run_returns_counts() {
 
 #[tokio::test]
 async fn backup_restore_invalid_mode_returns_400() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = make_admin_token(&h, &realm).await;
@@ -816,7 +816,7 @@ async fn backup_restore_body_limit_is_enforced() {
 #[tokio::test]
 async fn backup_restore_overwrite_refuses_over_a_live_realm() {
     set_master_key();
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
 
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
@@ -899,7 +899,7 @@ fn realm_slug(harness: &common::TestHarness, realm: &RealmId) -> String {
 #[tokio::test]
 async fn backup_create_refuses_peer_realm_slug() {
     set_master_key();
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
 
     let realm_a = h.create_realm();
     h.rbac().seed_realm(&realm_a).expect("seed a");
@@ -934,7 +934,7 @@ async fn backup_create_refuses_peer_realm_slug() {
 #[tokio::test]
 async fn backup_create_without_realm_param_exports_only_caller_realm() {
     set_master_key();
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
 
     let realm_a = h.create_realm();
     h.rbac().seed_realm(&realm_a).expect("seed a");
@@ -984,7 +984,7 @@ async fn backup_create_without_realm_param_exports_only_caller_realm() {
 #[tokio::test]
 async fn backup_restore_refuses_archive_naming_a_peer_realm() {
     set_master_key();
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
 
     let realm_a = h.create_realm();
     h.rbac().seed_realm(&realm_a).expect("seed a");
@@ -1088,7 +1088,7 @@ fn archive_without_member(archive: &[u8], drop_member: &str) -> Vec<u8> {
 #[tokio::test]
 async fn backup_restore_refuses_an_archive_that_fails_verification() {
     set_master_key();
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = make_admin_token(&h, &realm).await;
@@ -1199,7 +1199,7 @@ async fn dry_run_restore(
 #[tokio::test]
 async fn restore_without_a_verify_key_is_refused_outside_dev_mode() {
     set_master_key();
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = make_admin_token(&h, &realm).await;
@@ -1229,7 +1229,7 @@ async fn restore_without_a_verify_key_is_refused_outside_dev_mode() {
 #[tokio::test]
 async fn restore_without_a_verify_key_is_allowed_in_dev_mode() {
     set_master_key();
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = make_admin_token(&h, &realm).await;
@@ -1247,7 +1247,7 @@ async fn restore_without_a_verify_key_is_allowed_in_dev_mode() {
 #[tokio::test]
 async fn unsigned_archive_is_refused_when_a_verify_key_is_configured() {
     set_master_key();
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = make_admin_token(&h, &realm).await;
@@ -1275,7 +1275,7 @@ async fn unsigned_archive_is_refused_when_a_verify_key_is_configured() {
 #[tokio::test]
 async fn archive_signed_by_another_key_is_refused() {
     set_master_key();
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = make_admin_token(&h, &realm).await;
@@ -1371,7 +1371,7 @@ fn nil_realm_id_string() -> String {
 #[tokio::test]
 async fn a_system_realm_export_carries_the_system_realm_and_a_tenant_export_never_does() {
     set_master_key();
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let tenant = h.create_realm();
     h.rbac().seed_realm(&tenant).expect("seed");
     let tenant_token = make_admin_token(&h, &tenant).await;
@@ -1461,7 +1461,7 @@ async fn post_restore(
 async fn only_a_system_realm_caller_restores_the_system_realm_over_http() {
     set_master_key();
     // Source: an operator to recover, exported by a system-realm caller.
-    let src = common::TestHarness::embedded().await.expect("src");
+    let src = common::TestHarness::in_process().await.expect("src");
     let src_token = make_system_token(&src, "recovered@hearth.test");
     let archive = sign_bytes(
         &post_backup(
@@ -1474,7 +1474,7 @@ async fn only_a_system_realm_caller_restores_the_system_realm_over_http() {
         &test_signing_key(),
     );
 
-    let dst = common::TestHarness::embedded().await.expect("dst");
+    let dst = common::TestHarness::in_process().await.expect("dst");
     let tenant = dst.create_realm();
     dst.rbac().seed_realm(&tenant).expect("seed");
     let tenant_token = make_admin_token(&dst, &tenant).await;
@@ -1610,7 +1610,7 @@ async fn post_backup_status(
 #[allow(clippy::too_many_lines)] // one scenario: four sub-admins refused, then the superuser
 async fn a_system_realm_backup_or_restore_needs_hearth_admin_not_a_sub_admin() {
     set_master_key();
-    let src = common::TestHarness::embedded().await.expect("src");
+    let src = common::TestHarness::in_process().await.expect("src");
     let src_token = make_system_token(&src, "recovered@hearth.test");
     let archive = sign_bytes(
         &post_backup(
@@ -1623,7 +1623,7 @@ async fn a_system_realm_backup_or_restore_needs_hearth_admin_not_a_sub_admin() {
         &test_signing_key(),
     );
 
-    let dst = common::TestHarness::embedded().await.expect("dst");
+    let dst = common::TestHarness::in_process().await.expect("dst");
     let tenant = dst.create_realm();
     dst.rbac().seed_realm(&tenant).expect("seed");
     let tenant_archive = {
@@ -1739,7 +1739,7 @@ async fn a_system_realm_backup_or_restore_needs_hearth_admin_not_a_sub_admin() {
 #[tokio::test]
 async fn a_tenant_restore_naming_the_system_realm_is_refused_before_any_write() {
     set_master_key();
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let tenant = h.create_realm();
     h.rbac().seed_realm(&tenant).expect("seed");
     let tenant_token = make_admin_token(&h, &tenant).await;
@@ -1834,7 +1834,7 @@ fn chain_ok(h: &common::TestHarness, realm: &RealmId) -> bool {
 #[allow(clippy::too_many_lines)] // one scenario across two instances
 async fn restoring_audit_history_into_a_live_realm_keeps_its_chain_verifiable() {
     set_master_key();
-    let src = common::TestHarness::embedded().await.expect("src");
+    let src = common::TestHarness::in_process().await.expect("src");
     let tenant = src.create_realm();
     src.rbac().seed_realm(&tenant).expect("seed");
     let _ = make_admin_token(&src, &tenant).await;
@@ -1879,7 +1879,7 @@ async fn restoring_audit_history_into_a_live_realm_keeps_its_chain_verifiable() 
     assert_eq!(imported_events(&src, &tenant), 0, "nothing is duplicated");
 
     // A live instance with its own system-realm history.
-    let dst = common::TestHarness::embedded().await.expect("dst");
+    let dst = common::TestHarness::in_process().await.expect("dst");
     let dst_token = make_system_token(&dst, "dst-operator@hearth.test");
     let (status, body) = post_restore(
         &dst,
@@ -2090,7 +2090,7 @@ fn token_for(h: &common::TestHarness, realm: &RealmId, user: &hearth::core::User
 #[allow(clippy::too_many_lines)] // one scenario: four sub-admins refused, then the realm admin
 async fn a_tenant_restore_needs_the_realm_admin_not_a_sub_admin() {
     set_master_key();
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let tenant = h.create_realm();
     h.rbac().seed_realm(&tenant).expect("seed");
     let admin_token = make_admin_token(&h, &tenant).await;
@@ -2187,7 +2187,7 @@ async fn a_tenant_restore_needs_the_realm_admin_not_a_sub_admin() {
 #[tokio::test]
 async fn the_permission_checks_answer_before_the_export_rate_limit() {
     set_master_key();
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let tenant = h.create_realm();
     h.rbac().seed_realm(&tenant).expect("seed");
     let admin_token = make_admin_token(&h, &tenant).await;

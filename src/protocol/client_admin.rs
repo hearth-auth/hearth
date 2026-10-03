@@ -1,5 +1,5 @@
-//! Administrative OAuth-client operations shared by the REST and gRPC admin
-//! surfaces, so the two cannot drift (a per-surface copy is how the gRPC
+//! Administrative OAuth-client operations kept in one place so the admin
+//! surfaces cannot drift (a per-surface copy is how the since-removed gRPC
 //! create path came to accept caller-chosen secrets that REST refused).
 
 use crate::audit::{AuditAction, AuditEngine, CreateAuditEvent};

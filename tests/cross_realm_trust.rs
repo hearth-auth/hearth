@@ -29,7 +29,7 @@ fn make_realm(h: &TestHarness, suffix: &str) -> RealmId {
 
 #[tokio::test]
 async fn create_cross_realm_policy_returns_policy_record() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let target = make_realm(&h, "target");
     let source = make_realm(&h, "source");
 
@@ -56,7 +56,7 @@ async fn create_cross_realm_policy_returns_policy_record() {
 
 #[tokio::test]
 async fn get_cross_realm_policy_returns_stored_record() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let target = make_realm(&h, "target");
     let source = make_realm(&h, "source");
 
@@ -86,7 +86,7 @@ async fn get_cross_realm_policy_returns_stored_record() {
 
 #[tokio::test]
 async fn list_cross_realm_policies_returns_all_in_realm() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let target = make_realm(&h, "target");
     let source_a = make_realm(&h, "src-a");
     let source_b = make_realm(&h, "src-b");
@@ -125,7 +125,7 @@ async fn list_cross_realm_policies_returns_all_in_realm() {
 
 #[tokio::test]
 async fn delete_cross_realm_policy_removes_record() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let target = make_realm(&h, "target");
     let source = make_realm(&h, "source");
 
@@ -157,7 +157,7 @@ async fn delete_cross_realm_policy_removes_record() {
 
 #[tokio::test]
 async fn delete_nonexistent_cross_realm_policy_returns_error() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let target = make_realm(&h, "target");
 
     let err = h
@@ -175,7 +175,7 @@ async fn delete_nonexistent_cross_realm_policy_returns_error() {
 
 #[tokio::test]
 async fn check_cross_realm_policy_returns_true_for_permitted_capability() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let target = make_realm(&h, "target");
     let source = make_realm(&h, "source");
 
@@ -202,7 +202,7 @@ async fn check_cross_realm_policy_returns_true_for_permitted_capability() {
 
 #[tokio::test]
 async fn check_cross_realm_policy_returns_false_for_unpermitted_capability() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let target = make_realm(&h, "target");
     let source = make_realm(&h, "source");
 
@@ -232,7 +232,7 @@ async fn check_cross_realm_policy_returns_false_for_unpermitted_capability() {
 
 #[tokio::test]
 async fn check_cross_realm_policy_returns_false_when_no_policy_exists() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let target = make_realm(&h, "target");
     let source = make_realm(&h, "source");
 
@@ -259,7 +259,7 @@ async fn check_cross_realm_policy_returns_false_when_no_policy_exists() {
 /// so any subsequent check sees `now >= exp` as true).
 #[tokio::test]
 async fn check_cross_realm_policy_returns_false_for_expired_policy() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let target = make_realm(&h, "target");
     let source = make_realm(&h, "source");
 
@@ -317,7 +317,7 @@ fn store_policy(h: &TestHarness, target: &RealmId, source: &RealmId, caps: &[&st
 
 #[tokio::test]
 async fn system_sourced_policy_in_a_tenant_realm_is_reported() {
-    let h = TestHarness::embedded().await.expect("harness");
+    let h = TestHarness::in_process().await.expect("harness");
     let tenant = make_realm(&h, "legacy-target");
     let policy_id = store_policy(
         &h,
@@ -352,7 +352,7 @@ async fn system_sourced_policy_in_a_tenant_realm_is_reported() {
 
 #[tokio::test]
 async fn tenant_to_tenant_policy_is_not_reported() {
-    let h = TestHarness::embedded().await.expect("harness");
+    let h = TestHarness::in_process().await.expect("harness");
     let target = make_realm(&h, "t2t-target");
     let source = make_realm(&h, "t2t-source");
     let policy_id = store_policy(&h, &target, &source, &["search:read"]);
@@ -367,7 +367,7 @@ async fn tenant_to_tenant_policy_is_not_reported() {
 
 #[tokio::test]
 async fn a_realm_with_no_policies_reports_nothing_for_itself() {
-    let h = TestHarness::embedded().await.expect("harness");
+    let h = TestHarness::in_process().await.expect("harness");
     let quiet = make_realm(&h, "quiet");
 
     let found = hearth::identity::find_system_sourced_cross_realm_policies(h.identity());

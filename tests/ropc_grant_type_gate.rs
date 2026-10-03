@@ -141,7 +141,7 @@ async fn post_ropc(
 /// per-client check at all, so the refusal is `unsupported_grant_type`.
 #[tokio::test]
 async fn ropc_rejected_when_client_not_registered_for_password_grant() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let f = fixture(&h, "gate", &["authorization_code"]).await;
 
     let (status, body) = post_ropc(build_app(&h).await, &f, &f.password).await;
@@ -169,7 +169,7 @@ async fn ropc_rejected_when_client_not_registered_for_password_grant() {
 /// registration and on update, so no stored client can claim the grant.
 #[tokio::test]
 async fn a_client_cannot_be_registered_or_updated_for_the_password_grant() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -222,7 +222,7 @@ async fn a_client_cannot_be_registered_or_updated_for_the_password_grant() {
 /// password-validity oracle.
 #[tokio::test]
 async fn ropc_refusal_is_identical_for_valid_and_invalid_passwords() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let f = fixture(&h, "oracle", &["authorization_code"]).await;
 
     let (good_status, good_body) = post_ropc(build_app(&h).await, &f, &f.password).await;

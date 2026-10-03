@@ -85,7 +85,7 @@ fn issue_admin_token(h: &common::TestHarness, realm: &RealmId, role_name: &str) 
 
 #[tokio::test]
 async fn rest_post_clients_unauthenticated_rejected() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed rbac");
     let realm_id = realm.as_uuid().to_string();
@@ -115,7 +115,7 @@ async fn rest_post_clients_unauthenticated_rejected() {
 
 #[tokio::test]
 async fn rest_post_clients_admin_succeeds() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed rbac");
     let realm_id = realm.as_uuid().to_string();

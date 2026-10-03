@@ -27,7 +27,7 @@ fn granted(scopes: &[&str]) -> BTreeSet<String> {
 
 #[tokio::test]
 async fn default_profile_emits_roles_for_first_party() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
 
     let realm = h
         .identity()
@@ -102,7 +102,7 @@ async fn default_profile_emits_roles_for_first_party() {
 
 #[tokio::test]
 async fn default_profile_suppresses_roles_for_third_party() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
 
     let realm = h
         .identity()
@@ -178,7 +178,7 @@ async fn default_profile_suppresses_roles_for_third_party() {
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // TODO: split this function
 async fn required_scopes_gate_uses_granted_not_requested() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
 
     let realm = h
         .identity()
@@ -335,7 +335,7 @@ async fn required_scopes_gate_uses_granted_not_requested() {
 
 #[tokio::test]
 async fn yaml_override_fallback_to_default_when_gate_fails() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
 
     let realm = h
         .identity()
@@ -433,7 +433,7 @@ async fn yaml_override_fallback_to_default_when_gate_fails() {
 
 #[tokio::test]
 async fn omit_source_suppresses_default_claim() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
 
     let realm = h
         .identity()

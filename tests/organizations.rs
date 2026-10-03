@@ -28,7 +28,7 @@ fn setup_realm(identity: &dyn IdentityEngine) -> hearth::core::RealmId {
 
 #[tokio::test]
 async fn full_organization_lifecycle() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = setup_realm(identity);
 
@@ -117,7 +117,7 @@ async fn full_organization_lifecycle() {
 
 #[tokio::test]
 async fn membership_lifecycle() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = setup_realm(identity);
 
@@ -225,7 +225,7 @@ async fn membership_lifecycle() {
 
 #[tokio::test]
 async fn invitation_e2e_flow() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = setup_realm(identity);
 
@@ -320,7 +320,7 @@ async fn invitation_e2e_flow() {
 
 #[tokio::test]
 async fn cascading_delete_org_cleans_memberships_and_invitations() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = setup_realm(identity);
 
@@ -393,7 +393,7 @@ async fn cascading_delete_org_cleans_memberships_and_invitations() {
 
 #[tokio::test]
 async fn last_owner_cannot_be_removed_or_downgraded() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = setup_realm(identity);
 
@@ -476,7 +476,7 @@ async fn last_owner_cannot_be_removed_or_downgraded() {
 
 #[tokio::test]
 async fn duplicate_slug_rejected() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = setup_realm(identity);
 
@@ -517,7 +517,7 @@ async fn duplicate_slug_rejected() {
 
 #[tokio::test]
 async fn member_limit_enforced() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = setup_realm(identity);
 
@@ -583,7 +583,7 @@ async fn member_limit_enforced() {
 
 #[tokio::test]
 async fn delete_user_cascades_org_memberships() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = setup_realm(identity);
 
@@ -655,7 +655,7 @@ async fn delete_user_cascades_org_memberships() {
 
 #[tokio::test]
 async fn invitation_revocation() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = setup_realm(identity);
 
@@ -714,7 +714,7 @@ async fn invitation_revocation() {
 
 #[tokio::test]
 async fn operations_on_nonexistent_org_fail() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = setup_realm(identity);
 
@@ -760,7 +760,7 @@ mod proptests {
     fn make_harness() -> common::TestHarness {
         tokio::runtime::Runtime::new()
             .expect("runtime")
-            .block_on(common::TestHarness::embedded())
+            .block_on(common::TestHarness::in_process())
             .expect("harness")
     }
 
@@ -917,7 +917,7 @@ mod proptests {
 /// a token exists or was expired. All errors must be `InvitationInvalid`.
 #[tokio::test]
 async fn token_enumeration_resistance() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = setup_realm(identity);
 
@@ -963,7 +963,7 @@ async fn token_enumeration_resistance() {
 /// each of which must fail with `IdentityError::LastOwner`.
 #[tokio::test]
 async fn last_owner_cannot_be_demoted_or_removed() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = setup_realm(identity);
 
@@ -1020,7 +1020,7 @@ async fn last_owner_cannot_be_demoted_or_removed() {
 /// attempts, and path traversal are rejected by validation.
 #[tokio::test]
 async fn slug_injection_rejected() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = setup_realm(identity);
 
@@ -1064,7 +1064,7 @@ async fn slug_injection_rejected() {
 /// Archiving an org blocks add_member; restoring it allows add_member again.
 #[tokio::test]
 async fn org_archived_blocks_and_restore_allows_add_member() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = setup_realm(identity);
 
@@ -1130,7 +1130,7 @@ async fn org_archived_blocks_and_restore_allows_add_member() {
 /// Archiving an org blocks create_invitation; restoring it allows invitations again.
 #[tokio::test]
 async fn org_archived_blocks_and_restore_allows_invitation() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = setup_realm(identity);
 

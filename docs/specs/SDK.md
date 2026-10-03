@@ -601,10 +601,13 @@ Role assignment is not CRUD-shaped: `POST /admin/users/{id}/roles` with a
 `{ "role_id": ..., "org_id"?: ... }` body creates an assignment,
 `GET /admin/users/{id}/roles` lists them, and `DELETE /admin/assignments/{id}` removes one.
 
-**Organization memberships are not an SDK surface.** Hearth serves no organization route
-over HTTP — there is no `/admin/orgs`, no `/admin/orgs/{id}/members` and no per-member
-route in the router — so no SDK may expose org-membership methods (audit 2026-08-28
-§25.19). Membership is administered through the admin console.
+**Organizations.** The REST admin API serves organization CRUD at `/admin/organizations`
+and `/admin/organizations/{id}`, and a member's extra organization roles at
+`/admin/organizations/{id}/members/{user_id}/roles` (Hearth 3.0.0). No SDK exposes these
+yet; the OpenAPI-generated admin clients of the follow-up change `sdk-standard-libraries`
+will. **Membership itself (adding or removing a member) has no REST route**, so no SDK may
+expose membership methods (audit 2026-08-28 §25.19). Membership is administered through the
+admin console or SCIM.
 
 ### Pagination
 

@@ -23,7 +23,7 @@ use hearth::identity::oidc::{ClientCredentialsRequest, RegisterClientRequest};
 /// `dpop_jkt` must be rejected with `InvalidDPopProof`.
 #[tokio::test]
 async fn a38a_dpop_bound_client_credentials_without_dpop_rejected() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
 
@@ -75,7 +75,7 @@ async fn a38a_dpop_bound_client_credentials_without_dpop_rejected() {
 /// `dpop_jkt` thumbprint must succeed (the token carries `cnf.jkt`).
 #[tokio::test]
 async fn a38a_dpop_bound_client_credentials_with_dpop_jkt_accepted() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
 
@@ -149,7 +149,7 @@ async fn a38a_dpop_bound_client_credentials_with_dpop_jkt_accepted() {
 /// `dpop_jkt` must succeed (DPoP is optional for it).
 #[tokio::test]
 async fn a38c_unbound_client_credentials_without_dpop_ok() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
 

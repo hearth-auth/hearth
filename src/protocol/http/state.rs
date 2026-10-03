@@ -37,9 +37,7 @@ pub struct AppState {
     /// using constant-time comparison. When `None` the endpoint is
     /// unauthenticated (operators should firewall or bind to loopback).
     pub metrics_bearer_token: Option<String>,
-    /// Shared admin API rate limiter. Shared between the HTTP and gRPC
-    /// admin surfaces so a caller cannot evade the limit by switching
-    /// protocols.
+    /// Shared admin API rate limiter.
     pub admin_rate_limiter: Arc<AdminRateLimiter>,
     /// Per-`(realm, client_id)` rate limiter for token, introspection, and
     /// device-authorization endpoints. Returns 429 with `Retry-After` when
@@ -110,14 +108,13 @@ pub struct AppState {
     pub allowed_hosts: Vec<String>,
     /// Global per-IP and per-realm request shaper (A-2).
     ///
-    /// Shared with the gRPC surface via `Arc` so a caller cannot evade the
-    /// limit by switching protocols. Defaults to production-safe limits;
-    /// override via `with_request_shaper` using an operator-configured instance.
+    /// Defaults to production-safe limits; override via `with_request_shaper`
+    /// using an operator-configured instance.
     pub request_shaper: Arc<RequestShaper>,
 
     /// Outbound email transport, when one is configured.
     ///
-    /// `None` in embedded harnesses that do not wire delivery. Required by
+    /// `None` in in-process harnesses that do not wire delivery. Required by
     /// the magic-link endpoint: without it the minted link can never reach
     /// the account holder (audit 2026-08-28 §4.24#6).
     pub email: Option<Arc<crate::identity::email::EmailService>>,
@@ -202,44 +199,6 @@ impl AppState {
             // explicit `with_jwks_rate_limiter` call wired from
             // `config.security.jwks_rps_limit`.
             jwks_rate_limiter: Arc::new(JwksRateLimiter::with_rps_limit(u32::MAX)),
-            agent_identity_enabled: false,
-            agent_approval_enabled: false,
-            agent_advanced_enabled: false,
-            allowed_hosts: Vec::new(),
-            request_shaper: Arc::new(RequestShaper::new()),
-            email: None,
-            public_base_url: "http://localhost:8420".to_string(),
-            abuse_guards: Arc::new(crate::abuse::runtime::AbuseGuards::disabled()),
-        }
-    }
-
-    /// Creates an `AppState` that shares an existing rate limiter.
-    ///
-    /// Used when wiring the gRPC server so its interceptor sees the same
-    /// per-user counts as the HTTP handlers.
-    pub fn with_shared_rate_limiter(
-        identity: Arc<dyn IdentityEngine>,
-        rbac: Arc<dyn RbacEngine>,
-        audit: Arc<dyn AuditEngine>,
-        admin_rate_limiter: Arc<AdminRateLimiter>,
-    ) -> Self {
-        Self {
-            identity,
-            rbac,
-            audit,
-            webhook: None,
-            dev_mode: false,
-            metrics_enabled: true,
-            metrics_bearer_token: None,
-            admin_rate_limiter,
-            token_rate_limiter: Arc::new(TokenRateLimiter::new()),
-            par_rate_limiter: Arc::new(TokenRateLimiter::new()),
-            export_rate_limiter: Arc::new(ExportRateLimiter::new()),
-            backup_verify_key_bytes: None,
-            trusted_proxies: crate::core::TrustedProxies::default(),
-            cluster: None,
-            dpop: Arc::new(crate::identity::dpop::DPopProcessor::new([0u8; 32])),
-            jwks_rate_limiter: Arc::new(JwksRateLimiter::new()),
             agent_identity_enabled: false,
             agent_approval_enabled: false,
             agent_advanced_enabled: false,
@@ -359,10 +318,6 @@ impl AppState {
     }
 
     /// Replaces the default request shaper with a pre-configured or shared instance (A-2).
-    ///
-    /// Pass the same `Arc` to both `AppState` and the gRPC state so that per-IP
-    /// counters accumulate across HTTP and gRPC, preventing limit evasion by
-    /// switching protocols.
     pub fn with_request_shaper(mut self, shaper: Arc<RequestShaper>) -> Self {
         self.request_shaper = shaper;
         self

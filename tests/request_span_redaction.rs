@@ -70,7 +70,7 @@ fn logged_for(uri: &str) -> String {
         .expect("runtime");
     tracing::subscriber::with_default(subscriber, || {
         runtime.block_on(async {
-            let h = common::TestHarness::embedded().await.expect("harness");
+            let h = common::TestHarness::in_process().await.expect("harness");
             let app = router(Arc::new(AppState::new(
                 h.identity_arc(),
                 h.rbac_arc(),

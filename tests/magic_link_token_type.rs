@@ -53,7 +53,7 @@ fn token_endpoint_proof(key: &EcdsaKeyPair, htu: &str, nonce: Option<&str>) -> S
 
 #[tokio::test]
 async fn magic_link_grant_answers_bearer_for_its_unbound_tokens() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {

@@ -124,7 +124,7 @@ impl Fx {
 /// response's `token_type`, and the tokens carry the approved scope.
 #[tokio::test]
 async fn device_poll_with_dpop_binds_the_token_pair() {
-    let fx = fixture(common::TestHarness::embedded().await.unwrap()).await;
+    let fx = fixture(common::TestHarness::in_process().await.unwrap()).await;
     let client = fx.device_client(false);
     let code = fx.approved_device_code(&client);
 
@@ -158,7 +158,7 @@ async fn device_poll_with_dpop_binds_the_token_pair() {
 /// that was proven at the poll.
 #[tokio::test]
 async fn device_bound_refresh_token_rotates_only_with_the_same_key() {
-    let fx = fixture(common::TestHarness::embedded().await.unwrap()).await;
+    let fx = fixture(common::TestHarness::in_process().await.unwrap()).await;
     let client = fx.device_client(false);
     let code = fx.approved_device_code(&client);
     let resp =
@@ -191,7 +191,7 @@ async fn device_bound_refresh_token_rotates_only_with_the_same_key() {
 /// Without a proof, a standard realm still issues Bearer tokens.
 #[tokio::test]
 async fn device_poll_without_dpop_in_a_standard_realm_stays_bearer() {
-    let fx = fixture(common::TestHarness::embedded().await.unwrap()).await;
+    let fx = fixture(common::TestHarness::in_process().await.unwrap()).await;
     let client = fx.device_client(false);
     let code = fx.approved_device_code(&client);
     let resp =

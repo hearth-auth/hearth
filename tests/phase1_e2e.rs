@@ -217,7 +217,7 @@ mod wa {
 /// flow without regressing any step.
 #[tokio::test]
 async fn mfa_enrollment_plus_login() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
 
@@ -334,7 +334,7 @@ async fn mfa_enrollment_plus_login() {
 /// token validation without a password credential ever being set.
 #[tokio::test]
 async fn passkey_only_authentication() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
 
@@ -460,7 +460,7 @@ async fn passkey_only_authentication() {
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn multi_realm_isolation_roundtrip() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
 

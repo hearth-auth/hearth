@@ -42,7 +42,7 @@ fn create_user(harness: &common::TestHarness, realm: &RealmId) -> User {
 
 #[tokio::test]
 async fn oidc_authorization_code_flow_roundtrip() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -403,7 +403,7 @@ async fn oidc_authorization_code_flow_via_http() {
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn oidc_pkce_s256_flow() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -599,7 +599,7 @@ async fn oidc_pkce_s256_flow() {
 /// - `code_challenge_methods_supported` (OPTIONAL): PKCE methods
 #[tokio::test]
 async fn conformance_oidc_discovery_1_0() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
 
@@ -743,7 +743,7 @@ async fn conformance_oidc_discovery_1_0() {
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn conformance_token_endpoint_rfc6749() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();

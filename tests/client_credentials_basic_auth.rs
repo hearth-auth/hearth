@@ -36,7 +36,7 @@ struct Fixture {
 }
 
 async fn fixture() -> Fixture {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm_name = format!("ccbasic-{}", uuid::Uuid::new_v4());
     let realm: RealmId = h
         .identity()

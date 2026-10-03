@@ -170,7 +170,7 @@ async fn engine_with_fake_clock() -> (
 /// invoking ring's Ed25519 verifier.
 #[tokio::test]
 async fn alg_none_rejected_by_validate_token() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = harness.create_realm();
     let user = create_user(&harness, &realm);
     let session = harness
@@ -197,7 +197,7 @@ async fn alg_none_rejected_by_validate_token() {
 /// crypto layer; the error propagates as an identity error (not a panic).
 #[tokio::test]
 async fn alg_none_rejected_by_userinfo() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = harness.create_realm();
     let user = create_user(&harness, &realm);
     let session = harness
@@ -222,7 +222,7 @@ async fn alg_none_rejected_by_userinfo() {
 /// An alg:none refresh token must be rejected by refresh_tokens.
 #[tokio::test]
 async fn alg_none_rejected_by_refresh_tokens() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = harness.create_realm();
     let user = create_user(&harness, &realm);
     let session = harness
@@ -250,7 +250,7 @@ async fn alg_none_rejected_by_refresh_tokens() {
 /// active. RFC 7662: cryptographically invalid tokens → `{"active": false}`.
 #[tokio::test]
 async fn alg_none_on_introspect_returns_inactive() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = harness.create_realm();
     let user = create_user(&harness, &realm);
     let session = harness
@@ -286,7 +286,7 @@ async fn alg_none_on_introspect_returns_inactive() {
 /// invalid tokens → 200 OK) without revoking any real session.
 #[tokio::test]
 async fn alg_none_on_revoke_is_silent_noop() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = harness.create_realm();
     let user = create_user(&harness, &realm);
     let session = harness
@@ -339,7 +339,7 @@ async fn alg_none_on_revoke_is_silent_noop() {
 /// before attempting signature verification.
 #[tokio::test]
 async fn hs256_forgery_rejected_by_validate_token() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = harness.create_realm();
     let user = create_user(&harness, &realm);
     let session = harness
@@ -365,7 +365,7 @@ async fn hs256_forgery_rejected_by_validate_token() {
 /// Defense: alg check fires before signature verification.
 #[tokio::test]
 async fn hs256_forgery_on_introspect_returns_inactive() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = harness.create_realm();
     let user = create_user(&harness, &realm);
     let session = harness
@@ -399,7 +399,7 @@ async fn hs256_forgery_on_introspect_returns_inactive() {
 
 #[tokio::test]
 async fn hs256_forgery_rejected_by_refresh_tokens() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = harness.create_realm();
     let user = create_user(&harness, &realm);
     let session = harness
@@ -516,7 +516,7 @@ async fn expired_token_introspects_inactive() {
 /// (made with realm A's key) fails verification.
 #[tokio::test]
 async fn cross_realm_replay_rejected_by_validate_token() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm_a = harness.create_realm();
     let realm_b = harness.create_realm();
 
@@ -561,7 +561,7 @@ fn decode_jwt_payload(token: &str) -> String {
 /// alg-confusion suites above).
 #[tokio::test]
 async fn per_realm_issuer_token_validates() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = harness.create_realm();
     let user = create_user(&harness, &realm);
     let session = harness
@@ -601,7 +601,7 @@ async fn per_realm_issuer_token_validates() {
 /// since the token was signed with realm A's key, the signature check fails.
 #[tokio::test]
 async fn cross_realm_replay_on_refresh_tokens() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm_a = harness.create_realm();
     let realm_b = harness.create_realm();
 
@@ -630,7 +630,7 @@ async fn cross_realm_replay_on_refresh_tokens() {
 /// A token issued in realm A introspected against realm B must return inactive.
 #[tokio::test]
 async fn cross_realm_replay_on_introspect_returns_inactive() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm_a = harness.create_realm();
     let realm_b = harness.create_realm();
 
@@ -668,7 +668,7 @@ async fn cross_realm_replay_on_introspect_returns_inactive() {
 /// tokens → 200 OK, no error disclosure).
 #[tokio::test]
 async fn cross_realm_revoke_is_silent_noop() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm_a = harness.create_realm();
     let realm_b = harness.create_realm();
 
@@ -721,7 +721,7 @@ async fn cross_realm_revoke_is_silent_noop() {
 /// for a token whose session no longer exists.
 #[tokio::test]
 async fn revoked_session_token_introspects_inactive() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = harness.create_realm();
     let user = create_user(&harness, &realm);
     let session = harness
@@ -1210,7 +1210,7 @@ fn create_user_in_realm(id: &dyn hearth::identity::IdentityEngine, realm: &Realm
 /// and returns `RealmSuspended` if status is not `Active`.
 #[tokio::test]
 async fn validate_token_rejected_for_suspended_realm() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let id = harness.identity();
     let realm = setup_registered_realm(id);
     let user = create_user_in_realm(id, &realm);
@@ -1247,7 +1247,7 @@ async fn validate_token_rejected_for_suspended_realm() {
 /// of decommission and must not leave any authentication surface active.
 #[tokio::test]
 async fn validate_token_rejected_for_archived_realm() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let id = harness.identity();
     let realm = setup_registered_realm(id);
     let user = create_user_in_realm(id, &realm);
@@ -1280,7 +1280,7 @@ async fn validate_token_rejected_for_archived_realm() {
 /// session-validity check inside validate_token provides defense-in-depth.
 #[tokio::test]
 async fn suspend_realm_revokes_sessions() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let id = harness.identity();
     let realm = setup_registered_realm(id);
     let user = create_user_in_realm(id, &realm);
@@ -1325,7 +1325,7 @@ async fn suspend_realm_revokes_sessions() {
 /// claim is not `"access"` before reaching the active-response path.
 #[tokio::test]
 async fn id_token_on_introspect_returns_inactive() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = harness.create_realm();
     let user = create_user(&harness, &realm);
     let client = register_adv_client(harness.identity(), &realm);
@@ -1421,7 +1421,7 @@ async fn id_token_on_introspect_returns_inactive() {
 async fn concurrent_auth_code_exchange_only_one_succeeds() {
     use std::sync::{Arc, Barrier};
 
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = harness.create_realm();
     let user = create_user(&harness, &realm);
     let client = register_adv_client(harness.identity(), &realm);

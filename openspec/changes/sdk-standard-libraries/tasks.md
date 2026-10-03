@@ -18,7 +18,7 @@
 ## 3. Generated admin clients
 
 - [ ] 3.1 Add `make sdk-admin-gen` (all four generators) and commit each generated client under `sdks/<sdk>/generated/admin/`
-- [ ] 3.2 Rewrite each handwritten `AdminClient` as a wrapper over its generated client, keeping its tests green
+- [ ] 3.2 Rewrite each handwritten `AdminClient` as a wrapper over its generated client, keeping its tests green. Expose the `/admin/organizations` routes (CRUD and extra member roles) that the 3.0.0 server added, and delete the stale "Hearth serves no `/admin/orgs` route" comments in `sdks/go/hearth/admin.go`, `sdks/php/src/AdminClient.php`, `sdks/php/README.md` and `sdks/php/tests/Unit/AdminClientTest.php`
 - [ ] 3.3 Add `make sdk-admin-check` and a CI step that fails on a stale generated client
 
 ## 4. Conformance harness

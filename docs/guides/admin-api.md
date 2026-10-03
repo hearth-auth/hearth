@@ -245,15 +245,15 @@ Each change emits an audit event. Assignments are logged as `RequiredActionAssig
 
 ### List organizations
 
-`GET /admin/orgs`
+`GET /admin/organizations`
 
-Returns a paginated list of organizations.
+Returns a page of organizations.
 
 **Query parameters:**
 
 | Parameter | Description |
 |---|---|
-| `cursor` | Opaque pagination cursor from a previous response |
+| `cursor` | The `next_cursor` value from the previous page (a decimal offset) |
 | `limit` | Page size, 1–100 (default 20) |
 
 **Response:**
@@ -264,46 +264,50 @@ Returns a paginated list of organizations.
     {
       "id": "<uuid>",
       "slug": "acme-corp",
-      "name": "Acme Corporation",
-      "description": "Main enterprise customer",
+      "display_name": "Acme Corporation",
       "status": "active",
-      "config": { "max_members": 500 },
-      "attributes": { "crm_id": "SF-00123", "contract_tier": "enterprise" }
+      "member_limit": 500,
+      "mfa_required": false,
+      "attributes": { "crm_id": "SF-00123", "contract_tier": "enterprise" },
+      "created_at": 1759363200000000,
+      "updated_at": 1759363200000000
     }
   ],
-  "next_cursor": "<opaque-string-or-null>"
+  "next_cursor": "20"
 }
 ```
+
+`next_cursor` is `null` on the last page. `status` is `active`, `suspended` or `archived`.
+`created_at` and `updated_at` are microseconds since the Unix epoch.
 
 ---
 
 ### Get organization
 
-`GET /admin/orgs/{id}`
+`GET /admin/organizations/{id}`
 
-Returns a single organization by UUID.
+Returns one organization by UUID, in the same shape as a list item.
 
 ---
 
 ### Create organization
 
-`POST /admin/orgs`
+`POST /admin/organizations`
 
 Body fields:
 
 | Field | Required | Description |
 |---|---|---|
-| `slug` | ✅ | URL-safe identifier, 3–63 lowercase alphanumeric/hyphen chars |
-| `name` | ✅ | Human-readable display name |
-| `description` | — | Optional description |
-| `config.max_members` | — | Member limit (omit for unlimited) |
-| `mfa_required` | — | `true` requires MFA for every member. Default `false`. It can only tighten the realm policy. |
+| `slug` | ✅ | URL-safe identifier, 3–63 lowercase alphanumeric/hyphen chars. It cannot be changed later |
+| `display_name` | ✅ | Human-readable name |
+| `member_limit` | — | Maximum number of members (omit for no limit) |
+| `mfa_required` | — | `true` requires MFA for every member. Default `false`. It can only tighten the realm policy |
 | `attributes` | — | Key-value metadata map |
 
 ```json
 {
   "slug": "acme-corp",
-  "name": "Acme Corporation",
+  "display_name": "Acme Corporation",
   "attributes": {
     "crm_id": "SF-00123",
     "contract_tier": "enterprise"
@@ -311,16 +315,17 @@ Body fields:
 }
 ```
 
-Returns the created organization object.
+Answers `201 Created` with the new organization.
 
 ---
 
 ### Update organization
 
-`PATCH /admin/orgs/{id}`
+`PATCH /admin/organizations/{id}`
 
-Partially updates an organization. All fields are optional; omitted fields are unchanged.
-Send `mfa_required` (bool) to change the organization's MFA requirement. Responses include `mfa_required`.
+Changes only the fields you send. Accepted fields: `display_name`, `status` (`active` or
+`suspended`), `member_limit`, `mfa_required` and `attributes`. A request that sends `slug` is
+refused with `400`, because the slug cannot change.
 
 To replace the attribute map:
 
@@ -333,15 +338,28 @@ To replace the attribute map:
 }
 ```
 
-Attributes are replaced atomically — the entire map is overwritten. To clear all attributes, pass `"attributes": {}`.
+`attributes` replaces the whole map. To clear all attributes, send `"attributes": {}`.
 
 ---
 
 ### Delete organization
 
-`DELETE /admin/orgs/{id}`
+`DELETE /admin/organizations/{id}`
 
-Permanently deletes the organization and cascades to all membership records, pending invitations, and SCIM `externalId` mappings. Members themselves are not deleted.
+Answers `204 No Content`. Deletes the organization and its membership records, pending
+invitations and SCIM `externalId` mappings. The member users are not deleted.
+
+---
+
+### Extra organization roles
+
+An organization member can hold extra roles that apply only inside that organization.
+
+| Method and path | What it does |
+|---|---|
+| `GET /admin/organizations/{id}/members/{user_id}/roles` | Lists the member's extra role names (`{"items": [...]}`) |
+| `POST /admin/organizations/{id}/members/{user_id}/roles` | Adds one. Body: `{"role_name": "<name>"}` |
+| `DELETE /admin/organizations/{id}/members/{user_id}/roles/{role_name}` | Removes one |
 
 ---
 

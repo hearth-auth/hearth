@@ -157,7 +157,7 @@ where
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn totp_code_is_redeemable_once_under_concurrency() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm(&harness, "totp-race");
     let user = create_user(&harness, &realm);
 
@@ -191,7 +191,7 @@ async fn totp_code_is_redeemable_once_under_concurrency() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn recovery_code_is_redeemable_once_under_concurrency() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm(&harness, "recovery-race");
     let user = create_user(&harness, &realm);
 
@@ -225,7 +225,7 @@ async fn recovery_code_is_redeemable_once_under_concurrency() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn email_otp_is_redeemable_once_under_concurrency() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm(&harness, "email-race");
 
     let sender = CapturingEmailSender::new();

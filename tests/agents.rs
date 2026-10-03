@@ -106,7 +106,7 @@ fn agent_id_serde_round_trip() {
 
 #[tokio::test]
 async fn agent_create_and_get() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
@@ -134,7 +134,7 @@ async fn agent_create_and_get() {
 
 #[tokio::test]
 async fn agent_update_metadata() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
@@ -164,7 +164,7 @@ async fn agent_update_metadata() {
 
 #[tokio::test]
 async fn agent_list_by_realm() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
@@ -183,7 +183,7 @@ async fn agent_list_by_realm() {
 
 #[tokio::test]
 async fn agent_list_filtered_by_owner() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_a = make_user(identity, &realm_id);
@@ -209,7 +209,7 @@ async fn agent_list_filtered_by_owner() {
 
 #[tokio::test]
 async fn agent_delete() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
@@ -233,7 +233,7 @@ async fn agent_delete() {
 
 #[tokio::test]
 async fn agent_suspend_and_reactivate() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
@@ -256,7 +256,7 @@ async fn agent_suspend_and_reactivate() {
 
 #[tokio::test]
 async fn agent_revoke_is_terminal() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
@@ -290,7 +290,7 @@ async fn agent_revoke_is_terminal() {
 
 #[tokio::test]
 async fn agent_not_found_returns_none() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
 
@@ -306,7 +306,7 @@ async fn agent_not_found_returns_none() {
 
 #[tokio::test]
 async fn agents_are_realm_isolated() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_a = make_realm(identity);
     let realm_b = make_realm(identity);
@@ -339,7 +339,7 @@ async fn agents_are_realm_isolated() {
 
 #[tokio::test]
 async fn agent_cascade_delete_on_realm_deletion() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
@@ -381,7 +381,7 @@ async fn agent_cascade_delete_on_realm_deletion() {
 
 #[tokio::test]
 async fn agent_max_delegation_depth_must_be_1_to_10() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
@@ -427,7 +427,7 @@ async fn agent_max_delegation_depth_must_be_1_to_10() {
 
 #[tokio::test]
 async fn agent_display_name_length_validated() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
@@ -472,7 +472,7 @@ async fn agent_display_name_length_validated() {
 
 #[tokio::test]
 async fn create_agent_rejects_nonexistent_user_owner() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
 
@@ -505,7 +505,7 @@ async fn create_agent_rejects_nonexistent_user_owner() {
 async fn create_agent_respects_max_agents_quota() {
     use hearth::identity::{RealmConfig, RealmQuotaConfig, UpdateRealmRequest};
 
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
@@ -562,7 +562,7 @@ async fn create_agent_respects_max_agents_quota() {
 
 #[tokio::test]
 async fn agent_api_key_create_show_once() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
@@ -616,7 +616,7 @@ async fn agent_api_key_create_show_once() {
 
 #[tokio::test]
 async fn agent_api_key_list_and_revoke() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
@@ -664,7 +664,7 @@ async fn agent_api_key_list_and_revoke() {
 
 #[tokio::test]
 async fn agent_api_key_verify_correct_key() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
@@ -688,7 +688,7 @@ async fn agent_api_key_verify_correct_key() {
 
 #[tokio::test]
 async fn agent_api_key_verify_wrong_key_fails() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
@@ -713,7 +713,7 @@ async fn agent_api_key_verify_wrong_key_fails() {
 
 #[tokio::test]
 async fn agent_api_key_revoked_key_does_not_verify() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
@@ -748,7 +748,7 @@ async fn agent_api_key_revoked_key_does_not_verify() {
 
 #[tokio::test]
 async fn delete_agent_purges_credentials() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
@@ -798,7 +798,7 @@ async fn delete_agent_purges_credentials() {
 
 #[tokio::test]
 async fn delete_user_cascades_owned_agents() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
@@ -836,7 +836,7 @@ async fn delete_user_cascades_owned_agents() {
 
 #[tokio::test]
 async fn agent_capability_count_bounded_on_create() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
@@ -880,7 +880,7 @@ async fn agent_capability_count_bounded_on_create() {
 
 #[tokio::test]
 async fn agent_capability_string_length_bounded_on_create() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
@@ -924,7 +924,7 @@ async fn agent_capability_string_length_bounded_on_create() {
 
 #[tokio::test]
 async fn agent_capability_bounds_enforced_on_update() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
@@ -973,7 +973,7 @@ async fn agent_capability_bounds_enforced_on_update() {
 
 #[tokio::test]
 async fn agent_credential_quota_enforced() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
@@ -1180,7 +1180,7 @@ async fn agent_endpoint_cross_realm_bola() {
 /// deliberate, reviewed change.
 #[tokio::test]
 async fn m1_non_agent_token_claim_set_unchanged() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
 
@@ -1225,7 +1225,7 @@ async fn m1_non_agent_token_claim_set_unchanged() {
 async fn agent_credential_audit_actor_attributed() {
     use hearth::audit::{AuditAction, AuditQuery};
 
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let audit = harness.audit();
     let realm_id = make_realm(identity);

@@ -12289,7 +12289,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // (audit 2026-08-28 §4.20#5).
         self.require_active_realm(realm_id)?;
         // The YAML-managed gate for credentials and the security profile,
-        // enforced here so REST, gRPC and the console share it. Reconcile
+        // enforced here so REST and the console share it. Reconcile
         // treats `hearth.yaml` as authoritative for these fields: a key added
         // at runtime would be removed at the next restart or SIGHUP, and on a
         // secretless client that makes it public.
@@ -18393,7 +18393,7 @@ impl EmbeddedIdentityEngine {
 
         // The realm's `cidr_policy` binds every path that ends in a session,
         // not only the web password form that used to be its one reader
-        // (GA audit M13): the step-up grant, magic links, passkeys,
+        // (GA audit M13): magic links, passkeys,
         // federation and SAML all authenticate too.
         self.check_realm_network_policy(realm_id, context.ip_address.as_deref())?;
 
@@ -20439,9 +20439,10 @@ mod tests {
     // the unknown / public arms must match THAT — an Argon2id dummy there
     // would both reveal existence and keep the amplification on random ids.
 
-    /// Registers a confidential client whose secret the CALLER chose (the gRPC
-    /// shape). Unknown entropy, so it is stored as Argon2id — the same cost
-    /// class as a legacy pre-fast-hash secret.
+    /// Registers a confidential client whose secret the CALLER chose
+    /// (`RegisterClientRequest::client_secret`). Unknown entropy, so it is
+    /// stored as Argon2id — the same cost class as a legacy pre-fast-hash
+    /// secret.
     fn register_confidential_client(
         engine: &EmbeddedIdentityEngine,
         realm: &RealmId,

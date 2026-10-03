@@ -690,7 +690,7 @@ Key architectural decisions codified in this document, with rationale:
 | Config lifecycle | Immutable after startup | Simplifies concurrency model — config loaded once into `Arc<Config>`, no synchronization |
 | API contracts | Protobuf (`.proto` files) | Single source of truth for REST, events, and SDK codegen |
 | Audit trail | WAL-derived, async materialization | Zero write-path overhead; WAL is the durable record, audit store is a materialized view |
-| Embedded mode | Not supported | FFI tax unjustified without proven demand; sync core makes future addition feasible |
+| Embedded (library) mode | Not supported | Hearth ships only as a server. The in-process test harness is a test tool, not a deployment mode |
 | Unsafe code | Lean on crates | `memmap2`, `crossbeam-epoch` over custom `unsafe`. Matches Hearth's "leverage ecosystem" philosophy |
 | TDD | Strict, test-first | Database + security = zero tolerance for "I think this works." Tests define correctness before implementation. |
 | Compatibility | **Strict SemVer, in force now** | 1.0 GA shipped 2026-06-21 (`git tag v1.0.0`; CHANGELOG `[1.0.0]`), so the rules in [`VERSIONING.md`](../../VERSIONING.md) — per-surface breaking-change definitions, the support window, the deprecation policy and the 2.0 process — are **normative today**, not aspirational. The earlier "pre-1.0-GA: breaking changes permitted" entry in this row outlived the release that ended it and is withdrawn. |

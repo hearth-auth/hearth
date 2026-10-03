@@ -146,7 +146,7 @@ async fn make_admin_token(h: &common::TestHarness, realm: &RealmId) -> String {
 /// with a human-readable message that contains NO internal storage details.
 #[tokio::test]
 async fn sv_list_deltas_disabled_realm_error_is_sanitized() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm(); // SV disabled by default
 
     h.rbac().seed_realm(&realm).expect("seed rbac");
@@ -218,7 +218,7 @@ async fn sv_list_deltas_disabled_realm_error_is_sanitized() {
 /// storage details in the response. Either a clean 404/200 or a sanitized 500.
 #[tokio::test]
 async fn sv_bump_session_error_is_sanitized() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = setup_sv_realm(&h);
     let token = make_admin_token(&h, &realm).await;
 
@@ -260,7 +260,7 @@ async fn sv_bump_session_error_is_sanitized() {
 /// expose internal error text. Success returns `{"bumped": N}`.
 #[tokio::test]
 async fn sv_bump_all_response_is_sanitized() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = setup_sv_realm(&h);
     let token = make_admin_token(&h, &realm).await;
 

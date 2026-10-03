@@ -1,7 +1,7 @@
 //! Test infrastructure for black box testing.
 //!
 //! Provides [`TestHarness`] for running tests against Hearth in both
-//! embedded and server modes. The same test logic can run against both
+//! in-process and server modes. The same test logic can run against both
 //! modes to verify the public API contract.
 
 // Each integration test binary compiles this module independently,
@@ -23,7 +23,7 @@ use hearth::identity::{
 use hearth::rbac::{EmbeddedRbacEngine, RbacEngine, SvBumper};
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
 
-/// Stub HIBP transport used in all embedded test harnesses.
+/// Stub HIBP transport used in all in-process test harnesses.
 ///
 /// Always reports "not pwned" without any network I/O. Without this, the
 /// HIBP-enabled-by-default config would attempt real HTTP calls on every
@@ -81,8 +81,8 @@ impl From<std::io::Error> for TestHarnessError {
 /// The operational mode of the test harness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HarnessMode {
-    /// In-process embedded engine (library mode).
-    Embedded,
+    /// The engines run in the test process; requests call them directly.
+    InProcess,
     /// HTTP server on a random port.
     Server,
 }
@@ -99,7 +99,7 @@ pub struct TestHarness {
     identity_engine: Arc<EmbeddedIdentityEngine>,
     /// Audit engine.
     audit_engine: Arc<EmbeddedAuditEngine>,
-    /// Base URL for server mode (e.g. `http://127.0.0.1:54321`). None in embedded mode.
+    /// Base URL for server mode (e.g. `http://127.0.0.1:54321`). None in in-process mode.
     base_url: Option<String>,
     /// Background server task handle — aborted on drop to release the port.
     _server_handle: Option<tokio::task::AbortHandle>,
@@ -116,9 +116,9 @@ impl fmt::Debug for TestHarness {
 }
 
 impl TestHarness {
-    /// Creates a test harness in embedded mode.
+    /// Creates a test harness in in-process mode.
     #[allow(clippy::unused_async)]
-    pub async fn embedded() -> Result<Self, TestHarnessError> {
+    pub async fn in_process() -> Result<Self, TestHarnessError> {
         let temp_dir = tempfile::tempdir().map_err(hearth::storage::StorageError::Io)?;
         let config = StorageConfig::dev(temp_dir.path().to_path_buf());
         let engine = Arc::new(EmbeddedStorageEngine::open(config)?);
@@ -149,7 +149,7 @@ impl TestHarness {
         rbac_engine.init_sv_bumper(Arc::clone(&identity_engine) as Arc<dyn SvBumper>);
 
         Ok(Self {
-            mode: HarnessMode::Embedded,
+            mode: HarnessMode::InProcess,
             engine,
             rbac_engine,
             identity_engine,
@@ -160,14 +160,14 @@ impl TestHarness {
         })
     }
 
-    /// Creates a test harness in embedded mode whose stored key material is
+    /// Creates a test harness in in-process mode whose stored key material is
     /// sealed under `kek`.
     ///
     /// Two harnesses built with *different* KEKs are how a backup test proves
     /// that secret material is re-enveloped on import rather than copied as
     /// ciphertext the destination cannot open (OpenSpec 26.40).
     #[allow(clippy::unused_async)]
-    pub async fn embedded_with_kek(kek: [u8; 32]) -> Result<Self, TestHarnessError> {
+    pub async fn in_process_with_kek(kek: [u8; 32]) -> Result<Self, TestHarnessError> {
         let temp_dir = tempfile::tempdir().map_err(hearth::storage::StorageError::Io)?;
         let config = StorageConfig::dev(temp_dir.path().to_path_buf());
         let engine = Arc::new(EmbeddedStorageEngine::open(config)?);
@@ -198,7 +198,7 @@ impl TestHarness {
         rbac_engine.init_sv_bumper(Arc::clone(&identity_engine) as Arc<dyn SvBumper>);
 
         Ok(Self {
-            mode: HarnessMode::Embedded,
+            mode: HarnessMode::InProcess,
             engine,
             rbac_engine,
             identity_engine,
@@ -209,10 +209,10 @@ impl TestHarness {
         })
     }
 
-    /// Creates a test harness in embedded mode with an injected pre-token
+    /// Creates a test harness in in-process mode with an injected pre-token
     /// webhook transport (for HEA-1324 tests).
     #[allow(clippy::unused_async)]
-    pub async fn embedded_with_pre_token_transport(
+    pub async fn in_process_with_pre_token_transport(
         transport: std::sync::Arc<
             dyn hearth::identity::pre_token_webhook::PreTokenWebhookTransport,
         >,
@@ -247,7 +247,7 @@ impl TestHarness {
         rbac_engine.init_sv_bumper(Arc::clone(&identity_engine) as Arc<dyn SvBumper>);
 
         Ok(Self {
-            mode: HarnessMode::Embedded,
+            mode: HarnessMode::InProcess,
             engine,
             rbac_engine,
             identity_engine,
@@ -258,10 +258,10 @@ impl TestHarness {
         })
     }
 
-    /// Creates a test harness in embedded mode with an injected approval webhook
+    /// Creates a test harness in in-process mode with an injected approval webhook
     /// transport (for M7 tests — captures deliveries in-process without HTTP).
     #[allow(clippy::unused_async)]
-    pub async fn embedded_with_approval_transport(
+    pub async fn in_process_with_approval_transport(
         transport: std::sync::Arc<
             dyn hearth::identity::approval_notifier::ApprovalWebhookTransport,
         >,
@@ -296,7 +296,7 @@ impl TestHarness {
         rbac_engine.init_sv_bumper(Arc::clone(&identity_engine) as Arc<dyn SvBumper>);
 
         Ok(Self {
-            mode: HarnessMode::Embedded,
+            mode: HarnessMode::InProcess,
             engine,
             rbac_engine,
             identity_engine,
@@ -310,7 +310,7 @@ impl TestHarness {
     /// Creates a test harness in server mode.
     ///
     /// Starts an HTTP server on a random OS-assigned port backed by the same
-    /// in-process engines as embedded mode. Tests can read state via the engine
+    /// in-process engines as in-process mode. Tests can read state via the engine
     /// accessors and exercise the public API via [`Self::base_url`].
     pub async fn server() -> Result<Self, TestHarnessError> {
         let temp_dir = tempfile::tempdir().map_err(hearth::storage::StorageError::Io)?;
@@ -606,14 +606,14 @@ impl TestHarness {
             .expect("archive test realm");
     }
 
-    /// Returns the base URL for server mode, or `None` for embedded mode.
+    /// Returns the base URL for server mode, or `None` for in-process mode.
     ///
     /// Use this to construct HTTP requests in dual-mode tests:
     /// ```ignore
     /// if let Some(url) = h.base_url() {
     ///     // exercise via HTTP
     /// } else {
-    ///     // exercise via embedded engine directly
+    ///     // exercise the in-process engines directly
     /// }
     /// ```
     pub fn base_url(&self) -> Option<&str> {

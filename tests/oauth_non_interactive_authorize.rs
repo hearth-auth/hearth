@@ -124,7 +124,7 @@ struct Fixture {
 }
 
 async fn setup() -> Fixture {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm_name = format!("nonint-{}", uuid::Uuid::new_v4());
     let realm = harness
         .identity()

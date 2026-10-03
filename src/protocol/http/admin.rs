@@ -351,8 +351,7 @@ fn reject_system_realm_write(auth: &AdminAuth) -> Result<(), Response> {
 /// Enforces realm-level object authorization (BOLA guard).
 ///
 /// Returns `path_realm_id` when access is permitted, per the shared rule in
-/// [`crate::protocol::admin_auth::admin_realm_scope`] (also applied by gRPC
-/// `GetRealm` / `DeleteRealm`):
+/// [`crate::protocol::admin_auth::admin_realm_scope`]:
 /// - `auth.realm_id == path_realm_id` — no boundary is crossed, always allowed.
 /// - The **system realm** (nil UUID) is a superuser that may operate on any
 ///   realm, *subject to the target realm's cross-realm trust policies*.
@@ -1308,7 +1307,7 @@ async fn admin_list_realms(
     }
 
     // System-realm admins may list all realms; a tenant realm admin sees only
-    // their own realm — the gRPC ListRealms twin has always filtered this way
+    // their own realm — the removed gRPC ListRealms twin filtered this way
     // (audit 2026-08-28 §4.1#2).
     if crate::identity::keys::is_system_realm(&auth.realm_id) {
         match state.identity.list_realms(&params.as_page_request()) {
@@ -3087,7 +3086,8 @@ async fn admin_get_user_effective_permissions(
         None => None,
     };
     // A suspended or archived organisation grants nothing, here as in tokens
-    // and `/v1/me/permissions` (the gRPC twin applied this; REST did not).
+    // and `/v1/me/permissions` (the removed gRPC twin applied this; REST did
+    // not).
     let org_id = state.identity.active_org_context(&auth.realm_id, org_id);
     let scope = params.get("scope").cloned();
 
@@ -3988,8 +3988,8 @@ fn parse_user_id_path(raw: &str) -> Result<UserId, (StatusCode, Json<serde_json:
 }
 
 /// Refuses a role definition that would grant a permission the caller does not
-/// hold (GA audit M6), mirroring gRPC `CreateRole`/`UpdateRole` through the
-/// shared [`crate::protocol::role_ceiling`] check. `hearth.admin` is exempt.
+/// hold (GA audit M6), through the [`crate::protocol::role_ceiling`] check.
+/// `hearth.admin` is exempt.
 fn require_role_definition_ceiling(
     state: &AppState,
     auth: &AdminAuth,

@@ -322,8 +322,8 @@ impl EmbeddedIdentityEngine {
 
     /// Issues an authorization code.
     ///
-    /// `bearer` is set by the non-interactive surfaces (JSON and gRPC
-    /// `Authorize`) to the validated claims of the caller's bearer token.
+    /// `bearer` is set by the non-interactive surfaces (JSON `POST /authorize`
+    /// and its realm twin) to the validated claims of the caller's bearer token.
     /// They cannot show a consent screen or a factor challenge, so they may
     /// issue only for the client the token was issued to — or, for a
     /// first-party session token, a first-party client (GA audit 3 B-1) —
@@ -951,8 +951,8 @@ impl EmbeddedIdentityEngine {
         // 10. Create a session for the user (OAuth code exchange — no browser context).
         //     A derived session: an authorization code is minted only for a
         //     principal holding a live session — the browser `/authorize`
-        //     requires a UI session, and the non-interactive surfaces (JSON and
-        //     gRPC `Authorize`) require a bearer token that `validate_token`
+        //     requires a UI session, and the non-interactive JSON surfaces
+        //     (`POST /authorize` and its realm twin) require a bearer token that `validate_token`
         //     accepts only while its session is still active — and that
         //     session cleared the realm's second-factor gates when it was
         //     created (GA audit B2), so a realm that turns `mfa_required` on is
@@ -3611,8 +3611,8 @@ impl EmbeddedIdentityEngine {
     /// would make an unknown `client_id` measurably SLOWER than a real one
     /// (the existence oracle 22.25 closed, inverted) and let anyone burn an
     /// Argon2id run per request with random client ids. The residual: a
-    /// client still holding an Argon2id hash (caller-chosen via gRPC,
-    /// `hearth.yaml`, a migration import, or created before this change) is
+    /// client still holding an Argon2id hash (caller-chosen via `hearth.yaml`
+    /// or a migration import, or created before this change) is
     /// slower to verify than the other arms, which reveals that such a client
     /// exists. Rotating its secret moves it onto the fast format.
     ///

@@ -63,7 +63,7 @@ fn an_explicit_opt_out_is_honoured() {
 /// off; a realm that requires MFA is not named.
 #[tokio::test]
 async fn realms_with_mfa_off_are_listed_for_the_startup_warning() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     for (name, mfa) in [("mfa-on", Some(true)), ("mfa-off", Some(false))] {
         h.identity()
             .create_realm(&CreateRealmRequest {
@@ -96,7 +96,7 @@ fn mfa_events(
 /// audited with the old and new values; an update that leaves it alone is not.
 #[tokio::test]
 async fn a_realm_mfa_change_is_audited() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -144,7 +144,7 @@ async fn a_realm_mfa_change_is_audited() {
 /// other write path may touch; a change is audited, a no-op is not.
 #[tokio::test]
 async fn startup_applies_the_system_realm_policy() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let system = hearth::core::RealmId::new(uuid::Uuid::nil());
 
     assert!(h
@@ -343,7 +343,7 @@ fn session_with(
 #[tokio::test]
 async fn only_strong_factors_satisfy_mfa() {
     use hearth::identity::{IdentityError, MfaProof};
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -379,7 +379,7 @@ async fn only_strong_factors_satisfy_mfa() {
 /// for a user whose only factor is email OTP.
 #[tokio::test]
 async fn an_email_otp_completes_a_sign_in_where_mfa_is_optional() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -435,7 +435,7 @@ fn realm_with_mfa(h: &common::TestHarness, name: &str, mfa: bool) -> hearth::ide
 #[tokio::test]
 async fn an_org_requires_mfa_for_its_members_in_an_optional_realm() {
     use hearth::identity::{IdentityError, MfaProof, OrganizationRole};
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = realm_with_mfa(&h, "org-tightens", false);
     let strict = org(&h, realm.id(), "strict", true);
     let member = active_user(&h, realm.id(), "member@example.com");
@@ -454,7 +454,7 @@ async fn an_org_requires_mfa_for_its_members_in_an_optional_realm() {
 #[tokio::test]
 async fn an_org_cannot_loosen_a_realm_that_requires_mfa() {
     use hearth::identity::{IdentityError, MfaProof, OrganizationRole};
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = realm_with_mfa(&h, "org-loosen", true);
     let lax = org(&h, realm.id(), "lax", false);
     let member = active_user(&h, realm.id(), "lax-member@example.com");
@@ -470,7 +470,7 @@ async fn an_org_cannot_loosen_a_realm_that_requires_mfa() {
 /// only another setting keeps the requirement.
 #[tokio::test]
 async fn an_org_mfa_change_is_audited() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = realm_with_mfa(&h, "org-audit", false);
     let o = org(&h, realm.id(), "audited", false);
     let update = |config: hearth::identity::OrganizationConfig| {
@@ -507,7 +507,7 @@ async fn an_org_mfa_change_is_audited() {
 /// A SCIM-created organization does not require MFA.
 #[tokio::test]
 async fn a_scim_created_org_does_not_require_mfa() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = realm_with_mfa(&h, "org-scim", false);
     let o = h
         .identity()

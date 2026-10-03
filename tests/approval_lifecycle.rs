@@ -59,7 +59,7 @@ fn make_agent(h: &TestHarness, realm_id: &hearth::core::RealmId) -> AgentId {
 
 #[tokio::test]
 async fn create_approval_request_returns_pending() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -85,7 +85,7 @@ async fn create_approval_request_returns_pending() {
 
 #[tokio::test]
 async fn get_approval_request_returns_created_request() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -115,7 +115,7 @@ async fn get_approval_request_returns_created_request() {
 
 #[tokio::test]
 async fn approve_request_issues_capability_token() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -149,7 +149,7 @@ async fn approve_request_issues_capability_token() {
 
 #[tokio::test]
 async fn capability_token_ttl_capped_at_1h() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -183,7 +183,7 @@ async fn capability_token_ttl_capped_at_1h() {
 
 #[tokio::test]
 async fn deny_request_transitions_to_denied() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -217,7 +217,7 @@ async fn deny_request_transitions_to_denied() {
 
 #[tokio::test]
 async fn cannot_approve_already_approved_request() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -248,7 +248,7 @@ async fn cannot_approve_already_approved_request() {
 
 #[tokio::test]
 async fn cannot_deny_already_denied_request() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -279,7 +279,7 @@ async fn cannot_deny_already_denied_request() {
 
 #[tokio::test]
 async fn cannot_approve_denied_request() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -312,7 +312,7 @@ async fn cannot_approve_denied_request() {
 
 #[tokio::test]
 async fn get_nonexistent_request_returns_error() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
 
     let result = h
@@ -328,7 +328,7 @@ async fn get_nonexistent_request_returns_error() {
 
 #[tokio::test]
 async fn list_approval_requests_returns_pending() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -365,7 +365,7 @@ async fn list_approval_requests_returns_pending() {
 /// zero-callers gap in evaluate_tool_access (HEA-1428).
 #[tokio::test]
 async fn missing_capability_token_returns_tool_approval_required() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -404,7 +404,7 @@ async fn missing_capability_token_returns_tool_approval_required() {
 /// with the same token must be rejected (single-use JTI enforcement).
 #[tokio::test]
 async fn capability_token_single_use_enforcement() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
     let agent_sub = agent_id.as_uuid().to_string();
@@ -466,7 +466,7 @@ async fn capability_token_single_use_enforcement() {
 /// passes.
 #[tokio::test]
 async fn failed_caller_binding_does_not_consume_capability_jti() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
     let agent_sub = agent_id.as_uuid().to_string();
@@ -532,7 +532,7 @@ async fn failed_caller_binding_does_not_consume_capability_jti() {
 /// Regression test for the TOCTOU double-issuance race (HEA-1430).
 #[tokio::test]
 async fn concurrent_approve_issues_exactly_one_token() {
-    let h = Arc::new(TestHarness::embedded().await.expect("harness init"));
+    let h = Arc::new(TestHarness::in_process().await.expect("harness init"));
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -583,7 +583,7 @@ async fn concurrent_approve_issues_exactly_one_token() {
 /// tool invocation.
 #[tokio::test]
 async fn capability_token_tool_mismatch_rejected() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
     let agent_sub = agent_id.as_uuid().to_string();
@@ -634,7 +634,7 @@ async fn capability_token_tool_mismatch_rejected() {
 /// and must not mint a capability token.
 #[tokio::test]
 async fn approve_rejected_when_agent_revoked_after_request() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -682,7 +682,7 @@ async fn approve_rejected_when_agent_revoked_after_request() {
 /// must not have pending requests approved either.
 #[tokio::test]
 async fn approve_rejected_when_agent_suspended() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -719,7 +719,7 @@ async fn approve_rejected_when_agent_suspended() {
 /// the door, rather than queued for an operator who cannot tell it is dead.
 #[tokio::test]
 async fn create_approval_request_rejected_for_revoked_agent() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
 
@@ -752,7 +752,7 @@ async fn create_approval_request_rejected_for_revoked_agent() {
 /// approvable request whose capability token names a nonexistent subject.
 #[tokio::test]
 async fn create_approval_request_rejected_for_unknown_agent() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
 
     let err = h
@@ -797,7 +797,7 @@ async fn create_approval_request_rejected_for_unknown_agent() {
 /// becomes a way to deny the rightful holder.
 #[tokio::test]
 async fn a_revoked_agents_capability_token_stops_working() {
-    let h = TestHarness::embedded().await.expect("harness init");
+    let h = TestHarness::in_process().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
     let agent_sub = agent_id.as_uuid().to_string();

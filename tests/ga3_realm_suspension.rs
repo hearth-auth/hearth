@@ -49,7 +49,7 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
-        let h = common::TestHarness::embedded().await.expect("harness");
+        let h = common::TestHarness::in_process().await.expect("harness");
         h.rbac()
             .seed_realm(&system_realm())
             .expect("seed system rbac");

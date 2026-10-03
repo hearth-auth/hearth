@@ -371,7 +371,7 @@ fn rsa_retiring_blobs(storage: &Arc<dyn StorageEngine>, realm: &RealmId) -> usiz
 /// run-2026-09-21.md §4.1).
 #[tokio::test]
 async fn discovery_advertises_rs256_and_eddsa_for_id_tokens() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = dcr_realm(&h);
 
     for uri in [
@@ -396,7 +396,7 @@ async fn discovery_advertises_rs256_and_eddsa_for_id_tokens() {
 /// returns registered metadata, defaults included).
 #[tokio::test]
 async fn dynamic_registration_without_the_parameter_gets_rs256() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = dcr_realm(&h);
 
     let (status, body) = realm_register(&realm, registration(serde_json::json!({}))).await;
@@ -420,7 +420,7 @@ async fn dynamic_registration_without_the_parameter_gets_rs256() {
 
 #[tokio::test]
 async fn dynamic_registration_honours_an_explicit_rs256_or_eddsa() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = dcr_realm(&h);
 
     for (requested, expected) in [
@@ -457,7 +457,7 @@ async fn dynamic_registration_honours_an_explicit_rs256_or_eddsa() {
 /// would let it forge its own ID tokens.
 #[tokio::test]
 async fn dynamic_registration_refuses_unsupported_algorithms() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = dcr_realm(&h);
 
     for bad in [
@@ -510,7 +510,7 @@ async fn dynamic_registration_refuses_unsupported_algorithms() {
 /// as dynamic registration does.
 #[tokio::test]
 async fn admin_registration_defaults_to_eddsa_and_validates_the_parameter() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
 
     let default = admin_register(h.identity(), &realm, None).unwrap();
@@ -602,7 +602,7 @@ async fn admin_call(
 /// switch to RS256 would have been ignored with a `200`.
 #[tokio::test]
 async fn admin_rest_api_sets_and_validates_id_token_signed_response_alg() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let token = admin_token(&h, &realm);
     let state = Arc::new(AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()));
@@ -686,7 +686,7 @@ async fn admin_rest_api_sets_and_validates_id_token_signed_response_alg() {
 /// grant is still EdDSA and verifies against the Ed25519 key.
 #[tokio::test]
 async fn rs256_client_receives_an_id_token_that_verifies_against_the_realm_jwks() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = dcr_realm(&h);
     let (status, body) = realm_register(&realm, registration(serde_json::json!({}))).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
@@ -737,7 +737,7 @@ async fn rs256_client_receives_an_id_token_that_verifies_against_the_realm_jwks(
 /// client publishes no RSA key.
 #[tokio::test]
 async fn eddsa_client_keeps_eddsa_id_tokens() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let client = admin_register(h.identity(), &realm, None).unwrap();
 
@@ -753,7 +753,7 @@ async fn eddsa_client_keeps_eddsa_id_tokens() {
 /// on the next grant; an unsupported value is refused and changes nothing.
 #[tokio::test]
 async fn updating_a_client_switches_its_id_token_algorithm() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let client = admin_register(h.identity(), &realm, None).unwrap();
 
@@ -798,7 +798,7 @@ async fn updating_a_client_switches_its_id_token_algorithm() {
 /// algorithm too.
 #[tokio::test]
 async fn device_grant_signs_the_id_token_with_the_clients_algorithm() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let client = h
         .identity()
@@ -846,7 +846,7 @@ async fn device_grant_signs_the_id_token_with_the_clients_algorithm() {
 /// introspection, and `userinfo`.
 #[tokio::test]
 async fn an_rs256_id_token_is_never_accepted_as_an_access_token() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = dcr_realm(&h);
     let (_, body) = realm_register(&realm, registration(serde_json::json!({}))).await;
     let tokens = code_flow(h.identity(), &realm.id, &client_id_of(&body));
@@ -905,7 +905,7 @@ async fn an_rs256_id_token_is_never_accepted_as_an_access_token() {
 /// holds, so it must work as `id_token_hint` — and a tampered one must not.
 #[tokio::test]
 async fn an_rs256_id_token_hint_ends_the_session_and_a_forged_one_does_not() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let client = admin_register(h.identity(), &realm, Some("RS256")).unwrap();
     let tokens = code_flow(h.identity(), &realm, &client);
@@ -969,7 +969,7 @@ async fn an_rs256_id_token_hint_ends_the_session_and_a_forged_one_does_not() {
 /// silently ignored RS256 token would report a revocation that never happened).
 #[tokio::test]
 async fn revoking_an_rs256_id_token_ends_its_session() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let client = admin_register(h.identity(), &realm, Some("RS256")).unwrap();
     let tokens = code_flow(h.identity(), &realm, &client);
@@ -1171,7 +1171,7 @@ fn realm_delete_removes_the_rsa_keys() {
 /// leave that token unverifiable.
 #[tokio::test]
 async fn concurrent_rs256_registrations_converge_on_one_rsa_key() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let identity = h.identity_arc();
 

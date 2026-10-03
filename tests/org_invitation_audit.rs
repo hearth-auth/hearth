@@ -121,7 +121,7 @@ fn invitation_actions_round_trip_through_the_wire_tag() {
 
 #[tokio::test]
 async fn create_invitation_is_audited_with_inviter_org_and_role() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let org = make_org(&h, &realm, "acme-invite-create");
     let inviter = make_user(&h, &realm);
@@ -160,7 +160,7 @@ async fn create_invitation_is_audited_with_inviter_org_and_role() {
 
 #[tokio::test]
 async fn accept_invitation_is_audited_with_the_user_it_provisioned() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let org = make_org(&h, &realm, "acme-invite-accept");
 
@@ -204,7 +204,7 @@ async fn accept_invitation_is_audited_with_the_user_it_provisioned() {
 
 #[tokio::test]
 async fn revoke_invitation_is_audited() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let org = make_org(&h, &realm, "acme-invite-revoke");
 

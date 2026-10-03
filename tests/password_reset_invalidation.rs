@@ -71,7 +71,7 @@ fn assert_token_invalid(err: &IdentityError, what: &str) {
 
 #[tokio::test]
 async fn reset_token_dies_when_the_account_email_changes() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm(&harness, None);
     let email = format!("before-{}@example.com", uuid::Uuid::new_v4());
     let user = create_user(&harness, &realm, &email);
@@ -111,7 +111,7 @@ async fn reset_token_dies_when_the_account_email_changes() {
 
 #[tokio::test]
 async fn reset_token_dies_when_the_password_changes_out_of_band() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm(&harness, None);
     let email = format!("oob-{}@example.com", uuid::Uuid::new_v4());
     let user = create_user(&harness, &realm, &email);
@@ -149,7 +149,7 @@ async fn reset_token_dies_when_the_password_changes_out_of_band() {
 
 #[tokio::test]
 async fn a_newer_reset_token_supersedes_the_older_one() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm(&harness, None);
     let email = format!("supersede-{}@example.com", uuid::Uuid::new_v4());
     create_user(&harness, &realm, &email);
@@ -192,7 +192,7 @@ async fn a_newer_reset_token_supersedes_the_older_one() {
 
 #[tokio::test]
 async fn a_rejected_password_does_not_consume_the_reset_token() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = create_realm(
         &harness,
         Some(PasswordPolicy {

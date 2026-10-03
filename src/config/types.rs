@@ -453,7 +453,7 @@ pub struct OperationalConfig {
     #[serde(default = "OperationalConfig::default_header_read_timeout_secs")]
     pub header_read_timeout_secs: u64,
     /// Seconds a client has to complete the TLS handshake before the
-    /// connection is closed. Applies to the HTTPS and gRPC listeners.
+    /// connection is closed. Applies to the HTTPS listener.
     #[serde(default = "OperationalConfig::default_tls_handshake_timeout_secs")]
     pub tls_handshake_timeout_secs: u64,
     /// Maximum concurrent connections from one client address (one IPv4

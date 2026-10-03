@@ -318,7 +318,7 @@ async fn delete_agent_propagates_rbac_purge_failure() {
 /// keeps resolving to an agent UUID whose record is gone.
 #[tokio::test]
 async fn delete_agent_removes_the_spiffe_workload_mapping() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm = make_realm(identity, "cascade-spiffe");
     let owner = make_user(identity, &realm);
@@ -360,7 +360,7 @@ async fn delete_agent_removes_the_spiffe_workload_mapping() {
 /// the spec is a tested property rather than prose.
 #[tokio::test]
 async fn delete_agent_invalidates_outstanding_aats() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm = make_realm(identity, "cascade-aat");
     let owner = make_user(identity, &realm);
@@ -402,7 +402,7 @@ async fn delete_agent_invalidates_outstanding_aats() {
 
 #[tokio::test]
 async fn suspend_agent_is_frozen_on_an_archived_realm() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm = make_realm(identity, "freeze-suspend");
     let owner = make_user(identity, &realm);
@@ -430,7 +430,7 @@ async fn suspend_agent_is_frozen_on_an_archived_realm() {
 
 #[tokio::test]
 async fn reactivate_agent_is_frozen_on_an_archived_realm() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm = make_realm(identity, "freeze-reactivate");
     let owner = make_user(identity, &realm);
@@ -518,7 +518,7 @@ fn register_exchange_client_at(
 /// credential stuffing — must block the exchange just as `Revoked` does.
 #[tokio::test]
 async fn token_exchange_refuses_a_suspended_agent_actor() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm = make_realm(identity, "exchange-suspended");
     let owner = make_user(identity, &realm);
@@ -578,7 +578,7 @@ async fn token_exchange_refuses_a_suspended_agent_actor() {
 /// so it is where the MUST is enforced.
 #[tokio::test]
 async fn protected_resource_scope_vocabulary_enforces_mcp_format() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm = make_realm(identity, "mcp-scope-format");
 

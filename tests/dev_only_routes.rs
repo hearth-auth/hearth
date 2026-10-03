@@ -50,7 +50,7 @@ async fn dev_app(harness: &common::TestHarness) -> axum::Router {
 /// body, while the handler guard returns JSON.
 #[tokio::test]
 async fn bootstrap_route_absent_in_prod_mode() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness creation");
     let app = non_dev_app(&harness).await;
@@ -90,7 +90,7 @@ async fn bootstrap_route_absent_in_prod_mode() {
 #[cfg(not(feature = "dev-endpoints"))]
 #[tokio::test]
 async fn bootstrap_route_absent_in_dev_mode_without_the_feature() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness creation");
     let app = dev_app(&harness).await;
@@ -123,7 +123,7 @@ async fn bootstrap_route_absent_in_dev_mode_without_the_feature() {
 #[cfg(feature = "dev-endpoints")]
 #[tokio::test]
 async fn bootstrap_route_present_in_dev_mode() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness creation");
     let app = dev_app(&harness).await;

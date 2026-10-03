@@ -69,7 +69,7 @@ fn issue_admin_token(h: &common::TestHarness, realm: &RealmId) -> String {
 
 #[tokio::test]
 async fn list_sessions_returns_user_sessions() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = issue_admin_token(&h, &realm);
@@ -120,7 +120,7 @@ async fn list_sessions_returns_user_sessions() {
 
 #[tokio::test]
 async fn list_sessions_empty_for_user_with_no_sessions() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = issue_admin_token(&h, &realm);
@@ -166,7 +166,7 @@ async fn list_sessions_empty_for_user_with_no_sessions() {
 
 #[tokio::test]
 async fn list_sessions_requires_auth() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
 
     let resp = build_app(&h)
@@ -188,7 +188,7 @@ async fn list_sessions_requires_auth() {
 
 #[tokio::test]
 async fn revoke_session_returns_204() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = issue_admin_token(&h, &realm);
@@ -233,7 +233,7 @@ async fn revoke_session_returns_204() {
 
 #[tokio::test]
 async fn revoke_session_actually_invalidates_session() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = issue_admin_token(&h, &realm);
@@ -299,7 +299,7 @@ async fn revoke_session_actually_invalidates_session() {
 
 #[tokio::test]
 async fn revoke_session_unknown_id_returns_404() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = issue_admin_token(&h, &realm);
@@ -322,7 +322,7 @@ async fn revoke_session_unknown_id_returns_404() {
 
 #[tokio::test]
 async fn revoke_session_requires_auth() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
 
     let resp = build_app(&h)

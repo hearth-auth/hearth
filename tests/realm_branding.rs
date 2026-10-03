@@ -17,7 +17,7 @@ use hearth::identity::{CreateRealmRequest, RealmConfig, UpdateRealmRequest};
 
 #[tokio::test]
 async fn realm_branding_logo_and_primary_color_persist() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let realm = identity
@@ -61,7 +61,7 @@ async fn realm_branding_logo_and_primary_color_persist() {
 
 #[tokio::test]
 async fn realm_branding_can_be_cleared() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let realm = identity
@@ -97,7 +97,7 @@ async fn realm_branding_can_be_cleared() {
 
 #[tokio::test]
 async fn email_template_upsert_and_retrieve() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let realm = identity
@@ -160,7 +160,7 @@ async fn email_template_upsert_and_retrieve() {
 
 #[tokio::test]
 async fn email_template_delete_removes_entry() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let mut templates = std::collections::HashMap::new();

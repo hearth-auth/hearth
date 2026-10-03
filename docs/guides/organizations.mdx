@@ -314,10 +314,10 @@ Pass `attributes` on create or update:
 
 ```bash
 # Create with attributes
-POST /admin/orgs
+POST /admin/organizations
 {
   "slug": "acme-corp",
-  "name": "Acme Corporation",
+  "display_name": "Acme Corporation",
   "attributes": {
     "crm_id": "SF-00123",
     "contract_tier": "enterprise"
@@ -325,7 +325,7 @@ POST /admin/orgs
 }
 
 # Update attributes (full replacement)
-PATCH /admin/orgs/{id}
+PATCH /admin/organizations/{id}
 {
   "attributes": { "crm_id": "SF-00456" }
 }
@@ -341,7 +341,7 @@ Attributes are included in every organization response:
 {
   "id": "<uuid>",
   "slug": "acme-corp",
-  "name": "Acme Corporation",
+  "display_name": "Acme Corporation",
   "attributes": { "crm_id": "SF-00123", "contract_tier": "enterprise" }
 }
 ```

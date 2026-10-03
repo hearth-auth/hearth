@@ -42,7 +42,7 @@ fn challenge() -> String {
 
 #[tokio::test]
 async fn code_exchange_fails_closed_when_the_client_lookup_errors() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = h.create_realm();
     let user = h
         .identity()
@@ -198,7 +198,7 @@ fn scim_realm(h: &common::TestHarness, token: &str) -> RealmId {
 #[tokio::test]
 async fn scim_delete_fails_closed_when_the_admin_check_cannot_read_rbac() {
     let token = "ga-l13-scim-provisioning-token";
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let realm = scim_realm(&h, token);
     let user = h
         .identity()

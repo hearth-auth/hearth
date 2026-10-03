@@ -148,7 +148,7 @@ fn surviving_rbac_keys(h: &common::TestHarness, realm_id: &RealmId) -> Vec<Strin
 /// The three families the audit named must go with the realm's key space.
 #[tokio::test]
 async fn realm_deletion_removes_every_rbac_family() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let fixture = build_realm_with_every_rbac_family(&h, "residue");
 
     // Precondition: all three families really exist before the delete.
@@ -177,7 +177,7 @@ async fn realm_deletion_removes_every_rbac_family() {
 /// old `UserId` must not resurrect anything the delete removed.
 #[tokio::test]
 async fn a_reimported_user_inherits_no_grant_from_the_deleted_realm() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let fixture = build_realm_with_every_rbac_family(&h, "reimport");
 
     h.archive_realm(&fixture.realm_id);

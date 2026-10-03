@@ -68,7 +68,7 @@ async fn create_and_archive_realm_with_user(harness: &common::TestHarness, slug:
 
 #[tokio::test]
 async fn detects_orphan_when_archived_realm_has_users() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let slug = create_and_archive_realm_with_user(&harness, "legacy").await;
 
     let config = config_with_realms(Some(HashMap::new()));
@@ -81,7 +81,7 @@ async fn detects_orphan_when_archived_realm_has_users() {
 
 #[tokio::test]
 async fn no_orphan_when_archived_realm_is_empty() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     // Create and immediately archive a realm with NO users.
     harness
@@ -106,7 +106,7 @@ async fn no_orphan_when_archived_realm_is_empty() {
 
 #[tokio::test]
 async fn orphan_resolved_by_migrate_from() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     create_and_archive_realm_with_user(&harness, "old-realm").await;
 
     // First detection — should be orphaned.
@@ -143,7 +143,7 @@ async fn orphan_resolved_by_migrate_from() {
 
 #[tokio::test]
 async fn orphan_resolved_by_archive_drop() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     create_and_archive_realm_with_user(&harness, "drop-me").await;
 
     // First detection — should be orphaned.
@@ -180,7 +180,7 @@ async fn orphan_resolved_by_archive_drop() {
 
 #[tokio::test]
 async fn orphan_record_persisted_and_loadable() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     create_and_archive_realm_with_user(&harness, "persisted-orphan").await;
 
     let config = config_with_realms(Some(HashMap::new()));
@@ -196,7 +196,7 @@ async fn orphan_record_persisted_and_loadable() {
 
 #[tokio::test]
 async fn detected_at_preserved_across_detection_runs() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     create_and_archive_realm_with_user(&harness, "stable-orphan").await;
 
     let config = config_with_realms(Some(HashMap::new()));
@@ -214,7 +214,7 @@ async fn detected_at_preserved_across_detection_runs() {
 
 #[tokio::test]
 async fn archive_drop_prevents_realm_unarchiving_on_reconcile() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     create_and_archive_realm_with_user(&harness, "keep-archived").await;
 
     // Re-add the slug to YAML with archive_drop: true.

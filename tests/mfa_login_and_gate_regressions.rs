@@ -152,7 +152,7 @@ fn json_state(h: &common::TestHarness) -> AppState {
 /// Unknown method names were stored verbatim by the JSON admin API.
 #[tokio::test]
 async fn json_admin_api_refuses_an_unknown_mfa_method() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (status, realm) = json_patch_mfa(
         json_state(&h),
         &h,
@@ -167,7 +167,7 @@ async fn json_admin_api_refuses_an_unknown_mfa_method() {
 /// other unknown name, and writes nothing.
 #[tokio::test]
 async fn json_admin_api_refuses_sms_as_an_unknown_mfa_method() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (status, realm) =
         json_patch_mfa(json_state(&h), &h, r#"{"mfa_methods":["totp","sms"]}"#).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -182,7 +182,7 @@ async fn json_admin_api_refuses_sms_as_an_unknown_mfa_method() {
 /// refusals above are about the names and not a broken rig.
 #[tokio::test]
 async fn json_admin_api_accepts_known_mfa_methods() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (status, realm) = json_patch_mfa(
         json_state(&h),
         &h,
@@ -200,7 +200,7 @@ async fn json_admin_api_accepts_known_mfa_methods() {
 /// the list the operator sent. It is refused.
 #[tokio::test]
 async fn json_admin_api_refuses_a_non_string_mfa_method_entry() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (status, realm) = json_patch_mfa(json_state(&h), &h, r#"{"mfa_methods":["totp",5]}"#).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(stored_mfa_methods(&h, &realm), None);
@@ -210,7 +210,7 @@ async fn json_admin_api_refuses_a_non_string_mfa_method_entry() {
 /// and changed nothing). It is refused.
 #[tokio::test]
 async fn json_admin_api_refuses_a_non_array_mfa_methods() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (status, realm) = json_patch_mfa(json_state(&h), &h, r#"{"mfa_methods":"totp"}"#).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(stored_mfa_methods(&h, &realm), None);

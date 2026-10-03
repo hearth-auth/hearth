@@ -119,7 +119,7 @@ fn cc_request(client_id: &str, dpop_jkt: Option<&str>) -> ClientCredentialsReque
 
 #[tokio::test]
 async fn a_dpop_required_client_without_a_proof_is_refused() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, client_id) = m2m_client(&h, true);
     let err = h
         .identity()
@@ -133,7 +133,7 @@ async fn a_dpop_required_client_without_a_proof_is_refused() {
 
 #[tokio::test]
 async fn a_dpop_required_client_with_a_proof_gets_a_bound_token() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, client_id) = m2m_client(&h, true);
     let jkt = "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I";
     let resp = h
@@ -152,7 +152,7 @@ async fn a_dpop_required_client_with_a_proof_gets_a_bound_token() {
 /// Control: a client without the flag still gets a bearer token.
 #[tokio::test]
 async fn a_client_without_the_flag_still_gets_a_bearer_token() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, client_id) = m2m_client(&h, false);
     h.identity()
         .client_credentials_token(&realm, &cc_request(&client_id, None))
@@ -181,7 +181,7 @@ fn app(h: &common::TestHarness) -> axum::Router {
 
 #[tokio::test]
 async fn discovery_advertises_neither_jarm_nor_fapi() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (status, doc) = send(
         app(&h),
         Request::builder()
@@ -232,7 +232,7 @@ fn jarm_response_modes_no_longer_parse() {
 
 #[tokio::test]
 async fn dynamic_registration_records_dpop_bound_access_tokens() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {

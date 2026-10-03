@@ -1,8 +1,8 @@
 //! Test harness integration tests.
 //!
 //! Covers `TEST_SCENARIOS.md` § Test Infrastructure:
-//! 1. Embedded mode starts and stops cleanly
-//! 2. Dual-mode pattern: same logic runs against embedded and server modes
+//! 1. In-process mode starts and stops cleanly
+//! 2. Dual-mode pattern: same logic runs against in-process and server modes
 //! 3. Server mode starts an HTTP server, `base_url()` returns `Some`
 
 mod common;
@@ -10,17 +10,17 @@ mod common;
 use common::{HarnessMode, TestHarness};
 use hearth::core::RealmId;
 
-/// Scenario 1: Embedded mode starts with isolated temp dir and stops cleanly.
+/// Scenario 1: In-process mode starts with isolated temp dir and stops cleanly.
 #[tokio::test]
-async fn embedded_mode_starts_and_stops_cleanly() {
-    let harness = TestHarness::embedded()
+async fn in_process_mode_starts_and_stops_cleanly() {
+    let harness = TestHarness::in_process()
         .await
-        .expect("embedded harness should start");
+        .expect("in-process harness should start");
 
-    assert_eq!(harness.mode(), HarnessMode::Embedded);
+    assert_eq!(harness.mode(), HarnessMode::InProcess);
     assert!(
         harness.base_url().is_none(),
-        "embedded mode has no base URL"
+        "in-process mode has no base URL"
     );
 
     // Verify storage is functional with a basic round-trip
@@ -39,13 +39,13 @@ async fn embedded_mode_starts_and_stops_cleanly() {
     drop(harness);
 }
 
-/// Scenario 2: Dual-mode pattern — same async test logic runs against embedded mode.
+/// Scenario 2: Dual-mode pattern — same async test logic runs against in-process mode.
 #[tokio::test]
-async fn dual_mode_embedded() {
+async fn dual_mode_in_process() {
     run_dual_mode_assertions(
-        TestHarness::embedded()
+        TestHarness::in_process()
             .await
-            .expect("embedded harness should start"),
+            .expect("in-process harness should start"),
     )
     .await;
 }
@@ -98,11 +98,11 @@ async fn server_mode_starts_and_exposes_base_url() {
         .base_url()
         .expect("server mode must have a base_url");
 
-    // Server storage is also accessible via the embedded engine accessors.
+    // Server storage is also accessible via the in-process engine accessors.
     run_dual_mode_assertions(
-        TestHarness::embedded()
+        TestHarness::in_process()
             .await
-            .expect("embedded harness should start"),
+            .expect("in-process harness should start"),
     )
     .await;
 

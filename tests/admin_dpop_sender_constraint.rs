@@ -133,7 +133,7 @@ struct Fixture {
 }
 
 async fn setup() -> Fixture {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = harness.create_realm();
     harness.rbac().seed_realm(&realm).expect("seed realm");
 

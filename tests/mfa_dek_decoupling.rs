@@ -38,7 +38,7 @@ fn compute_totp_code(secret_base32: &str, unix_secs: u64) -> String {
 /// secret undecryptable and locking the user out of MFA permanently.
 #[tokio::test]
 async fn totp_verify_survives_signing_key_rotation() {
-    let harness = common::TestHarness::embedded().await.unwrap();
+    let harness = common::TestHarness::in_process().await.unwrap();
 
     let realm = harness
         .identity()
@@ -106,7 +106,7 @@ async fn totp_verify_survives_signing_key_rotation() {
 /// that `load_mfa_state` can still read the blob after rotation.
 #[tokio::test]
 async fn recovery_code_survives_signing_key_rotation() {
-    let harness = common::TestHarness::embedded().await.unwrap();
+    let harness = common::TestHarness::in_process().await.unwrap();
 
     let realm = harness
         .identity()
@@ -162,7 +162,7 @@ async fn recovery_code_survives_signing_key_rotation() {
 /// invalidate TOTP (each rotation migrates blobs to the same stable DEK).
 #[tokio::test]
 async fn totp_survives_multiple_signing_key_rotations() {
-    let harness = common::TestHarness::embedded().await.unwrap();
+    let harness = common::TestHarness::in_process().await.unwrap();
 
     let realm = harness
         .identity()

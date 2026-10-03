@@ -38,7 +38,7 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
-        let h = common::TestHarness::embedded().await.expect("harness");
+        let h = common::TestHarness::in_process().await.expect("harness");
         let realm = h.create_realm();
         h.rbac().seed_realm(&realm).expect("seed realm");
         // Agent identity routes on, so `/v1/agents` is registered.

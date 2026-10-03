@@ -276,7 +276,9 @@ fn all_grants() -> Vec<String> {
 /// `/device_authorization`.
 #[tokio::test]
 async fn restored_secret_clients_still_require_their_secret() {
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let realm = source_realm(&src).await;
 
     let argon = src
@@ -384,7 +386,9 @@ async fn restored_secret_clients_still_require_their_secret() {
 /// on its `client_id` alone.
 #[tokio::test]
 async fn restored_private_key_jwt_client_still_requires_its_assertion() {
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let realm = source_realm(&src).await;
     let key = ClientKey::new();
     let assertion_key = ClientKey::new();
@@ -469,7 +473,9 @@ async fn restored_private_key_jwt_client_still_requires_its_assertion() {
 /// assertion.
 #[tokio::test]
 async fn restored_jwks_client_keeps_its_flags_and_is_never_public() {
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let realm = source_realm(&src).await;
     let key = ClientKey::new();
     let cid = src
@@ -517,7 +523,9 @@ async fn restored_jwks_client_keeps_its_flags_and_is_never_public() {
 /// public — the fix must not break SPAs and native apps.
 #[tokio::test]
 async fn restored_public_client_stays_public() {
-    let src = common::TestHarness::embedded().await.expect("src harness");
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
     let realm = source_realm(&src).await;
     let cid = src
         .identity()

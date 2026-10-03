@@ -20,7 +20,7 @@ Dependencies flow bottom-up (leaf → root), matching the layer architecture.
 | 6 | **Storage: Tiered Hot/Cold** | Storage: Tiered Hot/Cold (12 scenarios) | Depends on all storage components. Introduces hot path constraints. |
 | 7 | **Storage: Public trait API** | (implicit) | `mod.rs` trait interface wrapping WAL+memtable+SST+tiered into clean `get/put/delete/scan` with `RealmId` enforcement. |
 | 8 | **Configuration** | Configuration (5 scenarios) | Standalone, needed before wiring layers. YAML parsing, `--dev` flag, validation. |
-| 9 | **Test infrastructure** | Test Infrastructure (4 scenarios) | `TestHarness` embedded mode. Server mode stays `#[ignore]` until HTTP exists. |
+| 9 | **Test infrastructure** | Test Infrastructure (4 scenarios) | `TestHarness` in-process mode. Server mode stays `#[ignore]` until HTTP exists. |
 | 10 | **RBAC engine** | Authorization (Phase 0 RBAC scenarios) | Standalone module. Identity depends on it laterally (to resolve permissions at token-issue time), so build it first. See `AUTHORIZATION.md`. |
 | 11 | **Identity: User CRUD** | User CRUD (14 scenarios) | First domain logic. Depends on storage + core types. |
 | 12 | **Identity: Credentials** | Credential Storage (12 scenarios) | Depends on users. Argon2id hashing, multi-algo verification. |

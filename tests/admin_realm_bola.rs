@@ -125,7 +125,7 @@ fn req(method: &str, uri: String, token: &str, auth_realm: &RealmId, body: &str)
 
 #[tokio::test]
 async fn cross_realm_get_realm_is_forbidden() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm_a, token_a) = setup_realm_admin(&h, "gr-a").await;
     let (realm_b, _) = setup_realm_admin(&h, "gr-b").await;
 
@@ -148,7 +148,7 @@ async fn cross_realm_get_realm_is_forbidden() {
 
 #[tokio::test]
 async fn cross_realm_get_branding_is_forbidden() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm_a, token_a) = setup_realm_admin(&h, "gb-a").await;
     let (realm_b, _) = setup_realm_admin(&h, "gb-b").await;
 
@@ -171,7 +171,7 @@ async fn cross_realm_get_branding_is_forbidden() {
 
 #[tokio::test]
 async fn cross_realm_patch_branding_is_forbidden() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm_a, token_a) = setup_realm_admin(&h, "pb-a").await;
     let (realm_b, _) = setup_realm_admin(&h, "pb-b").await;
 
@@ -194,7 +194,7 @@ async fn cross_realm_patch_branding_is_forbidden() {
 
 #[tokio::test]
 async fn cross_realm_list_email_templates_is_forbidden() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm_a, token_a) = setup_realm_admin(&h, "lt-a").await;
     let (realm_b, _) = setup_realm_admin(&h, "lt-b").await;
 
@@ -217,7 +217,7 @@ async fn cross_realm_list_email_templates_is_forbidden() {
 
 #[tokio::test]
 async fn cross_realm_get_email_template_is_forbidden() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm_a, token_a) = setup_realm_admin(&h, "gtet-a").await;
     let (realm_b, _) = setup_realm_admin(&h, "gtet-b").await;
 
@@ -243,7 +243,7 @@ async fn cross_realm_get_email_template_is_forbidden() {
 
 #[tokio::test]
 async fn cross_realm_put_email_template_is_forbidden() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm_a, token_a) = setup_realm_admin(&h, "ptet-a").await;
     let (realm_b, _) = setup_realm_admin(&h, "ptet-b").await;
 
@@ -271,7 +271,7 @@ async fn cross_realm_put_email_template_is_forbidden() {
 
 #[tokio::test]
 async fn cross_realm_delete_email_template_is_forbidden() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm_a, token_a) = setup_realm_admin(&h, "dtet-a").await;
     let (realm_b, _) = setup_realm_admin(&h, "dtet-b").await;
 
@@ -297,7 +297,7 @@ async fn cross_realm_delete_email_template_is_forbidden() {
 
 #[tokio::test]
 async fn cross_realm_rotate_signing_key_is_forbidden() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm_a, token_a) = setup_realm_admin(&h, "rsk-a").await;
     let (realm_b, _) = setup_realm_admin(&h, "rsk-b").await;
 
@@ -320,7 +320,7 @@ async fn cross_realm_rotate_signing_key_is_forbidden() {
 
 #[tokio::test]
 async fn cross_realm_sv_bump_all_is_forbidden() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm_a, token_a) = setup_realm_admin(&h, "sba-a").await;
     let (realm_b, _) = setup_realm_admin(&h, "sba-b").await;
 
@@ -343,7 +343,7 @@ async fn cross_realm_sv_bump_all_is_forbidden() {
 
 #[tokio::test]
 async fn cross_realm_delete_realm_is_forbidden() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm_a, token_a) = setup_realm_admin(&h, "dr-a").await;
     let (realm_b, _) = setup_realm_admin(&h, "dr-b").await;
 
@@ -372,7 +372,7 @@ async fn cross_realm_delete_realm_is_forbidden() {
 /// rather than the regular `create_user` which is blocked by `SystemRealmProtected`.
 #[tokio::test]
 async fn system_realm_admin_can_get_any_realm() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let sys = system_realm_id();
     h.rbac().seed_realm(&sys).expect("seed system rbac");
 
@@ -441,7 +441,7 @@ async fn system_realm_admin_can_get_any_realm() {
 /// A realm admin must be able to read their own realm.
 #[tokio::test]
 async fn own_realm_admin_can_get_own_realm() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm_a, token_a) = setup_realm_admin(&h, "own-realm").await;
 
     let resp = build_app(&h)
@@ -528,7 +528,7 @@ async fn listed_realm_ids(resp: axum::response::Response) -> Vec<String> {
 /// A tenant realm admin must see only their own realm — not every tenant.
 #[tokio::test]
 async fn list_realms_returns_only_callers_realm() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm_a, token_a) = setup_realm_admin(&h, "list-a").await;
     let (realm_b, _) = setup_realm_admin(&h, "list-b").await;
 
@@ -557,7 +557,7 @@ async fn list_realms_returns_only_callers_realm() {
 /// The system-realm operator keeps full visibility.
 #[tokio::test]
 async fn system_realm_admin_lists_all_realms() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm_a, _) = setup_realm_admin(&h, "syslist-a").await;
     let (realm_b, _) = setup_realm_admin(&h, "syslist-b").await;
     let sys = system_realm_id();
@@ -595,7 +595,7 @@ async fn refusal_message(resp: axum::response::Response) -> String {
 
 #[tokio::test]
 async fn cross_realm_update_realm_is_refused_and_leaves_realm_b_intact() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm_a, token_a) = setup_realm_admin(&h, "ur-a").await;
     let (realm_b, _) = setup_realm_admin(&h, "ur-b").await;
     let realm_b_name = h
@@ -652,7 +652,7 @@ async fn cross_realm_update_realm_is_refused_and_leaves_realm_b_intact() {
 
 #[tokio::test]
 async fn cross_realm_create_realm_is_refused_and_creates_nothing() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm_a, token_a) = setup_realm_admin(&h, "cr-a").await;
     let name = format!("new-realm-{}", uuid::Uuid::new_v4());
 

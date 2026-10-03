@@ -93,7 +93,7 @@ struct Env {
 }
 
 async fn setup_cc_client() -> Env {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let realm = harness
         .identity()
@@ -160,7 +160,7 @@ async fn setup_cc_client() -> Env {
 }
 
 async fn setup_auth_code_client() -> Env {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let realm = harness
         .identity()
@@ -570,7 +570,7 @@ async fn tampered_signature_rejected() {
 
 #[tokio::test]
 async fn no_assertion_key_registered_rejected() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let realm = harness
         .identity()
@@ -643,7 +643,7 @@ async fn no_assertion_key_registered_rejected() {
 
 #[tokio::test]
 async fn discovery_advertises_private_key_jwt_auth_method() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let discovery = harness.identity().oidc_discovery();
 
@@ -751,7 +751,7 @@ async fn assertion_excessive_lifetime_rejected() {
 
 #[tokio::test]
 async fn auth_code_exchange_without_assertion_rejected_for_pkjwt_client() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let realm = harness
         .identity()

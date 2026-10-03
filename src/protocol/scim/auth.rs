@@ -55,7 +55,8 @@ impl ScimResource {
     /// twin requires:
     ///
     /// - `Users` → `hearth.users.admin`, as on every REST `/admin/users*` route.
-    /// - `Groups` → `hearth.realm.admin`, as on every gRPC organization RPC.
+    /// - `Groups` → `hearth.realm.admin`, as on every REST `/admin/organizations*`
+    ///   route.
     #[must_use]
     pub const fn required_admin_permission(self) -> &'static str {
         match self {

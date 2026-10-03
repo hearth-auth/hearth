@@ -37,7 +37,7 @@ pub enum ClientTrustLevel {
 ///   `POST /realms/{realm}/register`): omitted means [`Self::Rs256`], the
 ///   default OIDC Registration §2 prescribes. A client registering the way the
 ///   OpenID certification suite does gets what the specification says.
-/// - **Administrative surfaces** (admin REST, gRPC, console, `hearth.yaml`,
+/// - **Administrative surfaces** (admin REST, console, `hearth.yaml`,
 ///   backup/migration import): omitted means [`Self::EdDsa`], Hearth's native
 ///   algorithm, so existing automation keeps the behaviour it was written for.
 ///
@@ -146,8 +146,8 @@ pub struct RegisterClientRequest {
     /// and never stored. If `None` (and [`Self::generated_client_secret`] is
     /// also `None`), this is a public client.
     ///
-    /// This field is for a secret the **caller chose** — a gRPC
-    /// `RegisterClient`/`CreateApplication` body, a test fixture. Its entropy
+    /// This field is for a secret the **caller chose** — a `hearth.yaml`
+    /// client, a migration import, a test fixture. Its entropy
     /// is unknown, so it is always stored as an Argon2id hash. A secret Hearth
     /// minted itself goes in [`Self::generated_client_secret`] instead. Setting
     /// both is refused.
@@ -251,7 +251,7 @@ impl RegisterClientRequest {
     /// `none` registers a public client. `None` leaves the request as it is.
     ///
     /// A caller-chosen [`Self::client_secret`] is refused whatever the method:
-    /// the administrative create paths (REST and gRPC) never accept one.
+    /// the administrative create paths never accept one.
     ///
     /// # Errors
     /// [`crate::identity::IdentityError::InvalidInput`] for an unknown method,
@@ -1298,8 +1298,9 @@ pub(crate) struct StoredAuthorizationCode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) resource: Option<String>,
     /// Authentication Methods References (RFC 8176) established during the
-    /// authorization flow (e.g. `["sms"]` after a successful SMS MFA challenge).
-    /// Propagated verbatim to both access and ID token claims at exchange time.
+    /// authorization flow. Propagated verbatim to both access and ID token
+    /// claims at exchange time. No flow sets it today: its only producer, the
+    /// SMS challenge, was removed in 3.0.0.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) amr_values: Vec<String>,
     /// What the session that authorized this code proved about a second
@@ -1826,8 +1827,8 @@ pub struct TokenRevocationRequest {
     /// only a token issued to this client — its `azp`, its grant family's
     /// client, or (for a `client_credentials` token) its `sub` — and treats any
     /// other token, including one issued to no client at all, as a silent
-    /// no-op (RFC 7009 §2.2). Every wire surface (`/revoke`, its realm twin,
-    /// gRPC `Revoke`) MUST set it. `None` is reserved for trusted in-process
+    /// no-op (RFC 7009 §2.2). Every wire surface (`/revoke` and its realm
+    /// twin) MUST set it. `None` is reserved for trusted in-process
     /// callers that have already authorized the revocation themselves.
     pub revoking_client_id: Option<crate::core::ClientId>,
 }

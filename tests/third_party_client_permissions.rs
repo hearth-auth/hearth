@@ -218,7 +218,7 @@ fn device_grant(
 
 #[tokio::test]
 async fn third_party_refresh_token_carries_no_permissions() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let user = create_user(&h, &realm);
     grant_docs_role(&h, &realm, user.id());
@@ -256,7 +256,7 @@ async fn third_party_refresh_token_carries_no_permissions() {
 
 #[tokio::test]
 async fn third_party_device_token_carries_no_permissions() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let user = create_user(&h, &realm);
     grant_docs_role(&h, &realm, user.id());
@@ -275,7 +275,7 @@ async fn third_party_device_token_carries_no_permissions() {
 /// Control: the fix must not strip permissions from first-party clients.
 #[tokio::test]
 async fn first_party_refresh_and_device_tokens_keep_permissions() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let user = create_user(&h, &realm);
     grant_docs_role(&h, &realm, user.id());
@@ -314,7 +314,7 @@ async fn first_party_refresh_and_device_tokens_keep_permissions() {
 /// `client_id`), on the code, refresh and device grants alike.
 #[tokio::test]
 async fn access_tokens_name_the_client_they_were_issued_to() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let user = create_user(&h, &realm);
     let code_client = register(
@@ -401,7 +401,7 @@ async fn get_admin_users(h: &common::TestHarness, realm: &RealmId, token: &str) 
 
 #[tokio::test]
 async fn admin_api_refuses_a_token_held_by_a_third_party_client() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = realm_releasing_permissions_to_everyone(&h);
     let user = create_user(&h, &realm);
     grant_realm_admin(&h, &realm, user.id());

@@ -85,7 +85,7 @@ async fn hsts_for(app: axum::Router, peer: IpAddr) -> bool {
 
 #[tokio::test]
 async fn forwarded_proto_from_a_peer_that_is_not_a_trusted_proxy_is_ignored() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     assert!(
         !hsts_for(app(&h).await, DIRECT_CLIENT).await,
         "a client that is not a trusted proxy set X-Forwarded-Proto: https and got HSTS — \
@@ -97,7 +97,7 @@ async fn forwarded_proto_from_a_peer_that_is_not_a_trusted_proxy_is_ignored() {
 /// above cannot pass merely because HSTS is never emitted.
 #[tokio::test]
 async fn forwarded_proto_from_a_trusted_proxy_is_honoured() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     assert!(
         hsts_for(app(&h).await, PROXY).await,
         "X-Forwarded-Proto: https from a trusted proxy must still be honoured"
@@ -112,7 +112,7 @@ async fn forwarded_proto_from_a_trusted_proxy_is_honoured() {
 /// A peer anywhere inside a trusted CIDR is a proxy: its header is honoured.
 #[tokio::test]
 async fn forwarded_proto_from_a_peer_inside_a_trusted_cidr_is_honoured() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let app = app_trusting(&h, &["10.42.0.0/16"]).await;
     assert!(
         hsts_for(app, IpAddr::V4(Ipv4Addr::new(10, 42, 200, 3))).await,
@@ -123,7 +123,7 @@ async fn forwarded_proto_from_a_peer_inside_a_trusted_cidr_is_honoured() {
 /// One address past the range is an ordinary client: its header is removed.
 #[tokio::test]
 async fn forwarded_proto_from_a_peer_outside_a_trusted_cidr_is_ignored() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let app = app_trusting(&h, &["10.42.0.0/16"]).await;
     assert!(
         !hsts_for(app, IpAddr::V4(Ipv4Addr::new(10, 43, 0, 0))).await,
@@ -134,7 +134,7 @@ async fn forwarded_proto_from_a_peer_outside_a_trusted_cidr_is_ignored() {
 /// IPv6 ranges and dual-stack (`::ffff:a.b.c.d`) peers use the same match.
 #[tokio::test]
 async fn forwarded_proto_honours_ipv6_and_v4_mapped_peers_by_range() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let trusted = ["2001:db8:42::/48", "10.42.0.0/16"];
     let v6_in: IpAddr = "2001:db8:42::9".parse().expect("ip");
     let v6_out: IpAddr = "2001:db8:43::9".parse().expect("ip");

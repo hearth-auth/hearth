@@ -413,7 +413,7 @@ pub enum IdentityError {
     /// The agent's per-minute request rate exceeded the configured threshold (D.6).
     ///
     /// The engine has already triggered auto-suspension via `suspend_agent()`.
-    /// Callers should surface this as HTTP 429 / gRPC `RESOURCE_EXHAUSTED`.
+    /// Callers should surface this as HTTP 429.
     AgentRateLimitExceeded,
     /// The requested agent credential was not found.
     AgentCredentialNotFound,

@@ -78,7 +78,7 @@ fn make_user(h: &common::TestHarness, realm: &RealmId) -> UserId {
 
 #[tokio::test]
 async fn remove_member_purges_org_extra_roles() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let org = make_org(&h, &realm, "acme-remove");
     let a = make_user(&h, &realm);
@@ -117,7 +117,7 @@ async fn remove_member_purges_org_extra_roles() {
 
 #[tokio::test]
 async fn re_added_member_does_not_regain_removed_org_extra_roles() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let org = make_org(&h, &realm, "acme-readd");
     let user = make_user(&h, &realm);
@@ -165,7 +165,7 @@ async fn re_added_member_does_not_regain_removed_org_extra_roles() {
 
 #[tokio::test]
 async fn delete_organization_purges_org_extra_roles() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let org = make_org(&h, &realm, "acme-delete");
     let member = make_user(&h, &realm);
@@ -205,7 +205,7 @@ async fn delete_organization_purges_org_extra_roles() {
 
 #[tokio::test]
 async fn delete_user_purges_org_extra_roles_in_every_org() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     let org_a = make_org(&h, &realm, "acme-a");
     let org_b = make_org(&h, &realm, "acme-b");

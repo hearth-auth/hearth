@@ -67,7 +67,7 @@ where
 
 #[tokio::test]
 async fn token_issuance_and_validation_roundtrip() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -134,7 +134,7 @@ async fn token_issuance_and_validation_roundtrip() {
 
 #[tokio::test]
 async fn token_refresh_flow_end_to_end() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -198,7 +198,7 @@ async fn token_refresh_flow_end_to_end() {
 
 #[tokio::test]
 async fn token_invalid_after_session_revoked() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -248,7 +248,7 @@ async fn token_invalid_after_session_revoked() {
 
 #[tokio::test]
 async fn token_invalid_for_different_realm() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm_a = harness.create_realm();
@@ -282,7 +282,7 @@ async fn token_invalid_for_different_realm() {
 
 #[tokio::test]
 async fn issue_tokens_fails_nonexistent_user() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -315,7 +315,7 @@ async fn issue_tokens_fails_nonexistent_user() {
 
 #[tokio::test]
 async fn validate_token_rejects_tampered_payload() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -348,7 +348,7 @@ async fn validate_token_rejects_tampered_payload() {
 
 #[tokio::test]
 async fn refresh_token_rejects_tampered_user_binding() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -383,7 +383,7 @@ async fn refresh_token_rejects_tampered_user_binding() {
 
 #[tokio::test]
 async fn revoke_token_ignores_tampered_payload() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -445,7 +445,7 @@ async fn revoke_token_ignores_tampered_payload() {
 
 #[tokio::test]
 async fn introspection_returns_inactive_for_tampered_payload() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -583,7 +583,7 @@ async fn validate_token_rejects_expired_access_token() {
 
 #[tokio::test]
 async fn validate_token_rejects_refresh_token_as_access_token() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -615,7 +615,7 @@ async fn validate_token_rejects_refresh_token_as_access_token() {
 
 #[tokio::test]
 async fn validate_token_rejects_forged_admin_permission() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -653,7 +653,7 @@ async fn validate_token_rejects_forged_admin_permission() {
 
 #[tokio::test]
 async fn refresh_token_rejects_forged_exp_extension() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -698,7 +698,7 @@ async fn refresh_token_rejects_forged_exp_extension() {
 
 #[tokio::test]
 async fn refresh_token_rejects_forged_session_impersonation() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -816,7 +816,7 @@ mod http_client_auth {
 
     #[tokio::test]
     async fn introspect_without_client_auth_returns_401() {
-        let h = common::TestHarness::embedded().await.expect("harness");
+        let h = common::TestHarness::in_process().await.expect("harness");
         let realm = h.create_realm();
         let app = build_app(&h).await;
 
@@ -841,7 +841,7 @@ mod http_client_auth {
 
     #[tokio::test]
     async fn revoke_without_client_auth_returns_401() {
-        let h = common::TestHarness::embedded().await.expect("harness");
+        let h = common::TestHarness::in_process().await.expect("harness");
         let realm = h.create_realm();
         let app = build_app(&h).await;
 
@@ -866,7 +866,7 @@ mod http_client_auth {
 
     #[tokio::test]
     async fn introspect_with_wrong_secret_returns_401() {
-        let h = common::TestHarness::embedded().await.expect("harness");
+        let h = common::TestHarness::in_process().await.expect("harness");
         let realm = h.create_realm();
         let (client_id, _) = register_confidential_client(&h, &realm);
         let app = build_app(&h).await;
@@ -896,7 +896,7 @@ mod http_client_auth {
 
     #[tokio::test]
     async fn revoke_with_wrong_secret_returns_401() {
-        let h = common::TestHarness::embedded().await.expect("harness");
+        let h = common::TestHarness::in_process().await.expect("harness");
         let realm = h.create_realm();
         let (client_id, _) = register_confidential_client(&h, &realm);
         let app = build_app(&h).await;
@@ -926,7 +926,7 @@ mod http_client_auth {
 
     #[tokio::test]
     async fn introspect_forged_token_with_valid_client_auth_returns_inactive() {
-        let h = common::TestHarness::embedded().await.expect("harness");
+        let h = common::TestHarness::in_process().await.expect("harness");
         let realm = h.create_realm();
         let (client_id, secret) = register_confidential_client(&h, &realm);
         let app = build_app(&h).await;
@@ -962,7 +962,7 @@ mod http_client_auth {
 
     #[tokio::test]
     async fn revoke_with_valid_client_auth_succeeds() {
-        let h = common::TestHarness::embedded().await.expect("harness");
+        let h = common::TestHarness::in_process().await.expect("harness");
         let realm = h.create_realm();
         let (client_id, secret) = register_confidential_client(&h, &realm);
         let app = build_app(&h).await;
@@ -991,7 +991,7 @@ mod http_client_auth {
 
     #[tokio::test]
     async fn introspect_with_body_client_credentials_returns_inactive_for_forged_token() {
-        let h = common::TestHarness::embedded().await.expect("harness");
+        let h = common::TestHarness::in_process().await.expect("harness");
         let realm = h.create_realm();
         let (client_id, secret) = register_confidential_client(&h, &realm);
         let app = build_app(&h).await;

@@ -234,7 +234,7 @@ async fn start_par_http_server() -> (
     use hearth::protocol::http::{router, AppState};
     use tokio::net::TcpListener;
 
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let realm_rec = harness
         .identity()

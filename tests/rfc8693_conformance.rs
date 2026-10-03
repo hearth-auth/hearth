@@ -204,7 +204,7 @@ async fn rfc8693_response_required_fields() {
         .map(|v| v.as_str().unwrap())
         .collect();
 
-    let harness = common::TestHarness::embedded().await.expect("test setup");
+    let harness = common::TestHarness::in_process().await.expect("test setup");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
 
@@ -271,7 +271,7 @@ async fn rfc8693_response_required_fields() {
 /// ERR-01: wrong `subject_token_type` → `invalid_request` (RFC 8693 §2.2.2).
 #[tokio::test]
 async fn rfc8693_err01_wrong_subject_token_type() {
-    let harness = common::TestHarness::embedded().await.expect("test setup");
+    let harness = common::TestHarness::in_process().await.expect("test setup");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = identity
@@ -342,7 +342,7 @@ async fn rfc8693_err01_wrong_subject_token_type() {
 /// test with full clock control.
 #[tokio::test]
 async fn rfc8693_err02_invalid_signature_subject_token_rejected() {
-    let harness = common::TestHarness::embedded().await.expect("test setup");
+    let harness = common::TestHarness::in_process().await.expect("test setup");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = identity
@@ -402,7 +402,7 @@ async fn rfc8693_err02_invalid_signature_subject_token_rejected() {
 /// (maps to the RFC 8693 `invalid_scope` OAuth error code at the HTTP layer).
 #[tokio::test]
 async fn rfc8693_err03_scope_wider_than_subject() {
-    let harness = common::TestHarness::embedded().await.expect("test setup");
+    let harness = common::TestHarness::in_process().await.expect("test setup");
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = identity

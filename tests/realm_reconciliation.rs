@@ -23,7 +23,7 @@ fn config_with_realms(realms: Option<HashMap<String, RealmYamlConfig>>) -> Confi
 
 #[tokio::test]
 async fn creates_default_realm_when_no_yaml_and_no_storage() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let config = config_with_realms(None);
@@ -56,7 +56,7 @@ async fn creates_default_realm_when_no_yaml_and_no_storage() {
 
 #[tokio::test]
 async fn skips_reconciliation_when_realms_exist_and_no_yaml_key() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     // Pre-create a realm
@@ -86,7 +86,7 @@ async fn skips_reconciliation_when_realms_exist_and_no_yaml_key() {
 
 #[tokio::test]
 async fn creates_realm_from_yaml() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let mut realms = HashMap::new();
@@ -108,7 +108,7 @@ async fn creates_realm_from_yaml() {
 
 #[tokio::test]
 async fn updates_realm_config_from_yaml() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     // Pre-create a realm with old config
@@ -151,7 +151,7 @@ async fn updates_realm_config_from_yaml() {
 
 #[tokio::test]
 async fn archives_realm_removed_from_yaml() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     // Create two realms
@@ -195,7 +195,7 @@ async fn archives_realm_removed_from_yaml() {
 
 #[tokio::test]
 async fn unarchives_realm_that_reappears_in_yaml() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     // Create and archive a realm
@@ -235,7 +235,7 @@ async fn unarchives_realm_that_reappears_in_yaml() {
 
 #[tokio::test]
 async fn idempotent_reconciliation() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let mut realms = HashMap::new();
@@ -259,7 +259,7 @@ async fn idempotent_reconciliation() {
 async fn reconcile_federation_wires_claim_mappings_to_idp() {
     use hearth::config::{FederationProviderYaml, FederationYamlConfig};
 
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let mut claim_mappings = std::collections::BTreeMap::new();
@@ -343,7 +343,7 @@ async fn reconcile_federation_wires_claim_mappings_to_idp() {
 async fn reconcile_saml_federation_wires_want_assertions_signed_to_idp() {
     use hearth::config::{FederationProviderYaml, FederationYamlConfig};
 
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     // Two SAML connectors: one requiring signed assertions, one not, so we
@@ -425,7 +425,7 @@ async fn reconcile_saml_federation_wires_want_assertions_signed_to_idp() {
 /// configured through the admin API.
 #[tokio::test]
 async fn reconcile_applies_post_logout_redirect_uris_from_yaml() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let dir = tempfile::tempdir().expect("tempdir");
@@ -478,7 +478,7 @@ realms:
 /// EdDSA default on the next reconcile.
 #[tokio::test]
 async fn reconcile_applies_id_token_signed_response_alg_from_yaml() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("hearth.yaml");
@@ -557,7 +557,7 @@ realms:
 async fn reconcile_federation_carries_trust_asserted_email_to_the_idp() {
     use hearth::config::{FederationProviderYaml, FederationYamlConfig};
 
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     let mut providers = std::collections::HashMap::new();
@@ -627,7 +627,7 @@ async fn reconcile_federation_carries_trust_asserted_email_to_the_idp() {
 /// PUBLIC (`/as/par` must not accept it on its `client_id` alone).
 #[tokio::test]
 async fn reconcile_application_carries_its_jwks_and_dpop_flag() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("hearth.yaml");

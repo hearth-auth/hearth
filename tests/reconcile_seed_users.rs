@@ -37,7 +37,7 @@ fn config_with_seed_users(realm_name: &str, seed_users: Vec<SeedUserYamlConfig>)
 
 #[tokio::test]
 async fn seed_users_created_with_active_status_and_roles() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let rbac = harness.rbac();
 
@@ -92,7 +92,7 @@ async fn seed_users_created_with_active_status_and_roles() {
 
 #[tokio::test]
 async fn reconcile_seed_users_is_idempotent() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let rbac = harness.rbac();
 
@@ -137,7 +137,7 @@ async fn reconcile_seed_users_is_idempotent() {
 
 #[tokio::test]
 async fn invalid_role_name_does_not_abort_reconcile() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let rbac = harness.rbac();
 

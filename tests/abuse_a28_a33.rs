@@ -33,7 +33,7 @@ use hearth::rbac::{AssignRoleRequest, CreateRoleRequest, Permission, Scope, Subj
 
 #[tokio::test]
 async fn a28_concurrent_slug_reservation_only_one_wins() {
-    let harness = Arc::new(common::TestHarness::embedded().await.expect("harness"));
+    let harness = Arc::new(common::TestHarness::in_process().await.expect("harness"));
 
     let realm_id = harness
         .identity()
@@ -119,7 +119,7 @@ async fn a28_concurrent_slug_reservation_only_one_wins() {
 
 #[tokio::test]
 async fn a28_invitation_double_spend_rejected() {
-    let harness = Arc::new(common::TestHarness::embedded().await.expect("harness"));
+    let harness = Arc::new(common::TestHarness::in_process().await.expect("harness"));
     let identity = harness.identity();
 
     let realm_id = identity
@@ -224,7 +224,7 @@ async fn a28_invitation_double_spend_rejected() {
 
 #[tokio::test]
 async fn a28_rbac_assignment_is_idempotent() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let rbac = harness.rbac();
 
@@ -313,7 +313,7 @@ async fn a28_rbac_assignment_is_idempotent() {
 
 #[tokio::test]
 async fn a33_delete_realm_rejects_new_operations_after_completion() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
 
     // Set up a realm with a user and an org.
@@ -400,7 +400,7 @@ async fn a33_delete_realm_rejects_new_operations_after_completion() {
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn a33_chunked_cascade_leaves_no_orphans() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let rbac = harness.rbac();
     let storage = harness.storage();

@@ -193,7 +193,7 @@ async fn webhook_extra_claims_appear_in_access_token() {
     extra.insert("custom_tier".to_string(), json!("pro"));
     let (transport, _counter) = FixedClaimsTransport::new(extra);
 
-    let harness = common::TestHarness::embedded_with_pre_token_transport(Arc::new(transport))
+    let harness = common::TestHarness::in_process_with_pre_token_transport(Arc::new(transport))
         .await
         .expect("harness setup");
 
@@ -252,7 +252,7 @@ async fn webhook_cannot_override_reserved_claims() {
     evil_claims.insert("legitimate_claim".to_string(), json!("ok"));
     let (transport, _counter) = FixedClaimsTransport::new(evil_claims);
 
-    let harness = common::TestHarness::embedded_with_pre_token_transport(Arc::new(transport))
+    let harness = common::TestHarness::in_process_with_pre_token_transport(Arc::new(transport))
         .await
         .expect("harness setup");
 
@@ -326,7 +326,7 @@ fn the_default_error_policy_is_fail_closed() {
 async fn webhook_fail_open_issues_token_despite_error() {
     let (transport, call_count) = FailingTransport::new();
 
-    let harness = common::TestHarness::embedded_with_pre_token_transport(Arc::new(transport))
+    let harness = common::TestHarness::in_process_with_pre_token_transport(Arc::new(transport))
         .await
         .expect("harness setup");
 
@@ -364,7 +364,7 @@ async fn webhook_fail_open_issues_token_despite_error() {
 async fn webhook_fail_closed_rejects_token_on_error() {
     let (transport, _call_count) = FailingTransport::new();
 
-    let harness = common::TestHarness::embedded_with_pre_token_transport(Arc::new(transport))
+    let harness = common::TestHarness::in_process_with_pre_token_transport(Arc::new(transport))
         .await
         .expect("harness setup");
 
@@ -469,7 +469,7 @@ async fn webhook_fail_closed_rejects_token_on_error() {
 async fn webhook_not_called_when_not_configured() {
     let (transport, call_count) = FixedClaimsTransport::new(BTreeMap::new());
 
-    let harness = common::TestHarness::embedded_with_pre_token_transport(Arc::new(transport))
+    let harness = common::TestHarness::in_process_with_pre_token_transport(Arc::new(transport))
         .await
         .expect("harness setup");
 
@@ -516,7 +516,7 @@ async fn webhook_request_contains_expected_context() {
         last_body: Arc::clone(&captured),
     };
 
-    let harness = common::TestHarness::embedded_with_pre_token_transport(Arc::new(transport))
+    let harness = common::TestHarness::in_process_with_pre_token_transport(Arc::new(transport))
         .await
         .expect("harness setup");
 
@@ -594,7 +594,7 @@ async fn webhook_hmac_sig_forwarded_to_transport_when_secret_configured() {
         captured_body: Arc::clone(&captured_body),
     };
 
-    let harness = common::TestHarness::embedded_with_pre_token_transport(Arc::new(transport))
+    let harness = common::TestHarness::in_process_with_pre_token_transport(Arc::new(transport))
         .await
         .expect("harness setup");
 
@@ -669,7 +669,7 @@ async fn webhook_hmac_sig_forwarded_to_transport_when_secret_configured() {
 /// neither HTTP nor gRPC callers can persist an insecure configuration.
 #[tokio::test]
 async fn webhook_without_hmac_secret_is_rejected_by_update_realm() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();
@@ -705,7 +705,7 @@ async fn webhook_without_hmac_secret_is_rejected_by_update_realm() {
 /// SEC-20: `update_realm` MUST also reject a webhook config with an empty `hmac_secret`.
 #[tokio::test]
 async fn webhook_with_empty_hmac_secret_is_rejected_by_update_realm() {
-    let harness = common::TestHarness::embedded()
+    let harness = common::TestHarness::in_process()
         .await
         .expect("harness setup");
     let realm = harness.create_realm();

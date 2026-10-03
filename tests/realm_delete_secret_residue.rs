@@ -149,7 +149,7 @@ fn build_realm_with_every_secret_family(h: &common::TestHarness) -> RealmId {
 /// Every family the audit named must go with the realm's key space.
 #[tokio::test]
 async fn realm_deletion_removes_every_named_secret_family() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm_id = build_realm_with_every_secret_family(&h);
 
     // Precondition: each family really exists, so an empty result after the

@@ -860,12 +860,11 @@ fn run_rbac_command(action: RbacAction) {
 /// against the server's bind address.
 ///
 /// The rate-limit-disable path (HEA-1796) is prod-gated on TWO conditions
-/// (HEA-1797): the process must run in `--dev` mode **and** every effective
-/// bind (HTTP and, when enabled, gRPC) must be loopback. If either check fails
-/// the request is refused and every limiter stays on, so a misconfigured
-/// production server — or a dev server whose gRPC listener diverges onto a
-/// public interface, or a prod-config binary behind a reverse proxy — can never
-/// silently ship with brute-force / abuse protection removed.
+/// (HEA-1797): the process must run in `--dev` mode **and** the effective HTTP
+/// bind must be loopback. If either check fails the request is refused and
+/// every limiter stays on, so a misconfigured production server — or a
+/// prod-config binary behind a reverse proxy — can never silently ship with
+/// brute-force / abuse protection removed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LoadtestUnthrottle {
     /// The flag is unset — limiters stay on (normal operation).
@@ -873,8 +872,8 @@ enum LoadtestUnthrottle {
     /// The flag is set, dev mode is on, and every bind is loopback — disable
     /// all limiters.
     Enabled,
-    /// The flag is set but at least one effective bind (HTTP or gRPC) is
-    /// non-loopback — refuse, keep limiters on.
+    /// The flag is set but the effective HTTP bind is non-loopback — refuse,
+    /// keep limiters on.
     RefusedNonLoopback,
     /// The flag is set but the process is not in `--dev` mode — refuse, keep
     /// limiters on. Guards the reverse-proxy topology where a prod server binds
@@ -955,8 +954,8 @@ enum DevBindCheck {
     RefusedNonLoopback,
 }
 
-/// Hard startup gate for `--dev` mode: refuses to start when any effective
-/// bind (HTTP or gRPC) is non-loopback (HEA-1980).
+/// Hard startup gate for `--dev` mode: refuses to start when the effective
+/// HTTP bind is non-loopback (HEA-1980).
 ///
 /// Unlike the config-file check in `validate.rs`, this runs **after** CLI
 /// `--bind`/`--port` overrides are applied, so `hearth serve --dev --bind
@@ -1304,7 +1303,7 @@ async fn run_serve(
     //
     // L24 (GA audit 2026-09-28): one shutdown signal for every listener. The
     // sender is armed by the signal task spawned just before serving; each
-    // listener — HTTP(S), redirect, gRPC, the Raft peer server — starts
+    // listener — HTTP(S), redirect, the Raft peer server — starts
     // draining the moment it fires, and all of them share one deadline
     // measured from the signal. gRPC used to be told only after HTTP had
     // drained (so shutdown could take twice the timeout), and the Raft peer
@@ -2468,13 +2467,11 @@ async fn run_serve(
         ))
     };
 
-    // A-2: build a shared RequestShaper from operator config (or defaults) and
-    // wire it to BOTH the HTTP AppState and the gRPC GrpcState so that per-IP
-    // counters accumulate across protocols — a caller cannot evade the limit by
-    // switching from REST to gRPC.
+    // A-2: build the RequestShaper from operator config (or defaults) and wire
+    // it into the HTTP AppState.
     // Load-test escape hatch (`security.load_test_unthrottled`): when set AND
-    // the process runs in `--dev` mode AND every effective bind (HTTP + gRPC)
-    // is loopback, disable every request-rate limiter so a single-node
+    // the process runs in `--dev` mode AND the effective HTTP bind is
+    // loopback, disable every request-rate limiter so a single-node
     // throughput/soak test can saturate the hot path instead of measuring the
     // rate limiter. Refused (fail-safe: limiters stay ON) when not in dev mode
     // (guards reverse-proxy prod topologies) or when the bind is non-loopback,
@@ -3002,10 +2999,8 @@ async fn run_serve(
         });
     }
 
-    // M14 (GA audit 2026-09-28): one certificate for HTTPS and gRPC. Built
-    // here, before either listener, so the gRPC listener can terminate TLS
-    // with the same (hot-reloadable) certificate; it used to be plaintext
-    // unconditionally.
+    // M14 (GA audit 2026-09-28): the HTTPS listener's (hot-reloadable)
+    // certificate, built here before the listener starts.
     let tls = match (&config.server.tls_cert_path, &config.server.tls_key_path) {
         (Some(cert_path), Some(key_path)) => {
             Some(build_tls_acceptor(&config, cert_path, key_path)?)
@@ -3592,10 +3587,10 @@ fn shared_drain_deadline(
     fired_at.unwrap_or_else(tokio::time::Instant::now) + drain
 }
 
-/// Builds the TLS acceptor shared by the HTTPS and gRPC listeners (M14).
+/// Builds the HTTPS listener's TLS acceptor (M14).
 ///
 /// The returned [`ReloadableTlsConfig`] backs the acceptor's certificate
-/// resolver, so a SIGHUP certificate reload reaches both listeners.
+/// resolver, so a SIGHUP certificate reload reaches the listener.
 fn build_tls_acceptor(
     config: &Config,
     cert_path: &std::path::Path,
@@ -7112,7 +7107,7 @@ mod tests {
 
     #[test]
     fn unthrottle_enabled_on_loopback_binds() {
-        // Dev mode + loopback HTTP bind, gRPC disabled → enabled.
+        // Dev mode + loopback HTTP bind → enabled.
         for bind in ["127.0.0.1", "127.0.0.53", "::1", "localhost", "LOCALHOST"] {
             assert_eq!(
                 loadtest_unthrottle_decision(true, true, bind),
@@ -7382,7 +7377,7 @@ mod tests {
 
     #[test]
     fn dev_bind_check_refused_non_loopback_http() {
-        // Dev + non-loopback HTTP bind → refused, even when gRPC is disabled.
+        // Dev + non-loopback HTTP bind → refused.
         // `host:port` wildcard forms and unparseable garbage stay fail-closed.
         for bind in [
             "0.0.0.0",

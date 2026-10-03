@@ -61,7 +61,7 @@ async fn setup_realm(h: &TestHarness) -> hearth::core::RealmId {
 
 #[tokio::test]
 async fn register_and_list_idp() {
-    let h = TestHarness::embedded().await.expect("harness");
+    let h = TestHarness::in_process().await.expect("harness");
     let realm = setup_realm(&h).await;
     let idp = IdpId::generate();
     h.identity()
@@ -81,7 +81,7 @@ async fn register_and_list_idp() {
 
 #[tokio::test]
 async fn idp_records_are_realm_isolated() {
-    let h = TestHarness::embedded().await.expect("harness");
+    let h = TestHarness::in_process().await.expect("harness");
     let realm_a = setup_realm(&h).await;
     let realm_b = h
         .identity()
@@ -109,7 +109,7 @@ async fn idp_records_are_realm_isolated() {
 
 #[tokio::test]
 async fn state_bag_is_single_use() {
-    let h = TestHarness::embedded().await.expect("harness");
+    let h = TestHarness::in_process().await.expect("harness");
     let realm = setup_realm(&h).await;
     let idp = IdpId::generate();
     h.identity()
@@ -141,7 +141,7 @@ async fn state_bag_is_single_use() {
 
 #[tokio::test]
 async fn state_bag_expiry_is_enforced() {
-    let h = TestHarness::embedded().await.expect("harness");
+    let h = TestHarness::in_process().await.expect("harness");
     let realm = setup_realm(&h).await;
     let idp = IdpId::generate();
     h.identity()
@@ -168,7 +168,7 @@ async fn state_bag_expiry_is_enforced() {
 
 #[tokio::test]
 async fn link_external_identity_roundtrip() {
-    let h = TestHarness::embedded().await.expect("harness");
+    let h = TestHarness::in_process().await.expect("harness");
     let realm = setup_realm(&h).await;
     let idp = IdpId::generate();
     h.identity()
@@ -209,7 +209,7 @@ async fn link_external_identity_roundtrip() {
 
 #[tokio::test]
 async fn link_refuses_to_rehome_to_different_user() {
-    let h = TestHarness::embedded().await.expect("harness");
+    let h = TestHarness::in_process().await.expect("harness");
     let realm = setup_realm(&h).await;
     let idp = IdpId::generate();
     h.identity()
@@ -255,7 +255,7 @@ async fn link_refuses_to_rehome_to_different_user() {
 
 #[tokio::test]
 async fn unlink_is_idempotent_second_call_errors() {
-    let h = TestHarness::embedded().await.expect("harness");
+    let h = TestHarness::in_process().await.expect("harness");
     let realm = setup_realm(&h).await;
     let idp = IdpId::generate();
     h.identity()
@@ -296,7 +296,7 @@ async fn unlink_is_idempotent_second_call_errors() {
 
 #[tokio::test]
 async fn delete_user_cascades_both_federation_indexes() {
-    let h = TestHarness::embedded().await.expect("harness");
+    let h = TestHarness::in_process().await.expect("harness");
     let realm = setup_realm(&h).await;
     let idp = IdpId::generate();
     h.identity()
@@ -330,7 +330,7 @@ async fn delete_user_cascades_both_federation_indexes() {
 
 #[tokio::test]
 async fn delete_idp_severs_all_links_but_leaves_users_intact() {
-    let h = TestHarness::embedded().await.expect("harness");
+    let h = TestHarness::in_process().await.expect("harness");
     let realm = setup_realm(&h).await;
     let idp = IdpId::generate();
     h.identity()
@@ -388,7 +388,7 @@ async fn delete_idp_severs_all_links_but_leaves_users_intact() {
 
 #[tokio::test]
 async fn confirm_link_ticket_is_single_use() {
-    let h = TestHarness::embedded().await.expect("harness");
+    let h = TestHarness::in_process().await.expect("harness");
     let realm = setup_realm(&h).await;
     let idp = IdpId::generate();
     h.identity()
@@ -448,7 +448,7 @@ async fn link_mode_default_is_confirm_when_unset() {
 
 #[tokio::test]
 async fn claim_mappings_in_idp_config_are_stored_and_retrieved() {
-    let h = TestHarness::embedded().await.expect("harness");
+    let h = TestHarness::in_process().await.expect("harness");
     let realm = setup_realm(&h).await;
     let idp_id = IdpId::generate();
 
@@ -487,7 +487,7 @@ async fn claim_mappings_in_idp_config_are_stored_and_retrieved() {
 
 #[tokio::test]
 async fn two_oidc_providers_same_realm_links_are_isolated() {
-    let h = TestHarness::embedded().await.expect("harness");
+    let h = TestHarness::in_process().await.expect("harness");
     let realm = setup_realm(&h).await;
 
     let idp1 = IdpId::generate();

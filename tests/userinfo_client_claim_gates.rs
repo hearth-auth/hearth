@@ -132,7 +132,7 @@ fn access_token_for(
 
 #[tokio::test]
 async fn userinfo_withholds_first_party_only_claims_from_a_third_party_client() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm, user) = setup(&h);
 
     let first = access_token_for(&h, &realm, &user, ClientTrustLevel::FirstParty);

@@ -218,7 +218,7 @@ async fn post_realm_token(
 // F1-01: token-exchange on the realm endpoint with NO client credentials → 401.
 #[tokio::test]
 async fn f1_01_realm_token_exchange_without_client_auth_is_rejected() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let (realm_name, realm_id, client_id, _secret, _cid, user_id) = setup(&h).await;
     let subject_token = make_subject_token(&h, &realm_id, &user_id);
     let state = Arc::new(AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()));
@@ -243,7 +243,7 @@ async fn f1_01_realm_token_exchange_without_client_auth_is_rejected() {
 // F1-02: token-exchange with a wrong client secret → 401.
 #[tokio::test]
 async fn f1_02_realm_token_exchange_with_wrong_secret_is_rejected() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let (realm_name, realm_id, client_id, _secret, _cid, user_id) = setup(&h).await;
     let subject_token = make_subject_token(&h, &realm_id, &user_id);
     let state = Arc::new(AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()));
@@ -261,7 +261,7 @@ async fn f1_02_realm_token_exchange_with_wrong_secret_is_rejected() {
 // F1-03: correct credentials → 200 and act.sub is the authenticated client.
 #[tokio::test]
 async fn f1_03_realm_token_exchange_with_correct_credentials_succeeds() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let (realm_name, realm_id, client_id, secret, _cid, user_id) = setup(&h).await;
     let subject_token = make_subject_token(&h, &realm_id, &user_id);
     let state = Arc::new(AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()));
@@ -292,7 +292,7 @@ async fn f1_03_realm_token_exchange_with_correct_credentials_succeeds() {
 // F2-01: exchanging a cnf-bound subject token with NO DPoP proof is rejected.
 #[tokio::test]
 async fn f2_01_cnf_bound_subject_without_dpop_is_rejected() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let (_realm_name, realm_id, _client_id, _secret, cid, user_id) = setup(&h).await;
     let subject_token = make_dpop_bound_subject_token(&h, &realm_id, &user_id, &cid);
 
@@ -321,7 +321,7 @@ async fn f2_01_cnf_bound_subject_without_dpop_is_rejected() {
 // F2-02: exchanging a cnf-bound subject token with a WRONG DPoP thumbprint is rejected.
 #[tokio::test]
 async fn f2_02_cnf_bound_subject_with_wrong_dpop_is_rejected() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let (_realm_name, realm_id, _client_id, _secret, cid, user_id) = setup(&h).await;
     let subject_token = make_dpop_bound_subject_token(&h, &realm_id, &user_id, &cid);
 
@@ -350,7 +350,7 @@ async fn f2_02_cnf_bound_subject_with_wrong_dpop_is_rejected() {
 // F2-03: exchanging a cnf-bound subject token with the MATCHING DPoP thumbprint succeeds.
 #[tokio::test]
 async fn f2_03_cnf_bound_subject_with_matching_dpop_succeeds() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let (_realm_name, realm_id, _client_id, _secret, cid, user_id) = setup(&h).await;
     let subject_token = make_dpop_bound_subject_token(&h, &realm_id, &user_id, &cid);
 

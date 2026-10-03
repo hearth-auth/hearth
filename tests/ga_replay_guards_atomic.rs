@@ -98,7 +98,7 @@ fn subject_token(identity: &dyn IdentityEngine, realm: &RealmId) -> String {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_concurrently_replayed_actor_token_is_accepted_once() {
-    let h = common::TestHarness::embedded().await.unwrap();
+    let h = common::TestHarness::in_process().await.unwrap();
     let identity: Arc<dyn IdentityEngine> = h.identity_arc();
     let realm = h.create_realm();
     let client = exchange_client(identity.as_ref(), &realm);

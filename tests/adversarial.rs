@@ -275,7 +275,7 @@ async fn admin_listing_response_time_constant_wrt_user_count() {
     use hearth::rbac::{AssignRoleRequest, Scope, Subject};
     use tower::ServiceExt as _;
 
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed realm roles");
 

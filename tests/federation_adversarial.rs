@@ -60,7 +60,7 @@ fn realm_named(h: &TestHarness, name: &str) -> RealmId {
 
 #[tokio::test]
 async fn state_token_cannot_be_consumed_twice() {
-    let h = TestHarness::embedded().await.unwrap();
+    let h = TestHarness::in_process().await.unwrap();
     let realm = realm_named(&h, "demo");
     let idp = IdpId::generate();
     h.identity()
@@ -94,7 +94,7 @@ async fn state_token_put_in_one_realm_is_invisible_to_another() {
     // Storage keys are realm-scoped — confirming the invariant at the
     // engine layer. An attacker who knows a state token from realm A
     // cannot take it from realm B to hijack that realm's session.
-    let h = TestHarness::embedded().await.unwrap();
+    let h = TestHarness::in_process().await.unwrap();
     let realm_a = realm_named(&h, "a");
     let realm_b = realm_named(&h, "b");
     let idp_a = IdpId::generate();
@@ -162,7 +162,7 @@ async fn confirm_link_ticket_cannot_be_stolen_by_another_user() {
 
 #[tokio::test]
 async fn confirm_link_ticket_cannot_be_replayed() {
-    let h = TestHarness::embedded().await.unwrap();
+    let h = TestHarness::in_process().await.unwrap();
     let realm = realm_named(&h, "demo");
     let idp = IdpId::generate();
     h.identity()
@@ -376,7 +376,7 @@ async fn link_external_identity_refuses_to_rehome_across_users() {
     // adversarial invariant: a malicious IdP that re-emits the same
     // external sub for a different upstream user account cannot
     // hijack a local Hearth user's link.
-    let h = TestHarness::embedded().await.unwrap();
+    let h = TestHarness::in_process().await.unwrap();
     let realm = realm_named(&h, "demo");
     let idp = IdpId::generate();
     h.identity()

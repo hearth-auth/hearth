@@ -291,19 +291,11 @@ All data types except the audit log participate in a **hot/cold tiered storage m
 
 > **Note (Hearth 1.x):** Multi-node clustering is present but experimental. Known limitations: follower cache invalidation is partial — RBAC, audit, revoked-token and control-epoch rows are forwarded, other cached types are not proven coherent (C-5); cluster membership is set at bootstrap and cannot be changed without a full-cluster restart (C-6, `add_learner`/`change_membership` not implemented); writes and logins on follower nodes are forwarded to the leader (H-3, fixed). These are tracked for resolution in the Wave 5 roadmap. The supported production deployment for Hearth 1.x is single-node. See [Clustering Guide](../guides/clustering.md) for the full list of current limitations.
 
-### 6.2 Embedded vs. Server Modes
+### 6.2 One Deployment Mode: Server
 
-Like SQLite and DuckDB, Hearth supports two deployment modes:
+Hearth runs as a standalone server process, and that is the only supported deployment. The server manages its own storage, clustering and protocol endpoints.
 
-**Server mode** (primary): Hearth runs as a standalone server process, accepting connections over the network. This is the default for production deployments. The server manages its own storage, clustering, and protocol endpoints.
-
-**Embedded mode** (library): Hearth is linked directly into the application process as a library (via C ABI or language-specific bindings). The application calls Hearth functions directly, with no network overhead. This mode is ideal for:
-- Edge deployments where a separate server process is impractical
-- Testing and development where operational simplicity is paramount
-- Applications where sub-microsecond auth latency is critical
-- CLI tools and single-process applications
-
-Embedded mode uses the same storage engine and provides the same durability guarantees as server mode. The only difference is the absence of the network layer and the cluster layer.
+There is no embedded (library) mode. An earlier draft of this document promised one, like SQLite or DuckDB, but nothing was ever built to support it: no C ABI, no language bindings, no stable library API. Hearth 3.0.0 removed the promise. The test suite runs the engines inside the test process (the in-process harness, `TestHarness::in_process`), but that is a test tool, not a deployment mode.
 
 ### 6.3 Language Choice: Rust
 
@@ -311,7 +303,7 @@ Hearth is written in Rust. This is a deliberate choice, not a trend-following on
 
 **Why Rust over Go:**
 - Go's garbage collector introduces unpredictable latency spikes that are fundamentally incompatible with sub-millisecond p99 targets. You can tune GC, but you can't eliminate it.
-- Go's runtime has a memory overhead floor (~5–10MB) that matters for embedded mode and edge deployments.
+- Go's runtime has a memory overhead floor (~5–10MB) that matters for small deployments.
 - Rust's ownership model provides compile-time guarantees about memory safety and data race freedom that are especially valuable in a security-critical system handling credentials and tokens.
 - The Rust database ecosystem (sled, rocksdb bindings, tokio, tower) is more mature for this specific use case than Go's.
 
@@ -579,7 +571,6 @@ This path is not the only option. The project could remain community-funded and 
 - Single-node only, no clustering
 - CLI management tool
 - Benchmark suite demonstrating performance targets
-- Embedded mode (library) API
 
 **Exit criteria**: A developer can run Hearth, create users, authenticate via OIDC, manage sessions, and observe sub-millisecond p99 on the hot path. Benchmark results are published and reproducible.
 
@@ -636,7 +627,6 @@ This path is not the only option. The project could remain community-funded and 
 - Remaining SDKs (C#, Ruby, Elixir)
 - Remaining import tools (Cognito, Firebase Auth, Okta)
 - Plugin system for custom identity providers (constrained, not arbitrary scripting)
-- Edge deployment mode (embedded Hearth at the CDN edge)
 - Community ecosystem: third-party integrations, contributed SDKs, deployment guides
 
 ---
@@ -672,7 +662,7 @@ This is a reasonable objection, and the honest answer is: you *can* build a good
 The argument for purpose-built:
 - **Performance ceiling**: Postgres will always have overhead that a purpose-built system doesn't — query parsing, plan optimization, transaction management for a general-purpose transaction model, MVCC overhead. These costs are small individually but compound on a hot path that handles millions of requests per second.
 - **Operational coupling**: depending on Postgres means inheriting Postgres's operational requirements — major version upgrades, vacuum tuning, connection pool management, replication configuration. These are well-understood but non-trivial.
-- **Architecture constraints**: a Postgres-backed system cannot offer embedded mode, cannot achieve zero-allocation hot paths, and cannot co-locate the authorization graph with the session store in the same process without significant complexity.
+- **Architecture constraints**: a Postgres-backed system cannot achieve zero-allocation hot paths, and cannot co-locate the authorization graph with the session store in the same process without significant complexity.
 
 The honest acknowledgment: if you already have a well-operated Postgres cluster and your auth performance requirements are modest (< 10K requests/second), building on Postgres is a reasonable choice. Hearth's value proposition is strongest for teams that need higher performance, want simpler operations, or are starting from scratch.
 

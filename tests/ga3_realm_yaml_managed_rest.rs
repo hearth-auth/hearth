@@ -146,7 +146,7 @@ fn assert_yaml_managed_refusal(status: StatusCode, body: &Value) {
 /// refused and the stored config must keep every field it had.
 #[tokio::test]
 async fn update_realm_is_refused_and_leaves_config_intact() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm_id, token) = tenant_realm_with_config(&h);
     let uri = format!("/admin/realms/{}", realm_id.as_uuid());
 
@@ -187,7 +187,7 @@ async fn update_realm_is_refused_and_leaves_config_intact() {
 /// suspended or detached from its YAML entry.
 #[tokio::test]
 async fn update_realm_status_and_name_are_refused() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (realm_id, token) = tenant_realm_with_config(&h);
     let uri = format!("/admin/realms/{}", realm_id.as_uuid());
     let original_name = h
@@ -225,7 +225,7 @@ async fn update_realm_status_and_name_are_refused() {
 /// A system-realm admin cannot create a realm either.
 #[tokio::test]
 async fn create_realm_is_refused_for_system_admin() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let token = system_admin_token(&h);
     let sys = RealmId::new(uuid::Uuid::nil());
     let name = format!("ga3-created-{}", uuid::Uuid::new_v4());

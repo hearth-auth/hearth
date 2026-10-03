@@ -151,7 +151,7 @@ fn config_with_realms(realms: HashMap<String, RealmYamlConfig>) -> Config {
 /// cascade converges, instead of answering `409` for the life of the realm.
 #[tokio::test]
 async fn a_wedged_realm_can_be_deleted_again_through_the_admin_api() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let token = system_admin_token(&h, "retry").await;
     let realm = setup_realm(&h);
     wedge_realm(&h, &realm);
@@ -184,7 +184,7 @@ async fn a_wedged_realm_can_be_deleted_again_through_the_admin_api() {
 /// stays. This pins that the fix above widened the gate by exactly one status.
 #[tokio::test]
 async fn an_active_realm_is_still_refused_by_the_admin_api() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let token = system_admin_token(&h, "active").await;
     let realm = setup_realm(&h);
 
@@ -207,7 +207,7 @@ async fn an_active_realm_is_still_refused_by_the_admin_api() {
 /// reconciled.
 #[tokio::test]
 async fn reconciliation_completes_when_a_declared_realm_is_wedged() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
 
     // Two declared realms, both created by a first reconcile pass.
     let mut declared: HashMap<String, RealmYamlConfig> = HashMap::new();

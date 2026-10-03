@@ -182,7 +182,7 @@ fn rename_patch(name: &str) -> serde_json::Value {
 /// The provisioning token manages what it created.
 #[tokio::test]
 async fn scim_token_deletes_a_scim_created_group() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = realm(&h);
     let token = enable_scim_token(&h, &realm);
     let app = app(&h);
@@ -218,7 +218,7 @@ async fn scim_token_deletes_a_scim_created_group() {
 /// An operator-created organization is read-only to the provisioning token.
 #[tokio::test]
 async fn scim_token_cannot_modify_or_delete_an_admin_created_org() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = realm(&h);
     let token = enable_scim_token(&h, &realm);
     let app = app(&h);
@@ -256,7 +256,7 @@ async fn scim_token_cannot_modify_or_delete_an_admin_created_org() {
 /// Admin-token callers themselves keep their rights (the PUT succeeds).
 #[tokio::test]
 async fn scim_put_cannot_set_the_marker() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = realm(&h);
     let app = app(&h);
     let org = admin_org(&h, &realm, "Legal");
@@ -286,7 +286,7 @@ async fn scim_put_cannot_set_the_marker() {
 /// Admin-token SCIM callers keep today's rights on operator-created orgs.
 #[tokio::test]
 async fn admin_token_scim_caller_still_deletes_admin_created_org() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = realm(&h);
     let app = app(&h);
     let org = admin_org(&h, &realm, "Ops");
@@ -302,7 +302,7 @@ async fn admin_token_scim_caller_still_deletes_admin_created_org() {
 /// a restored SCIM-created organization stays manageable by the token.
 #[tokio::test]
 async fn backup_restore_keeps_the_marker() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let source = realm(&h);
     let source_token = enable_scim_token(&h, &source);
     let app = app(&h);

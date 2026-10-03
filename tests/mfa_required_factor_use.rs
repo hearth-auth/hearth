@@ -52,7 +52,7 @@ async fn mfa_realm_and_user(
     hearth::identity::Realm,
     hearth::identity::User,
 ) {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -141,7 +141,7 @@ async fn create_session_accepts_a_proved_factor() {
 /// A realm that does not require MFA is untouched by the gate.
 #[tokio::test]
 async fn create_session_is_unchanged_when_the_realm_does_not_require_mfa() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h
         .identity()
         .create_realm(&CreateRealmRequest {

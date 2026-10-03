@@ -56,7 +56,7 @@ fn realm_grant(realm: &RealmId, user: &UserId, perm: &Permission) -> UserPermiss
 
 #[tokio::test]
 async fn grant_user_permission_returns_identical_grant() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
     let user = UserId::generate();
     let perm = Permission::new("docs.view").expect("valid perm");
@@ -74,7 +74,7 @@ async fn grant_user_permission_returns_identical_grant() {
 
 #[tokio::test]
 async fn grant_user_permission_appears_in_list() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
     let user = UserId::generate();
     let perm = Permission::new("docs.view").expect("valid perm");
@@ -90,7 +90,7 @@ async fn grant_user_permission_appears_in_list() {
 
 #[tokio::test]
 async fn revoke_user_permission_clears_grant() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
     let user = UserId::generate();
     let perm = Permission::new("docs.view").expect("valid perm");
@@ -108,7 +108,7 @@ async fn revoke_user_permission_clears_grant() {
 
 #[tokio::test]
 async fn grant_org_scoped_permission_appears_in_list() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
     let user = UserId::generate();
     let org = hearth::core::OrganizationId::generate();

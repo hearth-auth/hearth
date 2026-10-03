@@ -142,7 +142,7 @@ fn audit_retention_legacy_missing_max_rows() {
 /// `QuotaExceeded` naming the "users" resource.
 #[tokio::test]
 async fn a24_user_quota_enforced() {
-    let harness = common::TestHarness::embedded().await.expect("setup");
+    let harness = common::TestHarness::in_process().await.expect("setup");
     let realm = realm_with_quota(
         &harness,
         RealmQuotaConfig {
@@ -182,7 +182,7 @@ async fn a24_user_quota_enforced() {
 /// Without a quota, user creates are unlimited.
 #[tokio::test]
 async fn a24_no_quota_unlimited_users() {
-    let harness = common::TestHarness::embedded().await.expect("setup");
+    let harness = common::TestHarness::in_process().await.expect("setup");
     // TestHarness::create_realm() sets no quota.
     let realm = harness.create_realm();
 
@@ -211,7 +211,7 @@ async fn a24_no_quota_unlimited_users() {
 /// Org quota blocks create once the limit is reached.
 #[tokio::test]
 async fn a24_org_quota_enforced() {
-    let harness = common::TestHarness::embedded().await.expect("setup");
+    let harness = common::TestHarness::in_process().await.expect("setup");
     let realm = realm_with_quota(
         &harness,
         RealmQuotaConfig {
@@ -268,7 +268,7 @@ async fn a24_org_quota_enforced() {
 /// Client quota blocks registration once the limit is reached.
 #[tokio::test]
 async fn a24_client_quota_enforced() {
-    let harness = common::TestHarness::embedded().await.expect("setup");
+    let harness = common::TestHarness::in_process().await.expect("setup");
     let realm = realm_with_quota(
         &harness,
         RealmQuotaConfig {
@@ -327,7 +327,7 @@ async fn a24_client_quota_enforced() {
 /// Realm-wide session quota blocks new sessions once the limit is reached.
 #[tokio::test]
 async fn a24_session_quota_enforced() {
-    let harness = common::TestHarness::embedded().await.expect("setup");
+    let harness = common::TestHarness::in_process().await.expect("setup");
     let realm = realm_with_quota(
         &harness,
         RealmQuotaConfig {
@@ -383,7 +383,7 @@ async fn a24_session_quota_enforced() {
 /// realm-creation audit events, but must not grow without appends).
 #[tokio::test]
 async fn a25_count_events_stable_without_appends() {
-    let harness = common::TestHarness::embedded().await.expect("setup");
+    let harness = common::TestHarness::in_process().await.expect("setup");
     let realm = harness.create_realm();
     let count_a = harness
         .audit()
@@ -404,7 +404,7 @@ async fn a25_count_events_stable_without_appends() {
 async fn a25_count_events_tracks_appends() {
     use hearth::audit::{AuditAction, CreateAuditEvent};
 
-    let harness = common::TestHarness::embedded().await.expect("setup");
+    let harness = common::TestHarness::in_process().await.expect("setup");
     let realm = harness.create_realm();
     let before = harness.audit().count_events(&realm).expect("count before");
 
@@ -435,7 +435,7 @@ async fn a25_count_events_tracks_appends() {
 async fn a25_prune_oldest_removes_n_events() {
     use hearth::audit::{AuditAction, CreateAuditEvent};
 
-    let harness = common::TestHarness::embedded().await.expect("setup");
+    let harness = common::TestHarness::in_process().await.expect("setup");
     let realm = harness.create_realm();
     let initial = harness.audit().count_events(&realm).expect("initial count");
 
@@ -471,7 +471,7 @@ async fn a25_prune_oldest_removes_n_events() {
 async fn a25_prune_oldest_capped_at_total() {
     use hearth::audit::{AuditAction, CreateAuditEvent};
 
-    let harness = common::TestHarness::embedded().await.expect("setup");
+    let harness = common::TestHarness::in_process().await.expect("setup");
     let realm = harness.create_realm();
     let initial = harness.audit().count_events(&realm).expect("initial count");
 
@@ -511,7 +511,7 @@ async fn a25_prune_oldest_capped_at_total() {
 async fn a25_max_rows_backstop_simulation() {
     use hearth::audit::{AuditAction, CreateAuditEvent};
 
-    let harness = common::TestHarness::embedded().await.expect("setup");
+    let harness = common::TestHarness::in_process().await.expect("setup");
     let realm = harness.create_realm();
     let initial = harness.audit().count_events(&realm).expect("initial count");
 
@@ -561,7 +561,7 @@ async fn a25_max_rows_backstop_simulation() {
 /// surface them to operators.
 #[tokio::test]
 async fn a24_quota_error_carries_metadata() {
-    let harness = common::TestHarness::embedded().await.expect("setup");
+    let harness = common::TestHarness::in_process().await.expect("setup");
     let realm = realm_with_quota(
         &harness,
         RealmQuotaConfig {
@@ -601,7 +601,7 @@ async fn a24_quota_error_carries_metadata() {
 /// Zero quota (limit=0) blocks all creates immediately.
 #[tokio::test]
 async fn a24_adversarial_zero_quota_blocks_all() {
-    let harness = common::TestHarness::embedded().await.expect("setup");
+    let harness = common::TestHarness::in_process().await.expect("setup");
     let realm = realm_with_quota(
         &harness,
         RealmQuotaConfig {
@@ -638,7 +638,7 @@ async fn a24_adversarial_zero_quota_blocks_all() {
 /// Quota on one resource does not block creates of a different resource.
 #[tokio::test]
 async fn a24_quota_isolation_across_resources() {
-    let harness = common::TestHarness::embedded().await.expect("setup");
+    let harness = common::TestHarness::in_process().await.expect("setup");
     let realm = realm_with_quota(
         &harness,
         RealmQuotaConfig {

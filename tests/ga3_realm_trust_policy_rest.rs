@@ -152,7 +152,7 @@ async fn rest_realm(
 /// read; the same token reads an ungoverned realm (control).
 #[tokio::test]
 async fn get_realm_refused_when_target_policy_denies_system_realm() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let token = system_admin_token(&h);
     let control = tenant_realm(&h);
     let target = tenant_realm(&h);
@@ -177,7 +177,7 @@ async fn get_realm_refused_when_target_policy_denies_system_realm() {
 /// realm may not be purged; an archived ungoverned realm may (control).
 #[tokio::test]
 async fn delete_realm_refused_when_target_policy_denies_system_realm() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let token = system_admin_token(&h);
     let control = tenant_realm(&h);
     let target = tenant_realm(&h);
@@ -205,7 +205,7 @@ async fn delete_realm_refused_when_target_policy_denies_system_realm() {
 /// `hearth.admin` allows the crossing — enforcement must not over-refuse.
 #[tokio::test]
 async fn get_realm_permitted_when_ungoverned_or_granted() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let token = system_admin_token(&h);
     let ungoverned = tenant_realm(&h);
     let granted = tenant_realm(&h);
@@ -222,7 +222,7 @@ async fn get_realm_permitted_when_ungoverned_or_granted() {
 /// deleted realm's own key space must stay empty), attributed to the caller.
 #[tokio::test]
 async fn delete_realm_is_audited_in_the_system_realm() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let (operator_id, token) = system_admin(&h);
     let target = tenant_realm(&h);
     archive(&h, &target);

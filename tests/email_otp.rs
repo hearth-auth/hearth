@@ -88,7 +88,7 @@ fn make_email_service(sender: Arc<CapturingEmailSender>) -> hearth::identity::Em
 
 #[tokio::test]
 async fn email_otp_does_not_verify_for_a_different_address() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = harness
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -129,7 +129,7 @@ async fn email_otp_does_not_verify_for_a_different_address() {
 
 #[tokio::test]
 async fn email_otp_issue_verify_round_trip() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = harness
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -177,7 +177,7 @@ async fn email_otp_issue_verify_round_trip() {
 
 #[tokio::test]
 async fn email_otp_wrong_code_returns_invalid() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = harness
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -215,7 +215,7 @@ async fn email_otp_wrong_code_returns_invalid() {
 
 #[tokio::test]
 async fn email_otp_expired_returns_invalid() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = harness
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -270,7 +270,7 @@ async fn email_otp_expired_returns_invalid() {
 
 #[tokio::test]
 async fn email_otp_replay_fails() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = harness
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -314,7 +314,7 @@ async fn email_otp_replay_fails() {
 
 #[tokio::test]
 async fn email_otp_attempt_exhaustion_returns_invalid() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = harness
         .identity()
         .create_realm(&CreateRealmRequest {
@@ -369,7 +369,7 @@ async fn email_otp_attempt_exhaustion_returns_invalid() {
 
 #[tokio::test]
 async fn email_otp_realm_expiry_override() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     // Set 60-second expiry (below the 10-minute module default).
     let realm = harness
         .identity()
@@ -459,7 +459,7 @@ fn required_action_enroll_email_otp_path_segment() {
 
 #[tokio::test]
 async fn user_email_otp_enabled_starts_false_and_set_on_enrollment() {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let realm = harness
         .identity()
         .create_realm(&CreateRealmRequest {

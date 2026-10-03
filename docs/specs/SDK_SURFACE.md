@@ -89,7 +89,7 @@ Each capability has a stable **C-ID** used throughout this doc and in child issu
 
 | C-ID | Capability | Behavioral contract |
 | ------ | ----------- | --------------------- |
-| **C-19** | Admin SDK | `AdminClient` separate from `HearthClient`. Takes `(baseUrl, adminToken, realmId)`. Sends `X-Realm-ID` header. CRUD + list for: users, realms (read + delete only), OAuth clients (at `/admin/applications*`, **not** `/admin/clients*`), roles, groups. **No org-membership methods** — Hearth serves no `/admin/orgs` route (audit 2026-08-28 §25.19). Pagination via `limit` + `cursor`. 403 = typed `AdminPermissionError` (or equivalent HTTP error type). See SDK.md §12. |
+| **C-19** | Admin SDK | `AdminClient` separate from `HearthClient`. Takes `(baseUrl, adminToken, realmId)`. Sends `X-Realm-ID` header. CRUD + list for: users, realms (read + delete only), OAuth clients (at `/admin/applications*`, **not** `/admin/clients*`), roles, groups. **No org-membership methods** — membership has no REST route (audit 2026-08-28 §25.19). Organization CRUD exists at `/admin/organizations` (3.0.0) but no SDK wraps it yet (`sdk-standard-libraries`). Pagination via `limit` + `cursor`. 403 = typed `AdminPermissionError` (or equivalent HTTP error type). See SDK.md §12. |
 
 ### Tier 7 — Optional Advanced
 

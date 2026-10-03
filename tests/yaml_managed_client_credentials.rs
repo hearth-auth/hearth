@@ -176,7 +176,7 @@ async fn patch(
 /// `hearth.yaml`, and changes nothing. A non-credential edit still works.
 #[tokio::test]
 async fn rest_refuses_credential_changes_on_a_yaml_managed_application() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     reconcile(&h, &config("")).expect("reconcile");
     let realm = realm(&h);
     let client = find_client(&h).expect("client");
@@ -212,7 +212,7 @@ async fn rest_refuses_credential_changes_on_a_yaml_managed_application() {
 /// The engine gate every runtime surface (REST and gRPC) goes through.
 #[tokio::test]
 async fn the_engine_refuses_credential_changes_on_a_yaml_managed_application() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     reconcile(&h, &config("")).expect("reconcile");
     let realm = realm(&h);
     let client = find_client(&h).expect("client");
@@ -244,7 +244,7 @@ async fn the_engine_refuses_credential_changes_on_a_yaml_managed_application() {
 /// it, reports it, and leaves the client unchanged.
 #[tokio::test]
 async fn reconcile_refuses_to_remove_the_last_credential() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     reconcile(&h, &config(JWKS_YAML)).expect("reconcile v1");
     let before = find_client(&h).expect("client");
     assert!(before.jwks().is_some() && !before.is_public());
@@ -264,7 +264,7 @@ async fn reconcile_refuses_to_remove_the_last_credential() {
 /// JWKS — it stays confidential.
 #[tokio::test]
 async fn reconcile_still_removes_a_jwks_that_is_not_the_last_credential() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let secret =
         "        confidential: true\n        client_secret: \"yaml-secret-0123456789abcdef\"";
     reconcile(&h, &config(&format!("{secret}\n{JWKS_YAML}"))).expect("v1");
@@ -282,7 +282,7 @@ async fn reconcile_still_removes_a_jwks_that_is_not_the_last_credential() {
 /// failed second write.
 #[tokio::test]
 async fn reconcile_creates_an_application_in_one_write_or_not_at_all() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let bad_jwks =
         format!("{JWKS_YAML}\n              d: 11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo");
     let err = reconcile(&h, &config(&bad_jwks)).expect_err("an invalid JWKS must be refused");

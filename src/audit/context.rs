@@ -17,7 +17,7 @@ pub enum Actor {
     /// A user acting on their own behalf (self-service) or on
     /// behalf of another user (admin-initiated).
     User(UserId),
-    /// An OAuth/SCIM/gRPC client authenticated via bearer token or
+    /// An OAuth/SCIM client authenticated via bearer token or
     /// client credentials.
     Client(ClientId),
     /// The Hearth system itself (startup, reconciliation, background

@@ -49,7 +49,7 @@ fn json_array_with_n_elements(n: usize) -> Vec<u8> {
 /// before any handler extractor executes, so it returns 400 rather than 401.
 #[tokio::test]
 async fn a21_deeply_nested_json_rejected() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let app = build_app(&h);
 
     let body = deeply_nested_json(MAX_JSON_DEPTH + 1);
@@ -87,7 +87,7 @@ async fn a21_deeply_nested_json_rejected() {
 /// JSON body at exactly the maximum depth must pass the guard.
 #[tokio::test]
 async fn a21_json_at_exact_max_depth_passes_guard() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let app = build_app(&h);
 
     let body = deeply_nested_json(MAX_JSON_DEPTH);
@@ -115,7 +115,7 @@ async fn a21_json_at_exact_max_depth_passes_guard() {
 /// A JSON array with too many elements must be rejected.
 #[tokio::test]
 async fn a21_huge_json_array_rejected() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let app = build_app(&h);
 
     let body = json_array_with_n_elements(MAX_JSON_ARRAY_LEN);
@@ -151,7 +151,7 @@ async fn a21_huge_json_array_rejected() {
 /// A normal, shallow JSON body must not be rejected by the guard.
 #[tokio::test]
 async fn a21_normal_json_passes_guard() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let app = build_app(&h);
 
     let body = br#"{"email": "user@example.com", "name": "Test User"}"#;
@@ -179,7 +179,7 @@ async fn a21_normal_json_passes_guard() {
 /// Non-JSON content type must skip the guard entirely.
 #[tokio::test]
 async fn a21_non_json_content_type_skips_guard() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let app = build_app(&h);
 
     // Content that looks like deeply nested JSON but is sent as text/plain.
@@ -217,7 +217,7 @@ async fn a21_non_json_content_type_skips_guard() {
 /// GET requests (no body) must not trigger the guard.
 #[tokio::test]
 async fn a21_get_request_skips_guard() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let app = build_app(&h);
 
     let resp = app

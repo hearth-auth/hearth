@@ -118,7 +118,7 @@ struct Rig {
 
 /// A realm, an active user, and the web router.
 async fn rig() -> Rig {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity_arc();
     let realm = identity
         .create_realm(&CreateRealmRequest {

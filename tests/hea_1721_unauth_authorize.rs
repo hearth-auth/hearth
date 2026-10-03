@@ -36,7 +36,7 @@ struct TestEnv {
 }
 
 async fn setup() -> TestEnv {
-    let harness = common::TestHarness::embedded().await.expect("harness");
+    let harness = common::TestHarness::in_process().await.expect("harness");
 
     let realm = harness
         .identity()

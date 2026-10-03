@@ -20,7 +20,7 @@ use std::collections::BTreeSet;
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // TODO: split this function
 async fn org_context_token_emits_org_groups_paths() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
 
     // Create an organization with a known slug.
@@ -210,7 +210,7 @@ async fn org_context_token_emits_org_groups_paths() {
 
 #[tokio::test]
 async fn non_org_token_has_no_org_groups() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
 
     let user = h

@@ -13,7 +13,7 @@ use hearth::rbac::{Permission, RoleScopeKind, RoleSpec, ScopeSpec};
 
 #[tokio::test]
 async fn reconcile_creates_yaml_role_referencing_seed_parent() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
     h.rbac().seed_realm(&realm).expect("seed");
 
@@ -63,7 +63,7 @@ async fn reconcile_creates_yaml_role_referencing_seed_parent() {
 
 #[tokio::test]
 async fn reconcile_is_idempotent_and_repairs_drift() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
     h.rbac().seed_realm(&realm).expect("seed");
 
@@ -132,7 +132,7 @@ async fn reconcile_is_idempotent_and_repairs_drift() {
 
 #[tokio::test]
 async fn reconcile_unknown_parent_errors() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
     h.rbac().seed_realm(&realm).expect("seed");
 
@@ -152,7 +152,7 @@ async fn reconcile_unknown_parent_errors() {
 
 #[tokio::test]
 async fn reconcile_scopes_persists_bundle() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm = RealmId::generate();
     h.rbac().seed_realm(&realm).expect("seed");
 
@@ -182,7 +182,7 @@ async fn reconcile_scopes_persists_bundle() {
 
 #[tokio::test]
 async fn reconcile_does_not_leak_across_realms() {
-    let h = common::TestHarness::embedded().await.expect("harness");
+    let h = common::TestHarness::in_process().await.expect("harness");
     let realm_a = RealmId::generate();
     let realm_b = RealmId::generate();
     h.rbac().seed_realm(&realm_a).expect("seed a");

@@ -105,6 +105,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   removed key stops startup with a named error. The rate limits, lockout backoff, request
   shaper, distributed-attack detector, tenant CIDR policy, CAPTCHA challenge and outbound caps
   stay.
+- **The embedded (library) deployment mode is no longer promised.** It was never built; the
+  vision and spec documents no longer describe it. Hearth ships only as a server.
 - **BREAKING: the Kotlin, Rust and Node.js SDKs are removed.** Hearth supports four SDKs:
   TypeScript (`@hearth-auth/sdk`), Go, Python and PHP. The Node.js SDK's features (Express and
   Fastify middleware, Next.js helpers, the server-side OAuth flows) moved into
