@@ -657,6 +657,99 @@ async fn derive_aat_equal_string_object_constraint_allowed() {
         .expect("derive AAT with same string constraint must succeed");
 }
 
+// ── A child AAT keeps every parent constraint ────────────────────────────────
+
+/// Issues a root AAT whose `search_files` tool carries two constraints, and
+/// returns the derive result for a child with the given constraints.
+async fn derive_under_two_key_parent(
+    child_constraints: serde_json::Value,
+) -> Result<hearth::identity::AatResponse, IdentityError> {
+    let h = TestHarness::in_process().await.expect("harness init");
+    let realm_id = make_realm(&h);
+    let agent_id = make_agent(&h, &realm_id);
+
+    let root = h
+        .identity()
+        .issue_aat(
+            &realm_id,
+            &IssueAatRequest {
+                agent_id,
+                tools: vec![tool_with_constraints(
+                    "search_files",
+                    &["invoke"],
+                    serde_json::json!({"max_results": 100, "folder": "inbox"}),
+                )],
+                scope: vec!["files:read".to_string()],
+                aud: None,
+                expires_in_secs: Some(300),
+            },
+        )
+        .expect("issue root AAT with two constraints");
+
+    h.identity().derive_aat(
+        &realm_id,
+        &DeriveAatRequest {
+            parent_aat: root.aat,
+            tools: vec![tool_with_constraints(
+                "search_files",
+                &["invoke"],
+                child_constraints,
+            )],
+            scope: vec!["files:read".to_string()],
+            aud: None,
+            expires_in_secs: Some(60),
+        },
+    )
+}
+
+/// A child that lists a constrained tool with no constraints is refused.
+#[tokio::test]
+async fn derive_aat_child_without_parent_constraints_rejected() {
+    let err = derive_under_two_key_parent(serde_json::Value::Null)
+        .await
+        .expect_err("child without the parent's constraints must be refused");
+    assert!(
+        matches!(err, IdentityError::AatScopeEscalation),
+        "expected AatScopeEscalation, got {err:?}"
+    );
+}
+
+/// A child that keeps only some of the parent's constraint keys is refused.
+#[tokio::test]
+async fn derive_aat_child_missing_one_parent_constraint_rejected() {
+    let err = derive_under_two_key_parent(serde_json::json!({"max_results": 50}))
+        .await
+        .expect_err("child missing a parent constraint key must be refused");
+    assert!(
+        matches!(err, IdentityError::AatScopeEscalation),
+        "expected AatScopeEscalation, got {err:?}"
+    );
+}
+
+/// A child with an empty constraint object is refused.
+#[tokio::test]
+async fn derive_aat_child_empty_constraint_object_rejected() {
+    let err = derive_under_two_key_parent(serde_json::json!({}))
+        .await
+        .expect_err("child with an empty constraint object must be refused");
+    assert!(
+        matches!(err, IdentityError::AatScopeEscalation),
+        "expected AatScopeEscalation, got {err:?}"
+    );
+}
+
+/// A child that keeps every parent key, narrowing the numeric one, is allowed.
+#[tokio::test]
+async fn derive_aat_child_keeping_every_parent_constraint_allowed() {
+    let child = derive_under_two_key_parent(serde_json::json!({
+        "max_results": 50,
+        "folder": "inbox"
+    }))
+    .await
+    .expect("child keeping every parent constraint must be allowed");
+    assert_eq!(child.aat.split('.').count(), 3, "child AAT must be a JWT");
+}
+
 // ── D.1.9: Adversarial — tampered payload without re-signing rejected ─────────
 
 /// Decode the AAT payload, inject a wider scope, re-encode *without* re-signing.

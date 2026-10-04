@@ -142,6 +142,9 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   XML signature-wrapping variants (XSW1–XSW8).
 - **Agent API keys verify only while their agent is `Active`.** Revoking or suspending an agent
   now disables every API key it holds; verification answers `AgentRevoked`.
+- **A derived AAT keeps every constraint of its parent tool.** When a parent AAT constrains a
+  tool, deriving a child that lists the tool with no constraints, or without one of the parent's
+  constraint keys, is refused with `AatScopeEscalation`.
 
 ### Fixed
 - The cluster-mode startup warning no longer says writes to a follower fail with HTTP 500

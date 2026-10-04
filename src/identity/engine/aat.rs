@@ -291,13 +291,23 @@ fn validate_tools_subset(
         validate_constraint_type(&child_perm.constraints)?;
         validate_constraint_type(&parent_perm.constraints)?;
 
-        // Child constraints must not introduce keys absent in the parent.
-        // For numeric values, child value must be ≤ parent value.
-        if let (serde_json::Value::Object(child_obj), serde_json::Value::Object(parent_obj)) =
-            (&child_perm.constraints, &parent_perm.constraints)
-        {
-            for (k, child_val) in child_obj {
-                let parent_val = parent_obj.get(k).ok_or(IdentityError::AatScopeEscalation)?;
+        if let serde_json::Value::Object(parent_obj) = &parent_perm.constraints {
+            // A constrained parent tool needs a constrained child: the child
+            // must keep every parent key, each at most as wide as the
+            // parent's value, and may not introduce a key the parent lacks.
+            // A `null` child (no constraints, the only other type left after
+            // `validate_constraint_type`) keeps no key, so it fits only an
+            // empty parent object.
+            let no_constraints = serde_json::Map::new();
+            let child_obj = match &child_perm.constraints {
+                serde_json::Value::Object(child_obj) => child_obj,
+                _ => &no_constraints,
+            };
+            if child_obj.keys().any(|k| !parent_obj.contains_key(k)) {
+                return Err(IdentityError::AatScopeEscalation);
+            }
+            for (k, parent_val) in parent_obj {
+                let child_val = child_obj.get(k).ok_or(IdentityError::AatScopeEscalation)?;
                 // If both are numbers, child must be ≤ parent.
                 // For all other types (strings, booleans, nested objects), the
                 // child value must equal the parent value exactly — no widening.
@@ -309,7 +319,7 @@ fn validate_tools_subset(
                     return Err(IdentityError::AatScopeEscalation);
                 }
             }
-        } else if !child_perm.constraints.is_null() && parent_perm.constraints.is_null() {
+        } else if !child_perm.constraints.is_null() {
             // Child has constraints but parent doesn't — escalation.
             return Err(IdentityError::AatScopeEscalation);
         }
