@@ -154,6 +154,11 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   /admin/users/{id}/permissions` and the console grant forms refuse a `hearth.*` permission with
   `403 reserved_namespace`; reserved authority comes only from the roles seeded at realm
   bootstrap. Existing direct grants are unchanged and still count for the admin ceiling.
+- **Roles and groups declared in `hearth.yaml` cannot be changed or deleted at runtime.**
+  `PATCH`/`DELETE /admin/roles/{id}` and `/admin/groups/{id}`, and the console forms, answer
+  `409 yaml_managed` for them, naming `hearth.yaml`. Startup reconciliation still applies YAML
+  changes; a group removed from the YAML returns to runtime management, and a role removed from
+  it is archived as before.
 
 ### Fixed
 - The cluster-mode startup warning no longer says writes to a follower fail with HTTP 500

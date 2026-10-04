@@ -90,6 +90,12 @@ pub enum RbacError {
         /// Extra org-scoped role rows naming this role.
         org_roles: usize,
     },
+    /// The role or group is declared in `hearth.yaml`. Reconciliation owns
+    /// it, so the admin API may neither change nor delete it at runtime.
+    YamlManaged {
+        /// `"role"` or `"group"`.
+        kind: &'static str,
+    },
     /// One or more requested OAuth scopes could not be granted.
     ///
     /// Returned by `resolve_with_scopes` when a `ThirdParty` client requests
@@ -149,6 +155,11 @@ impl fmt::Display for RbacError {
                 f,
                 "role is in use ({assignments} assignments, {child_roles} child roles, \
                  {org_roles} extra organization roles); delete with cascade to remove them"
+            ),
+            Self::YamlManaged { kind } => write!(
+                f,
+                "this {kind} is managed by hearth.yaml: change or remove it there; it cannot \
+                 be changed or deleted at runtime"
             ),
             Self::InvalidScope { reason } => write!(f, "invalid_scope: {reason}"),
             Self::Storage(err) => write!(f, "storage error: {err}"),

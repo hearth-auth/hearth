@@ -1050,6 +1050,7 @@ pub(crate) fn rbac_error_to_response(err: &RbacError) -> (StatusCode, Json<serde
         }
         RbacError::RoleArchived => (StatusCode::CONFLICT, "role_archived"),
         RbacError::RoleInUse { .. } => (StatusCode::CONFLICT, "role_in_use"),
+        RbacError::YamlManaged { .. } => (StatusCode::CONFLICT, "yaml_managed"),
         RbacError::ReservedNamespace { .. } => (StatusCode::FORBIDDEN, "reserved_namespace"),
         RbacError::InvalidScope { .. } => (StatusCode::BAD_REQUEST, "invalid_scope"),
         RbacError::Storage(_) | RbacError::Serialization { .. } => {
