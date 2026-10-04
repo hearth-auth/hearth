@@ -366,6 +366,7 @@ export class HearthClient {
    * `exp`, `nbf` and `iat` allow a 5-second clock skew.
    *
    * @throws {@link TokenExpiredError} — token is expired.
+   * @throws {@link TokenNotYetValidError} — `nbf` or `iat` is in the future.
    * @throws {@link TokenInvalidError} — signature invalid or JWT malformed.
    * @throws {@link TokenIssuerError} — issuer does not match `issuerUrl`.
    * @throws {@link TokenAudienceError} — audience does not include `audience`.

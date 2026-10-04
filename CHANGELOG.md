@@ -138,7 +138,7 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   Python `HearthClient(..., audience=...)`; PHP `new HearthClient(..., audience: ...)` and the
   Laravel `audience` key (`HEARTH_AUDIENCE`).
 - **TypeScript SDK: a token whose `iat` is in the future is refused.** `verifyToken` throws
-  `TokenInvalidError` when `iat` is more than the 5 s clock skew ahead, as the other SDKs do.
+  `TokenNotYetValidError` when `iat` is more than the 5 s clock skew ahead, as the other SDKs do.
 - **TypeScript SDK: `createHearth` claim checks verify the token.** `hasPermission`, `hasRole`,
   `inGroup` and `inOrg` verify the EdDSA signature against the realm JWKS and the registered
   claims before they read a claim, and resolve `false` for a token that does not verify.
@@ -279,6 +279,9 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   short form was refused as "invalid status".
 
 ### Changed
+- **PHP SDK: a future `iat` throws `TokenNotYetValidException`** (was `TokenInvalidException`),
+  so a token issued beyond the 5 s clock skew in the future gets the same error in all four
+  SDKs, as a future `nbf` does.
 - **TypeScript SDK: `createHearth` predicates are async.** **BREAKING:** `hasPermission`,
   `hasRole`, `inGroup` and `inOrg` return `Promise<boolean>`; `createHearth` takes a required
   `issuerUrl` (the realm issuer) and an optional `audience`, and `getToken` may return a promise.

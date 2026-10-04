@@ -402,8 +402,8 @@ Errors raised by the SDK itself extend `HearthSdkError`:
 | `DiscoveryError` | The discovery document cannot be fetched or is invalid |
 | `JWKSFetchError` | The JWKS cannot be fetched |
 | `TokenVerificationError` | Base class of every token failure below |
-| `TokenExpiredError`, `TokenNotYetValidError` | `exp` / `nbf` outside the clock-skew window |
-| `TokenInvalidError` | Bad signature, wrong algorithm, malformed JWT, `iat` in the future |
+| `TokenExpiredError`, `TokenNotYetValidError` | `exp` / `nbf` or `iat` outside the clock-skew window |
+| `TokenInvalidError` | Bad signature, wrong algorithm, malformed JWT |
 | `TokenIssuerError`, `TokenAudienceError` | `iss` mismatch / `aud` does not contain the configured `audience` |
 | `IntrospectionError` | The introspection request failed or returned non-JSON |
 | `OAuthFlowError` | A token, userinfo, permissions or session-version request failed (`statusCode`, `errorCode`) |

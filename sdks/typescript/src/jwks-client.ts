@@ -10,6 +10,7 @@ import {
   TokenIssuerError,
   TokenAudienceError,
   TokenNotYetValidError,
+  TokenVerificationError,
 } from "./errors.js";
 
 /** Options for {@link JwksClient.verify}. */
@@ -120,6 +121,7 @@ export class JwksClient {
    * maps its errors.
    *
    * @throws {@link TokenExpiredError} when the token is expired.
+   * @throws {@link TokenNotYetValidError} when `nbf` or `iat` is in the future.
    * @throws {@link TokenInvalidError} when the signature or structure is invalid.
    * @throws {@link TokenIssuerError} when the issuer does not match.
    * @throws {@link TokenAudienceError} when the audience does not match.
@@ -164,12 +166,12 @@ export class JwksClient {
         clockTolerance,
       });
       // jose checks that `iat` is a number but not that it lies in the past.
-      // A token issued "later than now" (beyond the skew) is refused.
+      // A token issued "later than now" (beyond the skew) is not yet valid.
       if (
         typeof payload.iat === "number" &&
         payload.iat > Math.floor(Date.now() / 1000) + clockTolerance
       ) {
-        throw new TokenInvalidError("JWT iat is in the future");
+        throw new TokenNotYetValidError(new Date(payload.iat * 1000));
       }
       return new Claims(payload as Record<string, unknown>);
     };
@@ -195,7 +197,7 @@ export class JwksClient {
    * `issuer` and `audience` are the values the check actually used.
    */
   private mapJoseError(err: unknown, issuer: string, audience: string | string[]): never {
-    if (err instanceof TokenInvalidError) throw err;
+    if (err instanceof TokenVerificationError) throw err;
     if (err instanceof joseErrors.JWTExpired) {
       const exp = err.payload?.exp;
       throw new TokenExpiredError(exp ? new Date(exp * 1000) : new Date(0));

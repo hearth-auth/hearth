@@ -81,7 +81,7 @@ final class TokenVerifier implements TokenVerifierInterface
      * @throws TokenInvalidException  On malformed JWT, invalid Ed25519 signature or unknown `kid`
      * @throws JWKSFetchException      When the JWKS endpoint fails
      * @throws TokenExpiredException    When `exp` is in the past
-     * @throws TokenNotYetValidException When `nbf` is in the future
+     * @throws TokenNotYetValidException When `nbf` or `iat` is in the future
      * @throws TokenIssuerException     When `iss` does not match
      * @throws TokenAudienceException   When `aud` does not include the configured audience
      * @throws RequiredActionException  When `token_type === "required_action"`
@@ -214,7 +214,13 @@ final class TokenVerifier implements TokenVerifierInterface
             throw new TokenNotYetValidException($nbf);
         }
 
-        throw new TokenInvalidException('JWT was issued in the future (beyond clock skew tolerance)');
+        // Neither exp nor nbf failed, so `iat` lies beyond the clock skew in the future:
+        // the token is not yet valid, the same fault class as a future `nbf`.
+        $iat = $claims->get(RegisteredClaims::ISSUED_AT);
+        throw new TokenNotYetValidException(
+            $iat instanceof DateTimeImmutable ? $iat : null,
+            'JWT was issued in the future (beyond clock skew tolerance)',
+        );
     }
 
     /**

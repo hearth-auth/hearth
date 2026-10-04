@@ -13,7 +13,7 @@ All notable changes to `@hearth-auth/browser` and `@hearth-auth/node` are docume
   `VerifyOptions.audience` overrides it per call; an empty audience throws
   `ConfigurationError`.
 - **A token whose `iat` lies in the future is refused** — more than the 5 s clock skew
-  ahead throws `TokenInvalidError`.
+  ahead throws `TokenNotYetValidError`, as in the other SDKs.
 - **`createHearth` predicates verify the token** — `hasPermission`, `hasRole`, `inGroup`
   and `inOrg` check the EdDSA signature against the realm JWKS plus `exp`, `nbf`, `iat`,
   `iss` and `aud` before reading a claim, and resolve `false` for a token that does not

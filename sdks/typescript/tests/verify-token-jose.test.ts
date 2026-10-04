@@ -272,7 +272,7 @@ describe("audience check (on by default, RFC 9068 §4)", () => {
 });
 
 describe("iat in the future", () => {
-  it("rejects a token whose iat is 60 s in the future", async () => {
+  it("throws TokenNotYetValidError for a token whose iat is 60 s in the future", async () => {
     const now = Math.floor(Date.now() / 1000);
     const token = await new SignJWT({ sub: "user123", aud: "hearth" })
       .setProtectedHeader({ alg: "EdDSA", kid: KID })
@@ -281,9 +281,11 @@ describe("iat in the future", () => {
       .setExpirationTime(now + 3600)
       .sign(privateKey);
     mockFetch();
-    await expect(new HearthClient({ issuerUrl: ISSUER }).verifyToken(token)).rejects.toBeInstanceOf(
-      TokenInvalidError,
-    );
+    const err = await new HearthClient({ issuerUrl: ISSUER })
+      .verifyToken(token)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(TokenNotYetValidError);
+    expect((err as TokenNotYetValidError).notBefore.getTime()).toBe((now + 60) * 1000);
   });
 
   it("accepts an iat within the clock skew", async () => {
