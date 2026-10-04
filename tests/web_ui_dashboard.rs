@@ -269,7 +269,7 @@ async fn dashboard_renders_signed_in_page() {
     // Admin tiles must be visible because the test user has the
     // hearth#admin relation. After the path-based routing migration, all
     // realm-scoped tiles point at the realms picker (R-1 in
-    // UI_ROUTING.md): the operator chooses a realm before drilling in.
+    // openspec/specs/ui-routing/spec.md): the operator chooses a realm before drilling in.
     assert!(
         body.contains("/ui/admin/realms"),
         "dashboard should show Realms admin link"

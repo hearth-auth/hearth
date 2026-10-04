@@ -1,5 +1,5 @@
 //! Agent-identity hardening regressions from the 2026-09-21 orgs/agents
-//! subsystem audit (`reports/subsystem-audit-orgs-agents-2026-09-21.md`).
+//! subsystem audit (`https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/subsystem-audit-orgs-agents-2026-09-21.md`).
 //!
 //! Covers:
 //! - A-2 / task 26.12 — `delete_agent` must order its cascade so every
@@ -9,7 +9,7 @@
 //!   only a `Revoked` one. `Suspended` is the state the abuse monitor applies
 //!   automatically, so the automatic response to credential abuse used not to
 //!   stop the abused agent from delegating.
-//! - A-10 / task 26.19 — the MCP scope-format rule of AGENT_AUTH.md §2.6 must
+//! - A-10 / task 26.19 — the MCP scope-format rule of openspec/specs/mcp-authorization/spec.md must
 //!   be enforced where a realm declares its MCP scope vocabulary.
 //! - Task 26.28 — `suspend_agent` and `reactivate_agent` must observe the
 //!   archived-realm freeze that `revoke_agent` already observes.
@@ -313,7 +313,7 @@ async fn delete_agent_propagates_rbac_purge_failure() {
     );
 }
 
-/// AGENT_AUTH.md §1.2: deletion MUST delete all credentials. A SPIFFE mapping
+/// openspec/specs/agent-identity/spec.md: deletion MUST delete all credentials. A SPIFFE mapping
 /// is a live workload credential — the SVID keeps presenting and the mapping
 /// keeps resolving to an agent UUID whose record is gone.
 #[tokio::test]
@@ -354,7 +354,7 @@ async fn delete_agent_removes_the_spiffe_workload_mapping() {
     );
 }
 
-/// AGENT_AUTH.md §1.2: deletion MUST revoke all active tokens. For AATs — the
+/// openspec/specs/agent-identity/spec.md: deletion MUST revoke all active tokens. For AATs — the
 /// agent's own token family — that guarantee is carried by the subject
 /// resolution inside AAT validation. Assert it end to end so the sentence in
 /// the spec is a tested property rather than prose.
@@ -569,7 +569,7 @@ async fn token_exchange_refuses_a_suspended_agent_actor() {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// 26.19 / A-10 — AGENT_AUTH.md §2.6 MCP scope format is enforced
+// 26.19 / A-10 — openspec/specs/mcp-authorization/spec.md MCP scope format is enforced
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// §2.6: "Custom scopes MAY be registered per protected resource. Scope
@@ -617,7 +617,7 @@ async fn protected_resource_scope_vocabulary_enforces_mcp_format() {
             .err();
         assert!(
             matches!(err, Some(IdentityError::InvalidInput { .. })),
-            "`{bad}` violates AGENT_AUTH.md §2.6 and must be refused; got {err:?}"
+            "`{bad}` violates openspec/specs/mcp-authorization/spec.md and must be refused; got {err:?}"
         );
     }
 

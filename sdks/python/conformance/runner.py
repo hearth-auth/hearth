@@ -15,7 +15,7 @@ from typing import Any
 from hearth import HearthClient
 from hearth.errors import HearthSdkError
 
-# SDK.md §5 error names.
+# openspec/specs/sdk-support-contract/spec.md error names.
 SPEC_ERRORS = {
     "ConfigurationError",
     "DiscoveryError",

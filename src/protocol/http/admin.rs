@@ -470,7 +470,7 @@ fn list_all_realm_ids(
 /// anywhere else. A tenant-scoped caller is untouched: its export is confined
 /// to its own realm (B1), and `hearth.export` granted to a tenant sub-admin is
 /// the documented way to run a DR pipeline without full `hearth.admin`
-/// (ABUSE.md A-30.1).
+/// (openspec/specs/abuse-prevention/spec.md A-30.1).
 fn require_system_backup_superuser(
     auth: &AdminAuth,
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
@@ -3535,7 +3535,7 @@ fn dev_system_admin_token(state: &AppState, proof: crate::identity::MfaProof) ->
 
 /// Builds the `quickstart` snippet returned by `POST /admin/bootstrap`.
 ///
-/// Production-readiness task 26.27 (`reports/cold-first-run-2026-09-21.md`
+/// Production-readiness task 26.27 (`https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/cold-first-run-2026-09-21.md`
 /// C-7): the snippet used to hard-code `http://127.0.0.1:8420`, so an instance
 /// bound to any other port handed the operator commands that could not run,
 /// and it cited `docs/guides/getting-started.md` — the file is `.mdx`. The host
@@ -3875,7 +3875,7 @@ pub(super) async fn admin_bootstrap(
 }
 
 // =======================================================================
-// RBAC admin endpoints (AUTHORIZATION.md § 8.2)
+// RBAC admin endpoints (openspec/specs/rbac-admin-api/spec.md)
 // =======================================================================
 
 #[derive(Debug, Deserialize)]

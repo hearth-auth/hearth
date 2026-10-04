@@ -37,7 +37,7 @@ retired: its features are in `@hearth-auth/sdk`. See the
 
 ## Common patterns
 
-All SDKs expose the same surface (method names vary by language convention). See the [full symbol-name mapping table](../../specs/SDK.md#25-per-sdk-symbol-name-mapping) for a complete SDK-by-SDK reference, including platform exceptions.
+All SDKs expose the same surface (method names vary by language convention). See the [full symbol-name mapping table](https://github.com/hearth-auth/hearth/blob/main/openspec/specs/sdk-support-contract/spec.md) for a complete SDK-by-SDK reference, including platform exceptions.
 
 | Pattern | TypeScript | Go | Python | PHP |
 |---------|-----------|-----|--------|-----|
@@ -53,7 +53,7 @@ All SDKs expose the same surface (method names vary by language convention). See
 | Group check (local) | `claims.inGroup()` | `client.InGroup()` | `claims.in_group()` | `$claims->inGroup()` |
 | Token refresh | `client.refreshTokens()` | `client.RefreshTokens()` | `client.refresh_tokens()` | `$client->refreshToken()` |
 
-> ⚠ marks a [platform exception](../../specs/SDK.md#platform-exceptions). Read the linked spec section before using these methods.
+> ⚠ marks a [platform exception](https://github.com/hearth-auth/hearth/blob/main/openspec/specs/sdk-support-contract/spec.md). Read the linked spec section before using these methods.
 
 :::note[PKCE is mandatory for public clients]
 All public clients (browser SPAs, mobile apps) must use PKCE. Hearth rejects authorization requests without `code_challenge`. Each SDK quickstart includes a copy-paste implementation.

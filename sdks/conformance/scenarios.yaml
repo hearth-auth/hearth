@@ -7,7 +7,7 @@
 # (sdks/<sdk>/conformance/). A runner prints one JSON line per case:
 #
 #   {"id": "<scenario id>", "outcome": "ok", "claims": {"sub": ..., "scope": ..., "permissions": [...]}}
-#   {"id": "<scenario id>", "outcome": "error", "error": "<SDK.md §5 error name>"}
+#   {"id": "<scenario id>", "outcome": "error", "error": "<openspec/specs/sdk-support-contract/spec.md error name>"}
 #
 # `claims` holds exactly the claims named in `expect.claims`, read through the
 # SDK's public claims API: `sub` a string, `scope` a string or null when the
@@ -16,7 +16,7 @@
 # `client_credentials` it checks `sub` is `client_<client_id>` and `scope` the
 # requested scope.
 #
-# Error names are the SDK.md §5 names (`TokenInvalidError`, ...); PHP's
+# Error names are the openspec/specs/sdk-support-contract/spec.md names (`TokenInvalidError`, ...); PHP's
 # `...Exception` classes report the `...Error` name. The driver fails when a
 # runner's line differs from `expect`, or from another SDK's line, and names
 # the SDK and the scenario.
@@ -71,7 +71,7 @@ scenarios:
     kind: verify_token
     token: unknown_kid
     config: default
-    # SDK.md §5: JWKSFetchError is for an unreachable or invalid JWKS
+    # openspec/specs/sdk-support-contract/spec.md: JWKSFetchError is for an unreachable or invalid JWKS
     # endpoint. A token whose `kid` is absent after one re-fetch is a bad token.
     expect: {outcome: error, error: TokenInvalidError}
 

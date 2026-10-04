@@ -8,7 +8,7 @@
 //! * [`groups`] — group CRUD, membership, role assignments
 //! * [`rbac`] — role definitions, permissions browser, RBAC debug tooling
 //! * [`abuse`] — abuse monitor dashboard (A-8): security event counters, top IPs
-//! * [`approvals`] — agent approval-request queue (Phase C.6 — AGENT_AUTH.md §9)
+//! * [`approvals`] — agent approval-request queue (Phase C.6 — openspec/specs/agent-approvals/spec.md)
 
 use std::fmt::Write as _;
 use std::sync::Arc;

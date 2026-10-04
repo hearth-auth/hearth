@@ -1734,7 +1734,7 @@ export const RoleEntrySchema: GenMessage<RoleEntry> = /*@__PURE__*/
 
 /**
  * RBAC admin service: roles, groups, assignments. Mirrors the HTTP admin
- * surface in `docs/specs/AUTHORIZATION.md § 8.2`. There is NO service-to-service
+ * surface in `openspec/specs/rbac-admin-api/spec.md`. There is NO service-to-service
  * Check RPC; callers decode the JWT's `permissions` claim locally.
  *
  * @generated from service hearth.rbac.v1.RbacAdminService

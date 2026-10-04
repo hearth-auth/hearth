@@ -255,7 +255,7 @@ fn yaml_managed_realm_writes_are_not_documented() {
 // Client registration routes answer 201 Created
 // ---------------------------------------------------------------------------
 
-/// The client-create routes answer `201 Created` (SDK.md requires SDKs to
+/// The client-create routes answer `201 Created` (openspec/specs/sdk-support-contract/spec.md requires SDKs to
 /// treat 201 as success); the spec documented `200`, so a generated client
 /// that checks the documented status treated every creation as unexpected.
 /// The secret-regeneration route answers `200` with the client record.

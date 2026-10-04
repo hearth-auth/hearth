@@ -1295,7 +1295,7 @@ async fn admin_user_detail_404_renders_inside_admin_shell() {
 
 /// `GET /ui/admin/users` (no realm) returns 404 — the path-based routing
 /// migration deleted the cookie / `?realm=` fallbacks that used to
-/// silently resolve a tenant realm. Pins R-5 from `UI_ROUTING.md`.
+/// silently resolve a tenant realm. Pins R-5 from `openspec/specs/ui-routing/spec.md`.
 #[tokio::test]
 async fn admin_user_list_without_realm_path_returns_404() {
     let rig = build_rig();

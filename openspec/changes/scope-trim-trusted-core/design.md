@@ -42,7 +42,7 @@ The config structs already use `deny_unknown_fields`, so a deleted field turns i
 ### 3. Keep `proto/` as the REST schema source; delete only the gRPC server
 The REST layer serialises through the proto types, so `proto/hearth/{identity,rbac,events}/v1` stay as message definitions. The `service` blocks with their `google.api.http` annotations are removed. `docs/api/openapi.json` keeps being derived from them through `scripts/merge_openapi.py` until that pipeline is rewritten.
 **Why:** rewriting the REST DTOs is large and has nothing to do with the attack surface. Without a listener, the proto messages expose nothing.
-**Check:** the OpenAPI derivation currently reads the `google.api.http` annotations. If removing the services breaks it, keep the `service` blocks as schema-only (nothing compiles a server from them) and record that in `PROTO.md`. Decide this in the gRPC PR, using the generated diff.
+**Check:** the OpenAPI derivation currently reads the `google.api.http` annotations. If removing the services breaks it, keep the `service` blocks as schema-only (nothing compiles a server from them) and record that in `docs/dev/PROTO.md`. Decide this in the gRPC PR, using the generated diff.
 
 ### 4. One MFA policy resolver
 Add one function, `effective_mfa_requirement(realm, org, client, user_roles) -> MfaRequirement`, in the identity layer. Every site that today calls `mfa_required.unwrap_or(false)` calls the resolver instead. A clippy `disallowed-methods` entry or a `scripts/` lint fails CI on a new direct read of `mfa_required`.

@@ -38,7 +38,7 @@
 #   R6  `make loadtest-check` — the ONLY gate over the `loadtest` crate, which
 #       the root Cargo.toml `exclude`s from the workspace — runs clippy with
 #       `-D warnings`. Production-readiness task 26.32 / audit
-#       reports/subsystem-audit-fuzz-loadtest-2026-09-21.md L-7: `make clippy`
+#       https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/subsystem-audit-fuzz-loadtest-2026-09-21.md L-7: `make clippy`
 #       is `--all-targets` over the WORKSPACE, so it never reached an excluded
 #       crate, and `loadtest-check` ran only `cargo check` + `nextest`. Nothing
 #       in the repository had ever linted it. The command was red at HEAD with

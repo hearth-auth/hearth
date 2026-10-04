@@ -2,7 +2,7 @@
 
 This guide documents security configuration recommendations for Hearth deployments. It is
 aimed at production operators and complements the default configuration documented in
-[CONFIGURATION.md](../specs/CONFIGURATION.md).
+[docs/guides/configuration-reference.md](configuration-reference.md).
 
 ## Session TTL
 
@@ -267,7 +267,7 @@ newly disclosed vulnerabilities in dependencies.
 ## Rate Limiting
 
 Hearth enforces multiple rate-limit tiers out of the box. All thresholds are tunable under
-[`security.rate_limiting`](../specs/CONFIGURATION.md#securityrate_limiting) in `hearth.yaml`
+[`security.rate_limiting`](configuration-reference.md#securityrate_limiting) in `hearth.yaml`
 and per-realm under `realms.<name>.auth.rate_limit`.
 
 ### Per-IP login rate limit

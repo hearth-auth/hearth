@@ -1,4 +1,4 @@
-//! Phase D advanced agent routes (AGENT_AUTH.md §4, §8, §11).
+//! Phase D advanced agent routes (openspec/specs/delegated-authorization/spec.md, §8, §11).
 //!
 //! Routes (all require admin bearer token):
 //!   POST   /v1/aats                        — issue root AAT

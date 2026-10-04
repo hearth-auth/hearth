@@ -1,7 +1,7 @@
 //! Integration tests for the audit logging engine.
 //!
 //! Tests correspond to Phase 1 Step 20 (Audit Logging) scenarios in
-//! `TEST_SCENARIOS.md`.
+//! `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md`.
 
 mod common;
 

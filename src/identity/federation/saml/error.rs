@@ -41,7 +41,7 @@ pub enum SamlError {
     /// both RSA-SHA256 and SHA-256. Signature- and digest-algorithm downgrade
     /// is rejected by design. The declared canonicalization and transform
     /// algorithms are **not** inspected, so a document declaring inclusive
-    /// C14N does not produce this variant (see `docs/specs/SAML.md` §4).
+    /// C14N does not produce this variant (see `openspec/specs/saml-sp-profile/spec.md`).
     UnsupportedAlgorithm,
     /// Fetching SAML IdP metadata from the configured URL failed.
     MetadataFetch {

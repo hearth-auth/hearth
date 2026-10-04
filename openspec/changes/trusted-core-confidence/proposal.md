@@ -58,7 +58,7 @@ None.
   `make conformance-oidf` target and its script, a nightly `cargo-mutants` workflow and its
   budget file.
 - Changed: `ci/mutations.toml`, `docs/security-audit/pentest-scope.md`,
-  `docs/specs/TESTING.md` (§7 and the phase checklist), `docs/STATUS.md`, `README.md`,
+  `docs/dev/TESTING.md` (§7 and the phase checklist), `docs/STATUS.md`, `README.md`,
   `CONTRIBUTING.md` (the freeze rule).
 - The defect fixes touch `src/identity/` and `src/protocol/http/` (see `tasks.md` group 1).
 - No new runtime dependency. `cargo-mutants` and the conformance suite are tools, not

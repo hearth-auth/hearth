@@ -1,4 +1,4 @@
-//! Tool-level permission grammar and evaluation (AGENT_AUTH.md §5).
+//! Tool-level permission grammar and evaluation (openspec/specs/tool-permissions/spec.md).
 //!
 //! Permission convention:
 //! - `tool.{name}.invoke` — may invoke without approval.

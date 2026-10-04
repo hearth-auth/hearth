@@ -95,7 +95,7 @@ Every configuration snippet in the reference documentation and the shipped examp
 and every documented default SHALL match the code.
 
 #### Scenario: An operator copies a documented snippet
-- **WHEN** any snippet from `docs/specs/CONFIGURATION.md` or `hearth.example.yaml` is used
+- **WHEN** any snippet from `docs/guides/configuration-reference.md` or `hearth.example.yaml` is used
 - **THEN** it parses
 
 ### Requirement: Public claims match the code

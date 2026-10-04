@@ -148,7 +148,7 @@ func TestWrongAudience_Rejected(t *testing.T) {
 //	(a) A forged token whose `iss` is an attacker-controlled issuer must be
 //	    rejected at the resource server.
 //	(b) The real, Hearth-minted ID token stamps `iss` from `oidc.issuer` (NOT
-//	    `config.token.issuer`), per docs/specs/OIDC.md. We assert the minted
+//	    `config.token.issuer`), per openspec/specs/oidc-provider/spec.md. We assert the minted
 //	    token's `iss` equals the realm's advertised discovery issuer, which is
 //	    derived from oidc.issuer.
 //
@@ -181,7 +181,7 @@ func TestWrongIssuer_RejectedAndIssuerIsOidcIssuer(t *testing.T) {
 	}
 	gotIss, _ := jwtClaimAny(t, hIDToken, "iss").(string)
 	if gotIss == "" || gotIss != rootDisc.Issuer {
-		t.Fatalf("ID token iss %q != oidc.issuer %q (OIDC.md violation)", gotIss, rootDisc.Issuer)
+		t.Fatalf("ID token iss %q != oidc.issuer %q (openspec/specs/oidc-provider/spec.md violation)", gotIss, rootDisc.Issuer)
 	}
 }
 

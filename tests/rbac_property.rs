@@ -1,6 +1,6 @@
 //! Property-based tests for the RBAC engine.
 //!
-//! Covers `docs/specs/TEST_SCENARIOS.md` §"Authorization (RBAC) Engine" — Property:
+//! Covers `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md` §"Authorization (RBAC) Engine" — Property:
 //! - Random role DAGs (no cycles) produce correct reachability
 //! - Random group graphs (no cycles) produce correct transitive membership
 //! - Random assign/unassign sequences maintain invariants

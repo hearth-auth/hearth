@@ -4,7 +4,7 @@
 //! measured at 3 failures in 150 loaded runs under `MALLOC_CHECK_=3` (two
 //! `SIGSEGV`, one `free(): invalid size`), 0 once the primitive was replaced,
 //! and there is no release that fixes it
-//! (`reports/arc-swap-use-after-free-2026-09-21.md`). Every call site moved to
+//! (`https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/arc-swap-use-after-free-2026-09-21.md`). Every call site moved to
 //! `hearth::core::SwapCell` (off the hot path) or `hearth::core::EpochCell`
 //! (on it), and the dependency was removed.
 //!

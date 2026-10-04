@@ -1,6 +1,6 @@
 //! Property tests for Attenuating Authorization Token (AAT) scope-narrowing invariants.
 //!
-//! Covers `docs/specs/TEST_SCENARIOS.md` §"Agent Auth — AAT" — Property:
+//! Covers `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md` §"Agent Auth — AAT" — Property:
 //! - For any parent scope set P and attenuated scope set A where A ⊆ P, derive_aat succeeds.
 //! - For any P and A where A ⊄ P, derive_aat returns AatScopeEscalation.
 

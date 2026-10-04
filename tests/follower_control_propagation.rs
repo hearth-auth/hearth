@@ -16,7 +16,7 @@
 //! restarted, while node B's own storage already held the row that says so.
 //!
 //! The enumeration behind these three is
-//! `reports/follower-bypass-enumeration-2026-09-21.md`.
+//! `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/follower-bypass-enumeration-2026-09-21.md`.
 //!
 //! Two engines over ONE storage stand in for two nodes: that is exactly what a
 //! replicated store looks like from the engine's side, and it is the shape

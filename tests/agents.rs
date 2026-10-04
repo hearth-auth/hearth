@@ -1,6 +1,6 @@
 //! Integration tests for Agent entity CRUD, lifecycle, credentials, and M1 surfaces.
 //!
-//! Covers HEA-1325 / HEA-1405 (AGENT_AUTH.md Phase A):
+//! Covers HEA-1325 / HEA-1405 (openspec/specs/agent-identity/spec.md Phase A):
 //! - A.1: AgentId newtype
 //! - A.2: Agent entity CRUD + lifecycle (Active/Suspended/Revoked)
 //! - A.3: Agent credentials (API key create/list/revoke/verify, owner FK, quota)
@@ -1499,7 +1499,7 @@ async fn agent_rest_crud_positive_http() {
     );
 }
 
-// ── GET /v1/agents: filters and pagination (AGENT_AUTH.md §1.3) ──────────────
+// ── GET /v1/agents: filters and pagination (openspec/specs/agent-identity/spec.md) ──────────────
 //
 // Subsystem audit 2026-09-21 (task 23.11). §1.3 makes two MUSTs of the list
 // endpoint: "List endpoints MUST support filtering by owner_id, status, and
@@ -1649,7 +1649,7 @@ async fn agent_rest_list_supports_filters_and_cursor() {
 
 // ──────────────────────────────────────────────────────────────────────────────
 // POST /v1/agents/{id}/{suspend,reactivate,revoke}
-// (AGENT_AUTH.md §1.2 state machine · subsystem audit 2026-09-21 finding A-1)
+// (openspec/specs/agent-identity/spec.md state machine · subsystem audit 2026-09-21 finding A-1)
 // ──────────────────────────────────────────────────────────────────────────────
 //
 // §1.2 makes the transitions normative — "Active → Suspended → Active

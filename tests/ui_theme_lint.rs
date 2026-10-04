@@ -1,6 +1,6 @@
 //! Theme-token lint fence (HEA-2074).
 //!
-//! `THEME.md` bans pure `#ffffff`; primary text is `graphite-50`. Tailwind's
+//! `docs/dev/THEME.md` bans pure `#ffffff`; primary text is `graphite-50`. Tailwind's
 //! `text-white` compiles to pure white and is therefore forbidden in the UI
 //! templates. axe has no theme-token rule, so this cheap repo-level walk is the
 //! regression fence for finding #1 — it needs no browser and no running server.
@@ -51,7 +51,7 @@ fn no_text_white_in_templates() {
 
     assert!(
         offenders.is_empty(),
-        "`text-white` is banned by THEME.md (use a `graphite-*` token instead); found at:\n{}",
+        "`text-white` is banned by docs/dev/THEME.md (use a `graphite-*` token instead); found at:\n{}",
         offenders.join("\n")
     );
 }

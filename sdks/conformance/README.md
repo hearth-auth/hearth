@@ -72,7 +72,7 @@ case, in case order, on stdout, and nothing else on stdout:
 - `claims` holds the claims the case names, read through the SDK's public
   claims API: `sub` a string, `scope` a string or `null`, `permissions` a list
   (`[]` when absent).
-- `error` is the SDK.md §5 name of the error the SDK raised. PHP reports
+- `error` is the openspec/specs/sdk-support-contract/spec.md name of the error the SDK raised. PHP reports
   `TokenInvalidException` as `TokenInvalidError`. Anything that is not an SDK
   error is `{"outcome": "error", "error": "Unexpected:<type>"}`; it never
   crashes the runner.

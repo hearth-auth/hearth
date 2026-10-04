@@ -16,7 +16,7 @@
 //! * **Validation** only compares epochs. When it sees the persisted epoch
 //!   ahead of the one these caches reflect, it [signals](ControlPlane::signal)
 //!   the reloader: one atomic `fetch_max` and an `unpark`. No lock, no
-//!   allocation, no reload of its own (ARCHITECTURE.md §3.2 rule 3). In
+//!   allocation, no reload of its own (docs/dev/ARCHITECTURE.md §3.2 rule 3). In
 //!   cluster mode the replicated epoch row signals the reloader directly from
 //!   the state machine, so validation is not even the usual trigger.
 //! * **The reloader** is one background thread per engine. It scans storage

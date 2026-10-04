@@ -4,7 +4,7 @@
 //! D-4 taxonomy: adversarial (A-41) + integration (A-42).
 //!
 //! Plan sections §3.44 (session fixation) and §3.45 (password-change
-//! mass-revocation) from `docs/plans/HEA-1114-abuse-prevention.md`.
+//! mass-revocation) from `openspec/specs/abuse-prevention/spec.md`.
 
 mod common;
 

@@ -3153,7 +3153,7 @@ clustering is not supported for production.)
   `docs/guides/upgrading.md` placed the mandatory pre-upgrade backup *before* stopping the server,
   which the data-directory lock makes impossible, and its `backup inspect` sample was two fields
   stale. Full transcript and the code defects found but not fixed:
-  [`reports/cold-first-run-2026-09-21.md`](reports/cold-first-run-2026-09-21.md).
+  [`reports/cold-first-run-2026-09-21.md`](https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/cold-first-run-2026-09-21.md).
 ### Fixed
 - **`hearth backup` says what happened (audit 2026-08-28 §4.9#8, §4.14#6)** — `create`, `restore`,
   `verify` and `inspect` installed no tracing subscriber, so every diagnostic those paths emit was

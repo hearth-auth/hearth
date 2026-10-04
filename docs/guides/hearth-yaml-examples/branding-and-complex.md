@@ -135,7 +135,7 @@ curl -s -X POST "https://auth.example.com/admin/applications" \
 The same client can be declared in `hearth.yaml` with `jwks:` and
 `dpop_bound_access_tokens: true` under `realms.<realm>.applications.<app>`. Pair it with PAR
 (`/as/par`), signed request objects (JAR) and PKCE S256 — see
-[OIDC.md](../../specs/OIDC.md) for each.
+[openspec/specs/oidc-provider/spec.md](https://github.com/hearth-auth/hearth/blob/main/openspec/specs/oidc-provider/spec.md) for each.
 
 ---
 

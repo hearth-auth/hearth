@@ -334,9 +334,9 @@ pub fn default_claim_profile() -> Vec<ClaimMapping> {
 /// The `first_party_only` value a YAML mapping inherits when the operator
 /// declares no release gate for it.
 ///
-/// Two rules, from `AUTHZ_EXPANSION.md` § "Safe defaults for Tier 3 custom
+/// Two rules, from `openspec/specs/custom-permissions/spec.md` § "Safe defaults for Tier 3 custom
 /// claims" and the `claims.mappings[].first_party_only` row in
-/// `CONFIGURATION.md`:
+/// `docs/guides/configuration-reference.md`:
 ///
 /// * A mapping that **overrides a built-in claim** inherits that claim's
 ///   built-in gate. Overriding `email` keeps it released to third-party

@@ -54,7 +54,7 @@ All notable changes to `hearth-python` are documented here.
   **`CheckPermissionResponse`** Pydantic models.
 
 ### Changed
-- SDK brought into conformance with the [Hearth SDK Common Specification](../../docs/specs/SDK.md).
+- SDK brought into conformance with the [Hearth SDK Common Specification](../../openspec/specs/sdk-support-contract/spec.md).
 - All 9 required error types from spec §5 are now exported.
 - Full Claims API (spec §4) implemented on verified token objects.
 - JWKS caching follows the 5-rule contract from spec §2.

@@ -58,7 +58,7 @@ class JwksCache:
 
         :raises JWKSFetchError: if the JWKS endpoint is unreachable or invalid.
         :raises TokenInvalidError: if *kid* is not published after re-fetching
-            (SDK.md §5: an unknown ``kid`` is a bad token, not a fetch failure).
+            (openspec/specs/sdk-support-contract/spec.md: an unknown ``kid`` is a bad token, not a fetch failure).
         """
         if self._is_stale():
             self._fetch()

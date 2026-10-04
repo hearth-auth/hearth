@@ -109,7 +109,7 @@ jobs:
               - 'build.rs'
               # HEA-1862: a PR that only weakens the ROPC gate must still run it.
               - 'scripts/check-ropc-ban.sh'
-              # ARCHITECTURE.md §9.2: the Miri / AddressSanitizer harness and
+              # docs/dev/ARCHITECTURE.md §9.2: the Miri / AddressSanitizer harness and
               # the heap-check runner gate `unsafe-code` and `quality`, so a PR
               # that only edits them must still run them.
               - 'unsafe-check/**'
@@ -179,7 +179,7 @@ jobs:
               # The live conformance harness (sdk-smoke.yml conformance-harness).
               - 'scripts/sdk-conformance.sh'
               - 'scripts/sdk_conformance.py'
-              - 'docs/specs/SDK.md'
+              - 'openspec/specs/sdk-support-contract/spec.md'
               - '.github/workflows/ci.yml'
               # sdk-smoke gates on this filter: its own workflow file and the
               # two quickstart examples it runs must re-run it when edited.
@@ -223,7 +223,7 @@ jobs:
             # Deleted rather than wired: wiring them would fold an advisory
             # workflow into the required check against an explicit decision.
             abuse-coverage:
-              - 'docs/plans/HEA-1114-abuse-prevention.md'
+              - 'openspec/specs/abuse-prevention/spec.md'
               - 'tests/abuse_*.rs'
               - 'scripts/check-abuse-coverage.sh'
               - '.github/workflows/ci.yml'
@@ -486,7 +486,7 @@ jobs:
       - name: Red-test gate — guard self-test
         run: bash scripts/tests/check-red-test-gate.test.sh
 
-      # Task 26.30 / audit reports/subsystem-audit-fuzz-loadtest-2026-09-21.md
+      # Task 26.30 / audit https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/subsystem-audit-fuzz-loadtest-2026-09-21.md
       # F-7: `cargo fuzz run <target> "$SEEDS"` made the TRACKED seed corpus
       # libFuzzer's write directory — two 2 000-run passes left 14-364
       # generated files in each seed directory, and the documented local
@@ -502,7 +502,7 @@ jobs:
       - name: Fuzz corpus write path — guard self-test
         run: bash scripts/tests/check-fuzz-corpus-paths.test.sh
 
-      # Task 26.27 / audit reports/cold-first-run-2026-09-21.md C-7: the
+      # Task 26.27 / audit https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/cold-first-run-2026-09-21.md C-7: the
       # `quickstart` block POST /admin/bootstrap hands a brand-new operator
       # hard-coded port 8420 and cited docs/guides/getting-started.md, which
       # does not exist (it is .mdx). The first commands a stranger copies.
@@ -702,7 +702,7 @@ jobs:
           NEXTEST_PROFILE: ci
         run: make check
 
-      # ARCHITECTURE.md §9.2, the hearth-side half of the `unsafe-code` job
+      # docs/dev/ARCHITECTURE.md §9.2, the hearth-side half of the `unsafe-code` job
       # below: EpochCell's tests and those of every cell built on it — hot
       # tier, block cache, memtable, flush-vs-read, identity caches — under
       # glibc heap checking, three passes. It runs here because `make check`
@@ -911,7 +911,7 @@ jobs:
   # ── SDK spec conformance (folded from sdk-conformance.yml) ───────────────────
 
   sdk-conformance:
-    name: sdk-conformance (docs/specs/SDK.md)
+    name: sdk-conformance
     needs: filter
     # HEA-685: guard with `needs.filter.result == 'success'` — see `quality` above.
     if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-any == 'true') || github.ref == 'refs/heads/main'
@@ -1136,7 +1136,7 @@ jobs:
 
   # ── §3.41 adversarial test-quality gate (HEA-1214) ─────────────────────────
   #
-  # Verifies every A-N row in docs/plans/HEA-1114-abuse-prevention.md has at
+  # Verifies every A-N row in openspec/specs/abuse-prevention/spec.md has at
   # least one adversarial test in tests/abuse_*.rs. Grep-only — no Rust build.
   # Runs on every PR that touches the plan doc, abuse tests, the gate script,
   # or this workflow file. Always runs on main and scheduled events.
@@ -1361,7 +1361,7 @@ jobs:
       - name: cargo check (MSRV)
         run: cargo check --workspace --locked --features hearth/dev-endpoints
 
-  # ── Unsafe code: Miri + AddressSanitizer (ARCHITECTURE.md §9.2) ────────────
+  # ── Unsafe code: Miri + AddressSanitizer (docs/dev/ARCHITECTURE.md §9.2) ────────────
   #
   # §9.2: "All unsafe code MUST be covered by Miri tests where feasible, and by
   # address sanitizer runs in CI." The unsafe blocks are EpochCell's

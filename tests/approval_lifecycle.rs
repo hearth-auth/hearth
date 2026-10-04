@@ -787,7 +787,7 @@ async fn create_approval_request_rejected_for_unknown_agent() {
 ///
 /// So revoking an agent stopped everything except the one credential that is
 /// already a standing permission to act, for the rest of its five-minute life.
-/// `AGENT_AUTH.md` §1.2 documented that as a known exception rather than
+/// `openspec/specs/agent-identity/spec.md` documented that as a known exception rather than
 /// claiming full revocation, which was the honest thing to do — and this
 /// closes it, so the exception goes too.
 ///

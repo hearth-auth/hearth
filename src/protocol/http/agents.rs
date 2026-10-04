@@ -1,4 +1,4 @@
-//! Agent management endpoints (A.3, A.4, A.7 — AGENT_AUTH.md Phase A).
+//! Agent management endpoints (A.3, A.4, A.7 — openspec/specs/agent-identity/spec.md Phase A).
 //!
 //! Routes:
 //!   GET  /.well-known/agent.json          — Agent Card (by `?agent_id=`)
@@ -302,7 +302,7 @@ async fn create_agent(
 
 /// Query parameters for `GET /v1/agents`.
 ///
-/// AGENT_AUTH.md §1.3 requires the list endpoint to filter by `owner_id`,
+/// openspec/specs/agent-identity/spec.md requires the list endpoint to filter by `owner_id`,
 /// `status` and capability, and to paginate with the same cursor pattern as
 /// every other list endpoint. The handler previously passed
 /// `ListAgentsQuery::default()` and a fixed limit of 100 with no extractor at
@@ -566,7 +566,7 @@ async fn delete_agent(
     }
 }
 
-/// The `AgentStatus` transitions AGENT_AUTH.md §1.2 makes normative.
+/// The `AgentStatus` transitions openspec/specs/agent-identity/spec.md makes normative.
 #[derive(Clone, Copy)]
 enum LifecycleTransition {
     Suspend,
@@ -587,7 +587,7 @@ impl LifecycleTransition {
 
 /// Shared body for `POST /v1/agents/{id}/{suspend,reactivate,revoke}`.
 ///
-/// AGENT_AUTH.md §1.2 makes the state machine normative — `Active → Suspended
+/// openspec/specs/agent-identity/spec.md makes the state machine normative — `Active → Suspended
 /// → Active` (reversible) and `Active|Suspended → Revoked` (terminal) — and
 /// twelve enforcement points in the identity engine refuse a non-`Active`
 /// agent (AAT issue/validate/derive, approval create/approve, SPIFFE SVID

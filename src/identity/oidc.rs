@@ -222,7 +222,7 @@ impl Default for RegisterClientRequest {
             require_consent: true,
             client_logo_url: None,
             slug: None,
-            // Per AUTHZ_EXPANSION.md: DCR-registered clients default to
+            // Per openspec/specs/custom-permissions/spec.md: DCR-registered clients default to
             // ThirdParty trust. Managed (YAML) clients should set trust_level
             // explicitly. Choosing ThirdParty here preserves the existing
             // "consent always required" behavior for any caller that doesn't

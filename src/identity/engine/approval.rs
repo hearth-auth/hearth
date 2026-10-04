@@ -1,4 +1,4 @@
-//! Approval request lifecycle engine methods (AGENT_AUTH.md §9 / Phase C.4–C.5).
+//! Approval request lifecycle engine methods (openspec/specs/agent-approvals/spec.md / Phase C.4–C.5).
 //!
 //! Implements: create, get, approve (→ capability token), deny, list,
 //! and durable webhook notification (C.5).
@@ -540,7 +540,7 @@ impl EmbeddedIdentityEngine {
     ///
     /// The doc comment said "Called by the startup recovery scan and the
     /// periodic background task"; neither existed, and `#[allow(dead_code)]`
-    /// kept the compiler quiet about it. So `AGENT_AUTH.md`'s "durable
+    /// kept the compiler quiet about it. So `openspec/specs/agent-identity/spec.md`'s "durable
     /// at-least-once" delivery was at-MOST-once — a failed webhook was never
     /// retried — and every undelivered request leaked its outbox row forever,
     /// because only a successful delivery deletes it.
@@ -692,7 +692,7 @@ impl EmbeddedIdentityEngine {
         // subjects and both token-exchange subjects. This one did not, so
         // revoking an agent stopped everything except the one credential that
         // is already a standing permission to act, for the rest of its
-        // five-minute life. `AGENT_AUTH.md` §1.2 documented that as a known
+        // five-minute life. `openspec/specs/agent-identity/spec.md` documented that as a known
         // exception rather than claiming full revocation; this closes it.
         //
         // It sits BEFORE the `put_if_absent` below for the same reason task

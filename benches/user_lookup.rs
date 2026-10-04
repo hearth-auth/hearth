@@ -1,6 +1,6 @@
 //! Criterion benchmarks for the identity engine.
 //!
-//! Covers `TEST_SCENARIOS.md` § Identity Engine — Benchmark:
+//! Covers `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md` § Identity Engine — Benchmark:
 //! 1. User lookup by ID: p50 < 20 μs, p99 < 200 μs
 //! 2. User lookup by email: p50 < 20 μs, p99 < 200 μs
 //! 3. User creation with Argon2id: p50 < 50 ms, p99 < 100 ms

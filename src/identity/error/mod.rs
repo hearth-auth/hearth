@@ -338,7 +338,7 @@ pub enum IdentityError {
     ///
     /// `mfa_methods` restricts both enrolment and presentation: a method the
     /// operator did not list may not be enrolled and may not be presented
-    /// (CONFIGURATION.md, audit 2026-08-28 §4.18#10). An absent list is no
+    /// (docs/guides/configuration-reference.md, audit 2026-08-28 §4.18#10). An absent list is no
     /// restriction at all, so this is never raised for it.
     MfaMethodNotAllowed {
         /// The factor that was attempted: `"totp"`, `"webauthn"` or

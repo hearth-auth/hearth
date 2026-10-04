@@ -3,9 +3,9 @@
 //! Two constant sets, per the HEA-1787 plan §3/§6:
 //!
 //! * `SPEC_P99_ENGINE_*_US` — the **in-process engine** p99 targets, cited
-//!   verbatim from `docs/specs/TESTING.md` lines 143–152 ("Benchmark targets
-//!   and thresholds, from vision doc §7.1"). These are the physics floor: raw
-//!   op latency with no wire overhead. They are NOT what this harness measures.
+//!   verbatim from `openspec/specs/performance-budgets/spec.md` (each constant
+//!   names its requirement). These are the physics floor: raw op latency with
+//!   no wire overhead. They are NOT what this harness measures.
 //! * `HTTP_BUDGET_P99_*_US` — the HTTP-level p99 budgets this harness asserts
 //!   against. Each is its engine target **plus a documented loopback
 //!   envelope**: the extra cost of `loopback → axum → handler → engine →
@@ -19,28 +19,35 @@
 //! asserting it would fail every run and prove nothing.
 
 /// Engine p99 — token validation (JWT verify + session lookup).
-/// Source: `docs/specs/TESTING.md:147` (`< 500 us`).
+/// Source: `openspec/specs/performance-budgets/spec.md`, requirement
+/// "Token validation budget" (p99 `< 500 μs`).
 pub const SPEC_P99_ENGINE_TOKEN_VALIDATION_US: u64 = 500;
 
 /// Engine p99 — session lookup by ID.
-/// Source: `docs/specs/TESTING.md:148` (`< 100 us`).
+/// Source: `openspec/specs/performance-budgets/spec.md`, requirement
+/// "Session lookup budget" (p99 `< 100 μs`).
 pub const SPEC_P99_ENGINE_SESSION_LOOKUP_US: u64 = 100;
 
 /// Engine p99 — permission check (direct relationship). Not a load journey
 /// (authorization is off the hot path — permissions are baked into the JWT at
-/// issue time), cited for completeness of the sourced set.
-/// Source: `docs/specs/TESTING.md:149` (`< 200 us`).
-// Not mapped to a load journey (authorization is off the hot path), but cited
-// so the sourced-budget set is complete and the guard test below covers it.
+/// issue time).
+/// Source: none. The Zanzibar-era "Permission check (direct relationship)"
+/// budget (`< 200 us`, formerly TESTING.md) was dropped when the budgets moved
+/// to `openspec/specs/performance-budgets/spec.md`; permissions are checked
+/// from JWT claims ("RBAC resolution and claim-lookup budgets").
+// Not mapped to a load journey and no longer sourced; kept only so the guard
+// test below covers the value.
 #[allow(dead_code)]
 pub const SPEC_P99_ENGINE_PERMISSION_CHECK_US: u64 = 200;
 
 /// Engine p99 — user lookup by email/ID.
-/// Source: `docs/specs/TESTING.md:151` (`< 200 us`).
+/// Source: `openspec/specs/performance-budgets/spec.md`, requirement
+/// "User lookup budget" (p99 `< 200 μs`).
 pub const SPEC_P99_ENGINE_USER_LOOKUP_US: u64 = 200;
 
 /// Engine p99 — token issuance (full OAuth2 flow).
-/// Source: `docs/specs/TESTING.md:152` (`< 5 ms`).
+/// Source: `openspec/specs/performance-budgets/spec.md`, requirement
+/// "Token issuance budget" (p99 `< 5 ms`).
 pub const SPEC_P99_ENGINE_TOKEN_ISSUANCE_US: u64 = 5_000;
 
 /// Loopback envelope added to every engine target to form the HTTP budget.
@@ -49,6 +56,8 @@ pub const SPEC_P99_ENGINE_TOKEN_ISSUANCE_US: u64 = 5_000;
 /// loopback. `~1 ms` covers axum routing, request/response (de)serialization,
 /// and loopback syscall overhead. CTO-approved in the HEA-1787 plan (§6
 /// proposal "engine target + ~1 ms loopback allowance"; §9 decision 3).
+/// Source: `openspec/specs/performance-budgets/spec.md`, requirement
+/// "Load-test journeys are graded against HTTP budgets" (1 ms envelope).
 pub const LOOPBACK_ENVELOPE_P99_US: u64 = 1_000;
 
 /// HTTP p99 budget — validate journey (`POST /introspect`).
@@ -159,8 +168,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn engine_constants_match_testing_md() {
-        // Guards against a silent edit drifting away from TESTING.md:143-152.
+    fn engine_constants_match_performance_budgets() {
+        // Guards against a silent edit drifting away from the budgets in
+        // `openspec/specs/performance-budgets/spec.md` ("Token validation
+        // budget", "Session lookup budget", "User lookup budget", "Token
+        // issuance budget"). PERMISSION_CHECK has no requirement any more
+        // (dropped Zanzibar-era budget); its value is pinned only.
         assert_eq!(SPEC_P99_ENGINE_TOKEN_VALIDATION_US, 500);
         assert_eq!(SPEC_P99_ENGINE_SESSION_LOOKUP_US, 100);
         assert_eq!(SPEC_P99_ENGINE_PERMISSION_CHECK_US, 200);

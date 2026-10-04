@@ -603,7 +603,7 @@ mod tests {
 
     // ===== Phase A: P0 Fast Unit Tests =====
 
-    // TEST_SCENARIOS.md: "Recently accessed records remain in hot tier across subsequent reads"
+    // https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md: "Recently accessed records remain in hot tier across subsequent reads"
 
     #[test]
     fn hot_tier_recently_accessed_remains_hot() {
@@ -645,7 +645,7 @@ mod tests {
         }
     }
 
-    // TEST_SCENARIOS.md: "Records not accessed within eviction window are demoted to cold tier"
+    // https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md: "Records not accessed within eviction window are demoted to cold tier"
 
     #[test]
     fn hot_tier_unaccessed_evicted() {
@@ -675,7 +675,7 @@ mod tests {
         assert_eq!(tier.get(&realm, b"lonely"), None);
     }
 
-    // TEST_SCENARIOS.md: "Clock-based LRU approximation evicts least-recently-used records correctly"
+    // https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md: "Clock-based LRU approximation evicts least-recently-used records correctly"
 
     #[test]
     fn clock_lru_evicts_least_recently_used() {
@@ -729,7 +729,7 @@ mod tests {
         );
     }
 
-    // TEST_SCENARIOS.md: "Hot tier auto-sizes based on available system memory / cgroup memory limit"
+    // https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md: "Hot tier auto-sizes based on available system memory / cgroup memory limit"
 
     #[test]
     fn hot_tier_config_accepts_custom_capacity() {
@@ -1238,7 +1238,7 @@ mod tests {
         ]
     }
 
-    // TEST_SCENARIOS.md: "Random access patterns produce correct eviction and promotion behavior"
+    // https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md: "Random access patterns produce correct eviction and promotion behavior"
     proptest! {
         #[test]
         fn proptest_random_access_correct_eviction(
@@ -1304,7 +1304,7 @@ mod tests {
         }
     }
 
-    // TEST_SCENARIOS.md: "Power-law access distribution: hot tier converges to active working set"
+    // https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md: "Power-law access distribution: hot tier converges to active working set"
     proptest! {
         #[test]
         fn proptest_power_law_converges(seed in any::<u64>()) {

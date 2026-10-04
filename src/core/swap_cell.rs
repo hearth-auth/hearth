@@ -26,7 +26,7 @@
 //! Everywhere *except* the hot path. `CLAUDE.md` forbids locks on the read path
 //! of `validate_token`, `lookup_session` and `lookup_user`; those sites use the
 //! epoch-reclaimed [`EpochCell`](crate::core::EpochCell) instead (task 26.5,
-//! enumerated in `reports/arc-swap-use-after-free-2026-09-21.md`).
+//! enumerated in `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/arc-swap-use-after-free-2026-09-21.md`).
 //!
 //! # Why this type lives in `core`
 //!

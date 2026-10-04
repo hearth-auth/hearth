@@ -291,12 +291,12 @@ fn a29c_saml_find_element_range_finds_correct_assertion() {
 /// belt-and-suspenders event-cap protection on the signature-verification path.
 ///
 /// This sentinel asserts the shared constant value so any change forces an
-/// explicit update of ABUSE.md §A-29d and §A-35b together.
+/// explicit update of openspec/specs/abuse-prevention/spec.md §A-29d and §A-35b together.
 #[test]
 fn a29d_saml_entity_expansion_cap_constant_sentinel() {
     assert_eq!(
         MAX_SAML_XML_EVENTS, 10_000,
-        "MAX_SAML_XML_EVENTS changed — update ABUSE.md §A-29d and §A-35b"
+        "MAX_SAML_XML_EVENTS changed — update openspec/specs/abuse-prevention/spec.md §A-29d and §A-35b"
     );
 }
 

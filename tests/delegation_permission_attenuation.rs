@@ -1,4 +1,4 @@
-//! Regression tests for AUTHORIZATION.md § 16 (HEA-1726).
+//! Regression tests for openspec/specs/rbac-token-claims/spec.md (HEA-1726).
 //!
 //! Prior to the fix, delegated (`act`) tokens copied the subject's RBAC `permissions`
 //! verbatim. An actor with zero RBAC grants could acquire admin-level access by
@@ -175,7 +175,7 @@ async fn actor_with_no_permissions_yields_empty_delegated_permissions() {
 
     // Subject has significant RBAC grants. Use "openid" as the common scope so
     // the scope intersection in token exchange is non-empty ("openid" has no permission
-    // filter per AUTHORIZATION.md § 9.3, so all RBAC permissions flow through).
+    // filter per openspec/specs/rbac-admin-api/spec.md, so all RBAC permissions flow through).
     let subject_token = make_subject_token_with_perms(
         &h,
         &realm,

@@ -1,6 +1,6 @@
 //! Integration tests for HEA-922 — three access-token authorization modes.
 //!
-//! Covers `TEST_SCENARIOS.md` § Phase A:
+//! Covers `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md` § Phase A:
 //! - #1  Embedded mode → permissions embedded in JWT
 //! - #2  Introspection mode → JWT has no RBAC claims; `/introspect` returns live data
 //! - #3  Scope-bundle filtering preserved in embedded mode

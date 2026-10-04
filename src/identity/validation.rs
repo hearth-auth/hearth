@@ -560,7 +560,7 @@ pub(crate) fn validate_slug(slug: &str) -> Result<String, IdentityError> {
 /// Sub-resource path keywords reserved under `/ui/admin/realms/{name}/...`.
 ///
 /// A realm name MUST NOT match any of these because they would shadow a
-/// route segment, making the realm unaddressable. See `docs/specs/UI_ROUTING.md`
+/// route segment, making the realm unaddressable. See `openspec/specs/ui-routing/spec.md`
 /// rule R-4. Adding a new sub-resource keyword to the route map MUST also
 /// add it here.
 const RESERVED_REALM_NAMES: &[&str] = &[
@@ -587,7 +587,7 @@ const MAX_REALM_NAME_LENGTH: usize = 63;
 
 /// Validates a realm name. Realm names ride in URL paths, so they must
 /// be URL-safe AND must not collide with any admin sub-resource keyword
-/// (R-4 of `docs/specs/UI_ROUTING.md`).
+/// (R-4 of `openspec/specs/ui-routing/spec.md`).
 ///
 /// Allowed characters: ASCII alphanumeric, hyphen, and underscore. This
 /// is intentionally looser than `validate_slug` (which forbids

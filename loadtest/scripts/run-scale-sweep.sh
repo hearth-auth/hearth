@@ -516,7 +516,7 @@ lines = [
     f'**Issue:** HEA-1876 · **Parent:** HEA-1867 · **Phase:** 3',
     f'**Date:** {artifact["timestamp_utc"][:10]}  **Git SHA:** `{artifact["git_sha"]}`',
     f'**Host:** `dev-ryzen-7840hs` — AMD Ryzen 7 7840HS, {artifact["host"]["ram_available_gib"]} GiB RAM available',
-    f'**Grading contract:** `docs/perf/PERFORMANCE_REPORT_1_0.md` §3.3 (K1–K3) and §3.4 (E4)',
+    f'**Grading contract:** https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/perf/PERFORMANCE_REPORT_1_0.md §3.3 (K1–K3) and §3.4 (E4)',
     '',
     '---',
     '',
@@ -653,7 +653,7 @@ if rss_b is not None:
         f'- Data points (corpus → RSS bytes): {list(zip(rss_xs, rss_ys))}',
         '',
         '> This is the per-user cost the board asked for. The slope — not the ratio — is the',
-        '> legitimate number. PERFORMANCE_REPORT_1_0.md §4 explains why ratio-derived estimates',
+        '> legitimate number. https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/perf/PERFORMANCE_REPORT_1_0.md §4 explains why ratio-derived estimates',
         '> (e.g., the withdrawn ~12 KB/user figure) are artifacts.',
     ]
 else:

@@ -6,7 +6,7 @@
 //! `arc-swap` 1.9.2 corrupts the heap under the `load` + `rcu` pattern this
 //! codebase used: 3 failures in 150 loaded runs under `MALLOC_CHECK_=3` (two
 //! `SIGSEGV`, one `free(): invalid size`), 0 once the primitive was replaced.
-//! See `reports/arc-swap-use-after-free-2026-09-21.md`. [`SwapCell`] fixed the
+//! See `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/arc-swap-use-after-free-2026-09-21.md`. [`SwapCell`] fixed the
 //! sites off the hot path with a read lock. The hot path — `validate_token`,
 //! `lookup_session` and every storage read — may not take one (`CLAUDE.md`,
 //! hot-path rule 3), so this cell uses epoch-based reclamation from
@@ -72,7 +72,7 @@
 //!   2,000,000 loads.
 //!
 //! `tests/epoch_cell_hot_path.rs` gates both, the second with the writer
-//! running during the measurement. `ARCHITECTURE.md` §3.2 records this
+//! running during the measurement. `docs/dev/ARCHITECTURE.md` §3.2 records this
 //! bookkeeping as the one allocation the hot path permits.
 //!
 //! A separate collector keeps everything else out of that slice. On the
@@ -1003,7 +1003,7 @@ mod tests {
     /// `libc_malloc_debug.so` preloaded (glibc 2.34+ ignores the variable
     /// without it) and `MALLOC_PERTURB_=165` — so a use-after-free aborts or
     /// reads garbage rather than intact stale memory; see
-    /// `reports/arc-swap-use-after-free-2026-09-21.md`. `make heap-check` does
+    /// `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/arc-swap-use-after-free-2026-09-21.md`. `make heap-check` does
     /// exactly that (CI: the `quality` job), and `make asan` runs it under
     /// AddressSanitizer.
     #[test]

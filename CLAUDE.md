@@ -189,22 +189,30 @@ curl -s -X POST \
 
 ## Reference Documents
 
-Read these before writing code. They are the canonical source of truth:
+Read these before writing code. They are the canonical source of truth.
 
-- `docs/specs/ARCHITECTURE.md` — structural rules (MUST/SHOULD per RFC 2119).
-- `docs/specs/AUTHORIZATION.md` — normative spec for roles, groups, permissions, JWT claims, SDK contract.
-- `docs/specs/AUTHZ_EXPANSION.md` — custom permissions, scopes, configurable claim profiles. Hybrid spec + phase tracker.
-- `docs/specs/OIDC.md` — OIDC + OAuth 2.0 + FAPI 2.0 security profile. Normative for FAPI work.
-- `docs/specs/CONFIGURATION.md` — full `hearth.yaml` reference.
-- `docs/specs/UI_ROUTING.md` — realm-name and admin-route reservation rules.
-- `docs/specs/TESTING.md` — eight testing layers, TDD workflow, tooling, CI tiers.
-- `docs/specs/TEST_SCENARIOS.md` — granular checkbox-tracked scenario checklist.
-- `docs/specs/IMPLEMENTATION_ORDER.md` — **mandatory build sequence.** Do not skip ahead.
-- `docs/specs/PROTO.md` — **proto authoring guide.** RPC naming, `google.api.http` conventions, `json_name`, backward-compat rules. Read before touching `proto/`.
-- `docs/specs/SDK.md` — common SDK contract every Hearth client SDK must satisfy.
-- `docs/specs/AGENT_AUTH.md` — agent identity & authorization. **All phases shipped (M1–M5): agent entity, DPoP/RFC 9449, token exchange/RFC 8693, MCP authorization, tool-permission grammar, approval lifecycle, AATs, Phase D advanced routes.** Refer to the status banner at the top for the definitive capability list.
+### Normative specs — OpenSpec
+
+What Hearth MUST do lives in `openspec/specs/<capability>/spec.md`, one capability per folder
+(`openspec list --specs`). Change a spec only through an OpenSpec change (`/opsx:propose`); the
+change's delta specs merge into `openspec/specs/` when it is archived. Until then, the delta
+specs of the active changes in `openspec/changes/` are part of the contract too.
+
+| Area | Capabilities |
+|------|--------------|
+| Authorization | `rbac-model`, `rbac-token-claims`, `rbac-admin-api`, `custom-permissions`, `credential-hashing` |
+| OAuth 2.0 / OIDC | `oidc-provider`, `client-authentication`, `dpop`, `rp-initiated-logout` |
+| Agent auth | `agent-identity`, `mcp-authorization`, `delegated-authorization`, `tool-permissions`, `agent-approvals` |
+| Other | `saml-sp-profile`, `sdk-support-contract`, `abuse-prevention`, `ui-routing`, `performance-budgets` |
+
+### Contributor docs
+
+- `docs/dev/ARCHITECTURE.md` — structural rules (MUST/SHOULD per RFC 2119).
+- `docs/dev/TESTING.md` — eight testing layers, TDD workflow, tooling, CI tiers.
+- `docs/dev/PROTO.md` — **proto authoring guide.** RPC naming, `google.api.http` conventions, `json_name`, backward-compat rules. Read before touching `proto/`.
+- `docs/dev/THEME.md` — mandatory design theme for all UI code.
+- `docs/guides/configuration-reference.md` — full `hearth.yaml` reference.
 - `docs/vision/VISION.md` — design rationale, performance targets, competitive positioning.
-- `docs/specs/THEME.md` — mandatory design theme for all UI code.
 
 ## Workspace Structure
 
@@ -252,7 +260,7 @@ Six modules with strict downward dependency flow:
 Hot path = `validate_token()`, `lookup_session()`, `lookup_user()` when data is in hot tier. Authorization is NOT on the hot path (permissions are embedded in the JWT at issue time).
 
 Hot path code MUST obey ALL of:
-1. **Zero heap allocations** — no `Box::new`, `Vec::new`, `String::from`, `format!()`, `to_string()`. One exception: `EpochCell`'s epoch-collector bookkeeping while cells are being written (at most 1 allocation per 1,024 loads per thread; see `docs/specs/ARCHITECTURE.md` §3.2). No other allocation, amortised or not.
+1. **Zero heap allocations** — no `Box::new`, `Vec::new`, `String::from`, `format!()`, `to_string()`. One exception: `EpochCell`'s epoch-collector bookkeeping while cells are being written (at most 1 allocation per 1,024 loads per thread; see `docs/dev/ARCHITECTURE.md` §3.2). No other allocation, amortised or not.
 2. **No syscalls for reads** — serve from memory-mapped structures or in-process data.
 3. **No locks on read path** — no mutexes, no `RwLock` write locks. Use epoch-based reclamation.
 4. **No yielding** — MUST NOT `.await` on I/O. Complete synchronously.
@@ -275,7 +283,7 @@ Everything else (user creation, hashing, token issuance, WAL writes, admin ops) 
 
 **A PR without a test written *before* the implementation is incomplete.**
 
-Avoid false-confidence anti-patterns (vacuous `is_ok()`/`is_err()` asserts, zero-assert test bodies, stale ignores, etc.) — see `docs/specs/TESTING.md` § "Test Quality Anti-Patterns" for the full A–I taxonomy.
+Avoid false-confidence anti-patterns (vacuous `is_ok()`/`is_err()` asserts, zero-assert test bodies, stale ignores, etc.) — see `docs/dev/TESTING.md` § "Test Quality Anti-Patterns" for the full A–I taxonomy.
 
 ### Testing Tooling
 
@@ -333,7 +341,7 @@ Avoid false-confidence anti-patterns (vacuous `is_ok()`/`is_err()` asserts, zero
 
 ## UI Theme (MANDATORY)
 
-All UI code MUST comply with `docs/specs/THEME.md`. Read it before touching anything in `templates/ui/`.
+All UI code MUST comply with `docs/dev/THEME.md`. Read it before touching anything in `templates/ui/`.
 
 **Key rules:**
 - **Dark-mode only.** No light mode, no `dark:` Tailwind prefixes, no theme toggle.

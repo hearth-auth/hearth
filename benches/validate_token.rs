@@ -149,7 +149,7 @@ struct BenchState {
     access_token: String,
     /// A token whose `aud` also names a protected resource, validated while
     /// the realm holds an audience cutoff for another (removed) resource — so
-    /// the gates also cover the audience-cutoff lookup (AGENT_AUTH.md §2.5).
+    /// the gates also cover the audience-cutoff lookup (openspec/specs/mcp-authorization/spec.md).
     resource_access_token: String,
 }
 

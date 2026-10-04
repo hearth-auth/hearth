@@ -155,11 +155,12 @@ make unsafe-check   # Miri + AddressSanitizer (unsafe-check/) + glibc heap check
 
 `make miri` and `make asan` run on the nightly `unsafe-check/rust-toolchain.toml`
 pins (rustup installs it on first use); `make heap-check` needs glibc 2.34 or
-later. CI runs all three (`docs/specs/ARCHITECTURE.md` §9.2).
+later. CI runs all three (`docs/dev/ARCHITECTURE.md` §9.2).
 
-See [`CLAUDE.md`](CLAUDE.md) and [`docs/specs/`](docs/specs/) for the
-architecture, testing, and implementation-order rules every change
-must follow.
+See [`CLAUDE.md`](CLAUDE.md) and [`docs/dev/`](docs/dev/) for the
+architecture and testing rules every change must follow. Normative
+behaviour lives in [`openspec/specs/`](openspec/specs/); change it
+through an OpenSpec change (`openspec/changes/`).
 
 ## Performance benchmarks and CI gates
 
@@ -187,8 +188,8 @@ make bench-gate          # compile + run all three gate binaries
 | `demotion_latency` | During-demotion read (eviction churn) | — | 500 µs |
 | `demotion_latency` | Post-demotion read (re-promotion) | — | 500 µs |
 
-Thresholds derive from `docs/specs/ARCHITECTURE.md` § Hot Path Rules
-and `docs/specs/TEST_SCENARIOS.md` benchmark scenarios. The demotion
+Thresholds derive from `docs/dev/ARCHITECTURE.md` § Hot Path Rules
+and [`openspec/specs/performance-budgets/spec.md`](openspec/specs/performance-budgets/spec.md). The demotion
 thresholds are intentionally generous (500 µs) to tolerate the memtable
 fallback path during clock-sweep eviction without false CI failures.
 

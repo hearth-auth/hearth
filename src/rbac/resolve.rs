@@ -1,6 +1,6 @@
 //! Permission resolution algorithm.
 //!
-//! Implements AUTHORIZATION.md § 3: transitive group BFS, assignment
+//! Implements openspec/specs/rbac-model/spec.md: transitive group BFS, assignment
 //! collection (filtered by realm/org scope), role composition DFS,
 //! permission union, and OAuth-scope narrowing.
 //!
@@ -31,11 +31,11 @@ pub(crate) const MAX_GROUP_DEPTH: usize = 10;
 pub(crate) const MAX_GROUP_BREADTH: usize = 1000;
 /// Maximum depth for role-composition DFS.
 pub(crate) const MAX_ROLE_DEPTH: usize = 10;
-/// Maximum permissions in a single resolved token (AUTHORIZATION.md § 2.6).
+/// Maximum permissions in a single resolved token (openspec/specs/rbac-model/spec.md).
 pub(crate) const MAX_PERMISSIONS_PER_TOKEN: usize = 100;
-/// Maximum role names in a single resolved token (AUTHORIZATION.md § 2.6).
+/// Maximum role names in a single resolved token (openspec/specs/rbac-model/spec.md).
 pub(crate) const MAX_ROLES_PER_TOKEN: usize = 50;
-/// Maximum group names in a single resolved token (AUTHORIZATION.md § 2.6).
+/// Maximum group names in a single resolved token (openspec/specs/rbac-model/spec.md).
 pub(crate) const MAX_GROUPS_PER_TOKEN: usize = 50;
 
 /// Rate window for `OrphanedReferenceSkipped` events: at most one emit per
@@ -292,7 +292,7 @@ pub(crate) fn resolve_full<R: Resolver + ?Sized>(
     })
 }
 
-/// Enforces the per-token size caps (AUTHORIZATION.md § 2.6). Hard caps prevent
+/// Enforces the per-token size caps (openspec/specs/rbac-model/spec.md). Hard caps prevent
 /// oversized JWTs from escaping the issuance path.
 fn enforce_token_caps(
     permissions: &[Permission],
@@ -400,7 +400,7 @@ pub(crate) fn resolve_for_granted_scopes<R: Resolver + ?Sized>(
                 admitted.extend(list);
             }
             // A raw permission scope is a synthetic single-permission scope
-            // (AUTHZ_EXPANSION.md §"Resolution rule", rule 2).
+            // (openspec/specs/custom-permissions/spec.md §"Resolution rule", rule 2).
             _ if kind == Some(ScopeKind::Permission) => {
                 narrowing = true;
                 if let Ok(permission) = Permission::new(scope.as_str()) {
@@ -430,7 +430,7 @@ pub(crate) fn resolve_for_granted_scopes<R: Resolver + ?Sized>(
     })
 }
 
-/// Scope-resolution pipeline per `AUTHZ_EXPANSION.md` §"Resolution rule".
+/// Scope-resolution pipeline per `openspec/specs/custom-permissions/spec.md` §"Resolution rule".
 ///
 /// Classifies each requested scope string, performs full-satisfiability
 /// checking against the user's effective permission set, and applies
@@ -1098,7 +1098,7 @@ mod tests {
         }
     }
 
-    // === Worked example (AUTHORIZATION.md § 3.1) ===
+    // === Worked example (openspec/specs/rbac-model/spec.md) ===
 
     #[test]
     fn worked_example_resolves_to_union_of_docs_perms() {
@@ -1629,7 +1629,7 @@ mod tests {
     }
 
     /// A raw permission scope admits exactly that permission
-    /// (AUTHZ_EXPANSION.md §"Resolution rule", rule 2).
+    /// (openspec/specs/custom-permissions/spec.md §"Resolution rule", rule 2).
     #[test]
     fn granted_scopes_a_raw_permission_scope_admits_that_permission() {
         let (fake, realm, alice) = granted_scopes_fixture();

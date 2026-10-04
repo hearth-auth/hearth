@@ -539,7 +539,7 @@ async fn rbac_resource_bundles_follow_yaml() {
     assert!(!rbac_grants_bundle(&h, &realm, &user, RS2), "list emptied");
 }
 
-// ── Removing a resource stops its tokens (AGENT_AUTH.md §2.5) ────────────────
+// ── Removing a resource stops its tokens (openspec/specs/mcp-authorization/spec.md) ────────────────
 
 fn resource_bound_pair(
     h: &common::TestHarness,

@@ -82,7 +82,7 @@ final class TokenVerifier implements TokenVerifierInterface
         try {
             $key = $this->jwksClient->getKey(is_string($kid) ? $kid : '');
         } catch (JwksKeyNotFoundException $e) {
-            // SDK.md §5: an unknown signing key makes the token invalid;
+            // openspec/specs/sdk-support-contract/spec.md: an unknown signing key makes the token invalid;
             // JWKSFetchException stays for a failing JWKS endpoint.
             throw new TokenInvalidException('JWT signed with an unknown key', 0, $e);
         }

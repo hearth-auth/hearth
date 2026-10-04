@@ -18,7 +18,7 @@
   <td class="px-4 py-3 text-right">
     <div class="flex items-center justify-end gap-3">
       {% if t.status()|fmt("{:?}") == "Active" %}
-        {# Realm switching is a navigation, not a state change (UI_ROUTING.md R-6).
+        {# Realm switching is a navigation, not a state change (openspec/specs/ui-routing/spec.md R-6).
            Hard-link straight into the workspace at /ui/admin/realms/{name}. #}
         <a href="/ui/admin/realms/{{ t.name() }}"
            class="text-xs font-medium text-ht-content-brand hover:text-ht-brand-deep">

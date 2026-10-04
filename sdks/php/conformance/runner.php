@@ -16,7 +16,7 @@ use Hearth\HearthClient;
 
 require __DIR__ . '/../vendor/autoload.php';
 
-/** SDK.md §5 error names. PHP's `...Exception` classes report as `...Error`. */
+/** openspec/specs/sdk-support-contract/spec.md error names. PHP's `...Exception` classes report as `...Error`. */
 const SPEC_ERRORS = [
     'ConfigurationError', 'DiscoveryError', 'JWKSFetchError', 'TokenExpiredError',
     'TokenNotYetValidError', 'TokenInvalidError', 'TokenIssuerError', 'TokenAudienceError',
@@ -24,7 +24,7 @@ const SPEC_ERRORS = [
 ];
 
 /**
- * Maps a throwable to its SDK.md §5 name, walking up the class hierarchy, or
+ * Maps a throwable to its openspec/specs/sdk-support-contract/spec.md name, walking up the class hierarchy, or
  * `Unexpected:<class>` when it is not an SDK error.
  */
 function errorName(Throwable $e): string

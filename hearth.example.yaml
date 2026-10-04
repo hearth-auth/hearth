@@ -910,7 +910,7 @@ onboarding:
 
 
 # =============================================================================
-# Agent Authentication (AGENT_AUTH.md)
+# Agent Authentication (openspec/specs/agent-identity/spec.md)
 # =============================================================================
 #
 # Staged capability flags for the agent identity feature set.

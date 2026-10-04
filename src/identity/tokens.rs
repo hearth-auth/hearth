@@ -267,7 +267,7 @@ pub struct TokenClaims {
     pub tid: String,
     /// Organization ID — present only when the token was issued in an
     /// organization context. Enables org-scoped role assignments per
-    /// `AUTHORIZATION.md § 2.4`.
+    /// `openspec/specs/rbac-model/spec.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oid: Option<String>,
     /// Token type: `"access"` or `"refresh"`.
@@ -933,7 +933,7 @@ pub struct IssueTokenRequest<'a> {
     /// Must be `Some` when `oid` is `Some` and the token carries groups.
     pub org_slug: Option<&'a str>,
     /// Resolved flat permission set. Empty Vec is legal. Caller is
-    /// responsible for enforcing size caps per `AUTHORIZATION.md § 2.6`.
+    /// responsible for enforcing size caps per `openspec/specs/rbac-model/spec.md`.
     pub permissions: &'a [String],
     /// Additional top-level custom claims.
     pub custom: BTreeMap<String, serde_json::Value>,

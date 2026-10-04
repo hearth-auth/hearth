@@ -38,7 +38,7 @@ The consequence was that the Bootstrap Sequence could not be performed at all:
 step 1 (start all nodes) never completed, so step 3 (POST
 `/admin/cluster/bootstrap`) was unreachable — including on the designated
 bootstrap node. Verified on three nodes on 2026-09-21; the transcript is in
-`reports/cluster-ga-readiness-2026-09-21.md`.
+[`reports/cluster-ga-readiness-2026-09-21.md`](https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/cluster-ga-readiness-2026-09-21.md).
 
 **Fixed in two halves** (task 26.46), both covered by
 `tests/cluster_three_node_control_coherence.rs::a_cold_three_node_cluster_starts_every_node_without_a_manual_bootstrap`:
@@ -242,7 +242,7 @@ Before enabling cluster mode in a test environment:
 
 4. **Separate `data_dir` per node.** The exclusive directory lock means no two nodes may share a `data_dir`.
 
-5. **The same `HEARTH_MASTER_KEY` and key-encryption key on every node.** Both wrap data that *replicates*: a row encrypted by one node must be decryptable by the others. Generate each value **once** for the whole cluster and distribute it — do not run `openssl rand -hex 32` per node. Every node also needs the full set of settings that are [mandatory in production](../specs/CONFIGURATION.md#mandatory-in-production):
+5. **The same `HEARTH_MASTER_KEY` and key-encryption key on every node.** Both wrap data that *replicates*: a row encrypted by one node must be decryptable by the others. Generate each value **once** for the whole cluster and distribute it — do not run `openssl rand -hex 32` per node. Every node also needs the full set of settings that are [mandatory in production](configuration-reference.md#mandatory-in-production):
 
    | Setting | Where | Must match across nodes? |
    |---|---|---|
@@ -349,7 +349,7 @@ cluster:
 > with the same value on all three. It is not a YAML key and `hearth config
 > validate` does not check for it.
 
-> All config fields are documented in the [Configuration reference](../specs/CONFIGURATION.md#cluster).
+> All config fields are documented in the [Configuration reference](configuration-reference.md#cluster).
 
 ---
 

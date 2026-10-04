@@ -20,7 +20,7 @@
 #                        free sees garbage instead of intact stale data
 #
 # This is the recipe that separated arc-swap's heap corruption from EpochCell
-# (reports/arc-swap-use-after-free-2026-09-21.md). ARCHITECTURE.md §9.2 names the
+# (https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/arc-swap-use-after-free-2026-09-21.md). docs/dev/ARCHITECTURE.md §9.2 names the
 # tools; unsafe-check/ covers the cell itself under Miri and AddressSanitizer.
 set -euo pipefail
 

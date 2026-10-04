@@ -547,7 +547,7 @@ impl OnboardingService {
         // 5. Grant the realm.admin role to the first admin user. We
         //    seed the system realm's default roles first (idempotent).
         //    The RBAC engine owns these seed roles; see
-        //    `docs/specs/AUTHORIZATION.md` § 9.
+        //    `openspec/specs/rbac-admin-api/spec.md`.
         self.rbac
             .seed_realm(&realm_id)
             .map_err(|e| OnboardingError::Authz(e.to_string()))?;

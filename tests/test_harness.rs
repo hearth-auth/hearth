@@ -1,6 +1,6 @@
 //! Test harness integration tests.
 //!
-//! Covers `TEST_SCENARIOS.md` § Test Infrastructure:
+//! Covers `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md` § Test Infrastructure:
 //! 1. In-process mode starts and stops cleanly
 //! 2. Dual-mode pattern: same logic runs against in-process and server modes
 //! 3. Server mode starts an HTTP server, `base_url()` returns `Some`

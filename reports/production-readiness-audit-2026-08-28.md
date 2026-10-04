@@ -553,7 +553,7 @@ failed** — every transcript reproduced line for line from an independently bui
 | 7 | Audience and Destination validation is anchored to `X-Forwarded-Host` under the example config | Configuration | MEDIUM | Medium |
 | 8 | `security.allowed_hosts`, the global rate limiter and `DefaultBodyLimit` are not applied to the `/ui` route tree — **including the SAML ACS and `begin`** | Access Controls | MEDIUM | Low |
 | 9 | Two SAML key spaces grow without bound; one is written by an unauthenticated, unrate-limited GET | Denial of Service | MEDIUM | Low |
-| 10 | `SAML.md`, the `verify_signed_element` doc comment and the `trusted_base_url` doc comment claim protections the code does not implement | Authentication | CLAIM-DEFECT | Undetermined |
+| 10 | `openspec/specs/saml-sp-profile/spec.md`, the `verify_signed_element` doc comment and the `trusted_base_url` doc comment claim protections the code does not implement | Authentication | CLAIM-DEFECT | Undetermined |
 
 Finding 1 was reproduced by both the auditor and, independently, the critic:
 
@@ -1061,7 +1061,7 @@ than the author's, re-executed every repro, and re-derived every negative result
 | 10 | Two admin actions mint reset tokens, discard them, and report "Reset email sent" | Error Reporting | MEDIUM | Low |
 | 11 | `validate_magic_link` creates accounts without consulting `RegistrationPolicy` | Access Controls | MEDIUM | Medium |
 | 12 | `auth.token.magic_link_ttl` is documented, parsed, capped, stored — **and never read** | Configuration | CLAIM-DEFECT | Undetermined |
-| 13 | The rate-limit persistence table in `CONFIGURATION.md` is wrong on four of its five rows | Configuration | CLAIM-DEFECT | Undetermined |
+| 13 | The rate-limit persistence table in `docs/guides/configuration-reference.md` is wrong on four of its five rows | Configuration | CLAIM-DEFECT | Undetermined |
 
 **Finding 1 is the takeover path.** A reset token survives the email address changing underneath it.
 Request a reset, change the account's email, and the old token still works.

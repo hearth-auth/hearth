@@ -1,4 +1,4 @@
-//! Tool-invocation authorization check endpoint (Phase C — AGENT_AUTH.md §5).
+//! Tool-invocation authorization check endpoint (Phase C — openspec/specs/tool-permissions/spec.md).
 //!
 //! Route:
 //!   POST /v1/tools/invoke  — server-side capability-token enforcement

@@ -3,7 +3,7 @@
 //! Every Hearth number published so far (`PERFORMANCE_REPORT` 1.0 → 2.1) is
 //! **engine-level**: measured by calling `IdentityEngine` methods in-process
 //! with no HTTP server, no axum, no tokio, no sockets. Every competitor number
-//! we compare against (`docs/perf/HEA-1867-COMPETITIVE-COMPARISON.md`) is
+//! we compare against (`https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/perf/HEA-1867-COMPETITIVE-COMPARISON.md`) is
 //! **end-to-end HTTP under load**. Comparing the two is not a comparison, and
 //! 2.0/2.1 correctly record the HTTP layer as `NOT-MEASURABLE`
 //! (HEA-1871 / HEA-1876).
@@ -17,7 +17,7 @@
 //!
 //! ## Why this run is admissible where HEA-1871/HEA-1876 were not
 //!
-//! The binding grading rule from `docs/perf/HEA-1867-PLAN.md` is: *nothing is
+//! The binding grading rule from `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/perf/HEA-1867-PLAN.md` is: *nothing is
 //! graded PASS on a run whose ceiling attribution was the generator.* The Goose
 //! runs failed that rule — the generator and the server shared cores and Goose's
 //! own I/O loop consumed them first, so the measured ceiling was Goose's, not

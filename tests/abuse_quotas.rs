@@ -5,7 +5,7 @@
 //! on create), adversarial (exact-limit boundary, fail-closed, bypass attempt).
 //!
 //! Plan sections §3.25 (A-24) and §3.26 (A-25) from
-//! `docs/plans/HEA-1114-abuse-prevention.md`.
+//! `openspec/specs/abuse-prevention/spec.md`.
 
 mod common;
 

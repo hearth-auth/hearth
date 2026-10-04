@@ -7,11 +7,11 @@
 //! `permissions`); client- and server-side authorization then reads
 //! synchronously from the verified token without contacting the engine.
 //!
-//! See `docs/specs/AUTHORIZATION.md` for the normative specification.
+//! See `openspec/specs/rbac-model/spec.md` for the normative specification.
 //!
 //! # Module layout
 //!
-//! Per ARCHITECTURE.md § 13, this module file contains ONLY the trait,
+//! Per docs/dev/ARCHITECTURE.md § 13, this module file contains ONLY the trait,
 //! re-exports, and module declarations. No implementation lives here.
 
 mod engine;
@@ -64,7 +64,7 @@ pub trait SvBumper: Send + Sync {
 ///
 /// All methods are realm-scoped: every operation takes a `&RealmId`
 /// first parameter and MUST NOT read or write state in another realm.
-/// See AUTHORIZATION.md § 10 for the multi-tenancy invariants.
+/// See openspec/specs/rbac-model/spec.md for the multi-tenancy invariants.
 pub trait RbacEngine: Send + Sync {
     // ------- Permission resolution -------
 
@@ -72,7 +72,7 @@ pub trait RbacEngine: Send + Sync {
     ///
     /// Honors realm and optional organization scope. If `requested_scope` is
     /// `Some`, intersects the resolved set with the scope's declared
-    /// permission mapping. See AUTHORIZATION.md § 3.
+    /// permission mapping. See openspec/specs/rbac-model/spec.md.
     fn resolve_permissions(
         &self,
         user_id: &UserId,
@@ -105,7 +105,7 @@ pub trait RbacEngine: Send + Sync {
     ) -> Result<ResolvedPermissions, RbacError>;
 
     /// Resolves the effective permission set using the full scope-resolution
-    /// pipeline described in `AUTHZ_EXPANSION.md` §"Resolution rule".
+    /// pipeline described in `openspec/specs/custom-permissions/spec.md` §"Resolution rule".
     ///
     /// Performs separator-based scope dispatch, full-satisfiability checking,
     /// and trust-level-aware partial-grant or fail-closed semantics:
@@ -294,7 +294,7 @@ pub trait RbacEngine: Send + Sync {
     /// role is refused with [`RbacError::RoleInUse`]; with `cascade` every
     /// reference is removed in the same atomic batch as the role, so no
     /// assignment, parent link or extra-role row is left dangling
-    /// (AUTHORIZATION.md § 8.2).
+    /// (openspec/specs/rbac-admin-api/spec.md).
     fn delete_role(
         &self,
         realm_id: &RealmId,
@@ -452,7 +452,7 @@ pub trait RbacEngine: Send + Sync {
     /// Installs the default role, permission, and scope seed for a new realm.
     ///
     /// Idempotent: re-running on a realm that already has seed state is a
-    /// no-op. See AUTHORIZATION.md § 9.
+    /// no-op. See openspec/specs/rbac-admin-api/spec.md.
     fn seed_realm(&self, realm_id: &RealmId) -> Result<(), RbacError>;
 
     // ------- Declarative reconciliation (YAML-driven) -------

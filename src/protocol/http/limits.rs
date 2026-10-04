@@ -5,7 +5,7 @@
 //! `operational.request_timeout_secs`, `operational.max_connections` and
 //! `operational.queue_depth` parsed into
 //! [`OperationalConfig`](crate::config::OperationalConfig), were validated at
-//! startup, were documented in `docs/specs/CONFIGURATION.md` — and were then
+//! startup, were documented in `docs/guides/configuration-reference.md` — and were then
 //! read by nothing. A 38-second socket transcript ran to completion against a
 //! configured 5-second timeout (audit 2026-08-28 §4.4#3). `security.http2.*`
 //! had the same shape: the rapid-reset caps came from compiled-in constants,

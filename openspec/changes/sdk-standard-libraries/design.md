@@ -64,7 +64,7 @@ calls the generated client.
 ### 3. Conformance harness
 - Scenarios live in one language-neutral file, `sdks/conformance/scenarios.yaml`. Each
   scenario names an input (a token kind, or a flow) and the expected outcome (claims, or an
-  error class from the SDK error taxonomy in `docs/specs/SDK.md` §5).
+  error class from the SDK error taxonomy in `openspec/specs/sdk-support-contract/spec.md`).
 - Each SDK has a small runner (`sdks/<sdk>/conformance/`) that reads the scenarios from a JSON
   file the driver writes, runs them through the public SDK API, and prints one JSON result per
   scenario.

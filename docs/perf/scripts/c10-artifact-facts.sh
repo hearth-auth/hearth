@@ -5,7 +5,7 @@
 #
 # Both are properties of the built artifact and of startup, so they are gradeable
 # without C0-C9. Emits docs/perf/artifacts/c10-artifact-facts.json per the data
-# contract in docs/perf/PERFORMANCE_REPORT_1_0.md §7.
+# contract in loadtest/README.md § "Artifact contract and admissibility rules".
 #
 # Usage: bash docs/perf/scripts/c10-artifact-facts.sh
 set -euo pipefail

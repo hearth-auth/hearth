@@ -110,7 +110,7 @@ use crate::identity::magic_link::{
     PASSWORD_RESET_EXPIRY_MICROS,
 };
 
-/// Enforces token size caps per AUTHORIZATION.md § 2.6.
+/// Enforces token size caps per openspec/specs/rbac-model/spec.md.
 ///
 /// Operates on the *post-profile* claim payload that will actually be
 /// embedded in the JWT, not the raw `ResolvedPermissions`. This ensures
@@ -209,7 +209,7 @@ const CLOCK_SKEW_SECS: i64 = 60;
 /// archived or deleted can carry. Real `jti`s are UUIDs, so it cannot collide.
 const CLIENT_TOKEN_CUTOFF_PREFIX: &str = "client-cutoff:";
 
-/// Revoked-JTI projection id prefix for an audience cutoff (AGENT_AUTH.md
+/// Revoked-JTI projection id prefix for an audience cutoff (openspec/specs/agent-identity/spec.md
 /// §2.5): the entry `{realm}:aud-cutoff:{hash}` holds the latest `exp` any
 /// token minted for a since-removed protected resource can carry, where
 /// `{hash}` is [`audience_cutoff_hash_hex`] of the resource's canonical URI.
@@ -657,7 +657,7 @@ pub struct EmbeddedIdentityEngine {
     /// Engine configuration (global defaults, overridable per-realm).
     config: IdentityConfig,
     /// Claims-based RBAC engine used to resolve effective permissions
-    /// at token-issue time. See `docs/specs/AUTHORIZATION.md`.
+    /// at token-issue time. See `openspec/specs/rbac-model/spec.md`.
     rbac: Arc<dyn crate::rbac::RbacEngine>,
     /// Audit engine for recording security-critical mutations.
     ///
@@ -742,7 +742,7 @@ pub struct EmbeddedIdentityEngine {
     /// the mutating request. A kill-switch thrown on one node therefore did
     /// not bind on any other until that node restarted, while its own storage
     /// already held the row that said so (audit 2026-08-28 §4.1 objection,
-    /// §4.16#5, §4.19#12; `reports/follower-bypass-enumeration-2026-09-21.md`).
+    /// §4.16#5, §4.19#12; `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/follower-bypass-enumeration-2026-09-21.md`).
     /// Every control write now bumps a replicated control epoch, and a node
     /// whose caches trail it reloads them on a background thread. Validation
     /// only compares epochs and signals that thread; it never takes a lock or
@@ -965,7 +965,7 @@ pub struct EmbeddedIdentityEngine {
     /// the cache-hit read path is untouched. This is the claims-cache twin of
     /// the `realm_key_epoch` guard on the signing-key cache.
     token_claims_cache_gen: Arc<AtomicU64>,
-    /// Per-realm DPoP nonce HMAC secrets (AGENT_AUTH.md §13.2).
+    /// Per-realm DPoP nonce HMAC secrets (https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/AGENT_AUTH.md §13.2).
     ///
     /// Lazily populated: first call for a realm loads or generates the secret
     /// from storage, subsequent calls return the cached value. The underlying
@@ -1074,7 +1074,7 @@ impl crate::cluster::ReplicatedWriteObserver for EmbeddedIdentityEngine {
         // The RBAC decision cache is invalidated by a per-realm generation
         // counter that only the node serving the mutation bumps, so a role or
         // permission revoked on the leader kept resolving on every follower
-        // (task 23.16, `reports/cluster-ga-readiness-2026-09-21.md` B-6).
+        // (task 23.16, `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/cluster-ga-readiness-2026-09-21.md` B-6).
         // The identity engine is the node's single replicated-write observer,
         // so it forwards the row; the RBAC engine decides whether it cares.
         self.rbac.on_replicated_row(realm_id, key);
@@ -2861,7 +2861,7 @@ impl EmbeddedIdentityEngine {
     ///
     /// `mfa_methods` is documented as restricting which factors may be
     /// enrolled *and* presented, with an absent list meaning "all methods
-    /// allowed" (CONFIGURATION.md). Nothing read it that way: it was only
+    /// allowed" (docs/guides/configuration-reference.md). Nothing read it that way: it was only
     /// ever a positive trigger — inject an enrolment required-action, fire the
     /// OIDC SMS interceptor — so a realm that listed `["webauthn"]` still let
     /// every user enrol TOTP and log in with it (audit 2026-08-28 §4.18#10).
@@ -3514,7 +3514,7 @@ impl EmbeddedIdentityEngine {
 
     /// Validates `User.attributes` key/value constraints.
     ///
-    /// Rules (from `AUTHZ_EXPANSION.md § User attributes`):
+    /// Rules (from `openspec/specs/custom-permissions/spec.md § User attributes`):
     /// - Key MUST be non-empty, ≤64 chars, ASCII alphanumeric / `_` / `-` / `.`.
     /// - Value MUST be ≤1 KiB (1024 bytes).
     /// - Total map size (sum of key + value lengths) MUST be ≤16 KiB.
@@ -5968,7 +5968,7 @@ impl EmbeddedIdentityEngine {
     }
 
     /// Returns `true` when the token's `aud` names a protected resource that
-    /// has been removed since the token was minted (AGENT_AUTH.md §2.5): the
+    /// has been removed since the token was minted (openspec/specs/mcp-authorization/spec.md): the
     /// revoked-JTI projection holds an `aud-cutoff:{hash}` entry for that
     /// `aud` value whose value is the latest `exp` any pre-removal token can
     /// carry, and this token's `exp` is not after it.
@@ -7549,7 +7549,7 @@ impl EmbeddedIdentityEngine {
         }
         // If the rename targets a new name, validate it the same way
         // create_realm does — including the admin-URL reserved-keyword
-        // set (UI_ROUTING.md R-4). Skip when name is unchanged.
+        // set (openspec/specs/ui-routing/spec.md R-4). Skip when name is unchanged.
         if let Some(ref new_name) = request.name {
             super::validation::validate_realm_name(new_name)?;
         }
@@ -7712,7 +7712,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 operation: "create_realm",
             });
         }
-        // Slug shape + admin-URL keyword reservation (UI_ROUTING.md R-4).
+        // Slug shape + admin-URL keyword reservation (openspec/specs/ui-routing/spec.md R-4).
         // Realm names ride in URL paths, so they must be URL-safe AND
         // must not collide with any admin sub-resource keyword.
         super::validation::validate_realm_name(&request.name)?;
@@ -9713,7 +9713,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             }
         }
 
-        // AGENT_AUTH.md §2.5: a token whose `aud` names a protected resource
+        // openspec/specs/mcp-authorization/spec.md: a token whose `aud` names a protected resource
         // removed since it was minted stops validating, on both the
         // session-bound and the sessionless path. Hot-path safe (see the fn).
         if self.is_audience_cut_off(realm_id, &claims) {
@@ -9889,7 +9889,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // private half was regenerated on every process start — so a relying
         // party that selected the ES256 entry cached a public key (under
         // `max-age=3600`) whose private half no longer existed. Publishing a
-        // key invites verification against it; ARCHITECTURE.md §8.1 permits
+        // key invites verification against it; docs/dev/ARCHITECTURE.md §8.1 permits
         // RS256/ES256 (MAY) but never required advertising keys that sign
         // nothing (audit 2026-08-28 §4.2#4, §4.15#5).
         let mut keys = vec![self.signing_key.to_jwk()];
@@ -15662,7 +15662,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     }
 
     // =========================================================================
-    // Agents (AGENT_AUTH.md Phase A, HEA-1325)
+    // Agents (openspec/specs/agent-identity/spec.md Phase A, HEA-1325)
     // =========================================================================
 
     fn create_agent(
@@ -17299,7 +17299,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(secret)
     }
 
-    // ── B.1 Protected Resource Registration (AGENT_AUTH.md §2.5) ─────────────
+    // ── B.1 Protected Resource Registration (openspec/specs/mcp-authorization/spec.md) ─────────────
 
     fn register_protected_resource(
         &self,
@@ -17477,7 +17477,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
                 reason: e.to_string(),
             })?;
-        // AGENT_AUTH.md §2.5: removing a resource stops its tokens. Done
+        // openspec/specs/mcp-authorization/spec.md: removing a resource stops its tokens. Done
         // before the registry rows go, so a failure leaves the resource
         // registered (and the removal retried) rather than removed with its
         // tokens still live.
@@ -17665,7 +17665,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
         // 3. Validate actor_token if present (B.5 OBO).
         // Returns (actor_sub, actor_scope_owned, actor_permissions_owned) — the actor's scope
-        // ceiling (RFC 8693 §4.4) and the actor's own RBAC permission set (AUTHORIZATION.md § 16,
+        // ceiling (RFC 8693 §4.4) and the actor's own RBAC permission set (openspec/specs/rbac-token-claims/spec.md,
         // HEA-1726). Both are used to intersect the delegated token's effective authorization.
         let (actor_sub, actor_scope_owned, actor_permissions_owned) =
             if let Some(ref actor_jwt) = request.actor_token {
@@ -17860,7 +17860,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 .dpop_jkt
                 .as_ref()
                 .map(|jkt| crate::identity::tokens::CnfClaim { jkt: jkt.clone() }),
-            // AUTHORIZATION.md § 16 (HEA-1726): effective permissions are the intersection of the
+            // openspec/specs/rbac-token-claims/spec.md (HEA-1726): effective permissions are the intersection of the
             // subject's grants and the actor's own grants. roles/groups are cleared because they
             // reflect only the subject's identity and do not represent the effective actor grants.
             roles: Vec::new(),
@@ -23253,7 +23253,7 @@ mod tests {
 
     // ===== Phase 1 Step 19: Multi-Tenancy =====
     //
-    // Test scenarios from TEST_SCENARIOS.md § Multi-Tenancy
+    // Test scenarios from https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md § Multi-Tenancy
 
     // --- Unit Scenario 1: Create realm with configuration returns assigned RealmId ---
 

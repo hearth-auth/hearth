@@ -91,7 +91,7 @@ const DEMO_FORBIDDEN_IN_PROD: &str =
 /// Valid MFA method names.
 /// Valid `auth.mfa_methods` entries.
 ///
-/// `email_otp` was missing, so an operator following CONFIGURATION.md —
+/// `email_otp` was missing, so an operator following docs/guides/configuration-reference.md —
 /// which lists it, and which three code paths already read — got a hard
 /// config error for a documented value (audit 2026-08-28 §4.18#10).
 const VALID_MFA_METHODS: &[&str] = &["totp", "webauthn", "email_otp"];
@@ -1286,7 +1286,7 @@ fn validate_realm_protected_resources_all(
     dev_mode: bool,
     issues: &mut Vec<ValidationIssue>,
 ) {
-    // AGENT_AUTH.md §2.5: a protected resource's `resource_uri` MUST use HTTPS
+    // openspec/specs/mcp-authorization/spec.md: a protected resource's `resource_uri` MUST use HTTPS
     // in production; `--dev` MAY permit HTTP. The spec carves out dev mode
     // only, so a loopback `http://` URI is refused in production as well. The
     // scheme is compared on the canonical (lowercased) form. Malformed URIs
@@ -1310,7 +1310,7 @@ fn validate_realm_protected_resources_all(
                 issues.push(ValidationIssue {
                     field: format!("realms.{name}.protected_resources[{i}].resource_uri"),
                     reason: format!(
-                        "'{}' must use https outside --dev mode (AGENT_AUTH.md §2.5)",
+                        "'{}' must use https outside --dev mode (openspec/specs/mcp-authorization/spec.md)",
                         resource.resource_uri
                     ),
                 });
@@ -2762,7 +2762,7 @@ mod tests {
         );
     }
 
-    /// AGENT_AUTH.md §2.5: a protected resource's URI MUST be HTTPS in
+    /// openspec/specs/mcp-authorization/spec.md: a protected resource's URI MUST be HTTPS in
     /// production; `--dev` MAY permit HTTP. The spec carves out dev mode
     /// only — a loopback `http://` resource is refused in production too.
     #[test]

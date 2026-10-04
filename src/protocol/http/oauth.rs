@@ -178,7 +178,7 @@ async fn oidc_discovery(
     (StatusCode::OK, Json(doc)).into_response()
 }
 
-/// Protected Resource Metadata endpoint (RFC 9728 §3, AGENT_AUTH.md §2.4 / B.3).
+/// Protected Resource Metadata endpoint (RFC 9728 §3, openspec/specs/mcp-authorization/spec.md / B.3).
 ///
 /// Returns Hearth's own PRM document at `/.well-known/oauth-protected-resource`.
 /// MCP clients use this to discover which authorization server to use and
@@ -2963,7 +2963,7 @@ async fn token_exchange_impl(
                 Err(e) => identity_error_to_response(&e).into_response(),
             }
         }
-        // RFC 8693 Token Exchange (AGENT_AUTH.md §3.3 / B.4)
+        // RFC 8693 Token Exchange (openspec/specs/delegated-authorization/spec.md / B.4)
         "urn:ietf:params:oauth:grant-type:token-exchange" => {
             // M2: token-exchange MUST authenticate the requesting client (RFC 8693 §2.1).
             // Derive actor_sub from the authenticated identity, not the unauthenticated body.
@@ -4090,7 +4090,7 @@ async fn realm_token_exchange(
                 Err(e) => identity_error_to_response(&e).into_response(),
             }
         }
-        // RFC 8693 Token Exchange (AGENT_AUTH.md §3.3 / B.4)
+        // RFC 8693 Token Exchange (openspec/specs/delegated-authorization/spec.md / B.4)
         "urn:ietf:params:oauth:grant-type:token-exchange" => {
             // HEA-2024 (F1): token-exchange MUST authenticate the requesting client
             // (RFC 8693 §2.1), exactly as the header-realm handler does. Without this

@@ -242,7 +242,7 @@ development. Before deploying to production, review these differences:
 | **OIDC issuer** | `http://localhost:8420` | Use a stable HTTPS issuer URL that matches your DNS |
 | **Storage** | In-memory (ephemeral) | Use the WAL-backed disk storage engine for durability |
 
-See [Hearth's configuration reference](../../docs/specs/CONFIGURATION.md) for
+See [Hearth's configuration reference](../../docs/guides/configuration-reference.md) for
 the full `hearth.yaml` schema.
 
 ## Configuration

@@ -171,7 +171,7 @@ This principle is inspired by SQLite ("just works"), DuckDB (zero-config analyti
 Auth is on the critical path. Hearth treats latency the way a trading system treats latency: as a first-class design constraint, not a metric to be optimized after the fact.
 
 Concretely:
-- The hot path (token validation, session lookup, permission checks) runs entirely in memory, against purpose-built data structures, with no allocations in the steady state beyond epoch reclamation's amortised bookkeeping ([ARCHITECTURE.md §3.2](../specs/ARCHITECTURE.md#32-hard-rules))
+- The hot path (token validation, session lookup, permission checks) runs entirely in memory, against purpose-built data structures, with no allocations in the steady state beyond epoch reclamation's amortised bookkeeping ([docs/dev/ARCHITECTURE.md §3.2](../dev/ARCHITECTURE.md#32-hard-rules))
 - Writes go through a write-ahead log to durable storage; reads never block on writes
 - The system is designed to saturate modern hardware: memory bandwidth, CPU caches, NVMe I/O
 - The system distinguishes between hot data (in memory, sub-microsecond access) and cold data (on disk, millisecond-class access), automatically promoting records based on access patterns — enabling a single node to manage far more data than fits in RAM without sacrificing hot-path performance
@@ -277,7 +277,7 @@ Hearth compiles to a single binary (dynamically linked against the system C libr
 - **Co-located with identity data**: RBAC state shares the storage engine with users, sessions, and realms. Seeding a realm, creating a user, and assigning roles are atomic.
 - **Synchronous checks**: Clients and resource servers check permissions by reading the decoded JWT claim — no network round trip. Permission resolution runs once, off the hot path, at token issuance.
 
-See [`AUTHORIZATION.md`](../specs/AUTHORIZATION.md) for the full normative model.
+See [`openspec/specs/rbac-model/spec.md`](../../openspec/specs/rbac-model/spec.md) for the full normative model.
 
 **Storage Engine**: A purpose-built embedded storage engine optimized for identity access patterns. Not a generic LSM tree or B-tree — a hybrid that recognizes the distinct access patterns of different identity data types:
 - **User profiles and credentials**: relatively static, read-heavy, indexed by multiple keys (email, username, external ID, realm). Stored in a B-tree-like structure optimized for point lookups.
@@ -319,7 +319,7 @@ Hearth is written in Rust. This is a deliberate choice, not a trend-following on
 
 The hot path — the code that executes on every authenticated request — is the most performance-critical part of the system. It's designed with the following constraints:
 
-1. **Zero allocations**: all data structures used on the hot path are pre-allocated or arena-allocated. No heap allocation per request — except the epoch collector's own bookkeeping behind lock-free reads (item 3), which is amortised to at most one allocation per 1,024 reads on a thread, and to none while no cell is being written and no thread that used one exits ([ARCHITECTURE.md §3.2](../specs/ARCHITECTURE.md#32-hard-rules)).
+1. **Zero allocations**: all data structures used on the hot path are pre-allocated or arena-allocated. No heap allocation per request — except the epoch collector's own bookkeeping behind lock-free reads (item 3), which is amortised to at most one allocation per 1,024 reads on a thread, and to none while no cell is being written and no thread that used one exits ([docs/dev/ARCHITECTURE.md §3.2](../dev/ARCHITECTURE.md#32-hard-rules)).
 2. **No syscalls for hot reads**: hot-tier data (active sessions, frequently-accessed user records) lives in lock-free in-process hash structures (`EpochCell<HashMap>`, `src/storage/tiered.rs`), reclaimed by epoch rather than by lock. Hot-tier reads are in-memory hash lookups, not I/O operations. Cold-tier reads (SST files) use `memmap2` and incur a disk I/O on first access; see Section 7.3.1.
 3. **Lock-free reads**: read operations use epoch-based reclamation or read-copy-update patterns. Readers never block on writers.
 4. **Batched writes**: mutations are batched and committed to the WAL in groups, amortizing the cost of fsync across multiple operations.
@@ -370,7 +370,7 @@ was never in question: `W`=1.000 on every run, one WAL fsync per durable write, 
 intact throughout. What survives is the single-threaded floor, **484 ops/s at T=1, engine plane**.
 A peak figure returns only after a re-measurement on a quiesced server-class host. Source of
 record: `docs/perf/PUBLISHED_FIGURES.md` §2.1 and §6; background in
-`docs/perf/PERFORMANCE_REPORT_2_1.md` §3.2 (T4) and `docs/perf/HEA-1959-commit-cycle.md`, both of
+`docs/perf/PERFORMANCE_REPORT_2_1.md` §3.2 (T4) and [`docs/perf/HEA-1959-commit-cycle.md`](https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/perf/HEA-1959-commit-cycle.md), both of
 which predate the retraction.
 
 ### 7.3 Capacity Targets (Single Node)
@@ -504,7 +504,7 @@ Migration is the highest-friction part of adopting new infrastructure. Hearth ad
 
 Hearth's OIDC, OAuth 2.0, SAML, and SCIM endpoints are built to their respective RFCs and specifications, and are exercised by in-repo conformance suites (`tests/oidc_conformance.rs`, `rfc8693_conformance.rs`, `rfc8707_conformance.rs`, `rfc9728_conformance.rs`, `federation_conformance.rs`, plus `scripts/check-sdk-conformance.sh`). Any client library that speaks standard OIDC (e.g., `openid-client` in Node.js, `golang.org/x/oauth2` in Go) should work with Hearth without modification, which means teams can adopt Hearth server-side without changing their application's auth client code — just point the OIDC discovery URL at Hearth instead of Auth0/Keycloak.
 
-> **No certifying body's suite has been run.** The suites above are written and maintained in this repository; the OpenID Foundation certification suite, a SAML interop suite and a SCIM compliance suite have never been executed against Hearth. Do not represent Hearth as certified or as "strictly conformant" — the honest statement is that it implements these specifications and tests itself against them. See `docs/specs/TESTING.md` §7.
+> **No certifying body's suite has been run.** The suites above are written and maintained in this repository; the OpenID Foundation certification suite, a SAML interop suite and a SCIM compliance suite have never been executed against Hearth. Do not represent Hearth as certified or as "strictly conformant" — the honest statement is that it implements these specifications and tests itself against them. See `docs/dev/TESTING.md` §7.
 
 ---
 

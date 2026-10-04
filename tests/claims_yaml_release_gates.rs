@@ -139,7 +139,7 @@ fn tier3_custom_claim_defaults_to_first_party_only() {
     assert!(
         mapping(&mappings, "dept_code").first_party_only,
         "a Tier-3 custom claim with no declared gates must default to \
-         first_party_only: true (AUTHZ_EXPANSION.md § Safe defaults)"
+         first_party_only: true (openspec/specs/custom-permissions/spec.md § Safe defaults)"
     );
 }
 

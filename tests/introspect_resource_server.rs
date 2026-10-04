@@ -1,4 +1,4 @@
-//! G6 — a token exchanged with `audience=` only (AGENT_AUTH.md §2.5, OIDC.md
+//! G6 — a token exchanged with `audience=` only (openspec/specs/mcp-authorization/spec.md, openspec/specs/oidc-provider/spec.md
 //! §3.4.1a) carries no Hearth audience, so introspection refused it for every
 //! caller, the resource server it was minted for included: such a token could
 //! only be verified offline, and removing its resource could not stop it.

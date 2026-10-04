@@ -2,7 +2,7 @@
 //!
 //! All keys use the `rba:` prefix and are realm-scoped — either by
 //! embedding the realm ID directly or by indirection through a record
-//! that itself carries a `RealmId`. See AUTHORIZATION.md § 4.1.
+//! that itself carries a `RealmId`. See https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/AUTHORIZATION.md § 4.1.
 
 use crate::core::{OrganizationId, RealmId, UserId};
 

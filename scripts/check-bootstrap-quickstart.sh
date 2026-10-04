@@ -2,7 +2,7 @@
 # scripts/check-bootstrap-quickstart.sh — the commands Hearth hands a brand-new
 # operator must actually run.
 #
-# Production-readiness task 26.27 (audit reports/cold-first-run-2026-09-21.md,
+# Production-readiness task 26.27 (audit https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/cold-first-run-2026-09-21.md,
 # finding C-7):
 #
 #   `POST /admin/bootstrap` returns a `quickstart` block. On a server bound to

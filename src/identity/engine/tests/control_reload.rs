@@ -7,7 +7,7 @@
 //! These tests pin the properties that reload must have:
 //!
 //! * validation never waits for it — no lock on the validation path, even
-//!   when the epoch has moved (ARCHITECTURE.md §3.2 rule 3);
+//!   when the epoch has moved (docs/dev/ARCHITECTURE.md §3.2 rule 3);
 //! * a failed reload does not consume the epoch, so the control still binds
 //!   once storage recovers (it used to fail open until the next bump);
 //! * a replicated write is projected into the caches without any storage

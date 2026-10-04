@@ -6,7 +6,7 @@ name: Benchmark Regression Gate
 #
 # The AUTHORITATIVE regression blocker is the absolute latency gate built
 # into each bench binary's custom main() (p50/p99 μs limits from
-# ARCHITECTURE.md). Those gates panic on the runner if any target is
+# docs/dev/ARCHITECTURE.md). Those gates panic on the runner if any target is
 # breached, failing the job before criterion sampling begins.
 #
 # Shared GitHub Actions runners have ±10–15% variance for in-process

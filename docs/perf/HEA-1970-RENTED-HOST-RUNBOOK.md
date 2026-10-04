@@ -374,7 +374,7 @@ Then, in a normal PR:
    is either **confirmed** (2.1a value inside the new spread) or **re-based** to
    the new median, with the SHA and artifact path cited.
 3. Recompute every derived multiplier in
-   `HEA-1867-COMPETITIVE-COMPARISON.md` from the new envelope.
+   [`docs/perf/HEA-1867-COMPETITIVE-COMPARISON.md`](https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/perf/HEA-1867-COMPETITIVE-COMPARISON.md) from the new envelope.
 4. Tell HEA-1968 exactly which rows it may quote.
 
 ## 9. Destroy both droplets.

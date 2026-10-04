@@ -1,8 +1,8 @@
 //! MCP (Model Context Protocol) authorization helpers.
 //!
-//! Validates MCP scope strings per AGENT_AUTH.md §2.6 and RFC 9728 conventions.
+//! Validates MCP scope strings per openspec/specs/mcp-authorization/spec.md and RFC 9728 conventions.
 
-/// Well-known MCP scopes defined in AGENT_AUTH.md §2.6.
+/// Well-known MCP scopes defined in openspec/specs/mcp-authorization/spec.md.
 pub const MCP_SCOPE_TOOLS_INVOKE: &str = "mcp:tools:invoke";
 pub const MCP_SCOPE_TOOLS_LIST: &str = "mcp:tools:list";
 pub const MCP_SCOPE_RESOURCES_READ: &str = "mcp:resources:read";
@@ -18,7 +18,7 @@ pub const MCP_STANDARD_SCOPES: &[&str] = &[
     MCP_SCOPE_PROMPTS_READ,
 ];
 
-/// Validates a single scope string per AGENT_AUTH.md §2.6 MUST rule.
+/// Validates a single scope string per openspec/specs/mcp-authorization/spec.md MUST rule.
 ///
 /// MCP scopes MUST follow `{namespace}:{category}:{action}` — exactly three
 /// colon-separated components, each non-empty and containing only printable
@@ -61,7 +61,7 @@ pub fn is_mcp_scope(scope: &str) -> bool {
     scope.starts_with("mcp:")
 }
 
-/// Validates a declared scope vocabulary against AGENT_AUTH.md §2.6.
+/// Validates a declared scope vocabulary against openspec/specs/mcp-authorization/spec.md.
 ///
 /// Only `mcp:`-prefixed scopes are subject to the three-component rule — §2.6
 /// governs *MCP* scope strings, and plain OAuth scopes such as `openid` are one

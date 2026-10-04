@@ -276,7 +276,7 @@ final class TokenVerifierTest extends TestCase
     }
 
     /**
-     * SDK.md §5: an unknown `kid` (absent after one re-fetch) is a bad token,
+     * openspec/specs/sdk-support-contract/spec.md: an unknown `kid` (absent after one re-fetch) is a bad token,
      * not a JWKS fetch failure.
      */
     public function testVerifyReportsUnknownKidAsTokenInvalid(): void

@@ -1,6 +1,6 @@
 //! Criterion benchmarks for tiered hot/cold storage.
 //!
-//! Covers `TEST_SCENARIOS.md` § Storage: Tiered Hot/Cold — Benchmark:
+//! Covers `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md` § Storage: Tiered Hot/Cold — Benchmark:
 //! 1. Hot-tier session lookup: p50 < 10 μs, p99 < 100 μs
 //! 2. Cold-to-hot promotion latency: < 5 ms on `NVMe` storage
 //! 3. Memory footprint: < 500 MB for 1M hot users

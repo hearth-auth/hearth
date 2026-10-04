@@ -15,7 +15,7 @@
 //!
 //! The shards were `ArcSwap` until task 26.5; `arc-swap` 1.9.2 corrupts the
 //! heap under exactly this `load` + `rcu` pattern (see
-//! `reports/arc-swap-use-after-free-2026-09-21.md`).
+//! `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/arc-swap-use-after-free-2026-09-21.md`).
 
 use std::borrow::Borrow;
 use std::collections::HashMap;

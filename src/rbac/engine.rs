@@ -2756,7 +2756,7 @@ mod tests {
 
     #[test]
     fn reserved_namespace_rejected_for_operator_role() {
-        // Per AUTHZ_EXPANSION.md the global namespace is `hearth.*` —
+        // Per openspec/specs/custom-permissions/spec.md the global namespace is `hearth.*` —
         // operator-created roles may not include it directly.
         let (engine, realm) = mk_engine();
         let result = engine.create_role(

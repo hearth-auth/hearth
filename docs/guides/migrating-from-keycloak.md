@@ -292,7 +292,7 @@ The following Keycloak features do not migrate automatically. They require manua
 | **Custom authentication flows / SPI** | Not applicable | Hearth uses a built-in auth policy engine; SPI extensions do not port |
 | **TOTP / WebAuthn credentials** | Not exported by Keycloak | Users must re-enroll after migration |
 | **Session tokens** | Not migrated | All users must log in again after switchover |
-| **Custom themes** | Not imported | Recreate using Hearth's [theming system](../../docs/specs/THEME.md) |
+| **Custom themes** | Not imported | Recreate using Hearth's [theming system](https://github.com/hearth-auth/hearth/blob/main/docs/dev/THEME.md) |
 | **Events / audit history** | Not imported | Hearth starts a fresh audit log on migration |
 | **Client scopes** | Not imported | Recreate as [scope bundles](rbac.md) in `hearth.yaml` |
 

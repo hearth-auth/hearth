@@ -36,7 +36,7 @@ use hearth::core::RealmId;
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
 
 /// Corpus ladder — matches the C0 seed ladder in
-/// `docs/perf/HEA-1867-record-size-analysis.md`.
+/// `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/perf/HEA-1867-record-size-analysis.md`.
 const LADDER: &[usize] = &[200, 1_000, 4_000, 12_000];
 
 /// Representative serialized `User` record size (matches the C2/complexity

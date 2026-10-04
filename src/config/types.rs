@@ -1062,7 +1062,7 @@ pub struct SecurityYaml {
     pub dev_csp_form_action_origins: Vec<String>,
     /// A-3 distributed-attack detector (`security.distributed_attack_detector`).
     ///
-    /// Documented in `docs/specs/ABUSE.md` since HEA-1189 and, until task
+    /// Documented in `openspec/specs/abuse-prevention/spec.md` since HEA-1189 and, until task
     /// 20.13, absent from this struct — which `deny_unknown_fields` turns into
     /// a refusal to boot for any operator who copied the documented block
     /// (audit §4.17#9).
@@ -1523,7 +1523,7 @@ pub struct CaptchaYaml {
     pub turnstile: Option<TurnstileYaml>,
     /// A-16: failures per window before a CAPTCHA challenge is demanded.
     ///
-    /// Documented in `docs/specs/ABUSE.md` § A-16 and, until task 20.13,
+    /// Documented in `openspec/specs/abuse-prevention/spec.md` § A-16 and, until task 20.13,
     /// absent from this struct — `deny_unknown_fields` made the documented
     /// block a refusal to boot (audit §4.17#9).
     #[serde(default)]
@@ -2607,7 +2607,7 @@ pub struct RealmYamlConfig {
     /// Per-realm security policy (`realms.<name>.security`).
     ///
     /// Currently carries the A-9 tenant CIDR allow/deny lists. Documented in
-    /// `docs/specs/ABUSE.md` § A-9 and, until task 20.13, absent from this
+    /// `openspec/specs/abuse-prevention/spec.md` § A-9 and, until task 20.13, absent from this
     /// struct — `deny_unknown_fields` made the documented block a refusal to
     /// boot (audit §4.17#9).
     #[serde(default)]
@@ -2951,7 +2951,7 @@ impl FederationProviderYaml {
 /// Flags must be enabled in order; enabling a phase without its predecessor
 /// is rejected at startup. Defaults: all `false`.
 ///
-/// See `docs/specs/AGENT_AUTH.md` for phase definitions.
+/// See `openspec/specs/agent-identity/spec.md` for phase definitions.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentAuthCapabilities {
@@ -2987,7 +2987,7 @@ pub struct AgentAuthCapabilities {
 /// Uses staged capability flags so each phase can be enabled independently.
 /// Enabling a phase without its required predecessor is rejected at startup.
 ///
-/// See `docs/specs/AGENT_AUTH.md` for the normative specification.
+/// See `openspec/specs/agent-identity/spec.md` for the normative specification.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentAuthConfig {
@@ -3362,7 +3362,7 @@ impl RealmYamlConfig {
         // --- Protected resources: identity-registry invariants --------------
         //
         // Reconcile mirrors these entries into the identity protected-resource
-        // registry (the RFC 8693 token-exchange target allowlist, OIDC.md
+        // registry (the RFC 8693 token-exchange target allowlist, openspec/specs/oidc-provider/spec.md
         // §3.4.1a), which enforces the same rules. Checking here makes a bad
         // entry a config-load error naming it, not a reconcile failure.
         // Duplicates compare canonical forms (`core::Uri`): two spellings of
@@ -3761,7 +3761,7 @@ mod tests {
         assert!(cfg.tls_key_path.is_none());
     }
 
-    // ===== Protected resources (token-exchange targets, OIDC.md §3.4.1a) =====
+    // ===== Protected resources (token-exchange targets, openspec/specs/dpop/spec.md) =====
 
     fn resource(uri: &str, bundles: &[&str]) -> ProtectedResourceYamlConfig {
         ProtectedResourceYamlConfig {
@@ -3858,7 +3858,7 @@ mod tests {
     }
 
     /// `mcp:`-prefixed bundle names are the resource's MCP scope vocabulary
-    /// and must be `{namespace}:{category}:{action}` (AGENT_AUTH.md §2.6).
+    /// and must be `{namespace}:{category}:{action}` (openspec/specs/mcp-authorization/spec.md).
     #[test]
     fn protected_resource_mcp_bundle_names_must_have_three_parts() {
         assert_eq!(
@@ -4191,7 +4191,7 @@ pub struct Config {
     ///
     /// `agent_auth.capabilities.identity = true` enables Phase A (M1): agent
     /// CRUD, API-key credentials, Agent Card, and REST endpoints.
-    /// See `docs/specs/AGENT_AUTH.md` for the full capability map.
+    /// See `openspec/specs/agent-identity/spec.md` for the full capability map.
     #[serde(default)]
     pub agent_auth: AgentAuthConfig,
     /// Demo-mode configuration. Gates the large-scale demo seeder (per-realm

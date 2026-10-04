@@ -2,7 +2,7 @@
 //!
 //! # The defect this closes
 //!
-//! `docs/specs/ABUSE.md` marked guards **Shipped** that were never
+//! `openspec/specs/abuse-prevention/spec.md` marked guards **Shipped** that were never
 //! constructed anywhere except their own `#[cfg(test)]` blocks:
 //!
 //! | Guard | Type |
@@ -26,7 +26,7 @@
 //! [`AbuseGuards`] is built once at start-up from the `security:` block and
 //! held in the HTTP and web application states. Every guard is off by default
 //! (`enabled: false`), so an existing deployment sees no behaviour change until
-//! an operator opts in — the fail-open posture ABUSE.md §6.1 requires.
+//! an operator opts in — the fail-open posture openspec/specs/abuse-prevention/spec.md requires.
 //!
 //! The pre-auth entry point is [`AbuseGuards::pre_auth_login`], consulted by
 //! the login form's pre-gate phase before any Argon2 work is admitted, and
@@ -345,7 +345,7 @@ mod tests {
 
     // ===== The documented config keys must parse (§4.17#9) =====
 
-    /// Every `security.*` block `docs/specs/ABUSE.md` documents must
+    /// Every `security.*` block `openspec/specs/abuse-prevention/spec.md` documents must
     /// deserialize. `SecurityYaml` carries `deny_unknown_fields`, so a missing
     /// field is not a no-op — it is a server that refuses to boot.
     #[test]

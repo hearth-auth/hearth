@@ -36,7 +36,7 @@
 > means the code exists and is exercised by the `cluster-chaos` CI job — it is not a statement
 > that multi-node operation has been audited end to end. Four security-relevant controls were
 > found stranded on followers and fixed by a replicated control epoch
-> ([`reports/follower-bypass-enumeration-2026-09-21.md`](../reports/follower-bypass-enumeration-2026-09-21.md));
+> ([`reports/follower-bypass-enumeration-2026-09-21.md`](https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/follower-bypass-enumeration-2026-09-21.md));
 > a systematic enumeration against a live three-node cluster has **not** been done. Treat
 > single-node as the audited deployment shape.
 
@@ -71,8 +71,8 @@
 | JWT Authorization Response Mode (JARM) | ❌ Removed in 3.0.0 | `response_mode` is `query` or `fragment`; `*.jwt` modes answer `unsupported_response_mode` (OpenSpec `scope-trim-trusted-core`) |
 | RS256 ID tokens | ✅ Shipped | `id_token_signed_response_alg` per client (`RS256`/`EdDSA`; DCR defaults to RS256); per-realm RSA-3072 key, rotated with the realm key, published in the realm JWKS (`src/identity/engine/id_token_keys.rs`). Access tokens stay EdDSA-only |
 | FAPI 2.0 Security Profile | ❌ Removed in 3.0.0 | Use `dpop_bound_access_tokens` for sender-constrained clients (OpenSpec `scope-trim-trusted-core`) |
-| RFC 8693 token exchange / RFC 8707 resource indicators | ✅ Shipped | `src/identity/engine/oauth.rs`; see [docs/specs/AGENT_AUTH.md](specs/AGENT_AUTH.md) |
-| SAML 2.0 — SP (inbound federation, strict profile) | ✅ Shipped | `src/identity/federation/saml/sp.rs`; spec [docs/specs/SAML.md](specs/SAML.md) |
+| RFC 8693 token exchange / RFC 8707 resource indicators | ✅ Shipped | `src/identity/engine/oauth.rs`; see [openspec/specs/agent-identity/spec.md](../openspec/specs/agent-identity/spec.md) |
+| SAML 2.0 — SP (inbound federation, strict profile) | ✅ Shipped | `src/identity/federation/saml/sp.rs`; spec [openspec/specs/saml-sp-profile/spec.md](../openspec/specs/saml-sp-profile/spec.md) |
 | SAML 2.0 — IdP (Hearth asserts to third-party SPs) | ❌ Removed in 3.0.0 | `realms.<name>.saml_service_providers` now stops startup (OpenSpec `scope-trim-trusted-core`) |
 | SCIM 2.0 provisioning (Users, Groups, ServiceProviderConfig) | ✅ Shipped | `src/protocol/scim/` |
 | Agent identity — Agent Card, DPoP, delegation, AATs, approvals | ✅ Shipped | `src/protocol/http/agents.rs`, `src/identity/engine/{aat,approval,txn,cross_realm,spiffe}.rs` |
@@ -139,6 +139,6 @@ Features removed in 3.0.0 are not roadmap items.
 |---------|----------------------|------------|
 | Confidence gates before the production-readiness claim: OpenID Foundation conformance (Basic, Config, Dynamic OP), entry-point invariant tests, mutation budget, external pentest. The server is in a feature freeze until they pass | Planned, not started | OpenSpec [`trusted-core-confidence`](../openspec/changes/trusted-core-confidence/proposal.md) |
 | SDKs on standard JOSE/OIDC libraries, OpenAPI-generated admin clients, SDK conformance harness | Planned, not started | OpenSpec [`sdk-standard-libraries`](../openspec/changes/sdk-standard-libraries/proposal.md) |
-| RFC 7592 Dynamic Client Registration **management** (`GET`/`PUT`/`DELETE /register/{client_id}`) | No `/register/{client_id}` route is registered; registration (`POST /register`, RFC 7591) ships | [docs/specs/OIDC.md](specs/OIDC.md) §1 |
-| SAML encrypted assertions / encrypted NameIDs (`EncryptedAssertion`, `EncryptedID`) | No decryption path; neither name appears in `src/` | [docs/specs/SAML.md](specs/SAML.md) §7 |
-| SAML HTTP-Artifact and SOAP/PAOS (ECP) bindings | No artifact-resolution or SOAP endpoint; the strings `artifact`, `PAOS` and `SOAP` appear nowhere under `src/identity/federation/saml/` | [docs/specs/SAML.md](specs/SAML.md) §2 |
+| RFC 7592 Dynamic Client Registration **management** (`GET`/`PUT`/`DELETE /register/{client_id}`) | No `/register/{client_id}` route is registered; registration (`POST /register`, RFC 7591) ships | [openspec/specs/oidc-provider/spec.md](../openspec/specs/oidc-provider/spec.md) §1 |
+| SAML encrypted assertions / encrypted NameIDs (`EncryptedAssertion`, `EncryptedID`) | No decryption path; neither name appears in `src/` | [openspec/specs/saml-sp-profile/spec.md](../openspec/specs/saml-sp-profile/spec.md) §7 |
+| SAML HTTP-Artifact and SOAP/PAOS (ECP) bindings | No artifact-resolution or SOAP endpoint; the strings `artifact`, `PAOS` and `SOAP` appear nowhere under `src/identity/federation/saml/` | [openspec/specs/saml-sp-profile/spec.md](../openspec/specs/saml-sp-profile/spec.md) §2 |

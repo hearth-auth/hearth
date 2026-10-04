@@ -1,20 +1,26 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+# Project context, shown to AI when creating artifacts.
+context: |
+  Hearth is a single-binary Rust identity server: authentication, claims-based RBAC,
+  sessions, OAuth 2.0 / OIDC, agent auth, on a custom embedded storage engine.
+  Project rules and vocabulary: CLAUDE.md. Contributor docs: docs/dev/ (ARCHITECTURE,
+  TESTING, PROTO, THEME). Operator docs: docs/guides/ (published by docs-site/);
+  docs/guides/configuration-reference.md is the full hearth.yaml reference.
+  openspec/specs/ is the only home of normative requirements. There is no docs/specs/.
+  Hearth has zero production users: remove a legacy path outright, never deprecate it.
+  Every user-visible change also needs a CHANGELOG.md entry (see CLAUDE.md).
 
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+# Per-artifact rules.
+rules:
+  proposal:
+    - Name every capability the change adds or modifies, using the exact folder name under openspec/specs/.
+    - Say which existing openspec/specs/ capabilities the change modifies, or "None".
+  specs:
+    - Write plain, short sentences. One fact per sentence. Exact identifiers, paths, status codes and numbers in backticks.
+    - Every requirement body states its rule with SHALL or MUST. Keep SHOULD/MAY as SHOULD/MAY; never upgrade them.
+    - Every requirement has at least one "#### Scenario:" with WHEN/THEN bullets that describe observable behaviour.
+    - No implementation phases, status banners, file lists, Rust signatures or storage-key layouts in a spec.
+    - abuse-prevention requirement names start with the guard id (e.g. "A-45 ..."). scripts/check-abuse-coverage.sh requires a tests/abuse_*.rs test for every A-<n> token in that spec.
+  tasks:
+    - Each task names the test that proves it, written before the implementation (TDD, see CLAUDE.md).

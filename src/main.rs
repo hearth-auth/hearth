@@ -2126,7 +2126,7 @@ async fn run_serve(
     // An approval request writes its outbox row BEFORE it attempts delivery and
     // deletes it only on a 2xx, so a surviving row is a notification nobody
     // received. `flush_approval_webhook_outbox` is the retry half of the
-    // "durable at-least-once" guarantee in `AGENT_AUTH.md`; until this task
+    // "durable at-least-once" guarantee in `openspec/specs/agent-identity/spec.md`; until this task
     // existed it had NO caller, which made delivery at-MOST-once and leaked one
     // row per undelivered request, permanently.
     //
@@ -2623,7 +2623,7 @@ async fn run_serve(
 
     // Task 20.13 (audit §4.17#9): construct the abuse-prevention guards from
     // the `security:` block. Nine guards documented "Shipped" in
-    // `docs/specs/ABUSE.md` had no constructor outside their own test modules;
+    // `openspec/specs/abuse-prevention/spec.md` had no constructor outside their own test modules;
     // this is the production path. Every guard is fail-open until an operator
     // enables it, so an existing config sees no behaviour change.
     let abuse_guards = Arc::new(hearth::abuse::runtime::AbuseGuards::from_security(

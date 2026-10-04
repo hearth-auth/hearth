@@ -1,4 +1,4 @@
-//! Approval request endpoints (Phase C.4–C.5 — AGENT_AUTH.md §9).
+//! Approval request endpoints (Phase C.4–C.5 — openspec/specs/agent-approvals/spec.md).
 //!
 //! Routes (all require admin bearer token):
 //!   POST /v1/approval-requests              — create approval request

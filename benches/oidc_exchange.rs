@@ -1,6 +1,6 @@
 //! Criterion benchmarks for OIDC authorization code exchange.
 //!
-//! Covers `TEST_SCENARIOS.md` § OIDC — Benchmark:
+//! Covers `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md` § OIDC — Benchmark:
 //! Auth code exchange latency: p50 < 1ms, p99 < 5ms
 
 use std::sync::Arc;

@@ -74,7 +74,7 @@ None. `openspec/specs/` is empty, so every capability above is new.
   refresh-token rotation and family binding, MFA gates, password recovery.
 - **Protocol** (`src/protocol/`): SAML assertion consumer, `/ui` router guard parity, SCIM filter
   depth, `introspect`/`revoke` client authentication, backup HTTP handlers, byte-slicing panics.
-- **Config** (`src/core/`, `hearth.example.yaml`, `docs/specs/CONFIGURATION.md`): zero-valued
+- **Config** (`src/core/`, `hearth.example.yaml`, `docs/guides/configuration-reference.md`): zero-valued
   sentinels, `dev_mode`, and a start-up assertion that every parsed security key has a consumer.
 - **CI and release** (`.github/workflows/`, `deny.toml`, `Cargo.lock`, Helm chart, Dockerfile):
   required checks, `continue-on-error` removal, publish gating, version derivation, image labels.

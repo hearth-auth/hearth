@@ -1,5 +1,5 @@
 //! `unsafe-check/` must keep covering hearth's `unsafe` code
-//! (`docs/specs/ARCHITECTURE.md` §9.2).
+//! (`docs/dev/ARCHITECTURE.md` §9.2).
 //!
 //! §9.2: "All unsafe code MUST be covered by Miri tests where feasible, and by
 //! address sanitizer runs in CI." Hearth cannot be built for Miri — `ring`,
@@ -143,7 +143,7 @@ fn every_file_with_unsafe_code_is_under_miri_or_says_why_not() {
     assert!(
         uncovered.is_empty(),
         "{uncovered:?} hold unsafe code that no Miri or AddressSanitizer run covers \
-         (ARCHITECTURE.md §9.2). Compile the file in unsafe-check/src/lib.rs with \
+         (docs/dev/ARCHITECTURE.md §9.2). Compile the file in unsafe-check/src/lib.rs with \
          `#[path = \"../../<file>\"]` so `make miri` and `make asan` run its tests, or add it \
          to NOT_UNDER_MIRI with the reason Miri cannot run it."
     );

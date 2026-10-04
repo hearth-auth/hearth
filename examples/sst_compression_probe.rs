@@ -2,7 +2,7 @@
 //!
 //! ## Why this exists
 //!
-//! `docs/perf/HEA-1904-C0-RERUN-POST-LAYERBA.md` measured **2,840 B on disk per
+//! `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/perf/HEA-1904-C0-RERUN-POST-LAYERBA.md` measured **2,840 B on disk per
 //! user**; the VISION K7 budget is **2,147 B/user** (200 GB @ 100M users). The
 //! gap is 1.4×. Two candidate remediations are on the table:
 //!
@@ -74,7 +74,7 @@ use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
 /// or past this size; entries are never split.
 const V3_BLOCK_TARGET_BYTES: usize = 4096;
 
-/// Measured bytes-on-disk per user from `HEA-1904-C0-RERUN-POST-LAYERBA.md`
+/// Measured bytes-on-disk per user from `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/perf/HEA-1904-C0-RERUN-POST-LAYERBA.md`
 /// (OLS slope over N = 200 / 1k / 4k / 12k).
 const BASELINE_DISK_BYTES_PER_USER: f64 = 2840.0;
 

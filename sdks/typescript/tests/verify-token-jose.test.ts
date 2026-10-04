@@ -2,7 +2,7 @@
  * sdk-standard-libraries 2.1 — the `jose` library performs every signature,
  * algorithm, key and registered-claim check. These tests pin the outcomes the
  * `sdk-support-contract` capability requires, and the SDK error taxonomy the
- * jose errors map onto (docs/specs/SDK.md §2 and §5).
+ * jose errors map onto (openspec/specs/sdk-support-contract/spec.md and §5).
  */
 
 import { describe, it, expect, vi, beforeAll, afterEach } from "vitest";
