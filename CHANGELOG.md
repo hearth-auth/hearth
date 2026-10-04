@@ -171,6 +171,9 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   (`POST /webauthn/register/begin`, the account console and the required-action passkey
   enrolment) now carries `extensions` (`prf: {}`, `largeBlob: {support: "required"}`), so a
   browser can satisfy the policy.
+- **A login that passes through a required action rotates the browser session too.** When a
+  password, MFA or federated login is sent to a required-action page, the session the browser
+  already held is revoked before the flow starts; the flow ends in a session with a new ID.
 
 ### Fixed
 - The cluster-mode startup warning no longer says writes to a follower fail with HTTP 500
