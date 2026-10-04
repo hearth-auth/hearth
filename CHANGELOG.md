@@ -159,6 +159,8 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   passed through the SVG sanitizer before it is inlined into an email, and `branding.custom_css` /
   `realms.<name>.web.custom_css` are passed through the CSS sanitizer (which drops `@import` and
   script-bearing declarations) before they are served in the theme CSS.
+- **An SVG logo that fails to parse renders as no logo.** The SVG sanitizer used to keep the
+  part of the document written before the parse error.
 
 ### Fixed
 - The cluster-mode startup warning no longer says writes to a follower fail with HTTP 500

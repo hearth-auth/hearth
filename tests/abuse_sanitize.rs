@@ -292,6 +292,18 @@ fn a45_css_safe_siblings_preserved_in_mixed_block() {
     );
 }
 
+/// An SVG that fails to parse yields the empty string, not the part written
+/// before the error.
+#[test]
+fn a45_svg_unparseable_yields_empty() {
+    for svg in [
+        r#"<svg xmlns="http://www.w3.org/2000/svg"><circle r="4"/><g"#,
+        r#"<svg xmlns="http://www.w3.org/2000/svg"><circle r="4"/><!-- never closed"#,
+    ] {
+        assert_eq!(sanitize_svg(svg), "", "unparseable SVG must yield nothing: {svg}");
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // A-45 — Render paths run the sanitizers
 // ─────────────────────────────────────────────────────────────────────────────

@@ -61,8 +61,11 @@ pub fn sanitize_svg(input: &str) -> String {
     // We still track start/end nesting so nested blocked tags don't confuse us.
     let mut skip_depth: u32 = 0;
 
-    // fail-closed: loop exits on any parse error; Eof exits via explicit break.
-    while let Ok(event) = reader.read_event_into(&mut buf) {
+    // fail-closed: a parse error anywhere discards everything written so far.
+    loop {
+        let Ok(event) = reader.read_event_into(&mut buf) else {
+            return String::new();
+        };
         match event {
             Event::Eof => break,
 
