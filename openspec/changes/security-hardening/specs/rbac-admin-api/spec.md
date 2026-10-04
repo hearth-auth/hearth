@@ -47,6 +47,11 @@ Operators MAY declare roles, permissions, groups and scope mappings in realm YAM
 - **THEN** the request is refused with an error that points to `hearth.yaml`
 - **AND** the role and its assignments remain
 
+#### Scenario: A YAML-managed group cannot be changed at runtime
+- **WHEN** an admin updates or deletes, through the admin API or the console, a group declared in `hearth.yaml`
+- **THEN** the request is refused with an error that points to `hearth.yaml`
+- **AND** the group and its members remain
+
 ### Requirement: Live permissions of the bearer token
 `GET /v1/me/permissions` SHALL return the freshly resolved roles, groups and permissions of the bearer token: the token's live authority, not the user's. A third-party client's token SHALL read only what the claim profile releases to that client (by default no roles, groups or permissions). A scoped or delegated token SHALL read no more than it carries. An optional `scope` query parameter SHALL narrow the result further. The organization context SHALL be the token's `oid`; a token without `oid` resolves realm-scoped assignments only. An `org_id` query parameter that names an organization the user is not a member of SHALL be refused with `403`. A suspended or archived organization SHALL grant nothing. The request SHALL carry `Authorization: Bearer <access_token>` and `X-Realm-ID: <realm_uuid>`. The `200` response SHALL hold `roles`, `groups`, `permissions` and `scope`. A missing, invalid or expired token, a token that is not a user's token, and a token whose realm does not match `X-Realm-ID` SHALL get `401`. A missing `X-Realm-ID` SHALL get `400`.
 
