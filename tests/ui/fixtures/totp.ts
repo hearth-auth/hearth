@@ -55,7 +55,7 @@ const nowStep = () => Math.floor(Date.now() / 1000 / 30);
 /** Runs `update` on the shared step table under a cross-process lock. */
 function withSteps<T>(update: (steps: Record<string, number>) => T): T {
   fs.mkdirSync(path.dirname(STEPS_FILE), { recursive: true });
-  const deadline = Date.now() + 10_000;
+  let deadline = Date.now() + 10_000;
   for (;;) {
     try {
       fs.mkdirSync(LOCK_DIR); // atomic: exactly one process creates it
@@ -63,21 +63,32 @@ function withSteps<T>(update: (steps: Record<string, number>) => T): T {
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
       if (Date.now() > deadline) {
-        fs.rmSync(LOCK_DIR, { recursive: true, force: true }); // a crashed holder
+        // Held for 10 s: a crashed holder. The lock is an empty dir; another
+        // waiter may have removed it already. Restart the clock either way.
+        try {
+          fs.rmdirSync(LOCK_DIR);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        }
+        deadline = Date.now() + 10_000;
         continue;
       }
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
     }
   }
   try {
-    const steps: Record<string, number> = fs.existsSync(STEPS_FILE)
-      ? JSON.parse(fs.readFileSync(STEPS_FILE, 'utf-8'))
-      : {};
+    let steps: Record<string, number> = {};
+    try {
+      steps = JSON.parse(fs.readFileSync(STEPS_FILE, 'utf-8'));
+    } catch (e) {
+      // Read, then handle a missing file: no check-then-use window.
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+    }
     const result = update(steps);
     fs.writeFileSync(STEPS_FILE, JSON.stringify(steps));
     return result;
   } finally {
-    fs.rmSync(LOCK_DIR, { recursive: true, force: true });
+    fs.rmdirSync(LOCK_DIR);
   }
 }
 
