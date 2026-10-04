@@ -1,0 +1,104 @@
+# Shared SDK conformance scenarios (openspec sdk-support-contract,
+# "One shared conformance harness tests every SDK").
+#
+# scripts/sdk-conformance.sh boots a live `hearth serve --dev`, turns each
+# scenario below into a concrete case (a real token, the SDK config to use),
+# writes the cases to a JSON file and runs every SDK's runner on it
+# (sdks/<sdk>/conformance/). A runner prints one JSON line per case:
+#
+#   {"id": "<scenario id>", "outcome": "ok", "claims": {"sub": ..., "scope": ..., "permissions": [...]}}
+#   {"id": "<scenario id>", "outcome": "error", "error": "<SDK.md §5 error name>"}
+#
+# `claims` holds exactly the claims named in `expect.claims`, read through the
+# SDK's public claims API: `sub` a string, `scope` a string or null when the
+# token has none, `permissions` a list (empty when the token has none). The
+# driver compares them with the minted token's payload; for
+# `client_credentials` it checks `sub` is `client_<client_id>` and `scope` the
+# requested scope.
+#
+# Error names are the SDK.md §5 names (`TokenInvalidError`, ...); PHP's
+# `...Exception` classes report the `...Error` name. The driver fails when a
+# runner's line differs from `expect`, or from another SDK's line, and names
+# the SDK and the scenario.
+#
+# Token kinds (minted by the driver):
+#   user_access     the bootstrap admin's access token (dev-realm; roles and
+#                   permissions claims)
+#   m2m_access      a client_credentials token for the `conformance` realm's
+#                   `m2m` client (scope claim, no permissions)
+#   tampered        user_access with one payload claim changed after signing
+#   alg_none        user_access payload under an `alg: none` header, no signature
+#   unknown_kid     user_access with its header `kid` replaced
+#   expired         an m2m_access token from a second server whose access
+#                   tokens live 1 s, presented after the 5 s clock skew
+#
+# Config variants (what the SDK is configured with):
+#   default         the token's realm issuer, audience `hearth`
+#   wrong_audience  the token's realm issuer, audience `not-hearth`
+#   wrong_issuer    the same realm reached as `localhost` instead of
+#                   `127.0.0.1`: same keys, different `iss`
+
+scenarios:
+  - id: user-token-validates
+    kind: verify_token
+    token: user_access
+    config: default
+    expect:
+      outcome: ok
+      claims: [sub, scope, permissions]
+
+  - id: m2m-token-validates
+    kind: verify_token
+    token: m2m_access
+    config: default
+    expect:
+      outcome: ok
+      claims: [sub, scope, permissions]
+
+  - id: tampered-payload-fails
+    kind: verify_token
+    token: tampered
+    config: default
+    expect: {outcome: error, error: TokenInvalidError}
+
+  - id: alg-none-fails
+    kind: verify_token
+    token: alg_none
+    config: default
+    expect: {outcome: error, error: TokenInvalidError}
+
+  - id: unknown-kid-fails
+    kind: verify_token
+    token: unknown_kid
+    config: default
+    # SDK.md §5: JWKSFetchError is for an unreachable or invalid JWKS
+    # endpoint. A token whose `kid` is absent after one re-fetch is a bad token.
+    expect: {outcome: error, error: TokenInvalidError}
+
+  - id: expired-fails
+    kind: verify_token
+    token: expired
+    config: default
+    expect: {outcome: error, error: TokenExpiredError}
+
+  - id: wrong-audience-fails
+    kind: verify_token
+    token: user_access
+    config: wrong_audience
+    expect: {outcome: error, error: TokenAudienceError}
+
+  - id: wrong-issuer-fails
+    kind: verify_token
+    token: user_access
+    config: wrong_issuer
+    expect: {outcome: error, error: TokenIssuerError}
+
+  # The SDK runs its own client-credentials call against the `conformance`
+  # realm's `m2m` client, then verifies the token it got back.
+  - id: client-credentials-flow
+    kind: client_credentials
+    config: default
+    scope: openid
+    expect:
+      outcome: ok
+      claims: [sub, scope, permissions]

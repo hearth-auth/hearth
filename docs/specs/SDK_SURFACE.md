@@ -4,7 +4,7 @@
 > **Coverage:** C-01–C-19 ship across all applicable SDKs; PKCE (C-17, the original trigger gap) is now universal. Residual gaps tracked in §7.1.  
 > **Source of truth for:** capability identity, required behavior contracts, and language-idiomatic symbol names.  
 > **Full behavioral spec:** [`docs/specs/SDK.md`](SDK.md) — this document maps capabilities to symbols; SDK.md is normative for behavior.  
-> **Scope trim (2026-10):** Hearth now ships four SDKs — TypeScript, Go, Python, PHP. The Node.js SDK (`@hearth-auth/node`) was folded into `@hearth-auth/sdk`; the Rust and Kotlin SDKs were removed. The TypeScript rows below are re-checked against `sdks/typescript/src`; the Go, Python and PHP status cells in §4 still record the 2026-06 design target. Moving Go, Python and PHP to standard JOSE libraries, generating admin clients from OpenAPI, and a shared conformance harness are planned in the [`sdk-standard-libraries`](../../openspec/changes/sdk-standard-libraries/) change.
+> **Scope trim (2026-10):** Hearth now ships four SDKs — TypeScript, Go, Python, PHP. The Node.js SDK (`@hearth-auth/node`) was folded into `@hearth-auth/sdk`; the Rust and Kotlin SDKs were removed. The TypeScript rows below are re-checked against `sdks/typescript/src`; the Go, Python and PHP status cells in §4 still record the 2026-06 design target. The [`sdk-standard-libraries`](../../openspec/changes/sdk-standard-libraries/) change moved all four SDKs onto standard JOSE libraries (C-03, C-04), generated each admin client from OpenAPI (C-19), and added a shared live conformance harness (SDK.md §9); the C-04 and C-19 rows are re-checked against all four SDKs.
 
 ---
 
@@ -48,8 +48,8 @@ Each capability has a stable **C-ID** used throughout this doc and in child issu
 | ------ | ----------- | --------------------- |
 | **C-01** | Client configuration | Single entry point (`HearthClient`/`NewClient`/etc.) accepting `issuerUrl`, optional `clientId`, `clientSecret`, `jwksTtl`, `introspectionEndpoint`, `httpTimeout`. Validates required params at construction. Throws `ConfigurationError` on invalid URL. See SDK.md §1. |
 | **C-02** | OIDC discovery | Auto-discovers all endpoint URLs from `{issuerUrl}/.well-known/openid-configuration` on first use. Hard-coded paths are prohibited. Caches the document for the session lifetime. Throws `DiscoveryError` on failure. |
-| **C-03** | JWKS fetch & cache | Fetches keys from the discovered `jwks_uri`. Caches by `kid`. Respects `Cache-Control: max-age`, 24 h ceiling. On `kid` miss: re-fetches once before failing. Skips unrecognized `kty` values. Throws `JWKSFetchError` on failure. See SDK.md §2. |
-| **C-04** | Token verification (`verifyToken`) | Verifies signature against JWKS, then validates `exp`, `iss`, `aud` (optional), `iat` (±5 s clock skew) in that order. **EdDSA (`alg: "EdDSA"`, `kty: "OKP"`) is the only accepted algorithm; every other `alg` — RS256 and ES256 included — must be rejected.** Returns typed `Claims`. Throws typed errors (§C-07). On `kid` miss: re-fetches once. See SDK.md §2 and §6.1 below. |
+| **C-03** | JWKS fetch & cache | Fetches keys from the discovered `jwks_uri`. Caches by `kid`. Respects `Cache-Control: max-age`, 24 h ceiling. On `kid` miss: re-fetches once; a `kid` still absent is `TokenInvalidError`. Skips unrecognized `kty` values. Throws `JWKSFetchError` only when the endpoint is unreachable or answers an invalid document. See SDK.md §2. |
+| **C-04** | Token verification (`verifyToken`) | Verifies through the SDK's JOSE library (TS `jose`, Go `go-jose/v4`, Python `PyJWT`, PHP `lcobucci/jwt`; no handwritten signature code): signature against JWKS, then `exp`, `iss` (against the configured issuer), `aud` (optional), `nbf` and `iat`, with one 5 s clock-skew allowance on all three time claims. **EdDSA (`alg: "EdDSA"`, `kty: "OKP"`) is the only accepted algorithm; every other `alg` — RS256 and ES256 included — must be rejected.** Returns typed `Claims`. Throws typed errors (§C-07). On `kid` miss: re-fetches once. See SDK.md §2 and §6.1 below. |
 | **C-05** | Token introspection | RFC 7662 `POST /introspect`. Never cached. Requires `clientId` + `clientSecret`. Returns typed `IntrospectionResult` (`active`, `sub`, `exp`, `iat`, `iss`, `aud`, `scope`, `client_id`, `extra`). Throws `IntrospectionError` on failure. See SDK.md §3. |
 | **C-06** | Claims API | 17 typed accessors on a `Claims` (or `VerifiedToken`) object. All accessors return `false`/empty (never error) when the claim is absent. Full accessor list in §6.2 below. See SDK.md §4. |
 | **C-07** | Error taxonomy | 10 named error types. Language-native error handling applies (Go: sentinel errors; Python: exceptions; TS: Error subclasses; PHP: `\Throwable`). Errors must never include token values. See SDK.md §5. |
@@ -89,7 +89,7 @@ Each capability has a stable **C-ID** used throughout this doc and in child issu
 
 | C-ID | Capability | Behavioral contract |
 | ------ | ----------- | --------------------- |
-| **C-19** | Admin SDK | `AdminClient` separate from `HearthClient`. Takes `(baseUrl, adminToken, realmId)`. Sends `X-Realm-ID` header. CRUD + list for: users, realms (read + delete only), OAuth clients (at `/admin/applications*`, **not** `/admin/clients*`), roles, groups. **No org-membership methods** — membership has no REST route (audit 2026-08-28 §25.19). Organization CRUD exists at `/admin/organizations` (3.0.0) but no SDK wraps it yet (`sdk-standard-libraries`). Pagination via `limit` + `cursor`. 403 = typed `AdminPermissionError` (or equivalent HTTP error type). See SDK.md §12. |
+| **C-19** | Admin SDK | `AdminClient` separate from `HearthClient`. Takes `(baseUrl, adminToken, realmId)`. Sends `X-Realm-ID` header. CRUD + list for: users, realms (read + delete only), OAuth clients (at `/admin/applications*`, **not** `/admin/clients*`), roles, groups. **No org-membership methods** — membership has no REST route (audit 2026-08-28 §25.19). Organization CRUD and extra member roles at `/admin/organizations*` in every SDK. A thin wrapper over a client generated from `docs/api/openapi.json` (`make sdk-admin-gen`, freshness-gated in CI). Pagination via `limit` + `cursor`. 403 = typed `AdminPermissionError` (or equivalent HTTP error type). See SDK.md §12. |
 
 ### Tier 7 — Optional Advanced
 
@@ -152,9 +152,11 @@ Each capability has a stable **C-ID** used throughout this doc and in child issu
 | SDK | Symbol | Status |
 | ----- | -------- | -------- |
 | TS | `HearthClient.verifyToken(token: string): Promise<Claims>` → `JwksClient.verify()` | ✅ — EdDSA only (`algorithms: ["EdDSA"]`) |
-| Go | **`→ Client.VerifyToken(ctx context.Context, token string) (*Claims, error)`** | ❌ missing — no explicit verify path, only middleware internals |
-| PHP | `HearthClient::verifyToken(string $rawToken): Claims` → delegates to `TokenVerifier::verify()` | ⚠ present — verify `TokenVerifier` explicitly selects EdDSA; fix if not |
-| Python | **`→ HearthClient.verify_token(token: str) → Claims`** | ❌ missing |
+| Go | `Client.VerifyToken(ctx context.Context, token string, audience ...string) (*Claims, error)` | ✅ — go-jose `jwt.ParseSigned` with `jose.EdDSA` only |
+| PHP | `HearthClient::verifyToken(string $rawToken): Claims` → `TokenVerifier::verify()` | ✅ — lcobucci `Signer\Eddsa` + `SignedWith` constraint |
+| Python | `HearthClient.verify_token(token) → Claims` | ✅ — `jwt.decode(algorithms=["EdDSA"])` with a `PyJWK` |
+
+All four pass the same live scenarios (SDK.md §9, `make sdk-conformance`).
 
 ---
 
@@ -529,7 +531,7 @@ The original trigger gap — hand-rolled PKCE in Python and PHP — is **fully c
 2. ✅ **C-21 WebAuthn in TS — DONE.** Four ceremony helpers added to `HearthApiClient` with tests (`sdks/typescript/tests/webauthn.test.ts`).
 3. ✅ **C-12 magic-link send + exchange — DONE.** Board decided both halves are required. All four SDKs expose the full send→exchange flow.
 4. ⏳ **C-20 managed cache in Python (P3, optional).** Recommended-optional; PHP intentionally exempt (note ⁴). Tracked in [HEA-1590](/HEA/issues/HEA-1590).
-5. ⏳ **Standard JOSE libraries, generated admin clients, shared conformance harness** for Go, Python and PHP — planned in the [`sdk-standard-libraries`](../../openspec/changes/sdk-standard-libraries/) change.
+5. ✅ **Standard JOSE libraries, generated admin clients, shared conformance harness — DONE** in the [`sdk-standard-libraries`](../../openspec/changes/sdk-standard-libraries/) change (SDK.md §2, §9, §12).
 
 ---
 

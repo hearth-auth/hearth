@@ -11,10 +11,23 @@ Hearth has **no public gRPC API** — it was removed in 3.0.0. The API protos
 (`hearth/identity/v1`, `hearth/rbac/v1`, `hearth/events/v1`) remain the schema of the
 **REST API messages**:
 
-- `build.rs` compiles them with `prost` into the Rust request/response types the REST
-  handlers serialize, using the `pbjson` JSON codec (proto3 JSON mapping, `json_name`).
+- `build.rs` compiles them with `prost`, and generates their JSON codec with `pbjson`
+  using `preserve_proto_field_names()`. So a message on the wire uses the **proto field
+  names** (snake_case), not `json_name`; enums use their proto value names
+  (`USER_STATUS_ACTIVE`); decoding accepts both the proto name and the lowerCamel
+  `json_name`. `proto_to_rest_json` then writes every 64-bit integer as a JSON number.
+- Only some REST handlers use these messages: users, realms and applications. Most
+  admin handlers — roles, groups, members, role assignments, organizations, audit,
+  webhooks — serialize their own snake_case DTOs or domain types, not a proto message.
+  `docs/api/openapi.supplement.yaml` documents those shapes, and lists in
+  `x-hearth-omit-operations` the proto operations whose annotation would describe
+  them wrongly.
 - `buf generate` derives the TypeScript and Go SDK types and the OpenAPI document
-  (`docs/api/openapi.proto-derived.json`) from them.
+  (`docs/api/openapi_proto_derived.swagger.json`, with `json_names_for_fields=false`
+  so it names fields as the wire does) from them.
+- `tests/openapi_contract.rs` sends every admin operation the SDK admin clients use
+  through the router and checks request and response JSON against the merged
+  `docs/api/openapi.json`. A handler change that the spec does not follow fails it.
 
 Their `service` blocks are **schema only**. `build.rs` sets `build_server(false)` and
 `build_client(false)`, so no gRPC server or client code is generated, and nothing
@@ -145,6 +158,11 @@ string jwks_uri = 2 [json_name = "jwks_uri"];
 
 **Only add `json_name` when an external spec requires it.** Do not use it to
 work around naming preferences — fix the field name instead.
+
+Note: the server's REST JSON does **not** follow `json_name`. `build.rs` builds the
+pbjson codec with `preserve_proto_field_names()`, so the server writes the proto field
+name and reads either form (see "What the protos are for" above). `json_name` affects
+the JSON of the generated TypeScript and Go SDK types only.
 
 ### Optional Fields
 

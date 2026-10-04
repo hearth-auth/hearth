@@ -966,7 +966,7 @@ async fn par_accepts_a_signed_request_object() {
         })
         .expect("create realm");
 
-    // Generate Ed25519 key pair and register a JARM-capable JWKS client.
+    // Generate Ed25519 key pair and register a JWKS client.
     let rng = ring::rand::SystemRandom::new();
     let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("keygen");
     let pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("from_pkcs8");

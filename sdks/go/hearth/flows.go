@@ -92,7 +92,7 @@ func (c *Client) PollDeviceToken(ctx context.Context, deviceCode string) (*Token
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Realm-ID", c.realmID)
+	c.setRealmHeader(req)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -148,7 +148,7 @@ func (c *Client) RequestMagicLink(ctx context.Context, email string) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Realm-ID", c.realmID)
+	c.setRealmHeader(req)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -216,6 +216,6 @@ func (c *Client) postTokenRequest(ctx context.Context, path string, body url.Val
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Realm-ID", c.realmID)
+	c.setRealmHeader(req)
 	return doRequest(c.http, req, result)
 }

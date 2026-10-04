@@ -1,14 +1,24 @@
 package hearth
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"fmt"
 	"net/http"
+
+	"github.com/hearth-auth/hearth/sdks/go/generated/admin"
 )
 
 // AdminClient provides access to the Hearth admin API.
+//
+// It wraps the client generated from docs/api/openapi.json
+// (sdks/go/generated/admin, `make sdk-admin-gen`), which owns every route,
+// method and query parameter. This layer adds the bearer token and
+// X-Realm-ID header, the ergonomic method names and the SDK error taxonomy.
+//
+// Request bodies are the generated types, and responses decode into the
+// generated types before they are mapped onto the SDK's public types
+// (admin_convert.go). Realms are the exception on the response side:
+// Realm.Config is an untyped `any` in the public API, so realm responses
+// decode directly into Realm.
 type AdminClient struct {
 	baseURL     string
 	realmID     string
@@ -16,53 +26,117 @@ type AdminClient struct {
 	http        *http.Client
 }
 
+// Organization is an organization as the admin API returns it.
+type Organization = admin.AdminOrganization
+
+// OrganizationStatus is `active`, `suspended` or `archived`.
+type OrganizationStatus = admin.AdminOrganizationStatus
+
+// CreateOrganizationRequest is the body of CreateOrganization. Slug and
+// DisplayName are required.
+type CreateOrganizationRequest = admin.AdminCreateOrganizationRequest
+
+// UpdateOrganizationRequest is the body of UpdateOrganization. Nil fields are
+// unchanged; Status accepts `active` or `suspended`; the slug is immutable.
+type UpdateOrganizationRequest = admin.AdminUpdateOrganizationRequest
+
+// UpdateOrganizationStatus is the status an UpdateOrganizationRequest may set.
+type UpdateOrganizationStatus = admin.AdminUpdateOrganizationRequestStatus
+
+// api returns the generated client, authenticated for this AdminClient.
+func (a *AdminClient) api() *admin.Client {
+	// NewClient fails only on an invalid option; both options here are fixed.
+	c, _ := admin.NewClient(a.baseURL,
+		admin.WithHTTPClient(a.http),
+		admin.WithRequestEditorFn(func(_ context.Context, req *http.Request) error {
+			req.Header.Set("X-Realm-ID", a.realmID)
+			req.Header.Set("Authorization", "Bearer "+a.accessToken)
+			return nil
+		}),
+	)
+	return c
+}
+
+// listParams converts ListOptions to the generated cursor/limit pointers.
+func listParams(opts ListOptions) (cursor *string, limit *int64) {
+	if opts.Cursor != "" {
+		cursor = &opts.Cursor
+	}
+	if opts.Limit > 0 {
+		l := int64(opts.Limit)
+		limit = &l
+	}
+	return cursor, limit
+}
+
+// intListParams is listParams for the operations whose limit is a plain int.
+func intListParams(opts ListOptions) (cursor *string, limit *int) {
+	if opts.Cursor != "" {
+		cursor = &opts.Cursor
+	}
+	if opts.Limit > 0 {
+		limit = &opts.Limit
+	}
+	return cursor, limit
+}
+
+// ─── Users ────────────────────────────────────────────────────────────────────
+
 // CreateUser creates a new user via the admin API.
 func (a *AdminClient) CreateUser(ctx context.Context, req CreateUserRequest) (*User, error) {
-	var result User
-	if err := a.post(ctx, "/admin/users", req, &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
+	resp, err := a.api().IdentityAdminServiceCreateUser(ctx, admin.V1CreateUserRequest{
+		Email:       &req.Email,
+		DisplayName: &req.DisplayName,
+	})
+	return decodeMapped(resp, err, userFrom)
 }
 
 // GetUser retrieves a user by ID via the admin API.
 func (a *AdminClient) GetUser(ctx context.Context, userID string) (*User, error) {
-	var result User
-	if err := a.get(ctx, fmt.Sprintf("/admin/users/%s", userID), &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
+	resp, err := a.api().IdentityAdminServiceGetUser(ctx, userID)
+	return decodeMapped(resp, err, userFrom)
 }
 
-// UpdateUser updates a user via the admin API.
+// UpdateUser updates a user via the admin API. A Status in short form
+// (`active`) is sent as its proto name (`USER_STATUS_ACTIVE`).
 func (a *AdminClient) UpdateUser(ctx context.Context, userID string, req UpdateUserRequest) (*User, error) {
-	var result User
-	if err := a.request(ctx, "PATCH", fmt.Sprintf("/admin/users/%s", userID), req, &result); err != nil {
-		return nil, err
+	body := admin.V1UpdateUserRequest{Email: req.Email, DisplayName: req.DisplayName}
+	if req.Status != nil {
+		status, err := userStatus(*req.Status)
+		if err != nil {
+			return nil, err
+		}
+		body.Status = &status
 	}
-	return &result, nil
+	resp, err := a.api().IdentityAdminServiceUpdateUser(ctx, userID, body)
+	return decodeMapped(resp, err, userFrom)
 }
 
 // DeleteUser deletes a user via the admin API.
 func (a *AdminClient) DeleteUser(ctx context.Context, userID string) error {
-	return a.request(ctx, "DELETE", fmt.Sprintf("/admin/users/%s", userID), nil, nil)
+	resp, err := a.api().IdentityAdminServiceDeleteUser(ctx, userID)
+	return decodeResponse(resp, err, nil)
 }
 
 // ListUsers lists users with optional cursor-based pagination (spec §12).
 func (a *AdminClient) ListUsers(ctx context.Context, opts ListOptions) (*PageResponse[User], error) {
-	path := buildListPath("/admin/users", opts)
-	var result PageResponse[User]
-	if err := a.get(ctx, path, &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
+	cursor, limit := listParams(opts)
+	resp, err := a.api().IdentityAdminServiceListUsers(ctx,
+		&admin.IdentityAdminServiceListUsersParams{Cursor: cursor, Limit: limit})
+	return decodeMapped(resp, err, func(p admin.V1UserPage) PageResponse[User] {
+		return PageResponse[User]{Items: mapAll(deref(p.Items), userFrom), NextCursor: p.NextCursor}
+	})
 }
+
+// ─── Realms ───────────────────────────────────────────────────────────────────
 
 // ListRealms lists realms with optional cursor-based pagination (spec §12).
 func (a *AdminClient) ListRealms(ctx context.Context, opts ListOptions) (*PageResponse[Realm], error) {
-	path := buildListPath("/admin/realms", opts)
+	cursor, limit := listParams(opts)
 	var result PageResponse[Realm]
-	if err := a.get(ctx, path, &result); err != nil {
+	resp, err := a.api().IdentityAdminServiceListRealms(ctx,
+		&admin.IdentityAdminServiceListRealmsParams{Cursor: cursor, Limit: limit})
+	if err := decodeResponse(resp, err, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
@@ -71,7 +145,8 @@ func (a *AdminClient) ListRealms(ctx context.Context, opts ListOptions) (*PageRe
 // GetRealm retrieves a realm by ID via the admin API.
 func (a *AdminClient) GetRealm(ctx context.Context, realmID string) (*Realm, error) {
 	var result Realm
-	if err := a.get(ctx, fmt.Sprintf("/admin/realms/%s", realmID), &result); err != nil {
+	resp, err := a.api().IdentityAdminServiceGetRealm(ctx, realmID)
+	if err := decodeResponse(resp, err, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
@@ -84,36 +159,35 @@ func (a *AdminClient) GetRealm(ctx context.Context, realmID string) (*Realm, err
 
 // DeleteRealm deletes a realm via the admin API.
 func (a *AdminClient) DeleteRealm(ctx context.Context, realmID string) error {
-	return a.request(ctx, "DELETE", fmt.Sprintf("/admin/realms/%s", realmID), nil, nil)
+	resp, err := a.api().IdentityAdminServiceDeleteRealm(ctx, realmID)
+	return decodeResponse(resp, err, nil)
 }
 
 // ─── OAuth Clients ────────────────────────────────────────────────────────────
 
 // CreateClient creates an OAuth client via the admin API.
 func (a *AdminClient) CreateClient(ctx context.Context, req CreateClientRequest) (*OAuthClient, error) {
-	var result OAuthClient
-	if err := a.post(ctx, "/admin/applications", req, &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
+	resp, err := a.api().ApplicationAdminServiceCreateApplication(ctx, admin.V1RegisterClientRequest{
+		ClientName:   &req.ClientName,
+		RedirectUris: optSlice(req.RedirectURIs),
+		GrantTypes:   optSlice(req.GrantTypes),
+	})
+	return decodeMapped(resp, err, clientFrom)
 }
 
 // GetClient retrieves an OAuth client by ID via the admin API.
 func (a *AdminClient) GetClient(ctx context.Context, clientID string) (*OAuthClient, error) {
-	var result OAuthClient
-	if err := a.get(ctx, fmt.Sprintf("/admin/applications/%s", clientID), &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
+	resp, err := a.api().ApplicationAdminServiceGetApplication(ctx, clientID)
+	return decodeMapped(resp, err, clientFrom)
 }
 
 // UpdateClient updates an OAuth client via the admin API.
 func (a *AdminClient) UpdateClient(ctx context.Context, clientID string, req UpdateClientRequest) (*OAuthClient, error) {
-	var result OAuthClient
-	if err := a.request(ctx, "PATCH", fmt.Sprintf("/admin/applications/%s", clientID), req, &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
+	resp, err := a.api().ApplicationAdminServiceUpdateApplication(ctx, clientID, admin.V1UpdateClientRequest{
+		ClientName:   req.ClientName,
+		RedirectUris: optSlice(req.RedirectURIs),
+	})
+	return decodeMapped(resp, err, clientFrom)
 }
 
 // RegenerateClientSecret replaces a confidential client's secret
@@ -121,177 +195,195 @@ func (a *AdminClient) UpdateClient(ctx context.Context, clientID string, req Upd
 // carries the new secret in ClientSecret, once; the old secret stops working
 // immediately.
 func (a *AdminClient) RegenerateClientSecret(ctx context.Context, clientID string) (*OAuthClient, error) {
-	var result OAuthClient
-	if err := a.post(ctx, fmt.Sprintf("/admin/applications/%s/regenerate-secret", clientID), nil, &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
+	resp, err := a.api().ApplicationAdminServiceRegenerateApplicationSecret(ctx, clientID)
+	return decodeMapped(resp, err, clientFrom)
 }
 
 // DeleteClient deletes an OAuth client via the admin API.
 func (a *AdminClient) DeleteClient(ctx context.Context, clientID string) error {
-	return a.request(ctx, "DELETE", fmt.Sprintf("/admin/applications/%s", clientID), nil, nil)
+	resp, err := a.api().ApplicationAdminServiceDeleteApplication(ctx, clientID)
+	return decodeResponse(resp, err, nil)
 }
 
 // ListClients lists OAuth clients with optional cursor-based pagination.
 func (a *AdminClient) ListClients(ctx context.Context, opts ListOptions) (*PageResponse[OAuthClient], error) {
-	path := buildListPath("/admin/applications", opts)
-	var result PageResponse[OAuthClient]
-	if err := a.get(ctx, path, &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
+	cursor, limit := listParams(opts)
+	resp, err := a.api().ApplicationAdminServiceListApplications(ctx,
+		&admin.ApplicationAdminServiceListApplicationsParams{Cursor: cursor, Limit: limit})
+	return decodeMapped(resp, err, func(p admin.V1OAuthClientPage) PageResponse[OAuthClient] {
+		return PageResponse[OAuthClient]{Items: mapAll(deref(p.Items), clientFrom), NextCursor: p.NextCursor}
+	})
 }
 
 // ─── Roles ────────────────────────────────────────────────────────────────────
 
 // CreateRole creates a realm-level role via the admin API.
 func (a *AdminClient) CreateRole(ctx context.Context, req CreateRoleRequest) (*Role, error) {
-	var result Role
-	if err := a.post(ctx, "/admin/roles", req, &result); err != nil {
+	parents, err := parseUUIDs(req.ParentRoles)
+	if err != nil {
 		return nil, err
 	}
-	return &result, nil
+	resp, err := a.api().AdminCreateRole(ctx, admin.AdminCreateRoleRequest{
+		Name:        req.Name,
+		Description: optString(req.Description),
+		Permissions: optSlice(req.Permissions),
+		ParentRoles: parents,
+	})
+	return decodeMapped(resp, err, roleFrom)
 }
 
 // GetRole retrieves a role by ID via the admin API.
 func (a *AdminClient) GetRole(ctx context.Context, roleID string) (*Role, error) {
-	var result Role
-	if err := a.get(ctx, fmt.Sprintf("/admin/roles/%s", roleID), &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
+	resp, err := a.api().AdminGetRole(ctx, roleID)
+	return decodeMapped(resp, err, roleFrom)
 }
 
 // UpdateRole updates a role via the admin API.
 func (a *AdminClient) UpdateRole(ctx context.Context, roleID string, req UpdateRoleRequest) (*Role, error) {
-	var result Role
-	if err := a.request(ctx, "PATCH", fmt.Sprintf("/admin/roles/%s", roleID), req, &result); err != nil {
+	parents, err := parseUUIDs(req.ParentRoles)
+	if err != nil {
 		return nil, err
 	}
-	return &result, nil
+	resp, err := a.api().AdminUpdateRole(ctx, roleID, admin.AdminUpdateRoleRequest{
+		Name:        req.Name,
+		Description: req.Description,
+		Permissions: optSlice(req.Permissions),
+		ParentRoles: parents,
+	})
+	return decodeMapped(resp, err, roleFrom)
 }
 
 // DeleteRole deletes a role via the admin API.
 func (a *AdminClient) DeleteRole(ctx context.Context, roleID string) error {
-	return a.request(ctx, "DELETE", fmt.Sprintf("/admin/roles/%s", roleID), nil, nil)
+	resp, err := a.api().AdminDeleteRole(ctx, roleID, nil)
+	return decodeResponse(resp, err, nil)
 }
 
 // ListRoles lists roles with optional cursor-based pagination.
 func (a *AdminClient) ListRoles(ctx context.Context, opts ListOptions) (*PageResponse[Role], error) {
-	path := buildListPath("/admin/roles", opts)
-	var result PageResponse[Role]
-	if err := a.get(ctx, path, &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
+	cursor, limit := intListParams(opts)
+	resp, err := a.api().AdminListRoles(ctx, &admin.AdminListRolesParams{Cursor: cursor, Limit: limit})
+	return decodeMapped(resp, err, func(p admin.AdminRolePage) PageResponse[Role] {
+		return PageResponse[Role]{Items: mapAll(p.Items, roleFrom), NextCursor: p.NextCursor}
+	})
 }
 
 // ─── Groups ───────────────────────────────────────────────────────────────────
 
 // CreateGroup creates a realm-level group via the admin API.
 func (a *AdminClient) CreateGroup(ctx context.Context, req CreateGroupRequest) (*Group, error) {
-	var result Group
-	if err := a.post(ctx, "/admin/groups", req, &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
+	resp, err := a.api().AdminCreateGroup(ctx, admin.AdminCreateGroupRequest{
+		Name:        req.Name,
+		Slug:        req.Slug,
+		Description: optString(req.Description),
+	})
+	return decodeMapped(resp, err, groupFrom)
 }
 
 // GetGroup retrieves a group by ID via the admin API.
 func (a *AdminClient) GetGroup(ctx context.Context, groupID string) (*Group, error) {
-	var result Group
-	if err := a.get(ctx, fmt.Sprintf("/admin/groups/%s", groupID), &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
+	resp, err := a.api().AdminGetGroup(ctx, groupID)
+	return decodeMapped(resp, err, groupFrom)
 }
 
 // UpdateGroup updates a group via the admin API.
 func (a *AdminClient) UpdateGroup(ctx context.Context, groupID string, req UpdateGroupRequest) (*Group, error) {
-	var result Group
-	if err := a.request(ctx, "PATCH", fmt.Sprintf("/admin/groups/%s", groupID), req, &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
+	resp, err := a.api().AdminUpdateGroup(ctx, groupID, admin.AdminUpdateGroupRequest{
+		Name:        req.Name,
+		Slug:        req.Slug,
+		Description: req.Description,
+	})
+	return decodeMapped(resp, err, groupFrom)
 }
 
 // DeleteGroup deletes a group via the admin API.
 func (a *AdminClient) DeleteGroup(ctx context.Context, groupID string) error {
-	return a.request(ctx, "DELETE", fmt.Sprintf("/admin/groups/%s", groupID), nil, nil)
+	resp, err := a.api().AdminDeleteGroup(ctx, groupID)
+	return decodeResponse(resp, err, nil)
 }
 
 // ListGroups lists groups with optional cursor-based pagination.
 func (a *AdminClient) ListGroups(ctx context.Context, opts ListOptions) (*PageResponse[Group], error) {
-	path := buildListPath("/admin/groups", opts)
-	var result PageResponse[Group]
-	if err := a.get(ctx, path, &result); err != nil {
+	cursor, limit := intListParams(opts)
+	resp, err := a.api().AdminListGroups(ctx, &admin.AdminListGroupsParams{Cursor: cursor, Limit: limit})
+	return decodeMapped(resp, err, func(p admin.AdminGroupPage) PageResponse[Group] {
+		return PageResponse[Group]{Items: mapAll(p.Items, groupFrom), NextCursor: p.NextCursor}
+	})
+}
+
+// ─── Organizations ────────────────────────────────────────────────────────────
+
+// ListOrganizations lists the realm's organizations with cursor-based
+// pagination. NextCursor is nil on the last page.
+func (a *AdminClient) ListOrganizations(ctx context.Context, opts ListOptions) (*PageResponse[Organization], error) {
+	cursor, limit := intListParams(opts)
+	var result PageResponse[Organization]
+	resp, err := a.api().AdminListOrganizations(ctx, &admin.AdminListOrganizationsParams{Cursor: cursor, Limit: limit})
+	if err := decodeResponse(resp, err, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
 }
 
-// ─── Organization Memberships ─────────────────────────────────────────────────
-//
-// Removed. Hearth exposes no organization routes over HTTP at all: there is no
-// /admin/orgs, no /admin/orgs/{id}/members and no per-member route anywhere in
-// the router, so AddOrgMember, GetOrgMember, UpdateOrgMember, RemoveOrgMember
-// and ListOrgMembers every one 404'd (audit 2026-08-28 §25.19). Organization
-// membership is administered through the admin console, not the admin API.
-
-// buildListPath appends limit and cursor query parameters to base when provided.
-func buildListPath(base string, opts ListOptions) string {
-	sep := "?"
-	path := base
-	if opts.Limit > 0 {
-		path += fmt.Sprintf("%slimit=%d", sep, opts.Limit)
-		sep = "&"
+// CreateOrganization creates an organization. The server refuses it in the
+// system realm.
+func (a *AdminClient) CreateOrganization(ctx context.Context, req CreateOrganizationRequest) (*Organization, error) {
+	var result Organization
+	resp, err := a.api().AdminCreateOrganization(ctx, req)
+	if err := decodeResponse(resp, err, &result); err != nil {
+		return nil, err
 	}
-	if opts.Cursor != "" {
-		path += fmt.Sprintf("%scursor=%s", sep, opts.Cursor)
-	}
-	return path
+	return &result, nil
 }
 
-func (a *AdminClient) headers(req *http.Request) {
-	req.Header.Set("X-Realm-ID", a.realmID)
-	req.Header.Set("Authorization", "Bearer "+a.accessToken)
-	req.Header.Set("Content-Type", "application/json")
+// GetOrganization retrieves an organization by ID.
+func (a *AdminClient) GetOrganization(ctx context.Context, orgID string) (*Organization, error) {
+	var result Organization
+	resp, err := a.api().AdminGetOrganization(ctx, orgID)
+	if err := decodeResponse(resp, err, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
 }
 
-func (a *AdminClient) get(ctx context.Context, path string, result any) error {
-	httpReq, err := http.NewRequestWithContext(ctx, "GET", a.baseURL+path, nil)
-	if err != nil {
-		return err
+// UpdateOrganization changes the fields set in req; the slug is immutable.
+func (a *AdminClient) UpdateOrganization(ctx context.Context, orgID string, req UpdateOrganizationRequest) (*Organization, error) {
+	var result Organization
+	resp, err := a.api().AdminUpdateOrganization(ctx, orgID, req)
+	if err := decodeResponse(resp, err, &result); err != nil {
+		return nil, err
 	}
-	a.headers(httpReq)
-	return doRequest(a.http, httpReq, result)
+	return &result, nil
 }
 
-func (a *AdminClient) post(ctx context.Context, path string, body, result any) error {
-	return a.request(ctx, "POST", path, body, result)
+// DeleteOrganization deletes an organization. The server refuses it when a
+// member holds admin authority the caller lacks.
+func (a *AdminClient) DeleteOrganization(ctx context.Context, orgID string) error {
+	resp, err := a.api().AdminDeleteOrganization(ctx, orgID)
+	return decodeResponse(resp, err, nil)
 }
 
-func (a *AdminClient) request(ctx context.Context, method, path string, body, result any) error {
-	var bodyReader *bytes.Reader
-	if body != nil {
-		jsonBody, err := json.Marshal(body)
-		if err != nil {
-			return err
-		}
-		bodyReader = bytes.NewReader(jsonBody)
+// ListMemberRoles lists the extra org roles a member holds in an
+// organization, by role name.
+func (a *AdminClient) ListMemberRoles(ctx context.Context, orgID, userID string) ([]string, error) {
+	var result admin.AdminRoleNameList
+	resp, err := a.api().AdminListAdditionalRoles(ctx, orgID, userID)
+	if err := decodeResponse(resp, err, &result); err != nil {
+		return nil, err
 	}
+	return result.Items, nil
+}
 
-	var httpReq *http.Request
-	var err error
-	if bodyReader != nil {
-		httpReq, err = http.NewRequestWithContext(ctx, method, a.baseURL+path, bodyReader)
-	} else {
-		httpReq, err = http.NewRequestWithContext(ctx, method, a.baseURL+path, nil)
-	}
-	if err != nil {
-		return err
-	}
-	a.headers(httpReq)
-	return doRequest(a.http, httpReq, result)
+// AddMemberRole gives an organization member an extra org role. The user
+// must already be a member (409 otherwise).
+func (a *AdminClient) AddMemberRole(ctx context.Context, orgID, userID, roleName string) error {
+	resp, err := a.api().AdminAddAdditionalRole(ctx, orgID, userID,
+		admin.AdminAddAdditionalRoleRequest{RoleName: roleName})
+	return decodeResponse(resp, err, nil)
+}
+
+// RemoveMemberRole removes an extra org role from an organization member.
+func (a *AdminClient) RemoveMemberRole(ctx context.Context, orgID, userID, roleName string) error {
+	resp, err := a.api().AdminRemoveAdditionalRole(ctx, orgID, userID, roleName)
+	return decodeResponse(resp, err, nil)
 }

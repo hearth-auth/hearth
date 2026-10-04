@@ -6,6 +6,7 @@ namespace Hearth;
 
 use Hearth\Contracts\JwksClientInterface;
 use Hearth\Exceptions\JWKSFetchException;
+use Hearth\Exceptions\JwksKeyNotFoundException;
 use Hearth\Exceptions\NetworkException;
 use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestFactoryInterface;
@@ -17,7 +18,7 @@ use Throwable;
  * Implements the mandatory §2 JWKS caching contract:
  *   1. Cache keys by `kid`; do not discard keys missing from the latest fetch.
  *   2. Respect `Cache-Control: max-age` from the JWKS response.
- *   3. On cache miss for a `kid`: re-fetch once before raising JWKSFetchException.
+ *   3. On cache miss for a `kid`: re-fetch once before raising JwksKeyNotFoundException.
  *   4. Maximum cache age: 24 hours regardless of Cache-Control.
  *   5. Skip (do not error on) any key with an unrecognised `kty`.
  */
@@ -52,10 +53,11 @@ final class JwksClient implements JwksClientInterface
     /**
      * Returns the 32-byte raw Ed25519 public key for the given `kid`.
      *
-     * On a cache miss, re-fetches the JWKS once before raising JWKSFetchException.
+     * On a cache miss, re-fetches the JWKS once before raising JwksKeyNotFoundException.
      *
      * @return non-empty-string Raw 32-byte Ed25519 public key
-     * @throws JWKSFetchException    When the key is not found after a re-fetch
+     * @throws JwksKeyNotFoundException When the key is not found after a re-fetch
+     * @throws JWKSFetchException       When the JWKS response is invalid
      * @throws NetworkException When the JWKS endpoint is unreachable
      */
     public function getKey(string $kid): string
@@ -68,7 +70,7 @@ final class JwksClient implements JwksClientInterface
         $this->fetch();
 
         if (!isset($this->cache[$kid])) {
-            throw new JWKSFetchException("No key with kid '{$kid}' found in JWKS after re-fetch");
+            throw new JwksKeyNotFoundException($kid);
         }
 
         return $this->cache[$kid]['publicKeyBytes'];

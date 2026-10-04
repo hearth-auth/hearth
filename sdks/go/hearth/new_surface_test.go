@@ -282,7 +282,9 @@ func verifyTestClient(
 		mainSrv.Close()
 	})
 
-	c := NewClient(mainSrv.URL, "realm-1")
+	// The client is configured with the issuer the tokens carry (SDK.md §2
+	// step 3); only the JWKS fetch goes to the test server.
+	c := NewClient(issuer, "realm-1")
 	// Override jwksURL to point to our test server
 	c.jwksURLOverride = jwksSrv.URL + "/.well-known/jwks.json"
 	return c, mainSrv

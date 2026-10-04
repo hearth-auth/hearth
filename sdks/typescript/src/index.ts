@@ -70,6 +70,20 @@ export { Claims } from "./claims.js";
 export { HearthApiClient, HearthError } from "./client.js";
 export type { HearthApiClientConfig, HandleCallbackParams } from "./client.js";
 export { AdminClient } from "./admin.js";
+export type {
+  AdminApplication,
+  AdminGroup,
+  AdminRole,
+  CreateApplicationParams,
+  CreateGroupParams,
+  CreateOrganizationParams,
+  CreateRoleParams,
+  Organization,
+  UpdateApplicationParams,
+  UpdateGroupParams,
+  UpdateOrganizationParams,
+  UpdateRoleParams,
+} from "./admin.js";
 export { createHearth } from "./hearth.js";
 export type { HearthFacade, HearthHttpClient, HearthOptions } from "./hearth.js";
 export {
@@ -109,6 +123,7 @@ export type {
   TokenResponse,
   UpdateRealmParams,
   UpdateUserParams,
+  UserStatus,
   User,
   UserInfoResponse,
   WebAuthnAllowCredential,

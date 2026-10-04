@@ -1,9 +1,35 @@
 {
   "swagger": "2.0",
   "info": {
-    "title": "Hearth API",
-    "version": "0.1.0"
+    "title": "google/api/http.proto",
+    "version": "version not set"
   },
+  "tags": [
+    {
+      "name": "RaftService"
+    },
+    {
+      "name": "AuditService"
+    },
+    {
+      "name": "IdentityAdminService"
+    },
+    {
+      "name": "ApplicationAdminService"
+    },
+    {
+      "name": "OAuthService"
+    },
+    {
+      "name": "RbacAdminService"
+    }
+  ],
+  "consumes": [
+    "application/json"
+  ],
+  "produces": [
+    "application/json"
+  ],
   "paths": {
     "/admin/applications": {
       "get": {
@@ -44,8 +70,8 @@
       "post": {
         "operationId": "ApplicationAdminService_CreateApplication",
         "responses": {
-          "201": {
-            "description": "Created. For a client_secret_basic or client_secret_post client the body carries the generated client_secret, the only time it is returned.",
+          "200": {
+            "description": "A successful response.",
             "schema": {
               "$ref": "#/definitions/v1OAuthClient"
             }
@@ -73,7 +99,7 @@
         ]
       }
     },
-    "/admin/applications/{clientId}": {
+    "/admin/applications/{client_id}": {
       "get": {
         "operationId": "ApplicationAdminService_GetApplication",
         "responses": {
@@ -92,7 +118,7 @@
         },
         "parameters": [
           {
-            "name": "clientId",
+            "name": "client_id",
             "in": "path",
             "required": true,
             "type": "string"
@@ -120,7 +146,7 @@
         },
         "parameters": [
           {
-            "name": "clientId",
+            "name": "client_id",
             "in": "path",
             "required": true,
             "type": "string"
@@ -148,7 +174,7 @@
         },
         "parameters": [
           {
-            "name": "clientId",
+            "name": "client_id",
             "in": "path",
             "required": true,
             "type": "string"
@@ -167,7 +193,38 @@
         ]
       }
     },
-    "/admin/assignments/{assignmentId}": {
+    "/admin/applications/{client_id}/regenerate-secret": {
+      "post": {
+        "summary": "Replaces a confidential client's secret with a new Hearth-generated one\n(256 bits from the OS CSPRNG, stored only as a hash). The new secret is\nreturned once, in the response's client_secret; the old one stops\nauthenticating at once. Refused for a public client. Audited.",
+        "operationId": "ApplicationAdminService_RegenerateApplicationSecret",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1OAuthClient"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "client_id",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "ApplicationAdminService"
+        ]
+      }
+    },
+    "/admin/assignments/{assignment_id}": {
       "delete": {
         "operationId": "RbacAdminService_UnassignUserRole",
         "responses": {
@@ -186,19 +243,19 @@
         },
         "parameters": [
           {
-            "name": "assignmentId",
+            "name": "assignment_id",
             "in": "path",
             "required": true,
             "type": "string"
           },
           {
-            "name": "realmId",
+            "name": "realm_id",
             "in": "query",
             "required": false,
             "type": "string"
           },
           {
-            "name": "userId",
+            "name": "user_id",
             "in": "query",
             "required": false,
             "type": "string"
@@ -229,20 +286,20 @@
         },
         "parameters": [
           {
-            "name": "realmId",
+            "name": "realm_id",
             "in": "query",
             "required": false,
             "type": "string"
           },
           {
-            "name": "startTime",
+            "name": "start_time",
             "in": "query",
             "required": false,
             "type": "string",
             "format": "int64"
           },
           {
-            "name": "endTime",
+            "name": "end_time",
             "in": "query",
             "required": false,
             "type": "string",
@@ -256,6 +313,7 @@
           },
           {
             "name": "action",
+            "description": " - AUDIT_ACTION_GROUP_CREATED: RBAC group management\n - AUDIT_ACTION_ORPHANED_REFERENCE_SKIPPED: Permission management\n - AUDIT_ACTION_LOGIN_FAILED: Login events\n - AUDIT_ACTION_BACKUP_CREATED: Backup and export\n - AUDIT_ACTION_REQUIRED_ACTION_ASSIGNED: Required actions\n - AUDIT_ACTION_PASSWORD_COMPROMISED_REJECTED: Password security\n - AUDIT_ACTION_SESSION_LIMIT_ENFORCED: Session management\n - AUDIT_ACTION_ABUSE_DETECTED: Abuse detection\n - AUDIT_ACTION_EMAIL_CHANGE_INITIATED: Email change\n - AUDIT_ACTION_OIDC_SILENT_AUTH_PROBED: OIDC silent auth\n - AUDIT_ACTION_AGENT_CREATED: Agent lifecycle\n - AUDIT_ACTION_AGENT_DELEGATION: Agent delegation and MCP (M2)\n - AUDIT_ACTION_AAT_ISSUED: Phase D — advanced agent surface\n - AUDIT_ACTION_MFA_ENABLED: MFA lifecycle\n - AUDIT_ACTION_INVITATION_CREATED: Organization invitation lifecycle",
             "in": "query",
             "required": false,
             "type": "string",
@@ -310,7 +368,70 @@
               "AUDIT_ACTION_SCIM_GROUP_DELETED",
               "AUDIT_ACTION_ROLE_ASSIGNED",
               "AUDIT_ACTION_ROLE_REVOKED",
-              "AUDIT_ACTION_CLEANUP"
+              "AUDIT_ACTION_CLEANUP",
+              "AUDIT_ACTION_GROUP_CREATED",
+              "AUDIT_ACTION_GROUP_UPDATED",
+              "AUDIT_ACTION_GROUP_DELETED",
+              "AUDIT_ACTION_GROUP_MEMBER_ADDED",
+              "AUDIT_ACTION_GROUP_MEMBER_REMOVED",
+              "AUDIT_ACTION_GROUP_MEMBER_ROLE_CHANGED",
+              "AUDIT_ACTION_ORPHANED_REFERENCE_SKIPPED",
+              "AUDIT_ACTION_USER_PERMISSION_GRANTED",
+              "AUDIT_ACTION_USER_PERMISSION_REVOKED",
+              "AUDIT_ACTION_CLIENT_CONSENT_GRANTED",
+              "AUDIT_ACTION_CLIENT_CONSENT_REVOKED",
+              "AUDIT_ACTION_CONSENT_REQUIRED_ON_REFRESH",
+              "AUDIT_ACTION_LOGIN_FAILED",
+              "AUDIT_ACTION_LOGIN_LOCKED",
+              "AUDIT_ACTION_IP_LOGIN_LIMIT_EXCEEDED",
+              "AUDIT_ACTION_BACKUP_CREATED",
+              "AUDIT_ACTION_BACKUP_RESTORED",
+              "AUDIT_ACTION_REALM_EXPORT_WATERMARKED",
+              "AUDIT_ACTION_REQUIRED_ACTION_ASSIGNED",
+              "AUDIT_ACTION_REQUIRED_ACTION_REMOVED",
+              "AUDIT_ACTION_REQUIRED_ACTION_COMPLETED",
+              "AUDIT_ACTION_REQUIRED_ACTION_AUTO_CLEARED",
+              "AUDIT_ACTION_PASSWORD_COMPROMISED_REJECTED",
+              "AUDIT_ACTION_BREACH_CHECK_UNAVAILABLE",
+              "AUDIT_ACTION_SESSION_LIMIT_ENFORCED",
+              "AUDIT_ACTION_SESSIONS_REVOKED",
+              "AUDIT_ACTION_SESSION_EVICTED",
+              "AUDIT_ACTION_ABUSE_DETECTED",
+              "AUDIT_ACTION_EMAIL_CHANGE_INITIATED",
+              "AUDIT_ACTION_EMAIL_CHANGE_CONFIRMED",
+              "AUDIT_ACTION_OIDC_SILENT_AUTH_PROBED",
+              "AUDIT_ACTION_AGENT_CREATED",
+              "AUDIT_ACTION_AGENT_UPDATED",
+              "AUDIT_ACTION_AGENT_SUSPENDED",
+              "AUDIT_ACTION_AGENT_REACTIVATED",
+              "AUDIT_ACTION_AGENT_REVOKED",
+              "AUDIT_ACTION_AGENT_DELETED",
+              "AUDIT_ACTION_AGENT_CREDENTIAL_CREATED",
+              "AUDIT_ACTION_AGENT_CREDENTIAL_REVOKED",
+              "AUDIT_ACTION_AGENT_DELEGATION",
+              "AUDIT_ACTION_AGENT_TOOL_INVOCATION",
+              "AUDIT_ACTION_APPROVAL_REQUESTED",
+              "AUDIT_ACTION_APPROVAL_GRANTED",
+              "AUDIT_ACTION_APPROVAL_DENIED",
+              "AUDIT_ACTION_AGENT_TOKEN_REVOKED",
+              "AUDIT_ACTION_CROSS_REALM_TRUST_CREATED",
+              "AUDIT_ACTION_CROSS_REALM_TRUST_REVOKED",
+              "AUDIT_ACTION_PROTECTED_RESOURCE_REGISTERED",
+              "AUDIT_ACTION_PROTECTED_RESOURCE_UPDATED",
+              "AUDIT_ACTION_PROTECTED_RESOURCE_DELETED",
+              "AUDIT_ACTION_AAT_ISSUED",
+              "AUDIT_ACTION_AAT_REVOKED",
+              "AUDIT_ACTION_TRANSACTION_TOKEN_ISSUED",
+              "AUDIT_ACTION_CROSS_REALM_TOKEN_ISSUED",
+              "AUDIT_ACTION_SPIFFE_ID_MAPPED",
+              "AUDIT_ACTION_SPIFFE_AUTH_SUCCESS",
+              "AUDIT_ACTION_AUDIT_LOG_PRUNED",
+              "AUDIT_ACTION_MFA_ENABLED",
+              "AUDIT_ACTION_MFA_DISABLED",
+              "AUDIT_ACTION_INVITATION_CREATED",
+              "AUDIT_ACTION_INVITATION_ACCEPTED",
+              "AUDIT_ACTION_INVITATION_REVOKED",
+              "AUDIT_ACTION_MFA_REQUIREMENT_CHANGED"
             ],
             "default": "AUDIT_ACTION_UNSPECIFIED"
           },
@@ -346,7 +467,7 @@
         },
         "parameters": [
           {
-            "name": "realmId",
+            "name": "realm_id",
             "in": "query",
             "required": false,
             "type": "string"
@@ -400,7 +521,7 @@
         ]
       }
     },
-    "/admin/groups/{groupId}": {
+    "/admin/groups/{group_id}": {
       "get": {
         "operationId": "RbacAdminService_GetGroup",
         "responses": {
@@ -419,13 +540,13 @@
         },
         "parameters": [
           {
-            "name": "groupId",
+            "name": "group_id",
             "in": "path",
             "required": true,
             "type": "string"
           },
           {
-            "name": "realmId",
+            "name": "realm_id",
             "in": "query",
             "required": false,
             "type": "string"
@@ -453,13 +574,13 @@
         },
         "parameters": [
           {
-            "name": "groupId",
+            "name": "group_id",
             "in": "path",
             "required": true,
             "type": "string"
           },
           {
-            "name": "realmId",
+            "name": "realm_id",
             "in": "query",
             "required": false,
             "type": "string"
@@ -469,7 +590,7 @@
           "RbacAdminService"
         ]
       },
-      "put": {
+      "patch": {
         "operationId": "RbacAdminService_UpdateGroup",
         "responses": {
           "200": {
@@ -487,7 +608,7 @@
         },
         "parameters": [
           {
-            "name": "groupId",
+            "name": "group_id",
             "in": "path",
             "required": true,
             "type": "string"
@@ -506,7 +627,7 @@
         ]
       }
     },
-    "/admin/groups/{groupId}/members": {
+    "/admin/groups/{group_id}/members": {
       "get": {
         "operationId": "RbacAdminService_ListGroupMembers",
         "responses": {
@@ -525,13 +646,13 @@
         },
         "parameters": [
           {
-            "name": "groupId",
+            "name": "group_id",
             "in": "path",
             "required": true,
             "type": "string"
           },
           {
-            "name": "realmId",
+            "name": "realm_id",
             "in": "query",
             "required": false,
             "type": "string"
@@ -572,7 +693,7 @@
         },
         "parameters": [
           {
-            "name": "groupId",
+            "name": "group_id",
             "in": "path",
             "required": true,
             "type": "string"
@@ -591,7 +712,7 @@
         ]
       }
     },
-    "/admin/groups/{groupId}/members/{member.id}": {
+    "/admin/groups/{group_id}/members/{member.id}": {
       "delete": {
         "operationId": "RbacAdminService_RemoveGroupMember",
         "responses": {
@@ -610,7 +731,7 @@
         },
         "parameters": [
           {
-            "name": "groupId",
+            "name": "group_id",
             "in": "path",
             "required": true,
             "type": "string"
@@ -622,7 +743,7 @@
             "type": "string"
           },
           {
-            "name": "realmId",
+            "name": "realm_id",
             "in": "query",
             "required": false,
             "type": "string"
@@ -647,7 +768,7 @@
     },
     "/admin/realms": {
       "get": {
-        "summary": "Realms \u2014 operate against the system realm (mutations require admin in\nthe system realm). `x-realm-id` metadata is ignored for these RPCs.",
+        "summary": "Realms — operate against the system realm (mutations require admin in\nthe system realm). `x-realm-id` metadata is ignored for these RPCs.",
         "operationId": "IdentityAdminService_ListRealms",
         "responses": {
           "200": {
@@ -771,7 +892,7 @@
           "IdentityAdminService"
         ]
       },
-      "put": {
+      "patch": {
         "operationId": "IdentityAdminService_UpdateRealm",
         "responses": {
           "200": {
@@ -808,6 +929,68 @@
         ]
       }
     },
+    "/admin/realms/{id}/suspend": {
+      "post": {
+        "summary": "Suspends an active realm: its tokens stop validating, its sessions are\nrevoked and no new session starts until it is reinstated. Caller must be\na system-realm admin (`hearth.realm.admin` or `hearth.admin`); the system\nrealm itself cannot be suspended. YAML reconciliation never clears it.",
+        "operationId": "IdentityAdminService_SuspendRealm",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1Realm"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "IdentityAdminService"
+        ]
+      }
+    },
+    "/admin/realms/{id}/unsuspend": {
+      "post": {
+        "summary": "Reinstates a suspended realm. Same gate as SuspendRealm.",
+        "operationId": "IdentityAdminService_UnsuspendRealm",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1Realm"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "IdentityAdminService"
+        ]
+      }
+    },
     "/admin/roles": {
       "get": {
         "operationId": "RbacAdminService_ListRoles",
@@ -827,7 +1010,7 @@
         },
         "parameters": [
           {
-            "name": "realmId",
+            "name": "realm_id",
             "in": "query",
             "required": false,
             "type": "string"
@@ -881,7 +1064,7 @@
         ]
       }
     },
-    "/admin/roles/{roleId}": {
+    "/admin/roles/{role_id}": {
       "get": {
         "operationId": "RbacAdminService_GetRole",
         "responses": {
@@ -900,13 +1083,13 @@
         },
         "parameters": [
           {
-            "name": "roleId",
+            "name": "role_id",
             "in": "path",
             "required": true,
             "type": "string"
           },
           {
-            "name": "realmId",
+            "name": "realm_id",
             "in": "query",
             "required": false,
             "type": "string"
@@ -934,13 +1117,13 @@
         },
         "parameters": [
           {
-            "name": "roleId",
+            "name": "role_id",
             "in": "path",
             "required": true,
             "type": "string"
           },
           {
-            "name": "realmId",
+            "name": "realm_id",
             "in": "query",
             "required": false,
             "type": "string"
@@ -956,7 +1139,7 @@
           "RbacAdminService"
         ]
       },
-      "put": {
+      "patch": {
         "operationId": "RbacAdminService_UpdateRole",
         "responses": {
           "200": {
@@ -974,7 +1157,7 @@
         },
         "parameters": [
           {
-            "name": "roleId",
+            "name": "role_id",
             "in": "path",
             "required": true,
             "type": "string"
@@ -1156,7 +1339,7 @@
         ]
       }
     },
-    "/admin/users/{userId}/consents": {
+    "/admin/users/{user_id}/consents": {
       "get": {
         "summary": "List all active consents for a user.",
         "operationId": "RbacAdminService_ListUserConsents",
@@ -1176,13 +1359,13 @@
         },
         "parameters": [
           {
-            "name": "userId",
+            "name": "user_id",
             "in": "path",
             "required": true,
             "type": "string"
           },
           {
-            "name": "realmId",
+            "name": "realm_id",
             "in": "query",
             "required": false,
             "type": "string"
@@ -1193,7 +1376,7 @@
         ]
       }
     },
-    "/admin/users/{userId}/consents/{clientId}": {
+    "/admin/users/{user_id}/consents/{client_id}": {
       "delete": {
         "summary": "Revoke OAuth consent for a specific (user, client) pair.",
         "operationId": "RbacAdminService_RevokeConsent",
@@ -1213,19 +1396,19 @@
         },
         "parameters": [
           {
-            "name": "userId",
+            "name": "user_id",
             "in": "path",
             "required": true,
             "type": "string"
           },
           {
-            "name": "clientId",
+            "name": "client_id",
             "in": "path",
             "required": true,
             "type": "string"
           },
           {
-            "name": "realmId",
+            "name": "realm_id",
             "in": "query",
             "required": false,
             "type": "string"
@@ -1236,7 +1419,7 @@
         ]
       }
     },
-    "/admin/users/{userId}/effective-permissions": {
+    "/admin/users/{user_id}/effective-permissions": {
       "get": {
         "operationId": "RbacAdminService_ResolveEffectivePermissions",
         "responses": {
@@ -1255,19 +1438,19 @@
         },
         "parameters": [
           {
-            "name": "userId",
+            "name": "user_id",
             "in": "path",
             "required": true,
             "type": "string"
           },
           {
-            "name": "realmId",
+            "name": "realm_id",
             "in": "query",
             "required": false,
             "type": "string"
           },
           {
-            "name": "orgId",
+            "name": "org_id",
             "description": "optional; empty means realm-only",
             "in": "query",
             "required": false,
@@ -1286,7 +1469,7 @@
         ]
       }
     },
-    "/admin/users/{userId}/roles": {
+    "/admin/users/{user_id}/roles": {
       "get": {
         "operationId": "RbacAdminService_ListUserAssignments",
         "responses": {
@@ -1305,13 +1488,13 @@
         },
         "parameters": [
           {
-            "name": "userId",
+            "name": "user_id",
             "in": "path",
             "required": true,
             "type": "string"
           },
           {
-            "name": "realmId",
+            "name": "realm_id",
             "in": "query",
             "required": false,
             "type": "string"
@@ -1339,7 +1522,7 @@
         },
         "parameters": [
           {
-            "name": "userId",
+            "name": "user_id",
             "in": "path",
             "required": true,
             "type": "string"
@@ -1396,8 +1579,8 @@
         "summary": "Dynamic client registration (RFC 7591). Maps to POST /register (preferred)\nand POST /clients (legacy).",
         "operationId": "OAuthService_RegisterClient2",
         "responses": {
-          "201": {
-            "description": "Created. For a client_secret_basic or client_secret_post client the body carries the generated client_secret, the only time it is returned.",
+          "200": {
+            "description": "A successful response.",
             "schema": {
               "$ref": "#/definitions/v1OAuthClient"
             }
@@ -1530,8 +1713,8 @@
         "summary": "Dynamic client registration (RFC 7591). Maps to POST /register (preferred)\nand POST /clients (legacy).",
         "operationId": "OAuthService_RegisterClient",
         "responses": {
-          "201": {
-            "description": "Created. For a client_secret_basic or client_secret_post client the body carries the generated client_secret, the only time it is returned.",
+          "200": {
+            "description": "A successful response.",
             "schema": {
               "$ref": "#/definitions/v1OAuthClient"
             }
@@ -1594,7 +1777,7 @@
     },
     "/token": {
       "post": {
-        "summary": "TokenExchange handles authorization_code and refresh_token grants.\nClientCredentials (client_credentials grant) maps to the same POST /token\nendpoint via grant_type discriminator \u2014 see grpc-only.txt for the\nClientCredentials RPC.",
+        "summary": "TokenExchange handles authorization_code and refresh_token grants.\nClientCredentials (client_credentials grant) maps to the same POST /token\nendpoint via grant_type discriminator — see grpc-only.txt for the\nClientCredentials RPC.",
         "operationId": "OAuthService_TokenExchange",
         "responses": {
           "200": {
@@ -1626,15 +1809,15 @@
         ]
       }
     },
-    "/admin/applications/{clientId}/regenerate-secret": {
-      "post": {
-        "summary": "Replaces a confidential client's secret with a new Hearth-generated one (256 bits from the OS CSPRNG, stored only as a hash). The new secret is returned once, in the response's client_secret; the old one stops authenticating at once. Refused for a public client. Audited.",
-        "operationId": "ApplicationAdminService_RegenerateApplicationSecret",
+    "/v1/agents": {
+      "get": {
+        "summary": "Agents — Phase A (HEA-1405).",
+        "operationId": "IdentityAdminService_ListAgents",
         "responses": {
           "200": {
-            "description": "The client record with the new client_secret.",
+            "description": "A successful response.",
             "schema": {
-              "$ref": "#/definitions/v1OAuthClient"
+              "$ref": "#/definitions/v1AgentPage"
             }
           },
           "default": {
@@ -1646,23 +1829,293 @@
         },
         "parameters": [
           {
-            "name": "clientId",
+            "name": "owner_id",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "enum": [
+              "AGENT_STATUS_UNSPECIFIED",
+              "AGENT_STATUS_ACTIVE",
+              "AGENT_STATUS_SUSPENDED",
+              "AGENT_STATUS_REVOKED"
+            ],
+            "default": "AGENT_STATUS_UNSPECIFIED"
+          },
+          {
+            "name": "capability",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "type": "integer",
+            "format": "int64"
+          }
+        ],
+        "tags": [
+          "IdentityAdminService"
+        ]
+      },
+      "post": {
+        "operationId": "IdentityAdminService_CreateAgent",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1Agent"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "body",
+            "description": "Request to create a new agent.",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/v1CreateAgentRequest"
+            }
+          }
+        ],
+        "tags": [
+          "IdentityAdminService"
+        ]
+      }
+    },
+    "/v1/agents/{agent_id}/credentials": {
+      "get": {
+        "operationId": "IdentityAdminService_ListAgentCredentials",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1AgentCredentialPage"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "agent_id",
             "in": "path",
             "required": true,
             "type": "string"
           }
         ],
         "tags": [
-          "ApplicationAdminService"
+          "IdentityAdminService"
+        ]
+      }
+    },
+    "/v1/agents/{agent_id}/credentials/keys": {
+      "post": {
+        "operationId": "IdentityAdminService_CreateAgentApiKey",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1CreateAgentApiKeyResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/IdentityAdminServiceCreateAgentApiKeyBody"
+            }
+          }
+        ],
+        "tags": [
+          "IdentityAdminService"
+        ]
+      }
+    },
+    "/v1/agents/{agent_id}/credentials/{credential_id}": {
+      "delete": {
+        "operationId": "IdentityAdminService_RevokeAgentCredential",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1Empty"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "credential_id",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "IdentityAdminService"
+        ]
+      }
+    },
+    "/v1/agents/{id}": {
+      "get": {
+        "operationId": "IdentityAdminService_GetAgent",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1Agent"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "IdentityAdminService"
+        ]
+      },
+      "delete": {
+        "operationId": "IdentityAdminService_DeleteAgent",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1Empty"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "IdentityAdminService"
+        ]
+      },
+      "patch": {
+        "operationId": "IdentityAdminService_UpdateAgent",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1Agent"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/v1UpdateAgentRequest"
+            }
+          }
+        ],
+        "tags": [
+          "IdentityAdminService"
         ]
       }
     }
   },
   "definitions": {
+    "IdentityAdminServiceCreateAgentApiKeyBody": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": "string"
+        }
+      },
+      "description": "Request to issue an API key for an agent."
+    },
     "RbacAdminServiceAddGroupMemberBody": {
       "type": "object",
       "properties": {
-        "realmId": {
+        "realm_id": {
           "type": "string"
         },
         "member": {
@@ -1673,10 +2126,10 @@
     "RbacAdminServiceAssignUserRoleBody": {
       "type": "object",
       "properties": {
-        "realmId": {
+        "realm_id": {
           "type": "string"
         },
-        "roleId": {
+        "role_id": {
           "type": "string"
         },
         "scope": {
@@ -1687,7 +2140,7 @@
     "RbacAdminServiceUpdateGroupBody": {
       "type": "object",
       "properties": {
-        "realmId": {
+        "realm_id": {
           "type": "string"
         },
         "name": {
@@ -1704,7 +2157,7 @@
     "RbacAdminServiceUpdateRoleBody": {
       "type": "object",
       "properties": {
-        "realmId": {
+        "realm_id": {
           "type": "string"
         },
         "name": {
@@ -1720,7 +2173,7 @@
             "type": "string"
           }
         },
-        "parentRoleIds": {
+        "parent_role_ids": {
           "type": "array",
           "items": {
             "type": "string"
@@ -1765,6 +2218,143 @@
       ],
       "default": "EMBEDDED",
       "description": "Controls how access-token authorization data is exposed to resource servers.\n\n - EMBEDDED: Permissions, roles, and groups are embedded in the JWT at issuance (default).\n - INTROSPECTION: JWT carries only identity claims; resource servers call /introspect.\n - DECISION: JWT carries only identity claims; resource servers call POST /oauth/authorize."
+    },
+    "v1AddAdditionalRoleResponse": {
+      "type": "object"
+    },
+    "v1Agent": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "realm_id": {
+          "type": "string"
+        },
+        "owner_type": {
+          "type": "string",
+          "description": "Owner type: \"user\" or \"organization\"."
+        },
+        "owner_id": {
+          "type": "string",
+          "description": "UUID of the owning user or organization."
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "status": {
+          "$ref": "#/definitions/v1AgentStatus"
+        },
+        "max_delegation_depth": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "int64"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "int64"
+        }
+      },
+      "description": "An autonomous agent registered within a realm."
+    },
+    "v1AgentCredential": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "agent_id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/definitions/v1AgentCredentialKind"
+        },
+        "label": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "int64"
+        },
+        "revoked_at": {
+          "type": "string",
+          "format": "int64"
+        }
+      },
+      "description": "A stored agent credential record (no secret material)."
+    },
+    "v1AgentCredentialKind": {
+      "type": "string",
+      "enum": [
+        "AGENT_CREDENTIAL_KIND_UNSPECIFIED",
+        "AGENT_CREDENTIAL_KIND_API_KEY",
+        "AGENT_CREDENTIAL_KIND_ED25519_PUBLIC_KEY",
+        "AGENT_CREDENTIAL_KIND_MTLS_CERT"
+      ],
+      "default": "AGENT_CREDENTIAL_KIND_UNSPECIFIED",
+      "description": "Discriminates the type of credential stored for an agent."
+    },
+    "v1AgentCredentialPage": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1AgentCredential"
+          }
+        }
+      },
+      "description": "A cursor-based page of agent credentials."
+    },
+    "v1AgentPage": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1Agent"
+          }
+        },
+        "next_cursor": {
+          "type": "string"
+        }
+      },
+      "description": "A cursor-based page of agents."
+    },
+    "v1AgentStatus": {
+      "type": "string",
+      "enum": [
+        "AGENT_STATUS_UNSPECIFIED",
+        "AGENT_STATUS_ACTIVE",
+        "AGENT_STATUS_SUSPENDED",
+        "AGENT_STATUS_REVOKED"
+      ],
+      "default": "AGENT_STATUS_UNSPECIFIED",
+      "description": "Lifecycle status of an agent."
+    },
+    "v1AppendEntriesResponse": {
+      "type": "object",
+      "properties": {
+        "payload": {
+          "type": "string",
+          "format": "byte"
+        }
+      },
+      "description": "AppendEntries RPC response.\nPayload is CBOR-encoded openraft::AppendEntriesResponse\u003cu64\u003e."
     },
     "v1AuditAction": {
       "type": "string",
@@ -1819,10 +2409,73 @@
         "AUDIT_ACTION_SCIM_GROUP_DELETED",
         "AUDIT_ACTION_ROLE_ASSIGNED",
         "AUDIT_ACTION_ROLE_REVOKED",
-        "AUDIT_ACTION_CLEANUP"
+        "AUDIT_ACTION_CLEANUP",
+        "AUDIT_ACTION_GROUP_CREATED",
+        "AUDIT_ACTION_GROUP_UPDATED",
+        "AUDIT_ACTION_GROUP_DELETED",
+        "AUDIT_ACTION_GROUP_MEMBER_ADDED",
+        "AUDIT_ACTION_GROUP_MEMBER_REMOVED",
+        "AUDIT_ACTION_GROUP_MEMBER_ROLE_CHANGED",
+        "AUDIT_ACTION_ORPHANED_REFERENCE_SKIPPED",
+        "AUDIT_ACTION_USER_PERMISSION_GRANTED",
+        "AUDIT_ACTION_USER_PERMISSION_REVOKED",
+        "AUDIT_ACTION_CLIENT_CONSENT_GRANTED",
+        "AUDIT_ACTION_CLIENT_CONSENT_REVOKED",
+        "AUDIT_ACTION_CONSENT_REQUIRED_ON_REFRESH",
+        "AUDIT_ACTION_LOGIN_FAILED",
+        "AUDIT_ACTION_LOGIN_LOCKED",
+        "AUDIT_ACTION_IP_LOGIN_LIMIT_EXCEEDED",
+        "AUDIT_ACTION_BACKUP_CREATED",
+        "AUDIT_ACTION_BACKUP_RESTORED",
+        "AUDIT_ACTION_REALM_EXPORT_WATERMARKED",
+        "AUDIT_ACTION_REQUIRED_ACTION_ASSIGNED",
+        "AUDIT_ACTION_REQUIRED_ACTION_REMOVED",
+        "AUDIT_ACTION_REQUIRED_ACTION_COMPLETED",
+        "AUDIT_ACTION_REQUIRED_ACTION_AUTO_CLEARED",
+        "AUDIT_ACTION_PASSWORD_COMPROMISED_REJECTED",
+        "AUDIT_ACTION_BREACH_CHECK_UNAVAILABLE",
+        "AUDIT_ACTION_SESSION_LIMIT_ENFORCED",
+        "AUDIT_ACTION_SESSIONS_REVOKED",
+        "AUDIT_ACTION_SESSION_EVICTED",
+        "AUDIT_ACTION_ABUSE_DETECTED",
+        "AUDIT_ACTION_EMAIL_CHANGE_INITIATED",
+        "AUDIT_ACTION_EMAIL_CHANGE_CONFIRMED",
+        "AUDIT_ACTION_OIDC_SILENT_AUTH_PROBED",
+        "AUDIT_ACTION_AGENT_CREATED",
+        "AUDIT_ACTION_AGENT_UPDATED",
+        "AUDIT_ACTION_AGENT_SUSPENDED",
+        "AUDIT_ACTION_AGENT_REACTIVATED",
+        "AUDIT_ACTION_AGENT_REVOKED",
+        "AUDIT_ACTION_AGENT_DELETED",
+        "AUDIT_ACTION_AGENT_CREDENTIAL_CREATED",
+        "AUDIT_ACTION_AGENT_CREDENTIAL_REVOKED",
+        "AUDIT_ACTION_AGENT_DELEGATION",
+        "AUDIT_ACTION_AGENT_TOOL_INVOCATION",
+        "AUDIT_ACTION_APPROVAL_REQUESTED",
+        "AUDIT_ACTION_APPROVAL_GRANTED",
+        "AUDIT_ACTION_APPROVAL_DENIED",
+        "AUDIT_ACTION_AGENT_TOKEN_REVOKED",
+        "AUDIT_ACTION_CROSS_REALM_TRUST_CREATED",
+        "AUDIT_ACTION_CROSS_REALM_TRUST_REVOKED",
+        "AUDIT_ACTION_PROTECTED_RESOURCE_REGISTERED",
+        "AUDIT_ACTION_PROTECTED_RESOURCE_UPDATED",
+        "AUDIT_ACTION_PROTECTED_RESOURCE_DELETED",
+        "AUDIT_ACTION_AAT_ISSUED",
+        "AUDIT_ACTION_AAT_REVOKED",
+        "AUDIT_ACTION_TRANSACTION_TOKEN_ISSUED",
+        "AUDIT_ACTION_CROSS_REALM_TOKEN_ISSUED",
+        "AUDIT_ACTION_SPIFFE_ID_MAPPED",
+        "AUDIT_ACTION_SPIFFE_AUTH_SUCCESS",
+        "AUDIT_ACTION_AUDIT_LOG_PRUNED",
+        "AUDIT_ACTION_MFA_ENABLED",
+        "AUDIT_ACTION_MFA_DISABLED",
+        "AUDIT_ACTION_INVITATION_CREATED",
+        "AUDIT_ACTION_INVITATION_ACCEPTED",
+        "AUDIT_ACTION_INVITATION_REVOKED",
+        "AUDIT_ACTION_MFA_REQUIREMENT_CHANGED"
       ],
       "default": "AUDIT_ACTION_UNSPECIFIED",
-      "description": "Categories of security-critical actions recorded in the audit log."
+      "description": "Categories of security-critical actions recorded in the audit log.\n\n - AUDIT_ACTION_GROUP_CREATED: RBAC group management\n - AUDIT_ACTION_ORPHANED_REFERENCE_SKIPPED: Permission management\n - AUDIT_ACTION_LOGIN_FAILED: Login events\n - AUDIT_ACTION_BACKUP_CREATED: Backup and export\n - AUDIT_ACTION_REQUIRED_ACTION_ASSIGNED: Required actions\n - AUDIT_ACTION_PASSWORD_COMPROMISED_REJECTED: Password security\n - AUDIT_ACTION_SESSION_LIMIT_ENFORCED: Session management\n - AUDIT_ACTION_ABUSE_DETECTED: Abuse detection\n - AUDIT_ACTION_EMAIL_CHANGE_INITIATED: Email change\n - AUDIT_ACTION_OIDC_SILENT_AUTH_PROBED: OIDC silent auth\n - AUDIT_ACTION_AGENT_CREATED: Agent lifecycle\n - AUDIT_ACTION_AGENT_DELEGATION: Agent delegation and MCP (M2)\n - AUDIT_ACTION_AAT_ISSUED: Phase D — advanced agent surface\n - AUDIT_ACTION_MFA_ENABLED: MFA lifecycle\n - AUDIT_ACTION_INVITATION_CREATED: Organization invitation lifecycle"
     },
     "v1AuditEvent": {
       "type": "object",
@@ -1830,7 +2483,7 @@
         "id": {
           "type": "string"
         },
-        "realmId": {
+        "realm_id": {
           "type": "string"
         },
         "actor": {
@@ -1839,10 +2492,10 @@
         "action": {
           "$ref": "#/definitions/v1AuditAction"
         },
-        "resourceType": {
+        "resource_type": {
           "type": "string"
         },
-        "resourceId": {
+        "resource_id": {
           "type": "string"
         },
         "timestamp": {
@@ -1853,7 +2506,7 @@
           "type": "string",
           "description": "Optional additional context (JSON-encoded)."
         },
-        "integrityHash": {
+        "integrity_hash": {
           "type": "string"
         }
       },
@@ -1875,10 +2528,10 @@
     "v1AuthorizationRequest": {
       "type": "object",
       "properties": {
-        "clientId": {
+        "client_id": {
           "type": "string"
         },
-        "redirectUri": {
+        "redirect_uri": {
           "type": "string"
         },
         "scope": {
@@ -1887,20 +2540,24 @@
         "state": {
           "type": "string"
         },
-        "responseType": {
+        "response_type": {
           "type": "string"
         },
-        "userId": {
+        "user_id": {
           "type": "string"
         },
-        "codeChallenge": {
+        "code_challenge": {
           "type": "string"
         },
-        "codeChallengeMethod": {
+        "code_challenge_method": {
           "type": "string"
         },
         "nonce": {
           "type": "string"
+        },
+        "request_uri": {
+          "type": "string",
+          "description": "PAR request_uri (RFC 9126). When set, the server expands the stored\npushed authorization parameters. Other authorization fields are ignored\nwhen this is set."
         }
       },
       "description": "Request to initiate an OAuth 2.0 authorization."
@@ -1917,35 +2574,108 @@
       },
       "description": "Response from a successful authorization request."
     },
+    "v1ClientCredentialsResponse": {
+      "type": "object",
+      "properties": {
+        "access_token": {
+          "type": "string"
+        },
+        "token_type": {
+          "type": "string"
+        },
+        "expires_in": {
+          "type": "string",
+          "format": "int64"
+        },
+        "scope": {
+          "type": "string"
+        }
+      },
+      "description": "Response from a client credentials grant."
+    },
+    "v1ClientTrustLevel": {
+      "type": "string",
+      "enum": [
+        "CLIENT_TRUST_LEVEL_UNSPECIFIED",
+        "CLIENT_TRUST_LEVEL_THIRD_PARTY",
+        "CLIENT_TRUST_LEVEL_FIRST_PARTY"
+      ],
+      "default": "CLIENT_TRUST_LEVEL_UNSPECIFIED",
+      "description": "Controls whether a client is trusted as a first-party application.\n\nFirstParty clients skip the consent screen and receive the full\n`permissions`, `roles`, and `groups` claims in issued JWTs.  ThirdParty\nclients are shown the consent screen and do not receive those claims.\nUnspecified defaults to ThirdParty on the DCR path; on the authenticated\nadmin path the caller must pass FIRST_PARTY explicitly to grant first-party\ntrust."
+    },
     "v1ConsentEntry": {
       "type": "object",
       "properties": {
-        "clientId": {
+        "client_id": {
           "type": "string"
         },
-        "clientName": {
+        "client_name": {
           "type": "string"
         },
-        "grantedScopes": {
+        "granted_scopes": {
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "grantedAt": {
+        "granted_at": {
           "type": "string",
           "format": "int64"
         },
-        "updatedAt": {
+        "updated_at": {
           "type": "string",
           "format": "int64"
         }
       }
     },
+    "v1CreateAgentApiKeyResponse": {
+      "type": "object",
+      "properties": {
+        "credential": {
+          "$ref": "#/definitions/v1AgentCredential"
+        },
+        "key": {
+          "type": "string",
+          "description": "The plaintext API key. Show to the user once and discard."
+        }
+      },
+      "description": "Response from creating an agent API key.\nThe `key` field is the raw plaintext key — shown exactly once."
+    },
+    "v1CreateAgentRequest": {
+      "type": "object",
+      "properties": {
+        "display_name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "owner_type": {
+          "type": "string",
+          "description": "Owner type: \"user\" or \"organization\"."
+        },
+        "owner_id": {
+          "type": "string",
+          "description": "UUID of the owning user or organization."
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "max_delegation_depth": {
+          "type": "integer",
+          "format": "int64",
+          "description": "Maximum delegation depth (1–10, default 1)."
+        }
+      },
+      "description": "Request to create a new agent."
+    },
     "v1CreateGroupRequest": {
       "type": "object",
       "properties": {
-        "realmId": {
+        "realm_id": {
           "type": "string"
         },
         "name": {
@@ -1974,7 +2704,7 @@
     "v1CreateRoleRequest": {
       "type": "object",
       "properties": {
-        "realmId": {
+        "realm_id": {
           "type": "string"
         },
         "name": {
@@ -1989,7 +2719,7 @@
             "type": "string"
           }
         },
-        "parentRoleIds": {
+        "parent_role_ids": {
           "type": "array",
           "items": {
             "type": "string"
@@ -2003,13 +2733,13 @@
         "email": {
           "type": "string"
         },
-        "displayName": {
+        "display_name": {
           "type": "string"
         },
-        "firstName": {
+        "first_name": {
           "type": "string"
         },
-        "lastName": {
+        "last_name": {
           "type": "string"
         },
         "attributes": {
@@ -2030,13 +2760,13 @@
     "v1DeviceAuthorizationRequest": {
       "type": "object",
       "properties": {
-        "clientId": {
+        "client_id": {
           "type": "string"
         },
         "scope": {
           "type": "string"
         },
-        "clientSecret": {
+        "client_secret": {
           "type": "string",
           "description": "Client secret for a confidential client (RFC 8628 s3.1). HTTP Basic Auth\nis preferred and takes precedence; this is the client_secret_post\nfallback. Public clients omit it."
         },
@@ -2054,16 +2784,16 @@
     "v1DeviceAuthorizationResponse": {
       "type": "object",
       "properties": {
-        "deviceCode": {
+        "device_code": {
           "type": "string"
         },
-        "userCode": {
+        "user_code": {
           "type": "string"
         },
-        "verificationUri": {
+        "verification_uri": {
           "type": "string"
         },
-        "expiresIn": {
+        "expires_in": {
           "type": "string",
           "format": "int64"
         },
@@ -2078,13 +2808,26 @@
       "type": "object",
       "description": "Empty response type for delete RPCs."
     },
+    "v1ForwardWriteResponse": {
+      "type": "object",
+      "properties": {
+        "payload": {
+          "type": "string",
+          "format": "byte"
+        }
+      },
+      "description": "ForwardWrite RPC response.\nPayload is CBOR-encoded hearth::cluster::ForwardedWriteOutcome."
+    },
+    "v1GrantUserPermissionResponse": {
+      "type": "object"
+    },
     "v1Group": {
       "type": "object",
       "properties": {
         "id": {
           "type": "string"
         },
-        "realmId": {
+        "realm_id": {
           "type": "string"
         },
         "name": {
@@ -2096,11 +2839,11 @@
         "description": {
           "type": "string"
         },
-        "createdAtMicros": {
+        "created_at_micros": {
           "type": "string",
           "format": "int64"
         },
-        "updatedAtMicros": {
+        "updated_at_micros": {
           "type": "string",
           "format": "int64"
         }
@@ -2129,20 +2872,30 @@
     "v1GroupMembership": {
       "type": "object",
       "properties": {
-        "groupId": {
+        "group_id": {
           "type": "string"
         },
         "member": {
           "$ref": "#/definitions/v1GroupMember"
         },
-        "addedAtMicros": {
+        "added_at_micros": {
           "type": "string",
           "format": "int64"
         },
-        "addedByUserId": {
+        "added_by_user_id": {
           "type": "string"
         }
       }
+    },
+    "v1InstallSnapshotResponse": {
+      "type": "object",
+      "properties": {
+        "payload": {
+          "type": "string",
+          "format": "byte"
+        }
+      },
+      "description": "InstallSnapshot RPC response.\nPayload is CBOR-encoded openraft::InstallSnapshotResponse\u003cu64\u003e."
     },
     "v1IntrospectionResponse": {
       "type": "object",
@@ -2153,7 +2906,7 @@
         "scope": {
           "type": "string"
         },
-        "clientId": {
+        "client_id": {
           "type": "string"
         },
         "sub": {
@@ -2167,7 +2920,7 @@
           "type": "string",
           "format": "int64"
         },
-        "tokenType": {
+        "token_type": {
           "type": "string"
         },
         "iss": {
@@ -2200,6 +2953,17 @@
       },
       "description": "Response from token introspection (RFC 7662)."
     },
+    "v1ListAdditionalRolesResponse": {
+      "type": "object",
+      "properties": {
+        "role_names": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
     "v1ListGroupMembersResponse": {
       "type": "object",
       "properties": {
@@ -2210,7 +2974,7 @@
             "$ref": "#/definitions/v1GroupMember"
           }
         },
-        "nextCursor": {
+        "next_cursor": {
           "type": "string"
         }
       }
@@ -2225,7 +2989,52 @@
             "$ref": "#/definitions/v1Group"
           }
         },
-        "nextCursor": {
+        "next_cursor": {
+          "type": "string"
+        }
+      }
+    },
+    "v1ListRealmPermissionsResponse": {
+      "type": "object",
+      "properties": {
+        "permissions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1PermissionEntry"
+          }
+        },
+        "next_cursor": {
+          "type": "string"
+        }
+      }
+    },
+    "v1ListRealmRolesResponse": {
+      "type": "object",
+      "properties": {
+        "roles": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1RoleEntry"
+          }
+        },
+        "next_cursor": {
+          "type": "string"
+        }
+      }
+    },
+    "v1ListRoleMembersResponse": {
+      "type": "object",
+      "properties": {
+        "members": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1RoleSubject"
+          }
+        },
+        "next_cursor": {
           "type": "string"
         }
       }
@@ -2240,7 +3049,7 @@
             "$ref": "#/definitions/v1Role"
           }
         },
-        "nextCursor": {
+        "next_cursor": {
           "type": "string"
         }
       }
@@ -2269,44 +3078,60 @@
         }
       }
     },
+    "v1ListUserPermissionsResponse": {
+      "type": "object",
+      "properties": {
+        "permissions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1UserPermissionEntry"
+          }
+        }
+      }
+    },
     "v1OAuthClient": {
       "type": "object",
       "properties": {
-        "clientId": {
+        "client_id": {
           "type": "string"
         },
-        "clientName": {
+        "client_name": {
           "type": "string"
         },
-        "redirectUris": {
+        "redirect_uris": {
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "createdAt": {
+        "created_at": {
           "type": "string",
           "format": "int64"
         },
-        "isConfidential": {
+        "is_confidential": {
           "type": "boolean"
         },
-        "grantTypes": {
+        "grant_types": {
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "accessTokenAuthorization": {
+        "access_token_authorization": {
           "$ref": "#/definitions/v1AccessTokenAuthorization"
+        },
+        "id_token_signed_response_alg": {
+          "type": "string",
+          "description": "The algorithm this client's ID tokens are signed with: \"RS256\" or \"EdDSA\"."
         },
         "client_secret": {
           "type": "string",
-          "description": "The generated client secret. Present only in the response that created a client_secret_basic or client_secret_post client, or that regenerated its secret, and never returned again: store it on receipt. Hearth keeps only its hash."
+          "description": "The client secret Hearth generated for a confidential client. Present\nonly in the response that created the client (token_endpoint_auth_method\n\"client_secret_basic\" or \"client_secret_post\"); never returned again.\nStore it on receipt: Hearth keeps only its hash. Also set, once, by\nRegenerateApplicationSecret."
         },
         "dpop_bound_access_tokens": {
           "type": "boolean",
-          "description": "RFC 9449 s5.2: when true, every token request from this client must carry a DPoP proof, and every token it gets is bound to the proof's key."
+          "description": "RFC 9449 s5.2: when true, every token request from this client must carry\na DPoP proof, and every token it gets is bound to the proof's key."
         }
       },
       "description": "A registered OAuth 2.0 client."
@@ -2321,7 +3146,7 @@
             "$ref": "#/definitions/v1OAuthClient"
           }
         },
-        "nextCursor": {
+        "next_cursor": {
           "type": "string"
         }
       },
@@ -2334,20 +3159,20 @@
     "v1OidcTokenResponse": {
       "type": "object",
       "properties": {
-        "accessToken": {
+        "access_token": {
           "type": "string"
         },
-        "idToken": {
+        "id_token": {
           "type": "string"
         },
-        "tokenType": {
+        "token_type": {
           "type": "string"
         },
-        "expiresIn": {
+        "expires_in": {
           "type": "string",
           "format": "int64"
         },
-        "refreshToken": {
+        "refresh_token": {
           "type": "string"
         }
       },
@@ -2356,8 +3181,88 @@
     "v1OrgScope": {
       "type": "object",
       "properties": {
-        "orgId": {
+        "org_id": {
           "type": "string"
+        }
+      }
+    },
+    "v1Organization": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "realm_id": {
+          "type": "string"
+        },
+        "slug": {
+          "type": "string"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/v1OrganizationStatus"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "int64"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "int64"
+        },
+        "member_limit": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "attributes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "description": "An organization (B2B customer group) within a realm."
+    },
+    "v1OrganizationPage": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1Organization"
+          }
+        },
+        "next_cursor": {
+          "type": "string"
+        }
+      },
+      "description": "A cursor-based page of organizations."
+    },
+    "v1OrganizationStatus": {
+      "type": "string",
+      "enum": [
+        "ORGANIZATION_STATUS_UNSPECIFIED",
+        "ORGANIZATION_STATUS_ACTIVE",
+        "ORGANIZATION_STATUS_SUSPENDED"
+      ],
+      "default": "ORGANIZATION_STATUS_UNSPECIFIED",
+      "description": "The lifecycle status of an organization."
+    },
+    "v1PermissionEntry": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "category": {
+          "type": "string",
+          "description": "Optional grouping label (e.g. \"users\", \"billing\")."
         }
       }
     },
@@ -2376,11 +3281,11 @@
         "config": {
           "$ref": "#/definitions/v1RealmConfig"
         },
-        "createdAt": {
+        "created_at": {
           "type": "string",
           "format": "int64"
         },
-        "updatedAt": {
+        "updated_at": {
           "type": "string",
           "format": "int64"
         }
@@ -2390,15 +3295,15 @@
     "v1RealmConfig": {
       "type": "object",
       "properties": {
-        "sessionTtlMicros": {
+        "session_ttl_micros": {
           "type": "string",
           "format": "int64"
         },
-        "passwordMemoryCost": {
+        "password_memory_cost": {
           "type": "integer",
           "format": "int64"
         },
-        "passwordTimeCost": {
+        "password_time_cost": {
           "type": "integer",
           "format": "int64"
         }
@@ -2415,7 +3320,7 @@
             "$ref": "#/definitions/v1Realm"
           }
         },
-        "nextCursor": {
+        "next_cursor": {
           "type": "string"
         }
       },
@@ -2437,40 +3342,45 @@
     "v1RegisterClientRequest": {
       "type": "object",
       "properties": {
-        "clientName": {
+        "client_name": {
           "type": "string"
         },
-        "redirectUris": {
+        "redirect_uris": {
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "clientSecret": {
+        "client_secret": {
           "type": "string",
-          "description": "Refused (422 on REST, INVALID_ARGUMENT on gRPC): Hearth generates client secrets. Request one with token_endpoint_auth_method."
+          "description": "Not accepted on the admin create paths (REST and gRPC refuse it): Hearth\ngenerates client secrets. Request one with token_endpoint_auth_method."
         },
-        "grantTypes": {
+        "grant_types": {
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "accessTokenAuthorization": {
+        "access_token_authorization": {
           "$ref": "#/definitions/v1AccessTokenAuthorization"
+        },
+        "trust_level": {
+          "$ref": "#/definitions/v1ClientTrustLevel",
+          "description": "Trust level for this client.  Unspecified defaults to ThirdParty on the\nDCR path.  The authenticated admin create path respects this field."
+        },
+        "id_token_signed_response_alg": {
+          "type": "string",
+          "description": "JWS algorithm for this client's ID tokens (OIDC Dynamic Client\nRegistration 1.0 s2): \"RS256\" or \"EdDSA\"; anything else is rejected.\nOmitted means RS256 on the dynamic registration path (the OIDC default)\nand EdDSA on the authenticated admin path. Only ID tokens are affected;\naccess and refresh tokens are always EdDSA."
         },
         "token_endpoint_auth_method": {
           "type": "string",
-          "enum": [
-            "client_secret_basic",
-            "client_secret_post",
-            "private_key_jwt",
-            "none"
-          ],
-          "description": "How the client authenticates at the token endpoint (RFC 7591 \u00a72). client_secret_basic or client_secret_post creates a confidential client: Hearth generates its secret (256 bits from the OS CSPRNG), stores only a hash, and returns the secret exactly once, as client_secret in this create response. private_key_jwt requires jwks. Omitted or none registers a public client (a private_key_jwt client when jwks is given)."
+          "description": "How the client authenticates at the token endpoint (RFC 7591 s2):\n\"client_secret_basic\", \"client_secret_post\", \"private_key_jwt\" or \"none\".\nOn the authenticated admin create paths (POST /admin/applications,\nPOST /clients, gRPC CreateApplication and RegisterClient) a\n\"client_secret_*\" value creates a confidential client whose secret Hearth\ngenerates (256 bits from the OS CSPRNG) and returns exactly once, in the\nresponse's client_secret. Only a hash is stored. \"private_key_jwt\"\nrequires jwks. Omitted or \"none\" registers a public client (or a\nprivate_key_jwt client when jwks is given)."
         }
       },
       "description": "Request to register a new OAuth 2.0 client."
+    },
+    "v1RemoveAdditionalRoleResponse": {
+      "type": "object"
     },
     "v1RemoveGroupMemberResponse": {
       "type": "object"
@@ -2501,13 +3411,16 @@
     "v1RevokeConsentResponse": {
       "type": "object"
     },
+    "v1RevokeUserPermissionResponse": {
+      "type": "object"
+    },
     "v1Role": {
       "type": "object",
       "properties": {
         "id": {
           "type": "string"
         },
-        "realmId": {
+        "realm_id": {
           "type": "string"
         },
         "name": {
@@ -2522,17 +3435,17 @@
             "type": "string"
           }
         },
-        "parentRoleIds": {
+        "parent_role_ids": {
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "createdAtMicros": {
+        "created_at_micros": {
           "type": "string",
           "format": "int64"
         },
-        "updatedAtMicros": {
+        "updated_at_micros": {
           "type": "string",
           "format": "int64"
         }
@@ -2544,26 +3457,67 @@
         "id": {
           "type": "string"
         },
-        "realmId": {
+        "realm_id": {
           "type": "string"
         },
-        "subjectId": {
+        "subject_id": {
           "type": "string"
         },
-        "subjectType": {
+        "subject_type": {
           "$ref": "#/definitions/v1GroupMemberType"
         },
-        "roleId": {
+        "role_id": {
           "type": "string"
         },
         "scope": {
           "$ref": "#/definitions/v1Scope"
         },
-        "assignedAtMicros": {
+        "assigned_at_micros": {
           "type": "string",
           "format": "int64"
         },
-        "assignedByUserId": {
+        "assigned_by_user_id": {
+          "type": "string"
+        }
+      }
+    },
+    "v1RoleEntry": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "scope_kind": {
+          "type": "string",
+          "description": "Scope kind: \"realm\", \"organization\", or \"any\"."
+        },
+        "permissions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "parent_roles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "v1RoleSubject": {
+      "type": "object",
+      "properties": {
+        "subject_type": {
+          "$ref": "#/definitions/v1GroupMemberType"
+        },
+        "subject_id": {
           "type": "string"
         }
       }
@@ -2585,7 +3539,7 @@
         "permission": {
           "type": "string"
         },
-        "organizationId": {
+        "organization_id": {
           "type": "string"
         },
         "resource": {
@@ -2606,16 +3560,16 @@
     "v1TokenExchangeRequest": {
       "type": "object",
       "properties": {
-        "clientId": {
+        "client_id": {
           "type": "string"
         },
         "code": {
           "type": "string"
         },
-        "redirectUri": {
+        "redirect_uri": {
           "type": "string"
         },
-        "codeVerifier": {
+        "code_verifier": {
           "type": "string"
         }
       },
@@ -2627,7 +3581,7 @@
         "token": {
           "type": "string"
         },
-        "tokenTypeHint": {
+        "token_type_hint": {
           "type": "string"
         }
       },
@@ -2639,38 +3593,101 @@
         "token": {
           "type": "string"
         },
-        "tokenTypeHint": {
+        "token_type_hint": {
           "type": "string"
         }
       },
       "description": "Request to revoke an OAuth 2.0 token (RFC 7009)."
     },
+    "v1UnassignGroupRoleResponse": {
+      "type": "object"
+    },
     "v1UnassignUserRoleResponse": {
       "type": "object"
+    },
+    "v1UpdateAgentRequest": {
+      "type": "object",
+      "properties": {
+        "display_name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "max_delegation_depth": {
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "description": "Fields that may be updated on an agent."
     },
     "v1UpdateClientRequest": {
       "type": "object",
       "properties": {
-        "clientName": {
+        "client_name": {
           "type": "string"
         },
-        "redirectUris": {
+        "redirect_uris": {
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "grantTypes": {
+        "grant_types": {
           "type": "array",
           "items": {
             "type": "string"
           }
         },
-        "accessTokenAuthorization": {
+        "access_token_authorization": {
           "$ref": "#/definitions/v1AccessTokenAuthorization"
+        },
+        "trust_level": {
+          "$ref": "#/definitions/v1ClientTrustLevel",
+          "description": "Trust level override.  Omit to leave unchanged."
+        },
+        "id_token_signed_response_alg": {
+          "type": "string",
+          "description": "ID-token signing algorithm: \"RS256\" or \"EdDSA\". Omit to leave unchanged."
         }
       },
       "description": "Request to update an existing OAuth 2.0 client."
+    },
+    "v1UpdateOrganizationRequest": {
+      "type": "object",
+      "properties": {
+        "slug": {
+          "type": "string"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/v1OrganizationStatus"
+        },
+        "member_limit": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "attributes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "When non-empty, replaces the organization's entire custom attribute map.\nAn empty map is treated as \"no change\"; use clear_attributes to remove all."
+        },
+        "clear_attributes": {
+          "type": "boolean",
+          "description": "When true and attributes is empty, clears all custom attributes."
+        }
+      },
+      "description": "Request to update an existing organization."
     },
     "v1UpdateRealmRequest": {
       "type": "object",
@@ -2693,16 +3710,16 @@
         "email": {
           "type": "string"
         },
-        "displayName": {
+        "display_name": {
           "type": "string"
         },
         "status": {
           "$ref": "#/definitions/v1UserStatus"
         },
-        "firstName": {
+        "first_name": {
           "type": "string"
         },
-        "lastName": {
+        "last_name": {
           "type": "string"
         },
         "attributes": {
@@ -2712,7 +3729,7 @@
           },
           "description": "When non-empty, replaces the user's entire custom attribute map.\nAn empty map is treated as \"no change\"; use clear_attributes to remove all."
         },
-        "clearAttributes": {
+        "clear_attributes": {
           "type": "boolean",
           "description": "When true and attributes is empty, clears all custom attributes."
         }
@@ -2728,27 +3745,27 @@
         "email": {
           "type": "string"
         },
-        "displayName": {
+        "display_name": {
           "type": "string"
         },
         "status": {
           "$ref": "#/definitions/v1UserStatus"
         },
-        "createdAt": {
+        "created_at": {
           "type": "string",
           "format": "int64"
         },
-        "updatedAt": {
+        "updated_at": {
           "type": "string",
           "format": "int64"
         },
-        "firstName": {
+        "first_name": {
           "type": "string"
         },
-        "lastName": {
+        "last_name": {
           "type": "string"
         },
-        "requiredActions": {
+        "required_actions": {
           "type": "array",
           "items": {
             "type": "string"
@@ -2768,11 +3785,33 @@
             "$ref": "#/definitions/v1User"
           }
         },
-        "nextCursor": {
+        "next_cursor": {
           "type": "string"
         }
       },
       "description": "A cursor-based page of users."
+    },
+    "v1UserPermissionEntry": {
+      "type": "object",
+      "properties": {
+        "permission": {
+          "type": "string"
+        },
+        "scope_type": {
+          "type": "string"
+        },
+        "org_id": {
+          "type": "string"
+        },
+        "granted_by": {
+          "type": "string"
+        },
+        "granted_at": {
+          "type": "string",
+          "format": "int64",
+          "description": "Unix timestamp (seconds)."
+        }
+      }
     },
     "v1UserStatus": {
       "type": "string",
@@ -2784,6 +3823,32 @@
       ],
       "default": "USER_STATUS_UNSPECIFIED",
       "description": "The lifecycle status of a user account."
+    },
+    "v1VerifyIntegrityResponse": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "broken_at_event_id": {
+          "type": "string"
+        },
+        "event_count": {
+          "type": "string",
+          "format": "uint64"
+        }
+      },
+      "description": "Result of an integrity check. `ok = true` means the hash chain verified\nend-to-end; `ok = false` indicates a broken link at `broken_at_event_id`."
+    },
+    "v1VoteResponse": {
+      "type": "object",
+      "properties": {
+        "payload": {
+          "type": "string",
+          "format": "byte"
+        }
+      },
+      "description": "Vote RPC response.\nPayload is CBOR-encoded openraft::VoteResponse\u003cu64\u003e."
     }
   }
 }

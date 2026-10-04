@@ -37,7 +37,8 @@
     "format:check": "prettier --check ."
   },
   "dependencies": {
-    "jose": "^5.0.0"
+    "jose": "^5.0.0",
+    "openapi-fetch": "^0.17.0"
   },
   "peerDependencies": {
     "next": ">=14.0.0",
@@ -58,9 +59,11 @@
     "@types/react-dom": "^18.3.0",
     "eslint": "^10.11.0",
     "jsdom": "^25.0.0",
+    "openapi-typescript": "7.13.0",
     "prettier": "3.9.9",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
+    "tsx": "4.23.15",
     "typescript": "^5.0.0",
     "typescript-eslint": "^8.71.0",
     "vitest": "^4.1.6"

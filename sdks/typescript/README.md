@@ -302,7 +302,7 @@ const user = await admin.getUser("<user-id>");
 // Update a user
 const updated = await admin.updateUser("<user-id>", {
   displayName: "Alice Smith",
-  status: "active",
+  status: "USER_STATUS_ACTIVE", // the proto enum name; "active" is refused
 });
 
 // Delete a user
@@ -328,6 +328,34 @@ await admin.deleteRealm("<realm-id>");
 ### Clients, roles and groups
 
 `createClient`, `getClient`, `updateClient`, `regenerateClientSecret`, `deleteClient`, `listClients`, and the same create/get/update/delete/list set for roles and groups.
+
+### Organizations
+
+```typescript
+// Create an organization (slug is immutable after creation)
+const org = await admin.createOrganization({
+  slug: "acme",
+  display_name: "Acme Corp",
+  mfa_required: true, // members need MFA even where the realm does not
+});
+
+// List, get, update, delete
+const page = await admin.listOrganizations({ limit: 50 });
+const same = await admin.getOrganization(org.id);
+await admin.updateOrganization(org.id, { status: "suspended" });
+await admin.deleteOrganization(org.id);
+
+// Extra org roles of one member (the user must already be a member)
+await admin.addMemberRole(org.id, "<user-id>", "billing");
+const roles = await admin.listMemberRoles(org.id, "<user-id>"); // ["billing"]
+await admin.removeMemberRole(org.id, "<user-id>", "billing");
+```
+
+`Organization`, `CreateOrganizationParams` and `UpdateOrganizationParams` are exported types.
+
+### Generated client
+
+Routes and path parameters come from a client generated from Hearth's OpenAPI document (`src/generated/admin/schema.ts`, by `openapi-typescript`, called through `openapi-fetch`). Regenerate it with `make sdk-admin-gen` from the repository root; never edit it by hand.
 
 ---
 

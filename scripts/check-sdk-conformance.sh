@@ -60,6 +60,11 @@ README_SECTION_NAMES=(
   "Troubleshooting section"
 )
 
+# ── Direct signature-verify calls (must not appear in SDK source) ─────────────
+# Go crypto/ed25519 + crypto/rsa, Python `cryptography` public keys, PHP sodium
+# and openssl, WebCrypto, tweetnacl and noble.
+DIRECT_VERIFY_PATTERN='ed25519\.Verify|rsa\.VerifyPKCS1v15|rsa\.VerifyPSS|(Ed25519|RSA)PublicKey\)?\.verify|[A-Za-z_]*[Kk]ey\.verify\(|sodium_crypto_sign_verify_detached|openssl_verify\(|subtle\.verify\(|nacl\.sign\.detached\.verify|ed25519\.verify\('
+
 check_sdk() {
   local sdk_dir="$1"
   local sdk_name
@@ -121,6 +126,24 @@ check_sdk() {
         fail "$label — not found in $readme (spec §10)"
       fi
     done
+  fi
+
+  # ── 5. No handwritten signature check ───────────────────────────────────────
+  # openspec sdk-support-contract: a JOSE library verifies every signature.
+  # Tests may sign tokens; only source that ships is scanned.
+  echo ""
+  echo "  [§2] Signatures verified by a JOSE library"
+  local hits
+  hits="$(grep -rnE "$DIRECT_VERIFY_PATTERN" "$sdk_dir" \
+      --include="*.ts" --include="*.tsx" --include="*.go" --include="*.py" --include="*.php" \
+      --exclude="*_test.go" --exclude="*.test.ts" --exclude="*.test.tsx" \
+      --exclude-dir=node_modules --exclude-dir=vendor --exclude-dir=tests \
+      --exclude-dir=.venv --exclude-dir=dist --exclude-dir=generated 2>/dev/null || true)"
+  if [[ -z "$hits" ]]; then
+    pass "no direct signature-verify call"
+  else
+    fail "direct signature-verify call found; verify through the SDK's JOSE library:"
+    printf '      %s\n' "$hits"
   fi
 }
 

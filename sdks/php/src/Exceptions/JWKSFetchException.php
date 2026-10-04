@@ -9,8 +9,8 @@ use Throwable;
 /**
  * Thrown when the JWKS endpoint is unreachable or returns an invalid response.
  *
- * Also thrown when a key ID (kid) referenced by a JWT is not found in the
- * cached or freshly-fetched JWKS.
+ * Its subclass JwksKeyNotFoundException marks a `kid` absent from the JWKS;
+ * TokenVerifier reports that case as TokenInvalidException.
  *
  * Conforms to §5 of the Hearth SDK Common Specification (`JWKSFetchError`).
  */

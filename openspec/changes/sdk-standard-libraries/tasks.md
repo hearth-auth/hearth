@@ -1,34 +1,48 @@
 ## 0. Precondition
 
-- [ ] 0.1 Archive `scope-trim-trusted-core` first, so the `sdk-support-contract` capability exists in `openspec/specs/` (this change only adds requirements to it)
+- [ ] 0.1 Archive `scope-trim-trusted-core` first, so the `sdk-support-contract` capability exists in `openspec/specs/` (this change only adds requirements to it) **Deferred during apply (owner, 2026-10-03):** scope-trim still has 14.3 (cut v3.0.0) open. The code tasks do not need the archive; archive scope-trim after the release cut and before archiving this change
 
 ## 1. Spikes
 
-- [ ] 1.1 Generator spike per SDK (design decision 2): generate the admin client for `/admin/users`, `/admin/clients` and `/admin/roles`; record the chosen generator, and each gap in `docs/api/openapi.json` it hit
-- [ ] 1.2 Fix the gaps from 1.1 in the server's OpenAPI derivation (`scripts/merge_openapi.py` or the proto annotations), with `make openapi-check` green
+- [x] 1.1 Generator spike per SDK (design decision 2): generate the admin client for `/admin/users`, `/admin/clients` and `/admin/roles`; record the chosen generator, and each gap in `docs/api/openapi.json` it hit **Changed during apply:** the design's recommended generators all work, so they are the choice: `openapi-typescript` 7 (+ `openapi-fetch`), `oapi-codegen` v2 (`types,client`), `openapi-python-client`, `jane-php/open-api-3` 7 (no Java needed). "Clients" is `/admin/applications`. Gaps hit:
+  1. Converted query/path parameters kept the Swagger 2.0 inline `type` — 62 errors, the document was not valid OpenAPI 3.0.
+  2. Two unquoted supplement `description`s containing a comma parsed as YAML mappings.
+  3. `{member.id}` path parameter (proto `RemoveGroupMember`) — `openapi-python-client` dropped the endpoint. The handler also reads query `type` (not `member.type`) and answers `204`, not a typed `200`.
+  4. `/admin/assignments/{assignmentId}` (proto) and `/admin/assignments/{id}` (supplement) — the same route twice; the handler answers `204`.
+  5. **Root cause of most drift:** `docs/api/openapi.proto-derived.json` had no producer — `buf.gen.yaml` had no OpenAPI plugin, so it was hand-edited and stale: update role/group was `PUT` (proto and router: `PATCH`), 35 proto schemas were missing (organizations, permissions, agents), and 10 served `/v1/agents` and realm suspend operations were absent.
+  6. Organization routes had no request or response schemas, and the proto `v1Organization` messages do not match the handler's snake_case JSON.
+  7. Known, not blocking (no SDK admin client calls them yet): 30 supplement admin operations (webhooks, permissions, backup, cluster, branding, email templates…) have no typed 2xx; the router serves `/admin/realms/{realm_id}/cross-realm-policies`, `/admin/sessions/{id}` and `/admin/users/{id}/sessions` that the spec omits; proto-derived operations are not checked against the handlers' real status codes
+- [x] 1.2 Fix the gaps from 1.1 in the server's OpenAPI derivation (`scripts/merge_openapi.py` or the proto annotations), with `make openapi-check` green **Changed during apply:** `proto/buf.gen.yaml` now runs the pinned `grpc-ecosystem/openapiv2` plugin, writing `docs/api/openapi_proto_derived.swagger.json` (replaces the hand-edited `openapi.proto-derived.json`; `make proto-check` and the CI `proto` filter cover it). `merge_openapi.py` converts parameters to OpenAPI 3.0 and gains two supplement keys that fail the merge when stale: `x-hearth-created-operations` (the three `201` creates) and `x-hearth-schema-patches` (the `token_endpoint_auth_method` enum). The supplement omits the two wrong proto operations (gaps 3–4) and documents the served shapes, and types the six organization operations (`AdminOrganization*` schemas). `openapi-spec-validator`: 0 errors; `tests/openapi.rs` 10/10
 
 ## 2. JOSE-library verification (one PR per SDK is fine)
 
-- [ ] 2.1 TypeScript: red tests (Ed25519 token validates; tampered payload, `alg:none`, wrong `kid` fail); remove any handwritten claim check that `jwtVerify` options already cover
-- [ ] 2.2 Go: red tests first; add `github.com/go-jose/go-jose/v4`; replace `hearth/verify.go`'s `ed25519.Verify` path; keep the error taxonomy
-- [ ] 2.3 Python: red tests first; verify with `jwt.decode(..., algorithms=["EdDSA"])` and `PyJWK`; delete the `Ed25519PublicKey.verify` path in `client.py` and the key cache in `jwks.py` it fed
-- [ ] 2.4 PHP: red tests first; verify with `lcobucci/jwt` `Signer\Eddsa` and the validation constraints; delete the `sodium_crypto_sign_verify_detached` path in `TokenVerifier.php`
-- [ ] 2.5 Add a CI grep that fails on a direct Ed25519 verify call in `sdks/` (the "No handwritten signature check remains" scenario)
+- [x] 2.1 TypeScript: red tests (Ed25519 token validates; tampered payload, `alg:none`, wrong `kid` fail); remove any handwritten claim check that `jwtVerify` options already cover
+- [x] 2.2 Go: red tests first; add `github.com/go-jose/go-jose/v4`; replace `hearth/verify.go`'s `ed25519.Verify` path; keep the error taxonomy
+- [x] 2.3 Python: red tests first; verify with `jwt.decode(..., algorithms=["EdDSA"])` and `PyJWK`; delete the `Ed25519PublicKey.verify` path in `client.py` and the key cache in `jwks.py` it fed
+- [x] 2.4 PHP: red tests first; verify with `lcobucci/jwt` `Signer\Eddsa` and the validation constraints; delete the `sodium_crypto_sign_verify_detached` path in `TokenVerifier.php`
+  - Changed during apply (owner decision 2026-10-03): the JOSE libraries apply one clock skew to `exp`, `nbf` and `iat`, so all four SDKs now use one 5 s allowance (Go and PHP/Python were 0 s on `exp`; TypeScript defaulted to 60 s). `SDK.md` §2 must say so (task 5.1). Open: `jose` (TypeScript) refuses a future `iat` only when `maxTokenAge` is set, so TypeScript does not refuse it
+- [x] 2.5 Add a CI grep that fails on a direct Ed25519 verify call in `sdks/` (the "No handwritten signature check remains" scenario) **Changed during apply:** section 5 of `scripts/check-sdk-conformance.sh` (already a CI step); it fails on the pre-change tree for Go, Python and PHP, and passes now
 
 ## 3. Generated admin clients
 
-- [ ] 3.1 Add `make sdk-admin-gen` (all four generators) and commit each generated client under `sdks/<sdk>/generated/admin/`
-- [ ] 3.2 Rewrite each handwritten `AdminClient` as a wrapper over its generated client, keeping its tests green. Expose the `/admin/organizations` routes (CRUD and extra member roles) that the 3.0.0 server added, and delete the stale "Hearth serves no `/admin/orgs` route" comments in `sdks/go/hearth/admin.go`, `sdks/php/src/AdminClient.php`, `sdks/php/README.md` and `sdks/php/tests/Unit/AdminClientTest.php`
-- [ ] 3.3 Add `make sdk-admin-check` and a CI step that fails on a stale generated client
+- [x] 3.1 Add `make sdk-admin-gen` (all four generators) and commit each generated client under `sdks/<sdk>/generated/admin/`
+- [x] 3.2 Rewrite each handwritten `AdminClient` as a wrapper over its generated client, keeping its tests green. Expose the `/admin/organizations` routes (CRUD and extra member roles) that the 3.0.0 server added, and delete the stale "Hearth serves no `/admin/orgs` route" comments in `sdks/go/hearth/admin.go`, `sdks/php/src/AdminClient.php`, `sdks/php/README.md` and `sdks/php/tests/Unit/AdminClientTest.php`
+- [x] 3.3 Add `make sdk-admin-check` and a CI step that fails on a stale generated client
+  - Changed during apply: `scripts/admin_openapi.py` feeds every generator the `/admin` subset (51 paths); `scripts/sdk-admin-gen.sh` runs each `sdks/<sdk>/gen-admin.sh`, which pins its generator: `openapi-typescript` 7.13.0 (+ `openapi-fetch` runtime) → `sdks/typescript/src/generated/admin/schema.ts`; `oapi-codegen` v2.8.0 (+ `oapi-codegen/runtime`) → `sdks/go/generated/admin/`; `openapi-python-client` 0.29.1 + ruff → `sdks/python/src/hearth/generated/admin/` (importable package); `jane-php/open-api-3` 7.14.4 (Jane 8 needs PHP 8.3; the SDK supports 8.1) → `sdks/php/generated/admin/`. CI job `sdk-admin-freshness` (in `required-summary`).
+  - Changed during apply: no SDK had a method on a route the server does not serve (the `/admin/orgs` methods were already gone); each gained the eight organization methods. A live probe showed the proto-derived schemas for users, applications, roles, groups, realms, assignments and audit do not match the REST JSON, so for now the eight create/update calls per SDK send the SDK's own snake_case body through the generated route (raw body) and every non-organization response decodes into the SDK's own types. Follow-up 3.4 tightens them once the spec describes the served JSON
+
+- [x] 3.4 (added during apply) Make `docs/api/openapi.json` describe the served REST admin JSON (`json_names_for_fields=false`, supplement `Admin*` schemas for the hand-rolled DTO handlers, `tests/openapi_contract.rs` checking live responses against the spec), regenerate, and move the raw-body calls in each SDK onto the generated types **Changed during apply:** `json_names_for_fields=false` (pbjson keeps proto field names, so the wire is snake_case) fixed users, applications and realms; 18 supplement `Admin*` schemas cover the hand-rolled DTO handlers; `x-hearth-no-content-operations` marks `204` deletes. `tests/openapi_contract.rs` calls each SDK-used admin route and checks status, keys and required properties against the spec (198 mismatches before). All four wrappers now use the generated request types; PHP still decodes responses raw (Jane models only `200`), Go decodes `Realm` raw (`Config` is `any`). Possible server defects, not fixed: `proto_to_rest_json` turns numeric-looking strings into numbers (a `display_name` of `"123"`); `GET /admin/users` answers three different shapes; audit `action` uses Rust names, not the proto `AUDIT_ACTION_*` enum
 
 ## 4. Conformance harness
 
-- [ ] 4.1 Write `sdks/conformance/scenarios.yaml` (token validation set plus client credentials; design Open Question 2)
-- [ ] 4.2 Write a runner per SDK (`sdks/<sdk>/conformance/`) that prints one JSON result per scenario
-- [ ] 4.3 Write the driver (extend `scripts/sdk-smoke-local.sh`): boot `--dev`, bootstrap, mint tokens, run the runners, diff; a difference names the SDK and the scenario
-- [ ] 4.4 Add the harness as a CI job, required in the summary
+- [x] 4.1 Write `sdks/conformance/scenarios.yaml` (token validation set plus client credentials; design Open Question 2)
+- [x] 4.2 Write a runner per SDK (`sdks/<sdk>/conformance/`) that prints one JSON result per scenario
+- [x] 4.3 Write the driver (extend `scripts/sdk-smoke-local.sh`): boot `--dev`, bootstrap, mint tokens, run the runners, diff; a difference names the SDK and the scenario
+- [x] 4.4 Add the harness as a CI job, required in the summary
+  - Changed during apply: the driver is `scripts/sdk-conformance.sh` + `scripts/sdk_conformance.py` (`make sdk-conformance`; also step 9 of `sdk-smoke-local.sh`). It boots two servers, because the server's per-realm `access_token_ttl` does not reach client-credentials tokens (`oauth.rs` uses the global TTL): `main` and `expiry` (1 s global TTL). Runners: `sdks/<sdk>/conformance/run.sh`. CI: job `conformance / all SDKs` in `sdk-smoke.yml`, gated by `sdk-smoke-ok` → `required-summary`. First full run found 4 SDK bugs, all fixed: unknown `kid` gave `JWKSFetchError` (Go, Python, PHP); Go checked `iss` against discovery; Go and Python sent the realm name in `X-Realm-ID`, so client credentials never worked live. Now 9 scenarios × 4 SDKs agree
+  - Server defects found, for `trusted-core-confidence` (feature freeze, not fixed here): per-realm `access_token_ttl` is ignored by the client-credentials, JWT-bearer and device grants; client credentials without `scope` answers `400 HEARTH_INVALID_INPUT` (RFC 6749 makes `scope` optional)
 
 ## 5. Docs and release
 
-- [ ] 5.1 Update `docs/specs/SDK.md`, `docs/specs/SDK_SURFACE.md` and the four SDK guides: the libraries, the generated clients, the harness
-- [ ] 5.2 CHANGELOG `### Changed` entries per SDK (verification library, admin client method names)
+- [x] 5.1 Update `docs/specs/SDK.md`, `docs/specs/SDK_SURFACE.md` and the four SDK guides: the libraries, the generated clients, the harness
+- [x] 5.2 CHANGELOG `### Changed` entries per SDK (verification library, admin client method names)

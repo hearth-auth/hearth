@@ -775,7 +775,7 @@ async fn an_exchanged_token_with_an_actor_token_belongs_to_the_actor() {
 const CLIENT_ASSERTION_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
 
 /// Registers a secretless client that authenticates with `private_key_jwt`
-/// (an assertion key and no `client_secret`, as a FAPI 2.0 client must be).
+/// (an assertion key and no `client_secret`).
 fn register_pkjwt(h: &common::TestHarness, realm: &RealmId) -> (ClientId, SigningKey) {
     let key = SigningKey::generate().expect("key");
     let client_id = register(h, realm, None);

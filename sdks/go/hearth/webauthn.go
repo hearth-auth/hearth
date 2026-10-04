@@ -93,7 +93,7 @@ func (c *Client) postJSON(ctx context.Context, path, bearer string, body, result
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Realm-ID", c.realmID)
+	c.setRealmHeader(req)
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}

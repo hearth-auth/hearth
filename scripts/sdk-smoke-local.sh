@@ -2,7 +2,8 @@
 # sdk-smoke-local.sh — Host-side reproduction of the SDK smoke CI jobs.
 #
 # Builds hearth (debug), boots --dev on a random free port, runs the
-# TypeScript and Go SDK example smoke checks, then tears down.
+# TypeScript and Go SDK example smoke checks and the shared SDK conformance
+# harness (scripts/sdk-conformance.sh), then tears down.
 #
 # Usage: bash scripts/sdk-smoke-local.sh
 # Called by: make sdk-smoke-local (part of make ci-local-fast)
@@ -303,6 +304,11 @@ echo "==> SDK smoke — agent-auth"
 # Runs its own hearth instance (different port, agent_auth caps enabled).
 # The sub-script exits non-zero on any failure, which propagates via set -e.
 bash "$REPO_ROOT/examples/agent-auth-smoke/smoke.sh"
+
+# ── 9. Shared SDK conformance harness ─────────────────────────────────────────
+echo "==> SDK conformance — all four SDKs, one scenario set (sdks/conformance/)"
+# Boots its own two servers from the binary built in step 1.
+HEARTH_BIN="$HEARTH_BIN" bash "$REPO_ROOT/scripts/sdk-conformance.sh"
 
 echo ""
 echo "sdk-smoke-local: PASS"

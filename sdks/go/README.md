@@ -197,6 +197,12 @@ if err != nil {
 admin := client.Admin(accessToken)
 ```
 
+`AdminClient` is a thin layer over a client generated from Hearth's OpenAPI document
+(`generated/admin`, regenerated with `make sdk-admin-gen` from the repository root; never
+edit it by hand). The generated client owns the routes and query parameters; `AdminClient`
+adds the bearer token and `X-Realm-ID` header, these method names, and `*APIError` for
+non-2xx responses.
+
 ### Users
 
 ```go
@@ -215,8 +221,9 @@ updated, err := admin.UpdateUser(ctx, "<user-id>", hearth.UpdateUserRequest{
     DisplayName: &name,
 })
 
-// List users (paginated, up to limit records per page)
-page, err := admin.ListUsers(ctx, 50)
+// List users (paginated, up to Limit records per page)
+page, err := admin.ListUsers(ctx, hearth.ListOptions{Limit: 50})
+// Next page: hearth.ListOptions{Limit: 50, Cursor: *page.NextCursor}
 // page.Items: []User, page.NextCursor: *string (nil if last page)
 
 // Delete a user
@@ -236,6 +243,34 @@ realm, err := admin.GetRealm(ctx, "<realm-id>")
 
 // Delete a realm (cascades users, sessions, clients, assignments)
 err = admin.DeleteRealm(ctx, "<realm-id>")
+```
+
+### Organizations
+
+```go
+// Create an organization (refused in the system realm)
+mfa := true
+org, err := admin.CreateOrganization(ctx, hearth.CreateOrganizationRequest{
+    Slug:        "acme",
+    DisplayName: "Acme",
+    MfaRequired: &mfa, // optional: members need MFA even where the realm does not
+})
+
+// Get, list and update. The slug is immutable; nil fields are unchanged.
+org, err = admin.GetOrganization(ctx, org.Id.String())
+page, err := admin.ListOrganizations(ctx, hearth.ListOptions{Limit: 50})
+suspended := hearth.UpdateOrganizationStatus("suspended")
+org, err = admin.UpdateOrganization(ctx, org.Id.String(), hearth.UpdateOrganizationRequest{
+    Status: &suspended,
+})
+
+// Extra org roles of a member (the user must already be a member; 409 otherwise)
+err = admin.AddMemberRole(ctx, "<org-id>", "<user-id>", "billing")
+roles, err := admin.ListMemberRoles(ctx, "<org-id>", "<user-id>") // []string
+err = admin.RemoveMemberRole(ctx, "<org-id>", "<user-id>", "billing")
+
+// Delete (refused when a member holds admin authority the caller lacks)
+err = admin.DeleteOrganization(ctx, "<org-id>")
 ```
 
 ---

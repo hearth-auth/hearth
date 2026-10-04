@@ -208,23 +208,34 @@ func main() {
 
     claims, err := client.VerifyToken(ctx, accessToken)
     if err != nil {
-        var tokenErr *hearth.TokenError
-        if errors.As(err, &tokenErr) {
-            fmt.Println("token rejected:", tokenErr.Code) // "expired", "invalid", "issuer_mismatch", etc.
+        var expired *hearth.TokenExpiredError
+        var invalid *hearth.TokenInvalidError
+        switch {
+        case errors.As(err, &expired):
+            fmt.Println("token expired") // 401 — ask the caller to refresh
+        case errors.As(err, &invalid):
+            fmt.Println("token rejected") // 401
         }
         return
     }
 
-    fmt.Println("user:", claims.Subject)
-    fmt.Println("roles:", claims.Roles)
-    fmt.Println("permissions:", claims.Permissions)
+    fmt.Println("user:", claims.Subject())
+    fmt.Println("admin:", claims.HasRole("admin"))
+    fmt.Println("can write docs:", claims.HasPermission("docs.write"))
 }
 ```
 
-`VerifyToken` validates signature, `exp`, `iss`, `aud` (when `client_id` is
-set), and `iat` in that order. Keys are cached; a `kid` miss triggers one
-re-fetch before failing (transparent key rotation). It never falls back to
-introspection.
+Keys are cached; a `kid` miss triggers one re-fetch (transparent key rotation).
+It never falls back to introspection.
+
+**How verification works.** The SDK has no signature code of its own. It uses
+`github.com/go-jose/go-jose/v4`: `jwt.ParseSigned` accepts `EdDSA` only, `Claims`
+checks the signature against the key found by `kid`, and `ValidateWithLeeway`
+checks `exp`, `nbf`, `iat`, `iss` (against the configured issuer) and `aud` (when
+`client_id` is set) with one 5 s clock-skew allowance. A `kid` still unknown after
+the re-fetch returns `*TokenInvalidError`; `*JWKSFetchError` means the JWKS
+endpoint itself failed. A token with an unknown `crit` header or `b64: false` is
+refused.
 
 Pass additional audience values as variadic arguments:
 
@@ -498,9 +509,34 @@ user, err := admin.CreateUser(ctx, hearth.CreateUserRequest{
     DisplayName: "Alice",
 })
 
-page, err := admin.ListUsers(ctx, 50)
+page, err := admin.ListUsers(ctx, hearth.ListOptions{Limit: 50})
 // page.Items []hearth.User, page.NextCursor *string
+
+// Organizations and a member's extra organization roles
+org, err := admin.CreateOrganization(ctx, hearth.CreateOrganizationRequest{
+    Slug:        "acme",
+    DisplayName: "Acme",
+})
+err = admin.AddMemberRole(ctx, org.Id.String(), userID, "billing-admin")
+roles, err := admin.ListMemberRoles(ctx, org.Id.String(), userID) // []string
+err = admin.RemoveMemberRole(ctx, org.Id.String(), userID, "billing-admin")
 ```
+
+`ListOrganizations`, `GetOrganization`, `UpdateOrganization` and
+`DeleteOrganization` complete the set. Organization membership itself has no
+REST route.
+
+`AdminClient` is a thin layer over the client in `sdks/go/generated/admin`,
+generated from `docs/api/openapi.json` by `oapi-codegen` (`make sdk-admin-gen`)
+and committed; CI fails when it is stale. The organization types are aliases of
+the generated ones.
+
+## Conformance
+
+`sdks/go/conformance/run.sh` runs the shared SDK scenarios
+(`sdks/conformance/scenarios.yaml`) through this SDK's public API. `make
+sdk-conformance` runs it against live servers, next to the TypeScript, Python
+and PHP runners, and fails when an SDK gives a different answer.
 
 ## Runnable example
 

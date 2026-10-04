@@ -27,7 +27,7 @@ _PUBLIC_KEY = _PRIVATE_KEY.public_key()
 
 
 class _SeededJwksCache:
-    """A JwksCache stand-in that always returns the suite's test public key."""
+    """A JwksCache stand-in that always returns the suite's test key as a PyJWK."""
 
     def __init__(self, public_key) -> None:
         self._public_key = public_key
@@ -38,7 +38,11 @@ class _SeededJwksCache:
 
 def install_test_key(client):
     """Seed *client*'s JWKS cache with the suite's public key and return it."""
-    client._jwks_cache = _SeededJwksCache(_PUBLIC_KEY)
+    import jwt as pyjwt
+    from jwt.algorithms import OKPAlgorithm
+
+    jwk = OKPAlgorithm.to_jwk(_PUBLIC_KEY, as_dict=True)
+    client._jwks_cache = _SeededJwksCache(pyjwt.PyJWK(jwk, algorithm="EdDSA"))
     return client
 
 

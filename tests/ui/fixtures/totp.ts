@@ -1,4 +1,6 @@
 import * as crypto from 'crypto';
+import * as fs from 'fs';
+import * as path from 'path';
 
 /**
  * RFC 6238 TOTP (HMAC-SHA1, 30 s step, 6 digits) for the fixtures that sign
@@ -41,26 +43,77 @@ export function computeTotp(secretBase32: string, unixSec = Math.floor(Date.now(
   return (code % 1_000_000).toString().padStart(6, '0');
 }
 
-const lastStep = new Map<string, number>();
+// The last TOTP step spent per secret, shared by every Playwright process.
+// Global setup and each worker are separate processes: an in-memory map let
+// two of them send the same code in one 30 s window, and the server refused
+// the second as a replay (login_flow.spec.ts failed on main and on PRs).
+const STEPS_FILE = path.join(__dirname, '..', '.auth', 'totp-steps.json');
+const LOCK_DIR = `${STEPS_FILE}.lock`;
+
+const nowStep = () => Math.floor(Date.now() / 1000 / 30);
+
+/** Runs `update` on the shared step table under a cross-process lock. */
+function withSteps<T>(update: (steps: Record<string, number>) => T): T {
+  fs.mkdirSync(path.dirname(STEPS_FILE), { recursive: true });
+  let deadline = Date.now() + 10_000;
+  for (;;) {
+    try {
+      fs.mkdirSync(LOCK_DIR); // atomic: exactly one process creates it
+      break;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+      if (Date.now() > deadline) {
+        // Held for 10 s: a crashed holder. The lock is an empty dir; another
+        // waiter may have removed it already. Restart the clock either way.
+        try {
+          fs.rmdirSync(LOCK_DIR);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        }
+        deadline = Date.now() + 10_000;
+        continue;
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    }
+  }
+  try {
+    let steps: Record<string, number> = {};
+    try {
+      steps = JSON.parse(fs.readFileSync(STEPS_FILE, 'utf-8'));
+    } catch (e) {
+      // Read, then handle a missing file: no check-then-use window.
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+    }
+    const result = update(steps);
+    fs.writeFileSync(STEPS_FILE, JSON.stringify(steps));
+    return result;
+  } finally {
+    fs.rmdirSync(LOCK_DIR);
+  }
+}
 
 /**
  * A TOTP code the server has not seen yet for `secretBase32`. The server
  * refuses a code from a 30 s step it already accepted (replay protection), and
  * bootstrap spends the current step when it activates the factor. So the first
  * code is the NEXT step's (accepted inside the ±1-step window), and each later
- * call moves one step on, waiting for the clock when it must.
+ * call, in any process, moves one step on, waiting for the clock when it must.
  */
 export async function nextTotp(secretBase32: string): Promise<string> {
-  const now = () => Math.floor(Date.now() / 1000 / 30);
-  const step = Math.max((lastStep.get(secretBase32) ?? now()) + 1, now());
-  while (step > now() + 1) {
+  const step = withSteps((steps) => {
+    const next = Math.max((steps[secretBase32] ?? nowStep()) + 1, nowStep());
+    steps[secretBase32] = next;
+    return next;
+  });
+  while (step > nowStep() + 1) {
     await new Promise((r) => setTimeout(r, 1_000));
   }
-  lastStep.set(secretBase32, step);
   return computeTotp(secretBase32, step * 30);
 }
 
 /** Records that the code for the current step was used (a fresh enrolment). */
 export function markTotpUsed(secretBase32: string): void {
-  lastStep.set(secretBase32, Math.floor(Date.now() / 1000 / 30));
+  withSteps((steps) => {
+    steps[secretBase32] = Math.max(steps[secretBase32] ?? 0, nowStep());
+  });
 }
