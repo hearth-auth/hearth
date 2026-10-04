@@ -305,7 +305,15 @@ async fn auth_complete_pins_origin_server_side() {
         authenticator.build_registration_response(&reg_challenge, PINNED_ORIGIN);
     harness
         .identity()
-        .complete_webauthn_registration(&realm, user.id(), &reg_cdj, &reg_att, PINNED_ORIGIN, false)
+        .complete_webauthn_registration(
+            &realm,
+            user.id(),
+            &reg_cdj,
+            &reg_att,
+            PINNED_ORIGIN,
+            false,
+            &Default::default(),
+        )
         .expect("complete registration");
 
     let cred_id_b64 = b64(&authenticator.credential_id);

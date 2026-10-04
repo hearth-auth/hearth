@@ -1189,7 +1189,7 @@ pub async fn passkey_register_begin(
             let challenge_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&challenge);
             let user_id_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .encode(session.user_id.as_uuid().as_bytes());
-            let body = serde_json::json!({
+            let mut body = serde_json::json!({
                 "challenge": challenge_b64,
                 "rp": { "id": rp_id, "name": state.product_name },
                 "user": {
@@ -1207,6 +1207,11 @@ pub async fn passkey_register_begin(
                 },
                 "attestation": "none",
             });
+            super::handlers_common::add_registration_extensions(
+                &state,
+                &session.realm_id,
+                &mut body,
+            );
             Json(body).into_response()
         }
         Err(e) => {
@@ -1230,6 +1235,10 @@ pub struct PasskeyRegisterCompleteBody {
     /// User-supplied name for this credential (e.g. "MacBook Touch ID").
     #[serde(default)]
     pub name: Option<String>,
+    /// The credential's `getClientExtensionResults()`; the realm's
+    /// attestation policy reads `largeBlob.supported` from it.
+    #[serde(default)]
+    pub client_extension_results: crate::identity::ClientExtensionResults,
 }
 
 /// `POST /ui/account/passkeys/register-complete` — completes the
@@ -1265,6 +1274,7 @@ pub async fn passkey_register_complete(
         &attestation_object,
         &origin,
         true, // discoverable
+        &body.client_extension_results,
     ) {
         Ok(cred) => {
             // Apply user-supplied name if provided.

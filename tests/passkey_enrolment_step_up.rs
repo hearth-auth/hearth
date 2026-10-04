@@ -473,7 +473,15 @@ async fn web_enrolment_with_an_existing_passkey_assertion_is_allowed() {
         .expect("start registration");
     let (cdj, att) = authenticator.registration(&challenge, TEST_ORIGIN);
     rig.identity
-        .complete_webauthn_registration(&rig.realm_id, &rig.user_id, &cdj, &att, TEST_ORIGIN, true)
+        .complete_webauthn_registration(
+            &rig.realm_id,
+            &rig.user_id,
+            &cdj,
+            &att,
+            TEST_ORIGIN,
+            true,
+            &Default::default(),
+        )
         .expect("complete registration");
 
     // Step-up assertion challenge for that credential.
@@ -650,6 +658,7 @@ async fn web_enrolment_no_longer_answers_a_bare_get() {
 
 struct RestRig {
     app: axum::Router,
+    identity: Arc<dyn IdentityEngine>,
     realm_id: RealmId,
     access_token: String,
 }
@@ -710,6 +719,7 @@ async fn build_rest_rig() -> RestRig {
     let state = Arc::new(AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()));
     RestRig {
         app: http_router(state),
+        identity: h.identity_arc(),
         realm_id: realm.id().clone(),
         access_token: pair.access_token().to_string(),
     }
@@ -776,6 +786,98 @@ async fn rest_enrolment_with_a_wrong_password_is_refused() {
 
     assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
     assert!(body.contains("step_up_required"), "body: {body}");
+}
+
+/// Sets the realm's attestation policy to require PRF and/or largeBlob.
+fn require_extensions(
+    identity: &Arc<dyn IdentityEngine>,
+    realm_id: &RealmId,
+    require_prf: bool,
+    require_large_blob: bool,
+) {
+    let realm = identity
+        .get_realm(realm_id)
+        .expect("get realm")
+        .expect("realm exists");
+    let mut config = realm.config().clone();
+    config.webauthn_attestation = Some(hearth::identity::WebAuthnAttestationPolicy {
+        allow_none: true,
+        aaguid_allowlist: vec![],
+        require_prf,
+        require_large_blob,
+    });
+    identity
+        .update_realm(
+            realm_id,
+            &hearth::identity::UpdateRealmRequest {
+                config: Some(config),
+                ..Default::default()
+            },
+        )
+        .expect("update realm");
+}
+
+/// Asserts the creation options request exactly the extensions the policy
+/// requires: `prf: {}` for `require_prf`, `largeBlob: {support: "required"}`
+/// for `require_large_blob`, and no `extensions` member when neither is set.
+fn assert_requested_extensions(body: &str, prf: bool, large_blob: bool, case: &str) {
+    let opts: serde_json::Value = serde_json::from_str(body).expect("json body");
+    if !prf && !large_blob {
+        assert!(
+            opts.get("extensions").is_none(),
+            "{case}: no extension is requested without a policy; body: {body}"
+        );
+        return;
+    }
+    let ext = &opts["extensions"];
+    assert_eq!(
+        ext.get("prf"),
+        prf.then(|| serde_json::json!({})).as_ref(),
+        "{case}: prf input; body: {body}"
+    );
+    assert_eq!(
+        ext.get("largeBlob"),
+        large_blob
+            .then(|| serde_json::json!({ "support": "required" }))
+            .as_ref(),
+        "{case}: largeBlob input; body: {body}"
+    );
+}
+
+const EXTENSION_POLICIES: [(bool, bool); 4] =
+    [(false, false), (true, false), (false, true), (true, true)];
+
+/// The browser registration options request PRF / largeBlob exactly when the
+/// realm's attestation policy requires them, so a real browser can satisfy it.
+#[tokio::test]
+async fn web_register_begin_requests_the_extensions_the_policy_requires() {
+    for (prf, large_blob) in EXTENSION_POLICIES {
+        let rig = build_web_rig(true);
+        if prf || large_blob {
+            require_extensions(&rig.identity, &rig.realm_id, prf, large_blob);
+        }
+        let (status, body) =
+            web_register_begin(&rig, serde_json::json!({ "password": PASSWORD })).await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        let case = format!("web prf={prf} large_blob={large_blob}");
+        assert_requested_extensions(&body, prf, large_blob, &case);
+    }
+}
+
+/// The REST registration options do the same.
+#[tokio::test]
+async fn rest_register_begin_requests_the_extensions_the_policy_requires() {
+    for (prf, large_blob) in EXTENSION_POLICIES {
+        let rig = build_rest_rig().await;
+        if prf || large_blob {
+            require_extensions(&rig.identity, &rig.realm_id, prf, large_blob);
+        }
+        let (status, body) =
+            rest_register_begin(&rig, serde_json::json!({ "password": PASSWORD })).await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        let case = format!("rest prf={prf} large_blob={large_blob}");
+        assert_requested_extensions(&body, prf, large_blob, &case);
+    }
 }
 
 /// Sets the realm's WebAuthn `userVerification` policy to `required`.
@@ -879,7 +981,15 @@ fn enrol_web_passkey(rig: &WebRig) -> TestAuthenticator {
         .expect("start registration");
     let (cdj, att) = authenticator.registration(&challenge, TEST_ORIGIN);
     rig.identity
-        .complete_webauthn_registration(&rig.realm_id, &rig.user_id, &cdj, &att, TEST_ORIGIN, true)
+        .complete_webauthn_registration(
+            &rig.realm_id,
+            &rig.user_id,
+            &cdj,
+            &att,
+            TEST_ORIGIN,
+            true,
+            &Default::default(),
+        )
         .expect("complete registration");
     authenticator
 }

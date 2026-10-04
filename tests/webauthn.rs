@@ -95,6 +95,7 @@ async fn webauthn_full_lifecycle() {
             &attestation_object,
             origin,
             false,
+            &Default::default(),
         )
         .expect("complete registration");
 
@@ -178,7 +179,15 @@ async fn webauthn_credential_management() {
     let (cdj1, att1) = auth1.build_registration_response(&challenge1, origin);
     harness
         .identity()
-        .complete_webauthn_registration(&realm, user.id(), &cdj1, &att1, origin, false)
+        .complete_webauthn_registration(
+            &realm,
+            user.id(),
+            &cdj1,
+            &att1,
+            origin,
+            false,
+            &Default::default(),
+        )
         .expect("complete reg1");
 
     // Authenticate with key1
@@ -226,7 +235,15 @@ async fn webauthn_credential_management() {
     let (cdj2, att2) = auth2.build_registration_response(&challenge2, origin);
     harness
         .identity()
-        .complete_webauthn_registration(&realm, user.id(), &cdj2, &att2, origin, false)
+        .complete_webauthn_registration(
+            &realm,
+            user.id(),
+            &cdj2,
+            &att2,
+            origin,
+            false,
+            &Default::default(),
+        )
         .expect("complete reg2");
 
     // Two credentials now
@@ -322,7 +339,15 @@ async fn webauthn_credential_naming() {
     let (cdj, att) = auth.build_registration_response(&challenge, origin);
     let cred = harness
         .identity()
-        .complete_webauthn_registration(&realm, user.id(), &cdj, &att, origin, false)
+        .complete_webauthn_registration(
+            &realm,
+            user.id(),
+            &cdj,
+            &att,
+            origin,
+            false,
+            &Default::default(),
+        )
         .expect("complete registration");
 
     // Name is None after registration
@@ -400,7 +425,15 @@ async fn webauthn_counter_replay_rejected() {
     let (reg_cdj, reg_att) = authenticator.build_registration_response(&reg_challenge, origin);
     harness
         .identity()
-        .complete_webauthn_registration(&realm, user.id(), &reg_cdj, &reg_att, origin, false)
+        .complete_webauthn_registration(
+            &realm,
+            user.id(),
+            &reg_cdj,
+            &reg_att,
+            origin,
+            false,
+            &Default::default(),
+        )
         .expect("complete registration");
 
     // First authentication with sign_count=1 — should succeed and store count=1
@@ -499,7 +532,15 @@ async fn webauthn_rp_id_mismatch_rejected() {
     let (reg_cdj, reg_att) = authenticator.build_registration_response(&reg_challenge, origin);
     harness
         .identity()
-        .complete_webauthn_registration(&realm, user.id(), &reg_cdj, &reg_att, origin, false)
+        .complete_webauthn_registration(
+            &realm,
+            user.id(),
+            &reg_cdj,
+            &reg_att,
+            origin,
+            false,
+            &Default::default(),
+        )
         .expect("complete registration");
 
     // Start authentication — get a real challenge
@@ -576,7 +617,15 @@ async fn webauthn_tampered_client_data_json_rejected() {
     let (reg_cdj, reg_att) = authenticator.build_registration_response(&reg_challenge, origin);
     harness
         .identity()
-        .complete_webauthn_registration(&realm, user.id(), &reg_cdj, &reg_att, origin, false)
+        .complete_webauthn_registration(
+            &realm,
+            user.id(),
+            &reg_cdj,
+            &reg_att,
+            origin,
+            false,
+            &Default::default(),
+        )
         .expect("complete registration");
 
     // Get a real challenge then build a CDJ with the real challenge but wrong origin.
@@ -667,6 +716,7 @@ async fn webauthn_cbor_malformed_auth_data_rejected() {
             garbage_attestation_object,
             origin,
             false,
+            &Default::default(),
         )
         .expect_err("malformed CBOR attestation object should be rejected");
     assert!(
@@ -723,6 +773,7 @@ async fn webauthn_discoverable_userhandle_spoofing_rejected() {
             &reg_att,
             origin,
             true, // discoverable — writes credential_id → attacker into the index
+            &Default::default(),
         )
         .expect("complete registration");
 
@@ -815,7 +866,15 @@ fn register_discoverable(
     };
     harness
         .identity()
-        .complete_webauthn_registration(realm, user.id(), &cdj, &att, origin, true)
+        .complete_webauthn_registration(
+            realm,
+            user.id(),
+            &cdj,
+            &att,
+            origin,
+            true,
+            &Default::default(),
+        )
         .expect("complete registration");
     authenticator
 }
@@ -1302,7 +1361,15 @@ async fn registration_challenge_minted_in_realm_a_is_refused_in_realm_b() {
 
     let err = harness
         .identity()
-        .complete_webauthn_registration(&realm_b, user_b.id(), &cdj, &att, origin, false)
+        .complete_webauthn_registration(
+            &realm_b,
+            user_b.id(),
+            &cdj,
+            &att,
+            origin,
+            false,
+            &Default::default(),
+        )
         .expect_err("a realm-A challenge must not enrol a credential in realm B");
     assert!(
         matches!(err, IdentityError::WebAuthnRegistrationFailed { .. }),
@@ -1323,7 +1390,15 @@ async fn registration_challenge_minted_in_realm_a_is_refused_in_realm_b() {
     // The refusal must not have burned the challenge: realm A still completes.
     let info = harness
         .identity()
-        .complete_webauthn_registration(&realm_a, user_a.id(), &cdj, &att, origin, false)
+        .complete_webauthn_registration(
+            &realm_a,
+            user_a.id(),
+            &cdj,
+            &att,
+            origin,
+            false,
+            &Default::default(),
+        )
         .expect("the minting realm still completes its own ceremony");
     assert_eq!(info.credential_id(), authenticator.credential_id);
 }
@@ -1359,7 +1434,15 @@ async fn authentication_challenge_minted_in_realm_a_is_refused_in_realm_b() {
         let (cdj, att) = authenticator.build_registration_response(&challenge, origin);
         harness
             .identity()
-            .complete_webauthn_registration(realm, user.id(), &cdj, &att, origin, true)
+            .complete_webauthn_registration(
+                realm,
+                user.id(),
+                &cdj,
+                &att,
+                origin,
+                true,
+                &Default::default(),
+            )
             .expect("complete registration");
     }
 
@@ -1432,7 +1515,15 @@ async fn registration_challenge_is_refused_at_an_authentication_redemption() {
     let (cdj, att) = authenticator.build_registration_response(&challenge, origin);
     harness
         .identity()
-        .complete_webauthn_registration(&realm, user.id(), &cdj, &att, origin, false)
+        .complete_webauthn_registration(
+            &realm,
+            user.id(),
+            &cdj,
+            &att,
+            origin,
+            false,
+            &Default::default(),
+        )
         .expect("complete registration");
 
     // A *second* registration challenge, redeemed on the authentication path.
@@ -1531,7 +1622,15 @@ async fn authentication_challenge_is_refused_at_a_registration_redemption() {
 
     let err = harness
         .identity()
-        .complete_webauthn_registration(&realm, user.id(), &cdj, &att, origin, false)
+        .complete_webauthn_registration(
+            &realm,
+            user.id(),
+            &cdj,
+            &att,
+            origin,
+            false,
+            &Default::default(),
+        )
         .expect_err("an authentication challenge must not enrol a credential");
     assert!(
         matches!(err, IdentityError::WebAuthnRegistrationFailed { .. }),

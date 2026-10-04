@@ -159,13 +159,28 @@ fn assertion_to_external_identity(
     map: &AttributeMap,
     trust_asserted_email: bool,
 ) -> Result<ExternalIdentity, IdentityError> {
-    let nameid = a.subject_name_id.as_deref().unwrap_or("").to_string();
+    // The subject is what an account is linked, provisioned and signed in
+    // by: an assertion without a cleartext `<NameID>` names nobody.
+    let no_subject = || {
+        IdentityError::Saml(SamlError::Parse {
+            reason: "assertion has no subject NameID".to_string(),
+        })
+    };
+    let nameid = a
+        .subject_name_id
+        .as_deref()
+        .filter(|n| !n.trim().is_empty())
+        .ok_or_else(no_subject)?
+        .to_string();
 
     let email = resolve(map, "email", a, &nameid).unwrap_or_else(|| nameid.clone());
     let display_name = resolve(map, "display_name", a, &nameid).unwrap_or_default();
     let first_name = resolve(map, "first_name", a, &nameid).unwrap_or_default();
     let last_name = resolve(map, "last_name", a, &nameid).unwrap_or_default();
     let external_sub = resolve(map, "external_sub", a, &nameid).unwrap_or_else(|| nameid.clone());
+    if external_sub.trim().is_empty() {
+        return Err(no_subject());
+    }
 
     Ok(ExternalIdentity {
         idp_id,
@@ -232,6 +247,48 @@ mod tests {
         };
         let ext = assertion_to_external_identity(IdpId::generate(), &a, &m, false).expect("map");
         assert_eq!(ext.email, "alice@example.com");
+    }
+
+    /// An assertion without a usable subject identifier maps to no identity:
+    /// nothing may be linked, provisioned or signed in for an empty subject.
+    #[test]
+    fn assertion_without_subject_name_id_rejected() {
+        use crate::core::IdpId;
+        use std::collections::BTreeMap;
+
+        let assertion = |name_id: Option<&str>| Assertion {
+            id: "a1".into(),
+            issuer: "idp".into(),
+            subject_name_id: name_id.map(str::to_string),
+            subject_name_id_format: None,
+            not_before: None,
+            not_on_or_after: None,
+            audience_restrictions: Vec::new(),
+            attributes: BTreeMap::new(),
+            in_response_to: None,
+            session_index: None,
+            destination: None,
+            bearer_confirmations: Vec::new(),
+        };
+
+        // `external_sub` mapped to an attribute the assertion does not carry
+        // falls back to the NameID, so this case also covers an empty mapping.
+        let mut mapped = BTreeMap::new();
+        mapped.insert("external_sub".to_string(), "uid".to_string());
+
+        for (case, name_id, map) in [
+            ("missing NameID", None, BTreeMap::new()),
+            ("empty NameID", Some(""), BTreeMap::new()),
+            ("blank NameID", Some("  "), BTreeMap::new()),
+            ("missing NameID, unmapped external_sub", None, mapped),
+        ] {
+            let res =
+                assertion_to_external_identity(IdpId::generate(), &assertion(name_id), &map, false);
+            assert!(
+                matches!(&res, Err(IdentityError::Saml(SamlError::Parse { reason })) if reason.contains("subject")),
+                "{case}: expected a subject parse error, got {res:?}"
+            );
+        }
     }
 
     /// Test-only PEM wrapper for a DER cert (mirrors `signature::tests`).

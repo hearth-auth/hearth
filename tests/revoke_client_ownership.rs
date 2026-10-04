@@ -740,7 +740,7 @@ async fn an_exchanged_token_with_an_actor_token_belongs_to_the_actor() {
                 subject_token: subject.clone(),
                 subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
                 actor_token: Some(actor_token),
-                actor_token_type: Some("urn:ietf:params:oauth:token-type:access_token".to_string()),
+                actor_token_type: Some("urn:ietf:params:oauth:token-type:jwt".to_string()),
                 requested_token_type: None,
                 scope: None,
                 resource: None,

@@ -1646,3 +1646,132 @@ fn strict_profile_refuses_the_eight_published_xsw_variants() {
         assert_refused(cfg, xml, case);
     }
 }
+
+// ── Issuer binding and encrypted content ─────────────────────────────────────
+
+/// A Response for mallory whose assertion is rewritten by `rewrite` and then
+/// signed by the IdP, so the rewrite is covered by a valid signature.
+fn response_with_signed_rewritten_assertion(
+    idp_key: &RsaSigningKey,
+    rewrite: impl Fn(&str) -> String,
+) -> String {
+    let response = xsw_response_for_mallory(&BTreeMap::new());
+    let assertion = extract_assertion(&response);
+    let rewritten = rewrite(&with_saml_ns(&assertion));
+    let signed = sign_element(rewritten.as_bytes(), "_signed1", idp_key).expect("sign assertion");
+    let signed = String::from_utf8(signed).expect("utf8");
+    response.replace(&assertion, &signed)
+}
+
+fn assert_rejected_with(
+    idp_cfg: &SamlIdpConfig,
+    xml: &str,
+    case: &str,
+    want: fn(&IdentityError) -> bool,
+) {
+    match xsw_complete(idp_cfg, xml) {
+        SamlSpOutcome::Rejected { error } => {
+            assert!(
+                want(&error),
+                "{case}: rejected for the wrong reason: {error:?}"
+            );
+        }
+        SamlSpOutcome::Accepted { identity, .. } => panic!(
+            "{case}: accepted as external_sub={:?} email={:?}",
+            identity.external_sub, identity.email
+        ),
+    }
+}
+
+/// The Response names the registered IdP, but the signed assertion's own
+/// `<Issuer>` names another entity: the assertion is refused.
+#[test]
+fn sp_rejects_assertion_issued_by_another_entity() {
+    let idp_key = RsaSigningKey::generate("test-idp", 365).expect("idp key");
+    let idp_cfg = xsw_idp_config(&idp_key, "NameID", true);
+
+    // Control: the same construction without the rewrite is accepted.
+    let control = response_with_signed_rewritten_assertion(&idp_key, str::to_string);
+    xsw_assert_accepted_as_mallory(&idp_cfg, &control, "unchanged assertion");
+
+    let xml = response_with_signed_rewritten_assertion(&idp_key, |a| {
+        let idp_issuer = "<saml:Issuer>https://idp.example</saml:Issuer>";
+        assert!(a.contains(idp_issuer), "assertion names the IdP");
+        a.replacen(
+            idp_issuer,
+            "<saml:Issuer>https://other-idp.example</saml:Issuer>",
+            1,
+        )
+    });
+    assert!(
+        xml.contains("<saml:Issuer>https://idp.example</saml:Issuer><samlp:Status>"),
+        "the Response-level Issuer still names the registered IdP"
+    );
+    assert_rejected_with(&idp_cfg, &xml, "assertion issuer mismatch", |e| {
+        matches!(e, IdentityError::Saml(SamlError::IssuerMismatch))
+    });
+}
+
+/// A signed assertion that carries its subject as an `<EncryptedID>` and no
+/// `<NameID>` is refused rather than accepted with an empty subject.
+#[test]
+fn sp_rejects_encrypted_subject() {
+    let idp_key = RsaSigningKey::generate("test-idp", 365).expect("idp key");
+    let idp_cfg = xsw_idp_config(&idp_key, "NameID", true);
+
+    let xml = response_with_signed_rewritten_assertion(&idp_key, |a| {
+        let start = a.find("<saml:NameID").expect("NameID start");
+        let end = a.find("</saml:NameID>").expect("NameID end") + "</saml:NameID>".len();
+        format!(
+            "{}<saml:EncryptedID><xenc:EncryptedData \
+             xmlns:xenc=\"http://www.w3.org/2001/04/xmlenc#\"/></saml:EncryptedID>{}",
+            &a[..start],
+            &a[end..]
+        )
+    });
+    assert!(!xml.contains("<saml:NameID"), "fixture carries no NameID");
+    assert_rejected_with(&idp_cfg, &xml, "encrypted subject", |e| {
+        matches!(e, IdentityError::Saml(SamlError::Parse { .. }))
+    });
+}
+
+const ENCRYPTED_ASSERTION: &str = "<saml:EncryptedAssertion><xenc:EncryptedData \
+     xmlns:xenc=\"http://www.w3.org/2001/04/xmlenc#\"/></saml:EncryptedAssertion>";
+
+/// A Response whose only assertion is an `<EncryptedAssertion>` is refused.
+#[test]
+fn sp_rejects_encrypted_assertion_only() {
+    let idp_key = RsaSigningKey::generate("test-idp", 365).expect("idp key");
+    let idp_cfg = xsw_idp_config(&idp_key, "NameID", false);
+    let response = xsw_response_for_mallory(&BTreeMap::new());
+    let assertion = extract_assertion(&response);
+    let unsigned = response.replace(&assertion, ENCRYPTED_ASSERTION);
+    let xml = String::from_utf8(sign_element(unsigned.as_bytes(), "_r1", &idp_key).expect("sign"))
+        .expect("utf8");
+    // No cleartext assertion to consume: refused before any field is read.
+    assert_rejected_with(&idp_cfg, &xml, "encrypted assertion only", |e| {
+        matches!(
+            e,
+            IdentityError::Saml(SamlError::Signature | SamlError::Parse { .. })
+        )
+    });
+}
+
+/// An `<EncryptedAssertion>` beside a signed cleartext assertion is refused
+/// rather than ignored.
+#[test]
+fn sp_rejects_encrypted_assertion_beside_a_signed_assertion() {
+    let idp_key = RsaSigningKey::generate("test-idp", 365).expect("idp key");
+    let idp_cfg = xsw_idp_config(&idp_key, "NameID", true);
+    let control = response_with_signed_rewritten_assertion(&idp_key, str::to_string);
+    xsw_assert_accepted_as_mallory(&idp_cfg, &control, "unchanged assertion");
+
+    let xml = control.replacen(
+        "</samlp:Response>",
+        &format!("{ENCRYPTED_ASSERTION}</samlp:Response>"),
+        1,
+    );
+    assert_rejected_with(&idp_cfg, &xml, "encrypted assertion beside", |e| {
+        matches!(e, IdentityError::Saml(SamlError::Parse { .. }))
+    });
+}

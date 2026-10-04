@@ -1090,6 +1090,66 @@ async fn passkey_registration_refuses_requests_without_the_page_token() {
     assert_eq!(passkeys(&rig, &user), 0, "nothing was registered");
 }
 
+/// The login-time passkey enrolment asks the browser for the extensions the
+/// realm's attestation policy requires (`prf: {}`, `largeBlob: {support:
+/// "required"}`), and for none when the policy requires none.
+#[tokio::test]
+async fn passkey_registration_options_request_the_extensions_the_policy_requires() {
+    for (prf, large_blob) in [(false, false), (true, true)] {
+        let rig = build_rig_with(&["webauthn"], true);
+        if prf || large_blob {
+            let realm = rig
+                .identity
+                .get_realm(&rig.realm_id)
+                .expect("get realm")
+                .expect("realm exists");
+            let mut config = realm.config().clone();
+            config.webauthn_attestation = Some(hearth::identity::WebAuthnAttestationPolicy {
+                allow_none: true,
+                aaguid_allowlist: vec![],
+                require_prf: prf,
+                require_large_blob: large_blob,
+            });
+            rig.identity
+                .update_realm(
+                    &rig.realm_id,
+                    &hearth::identity::UpdateRealmRequest {
+                        config: Some(config),
+                        ..Default::default()
+                    },
+                )
+                .expect("update realm");
+        }
+        let email = format!("pk-ext-{prf}@example.com");
+        password_only_user(&rig, &email);
+        let (mut browser, _) = log_in(&rig, &email).await;
+        let html = open(&mut browser, PASSKEY_PAGE).await;
+        let csrf = page_csrf(&html);
+        let resp = browser
+            .post_json(
+                PASSKEY_BEGIN,
+                &serde_json::json!({}),
+                &[("x-csrf-token", csrf.as_str())],
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::OK, "begin");
+        let opts: serde_json::Value =
+            serde_json::from_str(&body_text(resp).await).expect("options JSON");
+        if prf || large_blob {
+            assert_eq!(
+                opts["extensions"],
+                serde_json::json!({ "prf": {}, "largeBlob": { "support": "required" } }),
+                "the options request both required extensions: {opts}"
+            );
+        } else {
+            assert!(
+                opts.get("extensions").is_none(),
+                "no extension is requested without a policy: {opts}"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn a_passkey_that_does_not_prove_user_verification_is_refused() {
     let rig = build_rig_with(&["webauthn"], true);

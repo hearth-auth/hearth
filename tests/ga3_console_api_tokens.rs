@@ -273,7 +273,7 @@ fn passkey_operator(rig: &Rig) -> Operator {
         .expect("start registration");
     let (cdj, att) = authenticator.build_verified_registration_response(&challenge, ORIGIN);
     rig.identity
-        .complete_webauthn_registration(&sys, &id, &cdj, &att, ORIGIN, true)
+        .complete_webauthn_registration(&sys, &id, &cdj, &att, ORIGIN, true, &Default::default())
         .expect("register passkey");
     let session = console_session(rig, &id);
     Operator {

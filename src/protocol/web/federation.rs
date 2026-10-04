@@ -994,6 +994,9 @@ fn complete_login(
     // refuses it if either is untrue. The peer address feeds the realm's
     // network policy (GA audit M13).
     let ctx: SessionContext = build_session_context(headers, peer_addr, &state.trusted_proxies);
+    // A-41: a federated login rotates the session like a password login —
+    // any session the browser already holds is revoked before the new one.
+    auth::revoke_prior_session_cookie(state.identity.as_ref(), headers, &state.cookie_secret);
     let session = match state.identity.create_session(realm_id, user_id, &ctx) {
         Ok(s) => s,
         Err(e) => {

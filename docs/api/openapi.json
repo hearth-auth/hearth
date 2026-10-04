@@ -4247,7 +4247,7 @@
         },
         "responses": {
           "200": {
-            "description": "PublicKeyCredentialCreationOptions JSON"
+            "description": "PublicKeyCredentialCreationOptions JSON. Carries `extensions` (`prf: {}`, `largeBlob: {support: \"required\"}`) when the realm's attestation policy sets `require_prf` / `require_large_blob`.\n"
           },
           "403": {
             "description": "`forbidden` \u2014 the token was issued to a third-party client; or `step_up_required` \u2014 no step-up proof was supplied, or it did not verify.\n"
@@ -4287,7 +4287,44 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object"
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "client_data_json",
+                  "attestation_object",
+                  "origin"
+                ],
+                "properties": {
+                  "client_data_json": {
+                    "type": "string",
+                    "description": "Base64url `response.clientDataJSON`."
+                  },
+                  "attestation_object": {
+                    "type": "string",
+                    "description": "Base64url `response.attestationObject`."
+                  },
+                  "origin": {
+                    "type": "string",
+                    "description": "Accepted but ignored; the origin is pinned server-side."
+                  },
+                  "discoverable": {
+                    "type": "boolean"
+                  },
+                  "client_extension_results": {
+                    "type": "object",
+                    "description": "The credential's `getClientExtensionResults()`. A realm whose attestation policy sets `require_large_blob` reads `largeBlob.supported` from it.\n",
+                    "properties": {
+                      "largeBlob": {
+                        "type": "object",
+                        "properties": {
+                          "supported": {
+                            "type": "boolean"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
               }
             }
           }

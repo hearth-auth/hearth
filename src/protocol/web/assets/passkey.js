@@ -28,6 +28,19 @@
     return Uint8Array.from(atob(base64), function (c) { return c.charCodeAt(0); });
   }
 
+  // The client extension outputs a registration sends to the server: only
+  // `largeBlob.supported`, which the realm's attestation policy reads. Every
+  // other output stays in the browser.
+  function registrationExtensionResults(cred) {
+    var out = {};
+    var ext = (cred && typeof cred.getClientExtensionResults === 'function')
+      ? cred.getClientExtensionResults() : null;
+    if (ext && ext.largeBlob && typeof ext.largeBlob.supported === 'boolean') {
+      out.largeBlob = { supported: ext.largeBlob.supported };
+    }
+    return out;
+  }
+
   // ── passkeyLogin ────────────────────────────────────────────────────
   //
   // Drives the "Sign in with passkey" button on login.html.
@@ -351,6 +364,7 @@
               client_data_json:   b64urlEncode(cred.response.clientDataJSON),
               attestation_object: b64urlEncode(cred.response.attestationObject),
               name: credName.trim() || null,
+              client_extension_results: registrationExtensionResults(cred),
             }),
           });
         })
@@ -612,6 +626,7 @@
           return post(completeUrl, {
             client_data_json: b64urlEncode(cred.response.clientDataJSON),
             attestation_object: b64urlEncode(cred.response.attestationObject),
+            client_extension_results: registrationExtensionResults(cred),
           });
         })
         .then(function (resp) {
