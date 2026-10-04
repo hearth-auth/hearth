@@ -269,6 +269,9 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   inside `assertion`, is refused instead of being read with the field dropped.
 
 ### Fixed
+- **`POST /device_authorization` now ignores an unknown parameter.** The header-routed device
+  authorization endpoint refused a parameter RFC 8628 does not define with `400`, unlike its
+  realm-routed twin and the other OAuth endpoints. It now ignores it, as RFC 6749 §3.1 requires.
 - The cluster-mode startup warning no longer says writes to a follower fail with HTTP 500
   (they are forwarded to the leader) or that followers never update cached RBAC and sessions.
   It now names the open items and points to the new cluster consistency spec,

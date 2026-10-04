@@ -493,6 +493,27 @@ struct HttpRevocationBody {
     client_assertion: Option<FormSecret>,
 }
 
+/// HTTP request body for device authorization (RFC 8628 §3.1).
+///
+/// Carries the same fields as the proto `DeviceAuthorizationRequest`
+/// (including its `clientId` / `clientSecret` JSON spellings), but as a plain
+/// serde struct: the proto's JSON decoder refuses unknown fields, and this is
+/// a protocol endpoint.
+// A-47 exception: RFC 6749 §3.1 — unknown request parameters are ignored, not refused.
+#[derive(Debug, Deserialize)]
+struct HttpDeviceAuthorizationBody {
+    #[serde(alias = "clientId")]
+    client_id: String,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default, alias = "clientSecret")]
+    client_secret: Option<FormSecret>,
+    #[serde(default)]
+    client_assertion_type: Option<String>,
+    #[serde(default)]
+    client_assertion: Option<FormSecret>,
+}
+
 /// HTTP request body for token introspection (RFC 7662).
 ///
 /// Extends the proto type with optional client credentials for HTTP endpoints.
@@ -3271,7 +3292,7 @@ async fn oauth_decide_permission(
 async fn device_authorization(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    JsonOrForm(body): JsonOrForm<pb::DeviceAuthorizationRequest>,
+    JsonOrForm(body): JsonOrForm<HttpDeviceAuthorizationBody>,
 ) -> impl IntoResponse {
     let realm_id = match extract_realm_id(&headers) {
         Ok(t) => t,
