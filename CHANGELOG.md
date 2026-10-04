@@ -150,6 +150,9 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
 - **SAML SP: encrypted content is refused.** A response carrying `<EncryptedAssertion>`,
   `<EncryptedID>` or `<EncryptedAttribute>` is rejected (there is no decryption path), and an
   assertion without a `<NameID>` subject maps to no account.
+- **Federated sign-in rotates the browser session.** Completing an OIDC or SAML login now
+  revokes any session the browser already holds before issuing a new one, as password sign-in
+  does.
 
 ### Fixed
 - The cluster-mode startup warning no longer says writes to a follower fail with HTTP 500
