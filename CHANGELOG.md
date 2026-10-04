@@ -147,6 +147,9 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
 - **`security.adaptive_backoff` now governs the `POST /ui/device` lockout.** The configured
   schedule used to be ignored there in favour of the compiled default; `durations: []` keeps a
   flat 1-minute lockout.
+- **`SIGHUP` now reloads the mTLS CRLs** in `security.tls.crl_paths`. They were read only at
+  startup, so a newly revoked client certificate kept working until a restart. A CRL that fails
+  to load at reload is logged and the previous CRLs stay in force.
 
 ### Fixed
 - The cluster-mode startup warning no longer says writes to a follower fail with HTTP 500

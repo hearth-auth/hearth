@@ -985,7 +985,7 @@ TLS-specific security settings (A-44).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `crl_paths` | list of strings | `[]` | Paths to PEM-encoded Certificate Revocation List (CRL) files for mTLS. When non-empty, client certificates are checked against every CRL on each TLS handshake. Revoked certificates are rejected. Paths are reloaded on `SIGHUP` alongside the server certificate. Empty list = no revocation check (existing mTLS behaviour preserved). |
+| `crl_paths` | list of strings | `[]` | Paths to PEM-encoded Certificate Revocation List (CRL) files for mTLS. When non-empty, client certificates are checked against every CRL on each TLS handshake. Revoked certificates are rejected. The files are re-read on `SIGHUP` alongside the server certificate, so a certificate revoked after startup is refused from the next handshake. A missing or malformed CRL stops startup; at reload it is logged and the previous CRLs stay in force. The client CA bundle (`server.tls_client_ca_path`) is read only at startup. Empty list = no revocation check (existing mTLS behaviour preserved). |
 
 ```yaml
 security:
