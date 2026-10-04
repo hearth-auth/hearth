@@ -44,11 +44,24 @@ function errorName(Throwable $e): string
 }
 
 /**
+ * A client that verifies with the case's audience; a null audience leaves the
+ * SDK on its default ("hearth").
+ *
  * @param array<string, mixed> $config
- * @param string|null          $clientId Expected audience for verification, or
- *                                       the OAuth client for client_credentials
  */
-function client(array $config, ?string $clientId, ?string $clientSecret = null): HearthClient
+function verifier(array $config, ?string $audience): HearthClient
+{
+    return $audience === null
+        ? new HearthClient(issuerUrl: (string) $config['issuer'])
+        : new HearthClient(issuerUrl: (string) $config['issuer'], audience: $audience);
+}
+
+/**
+ * The OAuth client for the client_credentials case.
+ *
+ * @param array<string, mixed> $config
+ */
+function m2mClient(array $config, string $clientId, string $clientSecret): HearthClient
 {
     return new HearthClient(
         issuerUrl: (string) $config['issuer'],
@@ -90,7 +103,7 @@ function runCase(array $case): array
     // A new client per case: no case reuses another case's JWKS cache.
     $token = match ($case['kind']) {
         'verify_token'       => (string) $case['token'],
-        'client_credentials' => client(
+        'client_credentials' => m2mClient(
             $config,
             (string) $config['client_id'],
             (string) $config['client_secret'],
@@ -98,7 +111,7 @@ function runCase(array $case): array
         default => throw new InvalidArgumentException('unknown case kind ' . json_encode($case['kind'])),
     };
 
-    $claims = client($config, $audience)->verifyToken($token);
+    $claims = verifier($config, $audience)->verifyToken($token);
 
     return ['outcome' => 'ok', 'claims' => pickClaims($claims, $names)];
 }

@@ -72,12 +72,11 @@ function pickClaims(claims: Claims, names: string[]): Record<string, unknown> {
   return out;
 }
 
-// The SDK checks `aud` against `clientId`, so the verifying client carries the
-// case's expected audience there.
+// A null case audience leaves the SDK on its default audience ("hearth").
 function verifier(config: CaseConfig): HearthClient {
   return new HearthClient({
     issuerUrl: config.issuer,
-    clientId: config.audience ?? undefined,
+    audience: config.audience ?? undefined,
   });
 }
 

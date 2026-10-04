@@ -3,9 +3,9 @@
 
 Usage:
     python3 scripts/sdk_conformance.py --main-url URL --expiry-url URL \
-        [--sdk typescript --sdk go ...] [--work DIR]
+        --audience-url URL [--sdk typescript --sdk go ...] [--work DIR]
 
-Called by scripts/sdk-conformance.sh, which builds and boots the two servers.
+Called by scripts/sdk-conformance.sh, which builds and boots the three servers.
 Reads sdks/conformance/scenarios.yaml, mints a real token for each scenario,
 writes the cases file (format: sdks/conformance/README.md), runs
 sdks/<sdk>/conformance/run.sh on it for each SDK, and compares each result
@@ -43,6 +43,10 @@ APP_NAMESPACE = uuid.UUID(bytes=bytes([
 CONFORMANCE_REALM = "conformance"
 M2M_SECRET = "conformance-secret-not-for-production"
 AUDIENCE = "hearth"
+# The protected resource the main server registers (sdk-conformance.sh).
+RESOURCE_URI = "https://api.example.com"
+TOKEN_EXCHANGE = "urn:ietf:params:oauth:grant-type:token-exchange"
+ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"
 # openspec/specs/sdk-support-contract/spec.md: one 5 s clock-skew allowance. Wait past it, with margin.
 EXPIRY_WAIT_SECS = 1 + 5 + 2
 
@@ -90,6 +94,23 @@ def m2m_token(base_url: str, scope: str) -> str:
     return body["access_token"]
 
 
+def exchange_for_audience(base_url: str, subject_token: str, audience: str) -> str:
+    """RFC 8693 token exchange by the `m2m` client: a token whose `aud` is *audience*."""
+    body = http(
+        "POST",
+        f"{base_url}/realms/{CONFORMANCE_REALM}/token",
+        form={
+            "grant_type": TOKEN_EXCHANGE,
+            "client_id": m2m_client_id(CONFORMANCE_REALM),
+            "client_secret": M2M_SECRET,
+            "subject_token": subject_token,
+            "subject_token_type": ACCESS_TOKEN_TYPE,
+            "audience": audience,
+        },
+    )
+    return body["access_token"]
+
+
 def config(base_url: str, realm: str, *, audience=AUDIENCE, with_client=False) -> dict:
     return {
         "base_url": base_url,
@@ -101,7 +122,7 @@ def config(base_url: str, realm: str, *, audience=AUDIENCE, with_client=False) -
     }
 
 
-def mint(main_url: str, expiry_url: str) -> dict:
+def mint(main_url: str, expiry_url: str, audience_url: str) -> dict:
     """Mint every token kind of scenarios.yaml; return {kind: (token, realm, base_url)}."""
     boot = http("POST", f"{main_url}/admin/bootstrap")
     user = boot["access_token"]
@@ -119,9 +140,16 @@ def mint(main_url: str, expiry_url: str) -> dict:
     unknown_kid = ".".join([b64url(json.dumps(kid_header).encode()), payload, signature])
 
     expired = m2m_token(expiry_url, "openid")
+    m2m = m2m_token(main_url, "openid")
     return {
         "user_access": (user, user_realm, main_url),
-        "m2m_access": (m2m_token(main_url, "openid"), CONFORMANCE_REALM, main_url),
+        "m2m_access": (m2m, CONFORMANCE_REALM, main_url),
+        "other_api_access": (m2m_token(audience_url, "openid"), CONFORMANCE_REALM, audience_url),
+        "resource_access": (
+            exchange_for_audience(main_url, m2m, RESOURCE_URI),
+            CONFORMANCE_REALM,
+            main_url,
+        ),
         "tampered": (tampered, user_realm, main_url),
         "alg_none": (alg_none, user_realm, main_url),
         "unknown_kid": (unknown_kid, user_realm, main_url),
@@ -139,6 +167,10 @@ def build_cases(scenarios: list, tokens: dict, main_url: str) -> list:
             variant = s.get("config", "default")
             if variant == "default":
                 cfg = config(base_url, realm)
+            elif variant == "no_audience":
+                cfg = config(base_url, realm, audience=None)
+            elif variant == "resource_audience":
+                cfg = config(base_url, realm, audience=RESOURCE_URI)
             elif variant == "wrong_audience":
                 cfg = config(base_url, realm, audience="not-hearth")
             elif variant == "wrong_issuer":
@@ -222,6 +254,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--main-url", required=True)
     parser.add_argument("--expiry-url", required=True)
+    parser.add_argument("--audience-url", required=True)
     parser.add_argument("--sdk", action="append", choices=SDKS)
     parser.add_argument("--work", default=None, help="directory for cases.json and results")
     args = parser.parse_args()
@@ -233,7 +266,7 @@ def main() -> None:
         scenarios = yaml.safe_load(f)["scenarios"]
     by_id = {s["id"]: s for s in scenarios}
 
-    tokens = mint(args.main_url, args.expiry_url)
+    tokens = mint(args.main_url, args.expiry_url, args.audience_url)
     cases = build_cases(scenarios, tokens, args.main_url)
     remaining = EXPIRY_WAIT_SECS - (time.monotonic() - tokens["_expired_minted_at"])
     if remaining > 0:
