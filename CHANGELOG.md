@@ -140,6 +140,30 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   `<samlp:Status>`, for example, used to be ignored; it is now an error. Responses that sign the
   Response, the Assertion, or both are unaffected. The SP suite now also runs the eight published
   XML signature-wrapping variants (XSW1–XSW8).
+- **Host allowlist on by default.** With `security.allowed_hosts` unset, the server now admits
+  only the `oidc.issuer` host (any port) instead of every `Host`. The match ignores the port on
+  both sides. `/healthz` and `/readyz` skip the check; `/health` and `/metrics` do not. A reverse
+  proxy that rewrites `Host` must set `security.allowed_hosts`.
+- **`security.adaptive_backoff` now governs the `POST /ui/device` lockout.** The configured
+  schedule used to be ignored there in favour of the compiled default; `durations: []` keeps a
+  flat 1-minute lockout.
+- **`SIGHUP` now reloads the mTLS CRLs** in `security.tls.crl_paths`. They were read only at
+  startup, so a newly revoked client certificate kept working until a restart. A CRL that fails
+  to load at reload is logged and the previous CRLs stay in force.
+- **Session idle and absolute timeouts are configurable.** `auth.session_idle_timeout_secs` and
+  `auth.session_absolute_timeout_secs`, with per-realm overrides
+  `realms.<name>.session_idle_timeout_secs` / `session_absolute_timeout_secs`, now load and apply
+  to new sessions. Before, these documented keys were refused as unknown and the timeouts could
+  not be turned on from `hearth.yaml`.
+- **Operator logos and custom CSS are sanitized where they are rendered.** A local SVG logo is
+  passed through the SVG sanitizer before it is inlined into an email, and `branding.custom_css` /
+  `realms.<name>.web.custom_css` are passed through the CSS sanitizer (which drops `@import` and
+  script-bearing declarations) before they are served in the theme CSS.
+- **An SVG logo that fails to parse renders as no logo.** The SVG sanitizer used to keep the
+  part of the document written before the parse error.
+- **Sanitized custom CSS keeps its braces balanced.** A rule whose selector or at-rule prelude
+  matches a blocked pattern is now dropped whole, including its block, so the rules after it
+  (inside or outside `@media`) are no longer misnested.
 
 ### Fixed
 - The cluster-mode startup warning no longer says writes to a follower fail with HTTP 500

@@ -374,9 +374,9 @@ Global UI and email branding. Controls the product name, logo, and visual theme 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `product_name` | string | `"Hearth"` | Shown in logo alt text, page titles, and email subjects. |
-| `logo_url` | string | built-in Hearth SVG | Logo image URL. Can be a remote URL (used directly in `<img>`) or a local file path (read at startup, served at `/ui/static/custom-logo`). Supported formats: SVG, PNG, JPEG. |
+| `logo_url` | string | built-in Hearth SVG | Logo image URL. Can be a remote URL (used directly in `<img>`) or a local file path (read at startup, served at `/ui/static/custom-logo`). Supported formats: SVG, PNG, JPEG. A local SVG inlined into emails is sanitized first: `<script>`, `<foreignObject>`, `<iframe>`, `<object>`, `<embed>`, `on*` attributes and non-`#` `href`s are removed, and an SVG that cannot be parsed renders as no logo. |
 | `theme` | string | `"ember"` | Named UI theme. See [Themes](#themes) below. |
-| `custom_css` | string | — | Path to a CSS file appended after the named theme. Use this to override `--ht-*` CSS variables without forking a theme. Read once at startup. **Validated:** must be a regular file whose name ends in `.css`, at most 256 KiB, valid UTF-8, and recognisable as CSS (a declaration block, no control characters, no markup). Its bytes are served to unauthenticated clients at `GET /ui/static/theme.css`, so a file that fails any of these is refused at startup rather than published. |
+| `custom_css` | string | — | Path to a CSS file appended after the named theme. Use this to override `--ht-*` CSS variables without forking a theme. Read once at startup. **Validated:** must be a regular file whose name ends in `.css`, at most 256 KiB, valid UTF-8, and recognisable as CSS (a declaration block, no control characters, no markup). Its bytes are served to unauthenticated clients at `GET /ui/static/theme.css`, so a file that fails any of these is refused at startup rather than published. **Sanitized:** a file that passes is then served without its `@import` rules and without any declaration containing `expression(`, `javascript:`, `behavior:`, `-moz-binding`, `url(data:`, `url(javascript:`, `-ms-filter` or `progid:`; everything else, including `:root` blocks and `--ht-*` properties, is served unchanged. |
 
 #### Themes
 
@@ -534,6 +534,8 @@ Global authentication defaults. These apply to all realms unless overridden per-
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `session_ttl` | duration | `"24h"` | Default session lifetime. |
+| `session_idle_timeout_secs` | integer | `null` (off) | Seconds a session may go without a refresh. A session not refreshed for this long is rejected (`401`), and the background sweep revokes it with a `session_evicted` audit event (`reason: idle_timeout`). Each refresh restarts the window. The deadline is fixed in the session at creation, so a later config change does not affect existing sessions. Per-realm `realms.<name>.session_idle_timeout_secs` overrides. |
+| `session_absolute_timeout_secs` | integer | `null` (off) | Seconds after creation at which a session is rejected however often it is refreshed (`reason: absolute_timeout`). Fixed in the session at creation. Per-realm `realms.<name>.session_absolute_timeout_secs` overrides. |
 | `password_memory_cost` | integer | `19456` | Argon2id memory parameter in KiB. Floored at the OWASP minimum — see below. |
 | `password_time_cost` | integer | `2` | Argon2id time parameter (iterations). Floored at the OWASP minimum — see below. |
 | `mfa_required` | bool | `true` when unset | Whether MFA is required for all users. MFA is required by default; set `false` to opt out. Per-realm `auth.mfa_required` overrides. When a realm's MFA is off, startup logs one `WARN` that names every such realm. Only a passkey (WebAuthn, user-verified), a TOTP code or a recovery code satisfies MFA. Email OTP and magic links do not. |
@@ -620,7 +622,7 @@ Global security hardening options.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `dpop_nonce_secret` | string | `"auto"` | 32-byte HMAC secret for stateless DPoP nonce generation (RFC 9449). Absent or `"auto"`: a fresh random key is generated at each startup — safe for single-node deployments but invalidates all outstanding DPoP proofs on restart. A 64-character lowercase hex string is decoded to 32 bytes and used verbatim; use a stable hex key to keep nonces valid across rolling restarts or in multi-node deployments where all nodes must share the same secret. **Never use the all-zero key (`0000…`) in production** — the server rejects it at startup. Set via `HEARTH_DPOP_NONCE_SECRET` env var to avoid storing secrets in the YAML file. |
-| `allowed_hosts` | list of strings | `[]` (any) | Allowlist of `Host` header values the server will accept (A-40). Requests with a `Host` not in this list are rejected with `400 Bad Request`. Include the port for non-standard ports (e.g. `"localhost:8420"`). Empty list = accept any host (backward-compatible default). **Applies to the browser surface too** — the admin console (`/ui/*`), the hosted login and recovery pages, and the SAML front channel — so list every hostname a browser uses to reach them, not just the API hostname. Under `--dev` a loopback `Host` (`localhost`, `127.0.0.1`, `[::1]`, any port) is always admitted so the dev console stays reachable. |
+| `allowed_hosts` | list of strings | the `oidc.issuer` host | Allowlist of `Host` header values the server will accept (A-40). Requests with a `Host` not in this list are rejected with `400 Bad Request`. The match ignores case and port on both sides, so `"auth.example.com"` admits `auth.example.com:8443`. When unset, the list is the host of `oidc.issuer` (required outside `--dev`); under `--dev` with no issuer, only loopback hosts are admitted. **A reverse proxy or load balancer that rewrites `Host` must set this list** to the hostnames it forwards. `/healthz` and `/readyz` skip the check so orchestrator probes addressed to a pod IP work; `/health` and `/metrics` do not skip it. **Applies to the browser surface too** — the admin console (`/ui/*`), the hosted login and recovery pages, and the SAML front channel — so list every hostname a browser uses to reach them, not just the API hostname. Under `--dev` a loopback `Host` (`localhost`, `127.0.0.1`, `[::1]`, any port) is always admitted so the dev console stays reachable. |
 | `allowed_return_to_origins` | list of strings | `[]` | Absolute origins permitted as `return_to` redirect targets (A-52). Relative paths (`/ui/…`) are always accepted. Absolute URLs are only accepted when their `scheme://host[:port]` matches an entry here. |
 | `jwks_rps_limit` | integer | `60` | Maximum JWKS / discovery requests per source IP per second (A-10). Applies to all unauthenticated key-discovery endpoints. Requests beyond this limit receive `429 Too Many Requests`. |
 | `reserved_slugs` | list of strings | 26-item built-in list | Slug names that may never be used as a realm or organization slug (case-insensitive). Setting this key **replaces** the built-in list entirely — include all names you still want reserved. The built-in default includes: `admin`, `api`, `support`, `www`, `mail`, `help`, `status`, `blog`, `app`, `auth`, `login`, `logout`, `signup`, `register`, `account`, `profile`, `settings`, `dashboard`, `billing`, `security`, `webhook`, `callback`, `oauth`, `oidc`, `saml`, `scim`. |
@@ -974,7 +976,7 @@ MFA is a plain per-realm policy (`mfa_required`).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `durations` | list of durations | `["1m", "5m", "30m", "24h"]` | Lockout applied to each successive offence. |
+| `durations` | list of durations | `["1m", "5m", "30m", "24h"]` | Lockout applied to each successive offence. Governs the `POST /ui/device` user-code guard (5 wrong codes per realm and user). `[]` turns escalation off and keeps a flat 1-minute lockout. |
 | `offense_cooldown` | duration | `"7d"` | How long a clean record must persist before the offence counter resets. |
 
 ---
@@ -985,7 +987,7 @@ TLS-specific security settings (A-44).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `crl_paths` | list of strings | `[]` | Paths to PEM-encoded Certificate Revocation List (CRL) files for mTLS. When non-empty, client certificates are checked against every CRL on each TLS handshake. Revoked certificates are rejected. Paths are reloaded on `SIGHUP` alongside the server certificate. Empty list = no revocation check (existing mTLS behaviour preserved). |
+| `crl_paths` | list of strings | `[]` | Paths to PEM-encoded Certificate Revocation List (CRL) files for mTLS. When non-empty, client certificates are checked against every CRL on each TLS handshake. Revoked certificates are rejected. The files are re-read on `SIGHUP` alongside the server certificate, so a certificate revoked after startup is refused from the next handshake. A missing or malformed CRL stops startup; at reload it is logged and the previous CRLs stay in force. The client CA bundle (`server.tls_client_ca_path`) is read only at startup. Empty list = no revocation check (existing mTLS behaviour preserved). |
 
 ```yaml
 security:
@@ -1122,6 +1124,8 @@ Each realm entry supports:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `session_ttl` | duration | inherits `auth.session_ttl` | Per-realm session lifetime override. |
+| `session_idle_timeout_secs` | integer | inherits `auth.session_idle_timeout_secs` | Per-realm session idle timeout in seconds. |
+| `session_absolute_timeout_secs` | integer | inherits `auth.session_absolute_timeout_secs` | Per-realm session absolute timeout in seconds. |
 | `password_memory_cost` | integer | inherits `auth.password_memory_cost` | Per-realm Argon2id memory cost. Subject to the [Argon2id cost floor](#argon2id-cost-floor). |
 | `password_time_cost` | integer | inherits `auth.password_time_cost` | Per-realm Argon2id time cost. Subject to the [Argon2id cost floor](#argon2id-cost-floor). |
 | `email` | object | — | Per-realm email branding overrides. |
@@ -2115,6 +2119,8 @@ Every field's default value at a glance.
 | `token` | `access_token_ttl` | `"15m"` |
 | `token` | `refresh_token_ttl` | `"7d"` |
 | `auth` | `session_ttl` | `"24h"` |
+| `auth` | `session_idle_timeout_secs` | `null` (no idle timeout) |
+| `auth` | `session_absolute_timeout_secs` | `null` (no absolute timeout) |
 | `auth` | `mfa_required` | `true` (MFA required; set `false` to opt out) |
 | `auth` | `passkey_requires_mfa` | `false` |
 | `auth` | `password_memory_cost` | `19456` (19 MiB) |
@@ -2150,7 +2156,7 @@ Every field's default value at a glance.
 | `realms.<name>.migrate` | `on_conflict` | `"error"` |
 | `security` | `dpop_nonce_secret` | `"auto"` (random per startup) |
 | `security` | `jwks_rps_limit` | `60` |
-| `security` | `allowed_hosts` | `[]` (any) |
+| `security` | `allowed_hosts` | the `oidc.issuer` host |
 | `security` | `allowed_return_to_origins` | `[]` |
 | `security` | `reserved_slugs` | 26-item built-in list |
 | `security` | `slug_cooldown_days` | `30` |

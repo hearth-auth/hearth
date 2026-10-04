@@ -37,6 +37,7 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
+use crate::abuse::backoff::BackoffConfig;
 use crate::abuse::challenge::{ChallengeConfig, ChallengeOutcome, IpChallengeStore};
 use crate::abuse::cidr::{CidrFilter, CidrOutcome};
 use crate::abuse::detector::{
@@ -44,6 +45,7 @@ use crate::abuse::detector::{
     DetectorOutcome, DistributedAttackDetector, OutboundVolumeShield, VolumeShieldConfig,
     VolumeShieldOutcome,
 };
+use crate::abuse::device_approval::{DeviceApprovalConfig, DeviceApprovalGuard};
 use crate::config::SecurityYaml;
 use crate::identity::CidrPolicy;
 
@@ -257,6 +259,48 @@ fn build_detector(security: &SecurityYaml) -> DistributedAttackDetector {
         window: parse_window(&yaml.window, Duration::from_secs(300)),
         username_per_ip_threshold: yaml.username_per_ip_threshold,
         ip_per_username_threshold: yaml.ip_per_username_threshold,
+    })
+}
+
+/// A-12 `POST /ui/device` guard built from `security.adaptive_backoff`.
+///
+/// The lockout ladder is `durations`, reset after `offense_cooldown`.
+/// `durations: []` turns escalation off but keeps a flat lockout of the
+/// compiled first step (one minute) after the attempt ceiling, so the guard
+/// never stops locking. A duration that does not parse falls back to the
+/// compiled schedule with a warning.
+#[must_use]
+pub fn build_device_approval_guard(security: &SecurityYaml) -> DeviceApprovalGuard {
+    let yaml = &security.adaptive_backoff;
+    let compiled = BackoffConfig::default();
+    let parsed: Option<Vec<Duration>> = yaml
+        .durations
+        .iter()
+        .map(|text| {
+            crate::config::parse_duration_to_micros(text)
+                .ok()
+                .and_then(|micros| u64::try_from(micros).ok())
+                .filter(|micros| *micros > 0)
+                .map(Duration::from_micros)
+        })
+        .collect();
+    let durations = match parsed {
+        Some(d) if d.is_empty() => compiled.durations.iter().take(1).copied().collect(),
+        Some(d) => d,
+        None => {
+            tracing::warn!(
+                "security.adaptive_backoff.durations has an entry that is not a positive \
+                 duration; using the compiled schedule"
+            );
+            compiled.durations.clone()
+        }
+    };
+    DeviceApprovalGuard::with_config(DeviceApprovalConfig {
+        backoff: BackoffConfig {
+            durations,
+            offense_cooldown: parse_window(&yaml.offense_cooldown, compiled.offense_cooldown),
+        },
+        ..DeviceApprovalConfig::default()
     })
 }
 

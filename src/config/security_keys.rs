@@ -411,6 +411,14 @@ const AUTH_KEYS: &[SecurityKey] = &[
         "src/config/types.rs -> src/identity/engine/mod.rs (session_over_limit_policy)",
     ),
     key(
+        "auth.session_absolute_timeout_secs",
+        "src/config/types.rs -> src/identity/types/session.rs (absolute_deadline)",
+    ),
+    key(
+        "auth.session_idle_timeout_secs",
+        "src/config/types.rs -> src/identity/types/session.rs (idle_deadline)",
+    ),
+    key(
         "auth.webauthn_required",
         "src/config/types.rs -> src/identity/engine/mod.rs (create_session, use-time via \
          MfaProof::satisfies_webauthn_required) + src/protocol/web/required_action.rs \

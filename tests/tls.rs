@@ -12,7 +12,9 @@ use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
 use hearth::core::SystemClock;
 use hearth::identity::{CredentialConfig, EmbeddedIdentityEngine, IdentityConfig};
 use hearth::protocol::http::{self, AppState};
-use hearth::protocol::tls::{build_server_config, ReloadableTlsConfig, TlsConfigParams};
+use hearth::protocol::tls::{
+    build_reloadable_server_config, build_server_config, ReloadableTlsConfig, TlsConfigParams,
+};
 use hearth::rbac::EmbeddedRbacEngine;
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -556,6 +558,153 @@ async fn tls13_only_rejects_tls12_client() {
     assert!(
         result.is_err(),
         "TLS 1.2 client must be rejected by a tls13-only server"
+    );
+
+    drop(shutdown_tx);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_handle).await;
+}
+
+// ===== A-44: SIGHUP reloads the CRLs =====
+//
+// A client certificate revoked by a CRL written after startup is refused once
+// the client verifier reloads; a CRL that fails to load at reload time leaves
+// the previous verifier in place.
+
+/// Serial number of the client certificate the CRL test revokes.
+const CRL_CLIENT_SERIAL: u64 = 0x4242;
+
+/// Writes a CRL signed by the CA that revokes the `revoked` serials.
+fn write_crl(
+    path: &Path,
+    ca_cert: &rcgen::Certificate,
+    ca_key: &rcgen::KeyPair,
+    crl_number: u64,
+    revoked: &[u64],
+) {
+    let now = time::OffsetDateTime::now_utc();
+    let params = rcgen::CertificateRevocationListParams {
+        this_update: now - time::Duration::minutes(1),
+        next_update: now + time::Duration::days(1),
+        crl_number: rcgen::SerialNumber::from(crl_number),
+        issuing_distribution_point: None,
+        revoked_certs: revoked
+            .iter()
+            .map(|serial| rcgen::RevokedCertParams {
+                serial_number: rcgen::SerialNumber::from(*serial),
+                revocation_time: now - time::Duration::minutes(1),
+                reason_code: Some(rcgen::RevocationReason::KeyCompromise),
+                invalidity_date: None,
+            })
+            .collect(),
+        key_identifier_method: rcgen::KeyIdMethod::Sha256,
+    };
+    let crl = params.signed_by(ca_cert, ca_key).expect("sign CRL");
+    std::fs::write(path, crl.pem().expect("CRL PEM")).expect("write CRL");
+}
+
+/// GETs `/health` over a fresh mTLS client (no pooled connection, no session
+/// resumption). `Ok(status)` when the handshake completed.
+async fn mtls_get_health(
+    port: u16,
+    ca_pem: &[u8],
+    identity_pem: &[u8],
+) -> Result<reqwest::StatusCode, reqwest::Error> {
+    let client = reqwest::Client::builder()
+        .add_root_certificate(reqwest::Certificate::from_pem(ca_pem).expect("CA"))
+        .identity(reqwest::Identity::from_pem(identity_pem).expect("identity"))
+        .build()
+        .expect("mTLS client");
+    client
+        .get(format!("https://localhost:{port}/health"))
+        .send()
+        .await
+        .map(|r| r.status())
+}
+
+#[tokio::test]
+async fn mtls_crl_reload_refuses_newly_revoked_client_cert() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let state = test_app_state(temp_dir.path());
+
+    let cert_dir = tempfile::tempdir().expect("cert dir");
+    let (ca_cert_path, cert_path, key_path, ca_cert, ca_key) =
+        generate_server_certs(cert_dir.path());
+
+    // Client certificate with a known serial, so a CRL can name it.
+    let mut client_params =
+        rcgen::CertificateParams::new(vec!["client".to_string()]).expect("client params");
+    client_params.serial_number = Some(rcgen::SerialNumber::from(CRL_CLIENT_SERIAL));
+    let client_key = rcgen::KeyPair::generate().expect("client keygen");
+    let client_cert = client_params
+        .signed_by(&client_key, &ca_cert, &ca_key)
+        .expect("sign client cert");
+    let mut identity_pem = client_cert.pem().into_bytes();
+    identity_pem.extend_from_slice(client_key.serialize_pem().as_bytes());
+
+    // At startup the CRL revokes some other certificate.
+    let crl_path = cert_dir.path().join("clients.crl.pem");
+    write_crl(&crl_path, &ca_cert, &ca_key, 1, &[0x01]);
+
+    let tls_config = ReloadableTlsConfig::load(cert_path, key_path).expect("load TLS config");
+    let params = TlsConfigParams {
+        resolver: Arc::new(tls_config.resolver()),
+        client_ca_path: Some(ca_cert_path.clone()),
+        require_client_cert: true,
+        crl_paths: vec![crl_path.clone()],
+        tls13_only: false,
+    };
+    let (server_config, client_verifier) =
+        build_reloadable_server_config(params).expect("build mTLS server config");
+    let client_verifier = client_verifier.expect("mTLS config has a reloadable client verifier");
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let port = listener.local_addr().expect("local addr").port();
+    let (shutdown_tx, shutdown_rx) = watch::channel(());
+    let server_handle = tokio::spawn(async move {
+        http::serve_tls(
+            listener,
+            state,
+            acceptor,
+            shutdown_rx,
+            std::time::Duration::from_secs(10),
+        )
+        .await
+        .expect("serve_tls");
+    });
+    let ca_pem = std::fs::read(&ca_cert_path).expect("read CA cert");
+
+    let before = mtls_get_health(port, &ca_pem, &identity_pem)
+        .await
+        .expect("a certificate absent from the CRL must be accepted");
+    assert_eq!(before, reqwest::StatusCode::OK);
+
+    // A CRL that does not load at reload time keeps the previous verifier.
+    std::fs::write(&crl_path, b"not a CRL").expect("corrupt CRL");
+    let err = client_verifier
+        .reload()
+        .expect_err("a malformed CRL must fail the reload");
+    assert!(
+        matches!(err, hearth::protocol::tls::TlsError::CrlLoad { .. }),
+        "expected CrlLoad, got {err}"
+    );
+    let kept = mtls_get_health(port, &ca_pem, &identity_pem)
+        .await
+        .expect("a failed reload must keep the previous verifier serving");
+    assert_eq!(kept, reqwest::StatusCode::OK);
+
+    // The operator revokes the client certificate and reloads.
+    write_crl(&crl_path, &ca_cert, &ca_key, 2, &[0x01, CRL_CLIENT_SERIAL]);
+    client_verifier.reload().expect("reload the updated CRL");
+
+    let err = mtls_get_health(port, &ca_pem, &identity_pem)
+        .await
+        .expect_err("a certificate revoked after startup must be refused after reload");
+    assert!(
+        err.status().is_none(),
+        "revocation must fail the TLS handshake, not produce an HTTP status: {err}"
     );
 
     drop(shutdown_tx);

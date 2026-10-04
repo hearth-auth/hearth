@@ -261,6 +261,149 @@ async fn a40_invalid_host_header_rejected() {
     );
 }
 
+/// Sends one `GET` with the given `Host` through a router built on `state`.
+async fn a40_get_status(state: &Arc<AppState>, path: &str, host: &str) -> StatusCode {
+    router(Arc::clone(state))
+        .oneshot(
+            Request::builder()
+                .uri(path)
+                .header(HOST, host)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+}
+
+/// With `security.allowed_hosts` unset, the effective allowlist is the host of
+/// `oidc.issuer`, so a foreign `Host` is refused and the issuer's host is
+/// served on any port.
+///
+/// A-40 — see `Config::effective_allowed_hosts` and
+/// `src/protocol/http.rs::enforce_host_allowlist`.
+#[tokio::test]
+async fn a40_unset_allowlist_defaults_to_issuer_host() {
+    let config = hearth::config::Config::from_yaml_str_unchecked(
+        "oidc:\n  issuer: \"https://hearth.example.com/\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        config.effective_allowed_hosts(),
+        vec!["hearth.example.com".to_string()],
+        "an unset allowlist must default to the issuer host"
+    );
+
+    let h = common::TestHarness::in_process().await.unwrap();
+    let state = Arc::new(
+        AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc())
+            .with_allowed_hosts(config.effective_allowed_hosts()),
+    );
+
+    assert_eq!(
+        a40_get_status(&state, "/health", "evil.example").await,
+        StatusCode::BAD_REQUEST,
+        "a Host outside the issuer-derived default must be refused"
+    );
+    assert_eq!(
+        a40_get_status(&state, "/health", "hearth.example.com").await,
+        StatusCode::OK,
+        "the issuer host must be admitted"
+    );
+    assert_eq!(
+        a40_get_status(&state, "/health", "HEARTH.example.com:8443").await,
+        StatusCode::OK,
+        "the comparison must ignore case and port"
+    );
+}
+
+/// A configured `security.allowed_hosts` replaces the issuer-derived default.
+#[tokio::test]
+async fn a40_configured_allowlist_replaces_issuer_default() {
+    let config = hearth::config::Config::from_yaml_str_unchecked(
+        "oidc:\n  issuer: \"https://hearth.example.com\"\n\
+         security:\n  allowed_hosts: [\"auth.example.org\", \"[::1]:8420\"]\n",
+    )
+    .unwrap();
+    assert_eq!(
+        config.effective_allowed_hosts(),
+        vec!["auth.example.org".to_string(), "[::1]:8420".to_string()],
+    );
+
+    let h = common::TestHarness::in_process().await.unwrap();
+    let state = Arc::new(
+        AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc())
+            .with_allowed_hosts(config.effective_allowed_hosts()),
+    );
+    assert_eq!(
+        a40_get_status(&state, "/health", "hearth.example.com").await,
+        StatusCode::BAD_REQUEST,
+        "the issuer host is not admitted once an explicit list is set"
+    );
+    assert_eq!(
+        a40_get_status(&state, "/health", "[::1]").await,
+        StatusCode::OK,
+        "a listed entry carrying a port must match a Host without one"
+    );
+}
+
+/// Under `--dev` with no issuer and no list, only loopback hosts are admitted.
+#[tokio::test]
+async fn a40_dev_without_issuer_admits_loopback_only() {
+    let mut config = hearth::config::Config::dev();
+    config.oidc.issuer = None;
+    let hosts = config.effective_allowed_hosts();
+    assert!(
+        !hosts.is_empty(),
+        "the effective list must never be empty (empty disables the check)"
+    );
+
+    let h = common::TestHarness::in_process().await.unwrap();
+    let mut dev_state = AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc());
+    dev_state.dev_mode = true;
+    let state = Arc::new(dev_state.with_allowed_hosts(hosts));
+    assert_eq!(
+        a40_get_status(&state, "/health", "127.0.0.1:8420").await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        a40_get_status(&state, "/health", "evil.example").await,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+/// Only the `/healthz` and `/readyz` probes skip the Host check; `/health` and
+/// `/metrics` stay behind it.
+#[tokio::test]
+async fn a40_only_probe_routes_skip_host_check() {
+    let h = common::TestHarness::in_process().await.unwrap();
+    let state = Arc::new(
+        AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc())
+            .with_allowed_hosts(vec!["hearth.example.com".to_string()]),
+    );
+
+    assert_eq!(
+        a40_get_status(&state, "/healthz", "10.0.0.7:8420").await,
+        StatusCode::OK,
+        "/healthz must answer an orchestrator probe whatever its Host"
+    );
+    assert_eq!(
+        a40_get_status(&state, "/readyz", "10.0.0.7:8420").await,
+        StatusCode::OK,
+        "/readyz must answer an orchestrator probe whatever its Host"
+    );
+    assert_eq!(
+        a40_get_status(&state, "/health", "10.0.0.7:8420").await,
+        StatusCode::BAD_REQUEST,
+        "/health stays behind the Host check"
+    );
+    assert_eq!(
+        a40_get_status(&state, "/metrics", "10.0.0.7:8420").await,
+        StatusCode::BAD_REQUEST,
+        "/metrics stays behind the Host check"
+    );
+}
+
 // A-40: COOP/COEP header emission is asserted in
 // `tests/abuse_http.rs::a40_coop_coep_headers_present` (and its disabled
 // counterpart). Those exercise the `SecurityHeadersLayer` that fronts the web

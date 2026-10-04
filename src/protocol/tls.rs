@@ -8,11 +8,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use rustls::client::danger::HandshakeSignatureValid;
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::server::ResolvesServerCert;
 use rustls::sign::CertifiedKey;
-use rustls::ServerConfig;
+use rustls::{DigitallySignedStruct, DistinguishedName, ServerConfig, SignatureScheme};
 use rustls_pki_types::pem::PemObject;
-use rustls_pki_types::{CertificateDer, CertificateRevocationListDer, PrivateKeyDer};
+use rustls_pki_types::{CertificateDer, CertificateRevocationListDer, PrivateKeyDer, UnixTime};
 use tracing::info;
 
 use crate::core::SwapCell;
@@ -271,6 +273,187 @@ impl ResolvesServerCert for ReloadableResolver {
     }
 }
 
+/// One built client-certificate verifier, held behind a [`SwapCell`].
+struct VerifierSlot(Arc<dyn ClientCertVerifier>);
+
+/// Hot-reloadable mTLS client-certificate verifier (A-44).
+///
+/// Wraps a [`rustls::server::WebPkiClientVerifier`] built from the client CA
+/// and the CRL files in `security.tls.crl_paths`. [`reload`](Self::reload)
+/// re-reads every CRL file and swaps in a new verifier, so a certificate
+/// revoked after startup is refused on the next handshake. The client CA
+/// bundle is read once at startup; changing it takes a restart.
+///
+/// A reload that fails (a missing, unreadable or malformed CRL) changes
+/// nothing: the previous verifier keeps serving and the error is returned.
+/// Startup, by contrast, fails on a bad CRL.
+///
+/// Like [`ReloadableResolver`], this is read once per TLS handshake, not on
+/// the hot path, so the read lock a [`SwapCell`] load takes is permitted.
+pub struct ReloadableClientVerifier {
+    /// The verifier the next handshake uses.
+    current: SwapCell<VerifierSlot>,
+    /// Trust anchors from the client CA bundle, fixed for the process.
+    roots: Arc<rustls::RootCertStore>,
+    /// Crypto provider shared with the server config.
+    provider: Arc<rustls::crypto::CryptoProvider>,
+    /// CRL files re-read on every reload.
+    crl_paths: Vec<PathBuf>,
+    /// Whether a client certificate is mandatory.
+    require_client_cert: bool,
+    /// CA subjects sent in the `CertificateRequest`. Derived from `roots`,
+    /// which never change, so they stay valid across reloads.
+    root_hints: Vec<DistinguishedName>,
+}
+
+impl std::fmt::Debug for ReloadableClientVerifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReloadableClientVerifier")
+            .field("crl_paths", &self.crl_paths)
+            .field("require_client_cert", &self.require_client_cert)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ReloadableClientVerifier {
+    /// Loads the client CA bundle and every CRL file and builds the verifier.
+    ///
+    /// # Errors
+    ///
+    /// [`TlsError::ClientCa`] when the CA bundle cannot be loaded, and
+    /// [`TlsError::CrlLoad`] when a CRL file is missing, unreadable or
+    /// malformed.
+    pub fn load(
+        client_ca_path: &Path,
+        crl_paths: Vec<PathBuf>,
+        require_client_cert: bool,
+        provider: Arc<rustls::crypto::CryptoProvider>,
+    ) -> Result<Self, TlsError> {
+        let ca_certs = load_certs(client_ca_path).map_err(|e| TlsError::ClientCa {
+            reason: e.to_string(),
+        })?;
+        let mut root_store = rustls::RootCertStore::empty();
+        for cert in ca_certs {
+            root_store.add(cert).map_err(|e| TlsError::ClientCa {
+                reason: e.to_string(),
+            })?;
+        }
+        let roots = Arc::new(root_store);
+        let initial = build_client_verifier(&roots, &provider, &crl_paths, require_client_cert)?;
+        let root_hints = initial.root_hint_subjects().to_vec();
+        Ok(Self {
+            current: SwapCell::from_pointee(VerifierSlot(initial)),
+            roots,
+            provider,
+            crl_paths,
+            require_client_cert,
+            root_hints,
+        })
+    }
+
+    /// Re-reads every CRL file and swaps in a verifier built from them.
+    ///
+    /// # Errors
+    ///
+    /// [`TlsError::CrlLoad`] when a CRL file is missing, unreadable or
+    /// malformed; the previous verifier stays in place.
+    pub fn reload(&self) -> Result<(), TlsError> {
+        let next = build_client_verifier(
+            &self.roots,
+            &self.provider,
+            &self.crl_paths,
+            self.require_client_cert,
+        )?;
+        self.current.store(Arc::new(VerifierSlot(next)));
+        info!(
+            crl_files = self.crl_paths.len(),
+            "mTLS client CRLs reloaded successfully"
+        );
+        Ok(())
+    }
+
+    /// The verifier the next handshake uses.
+    fn verifier(&self) -> Arc<VerifierSlot> {
+        self.current.load()
+    }
+}
+
+impl ClientCertVerifier for ReloadableClientVerifier {
+    fn offer_client_auth(&self) -> bool {
+        self.verifier().0.offer_client_auth()
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        self.verifier().0.client_auth_mandatory()
+    }
+
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        &self.root_hints
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        now: UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        self.verifier()
+            .0
+            .verify_client_cert(end_entity, intermediates, now)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.verifier().0.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.verifier().0.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.verifier().0.supported_verify_schemes()
+    }
+}
+
+/// Builds a WebPKI client verifier over `roots` with every CRL in `crl_paths`.
+fn build_client_verifier(
+    roots: &Arc<rustls::RootCertStore>,
+    provider: &Arc<rustls::crypto::CryptoProvider>,
+    crl_paths: &[PathBuf],
+    require_client_cert: bool,
+) -> Result<Arc<dyn ClientCertVerifier>, TlsError> {
+    let crls: Vec<CertificateRevocationListDer<'static>> = crl_paths
+        .iter()
+        .map(|p| load_crls(p))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect();
+    let builder = rustls::server::WebPkiClientVerifier::builder_with_provider(
+        Arc::clone(roots),
+        Arc::clone(provider),
+    )
+    .with_crls(crls);
+    let builder = if require_client_cert {
+        builder
+    } else {
+        builder.allow_unauthenticated()
+    };
+    builder.build().map_err(|e| TlsError::ClientCa {
+        reason: e.to_string(),
+    })
+}
+
 /// Parameters for building a TLS [`ServerConfig`].
 pub struct TlsConfigParams {
     /// The certificate resolver for the server.
@@ -308,6 +491,20 @@ pub struct TlsConfigParams {
 /// if a future rustls version changes the default, the server will fail to
 /// start rather than silently allowing replay-vulnerable early data.
 pub fn build_server_config(params: TlsConfigParams) -> Result<ServerConfig, TlsError> {
+    build_reloadable_server_config(params).map(|(config, _)| config)
+}
+
+/// Builds a [`rustls::ServerConfig`] like [`build_server_config`] and also
+/// returns the [`ReloadableClientVerifier`] behind it when `client_ca_path` is
+/// set, so the caller can reload the CRLs on `SIGHUP` (A-44).
+///
+/// # Errors
+///
+/// Any [`TlsError`] from loading the client CA or a CRL file, or from building
+/// the config. A bad CRL fails here, so the server refuses to start.
+pub fn build_reloadable_server_config(
+    params: TlsConfigParams,
+) -> Result<(ServerConfig, Option<Arc<ReloadableClientVerifier>>), TlsError> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
 
     // HEA-SEC-33: when tls13_only, present only TLS 1.3 so TLS 1.2 is rejected at handshake.
@@ -317,64 +514,25 @@ pub fn build_server_config(params: TlsConfigParams) -> Result<ServerConfig, TlsE
         &[&rustls::version::TLS12, &rustls::version::TLS13]
     };
 
-    // A-44: load CRL files so mTLS revocation is enforced at the TLS layer.
-    let crls: Vec<CertificateRevocationListDer<'static>> = params
-        .crl_paths
-        .iter()
-        .map(|p| load_crls(p))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .flatten()
-        .collect();
-
-    let builder = if let Some(ca_path) = params.client_ca_path {
-        let ca_certs = load_certs(&ca_path).map_err(|e| TlsError::ClientCa {
+    let builder = ServerConfig::builder_with_provider(Arc::clone(&provider))
+        .with_protocol_versions(versions)
+        .map_err(|e| TlsError::ConfigBuild {
             reason: e.to_string(),
         })?;
 
-        let mut root_store = rustls::RootCertStore::empty();
-        for cert in ca_certs {
-            root_store.add(cert).map_err(|e| TlsError::ClientCa {
-                reason: e.to_string(),
-            })?;
-        }
-
-        let verifier = if params.require_client_cert {
-            rustls::server::WebPkiClientVerifier::builder_with_provider(
-                Arc::new(root_store),
-                Arc::clone(&provider),
-            )
-            .with_crls(crls)
-            .build()
-            .map_err(|e| TlsError::ClientCa {
-                reason: e.to_string(),
-            })?
-        } else {
-            rustls::server::WebPkiClientVerifier::builder_with_provider(
-                Arc::new(root_store),
-                Arc::clone(&provider),
-            )
-            .with_crls(crls)
-            .allow_unauthenticated()
-            .build()
-            .map_err(|e| TlsError::ClientCa {
-                reason: e.to_string(),
-            })?
-        };
-
-        ServerConfig::builder_with_provider(provider)
-            .with_protocol_versions(versions)
-            .map_err(|e| TlsError::ConfigBuild {
-                reason: e.to_string(),
-            })?
-            .with_client_cert_verifier(verifier)
+    // A-44: the CRL files are attached to the mTLS verifier so revoked client
+    // certificates are rejected at the handshake, and reloaded with it.
+    let (builder, client_verifier) = if let Some(ca_path) = params.client_ca_path {
+        let verifier = Arc::new(ReloadableClientVerifier::load(
+            &ca_path,
+            params.crl_paths,
+            params.require_client_cert,
+            provider,
+        )?);
+        let as_dyn: Arc<dyn ClientCertVerifier> = verifier.clone();
+        (builder.with_client_cert_verifier(as_dyn), Some(verifier))
     } else {
-        ServerConfig::builder_with_provider(provider)
-            .with_protocol_versions(versions)
-            .map_err(|e| TlsError::ConfigBuild {
-                reason: e.to_string(),
-            })?
-            .with_no_client_auth()
+        (builder.with_no_client_auth(), None)
     };
 
     let mut config = builder.with_cert_resolver(params.resolver);
@@ -388,7 +546,7 @@ pub fn build_server_config(params: TlsConfigParams) -> Result<ServerConfig, TlsE
         "rustls changed the 0-RTT default — early data must remain disabled"
     );
 
-    Ok(config)
+    Ok((config, client_verifier))
 }
 
 #[cfg(test)]

@@ -223,3 +223,56 @@ fn a12_single_duration_always_same_lockout() {
         }
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Configured schedule reaches the `POST /ui/device` guard
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Builds the device-approval guard the server builds from `security:` YAML.
+fn device_guard_from_yaml(yaml: &str) -> hearth::abuse::device_approval::DeviceApprovalGuard {
+    let config = hearth::config::Config::from_yaml_str_unchecked(yaml).expect("config parses");
+    hearth::abuse::runtime::build_device_approval_guard(&config.security)
+}
+
+/// Records wrong codes for `key` until the guard locks it, and returns how
+/// long the lockout lasts, measured from just before the tripping attempt.
+fn device_lockout_length(
+    guard: &hearth::abuse::device_approval::DeviceApprovalGuard,
+    key: &str,
+) -> Duration {
+    use hearth::abuse::device_approval::DeviceApprovalDecision;
+    for _ in 0..4 {
+        assert_eq!(guard.record_failure(key), DeviceApprovalDecision::Allow);
+    }
+    let before = std::time::Instant::now();
+    match guard.record_failure(key) {
+        DeviceApprovalDecision::LockedOut { until, .. } => until.duration_since(before),
+        other => panic!("the fifth wrong code must lock the key, got {other:?}"),
+    }
+}
+
+/// `security.adaptive_backoff.durations: ["2m"]` sets the `/ui/device` lockout
+/// to two minutes instead of the compiled one-minute first step.
+#[test]
+fn a12_configured_schedule_reaches_device_approval_guard() {
+    let guard = device_guard_from_yaml("security:\n  adaptive_backoff:\n    durations: [\"2m\"]\n");
+    let lockout = device_lockout_length(&guard, "realm:user");
+    assert!(
+        lockout >= Duration::from_secs(120) && lockout < Duration::from_secs(121),
+        "the configured 2m step must govern the device lockout, got {lockout:?}"
+    );
+}
+
+/// `durations: []` turns off escalation but keeps a flat lockout on
+/// `/ui/device`: a repeat offence locks the key for the same one minute.
+#[test]
+fn a12_empty_schedule_keeps_flat_device_lockout() {
+    let guard = device_guard_from_yaml("security:\n  adaptive_backoff:\n    durations: []\n");
+    for offence in 1..=3 {
+        let lockout = device_lockout_length(&guard, "realm:user");
+        assert!(
+            lockout >= Duration::from_secs(60) && lockout < Duration::from_secs(61),
+            "offence {offence}: an empty schedule must keep a flat 1m lockout, got {lockout:?}"
+        );
+    }
+}
