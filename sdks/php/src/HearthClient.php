@@ -58,6 +58,11 @@ final class HearthClient
      * @param ClientInterface|null         $httpClient     Custom PSR-18 HTTP client
      * @param RequestFactoryInterface|null $requestFactory Custom PSR-17 request factory
      * @param StreamFactoryInterface|null  $streamFactory  Custom PSR-17 stream factory
+     * @param string      $audience                Expected `aud` of verified access tokens: this
+     *                                           API's name (RFC 9068 §4), not the client ID.
+     *                                           Default `hearth`, the audience Hearth mints when a
+     *                                           client names no resource; an API registered as a
+     *                                           protected resource sets its resource URI. Always checked.
      *
      * @throws ConfigurationException When a required config combination is missing
      */
@@ -72,6 +77,7 @@ final class HearthClient
         ?ClientInterface $httpClient = null,
         ?RequestFactoryInterface $requestFactory = null,
         ?StreamFactoryInterface $streamFactory = null,
+        private readonly string $audience = TokenVerifier::DEFAULT_AUDIENCE,
     ) {
         $this->validateConfiguration();
 
@@ -794,7 +800,7 @@ final class HearthClient
             $this->tokenVerifier = new TokenVerifier(
                 $this->getJwksClient(),
                 $this->issuerUrl,
-                $this->clientId,
+                $this->audience,
             );
         }
 
@@ -1087,6 +1093,10 @@ final class HearthClient
     {
         if ($this->issuerUrl === '') {
             throw new ConfigurationException('issuerUrl must not be empty');
+        }
+
+        if ($this->audience === '') {
+            throw new ConfigurationException('audience must not be empty; omit it for the default "hearth"');
         }
 
         if ($this->tokenAuthorizationMode === 'introspection'

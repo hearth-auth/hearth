@@ -75,8 +75,8 @@ final class HearthClientTest extends TestCase
 
         $accessToken = $this->issueClientCredentialsToken($clientId, $clientSecret);
 
-        // No clientId: a client_credentials token is not audience-bound to the
-        // client that requested it, so the audience check is skipped.
+        // A client_credentials token names no resource, so its aud is the
+        // default "hearth" — the audience the client checks when none is set.
         $hearth = new HearthClient(issuerUrl: $this->realmUrl);
 
         $claims = $hearth->verifyToken($accessToken);

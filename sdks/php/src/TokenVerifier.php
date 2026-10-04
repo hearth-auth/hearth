@@ -8,6 +8,7 @@ use DateInterval;
 use DateTimeImmutable;
 use Hearth\Contracts\JwksClientInterface;
 use Hearth\Contracts\TokenVerifierInterface;
+use Hearth\Exceptions\ConfigurationException;
 use Hearth\Exceptions\JWKSFetchException;
 use Hearth\Exceptions\JwksKeyNotFoundException;
 use Hearth\Exceptions\RequiredActionException;
@@ -42,7 +43,8 @@ use Psr\Clock\ClockInterface;
  *   1. `alg` is `EdDSA` and the Ed25519 signature verifies (`SignedWith`).
  *   2. `exp`, `nbf` and `iat` hold at the current time, with 5 s clock skew (`LooseValidAt`).
  *   3. `iss` matches the configured issuer URL (`IssuedBy`).
- *   4. `aud` contains the configured client ID, when set (`PermittedFor`).
+ *   4. `aud` contains the configured audience, always (`PermittedFor`). The audience is
+ *      the name of the API that verifies the token (RFC 9068 §4), default `hearth`.
  *
  * Tokens with `token_type === "required_action"` raise RequiredActionException.
  */
@@ -51,16 +53,27 @@ final class TokenVerifier implements TokenVerifierInterface
     /** Clock skew tolerated for the `exp`, `nbf` and `iat` claims (seconds). */
     private const CLOCK_SKEW_SECONDS = 5;
 
+    /** The audience Hearth mints in an access token when the client names no resource. */
+    public const DEFAULT_AUDIENCE = 'hearth';
+
     /**
      * @param JwksClientInterface $jwksClient   Key source
      * @param string              $issuerUrl    Expected `iss` value
-     * @param string|null         $clientId     Expected audience; if null, audience check is skipped
+     * @param string              $audience     Expected `aud`: this API's name, default `hearth`.
+     *                                          An API registered as a protected resource sets
+     *                                          its resource URI. The check is always on.
+     *
+     * @throws ConfigurationException When `$audience` is empty
      */
     public function __construct(
         private readonly JwksClientInterface $jwksClient,
         private readonly string $issuerUrl,
-        private readonly ?string $clientId = null,
-    ) {}
+        private readonly string $audience = self::DEFAULT_AUDIENCE,
+    ) {
+        if ($this->audience === '') {
+            throw new ConfigurationException('audience must not be empty; omit it for the default "hearth"');
+        }
+    }
 
     /**
      * Verifies and decodes a JWT, returning a typed Claims accessor.
@@ -70,7 +83,7 @@ final class TokenVerifier implements TokenVerifierInterface
      * @throws TokenExpiredException    When `exp` is in the past
      * @throws TokenNotYetValidException When `nbf` is in the future
      * @throws TokenIssuerException     When `iss` does not match
-     * @throws TokenAudienceException   When `aud` does not include the client ID
+     * @throws TokenAudienceException   When `aud` does not include the configured audience
      * @throws RequiredActionException  When `token_type === "required_action"`
      */
     public function verify(string $rawToken): Claims
@@ -97,20 +110,17 @@ final class TokenVerifier implements TokenVerifierInterface
         $this->checkValidAt($token);
 
         // Step 3 — issuer
-        // An empty expected issuer or audience matches no token (lcobucci needs non-empty).
+        // An empty expected issuer matches no token (lcobucci needs non-empty).
         if ($this->issuerUrl === '' || !$this->satisfies($token, new IssuedBy($this->issuerUrl))) {
             $iss = $token->claims()->get(RegisteredClaims::ISSUER);
             throw new TokenIssuerException($this->issuerUrl, is_string($iss) ? $iss : '');
         }
 
-        // Step 4 — audience
-        if (
-            $this->clientId !== null
-            && ($this->clientId === '' || !$this->satisfies($token, new PermittedFor($this->clientId)))
-        ) {
+        // Step 4 — audience, always checked
+        if (!$this->satisfies($token, new PermittedFor($this->audience))) {
             /** @var list<string> $audiences */
             $audiences = array_map('strval', (array) $token->claims()->get(RegisteredClaims::AUDIENCE, []));
-            throw new TokenAudienceException($this->clientId, $audiences);
+            throw new TokenAudienceException($this->audience, $audiences);
         }
 
         $claims    = $this->rawClaims($token);

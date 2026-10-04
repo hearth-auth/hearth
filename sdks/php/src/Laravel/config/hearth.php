@@ -20,12 +20,25 @@ return [
     | OAuth Client Credentials
     |--------------------------------------------------------------------------
     |
-    | client_id is required for audience validation.  client_secret is only
-    | required when token_authorization_mode is "introspection".
+    | client_id and client_secret are required when token_authorization_mode
+    | is "introspection", and for the client-credentials flow.
     |
     */
     'client_id'     => env('HEARTH_CLIENT_ID'),
     'client_secret' => env('HEARTH_CLIENT_SECRET'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Audience
+    |--------------------------------------------------------------------------
+    |
+    | The `aud` every access token must carry: the name of this API, not the
+    | client ID. "hearth" is the audience Hearth mints when a client names no
+    | resource. An API registered as a protected resource sets its resource
+    | URI. The check is always on.
+    |
+    */
+    'audience' => env('HEARTH_AUDIENCE', 'hearth'),
 
     /*
     |--------------------------------------------------------------------------
