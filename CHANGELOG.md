@@ -145,6 +145,11 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
 - **A derived AAT keeps every constraint of its parent tool.** When a parent AAT constrains a
   tool, deriving a child that lists the tool with no constraints, or without one of the parent's
   constraint keys, is refused with `AatScopeEscalation`.
+- **SAML SP: the assertion's own `<Issuer>` must name the registered IdP.** A Response-level
+  `<Issuer>`, when present, must name it too; either mismatch is refused with `IssuerMismatch`.
+- **SAML SP: encrypted content is refused.** A response carrying `<EncryptedAssertion>`,
+  `<EncryptedID>` or `<EncryptedAttribute>` is rejected (there is no decryption path), and an
+  assertion without a `<NameID>` subject maps to no account.
 
 ### Fixed
 - The cluster-mode startup warning no longer says writes to a follower fail with HTTP 500
