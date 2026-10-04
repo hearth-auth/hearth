@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 /// All fields are optional — a custom template need only override the
 /// fields it cares about. `None` fields inherit from the compiled default.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EmailTemplateBody {
     /// Custom subject line. May contain `{{product_name}}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -43,6 +44,7 @@ impl EmailTemplateBody {
 /// BCP-47 locale tags (e.g. `"fr"`, `"de"`, `"pt-BR"`) to locale-specific
 /// body overrides.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LocalizedEmailTemplate {
     /// Locale-neutral default body. Used when no locale match is found.
     #[serde(default)]

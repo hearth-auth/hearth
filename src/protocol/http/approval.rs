@@ -48,6 +48,7 @@ pub(super) fn routes() -> axum::Router<Arc<AppState>> {
 
 /// JSON body for creating an approval request.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateApprovalRequestBody {
     agent_id: String,
     tool: String,
@@ -66,12 +67,14 @@ fn default_action() -> String {
 
 /// JSON body for denying an approval request.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DenyBody {
     reason: Option<String>,
 }
 
 /// JSON body for approving an approval request.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ApproveBody {
     capability_ttl_secs: Option<i64>,
 }

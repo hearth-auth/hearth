@@ -192,6 +192,73 @@ async fn admin_create_user_duplicate_email_returns_error_code() {
     );
 }
 
+/// A-20 scenario "Reserved and in-use emails answer the same body": a user
+/// create that hits a reserved address (its owner was deleted) and one that
+/// hits an address in use get the same status and a byte-identical body.
+#[tokio::test]
+async fn reserved_and_in_use_emails_answer_the_same_body() {
+    let (base, _identity, _shutdown) = start_server().await;
+    let (realm_id, token) = bootstrap(&base).await;
+    let client = reqwest::Client::new();
+
+    let create = |email: &'static str| {
+        client
+            .post(format!("{base}/admin/users"))
+            .header("X-Realm-ID", &realm_id)
+            .header("Authorization", format!("Bearer {token}"))
+            .json(&serde_json::json!({"email": email, "display_name": "Mail"}))
+            .send()
+    };
+
+    // An address in use.
+    assert_eq!(
+        create("in-use@example.com")
+            .await
+            .expect("request")
+            .status(),
+        201
+    );
+    // A reserved address: its owner was created, then deleted.
+    let doomed = create("reserved@example.com").await.expect("request");
+    assert_eq!(doomed.status(), 201);
+    let doomed: Value = doomed.json().await.expect("request");
+    let doomed_id = doomed["id"].as_str().expect("created user id").to_string();
+    let deleted = client
+        .delete(format!("{base}/admin/users/{doomed_id}"))
+        .header("X-Realm-ID", &realm_id)
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("request");
+    assert!(
+        deleted.status().is_success(),
+        "delete: {}",
+        deleted.status()
+    );
+
+    let in_use = create("in-use@example.com").await.expect("request");
+    let reserved = create("reserved@example.com").await.expect("request");
+    let (in_use_status, reserved_status) = (in_use.status(), reserved.status());
+    let in_use_body = in_use.bytes().await.expect("request");
+    let reserved_body = reserved.bytes().await.expect("request");
+
+    assert_eq!(in_use_status.as_u16(), 409);
+    assert_eq!(
+        reserved_status, in_use_status,
+        "a reserved address must answer the in-use status"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&reserved_body),
+        String::from_utf8_lossy(&in_use_body),
+        "a reserved address must answer the in-use body byte for byte"
+    );
+    assert_eq!(
+        hearth::identity::IdentityError::EmailReserved.to_string(),
+        hearth::identity::IdentityError::DuplicateEmail.to_string(),
+        "the two errors must also read the same wherever their text is shown"
+    );
+}
+
 // ─── Scenario 3: unknown OAuth client → HEARTH_INVALID_CLIENT ────────────────
 
 /// Requesting a client_credentials token for an unregistered client must return

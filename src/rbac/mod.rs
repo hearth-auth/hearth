@@ -160,7 +160,24 @@ pub trait RbacEngine: Send + Sync {
     fn on_replicated_snapshot(&self);
 
     /// Grants a direct permission to a user outside any role.
+    ///
+    /// A permission in the reserved `hearth.*` namespace is refused with
+    /// [`RbacError::ReservedNamespace`]: reserved authority comes only from
+    /// Hearth itself and the roles seeded at realm bootstrap.
     fn grant_user_permission(
+        &self,
+        realm_id: &RealmId,
+        grant: &UserPermissionGrant,
+    ) -> Result<UserPermissionGrant, RbacError>;
+
+    /// Stores a direct permission grant WITHOUT the reserved-namespace check.
+    ///
+    /// Not an operator path: no admin surface calls it, and a test pins that
+    /// (`tests/admin_rest_parity.rs`). It exists so tests can reproduce a
+    /// reserved grant stored before direct reserved grants were refused — the
+    /// admin ceiling must still count such a grant.
+    #[doc(hidden)]
+    fn seed_user_permission_unchecked(
         &self,
         realm_id: &RealmId,
         grant: &UserPermissionGrant,

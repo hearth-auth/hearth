@@ -1056,6 +1056,8 @@ export interface components {
             name: string;
             slug: string;
             description: string | null;
+            /** @description Declared in hearth.yaml; the admin API cannot change or delete it. */
+            yaml_managed: boolean;
             /**
              * Format: int64
              * @description Microseconds since the Unix epoch.

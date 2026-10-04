@@ -200,10 +200,12 @@ impl Fixture {
             .expect("add member");
     }
 
+    /// Stores a direct grant through the unchecked path: the ceiling must
+    /// still count a reserved grant stored before such grants were refused.
     fn grant(&self, user: &UserId, perm: &str, scope: Scope) {
         self.h
             .rbac()
-            .grant_user_permission(
+            .seed_user_permission_unchecked(
                 &self.realm,
                 &UserPermissionGrant {
                     realm_id: self.realm.clone(),
@@ -675,32 +677,37 @@ async fn role_members_lists_users_and_groups() {
 #[tokio::test]
 async fn user_permission_grants_honour_the_ceiling() {
     let f = Fixture::new().await;
-    let (caller, sub) = f.admin("hearth.realm.admin");
+    let (caller, sub) = f.admin_with("hearth.realm.admin", &["docs.read"]);
     let (_, full) = f.admin("realm.admin");
     let target = f.user("target");
     let uri = format!("/admin/users/{}/permissions", target.as_uuid());
 
-    let (refused, _) = f
+    let (refused, body) = f
         .call(
             "POST",
             &uri,
             &sub,
-            Some(&json!({"permission": "hearth.admin"})),
+            Some(&json!({"permission": "docs.secret"})),
         )
         .await;
     assert_eq!(
         refused,
         StatusCode::FORBIDDEN,
-        "a permission the caller lacks"
+        "a permission the caller lacks: {body}"
     );
-    assert!(!f.holds_superuser(&target, None));
+    assert!(f
+        .h
+        .rbac()
+        .list_user_permissions(&f.realm, &target)
+        .expect("list")
+        .is_empty());
 
     let (held, body) = f
         .call(
             "POST",
             &uri,
             &sub,
-            Some(&json!({"permission": "hearth.realm.admin"})),
+            Some(&json!({"permission": "docs.read"})),
         )
         .await;
     assert_eq!(held, StatusCode::CREATED, "{body}");
@@ -729,7 +736,7 @@ async fn user_permission_grants_honour_the_ceiling() {
         .filter_map(|p| p["permission"].as_str())
         .collect();
     assert!(
-        names.contains(&"hearth.realm.admin") && names.contains(&"docs.anything"),
+        names.contains(&"docs.read") && names.contains(&"docs.anything"),
         "{list}"
     );
 
@@ -737,6 +744,66 @@ async fn user_permission_grants_honour_the_ceiling() {
         .call("DELETE", &format!("{uri}/docs.anything"), &sub, None)
         .await;
     assert_eq!(revoked, StatusCode::NO_CONTENT);
+}
+
+/// `rbac-model` scenario "Reserved permissions are not granted directly": even
+/// a `hearth.admin` caller cannot grant a `hearth.*` permission as a direct
+/// user permission. Reserved authority comes only from the seeded roles.
+#[tokio::test]
+async fn reserved_permissions_are_not_granted_directly() {
+    let f = Fixture::new().await;
+    let (_, full) = f.admin("realm.admin");
+    let target = f.user("target");
+    let uri = format!("/admin/users/{}/permissions", target.as_uuid());
+
+    for (permission, org) in [
+        ("hearth.admin", None),
+        ("hearth.users.admin", None),
+        ("hearth.admin", Some(f.org("acme"))),
+    ] {
+        let mut body = json!({ "permission": permission });
+        if let Some(org) = &org {
+            body["org_id"] = json!(org.as_uuid().to_string());
+        }
+        let (status, resp) = f.call("POST", &uri, &full, Some(&body)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{permission}: {resp}");
+        assert_eq!(resp["error"], "reserved_namespace", "{permission}: {resp}");
+    }
+    assert!(
+        f.h.rbac()
+            .list_user_permissions(&f.realm, &target)
+            .expect("list")
+            .is_empty(),
+        "a refused grant leaves no direct permission behind"
+    );
+    assert!(!f.holds_superuser(&target, None));
+}
+
+/// The unchecked grant path exists only for fixtures: no production module
+/// outside the RBAC engine may call it.
+#[test]
+fn the_unchecked_grant_path_has_no_production_caller() {
+    fn walk(dir: &std::path::Path, hits: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).expect("read_dir") {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                walk(&path, hits);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let rel = path.to_string_lossy().replace('\\', "/");
+                let allowed = rel.contains("/src/rbac/") || rel.ends_with("/tests.rs");
+                let text = std::fs::read_to_string(&path).expect("read");
+                if !allowed && text.contains("seed_user_permission_unchecked") {
+                    hits.push(rel);
+                }
+            }
+        }
+    }
+    let mut hits = Vec::new();
+    walk(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut hits,
+    );
+    assert!(hits.is_empty(), "unexpected callers: {hits:?}");
 }
 
 #[tokio::test]

@@ -24,6 +24,7 @@ class AdminGroup:
         name (str):
         slug (str):
         description (None | str):
+        yaml_managed (bool): Declared in hearth.yaml; the admin API cannot change or delete it.
         created_at (int): Microseconds since the Unix epoch.
         updated_at (int): Microseconds since the Unix epoch.
     """
@@ -33,6 +34,7 @@ class AdminGroup:
     name: str
     slug: str
     description: None | str
+    yaml_managed: bool
     created_at: int
     updated_at: int
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
@@ -49,6 +51,8 @@ class AdminGroup:
         description: None | str
         description = self.description
 
+        yaml_managed = self.yaml_managed
+
         created_at = self.created_at
 
         updated_at = self.updated_at
@@ -62,6 +66,7 @@ class AdminGroup:
                 "name": name,
                 "slug": slug,
                 "description": description,
+                "yaml_managed": yaml_managed,
                 "created_at": created_at,
                 "updated_at": updated_at,
             }
@@ -87,6 +92,8 @@ class AdminGroup:
 
         description = _parse_description(d.pop("description"))
 
+        yaml_managed = d.pop("yaml_managed")
+
         created_at = d.pop("created_at")
 
         updated_at = d.pop("updated_at")
@@ -97,6 +104,7 @@ class AdminGroup:
             name=name,
             slug=slug,
             description=description,
+            yaml_managed=yaml_managed,
             created_at=created_at,
             updated_at=updated_at,
         )

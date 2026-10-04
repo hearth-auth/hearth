@@ -127,7 +127,7 @@ curl -X POST http://127.0.0.1:8420/admin/users/<user-id>/roles \
   -H "Content-Type: application/json" \
   -d '{
     "role_id": "<role-id>",
-    "scope": {"type": "org", "org_id": "org_<uuid>"}
+    "org_id": "org_<uuid>"
   }'
 ```
 

@@ -30,6 +30,7 @@ use crate::rbac::{
 
 /// Body of `POST /admin/groups/{id}/roles`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct AssignGroupRoleBody {
     role_id: String,
     /// Optional org ID for an org-scoped assignment; omit for realm scope.
@@ -39,6 +40,7 @@ pub(super) struct AssignGroupRoleBody {
 
 /// Body of `POST /admin/users/{id}/permissions`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct GrantPermissionBody {
     permission: String,
     /// Optional org ID for an org-scoped grant; omit for realm scope.

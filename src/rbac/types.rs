@@ -314,6 +314,11 @@ pub struct Group {
     pub created_at: Timestamp,
     /// Last-update timestamp (UTC microseconds).
     pub updated_at: Timestamp,
+    /// `true` while the group is declared in `hearth.yaml`. Set by
+    /// reconciliation only; the admin API refuses to edit or delete such a
+    /// group. Rows written before the marker existed read as `false`.
+    #[serde(default)]
+    pub yaml_managed: bool,
 }
 
 /// A user or group that can be a member of another group.

@@ -188,12 +188,34 @@ paths:
     get:
       summary: Resolve the authenticated user's effective permissions
       operationId: mePermissions
+      description: >-
+        The organization context is the token's `oid` claim; a token without
+        `oid` resolves realm-scoped assignments only.
       tags: [Users]
       security:
         - bearerAuth: []
+      parameters:
+        - name: org_id
+          in: query
+          required: false
+          description: >-
+            Resolve this organization instead of the token's `oid`. The user
+            must be a member of it; otherwise the request is refused with 403.
+          schema: {type: string}
+        - name: scope
+          in: query
+          required: false
+          description: Narrow the result to these space-separated scopes.
+          schema: {type: string}
       responses:
         "200":
           description: Roles, groups, and permissions resolved fresh (not from JWT)
+        "400":
+          description: "`org_id` is not an organization ID, or `X-Realm-ID` is missing"
+        "401":
+          description: Missing, invalid or expired token, or not a user's token
+        "403":
+          description: The user is not a member of the organization named by `org_id`
 
   # ── OAuth self-service ───────────────────────────────────────────────────
   /oauth/consents:
@@ -1779,13 +1801,16 @@ components:
         parent_roles: {type: array, items: {type: string, format: uuid}}
     AdminGroup:
       type: object
-      required: [id, realm_id, name, slug, description, created_at, updated_at]
+      required: [id, realm_id, name, slug, description, yaml_managed, created_at, updated_at]
       properties:
         id: {type: string, format: uuid}
         realm_id: {type: string, format: uuid}
         name: {type: string}
         slug: {type: string}
         description: {type: string, nullable: true}
+        yaml_managed:
+          type: boolean
+          description: Declared in hearth.yaml; the admin API cannot change or delete it.
         created_at: {type: integer, format: int64, description: Microseconds since the Unix epoch.}
         updated_at: {type: integer, format: int64, description: Microseconds since the Unix epoch.}
     AdminGroupPage:

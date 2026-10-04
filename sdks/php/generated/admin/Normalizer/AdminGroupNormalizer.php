@@ -37,6 +37,9 @@ class AdminGroupNormalizer implements DenormalizerInterface, NormalizerInterface
         if (isset($data['$recursiveRef'])) {
             return new Reference($data['$recursiveRef'], $context['document-origin']);
         }
+        if (\array_key_exists('yaml_managed', $data) && \is_int($data['yaml_managed'])) {
+            $data['yaml_managed'] = (bool) $data['yaml_managed'];
+        }
         if (\array_key_exists('id', $data) && $data['id'] !== null) {
             $object->setId($data['id']);
             unset($data['id']);
@@ -77,6 +80,14 @@ class AdminGroupNormalizer implements DenormalizerInterface, NormalizerInterface
             $object->setDescription(null);
             unset($data['description']);
         }
+        if (\array_key_exists('yaml_managed', $data) && $data['yaml_managed'] !== null) {
+            $object->setYamlManaged($data['yaml_managed']);
+            unset($data['yaml_managed']);
+        }
+        elseif (\array_key_exists('yaml_managed', $data) && $data['yaml_managed'] === null) {
+            $object->setYamlManaged(null);
+            unset($data['yaml_managed']);
+        }
         if (\array_key_exists('created_at', $data) && $data['created_at'] !== null) {
             $object->setCreatedAt($data['created_at']);
             unset($data['created_at']);
@@ -108,6 +119,7 @@ class AdminGroupNormalizer implements DenormalizerInterface, NormalizerInterface
         $dataArray['name'] = $data->getName();
         $dataArray['slug'] = $data->getSlug();
         $dataArray['description'] = $data->getDescription();
+        $dataArray['yaml_managed'] = $data->getYamlManaged();
         $dataArray['created_at'] = $data->getCreatedAt();
         $dataArray['updated_at'] = $data->getUpdatedAt();
         foreach ($data->additionalPropertyEntries() as $key => $value) {

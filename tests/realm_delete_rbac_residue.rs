@@ -60,7 +60,7 @@ fn build_realm_with_every_rbac_family(h: &common::TestHarness, slug: &str) -> Re
     let user_id = user.id().clone();
 
     // 1. A direct permission grant, held outside any role.
-    let permission = Permission::new("hearth.user.read").expect("build permission");
+    let permission = Permission::new("docs.read").expect("build permission");
     h.rbac()
         .grant_user_permission(
             &realm_id,

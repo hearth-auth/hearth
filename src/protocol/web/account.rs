@@ -1404,6 +1404,7 @@ pub async fn passkey_delete(
 
 /// JSON body for passkey rename.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RenamePasskeyBody {
     /// New display name for the credential.
     pub name: String,

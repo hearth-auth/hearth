@@ -3506,6 +3506,7 @@ impl RealmYamlConfig {
                 description: g.description.clone(),
                 created_at: crate::core::Timestamp::from_micros(0),
                 updated_at: crate::core::Timestamp::from_micros(0),
+                yaml_managed: true,
             })
             .collect();
 

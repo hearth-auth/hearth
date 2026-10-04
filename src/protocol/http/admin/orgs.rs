@@ -70,6 +70,7 @@ impl From<&Organization> for OrganizationDto {
 
 /// Body of `POST /admin/organizations`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct CreateOrganizationBody {
     slug: String,
     display_name: String,
@@ -85,6 +86,7 @@ pub(super) struct CreateOrganizationBody {
 
 /// Body of `PATCH /admin/organizations/{id}`. Absent fields are unchanged.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct UpdateOrganizationBody {
     /// Present only to be refused: the slug is immutable.
     #[serde(default)]
@@ -105,6 +107,7 @@ pub(super) struct UpdateOrganizationBody {
 
 /// Body of `POST /admin/organizations/{id}/members/{user_id}/roles`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct AddAdditionalRoleBody {
     role_name: String,
 }

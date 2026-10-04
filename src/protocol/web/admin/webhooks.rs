@@ -495,6 +495,7 @@ pub async fn admin_webhook_test(
 
 /// Minimal JSON body for the pre-save test-ping endpoint.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TestPingBody {
     pub url: String,
     #[serde(default)]

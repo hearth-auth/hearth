@@ -198,6 +198,29 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
 - **A login that passes through a required action rotates the browser session too.** When a
   password, MFA or federated login is sent to a required-action page, the session the browser
   already held is revoked before the flow starts; the flow ends in a session with a new ID.
+- **Admin and authentication request bodies refuse unknown fields.** Role assignment, direct
+  permission grants, application updates, webhooks, organizations, agents, approvals, tool
+  invocation, AATs, transaction tokens, SPIFFE mappings, cross-realm policies, email templates,
+  required actions and magic-link requests now answer `422` naming a field the body does not
+  declare, instead of ignoring it. An organization-scoped role assignment is `{"role_id": …,
+  "org_id": …}`; the guides showed a `scope` object, which is refused. OAuth/OIDC endpoint
+  parameters are still ignored when unknown, as RFC 6749 §3.1 requires.
+- **A recently deleted user's email address answers like one in use.** Creating a user or
+  changing an email to a reserved address now returns the same `409` body as an address in use,
+  and the console, SCIM and setup pages show the same message for both.
+- **Reserved `hearth.*` permissions cannot be granted directly.** `POST
+  /admin/users/{id}/permissions` and the console grant forms refuse a `hearth.*` permission with
+  `403 reserved_namespace`; reserved authority comes only from the roles seeded at realm
+  bootstrap. Existing direct grants are unchanged and still count for the admin ceiling.
+- **Roles and groups declared in `hearth.yaml` cannot be changed or deleted at runtime.**
+  `PATCH`/`DELETE /admin/roles/{id}` and `/admin/groups/{id}`, and the console forms, answer
+  `409 yaml_managed` for them, naming `hearth.yaml`. Startup reconciliation still applies YAML
+  changes; a group removed from the YAML returns to runtime management, and a role removed from
+  it is archived as before.
+- **`GET /v1/me/permissions` takes the organization from the token.** Without `org_id` it
+  resolves the token's `oid` (realm-scoped assignments only when the token has none). An
+  `org_id` query parameter must name an organization the user is a member of, or the request is
+  refused with `403`; a malformed `org_id` is `400`. Group responses now include `yaml_managed`.
 
 ### Fixed
 - The cluster-mode startup warning no longer says writes to a follower fail with HTTP 500
