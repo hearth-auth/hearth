@@ -6,6 +6,7 @@ namespace Hearth\Laravel;
 
 use GuzzleHttp\Psr7\HttpFactory;
 use Hearth\HearthClient;
+use Hearth\TokenVerifier;
 use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Routing\Router;
 use Illuminate\Support\ServiceProvider;
@@ -61,6 +62,9 @@ final class HearthServiceProvider extends ServiceProvider
                 tokenAuthorizationMode: isset($config['token_authorization_mode'])
                     ? (string) $config['token_authorization_mode']
                     : null,
+                audience: isset($config['audience']) && $config['audience'] !== ''
+                    ? (string) $config['audience']
+                    : TokenVerifier::DEFAULT_AUDIENCE,
             );
         });
 

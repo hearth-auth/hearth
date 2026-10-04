@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { hearthAuth } from "./main.js";
-import { getRefreshToken, clearTokens, isAuthenticated } from "@hearth-auth/sdk";
 import Login from "./pages/Login.js";
 import Callback from "./pages/Callback.js";
 import Dashboard from "./pages/Dashboard.js";
@@ -10,16 +9,16 @@ import Admin from "./pages/Admin.js";
 import ProtectedRoute from "./components/ProtectedRoute.js";
 
 export default function App() {
-  // Restore session from localStorage refresh token on page load.
+  // Restore the session from the stored refresh token on page load.
   const [restoring, setRestoring] = useState(() => {
-    return getRefreshToken() !== null && !isAuthenticated();
+    return hearthAuth.getRefreshToken() !== null && !hearthAuth.isAuthenticated();
   });
 
   useEffect(() => {
     if (!restoring) return;
     hearthAuth
       .refreshAccessToken()
-      .catch(() => clearTokens())
+      .catch(() => hearthAuth.clearTokens())
       .finally(() => setRestoring(false));
   }, [restoring]);
 

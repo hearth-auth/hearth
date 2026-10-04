@@ -138,7 +138,7 @@ use Hearth\HearthClient;
 
 $hearth = new HearthClient(
     issuerUrl: 'https://hearth.example.com',
-    clientId:  '<client_id>',
+    audience:  'https://api.example.com', // optional — default 'hearth'
 );
 
 $bearerToken = str_replace('Bearer ', '', $_SERVER['HTTP_AUTHORIZATION'] ?? '');
@@ -166,13 +166,28 @@ $userInfo = $hearth->getUserInfo($tokens->accessToken);
 **How verification works.** The SDK has no signature code of its own. It parses
 the token with `lcobucci/jwt` v5 and validates it with four constraints:
 `SignedWith(new Eddsa(), <key chosen by kid>)`, `LooseValidAt` (one 5 s clock-skew
-allowance on `exp`, `nbf` and `iat`), `IssuedBy(<issuerUrl>)` and, when `clientId`
-is set, `PermittedFor(<clientId>)`. Each failure maps to the matching exception
+allowance on `exp`, `nbf` and `iat`), `IssuedBy(<issuerUrl>)` and
+`PermittedFor(<audience>)`. Each failure maps to the matching exception
 (`TokenExpiredException`, `TokenIssuerException`, …). A `kid` still unknown after
 one JWKS re-fetch throws `TokenInvalidException`; `JWKSFetchException` means the
 JWKS endpoint itself failed. `issuerUrl` must equal the `iss` your tokens carry
 (`https://hearth.example.com/realms/<realm>` for realm tokens). `ext-sodium` stays
 required: `lcobucci`'s `Eddsa` signer uses it.
+
+### Audience
+
+`verifyToken()` always checks `aud` (RFC 9068 §4); the check cannot be turned
+off. The expected audience is the `audience` named argument of `HearthClient`
+(the last constructor parameter), default `'hearth'`
+(`TokenVerifier::DEFAULT_AUDIENCE`): the audience Hearth mints when a client
+names no resource. If your API is registered as a protected resource, pass its
+resource URI. `TokenVerifier` takes the same value as its third argument.
+
+The client ID is not the audience: only ID tokens are checked against a client
+ID (OIDC Core). An empty `audience` throws `ConfigurationException`; a token
+whose `aud` does not contain the expected audience throws
+`TokenAudienceException`. In Laravel, set `HEARTH_AUDIENCE` (config key
+`audience`).
 
 ## Admin client
 
@@ -268,7 +283,7 @@ $app = AppFactory::create();
 
 $hearth = new HearthClient(
     issuerUrl: 'https://hearth.example.com',
-    clientId:  '<client_id>',
+    audience:  'https://api.example.com', // optional — default 'hearth'
 );
 
 // Apply globally — all routes require a valid Bearer token
@@ -359,7 +374,7 @@ services:
         class: Hearth\HearthClient
         arguments:
             $issuerUrl: '%env(HEARTH_ISSUER_URL)%'
-            $clientId:  '%env(HEARTH_CLIENT_ID)%'
+            $audience:  '%env(HEARTH_AUDIENCE)%' # e.g. https://api.example.com; must not be empty
 
     App\EventSubscriber\HearthAuthSubscriber:
         arguments: ['@hearth.client']
@@ -445,7 +460,7 @@ $hearth->requestMagicLink('user@example.com');
 | `TokenExpiredException` | `exp` claim is in the past |
 | `TokenInvalidException` | Signature invalid or malformed JWT |
 | `TokenIssuerException` | `iss` mismatch |
-| `TokenAudienceException` | `aud` mismatch |
+| `TokenAudienceException` | `aud` does not contain the configured `audience` (default `hearth`) |
 | `JWKSFetchException` | JWKS endpoint unreachable |
 | `ConfigurationException` | Missing required config |
 

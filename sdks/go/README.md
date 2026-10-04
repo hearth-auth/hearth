@@ -29,6 +29,21 @@ client := hearth.NewClient("https://hearth.example.com", "<your-realm-id>")
 
 `Client` wraps the Hearth HTTP API for auth code flows, token management, JWKS retrieval, and live RBAC claim resolution. All methods are safe to call concurrently.
 
+### Audience
+
+`VerifyToken` and every RBAC helper always check the access token's `aud` (RFC 9068 §4); the check cannot be turned off. The expected audience defaults to `hearth.DefaultAudience` (`"hearth"`), the audience Hearth mints when a client names no resource. An API registered as a protected resource sets its resource URI:
+
+```go
+client := hearth.NewClient("https://hearth.example.com", "<your-realm-id>",
+    hearth.WithAudience("https://api.example.com"),
+)
+
+claims, err := client.VerifyToken(ctx, token)                       // checks the client's audience
+claims, err = client.VerifyToken(ctx, token, "https://other.example") // overrides it for this call
+```
+
+An empty `WithAudience` value is ignored and keeps the default. The client ID is not the audience: only ID tokens are checked against a client ID (OIDC Core). A token whose `aud` does not contain the expected audience returns `*hearth.TokenAudienceError`.
+
 ---
 
 ## Auth code flow (with PKCE)
@@ -105,8 +120,8 @@ func main() {
 ## RBAC capabilities
 
 Every helper below **verifies the token before reading any claim**: the EdDSA
-signature against the realm's JWKS, plus `exp`, `nbf` and `iss`. They return
-`false` for an empty, malformed, expired, foreign or unverifiable token. The
+signature against the realm's JWKS, plus `exp`, `nbf`, `iss` and `aud`. They return
+`false` for an empty, malformed, expired, foreign, wrong-audience or unverifiable token. The
 JWKS is cached, so the first call costs one HTTP round trip and later calls are
 CPU-only.
 
@@ -326,8 +341,9 @@ admin  := client.Admin(resp.AccessToken)
 ## Type reference
 
 ```go
-// Client — created by NewClient(baseURL, realmID string)
-// All methods are goroutine-safe.
+// Client — created by NewClient(baseURL, realmID string, opts ...ClientOption)
+// All methods are goroutine-safe. WithAudience(aud) sets the expected access-token
+// `aud` (default DefaultAudience = "hearth").
 
 // AuthorizeRequest — argument to Client.Authorize
 type AuthorizeRequest struct {
@@ -546,7 +562,7 @@ mw := hearth.RequirePermission(client, "api.write", hearth.MiddlewareConfig{
 
 **`TokenInvalidError`** — JWT signature does not match any key in the JWKS. If the server recently rotated keys the SDK will re-fetch once automatically; persistent failures indicate a key mismatch.
 
-**`TokenAudienceError`** — the token's `aud` claim does not contain the configured audience. Verify `ClientID` matches the audience your authorization server issues.
+**`TokenAudienceError`** — the token's `aud` claim does not contain the expected audience (`WithAudience`, default `"hearth"`). Set `WithAudience` to the resource URI the token was issued for; the client ID is not the audience.
 
 See [openspec/specs/sdk-support-contract/spec.md](../../openspec/specs/sdk-support-contract/spec.md) Section 5 for the full error taxonomy.
 

@@ -188,13 +188,34 @@ and re-fetched once on a key miss.
 from hearth.errors import TokenExpiredError, TokenInvalidError
 
 try:
-    claims = client.verify_token(access_token, audience="hearth")
-    # claims.subject(), claims.has_role("admin"), claims.has_permission("docs.write")
+    claims = client.verify_token(access_token)
+    # claims.subject(), claims.hasRole("admin"), claims.hasPermission("docs.write")
 except TokenExpiredError:
     pass  # 401 — ask client to refresh
 except TokenInvalidError:
     pass  # 401 — reject the request
 ```
+
+### Audience
+
+`verify_token` always checks `aud` (RFC 9068 §4); the check cannot be turned
+off. The expected audience is the `audience` keyword of `HearthClient`, default
+`"hearth"` (`hearth.client.DEFAULT_AUDIENCE`): the audience Hearth mints when a
+client names no resource. If your API is registered as a protected resource,
+set its resource URI:
+
+```python
+client = HearthClient(
+    base_url="https://hearth.example.com/realms/<realm>",
+    realm_id="<realm>",
+    audience="https://api.example.com",
+)
+```
+
+`verify_token(token, audience=...)` overrides it for one call. The client ID is
+not the audience: only ID tokens are checked against a client ID (OIDC Core).
+An empty `audience` raises `ConfigurationError`; a token whose `aud` does not
+contain the expected audience raises `TokenAudienceError`.
 
 **How verification works.** The SDK has no signature code of its own. It calls
 PyJWT's `jwt.decode(token, key, algorithms=["EdDSA"], issuer=..., audience=...,
@@ -205,17 +226,29 @@ allowance. A `kid` still unknown after the re-fetch raises `TokenInvalidError`;
 
 ## RBAC permission checks
 
-Permission checks are **synchronous and zero-network** — they read the embedded JWT claims:
+Permission checks on verified claims are **synchronous and zero-network** — they read the embedded JWT claims:
 
 ```python
-if claims.has_permission("invoices.write"):
+if claims.hasPermission("invoices.write"):
     render_invoice_form()
 
-if claims.has_role("billing-admin"):
+if claims.hasRole("billing-admin"):
     render_billing_panel()
 
 if claims.in_group("engineering"):
     render_internal_tooling()
+```
+
+To check a raw token, call the client's instance methods `has_permission`,
+`has_role`, `in_group` and `in_org`. Each verifies the token with
+`verify_token` first (no network call once the JWKS is cached) and returns
+`False` for a token that does not verify:
+
+```python
+client = HearthClient(base_url="https://hearth.example.com/realms/acme", realm_id="acme")
+
+if client.has_permission(token, "docs.write"):
+    render_editor()
 ```
 
 ## Middleware
@@ -476,7 +509,7 @@ PHP runners, and fails when an SDK gives a different answer.
 | `TokenExpiredError` | `exp` in the past |
 | `TokenInvalidError` | Signature invalid or malformed JWT |
 | `TokenIssuerError` | `iss` mismatch |
-| `TokenAudienceError` | `aud` mismatch |
+| `TokenAudienceError` | `aud` does not contain the configured `audience` (default `hearth`) |
 | `DiscoveryError` | OIDC discovery unreachable |
 | `JWKSFetchError` | JWKS endpoint unreachable |
 | `OAuthFlowError` | OAuth endpoint error (client credentials, device flow, magic link) |

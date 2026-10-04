@@ -45,7 +45,8 @@ function App() {
   );
 }
 
-// In any component — reads permissions from the JWT in context, no network call
+// In any component — verifies the token against the cached realm JWKS, then
+// reads its permissions; false until the check resolves
 function AdminPage() {
   const canAdmin = useHasPermission('hearth.admin');
   if (!canAdmin) return <p>Access denied.</p>;
@@ -85,7 +86,8 @@ const NODE_EXPRESS_SNIPPET = `\
 import express from 'express';
 import { HearthClient, hearthMiddleware } from '@hearth-auth/sdk';
 
-const client = new HearthClient({ issuerUrl: 'http://localhost:8420', clientId: 'my-api' });
+// audience: the aud claim this API accepts (default 'hearth')
+const client = new HearthClient({ issuerUrl: 'http://localhost:8420', audience: 'https://api.example.com' });
 const app = express();
 
 // Mount once to verify the token and attach its claims to every request

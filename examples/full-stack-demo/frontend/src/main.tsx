@@ -5,7 +5,6 @@ import {
   HearthProvider,
   createHearth,
   createHearthAuth,
-  getAccessToken,
 } from "@hearth-auth/sdk";
 import App from "./App.js";
 import "./index.css";
@@ -25,7 +24,12 @@ export const hearthAuth = createHearthAuth(apiClient, {
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <HearthProvider client={createHearth({ baseUrl: hearthUrl, realmId, getToken: () => getAccessToken() })}>
+    <HearthProvider client={createHearth({
+        baseUrl: hearthUrl,
+        realmId,
+        issuerUrl: `${hearthUrl}/realms/${realmSlug}`,
+        getToken: () => hearthAuth.getAccessToken(),
+      })}>
       <App />
     </HearthProvider>
   </React.StrictMode>,

@@ -51,7 +51,14 @@ def jwks(respx_mock, private_key):
 
 def _payload(**extra) -> dict:
     now = int(time.time())
-    return {"sub": "user-abc", "iss": ISSUER, "exp": now + 3600, "iat": now, **extra}
+    return {
+        "sub": "user-abc",
+        "iss": ISSUER,
+        "aud": "hearth",
+        "exp": now + 3600,
+        "iat": now,
+        **extra,
+    }
 
 
 def _sign(private_key, payload: dict, kid: str = KID) -> str:
@@ -95,11 +102,12 @@ def test_unknown_kid_fails(jwks, private_key):
         _client().verify_token(_sign(private_key, _payload(), kid="not-published"))
 
 
-def test_missing_aud_claim_fails_when_an_audience_is_expected(jwks, private_key):
+def test_missing_aud_claim_fails_under_the_default_audience(jwks, private_key):
     from hearth.errors import TokenAudienceError
 
+    payload = {k: v for k, v in _payload().items() if k != "aud"}
     with pytest.raises(TokenAudienceError) as excinfo:
-        _client().verify_token(_sign(private_key, _payload()), audience="client-1")
+        _client().verify_token(_sign(private_key, payload))
     assert excinfo.value.actual == []
 
 

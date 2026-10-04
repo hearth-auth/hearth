@@ -46,7 +46,7 @@ function stubIssuer(): void {
 }
 
 async function sign(claims: Record<string, unknown> = {}): Promise<string> {
-  return new SignJWT({ sub: "user1", ...claims })
+  return new SignJWT({ sub: "user1", aud: "hearth", ...claims })
     .setProtectedHeader({ alg: "EdDSA", kid: KID })
     .setIssuer(ISSUER)
     .setIssuedAt()

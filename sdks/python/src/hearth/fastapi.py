@@ -131,7 +131,8 @@ class HearthFastAPIDep:
         verification; ``"introspection"`` and ``"decision"`` make network calls.
     :param permission: Optional permission to enforce.  When set, the
         dependency raises ``HTTP 403`` if the verified token lacks it.
-    :param audience: Optional expected ``aud`` claim value.
+    :param audience: Expected ``aud`` for this dependency. When ``None``, the
+        client's configured ``audience`` (default ``"hearth"``) is checked.
 
     Raises ``HTTP 401`` on missing / invalid / expired tokens.
     Raises ``HTTP 403`` on insufficient permissions.

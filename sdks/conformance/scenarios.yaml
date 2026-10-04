@@ -31,9 +31,20 @@
 #   unknown_kid     user_access with its header `kid` replaced
 #   expired         an m2m_access token from a second server whose access
 #                   tokens live 1 s, presented after the 5 s clock skew
+#   other_api_access  an m2m_access token from a third server that mints
+#                   access tokens for audience `other-api` (`token.audience`)
+#   resource_access an m2m_access token exchanged (RFC 8693, `audience=`) for
+#                   one whose `aud` is the registered protected resource
+#                   https://api.example.com
+#
+# A token whose `iat` is in the future cannot be minted: the driver holds no
+# realm key, and the server always stamps its own clock. TypeScript's future
+# `iat` check is covered by sdks/typescript/tests/verify-token-jose.test.ts.
 #
 # Config variants (what the SDK is configured with):
 #   default         the token's realm issuer, audience `hearth`
+#   no_audience     the token's realm issuer, no audience (the SDK default)
+#   resource_audience  the token's realm issuer, audience https://api.example.com
 #   wrong_audience  the token's realm issuer, audience `not-hearth`
 #   wrong_issuer    the same realm reached as `localhost` instead of
 #                   `127.0.0.1`: same keys, different `iss`
@@ -86,6 +97,23 @@ scenarios:
     token: user_access
     config: wrong_audience
     expect: {outcome: error, error: TokenAudienceError}
+
+  # openspec sdk-support-contract, "Every SDK checks the audience by default":
+  # with no audience configured the SDK expects `hearth`.
+  - id: default-audience-rejects-other-api
+    kind: verify_token
+    token: other_api_access
+    config: no_audience
+    expect: {outcome: error, error: TokenAudienceError}
+
+  # "A protected resource sets its audience".
+  - id: protected-resource-audience-validates
+    kind: verify_token
+    token: resource_access
+    config: resource_audience
+    expect:
+      outcome: ok
+      claims: [sub, scope, permissions]
 
   - id: wrong-issuer-fails
     kind: verify_token

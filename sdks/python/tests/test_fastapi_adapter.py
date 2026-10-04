@@ -57,7 +57,7 @@ def _valid_payload(
     payload = {
         "sub": "user-abc",
         "iss": issuer,
-        "aud": "client-1",
+        "aud": "hearth",
         "exp": now + 3600,
         "iat": now,
     }

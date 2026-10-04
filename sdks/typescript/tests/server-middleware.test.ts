@@ -171,7 +171,7 @@ describe("hearthMiddleware — authentication", () => {
     expect(forgedCall.res.statusCode).toBe(401);
     expect(forgedCall.next).not.toHaveBeenCalled();
 
-    const signed = await new SignJWT({ sub: "u1", permissions: ["admin.write"] })
+    const signed = await new SignJWT({ sub: "u1", aud: "hearth", permissions: ["admin.write"] })
       .setProtectedHeader({ alg: "EdDSA", kid: "k1" })
       .setIssuer(ISSUER)
       .setIssuedAt()

@@ -8,11 +8,15 @@
 #   HEARTH_BIN=<path>   use this hearth binary (built with dev-endpoints)
 #                       instead of building one
 #
-# Boots two servers from empty directories (so no contributor hearth.yaml is
+# Boots three servers from empty directories (so no contributor hearth.yaml is
 # picked up — see sdk-smoke-local.sh step 2):
-#   main    realm `conformance` with a client-credentials client `m2m`
-#   expiry  the same, with 1 s access tokens (the `expired` scenario; the
-#           server's per-realm TTL does not reach client-credentials tokens)
+#   main      realm `conformance` with a client-credentials client `m2m` (also
+#             allowed token exchange) and the protected resource
+#             https://api.example.com
+#   expiry    the same, with 1 s access tokens (the `expired` scenario; the
+#             server's per-realm TTL does not reach client-credentials tokens)
+#   audience  the same, minting access tokens for audience `other-api` (the
+#             default-audience scenario)
 # then hands over to scripts/sdk_conformance.py.
 # Called by: make sdk-conformance, scripts/sdk-smoke-local.sh, CI.
 
@@ -58,7 +62,12 @@ realms:
         name: "Conformance M2M"
         confidential: true
         client_secret: "conformance-secret-not-for-production"
-        grant_types: [client_credentials]
+        grant_types:
+          - client_credentials
+          - "urn:ietf:params:oauth:grant-type:token-exchange"
+    protected_resources:
+      - resource_uri: "https://api.example.com"
+        display_name: "Conformance API"
 EOF
     ( cd "$dir" && exec "$HEARTH_BIN" serve --dev --bind "127.0.0.1:$port" \
         --config "$dir/conformance.yaml" ) > "$dir/hearth.log" 2>&1 &
@@ -82,11 +91,14 @@ MAIN_URL="$BOOT_URL"
 boot expiry 'token:
   access_token_ttl: "1s"'
 EXPIRY_URL="$BOOT_URL"
-echo "    main=$MAIN_URL expiry=$EXPIRY_URL"
+boot audience 'token:
+  audience: "other-api"'
+AUDIENCE_URL="$BOOT_URL"
+echo "    main=$MAIN_URL expiry=$EXPIRY_URL audience=$AUDIENCE_URL"
 
 PY=(python3)
 if ! python3 -c "import yaml" 2>/dev/null; then
     PY=(uv run --quiet --with pyyaml python3)
 fi
 "${PY[@]}" "$REPO_ROOT/scripts/sdk_conformance.py" \
-    --main-url "$MAIN_URL" --expiry-url "$EXPIRY_URL" "$@"
+    --main-url "$MAIN_URL" --expiry-url "$EXPIRY_URL" --audience-url "$AUDIENCE_URL" "$@"

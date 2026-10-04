@@ -142,7 +142,7 @@ curl -X DELETE http://127.0.0.1:8420/admin/users/<user-id>/roles/<role-id> \
 
 ### Via the token itself (SDK)
 
-All SDKs expose synchronous, zero-network permission helpers that read the `permissions` claim embedded in the JWT. Use these on the hot path — they never make a network call.
+All SDKs expose local permission helpers that read the `permissions` claim embedded in the JWT. Each helper reads claims only from a verified token: the Ed25519 signature is checked against the realm's cached JWKS, together with `exp`, `iss` and `aud`. After the first JWKS fetch they make no network call, so they suit the hot path.
 
 The following examples check whether the current token has the `docs.edit` permission:
 
@@ -152,7 +152,8 @@ The following examples check whether the current token has the `docs.edit` permi
 ```ts
 import { useHasPermission } from '@hearth-auth/sdk';
 
-// React hook — reads permissions from the JWT in context
+// React hook — verifies the token from the HearthProvider's facade, then reads
+// its permissions; false until the check resolves
 function EditButton() {
   const canEdit = useHasPermission('docs.edit');
   if (!canEdit) return null;
@@ -199,11 +200,11 @@ if !client.HasPermission(accessToken, "docs.edit") {
 ```python
 from hearth import HearthClient
 
-client = HearthClient(issuer_url=HEARTH_URL, client_id=CLIENT_ID)
+client = HearthClient(base_url=HEARTH_ISSUER_URL, realm_id=REALM_ID)
 
 # After verify_token() — reads embedded JWT claims locally
 claims = client.verify_token(access_token)
-if not claims.has_permission("docs.edit"):
+if not claims.hasPermission("docs.edit"):
     raise HTTPException(status_code=403, detail="Forbidden")
 ```
 

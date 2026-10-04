@@ -3,6 +3,7 @@ import { createHearth } from "../src/hearth.js";
 import { SessionVersionCache } from "../src/session-version-cache.js";
 import { SessionVersionCacheStaleError, SessionVersionRevokedError } from "../src/errors.js";
 import type { SessionVersionConfig } from "../src/types.js";
+import { makeIssuer, type TestIssuer } from "./issuer.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -22,14 +23,6 @@ import type { SessionVersionConfig } from "../src/types.js";
  */
 async function flushAsync(): Promise<void> {
   for (let i = 0; i < 50; i++) await Promise.resolve();
-}
-
-function forgeJwt(claims: Record<string, unknown>): string {
-  const header = Buffer.from(JSON.stringify({ alg: "EdDSA", typ: "JWT" }), "utf8").toString(
-    "base64url",
-  );
-  const body = Buffer.from(JSON.stringify(claims), "utf8").toString("base64url");
-  return `${header}.${body}.fakesig`;
 }
 
 const BASE_SV_CONFIG: SessionVersionConfig = {
@@ -260,8 +253,13 @@ describe("SessionVersionCache", () => {
 // ---------------------------------------------------------------------------
 
 describe("createHearth() with sessionVersions", () => {
-  beforeEach(() => {
-    vi.stubGlobal("fetch", vi.fn());
+  // The facade verifies each token against `realm`'s JWKS before the sv
+  // check; snapshot/delta requests are answered by the mockFetch queue first,
+  // then fail (so the cache can go stale).
+  let realm: TestIssuer;
+  beforeEach(async () => {
+    realm ??= await makeIssuer("https://hearth.example.com/realms/r1");
+    vi.stubGlobal("fetch", vi.fn(realm.fetchImpl()));
     vi.useFakeTimers();
   });
   afterEach(() => {
@@ -272,58 +270,62 @@ describe("createHearth() with sessionVersions", () => {
   it("hasPermission passes when sv is valid", async () => {
     mockFetch(snapshotResponse({ sess_01: 1 }));
 
-    const token = forgeJwt({ permissions: ["docs.read"], sv: 1, sid: "sess_01" });
+    const token = await realm.sign({ permissions: ["docs.read"], sv: 1, sid: "sess_01" });
     const hearth = createHearth({
       baseUrl: "https://hearth.example.com",
       realmId: "r1",
+      issuerUrl: "https://hearth.example.com/realms/r1",
       getToken: () => token,
       sessionVersions: BASE_SV_CONFIG,
     });
     await flushAsync();
 
-    expect(hearth.hasPermission("docs.read")).toBe(true);
+    expect(await hearth.hasPermission("docs.read")).toBe(true);
     hearth.stop();
   });
 
   it("hasPermission throws SessionVersionRevokedError when sv < minSv", async () => {
     mockFetch(snapshotResponse({ sess_01: 5 })); // min is 5
 
-    const token = forgeJwt({ permissions: ["docs.read"], sv: 3, sid: "sess_01" });
+    const token = await realm.sign({ permissions: ["docs.read"], sv: 3, sid: "sess_01" });
     const hearth = createHearth({
       baseUrl: "https://hearth.example.com",
       realmId: "r1",
+      issuerUrl: "https://hearth.example.com/realms/r1",
       getToken: () => token,
       sessionVersions: BASE_SV_CONFIG,
     });
     await flushAsync();
 
-    expect(() => hearth.hasPermission("docs.read")).toThrow(SessionVersionRevokedError);
+    await expect(hearth.hasPermission("docs.read")).rejects.toThrow(SessionVersionRevokedError);
     hearth.stop();
   });
 
   it("hasPermission passes when token has no sv claim (backward compat)", async () => {
     mockFetch(snapshotResponse({ sess_01: 5 }));
 
-    const token = forgeJwt({ permissions: ["docs.read"] }); // no sv
+    const token = await realm.sign({ permissions: ["docs.read"] }); // no sv
     const hearth = createHearth({
       baseUrl: "https://hearth.example.com",
       realmId: "r1",
+      issuerUrl: "https://hearth.example.com/realms/r1",
       getToken: () => token,
       sessionVersions: BASE_SV_CONFIG,
     });
     await flushAsync();
 
-    expect(hearth.hasPermission("docs.read")).toBe(true);
+    expect(await hearth.hasPermission("docs.read")).toBe(true);
     hearth.stop();
   });
 
   it("hasPermission throws SessionVersionCacheStaleError when cache is stale", async () => {
     mockFetch(snapshotResponse({ sess_01: 1 }));
 
-    const token = forgeJwt({ permissions: ["docs.read"], sv: 1, sid: "sess_01" });
+    const token = await realm.sign({ permissions: ["docs.read"], sv: 1, sid: "sess_01" });
     const hearth = createHearth({
       baseUrl: "https://hearth.example.com",
       realmId: "r1",
+      issuerUrl: "https://hearth.example.com/realms/r1",
       getToken: () => token,
       sessionVersions: BASE_SV_CONFIG,
     });
@@ -331,14 +333,14 @@ describe("createHearth() with sessionVersions", () => {
 
     vi.advanceTimersByTime(BASE_SV_CONFIG.staleThresholdMs + 1_000);
 
-    expect(() => hearth.hasPermission("docs.read")).toThrow(SessionVersionCacheStaleError);
+    await expect(hearth.hasPermission("docs.read")).rejects.toThrow(SessionVersionCacheStaleError);
     hearth.stop();
   });
 
   it("hasRole, inGroup, inOrg also validate sv", async () => {
     mockFetch(snapshotResponse({ sess_01: 3 }));
 
-    const token = forgeJwt({
+    const token = await realm.sign({
       roles: ["admin"],
       groups: ["eng"],
       oid: "org_1",
@@ -348,14 +350,15 @@ describe("createHearth() with sessionVersions", () => {
     const hearth = createHearth({
       baseUrl: "https://hearth.example.com",
       realmId: "r1",
+      issuerUrl: "https://hearth.example.com/realms/r1",
       getToken: () => token,
       sessionVersions: BASE_SV_CONFIG,
     });
     await flushAsync();
 
-    expect(() => hearth.hasRole("admin")).toThrow(SessionVersionRevokedError);
-    expect(() => hearth.inGroup("eng")).toThrow(SessionVersionRevokedError);
-    expect(() => hearth.inOrg("org_1")).toThrow(SessionVersionRevokedError);
+    await expect(hearth.hasRole("admin")).rejects.toThrow(SessionVersionRevokedError);
+    await expect(hearth.inGroup("eng")).rejects.toThrow(SessionVersionRevokedError);
+    await expect(hearth.inOrg("org_1")).rejects.toThrow(SessionVersionRevokedError);
     hearth.stop();
   });
 
@@ -363,6 +366,7 @@ describe("createHearth() with sessionVersions", () => {
     const hearth = createHearth({
       baseUrl: "https://hearth.example.com",
       realmId: "r1",
+      issuerUrl: "https://hearth.example.com/realms/r1",
       getToken: () => null,
     });
     expect(hearth.sessionVersionCacheAge()).toBe(Number.POSITIVE_INFINITY);
@@ -374,6 +378,7 @@ describe("createHearth() with sessionVersions", () => {
     const hearth = createHearth({
       baseUrl: "https://hearth.example.com",
       realmId: "r1",
+      issuerUrl: "https://hearth.example.com/realms/r1",
       getToken: () => null,
       sessionVersions: BASE_SV_CONFIG,
     });
@@ -383,16 +388,17 @@ describe("createHearth() with sessionVersions", () => {
     hearth.stop();
   });
 
-  it("no sv check when sessionVersions.enabled is false", () => {
-    // No fetch mock — any network call would throw.
-    const token = forgeJwt({ permissions: ["docs.read"], sv: 99, sid: "sess_X" });
+  it("no sv check when sessionVersions.enabled is false", async () => {
+    // Only discovery and the JWKS are served; an sv request would fail.
+    const token = await realm.sign({ permissions: ["docs.read"], sv: 99, sid: "sess_X" });
     const hearth = createHearth({
       baseUrl: "https://hearth.example.com",
       realmId: "r1",
+      issuerUrl: "https://hearth.example.com/realms/r1",
       getToken: () => token,
       sessionVersions: { ...BASE_SV_CONFIG, enabled: false },
     });
-    expect(hearth.hasPermission("docs.read")).toBe(true);
+    expect(await hearth.hasPermission("docs.read")).toBe(true);
     hearth.stop();
   });
 });

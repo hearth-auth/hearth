@@ -6,7 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Security
+- **Access-token audience is always checked** — `HearthClient::verifyToken()` and
+  `TokenVerifier` require `aud` to contain the expected audience (RFC 9068 §4): the new
+  `audience` named argument of `HearthClient` (and third argument of `TokenVerifier`),
+  default `TokenVerifier::DEFAULT_AUDIENCE` (`'hearth'`), the audience Hearth mints when a
+  client names no resource. An API registered as a protected resource sets its resource
+  URI. The client ID is not used as the audience. An empty audience throws
+  `ConfigurationException`. Laravel: config key `audience`, env `HEARTH_AUDIENCE`.
+
 ### Changed
+- **A future `iat` throws `TokenNotYetValidException`** — a token whose `iat` is more than
+  the 5 s clock skew ahead is not yet valid, the same error as a future `nbf` and the one
+  the other SDKs raise (was `TokenInvalidException`). `getNotBefore()` returns the `iat`.
 - **`startWebAuthnRegistration()` now requires a step-up proof (audit 2026-08-28 §4.18#2)** —
   the server refuses passkey enrolment carried by an access token alone with
   `403 step_up_required`, because a stolen token would otherwise mint a permanent

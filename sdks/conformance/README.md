@@ -5,9 +5,12 @@ scenarios; `scripts/sdk-conformance.sh` (`make sdk-conformance`) runs them.
 
 ## What the driver does
 
-1. Builds `hearth` with `dev-endpoints` and boots two `serve --dev` servers from
-   an empty directory: **main** (realm `conformance` with a client-credentials
-   client `m2m`) and **expiry** (the same, with 1 s access tokens).
+1. Builds `hearth` with `dev-endpoints` and boots three `serve --dev` servers
+   from an empty directory: **main** (realm `conformance` with a
+   client-credentials client `m2m`, also allowed token exchange, and the
+   protected resource `https://api.example.com`), **expiry** (the same, with
+   1 s access tokens) and **audience** (the same, minting access tokens for
+   audience `other-api`).
 2. Bootstraps main, mints every token kind in `scenarios.yaml`, and writes the
    cases to a JSON file.
 3. Runs each SDK's runner on that file, one SDK after another.
@@ -56,6 +59,8 @@ scenarios; `scripts/sdk-conformance.sh` (`make sdk-conformance`) runs them.
 - `client_credentials`: build a client from `config`, call the SDK's
   client-credentials method with `scope`, then verify the access token it
   returns, as above.
+- `config.audience` is the SDK's `audience` option. When it is `null`, leave
+  the option unset, so the SDK checks its default audience (`hearth`).
 - Build a new client for every case: a case must not reuse another case's JWKS
   cache.
 

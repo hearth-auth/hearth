@@ -71,7 +71,7 @@ async function signWith(
   claims: Record<string, unknown>,
   issuer = ISSUER,
 ): Promise<string> {
-  return new SignJWT({ sub: "user123", ...claims })
+  return new SignJWT({ sub: "user123", aud: "hearth", ...claims })
     .setProtectedHeader({ alg: "EdDSA", kid: KID })
     .setIssuedAt()
     .setIssuer(issuer)

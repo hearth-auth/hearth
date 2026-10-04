@@ -17,7 +17,7 @@ export type {
 export type { HearthClientConfig, OidcConfiguration } from "./hearth-client.js";
 
 // Lower-level primitives (JWKS and introspection).
-export { JwksClient } from "./jwks-client.js";
+export { DEFAULT_AUDIENCE, JwksClient } from "./jwks-client.js";
 export type { JwksClientConfig, VerifyOptions } from "./jwks-client.js";
 export { IntrospectionClient } from "./introspection-client.js";
 export type { IntrospectionClientConfig, IntrospectionResult } from "./introspection-client.js";
@@ -135,13 +135,6 @@ export type {
 } from "./types.js";
 export { SessionVersionCache } from "./session-version-cache.js";
 
-// Browser auth: token store + PKCE login facade for SPAs.
-export {
-  getAccessToken,
-  getRefreshToken,
-  getIdToken,
-  isAuthenticated,
-  clearTokens,
-  createHearthAuth,
-} from "./browser-auth.js";
-export type { AuthConfig, HearthBrowserAuth } from "./browser-auth.js";
+// Browser auth: PKCE login facade for SPAs; token getters live on the returned object.
+export { createHearthAuth } from "./browser-auth.js";
+export type { AuthConfig, AuthStorage, HearthBrowserAuth, TokenStorage } from "./browser-auth.js";

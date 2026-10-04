@@ -92,7 +92,7 @@ if !client.HasPermission(accessToken, "docs.edit") {
 ```python
 # Synchronous, no network call — reads from JWT claims
 claims = client.verify_token(access_token)
-if not claims.has_permission("docs.edit"):
+if not claims.hasPermission("docs.edit"):
     raise HTTPException(status_code=403)
 ```
 

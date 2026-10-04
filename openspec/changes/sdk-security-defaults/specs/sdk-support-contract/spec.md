@@ -9,7 +9,7 @@
 | 2 | `exp` is not in the past. | `TokenExpiredError` |
 | 3 | `iss` equals the configured issuer (TypeScript and PHP `issuerUrl`, Go `baseURL`, Python `base_url` or the `issuer_url` argument). The issuer in the discovery document does not replace it. | `TokenIssuerError` |
 | 4 | `aud` contains the configured `audience`: the name of the API that verifies the token (RFC 9068 §4). It defaults to `hearth`, the audience Hearth mints when a client names no resource; an API registered as a protected resource sets its resource URI. The check is always on. Server SDKs only. An ID token is checked against the client ID instead (OIDC Core §3.1.3.7). | `TokenAudienceError` |
-| 5 | `iat` is not in the future. | — |
+| 5 | `iat` is not in the future. | `TokenNotYetValidError` |
 | 6 | When `nbf` is present, `now` is not before `nbf`. | `TokenNotYetValidError` |
 
 The SDK need not run the checks in this order. A token with two faults (for example expired and with the wrong issuer) MAY get either error, and different SDKs MAY answer differently. A token with one fault SHALL get the same error in every SDK.
@@ -36,7 +36,7 @@ The SDK need not run the checks in this order. A token with two faults (for exam
 
 #### Scenario: TypeScript rejects a future `iat`
 - **WHEN** the TypeScript SDK verifies a token whose `iat` is 60 s in the future
-- **THEN** the SDK rejects the token
+- **THEN** the SDK throws `TokenNotYetValidError`
 
 #### Scenario: Every SDK checks the audience by default
 - **WHEN** an SDK is configured with no `audience` and no per-call audience, and verifies a token whose `aud` is `other-api`

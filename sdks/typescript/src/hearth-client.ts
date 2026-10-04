@@ -5,7 +5,7 @@ import {
   OAuthFlowError,
   TokenExpiredError,
 } from "./errors.js";
-import { JwksClient } from "./jwks-client.js";
+import { DEFAULT_AUDIENCE, JwksClient } from "./jwks-client.js";
 import { IntrospectionClient, type IntrospectionResult } from "./introspection-client.js";
 import type {
   AccessTokenAuthorizationMode,
@@ -34,6 +34,14 @@ export interface HearthClientConfig {
    * Required for flows that need a client identity (e.g. introspection).
    */
   clientId?: string;
+  /**
+   * Expected `aud` of the access tokens {@link HearthClient.verifyToken}
+   * accepts: the name of this API (RFC 9068 §4), not the client ID.
+   * Default: `"hearth"`, the audience Hearth mints when a client names no
+   * resource. An API registered as a protected resource sets its resource URI.
+   * The check is always on.
+   */
+  audience?: string;
   /**
    * OAuth 2.0 client secret.
    * Required for confidential client flows (e.g. introspection).
@@ -106,6 +114,8 @@ export class HearthClient {
   readonly issuerUrl: string;
   readonly clientId: string | undefined;
   readonly clientSecret: string | undefined;
+  /** Expected `aud` of verified access tokens. Default `"hearth"`. */
+  readonly audience: string;
   readonly jwksTtl: number | undefined;
   readonly introspectionEndpointOverride: string | undefined;
   /** HTTP timeout in milliseconds applied to all outbound fetch calls. */
@@ -133,6 +143,12 @@ export class HearthClient {
     this.issuerUrl = config.issuerUrl.replace(/\/$/, "");
     this.clientId = config.clientId;
     this.clientSecret = config.clientSecret;
+    if (config.audience === "") {
+      throw new ConfigurationError(
+        'audience must not be empty — leave it unset for the default "hearth"',
+      );
+    }
+    this.audience = config.audience ?? DEFAULT_AUDIENCE;
     this.jwksTtl = config.jwksTtl;
     this.introspectionEndpointOverride = config.introspectionEndpoint;
     this.httpTimeout = config.httpTimeout ?? 10_000;
@@ -216,7 +232,7 @@ export class HearthClient {
       // Pin iss/aud on the client itself, so a caller who reaches for the
       // exported JwksClient still gets them checked.
       issuer: this.issuerUrl,
-      audience: this.clientId,
+      audience: this.audience,
       ttl: this.jwksTtl,
       httpTimeout: this.httpTimeout,
     });
@@ -344,21 +360,23 @@ export class HearthClient {
    * 2. `exp` claim (rejects expired tokens).
    * 3. `nbf` claim (rejects post-dated tokens).
    * 4. `iss` claim (must match configured `issuerUrl`).
-   * 5. `aud` claim (validated when `clientId` is set in config).
+   * 5. `aud` claim (must contain the configured `audience`, default `"hearth"`).
+   * 6. `iat` claim (rejects a token issued in the future).
    *
-   * `exp` and `nbf` allow a 5-second clock skew.
+   * `exp`, `nbf` and `iat` allow a 5-second clock skew.
    *
    * @throws {@link TokenExpiredError} — token is expired.
+   * @throws {@link TokenNotYetValidError} — `nbf` or `iat` is in the future.
    * @throws {@link TokenInvalidError} — signature invalid or JWT malformed.
    * @throws {@link TokenIssuerError} — issuer does not match `issuerUrl`.
-   * @throws {@link TokenAudienceError} — audience does not include `clientId`.
+   * @throws {@link TokenAudienceError} — audience does not include `audience`.
    * @throws {@link JWKSFetchError} — JWKS endpoint unreachable.
    */
   async verifyToken(token: string): Promise<Claims> {
     const jc = await this.jwksClient();
     return jc.verify(token, {
       issuer: this.issuerUrl,
-      audience: this.clientId,
+      audience: this.audience,
     });
   }
 

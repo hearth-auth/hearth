@@ -34,6 +34,11 @@ from .types import (
     UserInfoResponse,
 )
 
+#: The audience Hearth mints in an access token when the client names no
+#: resource (RFC 9068 §4). ``verify_token`` checks ``aud`` against it unless the
+#: client is configured with another ``audience``.
+DEFAULT_AUDIENCE = "hearth"
+
 #: Clock-skew allowance for ``exp``, ``nbf`` and ``iat``, in seconds (SDK spec §2).
 _CLOCK_SKEW_SECONDS = 5
 
@@ -52,11 +57,18 @@ class HearthClient:
     """Client for Hearth OAuth flows, userinfo, and RBAC predicates.
 
     RBAC predicate methods (has_permission, has_role, in_group, in_org)
-    decode the JWT locally — no network call needed.
+    verify the JWT locally (signature against the cached JWKS, plus the
+    registered claims) before they read a claim — no per-call network hop
+    once the JWKS is cached. A token that does not verify holds nothing.
 
     Attributes:
         base_url: The Hearth server base URL (e.g. ``https://auth.example.com``).
         realm_id: The realm identifier for all scoped requests.
+        audience: The ``aud`` that :meth:`verify_token` expects: the name of
+            this API (RFC 9068 §4), not the client ID. Defaults to
+            ``"hearth"``, the audience Hearth mints when a client names no
+            resource; an API registered as a protected resource sets its
+            resource URI. The check is always on.
     """
 
     def __init__(
@@ -68,10 +80,16 @@ class HearthClient:
         client_secret: str | None = None,
         jwks_ttl: float | None = None,
         timeout: float = 30.0,
+        audience: str = DEFAULT_AUDIENCE,
     ):
+        if not audience:
+            raise ConfigurationError(
+                'audience must not be empty; omit it for the default "hearth"'
+            )
         self._base = base_url.rstrip("/")
         self._realm = realm_id
         self._token = access_token
+        self._audience = audience
         self._client_id = client_id
         self._client_secret = client_secret
         self._jwks_ttl = jwks_ttl
@@ -313,40 +331,48 @@ class HearthClient:
         return resp.json()
 
     # ------------------------------------------------------------------
-    # RBAC predicates (local, no network call)
+    # RBAC predicates (local verification, no per-call network hop)
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def has_permission(token: str, permission: str) -> bool:
-        """Check whether the JWT contains a specific permission."""
+    def _verified(self, token: str) -> Claims | None:
+        """Return the verified claims of *token*, or ``None`` when it does not verify."""
         try:
-            return Claims.decode(token).hasPermission(permission)
-        except Exception:  # noqa: BLE001 -- fail closed: an undecodable token has no permission
-            return False
+            return self.verify_token(token)
+        except Exception:  # noqa: BLE001 -- fail closed: an unverified token holds nothing
+            return None
 
-    @staticmethod
-    def has_role(token: str, role: str) -> bool:
-        """Check whether the JWT contains a specific role."""
-        try:
-            return Claims.decode(token).hasRole(role)
-        except Exception:  # noqa: BLE001 -- fail closed: an undecodable token has no role
-            return False
+    def has_permission(self, token: str, permission: str) -> bool:
+        """Verify *token*, then check whether it carries *permission*.
 
-    @staticmethod
-    def in_group(token: str, group_slug: str) -> bool:
-        """Check whether the JWT indicates membership in a group."""
-        try:
-            return Claims.decode(token).in_group(group_slug)
-        except Exception:  # noqa: BLE001 -- fail closed: an undecodable token is in no group
-            return False
+        Returns ``False`` when the token does not verify (bad signature,
+        expired, wrong issuer or audience, JWKS unreachable).
+        """
+        claims = self._verified(token)
+        return claims is not None and claims.hasPermission(permission)
 
-    @staticmethod
-    def in_org(token: str, org_id: str) -> bool:
-        """Check whether the JWT is scoped to a specific organization."""
-        try:
-            return Claims.decode(token).in_org(org_id)
-        except Exception:  # noqa: BLE001 -- fail closed: an undecodable token is in no org
-            return False
+    def has_role(self, token: str, role: str) -> bool:
+        """Verify *token*, then check whether it carries *role*.
+
+        Returns ``False`` when the token does not verify.
+        """
+        claims = self._verified(token)
+        return claims is not None and claims.hasRole(role)
+
+    def in_group(self, token: str, group_slug: str) -> bool:
+        """Verify *token*, then check whether it names membership in *group_slug*.
+
+        Returns ``False`` when the token does not verify.
+        """
+        claims = self._verified(token)
+        return claims is not None and claims.in_group(group_slug)
+
+    def in_org(self, token: str, org_id: str) -> bool:
+        """Verify *token*, then check whether it is scoped to *org_id*.
+
+        Returns ``False`` when the token does not verify.
+        """
+        claims = self._verified(token)
+        return claims is not None and claims.in_org(org_id)
 
     # ------------------------------------------------------------------
     # Permission delivery (HEA-921 — decision + introspection modes)
@@ -536,12 +562,14 @@ class HearthClient:
         1. Verify Ed25519 signature against cached JWKS keys.
         2. Verify ``exp`` claim (reject if expired).
         3. Verify ``iss`` matches the configured ``base_url`` (or *issuer_url*).
-        4. Verify ``aud`` contains *audience* (server SDKs only; skipped when None).
+        4. Verify ``aud`` contains the expected audience: *audience* when given,
+           else the client's ``audience`` (default ``"hearth"``). Always on.
         5. Verify ``nbf`` is not more than 5 s in the future.
         6. Verify ``iat`` is not more than 5 s in the future.
 
         :param token: Raw JWT string.
-        :param audience: Expected ``aud`` value.  When ``None``, audience is not checked.
+        :param audience: Expected ``aud`` value for this call.  When ``None`` or
+            empty, the client's configured ``audience`` is used.
         :param issuer_url: Expected ``iss`` value.  Defaults to ``base_url``.
         :returns: :class:`~hearth.claims.Claims` on success.
         :raises TokenInvalidError: Structural failure or bad signature.
@@ -575,19 +603,19 @@ class HearthClient:
 
         key = self._jwks_cache.get_key(str(header.get("kid") or ""))
         expected_iss = (issuer_url or self._base).rstrip("/")
+        expected_aud = audience or self._audience
 
-        # PyJWT checks the signature first, then exp, iss, aud (only when an
-        # audience is configured), nbf and iat, with the spec's clock-skew
-        # allowance. The except arms only map its errors onto the SDK taxonomy.
+        # PyJWT checks the signature first, then exp, iss, aud, nbf and iat,
+        # with the spec's clock-skew allowance. The except arms only map its
+        # errors onto the SDK taxonomy.
         try:
             payload: dict[str, Any] = jwt.decode(
                 token,
                 key=key,
                 algorithms=["EdDSA"],
                 issuer=expected_iss,
-                audience=audience,
+                audience=expected_aud,
                 leeway=_CLOCK_SKEW_SECONDS,
-                options={"verify_aud": audience is not None},
             )
         except jwt.ExpiredSignatureError as exc:
             raise TokenExpiredError(
@@ -600,7 +628,7 @@ class HearthClient:
             ) from exc
         except jwt.MissingRequiredClaimError as exc:
             if exc.claim == "aud":
-                raise TokenAudienceError(expected=str(audience), actual=[]) from exc
+                raise TokenAudienceError(expected=expected_aud, actual=[]) from exc
             if exc.claim == "iss":
                 raise TokenIssuerError(expected=expected_iss, actual="") from exc
             raise TokenInvalidError(str(exc)) from exc
@@ -610,7 +638,7 @@ class HearthClient:
         except jwt.InvalidAudienceError as exc:
             aud = _claims_after_decode(token).get("aud", [])
             raise TokenAudienceError(
-                expected=str(audience),
+                expected=expected_aud,
                 actual=[aud] if isinstance(aud, str) else list(aud),
             ) from exc
         except jwt.PyJWTError as exc:

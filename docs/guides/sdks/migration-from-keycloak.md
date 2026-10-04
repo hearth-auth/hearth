@@ -160,27 +160,30 @@ import {
 // Server-side token verification
 const client = new HearthClient({
   issuerUrl: "https://hearth.example.com",
-  clientId: "<client_id>",
+  audience: "https://api.example.com", // the `aud` your API accepts; default "hearth"
 });
 const claims = await client.verifyToken(accessToken);
 
-// Browser-side RBAC — access token stays in memory via createHearthAuth
-// Never store access tokens in localStorage or sessionStorage — see /docs/guides/browser-spa-tokens
+// Browser-side RBAC — access token stays in memory via createHearthAuth;
+// the refresh token goes to sessionStorage — see /docs/guides/browser-spa-tokens
 const apiClient = new HearthApiClient({ baseUrl: "https://hearth.example.com", realmId: "<realm_id>" });
 const auth = createHearthAuth(apiClient, {
   clientId:    "<client_id>",
   redirectUri: "https://myapp.example.com/callback",
+  hearthUrl:   "https://hearth.example.com",
+  realmSlug:   "<realm-slug>",
 });
 
-// RBAC — synchronous local checks from JWT claims
+// RBAC — each check verifies the token (cached JWKS), then reads its claims
 const hearth = createHearth({
-  baseUrl: "https://hearth.example.com",
-  realmId: "<realm_id>",
-  getToken: () => auth.getAccessToken(), // in-memory — never localStorage or sessionStorage
+  baseUrl:   "https://hearth.example.com",
+  realmId:   "<realm_id>",
+  issuerUrl: "https://hearth.example.com/realms/<realm-slug>",
+  getToken:  () => auth.getAccessToken(),
 });
 
-if (hearth.hasRole("admin")) { ... }
-if (hearth.hasPermission("billing.read")) { ... }
+if (await hearth.hasRole("admin")) { ... }
+if (await hearth.hasPermission("billing.read")) { ... }
 
 // Token refresh
 const legacyClient = new HearthApiClient({ baseUrl: "https://hearth.example.com", realmId: "<realm_id>" });
@@ -229,9 +232,10 @@ import "github.com/hearth-auth/hearth/sdks/go/hearth"
 
 client := hearth.NewClient("https://hearth.example.com", "<realm_id>",
     hearth.WithClientCredentials("<client_id>", ""),
+    hearth.WithAudience("https://api.example.com"), // the `aud` your API accepts; default "hearth"
 )
 
-// Validate token against JWKS (full Ed25519/EdDSA local verification)
+// Validate token against JWKS (full Ed25519/EdDSA local verification, `aud` included)
 claims, err := client.VerifyToken(ctx, token)
 if err != nil {
     // typed error: *hearth.TokenError
@@ -243,6 +247,14 @@ if client.HasRole(ctx, token, "admin") { ... }
 if client.HasPermission(ctx, token, "billing.read") { ... }
 ```
 
+:::note[Audience is not the client ID]
+Keycloak setups often put the client ID in `aud`. Every Hearth SDK checks an
+access token's `aud` against a configured audience instead: `"hearth"` by
+default, the audience Hearth mints when a client names no resource, or your
+API's resource URI when it is registered as a protected resource. The client
+ID is checked only on ID tokens.
+:::
+
 ### Authorization model translation
 
 Keycloak's UMA fine-grained authorization requires a network round-trip to the
@@ -251,8 +263,8 @@ the JWT at issuance time:
 
 | Keycloak pattern | Hearth equivalent |
 |-----------------|-------------------|
-| Realm role check via adapter | `hearth.hasRole("role")` or `HasRole(ctx, token, "role")` |
-| Resource role check | `hearth.hasPermission("resource.action")` |
+| Realm role check via adapter | `await hearth.hasRole("role")` or `client.HasRole(ctx, token, "role")` |
+| Resource role check | `await hearth.hasPermission("resource.action")` |
 | UMA policy enforcement point | Local JWT claim — no PEP needed |
 | `realm_access.roles[]` in token | `roles: string[]` claim |
 | `resource_access.<client>.roles[]` | `permissions: string[]` claim |

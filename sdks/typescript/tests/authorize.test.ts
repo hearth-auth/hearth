@@ -256,7 +256,7 @@ describe("requirePermission() — embedded mode", () => {
   }
 
   async function signJwt(claims: Record<string, unknown>): Promise<string> {
-    return new SignJWT({ sub: "user_1", ...claims })
+    return new SignJWT({ sub: "user_1", aud: "hearth", ...claims })
       .setProtectedHeader({ alg: "EdDSA", kid: KID })
       .setIssuedAt()
       .setIssuer(ISSUER)

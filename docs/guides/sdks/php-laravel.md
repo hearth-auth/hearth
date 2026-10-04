@@ -36,8 +36,11 @@ This writes `config/hearth.php` with all available configuration keys and their 
 
 ```env
 HEARTH_ISSUER_URL=https://hearth.example.com
-HEARTH_CLIENT_ID=<client_id>
+# The `aud` access tokens must carry. Default `hearth`; set your API's resource
+# URI if it is registered as a protected resource:
+# HEARTH_AUDIENCE=https://api.example.com
 # Only required for M2M (client_credentials) or introspection mode:
+# HEARTH_CLIENT_ID=<client_id>
 # HEARTH_CLIENT_SECRET=<client_secret>
 HEARTH_JWKS_TTL=3600
 HEARTH_REQUIRE_AUTH=true
@@ -48,7 +51,8 @@ All keys map directly to `config/hearth.php`:
 | `.env` variable | Config key | Default | Purpose |
 |---|---|---|---|
 | `HEARTH_ISSUER_URL` | `issuer_url` | `""` | Root URL of the Hearth instance |
-| `HEARTH_CLIENT_ID` | `client_id` | `null` | OAuth client ID for audience validation |
+| `HEARTH_AUDIENCE` | `audience` | `"hearth"` | Expected `aud` of every access token: this API's name, not the client ID. Always checked |
+| `HEARTH_CLIENT_ID` | `client_id` | `null` | OAuth client ID. Required for M2M flows or introspection mode |
 | `HEARTH_CLIENT_SECRET` | `client_secret` | `null` | Required for M2M flows or introspection mode |
 | `HEARTH_JWKS_TTL` | `jwks_ttl` | `300` | JWKS key cache lifetime in seconds |
 | `HEARTH_REQUIRE_AUTH` | `require_auth` | `true` | Return 401 when no Bearer token is present |
@@ -292,7 +296,7 @@ try {
 | `TokenExpiredException` | `exp` claim is in the past |
 | `TokenInvalidException` | Signature invalid or malformed JWT |
 | `TokenIssuerException` | `iss` does not match `HEARTH_ISSUER_URL` |
-| `TokenAudienceException` | `aud` does not match `HEARTH_CLIENT_ID` |
+| `TokenAudienceException` | `aud` does not contain `HEARTH_AUDIENCE` (default `hearth`) |
 | `JWKSFetchException` | JWKS endpoint unreachable or returned invalid data |
 | `ConfigurationException` | Missing required config key (e.g. `HEARTH_ISSUER_URL` empty) |
 

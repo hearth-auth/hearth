@@ -74,7 +74,7 @@ def _check_embedded(client: HearthClient | None, token: str, permission: str) ->
     """Verify the JWT, then check its ``permissions`` claim.
 
     *client* verifies the token end-to-end — Ed25519 signature against the
-    realm's cached JWKS, plus ``exp``, ``nbf`` and ``iss`` — before any claim is
+    realm's cached JWKS, plus ``exp``, ``nbf``, ``iss`` and ``aud`` — before any claim is
     read.  A token that does not verify grants nothing, and neither does a
     missing *client*: embedded mode has no way to verify without one, so it
     denies rather than falling back to trusting the payload.

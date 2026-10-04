@@ -59,7 +59,13 @@ def _jwks(x_b64: str, kid: str) -> dict:
 
 def _payload(permissions: list | None = None, **extra) -> dict:
     now = int(time.time())
-    body = {"sub": "user-abc", "iss": BASE_URL, "exp": now + 3600, "iat": now}
+    body = {
+        "sub": "user-abc",
+        "iss": BASE_URL,
+        "aud": "hearth",
+        "exp": now + 3600,
+        "iat": now,
+    }
     if permissions is not None:
         body["permissions"] = permissions
     body.update(extra)

@@ -1,11 +1,11 @@
 // Typed fetch wrapper that auto-attaches Authorization: Bearer <token>.
 
-import { getAccessToken } from "@hearth-auth/sdk";
+import { hearthAuth } from "./main.js";
 
 const API_BASE = (import.meta.env.VITE_API_URL as string) ?? "http://localhost:8421";
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const token = getAccessToken();
+  const token = hearthAuth.getAccessToken();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(init?.headers as Record<string, string> | undefined),

@@ -1,5 +1,6 @@
-import { decodeJwt } from "jose";
+import type { Claims } from "./claims.js";
 import { HearthApiClient } from "./client.js";
+import { HearthClient } from "./hearth-client.js";
 import { SessionVersionCache } from "./session-version-cache.js";
 import type { MePermissionsResponse, SessionVersionConfig } from "./types.js";
 
@@ -10,11 +11,22 @@ export interface HearthOptions {
   /** Realm ID to scope all requests to. */
   realmId: string;
   /**
-   * Called synchronously on every `hasPermission` / `hasRole` /
-   * `inGroup` / `inOrg` check. Return `null`/`undefined` when the
-   * caller is unauthenticated.
+   * The realm's issuer URL, e.g. `https://hearth.example.com/realms/acme`.
+   * Tokens are verified against the JWKS this issuer publishes, and their
+   * `iss` must equal it.
    */
-  getToken: () => string | null | undefined;
+  issuerUrl: string;
+  /**
+   * Expected `aud` of the token: the name of the API that checks it
+   * (RFC 9068 §4). Default `"hearth"`, the audience Hearth mints when a
+   * client names no resource. The check is always on.
+   */
+  audience?: string;
+  /**
+   * Called on every `hasPermission` / `hasRole` / `inGroup` / `inOrg`
+   * check. Return `null`/`undefined` when the caller is unauthenticated.
+   */
+  getToken: () => string | null | undefined | Promise<string | null | undefined>;
   /**
    * Optional session-version cache configuration (RFC HEA-930 § 13).
    *
@@ -46,42 +58,45 @@ export interface HearthHttpClient {
 /**
  * RBAC claim-oriented facade over the Hearth SDK.
  *
- * When `sessionVersions` is not configured all boolean predicates are
- * synchronous, lock-free, and decode the JWT returned by `getToken()` on
- * every call. No network traffic, no cache. When the token is absent or
- * malformed every predicate returns `false`.
+ * Every predicate verifies the token returned by `getToken()` before it
+ * reads a claim: the EdDSA signature against the realm JWKS (fetched once,
+ * then cached), plus `exp`, `nbf`, `iat`, `iss` and `aud`. A token that is
+ * absent or does not verify holds nothing, and the predicate resolves to
+ * `false`.
  *
  * When `sessionVersions.enabled` is `true`, the predicates additionally
- * validate the `sv` claim and may throw {@link SessionVersionRevokedError}
- * or {@link SessionVersionCacheStaleError} (see RFC HEA-930 § 8).
+ * validate the `sv` claim and may reject with
+ * {@link SessionVersionRevokedError} or {@link SessionVersionCacheStaleError}
+ * (see RFC HEA-930 § 8).
  */
 export interface HearthFacade {
   /**
-   * Returns `true` iff the JWT `permissions` claim contains `permission`.
+   * Resolves `true` iff the token verifies and its `permissions` claim
+   * contains `permission`.
    *
-   * May throw {@link SessionVersionRevokedError} or
+   * May reject with {@link SessionVersionRevokedError} or
    * {@link SessionVersionCacheStaleError} when session-version tracking
    * is enabled and the token's `sv` claim fails validation.
    */
-  hasPermission(permission: string): boolean;
+  hasPermission(permission: string): Promise<boolean>;
   /**
-   * Returns `true` iff the JWT `roles` claim contains `role`.
+   * Resolves `true` iff the token verifies and its `roles` claim contains `role`.
    *
-   * Same session-version throw semantics as {@link hasPermission}.
+   * Same session-version semantics as {@link hasPermission}.
    */
-  hasRole(role: string): boolean;
+  hasRole(role: string): Promise<boolean>;
   /**
-   * Returns `true` iff the JWT `groups` claim contains `group`.
+   * Resolves `true` iff the token verifies and its `groups` claim contains `group`.
    *
-   * Same session-version throw semantics as {@link hasPermission}.
+   * Same session-version semantics as {@link hasPermission}.
    */
-  inGroup(group: string): boolean;
+  inGroup(group: string): Promise<boolean>;
   /**
-   * Returns `true` iff the JWT `oid` claim equals `org`.
+   * Resolves `true` iff the token verifies and its `oid` claim equals `org`.
    *
-   * Same session-version throw semantics as {@link hasPermission}.
+   * Same session-version semantics as {@link hasPermission}.
    */
-  inOrg(org: string): boolean;
+  inOrg(org: string): Promise<boolean>;
   /**
    * Returns the age of the session-version cache in milliseconds.
    *
@@ -101,51 +116,27 @@ export interface HearthFacade {
   client: HearthHttpClient;
 }
 
-interface RbacJwtClaims {
-  permissions?: unknown;
-  roles?: unknown;
-  groups?: unknown;
-  oid?: unknown;
-  /** Session version — `u64` emitted when session_version.enabled=true. */
-  sv?: unknown;
-  /** Session ID — present on all session-bearing access tokens. */
-  sid?: unknown;
-}
-
-/**
- * Decode the middle JWT segment using `jose.decodeJwt`. Returns `null`
- * when the token is missing, malformed, or cannot be parsed as JSON.
- * Signature is NOT verified — the app trusts its own token.
- */
-function safeDecode(token: string | null | undefined): RbacJwtClaims | null {
-  if (!token || typeof token !== "string") return null;
-  try {
-    return decodeJwt(token) as RbacJwtClaims;
-  } catch {
-    return null;
-  }
-}
-
 function arrayContains(claim: unknown, value: string): boolean {
   return Array.isArray(claim) && claim.includes(value);
 }
 
 /** Extract the `sv` claim as `bigint`, or `undefined` if absent/non-numeric. */
-function extractSv(c: RbacJwtClaims): bigint | undefined {
-  if (c.sv === undefined || c.sv === null) return undefined;
-  if (typeof c.sv === "number") return BigInt(Math.trunc(c.sv));
-  if (typeof c.sv === "bigint") return c.sv;
+function extractSv(c: Claims): bigint | undefined {
+  const sv = c.get("sv");
+  if (typeof sv === "number") return BigInt(Math.trunc(sv));
+  if (typeof sv === "bigint") return sv;
   return undefined;
 }
 
 /** Extract the `sid` claim as `string`, or `undefined` if absent. */
-function extractSid(c: RbacJwtClaims): string | undefined {
-  return typeof c.sid === "string" ? c.sid : undefined;
+function extractSid(c: Claims): string | undefined {
+  const sid = c.get("sid");
+  return typeof sid === "string" ? sid : undefined;
 }
 
 /**
- * Create a {@link HearthFacade} over the RBAC claim set embedded in the
- * JWT returned by `opts.getToken()`.
+ * Create a {@link HearthFacade} over the RBAC claims of the token returned
+ * by `opts.getToken()`. Each check verifies that token first.
  *
  * When `opts.sessionVersions.enabled` is `true` the facade additionally
  * starts a background session-version poll loop. Call `facade.stop()` to
@@ -156,6 +147,8 @@ export function createHearth(opts: HearthOptions): HearthFacade {
     baseUrl: opts.baseUrl,
     realmId: opts.realmId,
   });
+  // Discovery and the JWKS are fetched on the first check and cached.
+  const verifier = new HearthClient({ issuerUrl: opts.issuerUrl, audience: opts.audience });
 
   let svCache: SessionVersionCache | null = null;
   if (opts.sessionVersions?.enabled) {
@@ -163,41 +156,41 @@ export function createHearth(opts: HearthOptions): HearthFacade {
     svCache.start();
   }
 
-  function claims(): RbacJwtClaims | null {
-    return safeDecode(opts.getToken());
-  }
-
-  /** Runs the sv check; throws on revoked or stale. No-op when sv absent. */
-  function assertSv(c: RbacJwtClaims): void {
-    if (svCache !== null) {
-      svCache.validateSv(extractSv(c), extractSid(c));
+  /**
+   * The verified claims of the current token, or `null` when there is no
+   * token or it does not verify. Runs the `sv` check on verified claims; that
+   * check throws on a revoked or stale session.
+   */
+  async function verifiedClaims(): Promise<Claims | null> {
+    const token = await opts.getToken();
+    if (!token || typeof token !== "string") return null;
+    let claims: Claims;
+    try {
+      claims = await verifier.verifyToken(token);
+    } catch {
+      return null;
     }
+    svCache?.validateSv(extractSv(claims), extractSid(claims));
+    return claims;
   }
 
   return {
-    hasPermission(permission: string): boolean {
-      const c = claims();
-      if (c === null) return false;
-      assertSv(c);
-      return arrayContains(c.permissions, permission);
+    async hasPermission(permission: string): Promise<boolean> {
+      const c = await verifiedClaims();
+      return c !== null && arrayContains(c.get("permissions"), permission);
     },
-    hasRole(role: string): boolean {
-      const c = claims();
-      if (c === null) return false;
-      assertSv(c);
-      return arrayContains(c.roles, role);
+    async hasRole(role: string): Promise<boolean> {
+      const c = await verifiedClaims();
+      return c !== null && arrayContains(c.get("roles"), role);
     },
-    inGroup(group: string): boolean {
-      const c = claims();
-      if (c === null) return false;
-      assertSv(c);
-      return arrayContains(c.groups, group);
+    async inGroup(group: string): Promise<boolean> {
+      const c = await verifiedClaims();
+      return c !== null && arrayContains(c.get("groups"), group);
     },
-    inOrg(org: string): boolean {
-      const c = claims();
-      if (c === null) return false;
-      assertSv(c);
-      return typeof c.oid === "string" && c.oid === org;
+    async inOrg(org: string): Promise<boolean> {
+      const c = await verifiedClaims();
+      const oid = c?.get("oid");
+      return typeof oid === "string" && oid === org;
     },
     sessionVersionCacheAge(): number {
       return svCache?.age() ?? Number.POSITIVE_INFINITY;
@@ -206,12 +199,10 @@ export function createHearth(opts: HearthOptions): HearthFacade {
       svCache?.stop();
     },
     client: {
-      permissions(): Promise<MePermissionsResponse> {
-        const token = opts.getToken();
+      async permissions(): Promise<MePermissionsResponse> {
+        const token = await opts.getToken();
         if (!token) {
-          return Promise.reject(
-            new Error("getToken() returned no token; cannot call permissions()"),
-          );
+          throw new Error("getToken() returned no token; cannot call permissions()");
         }
         return http.permissions(token);
       },

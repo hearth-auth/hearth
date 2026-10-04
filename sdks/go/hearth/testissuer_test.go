@@ -71,7 +71,7 @@ func (ti *testIssuer) URL() string { return ti.server.URL }
 // client returns a Client wired to this issuer.
 func (ti *testIssuer) client() *Client { return NewClient(ti.server.URL, "r1") }
 
-// sign mints a properly signed EdDSA token. `iss` and `exp` are filled in when
+// sign mints a properly signed EdDSA token. `iss`, `aud` and `exp` are filled in when
 // the caller does not supply them, so callers only state the claims they care
 // about.
 func (ti *testIssuer) sign(t *testing.T, claims map[string]any) string {
@@ -85,6 +85,12 @@ func (ti *testIssuer) sign(t *testing.T, claims map[string]any) string {
 	}
 	if _, ok := body["exp"]; !ok {
 		body["exp"] = time.Now().Add(time.Hour).Unix()
+	}
+	// The SDK checks aud against DefaultAudience; a nil value drops the claim.
+	if aud, ok := body["aud"]; !ok {
+		body["aud"] = DefaultAudience
+	} else if aud == nil {
+		delete(body, "aud")
 	}
 
 	hb, err := json.Marshal(map[string]string{"alg": "EdDSA", "typ": "JWT", "kid": ti.kid})

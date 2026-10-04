@@ -27,6 +27,10 @@ type Client struct {
 	clientID     string
 	clientSecret string
 
+	// audience is the aud VerifyToken expects (RFC 9068 §4). Defaults to
+	// DefaultAudience; WithAudience sets an API's resource URI.
+	audience string
+
 	// jwksTTL overrides the default JWKS cache TTL.
 	jwksTTL time.Duration
 
@@ -63,6 +67,23 @@ func WithClientCredentials(clientID, clientSecret string) ClientOption {
 	return func(c *Client) {
 		c.clientID = clientID
 		c.clientSecret = clientSecret
+	}
+}
+
+// DefaultAudience is the audience Hearth mints in an access token when the
+// client names no resource. VerifyToken checks aud against it unless the
+// client is configured with WithAudience.
+const DefaultAudience = "hearth"
+
+// WithAudience sets the aud VerifyToken expects: the name of the API that
+// verifies the token (RFC 9068 §4). An API registered as a protected resource
+// sets its resource URI. The audience check is always on; an empty value keeps
+// DefaultAudience.
+func WithAudience(audience string) ClientOption {
+	return func(c *Client) {
+		if audience != "" {
+			c.audience = audience
+		}
 	}
 }
 
@@ -106,9 +127,10 @@ func (c *Client) setRealmHeader(req *http.Request) {
 // and are applied in order after the client struct is initialised.
 func NewClient(baseURL, realmID string, opts ...ClientOption) *Client {
 	c := &Client{
-		baseURL: baseURL,
-		realmID: realmID,
-		http:    &http.Client{},
+		baseURL:  baseURL,
+		realmID:  realmID,
+		http:     &http.Client{},
+		audience: DefaultAudience,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -273,7 +295,7 @@ func contains(haystack []string, needle string) bool {
 }
 
 // verifiedClaims verifies token end-to-end via VerifyToken — EdDSA signature
-// against the issuer's JWKS, plus exp, nbf, iat and iss — and only then returns
+// against the issuer's JWKS, plus exp, nbf, iat, iss and aud — and only then returns
 // the RBAC subset of the (now authenticated) payload.
 //
 // Returns nil when verification fails for any reason, so every caller is

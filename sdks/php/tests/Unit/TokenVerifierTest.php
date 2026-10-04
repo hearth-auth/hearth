@@ -171,7 +171,7 @@ final class TokenVerifierTest extends TestCase
         $this->setUpJwksForKey();
         $token = $this->makeToken($this->validClaims(['iat' => time() + 60]));
 
-        $this->expectException(TokenInvalidException::class);
+        $this->expectException(TokenNotYetValidException::class);
         $this->verifier->verify($token);
     }
 
