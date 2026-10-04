@@ -159,6 +159,13 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
 - **Token exchange without an `actor_token` is attenuated to the client.** The exchanging client
   is the actor, and a client holds no RBAC permissions, so the delegated token's `permissions`
   are empty rather than the subject's.
+- **WebAuthn attestation policy: `require_prf` and `require_large_blob` are checked
+  independently.** Support for one no longer satisfies the other. PRF support is read from the
+  authenticator data (`prf`, or `hmac-secret`, its CTAP2 form); largeBlob support from the
+  client's `largeBlob.supported` output, which the registration-complete bodies
+  (`POST /webauthn/register/complete` and the browser passkey flows) now accept as
+  `client_extension_results`. The `/webauthn/register/*` and `/webauthn/auth/*` request bodies
+  refuse undeclared fields with `422`.
 
 ### Fixed
 - The cluster-mode startup warning no longer says writes to a follower fail with HTTP 500

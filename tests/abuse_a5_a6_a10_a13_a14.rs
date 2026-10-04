@@ -171,18 +171,39 @@ mod webauthn_helper {
         }
 
         /// Builds authenticator data with all-zero AAGUID and `include_credential = true`.
+        /// A non-empty `extensions` sets the ED flag and appends them as a CBOR
+        /// map `{ name: bool }`.
         #[allow(clippy::cast_possible_truncation)]
-        fn build_auth_data(&self) -> Vec<u8> {
+        fn build_auth_data(&self, extensions: &[(&str, bool)]) -> Vec<u8> {
             let rp_id_hash = ring::digest::digest(&ring::digest::SHA256, self.rp_id.as_bytes());
             let mut data = Vec::new();
             data.extend_from_slice(rp_id_hash.as_ref());
-            data.push(0x41u8); // UP flag + AT flag
+            // UP flag + AT flag, + ED flag when extensions follow.
+            data.push(if extensions.is_empty() {
+                0x41u8
+            } else {
+                0xC1u8
+            });
             data.extend_from_slice(&0u32.to_be_bytes()); // sign count = 0
             data.extend_from_slice(&[0u8; 16]); // all-zero AAGUID
             let cred_id_len = self.credential_id.len() as u16;
             data.extend_from_slice(&cred_id_len.to_be_bytes());
             data.extend_from_slice(&self.credential_id);
             data.extend_from_slice(&self.cose_public_key());
+            if !extensions.is_empty() {
+                let map = ciborium::Value::Map(
+                    extensions
+                        .iter()
+                        .map(|(k, v)| {
+                            (
+                                ciborium::Value::Text((*k).to_string()),
+                                ciborium::Value::Bool(*v),
+                            )
+                        })
+                        .collect(),
+                );
+                ciborium::into_writer(&map, &mut data).expect("encode extensions");
+            }
             data
         }
 
@@ -192,6 +213,17 @@ mod webauthn_helper {
             challenge: &[u8],
             origin: &str,
         ) -> (Vec<u8>, Vec<u8>) {
+            self.build_registration_response_with_extensions(challenge, origin, &[])
+        }
+
+        /// As [`Self::build_registration_response`], with authenticator
+        /// extension outputs in the authenticator data.
+        pub fn build_registration_response_with_extensions(
+            &self,
+            challenge: &[u8],
+            origin: &str,
+            extensions: &[(&str, bool)],
+        ) -> (Vec<u8>, Vec<u8>) {
             let challenge_b64 = URL_SAFE_NO_PAD.encode(challenge);
             let client_data_json = serde_json::to_vec(&serde_json::json!({
                 "type": "webauthn.create",
@@ -200,7 +232,7 @@ mod webauthn_helper {
             }))
             .expect("serialize clientDataJSON");
 
-            let auth_data = self.build_auth_data();
+            let auth_data = self.build_auth_data(extensions);
             let att_obj = ciborium::Value::Map(vec![
                 (
                     ciborium::Value::Text("fmt".to_string()),
@@ -606,6 +638,7 @@ async fn a13_aaguid_not_in_allowlist_is_rejected() {
             &attestation_object,
             origin,
             false,
+            &Default::default(),
         )
         .expect_err("registration with AAGUID not in allowlist must fail");
 
@@ -697,12 +730,316 @@ async fn a13_none_attestation_rejected_when_not_allowed() {
             &attestation_object,
             origin,
             false,
+            &Default::default(),
         )
         .expect_err("'none' attestation must be rejected when allow_none = false");
 
     assert!(
         matches!(err, IdentityError::AttestationPolicyViolation { .. }),
         "expected AttestationPolicyViolation for 'none' attestation, got {err:?}"
+    );
+}
+
+/// Registers a mock credential in a fresh realm whose attestation policy sets
+/// `require_prf` / `require_large_blob`, with the given authenticator
+/// extension outputs and client extension results. Returns the result and
+/// the number of credentials the user holds afterwards.
+async fn a13_register_under_extension_policy(
+    require_prf: bool,
+    require_large_blob: bool,
+    authenticator_extensions: &[(&str, bool)],
+    client_extensions: &hearth::identity::ClientExtensionResults,
+) -> (Result<(), IdentityError>, usize) {
+    let harness = common::TestHarness::in_process()
+        .await
+        .expect("harness setup");
+    let realm_id = harness
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("a13-ext-{}", uuid::Uuid::new_v4()),
+            config: None,
+        })
+        .expect("create realm")
+        .id()
+        .clone();
+    harness
+        .identity()
+        .update_realm(
+            &realm_id,
+            &UpdateRealmRequest {
+                config: Some(RealmConfig {
+                    webauthn_attestation: Some(WebAuthnAttestationPolicy {
+                        allow_none: true,
+                        aaguid_allowlist: vec![],
+                        require_prf,
+                        require_large_blob,
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("update realm attestation policy");
+    let user = harness
+        .identity()
+        .create_user(
+            &realm_id,
+            &CreateUserRequest {
+                email: format!("a13-ext-{}@example.com", uuid::Uuid::new_v4()),
+                display_name: "A13 Extension User".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create user");
+
+    let origin = "https://example.com";
+    let rp_id = "example.com";
+    let authenticator = webauthn_helper::MockAuthenticator::new(rp_id);
+    let challenge = harness
+        .identity()
+        .start_webauthn_registration(
+            &realm_id,
+            user.id(),
+            &RegistrationOptions {
+                rp_id: rp_id.to_string(),
+                discoverable: false,
+            },
+        )
+        .expect("start webauthn registration");
+    let (client_data_json, attestation_object) = authenticator
+        .build_registration_response_with_extensions(&challenge, origin, authenticator_extensions);
+
+    let result = harness
+        .identity()
+        .complete_webauthn_registration(
+            &realm_id,
+            user.id(),
+            &client_data_json,
+            &attestation_object,
+            origin,
+            false,
+            client_extensions,
+        )
+        .map(|_| ());
+    let stored = harness
+        .identity()
+        .list_webauthn_credentials(&realm_id, user.id())
+        .expect("list credentials")
+        .len();
+    (result, stored)
+}
+
+fn large_blob_supported(supported: bool) -> hearth::identity::ClientExtensionResults {
+    hearth::identity::ClientExtensionResults {
+        large_blob: Some(hearth::identity::LargeBlobOutputs {
+            supported: Some(supported),
+        }),
+    }
+}
+
+fn assert_policy_refused(result: (Result<(), IdentityError>, usize), case: &str) {
+    let (result, stored) = result;
+    assert!(
+        matches!(
+            result,
+            Err(IdentityError::AttestationPolicyViolation { .. })
+        ),
+        "{case}: expected AttestationPolicyViolation, got {result:?}"
+    );
+    assert_eq!(stored, 0, "{case}: no credential may be stored");
+}
+
+fn assert_policy_accepted(result: (Result<(), IdentityError>, usize), case: &str) {
+    let (result, stored) = result;
+    assert!(
+        matches!(result, Ok(())),
+        "{case}: expected the credential to register, got {result:?}"
+    );
+    assert_eq!(stored, 1, "{case}: the credential is stored");
+}
+
+/// A-13: `require_prf` is not satisfied by largeBlob support.
+#[tokio::test]
+async fn a13_require_prf_refuses_an_authenticator_reporting_only_large_blob() {
+    assert_policy_refused(
+        a13_register_under_extension_policy(
+            true,
+            false,
+            &[("largeBlob", true)],
+            &large_blob_supported(true),
+        )
+        .await,
+        "largeBlob only",
+    );
+    assert_policy_refused(
+        a13_register_under_extension_policy(true, false, &[], &Default::default()).await,
+        "no extension at all",
+    );
+}
+
+/// A-13: `hmac-secret` in the authenticator data (the CTAP2 form of PRF)
+/// satisfies `require_prf`.
+#[tokio::test]
+async fn a13_require_prf_accepts_hmac_secret() {
+    assert_policy_accepted(
+        a13_register_under_extension_policy(
+            true,
+            false,
+            &[("hmac-secret", true)],
+            &Default::default(),
+        )
+        .await,
+        "hmac-secret",
+    );
+}
+
+/// A-13: `require_large_blob` reads the client's `largeBlob.supported`
+/// output, and PRF support does not satisfy it.
+#[tokio::test]
+async fn a13_require_large_blob_reads_client_extension_results() {
+    assert_policy_refused(
+        a13_register_under_extension_policy(
+            false,
+            true,
+            &[("hmac-secret", true)],
+            &Default::default(),
+        )
+        .await,
+        "PRF only",
+    );
+    assert_policy_refused(
+        a13_register_under_extension_policy(false, true, &[], &large_blob_supported(false)).await,
+        "largeBlob.supported = false",
+    );
+    assert_policy_accepted(
+        a13_register_under_extension_policy(false, true, &[], &large_blob_supported(true)).await,
+        "largeBlob.supported = true",
+    );
+}
+
+/// The WebAuthn ceremony bodies refuse fields they do not declare (`422`),
+/// while a body with only declared fields — `client_extension_results`
+/// included — gets past body parsing.
+#[tokio::test]
+async fn webauthn_bodies_refuse_unknown_fields() {
+    let harness = common::TestHarness::in_process()
+        .await
+        .expect("harness setup");
+    let realm_id = harness
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("wb-body-{}", uuid::Uuid::new_v4()),
+            config: None,
+        })
+        .expect("create realm")
+        .id()
+        .clone();
+    let app = router(Arc::new(AppState::new(
+        harness.identity_arc(),
+        harness.rbac_arc(),
+        harness.audit_arc(),
+    )));
+
+    let post = |path: &str, body: serde_json::Value| {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json")
+            .header("x-realm-id", realm_id.as_uuid().to_string())
+            .body(Body::from(body.to_string()))
+            .expect("build request");
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                51234,
+            ))));
+        req
+    };
+
+    let cases = [
+        (
+            "/webauthn/register/begin",
+            serde_json::json!({ "discoverable": true, "password": "pw" }),
+        ),
+        (
+            "/webauthn/register/complete",
+            serde_json::json!({
+                "client_data_json": "e30",
+                "attestation_object": "oA",
+                "origin": "https://example.com",
+                "client_extension_results": { "largeBlob": { "supported": true } },
+            }),
+        ),
+        ("/webauthn/auth/begin", serde_json::json!({})),
+        (
+            "/webauthn/auth/complete",
+            serde_json::json!({
+                "credential_id": "AA",
+                "client_data_json": "e30",
+                "authenticator_data": "AA",
+                "signature": "AA",
+                "origin": "https://example.com",
+            }),
+        ),
+    ];
+    for (path, declared) in cases {
+        let control = app
+            .clone()
+            .oneshot(post(path, declared.clone()))
+            .await
+            .expect("request");
+        assert_ne!(
+            control.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{path}: a body with only declared fields must parse"
+        );
+
+        let mut undeclared = declared;
+        undeclared
+            .as_object_mut()
+            .expect("object body")
+            .insert("undeclared_field".to_string(), serde_json::json!("x"));
+        let refused = app
+            .clone()
+            .oneshot(post(path, undeclared))
+            .await
+            .expect("request");
+        assert_eq!(
+            refused.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{path}: an undeclared field must be refused"
+        );
+    }
+}
+
+/// A-13: with both required, each is checked on its own.
+#[tokio::test]
+async fn a13_require_prf_and_large_blob_are_independent() {
+    assert_policy_refused(
+        a13_register_under_extension_policy(
+            true,
+            true,
+            &[("hmac-secret", true)],
+            &Default::default(),
+        )
+        .await,
+        "PRF without largeBlob",
+    );
+    assert_policy_refused(
+        a13_register_under_extension_policy(true, true, &[], &large_blob_supported(true)).await,
+        "largeBlob without PRF",
+    );
+    assert_policy_accepted(
+        a13_register_under_extension_policy(
+            true,
+            true,
+            &[("hmac-secret", true)],
+            &large_blob_supported(true),
+        )
+        .await,
+        "both",
     );
 }
 

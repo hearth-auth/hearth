@@ -473,7 +473,15 @@ async fn web_enrolment_with_an_existing_passkey_assertion_is_allowed() {
         .expect("start registration");
     let (cdj, att) = authenticator.registration(&challenge, TEST_ORIGIN);
     rig.identity
-        .complete_webauthn_registration(&rig.realm_id, &rig.user_id, &cdj, &att, TEST_ORIGIN, true)
+        .complete_webauthn_registration(
+            &rig.realm_id,
+            &rig.user_id,
+            &cdj,
+            &att,
+            TEST_ORIGIN,
+            true,
+            &Default::default(),
+        )
         .expect("complete registration");
 
     // Step-up assertion challenge for that credential.
@@ -879,7 +887,15 @@ fn enrol_web_passkey(rig: &WebRig) -> TestAuthenticator {
         .expect("start registration");
     let (cdj, att) = authenticator.registration(&challenge, TEST_ORIGIN);
     rig.identity
-        .complete_webauthn_registration(&rig.realm_id, &rig.user_id, &cdj, &att, TEST_ORIGIN, true)
+        .complete_webauthn_registration(
+            &rig.realm_id,
+            &rig.user_id,
+            &cdj,
+            &att,
+            TEST_ORIGIN,
+            true,
+            &Default::default(),
+        )
         .expect("complete registration");
     authenticator
 }

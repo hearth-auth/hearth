@@ -1230,6 +1230,10 @@ pub struct PasskeyRegisterCompleteBody {
     /// User-supplied name for this credential (e.g. "MacBook Touch ID").
     #[serde(default)]
     pub name: Option<String>,
+    /// The credential's `getClientExtensionResults()`; the realm's
+    /// attestation policy reads `largeBlob.supported` from it.
+    #[serde(default)]
+    pub client_extension_results: crate::identity::ClientExtensionResults,
 }
 
 /// `POST /ui/account/passkeys/register-complete` — completes the
@@ -1265,6 +1269,7 @@ pub async fn passkey_register_complete(
         &attestation_object,
         &origin,
         true, // discoverable
+        &body.client_extension_results,
     ) {
         Ok(cred) => {
             // Apply user-supplied name if provided.

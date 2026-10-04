@@ -277,6 +277,10 @@ pub struct PasskeyRegistrationBody {
     pub client_data_json: String,
     /// Base64url `attestationObject` from the authenticator.
     pub attestation_object: String,
+    /// The credential's `getClientExtensionResults()`; the realm's
+    /// attestation policy reads `largeBlob.supported` from it.
+    #[serde(default)]
+    pub client_extension_results: crate::identity::ClientExtensionResults,
 }
 
 /// `POST /required-action/enroll-mfa/passkey/complete` — verifies and stores
@@ -329,6 +333,7 @@ pub async fn passkey_complete(
         &attestation_object,
         &origin,
         true,
+        &body.client_extension_results,
     ) {
         tracing::warn!(error = %e, "ra passkey_complete: registration refused");
         return (StatusCode::BAD_REQUEST, "Registration failed").into_response();

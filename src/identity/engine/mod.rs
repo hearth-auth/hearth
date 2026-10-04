@@ -6564,6 +6564,7 @@ impl EmbeddedIdentityEngine {
         attestation_object: &[u8],
         origin: &str,
         discoverable: bool,
+        client_extensions: &webauthn::ClientExtensionResults,
         require_uv: bool,
     ) -> Result<WebAuthnCredentialInfo, IdentityError> {
         // Archival is a freeze: refuse mutations on a non-active realm
@@ -6638,6 +6639,7 @@ impl EmbeddedIdentityEngine {
             origin,
             now,
             attestation_policy.as_ref(),
+            client_extensions,
         )?;
 
         // Set discoverable from caller's request
@@ -10714,6 +10716,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         attestation_object: &[u8],
         origin: &str,
         discoverable: bool,
+        client_extensions: &webauthn::ClientExtensionResults,
     ) -> Result<WebAuthnCredentialInfo, IdentityError> {
         let require_uv = self.realm_requires_user_verification(realm_id);
         self.complete_webauthn_registration_inner(
@@ -10723,6 +10726,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             attestation_object,
             origin,
             discoverable,
+            client_extensions,
             require_uv,
         )
     }
@@ -10735,6 +10739,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         attestation_object: &[u8],
         origin: &str,
         discoverable: bool,
+        client_extensions: &webauthn::ClientExtensionResults,
     ) -> Result<WebAuthnCredentialInfo, IdentityError> {
         self.complete_webauthn_registration_inner(
             realm_id,
@@ -10743,6 +10748,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             attestation_object,
             origin,
             discoverable,
+            client_extensions,
             true,
         )
     }

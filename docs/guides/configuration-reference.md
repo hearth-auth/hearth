@@ -1244,8 +1244,8 @@ WebAuthn attestation policy for the realm (A-13). When absent, any authenticator
 |-------|------|---------|-------------|
 | `allow_none` | bool | `true` | Whether attestation format `"none"` is accepted. When `false`, platform and cross-platform authenticators that omit attestation are rejected at registration. Most consumer authenticators (Touch ID, Face ID, Android) send `"none"` — only set `false` in environments where authenticator provenance is a hard requirement. |
 | `aaguid_allowlist` | list of strings | `[]` | Allowlist of authenticator AAGUID values in lowercase UUID format (e.g. `"aaguid-value-here"`). When non-empty, only authenticators whose AAGUID matches an entry in this list may register. An empty list (the default) accepts any AAGUID. |
-| `require_prf` | bool | `false` | Require the `prf` WebAuthn extension. Reject authenticators that do not support PRF. |
-| `require_large_blob` | bool | `false` | Require the `largeBlob` WebAuthn extension. Reject authenticators that do not support large blob storage. |
+| `require_prf` | bool | `false` | Require the `prf` WebAuthn extension. Reject authenticators that do not support PRF. Support is read from the authenticator data (`prf`, or `hmac-secret: true`, its CTAP2 form). Checked independently of `require_large_blob`. |
+| `require_large_blob` | bool | `false` | Require the `largeBlob` WebAuthn extension. Reject authenticators that do not support large blob storage. Support is read from the client's `largeBlob.supported` extension output, sent as `client_extension_results` with the registration. Checked independently of `require_prf`. |
 
 ```yaml
 realms:

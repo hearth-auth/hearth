@@ -569,7 +569,8 @@ Content-Type: application/json
   "client_data_json": "<base64url>",
   "attestation_object": "<base64url>",
   "origin": "<ignored>",
-  "discoverable": false
+  "discoverable": false,
+  "client_extension_results": { "largeBlob": { "supported": true } }
 }
 ```
 
@@ -579,6 +580,9 @@ Content-Type: application/json
 | `attestation_object` | string | Yes | Base64url of `response.attestationObject` from the browser. |
 | `origin` | string | Yes | Accepted but ignored. Server pins origin from `oidc.issuer`. Pass any non-empty string for backward compatibility. |
 | `discoverable` | bool | No | Whether the credential is resident. Default: `false`. |
+| `client_extension_results` | object | No | The credential's `getClientExtensionResults()`. A realm whose attestation policy sets `require_large_blob` reads `largeBlob.supported` from it. Default: `{}`. |
+
+The body refuses fields it does not declare (`422`).
 
 **Response `200 OK`:**
 ```json
