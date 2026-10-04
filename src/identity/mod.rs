@@ -2521,7 +2521,7 @@ pub trait IdentityEngine: Send + Sync {
 
     /// Creates a new agent in the given realm.
     ///
-    /// Validates `display_name` (1–256 chars), `max_delegation_depth` (1–10),
+    /// Validates `display_name` (1–256 chars), `max_delegation_depth` (1 to the act-chain ceiling),
     /// and verifies that the owning user/organization exists in the realm.
     /// Persists the agent record and owner index atomically.
     fn create_agent(
@@ -2541,7 +2541,7 @@ pub trait IdentityEngine: Send + Sync {
     /// Updates mutable fields on an agent.
     ///
     /// Only non-`None` fields in the request are applied. Returns the
-    /// updated agent. Validates `max_delegation_depth` (1–10) when supplied.
+    /// updated agent. Validates `max_delegation_depth` (1 to the act-chain ceiling) when supplied.
     fn update_agent(
         &self,
         realm_id: &RealmId,

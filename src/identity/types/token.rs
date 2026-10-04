@@ -486,7 +486,7 @@ pub struct Agent {
     description: String,
     capabilities: Vec<String>,
     status: AgentStatus,
-    /// Maximum number of delegation hops this agent may initiate (1–10).
+    /// Maximum number of delegation hops this agent may initiate (1 to `security.max_act_chain_depth`).
     max_delegation_depth: u8,
     created_at: Timestamp,
     updated_at: Timestamp,
@@ -613,7 +613,7 @@ pub struct CreateAgentRequest {
     pub owner: AgentOwner,
     /// Declared capability URIs (informational; enforcement via RBAC).
     pub capabilities: Vec<String>,
-    /// Maximum number of delegation hops (1–10, default 1).
+    /// Maximum number of delegation hops (1 to `security.max_act_chain_depth`, default 1).
     pub max_delegation_depth: u8,
 }
 

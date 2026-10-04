@@ -1,5 +1,20 @@
 ## MODIFIED Requirements
 
+### Requirement: Every delegation hop attenuates
+Delegation depth MUST be bounded. A token exchange that would make the `act` chain deeper than the configured act-chain ceiling (`security.max_act_chain_depth`, default `3`), the ceiling that token validation also applies, MUST be refused with `invalid_grant`. When the actor is a registered agent, the bound is the lower of the ceiling and the agent's `max_delegation_depth`. Each hop MUST attenuate scope: the resulting token's scope MUST be a subset of the parent token's scope. Scope can only narrow, never widen. Each hop MUST attenuate lifetime: the resulting token's expiry MUST NOT exceed the parent token's expiry.
+
+#### Scenario: The depth ceiling is reached
+- **WHEN** a client exchanges a subject token whose `act` chain is already as deep as the act-chain ceiling
+- **THEN** the exchange is refused with `invalid_grant`
+
+#### Scenario: A hop asks for more scope
+- **WHEN** a hop requests a scope its parent token does not hold
+- **THEN** the issued token does not hold that scope, or the request is refused with `invalid_scope` when nothing is left
+
+#### Scenario: A hop cannot outlive its parent
+- **WHEN** a hop exchanges a parent token that expires in 30 seconds
+- **THEN** the issued token expires no later than the parent
+
 ### Requirement: Users can view and revoke agent delegations
 A signed-in user MUST be able to view and revoke their active delegations. Hearth SHALL list them at `GET /ui/consent/delegations` and revoke one with `POST /ui/consent/delegations/{delegation_id}/revoke`. Revoking a delegation MUST immediately invalidate every token issued under it.
 

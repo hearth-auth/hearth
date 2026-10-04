@@ -50,7 +50,7 @@ fn make_agent(h: &TestHarness, realm_id: &RealmId) -> hearth::core::AgentId {
                 description: None,
                 owner: AgentOwner::User(owner.id().clone()),
                 capabilities: vec![],
-                max_delegation_depth: 5,
+                max_delegation_depth: 3,
             },
             None,
         )

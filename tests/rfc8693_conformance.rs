@@ -141,10 +141,10 @@ fn act_chain_round_trip_from_fixture() {
             .unwrap_or_else(|e| panic!("{id}: deserialization failed: {e}"));
 
         assert_eq!(
-            claim.depth(),
+            claim.depth_up_to(32),
             expected_depth,
             "{id}: expected act chain depth {expected_depth}, got {}",
-            claim.depth()
+            claim.depth_up_to(32)
         );
 
         // Round-trip: serialize then deserialize and compare.
@@ -168,7 +168,7 @@ fn act_chain_depth1_no_inner_act() {
         val.get("act").is_none(),
         "depth-1 claim must omit the 'act' key"
     );
-    assert_eq!(claim.depth(), 1);
+    assert_eq!(claim.depth_up_to(32), 1);
 }
 
 /// ACT-02: depth-2 `act` claim has exactly one level of nesting.
@@ -188,7 +188,7 @@ fn act_chain_depth2_one_hop() {
         inner.get("act").is_none(),
         "inner should not have a nested act"
     );
-    assert_eq!(claim.depth(), 2);
+    assert_eq!(claim.depth_up_to(32), 2);
 }
 
 // ── Response required-field assertions ────────────────────────────────────────

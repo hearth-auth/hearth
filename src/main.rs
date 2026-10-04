@@ -1554,6 +1554,7 @@ async fn run_serve(
             rate_limit: rate_limit_config,
             reserved_slugs: reserved_slugs.clone(),
             slug_cooldown_secs,
+            max_act_chain_depth: config.security.max_act_chain_depth,
             key_encryption_key: storage_kek.clone(),
             ..IdentityConfig::default()
         }
@@ -1565,6 +1566,7 @@ async fn run_serve(
             rate_limit: rate_limit_config,
             reserved_slugs: reserved_slugs.clone(),
             slug_cooldown_secs,
+            max_act_chain_depth: config.security.max_act_chain_depth,
             key_encryption_key: storage_kek,
             ..IdentityConfig::default()
         }

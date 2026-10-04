@@ -518,6 +518,9 @@ pub struct IdentityConfig {
     /// entries continue to be read transparently and are re-encrypted on the
     /// next key rotation.
     pub key_encryption_key: Option<crate::identity::key_encryption::StorageKek>,
+    /// A-38: the deepest RFC 8693 `act` chain a token may carry, from
+    /// `security.max_act_chain_depth` (`1`–`32`, default `3`).
+    pub max_act_chain_depth: u8,
 }
 
 impl Default for IdentityConfig {
@@ -535,6 +538,7 @@ impl Default for IdentityConfig {
             reserved_slugs: Vec::new(),
             slug_cooldown_secs: 30 * 86_400,
             key_encryption_key: None,
+            max_act_chain_depth: 3,
         }
     }
 }
@@ -9627,10 +9631,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::InvalidToken);
         }
 
-        // A-38: reject tokens with deeply-nested `act` delegation chains.
-        // `act` is a typed field on TokenClaims; reading from `custom` was dead code.
+        // A-38: reject a token whose `act` chain is deeper than the configured
+        // ceiling. The count stops one link past it, so a long chain costs no
+        // more than a short one.
         if let Some(act) = &claims.act {
-            if act.depth() > crate::abuse::MAX_ACT_CHAIN_DEPTH {
+            let ceiling = usize::from(self.config.max_act_chain_depth);
+            if act.depth_up_to(ceiling) > ceiling {
                 return Err(IdentityError::InvalidToken);
             }
         }
@@ -15697,15 +15703,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             });
         }
 
-        // Validate max_delegation_depth: 1–10
-        if request.max_delegation_depth == 0 || request.max_delegation_depth > 10 {
-            return Err(IdentityError::InvalidInput {
-                reason: format!(
-                    "max_delegation_depth must be 1–10, got {}",
-                    request.max_delegation_depth
-                ),
-            });
-        }
+        self.check_delegation_depth(request.max_delegation_depth)?;
 
         // Validate description length
         if let Some(desc) = &request.description {
@@ -15859,11 +15857,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
 
         if let Some(depth) = request.max_delegation_depth {
-            if depth == 0 || depth > 10 {
-                return Err(IdentityError::InvalidInput {
-                    reason: format!("max_delegation_depth must be 1–10, got {depth}"),
-                });
-            }
+            self.check_delegation_depth(depth)?;
             agent.set_max_delegation_depth(depth);
         }
 
@@ -17791,7 +17785,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
 
         // 4. Delegation depth check.
-        let existing_depth = subject_claims.act.as_ref().map_or(0, |a| a.depth());
+        // The subject token passed `validate_token`, so its chain is within the
+        // ceiling and the bounded count is its exact depth.
+        let existing_depth = subject_claims.act.as_ref().map_or(0, |a| {
+            a.depth_up_to(usize::from(self.config.max_act_chain_depth))
+        });
         let new_depth = existing_depth + 1;
 
         // The effective ceiling is the minimum of:
@@ -17800,9 +17798,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         //       limit acts as a ceiling over all sub-delegations it allows.
         // This prevents an intermediate agent with a loose limit from
         // extending a chain beyond what the original delegator permitted.
-        let actor_ceiling = self
-            .resolve_agent_max_depth(realm_id, &actor_sub)?
-            .unwrap_or(crate::abuse::MAX_ACT_CHAIN_DEPTH as u8);
+        let actor_ceiling = self.actor_depth_ceiling(realm_id, &actor_sub)?;
         let chain_ceiling =
             self.chain_depth_ceiling(realm_id, subject_claims.act.as_ref(), actor_ceiling)?;
 
@@ -18216,8 +18212,7 @@ impl EmbeddedIdentityEngine {
     /// Resolves the `max_delegation_depth` for an actor subject string.
     ///
     /// Returns `Ok(None)` when the actor is not a registered agent in this
-    /// realm, signalling that the global ceiling (`MAX_ACT_CHAIN_DEPTH`)
-    /// applies.
+    /// realm, signalling that the configured act-chain ceiling applies.
     ///
     /// A-8: the storage read is propagated rather than swallowed with `.ok()?`.
     /// Answering `None` on an I/O fault meant "not a registered agent", which
@@ -18293,6 +18288,38 @@ impl EmbeddedIdentityEngine {
     /// `max_delegation_depth` found in the existing `act` chain. This
     /// prevents a loose-limit intermediate agent from extending a chain
     /// beyond what an earlier, stricter delegator permitted (L2).
+    /// The deepest chain a token exchanged by `actor_sub` may reach.
+    ///
+    /// A registered, active agent gets its own `max_delegation_depth`, capped
+    /// at the configured act-chain ceiling: a depth stored under a higher
+    /// ceiling is not trusted after the operator lowers it. Any other actor
+    /// gets the ceiling.
+    fn actor_depth_ceiling(
+        &self,
+        realm_id: &RealmId,
+        actor_sub: &str,
+    ) -> Result<u8, IdentityError> {
+        let ceiling = self.config.max_act_chain_depth;
+        Ok(self
+            .resolve_agent_max_depth(realm_id, actor_sub)?
+            .map_or(ceiling, |depth| depth.min(ceiling)))
+    }
+
+    /// Refuses an agent `max_delegation_depth` outside `1` to the configured
+    /// act-chain ceiling (`security.max_act_chain_depth`).
+    fn check_delegation_depth(&self, depth: u8) -> Result<(), IdentityError> {
+        let ceiling = self.config.max_act_chain_depth;
+        if depth == 0 || depth > ceiling {
+            return Err(IdentityError::InvalidInput {
+                reason: format!(
+                    "max_delegation_depth must be 1–{ceiling} \
+                     (security.max_act_chain_depth), got {depth}"
+                ),
+            });
+        }
+        Ok(())
+    }
+
     fn chain_depth_ceiling(
         &self,
         realm_id: &RealmId,
@@ -19019,6 +19046,9 @@ mod tests {
     /// Refresh-rotation family coverage, revocation lost-update races and the
     /// consent cascade (audit 2026-08-28 §4.16#2, #6, #7, #10, #11).
     mod refresh_races;
+
+    /// `security.max_act_chain_depth` bounds validation, exchange and agents.
+    mod act_chain_ceiling;
 
     /// Hot-path epoch reconciliation: debounced storage reads, bounded staleness.
     mod epoch_sync_debounce;
@@ -27328,76 +27358,6 @@ mod tests {
         );
     }
 
-    // A-38: typed ActClaim::depth() unit tests
-    //
-    // The hot-path guard now reads `claims.act` (typed field) and calls
-    // `act.depth()` directly. These tests verify `ActClaim::depth()` so that
-    // the guard and the chain-building code stay in sync.
-
-    #[test]
-    fn act_claim_depth_leaf_is_1() {
-        use crate::identity::tokens::ActClaim;
-        let leaf = ActClaim {
-            sub: "alice".to_string(),
-            act: None,
-        };
-        assert_eq!(leaf.depth(), 1);
-    }
-
-    #[test]
-    fn act_claim_depth_one_nested_is_2() {
-        use crate::identity::tokens::ActClaim;
-        let inner = ActClaim {
-            sub: "bob".to_string(),
-            act: None,
-        };
-        let outer = ActClaim {
-            sub: "alice".to_string(),
-            act: Some(Box::new(inner)),
-        };
-        assert_eq!(outer.depth(), 2);
-    }
-
-    #[test]
-    fn act_claim_depth_at_max_accepted() {
-        use crate::identity::tokens::ActClaim;
-        let max = crate::abuse::MAX_ACT_CHAIN_DEPTH;
-        let mut chain = ActClaim {
-            sub: "leaf".to_string(),
-            act: None,
-        };
-        for i in 0..(max - 1) {
-            chain = ActClaim {
-                sub: format!("a{i}"),
-                act: Some(Box::new(chain)),
-            };
-        }
-        assert_eq!(chain.depth(), max);
-        assert!(
-            chain.depth() <= max,
-            "depth-{max} chain must not exceed ceiling"
-        );
-    }
-
-    #[test]
-    fn act_claim_depth_over_max_exceeds_cap() {
-        use crate::identity::tokens::ActClaim;
-        let max = crate::abuse::MAX_ACT_CHAIN_DEPTH;
-        let mut chain = ActClaim {
-            sub: "leaf".to_string(),
-            act: None,
-        };
-        for i in 0..max {
-            chain = ActClaim {
-                sub: format!("a{i}"),
-                act: Some(Box::new(chain)),
-            };
-        }
-        let depth = chain.depth();
-        assert_eq!(depth, max + 1);
-        assert!(depth > max, "depth-{} chain should exceed the cap", max + 1);
-    }
-
     // L2 regression: chain_depth_ceiling uses the minimum of all prior agents' limits.
     //
     // A strict delegator (max_delegation_depth=2) in the act chain must cap all
@@ -27454,7 +27414,7 @@ mod tests {
         let (_dir, engine, _clock) = setup_engine();
         let realm = create_test_realm(&engine);
 
-        // Register agent A with a generous limit (max_delegation_depth = 10).
+        // Register agent A with a looser limit (max_delegation_depth = 3).
         let owner = create_test_user(&engine, &realm);
         let agent_a = engine
             .create_agent(
@@ -27464,7 +27424,7 @@ mod tests {
                     description: None,
                     owner: AgentOwner::User(owner.id().clone()),
                     capabilities: vec![],
-                    max_delegation_depth: 10,
+                    max_delegation_depth: 3,
                 },
                 None,
             )
@@ -27476,13 +27436,13 @@ mod tests {
             act: None,
         };
 
-        // New actor has a tighter ceiling (3) — that should be the result.
+        // New actor has a tighter ceiling (2) — that should be the result.
         let ceiling = engine
-            .chain_depth_ceiling(&realm, Some(&existing_act), 3)
+            .chain_depth_ceiling(&realm, Some(&existing_act), 2)
             .expect("chain ceiling");
         assert_eq!(
-            ceiling, 3,
-            "new actor ceiling (3) must win when it is stricter than the chain agent (10)"
+            ceiling, 2,
+            "new actor ceiling (2) must win when it is stricter than the chain agent (3)"
         );
     }
 
@@ -27524,7 +27484,7 @@ mod tests {
                         description: None,
                         owner: AgentOwner::User(owner.id().clone()),
                         capabilities: vec![],
-                        max_delegation_depth: 5,
+                        max_delegation_depth: 3,
                     },
                     None,
                 )
@@ -27616,7 +27576,7 @@ mod tests {
                     description: None,
                     owner: AgentOwner::User(owner.id().clone()),
                     capabilities: vec![],
-                    max_delegation_depth: 5,
+                    max_delegation_depth: 3,
                 },
                 None,
             )

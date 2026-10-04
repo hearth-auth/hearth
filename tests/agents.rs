@@ -405,7 +405,7 @@ async fn agent_max_delegation_depth_must_be_1_to_10() {
         "expected InvalidInput for depth=0, got {err:?}"
     );
 
-    // depth=11 should be rejected
+    // depth=4 is above the default act-chain ceiling of 3, so it is rejected
     let err2 = identity
         .create_agent(
             &realm_id,
@@ -414,14 +414,14 @@ async fn agent_max_delegation_depth_must_be_1_to_10() {
                 description: None,
                 owner: AgentOwner::User(user_id.clone()),
                 capabilities: vec![],
-                max_delegation_depth: 11,
+                max_delegation_depth: 4,
             },
             None,
         )
-        .expect_err("depth=11 should be invalid");
+        .expect_err("depth=4 should be invalid");
     assert!(
         matches!(err2, IdentityError::InvalidInput { .. }),
-        "expected InvalidInput for depth=11, got {err2:?}"
+        "expected InvalidInput for depth=4, got {err2:?}"
     );
 }
 

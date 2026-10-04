@@ -1013,6 +1013,15 @@ pub struct SecurityYaml {
     /// Default: `30`.
     #[serde(default = "SecurityYaml::default_slug_cooldown_days")]
     pub slug_cooldown_days: u32,
+    /// A-38: the deepest RFC 8693 `act` delegation chain a token may carry.
+    ///
+    /// Token validation refuses a deeper chain, and token exchange refuses to
+    /// build one. An agent's `max_delegation_depth` must not exceed it.
+    /// Range `1`–`32`, default `3`. The upper bound is a token-size limit,
+    /// not a policy: each link adds an `act` object, and past about 32 links a
+    /// delegated token can exceed common 8 KB request-header limits.
+    #[serde(default = "SecurityYaml::default_max_act_chain_depth")]
+    pub max_act_chain_depth: u8,
     /// A-10: Maximum JWKS / discovery requests per IP per second.
     ///
     /// Applies to all unauthenticated key-discovery endpoints:
@@ -1270,6 +1279,7 @@ impl std::fmt::Debug for SecurityYaml {
             .field("backup", &self.backup)
             .field("reserved_slugs", &self.reserved_slugs)
             .field("slug_cooldown_days", &self.slug_cooldown_days)
+            .field("max_act_chain_depth", &self.max_act_chain_depth)
             .field("jwks_rps_limit", &self.jwks_rps_limit)
             .field(
                 "key_encryption_key",
@@ -1434,6 +1444,7 @@ impl Default for SecurityYaml {
             backup: BackupSecurityYaml::default(),
             reserved_slugs: Self::default_reserved_slugs(),
             slug_cooldown_days: Self::default_slug_cooldown_days(),
+            max_act_chain_depth: Self::default_max_act_chain_depth(),
             jwks_rps_limit: Self::default_jwks_rps_limit(),
             key_encryption_key: None,
             password: PasswordSecurityYaml::default(),
@@ -1490,6 +1501,11 @@ impl SecurityYaml {
     /// Default slug cooldown in days (A-5).
     const fn default_slug_cooldown_days() -> u32 {
         30
+    }
+
+    /// Default act-chain ceiling: `3` (A-38).
+    const fn default_max_act_chain_depth() -> u8 {
+        3
     }
 
     /// Default dev-mode CSP `form-action` extra origins (HEA-2084).

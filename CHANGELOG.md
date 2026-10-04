@@ -17,6 +17,11 @@ libraries, admin clients generated from OpenAPI, one conformance harness for all
 testing, an external pentest). Hearth is not yet production-ready until the second one is done.
 
 ### Added
+- **`security.max_act_chain_depth`** — the deepest RFC 8693 `act` delegation chain a token may
+  carry. Default `3`, range `1`–`32`; a value outside the range fails config load. Token
+  validation and token exchange both read it, and an agent's `max_delegation_depth` must be from
+  `1` to this value. The bound of `32` keeps a delegated token under common 8 KB request-header
+  limits.
 - **Organization methods in every SDK's `AdminClient`** — list, create, get, update and delete
   organizations, and list, add and remove a member's extra organization roles
   (`/admin/organizations`, served since 3.0.0). TypeScript and Go: `listOrganizations` …
@@ -148,6 +153,11 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   token, ID token and PKCE state live in `sessionStorage` (the access token stays in memory),
   and the refresh and ID tokens earlier releases kept in `localStorage` are removed when the
   facade is created.
+- **The act-chain depth ceiling is now `3` by default, and one setting controls it.** Token
+  validation refuses a token whose `act` chain is deeper than `security.max_act_chain_depth`, and
+  stops reading the chain once it passes the ceiling. Token exchange applies the same ceiling. An
+  agent's `max_delegation_depth` above the ceiling is refused on create and update, and a stored
+  value above a later, lower ceiling is capped at the ceiling.
 - **`GET /admin/users/{id}/effective-permissions?org_id=` no longer reports a suspended
   organization's permissions.** The REST handler passed `org_id` straight to the resolver, so an
   administrator was shown org-scoped authority that tokens never carried; it now applies the
