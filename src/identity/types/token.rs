@@ -1041,7 +1041,10 @@ pub struct AatToolPermission {
 /// Issued by Hearth (typ: `"aat+jwt"`, signed with the realm key).
 /// Each derived child includes a reference back to its parent via
 /// `aat_parent` and the full ordered `aat_chain`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// Hearth stores the claims of every AAT it mints, and validation compares a
+/// presented token with that record, link by link.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct AatClaims {
     /// Token ID (UUID string). Used for revocation and chain references.
     pub jti: String,

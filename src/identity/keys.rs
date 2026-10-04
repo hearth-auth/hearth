@@ -2638,6 +2638,21 @@ pub(crate) fn aat_revoked_jti_scan_prefix() -> Vec<u8> {
     AAT_REVOKED_JTI_PREFIX.as_bytes().to_vec()
 }
 
+/// Prefix for the record of an AAT Hearth minted.
+///
+/// Format: `aat:rec:{jti}`; the value is the minted claims as JSON.
+const AAT_RECORD_PREFIX: &str = "aat:rec:";
+
+/// Storage key for the record of the AAT with `jti`.
+pub(crate) fn encode_aat_record(jti: &str) -> Vec<u8> {
+    format!("{AAT_RECORD_PREFIX}{jti}").into_bytes()
+}
+
+/// Returns the scan prefix for every AAT record in a realm (cleanup).
+pub(crate) fn aat_record_scan_prefix() -> Vec<u8> {
+    AAT_RECORD_PREFIX.as_bytes().to_vec()
+}
+
 // ── Phase D.3: Transaction token replay prevention ───────────────────────────
 
 /// Prefix for consumed transaction token entries.

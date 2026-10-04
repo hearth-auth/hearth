@@ -17,4 +17,4 @@
 
 ## 3. AAT chain validation
 
-- [ ] 3.1 Enforce: Validation checks every chain link. Test: scenario "Validation checks every chain link" (`src/identity/engine/tests/aat.rs`)
+- [x] 3.1 Enforce: Validation checks every chain link. Test: scenario "Validation checks every chain link" (`src/identity/engine/tests/aat_chain_links.rs`)

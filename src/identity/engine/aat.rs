@@ -7,6 +7,10 @@
 //! - Derivation enforces strict scope narrowing: child ⊆ parent.
 //! - Revocation is by JTI: any ancestor revocation invalidates descendants.
 //! - Chain depth is capped at 5 to limit validation cost.
+//! - Every minted AAT's claims are stored at `aat:rec:{jti}`. Validation
+//!   checks each chain link against its record, so a token is trusted only
+//!   as far as Hearth's own records of the chain go, not as far as its claims
+//!   say (delegation-chain-integrity design §3).
 
 use crate::audit::AuditAction;
 use crate::core::RealmId;
@@ -14,6 +18,7 @@ use crate::identity::tokens::verify_jwt_typed;
 use crate::identity::types::{
     AatClaims, AatResponse, AatToolPermission, DeriveAatRequest, IssueAatRequest,
 };
+
 use crate::identity::{keys, IdentityEngine, IdentityError};
 
 use super::EmbeddedIdentityEngine;
@@ -72,6 +77,7 @@ impl EmbeddedIdentityEngine {
             aat_chain: vec![jti.clone()],
         };
 
+        self.store_aat_record(realm_id, &claims)?;
         let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
         let aat = signing_key.sign_jwt(&claims, AAT_TYP)?;
 
@@ -141,6 +147,7 @@ impl EmbeddedIdentityEngine {
             aat_chain: chain,
         };
 
+        self.store_aat_record(realm_id, &claims)?;
         let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
         let aat = signing_key.sign_jwt(&claims, AAT_TYP)?;
 
@@ -191,11 +198,15 @@ impl EmbeddedIdentityEngine {
         // The agent named by `sub` must still be Active.
         require_active_subject_agent(self, realm_id, &claims.sub)?;
 
-        // Check revocation of this JTI and all ancestors in the chain.
+        check_chain_structure(&claims)?;
+
+        // Check revocation of this JTI and all ancestors in the chain, and
+        // read each link's record.
         //
         // A storage error here is NOT "not revoked": answering `Ok` on a failed
         // read would turn a transient I/O fault into a bypass of the revocation
         // blocklist. Propagate it and fail closed.
+        let mut records = Vec::with_capacity(claims.aat_chain.len());
         for jti in &claims.aat_chain {
             let rev_key = keys::encode_aat_revoked_jti(jti);
             if self
@@ -206,9 +217,40 @@ impl EmbeddedIdentityEngine {
             {
                 return Err(IdentityError::AatRevoked);
             }
+            records.push(self.load_aat_record(realm_id, jti)?);
         }
+        check_chain_records(&claims, &records)?;
 
         Ok(claims)
+    }
+
+    /// Stores the claims of an AAT Hearth is about to mint. A failed write
+    /// fails the mint: a token without a record could never validate.
+    fn store_aat_record(
+        &self,
+        realm_id: &RealmId,
+        claims: &AatClaims,
+    ) -> Result<(), IdentityError> {
+        let bytes = serde_json::to_vec(claims).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        self.storage
+            .put(realm_id, &keys::encode_aat_record(&claims.jti), &bytes)
+            .map_err(Self::storage_err)
+    }
+
+    /// Reads the record of a chain link. A link with no record is one this
+    /// realm never minted (or minted before records existed): the chain is
+    /// broken.
+    fn load_aat_record(&self, realm_id: &RealmId, jti: &str) -> Result<AatClaims, IdentityError> {
+        let bytes = self
+            .storage
+            .get(realm_id, &keys::encode_aat_record(jti))
+            .map_err(Self::storage_err)?
+            .ok_or_else(|| chain_broken("a chain link has no record"))?;
+        serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })
     }
 
     /// Marks an AAT JTI as revoked.
@@ -228,6 +270,63 @@ impl EmbeddedIdentityEngine {
         self.record_audit(realm_id, None, AuditAction::AatRevoked, "aat", jti)?;
         Ok(())
     }
+}
+
+fn chain_broken(reason: &str) -> IdentityError {
+    IdentityError::AatChainBroken {
+        reason: reason.to_string(),
+    }
+}
+
+/// Checks the shape of `aat_chain` and `aat_parent` against the token itself:
+/// the chain is 1 to `MAX_AAT_CHAIN_DEPTH` distinct links and ends with the
+/// token's own `jti`; `aat_parent` is absent for a root and is the link before
+/// the last for a child.
+fn check_chain_structure(claims: &AatClaims) -> Result<(), IdentityError> {
+    let chain = &claims.aat_chain;
+    if chain.is_empty() || chain.len() > MAX_AAT_CHAIN_DEPTH {
+        return Err(chain_broken("chain length out of range"));
+    }
+    if chain.last() != Some(&claims.jti) {
+        return Err(chain_broken("chain does not end with the token"));
+    }
+    if chain
+        .iter()
+        .enumerate()
+        .any(|(i, jti)| chain[..i].contains(jti))
+    {
+        return Err(chain_broken("chain repeats a link"));
+    }
+    let expected_parent = chain.len().checked_sub(2).map(|i| &chain[i]);
+    if claims.aat_parent.as_ref() != expected_parent {
+        return Err(chain_broken("parent is not the previous link"));
+    }
+    Ok(())
+}
+
+/// Checks the chain against the records Hearth wrote when it minted each
+/// link. `records[i]` is the record of `claims.aat_chain[i]`.
+///
+/// The token must equal its own record. Each record must name the links
+/// before it as its chain, and each link after the root must narrow its
+/// parent: tools by [`validate_tools_subset`], scopes by inclusion.
+fn check_chain_records(claims: &AatClaims, records: &[AatClaims]) -> Result<(), IdentityError> {
+    if records.last() != Some(claims) {
+        return Err(chain_broken("token does not match its record"));
+    }
+    for (i, record) in records.iter().enumerate() {
+        if record.aat_chain.as_slice() != &claims.aat_chain[..=i] {
+            return Err(chain_broken("a link's record names another chain"));
+        }
+        let Some(parent) = i.checked_sub(1).map(|p| &records[p]) else {
+            continue;
+        };
+        validate_tools_subset(&record.tools, &parent.tools)?;
+        if record.scope.iter().any(|s| !parent.scope.contains(s)) {
+            return Err(IdentityError::AatScopeEscalation);
+        }
+    }
+    Ok(())
 }
 
 /// Resolves the `sub` of an AAT to its agent record and requires it to be

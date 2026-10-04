@@ -165,6 +165,13 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   of its subject token fails with `invalid_grant` and leaves no live delegation behind, and a
   token exchange whose delegation record cannot be stored now fails instead of issuing a token
   that could not be revoked.
+- **AAT validation now checks every link of the attenuation chain.** Hearth stores the claims of
+  each AAT it issues or derives, and validation compares the presented token with that record.
+  `aat_chain` must end with the token's own `jti`, `aat_parent` must be the link before it, and
+  each link must narrow its parent's tools and scopes. AATs issued before this release have no
+  record and fail validation; they live at most one hour, so issue or derive a new one. A backup
+  restore does not carry the records, so AATs minted on the source fail on the target the same
+  way.
 - **`GET /admin/users/{id}/effective-permissions?org_id=` no longer reports a suspended
   organization's permissions.** The REST handler passed `org_id` straight to the resolver, so an
   administrator was shown org-scoped authority that tokens never carried; it now applies the

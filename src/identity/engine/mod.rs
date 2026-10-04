@@ -19063,6 +19063,8 @@ mod tests {
     /// consent cascade (audit 2026-08-28 §4.16#2, #6, #7, #10, #11).
     mod refresh_races;
 
+    /// AAT validation checks every chain link against its minted record.
+    mod aat_chain_links;
     /// `security.max_act_chain_depth` bounds validation, exchange and agents.
     mod act_chain_ceiling;
     /// A revoke racing an onward exchange cannot leave the onward token alive.

@@ -76,19 +76,19 @@ This change makes three rules hold:
 
 ### 3. AAT records
 
-- `issue_aat` and `derive_aat` store an `AatRecord` at `aat:rec:{jti}` before they return the
-  token: `sub`, `aud`, `exp`, `tools`, `scope`, `parent` and `chain`. A failed write fails the call.
+- `issue_aat` and `derive_aat` store the minted `AatClaims` at `aat:rec:{jti}` before they sign
+  the token. A failed write fails the call.
 - `parse_and_validate_aat`, after the signature, expiry, audience and agent checks:
   1. **Structure:** `aat_chain` is not empty, has no repeated `jti`, ends with the token's own
-     `jti`, and is at most `MAX_AAT_CHAIN_DEPTH + 1` long. `aat_parent` is `None` for a chain of
+     `jti`, and is at most `MAX_AAT_CHAIN_DEPTH` (5) links long. `aat_parent` is `None` for a chain of
      one, else it is the link before the last.
   2. **Records:** each `jti` in the chain has a record. The token's own record must equal the
-     presented claims (`sub`, `aud`, `exp`, `tools`, `scope`, `parent`, `chain`). Each record's
-     `parent` must be the link before it.
+     presented claims, field for field. Each record's `aat_chain` must be the chain up to and
+     including that link.
   3. **Narrowing:** for each link after the root, its tools pass `validate_tools_subset` against the
      previous link's record, and its scopes are a subset of the previous link's scopes.
   4. **Revocation:** unchanged. Every `jti` in the chain is checked against `aat:rev:`.
-- The records are read in the same loop as the revocation rows. The chain is at most 6 links, and
+- The records are read in the same loop as the revocation rows. The chain is at most 5 links, and
   AAT validation is not on the hot path.
 - The cleanup sweep deletes an `aat:rec:` row once its `exp` has passed.
 
