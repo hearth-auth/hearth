@@ -27711,6 +27711,157 @@ mod tests {
         );
     }
 
+    /// `decide` honours a revoked delegation (audit 2026-08-28 §4.19#5).
+    ///
+    /// Revoking a delegation projects its token's `jti` into the revocation
+    /// blocklist while the subject's session stays alive. A delegated token
+    /// carries only the actor ∩ subject permissions, and no issuance path
+    /// gives an actor permissions, so the test re-signs the issued delegated
+    /// token with one permission (same `jti`, `sid` and `act`) to make the
+    /// before/after observable: `decide` allows it, then denies it once the
+    /// delegation is revoked.
+    #[test]
+    #[allow(clippy::too_many_lines)] // role + session + exchange + before/after decisions
+    fn decide_denies_a_delegated_token_after_its_delegation_is_revoked() {
+        use crate::identity::oidc::DecidePermissionRequest;
+        use crate::identity::tokens::decode_claims_unverified;
+        use crate::identity::{Rfc8693Request, SessionContext, TokenIssuanceContext};
+        use crate::rbac::{AssignRoleRequest, CreateRoleRequest, Permission, Scope, Subject};
+        use std::collections::BTreeSet;
+
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+        let role = engine
+            .rbac
+            .create_role(
+                &realm,
+                &CreateRoleRequest {
+                    name: "tools.user".to_string(),
+                    description: None,
+                    permissions: vec![Permission::new("tools.invoke").expect("perm")],
+                    parent_roles: vec![],
+                    ..Default::default()
+                },
+            )
+            .expect("create role");
+        engine
+            .rbac
+            .assign_role(
+                &realm,
+                &AssignRoleRequest {
+                    subject: Subject::User(user.id().clone()),
+                    role_id: role.id,
+                    scope: Scope::Realm,
+                    assigned_by: None,
+                },
+            )
+            .expect("assign role");
+
+        let session = engine
+            .create_session(&realm, user.id(), &SessionContext::default())
+            .expect("create session");
+        let subject_token = engine
+            .issue_tokens_with_context(
+                &realm,
+                user.id(),
+                session.id(),
+                &TokenIssuanceContext {
+                    client_id: None,
+                    granted_scopes: BTreeSet::from(["mcp:tools:invoke".to_string()]),
+                    oid: None,
+                    resource: None,
+                    dpop_jkt: None,
+                },
+            )
+            .expect("issue subject token")
+            .access_token()
+            .to_string();
+        let client_id =
+            engine
+                .register_client(
+                    &realm,
+                    &crate::identity::RegisterClientRequest {
+                        client_name: "decide-revocation-exchanger".to_string(),
+                        redirect_uris: vec!["https://client.example.com/cb".to_string()],
+                        client_secret: Some("decide-revocation-secret!".to_string()),
+                        grant_types: vec![
+                            "urn:ietf:params:oauth:grant-type:token-exchange".to_string()
+                        ],
+                        require_consent: false,
+                        ..Default::default()
+                    },
+                )
+                .expect("register exchange client")
+                .client_id()
+                .clone();
+        let delegated = engine
+            .rfc8693_token_exchange(
+                &realm,
+                &Rfc8693Request {
+                    client_id,
+                    subject_token,
+                    subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
+                    actor_token: None,
+                    actor_token_type: None,
+                    requested_token_type: None,
+                    scope: Some("mcp:tools:invoke".to_string()),
+                    resource: None,
+                    audience: None,
+                    dpop_jkt: None,
+                },
+            )
+            .expect("token exchange")
+            .access_token;
+
+        let mut claims = decode_claims_unverified(&delegated).expect("decode delegated claims");
+        assert!(claims.act.is_some(), "the exchanged token is delegated");
+        claims.permissions = vec!["tools.invoke".to_string()];
+        let with_permission = engine
+            .get_signing_key_or_default(&realm)
+            .issue_token(&claims)
+            .expect("re-sign delegated token");
+        let decide = |token: &str| {
+            engine
+                .decide_token_permission(
+                    &realm,
+                    &DecidePermissionRequest {
+                        token: token.to_string(),
+                        permission: "tools.invoke".to_string(),
+                        organization_id: None,
+                        resource: None,
+                    },
+                )
+                .expect("decide")
+                .allowed
+        };
+        assert!(
+            decide(&with_permission),
+            "control: the delegated permission is allowed before revocation"
+        );
+
+        let user_sub = user.id().to_string();
+        let grants = engine
+            .list_delegation_grants(&realm, &user_sub)
+            .expect("list delegation grants");
+        assert_eq!(grants.len(), 1, "the exchange recorded one delegation");
+        engine
+            .revoke_delegation_grant(&realm, &grants[0].delegation_id, &user_sub)
+            .expect("revoke delegation");
+
+        assert!(
+            engine
+                .get_session(&realm, session.id())
+                .expect("get session")
+                .is_some(),
+            "the subject's session outlives the delegation"
+        );
+        assert!(
+            !decide(&with_permission),
+            "decide must deny a token whose delegation was revoked"
+        );
+    }
+
     // ===== DPoP storage tests (HEA-1410) =====
 
     #[test]
