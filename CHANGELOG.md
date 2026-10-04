@@ -144,6 +144,9 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   only the `oidc.issuer` host (any port) instead of every `Host`. The match ignores the port on
   both sides. `/healthz` and `/readyz` skip the check; `/health` and `/metrics` do not. A reverse
   proxy that rewrites `Host` must set `security.allowed_hosts`.
+- **`security.adaptive_backoff` now governs the `POST /ui/device` lockout.** The configured
+  schedule used to be ignored there in favour of the compiled default; `durations: []` keeps a
+  flat 1-minute lockout.
 
 ### Fixed
 - The cluster-mode startup warning no longer says writes to a follower fail with HTTP 500

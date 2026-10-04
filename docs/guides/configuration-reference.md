@@ -974,7 +974,7 @@ MFA is a plain per-realm policy (`mfa_required`).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `durations` | list of durations | `["1m", "5m", "30m", "24h"]` | Lockout applied to each successive offence. |
+| `durations` | list of durations | `["1m", "5m", "30m", "24h"]` | Lockout applied to each successive offence. Governs the `POST /ui/device` user-code guard (5 wrong codes per realm and user). `[]` turns escalation off and keeps a flat 1-minute lockout. |
 | `offense_cooldown` | duration | `"7d"` | How long a clean record must persist before the offence counter resets. |
 
 ---

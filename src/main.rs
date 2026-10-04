@@ -2723,6 +2723,10 @@ async fn run_serve(
     .with_default_realm(config.server.default_realm.clone())
     .with_config(Arc::new(config.clone()))
     .with_abuse_guards(Arc::clone(&abuse_guards))
+    // A-12: the `/ui/device` lockout follows `security.adaptive_backoff`.
+    .with_device_approval_guard(Arc::new(
+        hearth::abuse::runtime::build_device_approval_guard(&config.security),
+    ))
     .with_dev_mode(config.dev_mode);
 
     if !api_trusted_proxies.is_empty() {
