@@ -211,11 +211,17 @@ async fn reserved_and_in_use_emails_answer_the_same_body() {
     };
 
     // An address in use.
-    assert_eq!(create("in-use@example.com").await.unwrap().status(), 201);
+    assert_eq!(
+        create("in-use@example.com")
+            .await
+            .expect("request")
+            .status(),
+        201
+    );
     // A reserved address: its owner was created, then deleted.
-    let doomed = create("reserved@example.com").await.unwrap();
+    let doomed = create("reserved@example.com").await.expect("request");
     assert_eq!(doomed.status(), 201);
-    let doomed: Value = doomed.json().await.unwrap();
+    let doomed: Value = doomed.json().await.expect("request");
     let doomed_id = doomed["id"].as_str().expect("created user id").to_string();
     let deleted = client
         .delete(format!("{base}/admin/users/{doomed_id}"))
@@ -223,18 +229,18 @@ async fn reserved_and_in_use_emails_answer_the_same_body() {
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
-        .unwrap();
+        .expect("request");
     assert!(
         deleted.status().is_success(),
         "delete: {}",
         deleted.status()
     );
 
-    let in_use = create("in-use@example.com").await.unwrap();
-    let reserved = create("reserved@example.com").await.unwrap();
+    let in_use = create("in-use@example.com").await.expect("request");
+    let reserved = create("reserved@example.com").await.expect("request");
     let (in_use_status, reserved_status) = (in_use.status(), reserved.status());
-    let in_use_body = in_use.bytes().await.unwrap();
-    let reserved_body = reserved.bytes().await.unwrap();
+    let in_use_body = in_use.bytes().await.expect("request");
+    let reserved_body = reserved.bytes().await.expect("request");
 
     assert_eq!(in_use_status.as_u16(), 409);
     assert_eq!(
