@@ -191,6 +191,58 @@ impl ClientExtensionResults {
     }
 }
 
+/// The extension inputs a registration ceremony's creation options carry —
+/// the `extensions` member of `PublicKeyCredentialCreationOptions`.
+///
+/// Built from the realm's attestation policy, so that an authenticator that
+/// supports what the policy requires reports it: a browser implements `prf`
+/// with the CTAP2 `hmac-secret` extension and reports `largeBlob.supported`
+/// only when asked.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct RegistrationExtensionInputs {
+    /// `prf: {}` — asks the authenticator to enable PRF for the credential.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prf: Option<PrfInputs>,
+    /// `largeBlob: {support: "required"}`.
+    #[serde(rename = "largeBlob", skip_serializing_if = "Option::is_none")]
+    pub large_blob: Option<LargeBlobInputs>,
+}
+
+/// The `prf` registration input. Empty: no evaluation at registration.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct PrfInputs {}
+
+/// The `largeBlob` registration input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LargeBlobInputs {
+    /// `"required"` — the ceremony fails on an authenticator without it.
+    pub support: &'static str,
+}
+
+impl RegistrationExtensionInputs {
+    /// The inputs a realm's attestation policy requires: `prf` for
+    /// `require_prf`, `largeBlob` for `require_large_blob`, none without a
+    /// policy.
+    #[must_use]
+    pub fn for_policy(policy: Option<&crate::identity::WebAuthnAttestationPolicy>) -> Self {
+        let Some(p) = policy else {
+            return Self::default();
+        };
+        Self {
+            prf: p.require_prf.then_some(PrfInputs {}),
+            large_blob: p.require_large_blob.then_some(LargeBlobInputs {
+                support: "required",
+            }),
+        }
+    }
+
+    /// Whether no extension is requested (the `extensions` member is omitted).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.prf.is_none() && self.large_blob.is_none()
+    }
+}
+
 /// Options for starting a `WebAuthn` authentication ceremony.
 #[derive(Debug, Clone)]
 pub struct AuthenticationOptions {
@@ -3157,6 +3209,31 @@ mod tests {
         );
         register_under_extension_policy(true, true, &[("hmac-secret", true)], &large_blob(true))
             .expect("both satisfied");
+    }
+
+    #[test]
+    fn registration_extension_inputs_follow_the_policy() {
+        let policy = |require_prf, require_large_blob| crate::identity::WebAuthnAttestationPolicy {
+            allow_none: true,
+            aaguid_allowlist: vec![],
+            require_prf,
+            require_large_blob,
+        };
+        assert!(RegistrationExtensionInputs::for_policy(None).is_empty());
+        assert!(RegistrationExtensionInputs::for_policy(Some(&policy(false, false))).is_empty());
+        let json = |p| {
+            serde_json::to_value(RegistrationExtensionInputs::for_policy(Some(&p)))
+                .expect("serialize")
+        };
+        assert_eq!(json(policy(true, false)), serde_json::json!({ "prf": {} }));
+        assert_eq!(
+            json(policy(false, true)),
+            serde_json::json!({ "largeBlob": { "support": "required" } })
+        );
+        assert_eq!(
+            json(policy(true, true)),
+            serde_json::json!({ "prf": {}, "largeBlob": { "support": "required" } })
+        );
     }
 
     #[test]

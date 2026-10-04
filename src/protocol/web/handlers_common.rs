@@ -262,6 +262,31 @@ pub(crate) fn server_error() -> Response {
     )
 }
 
+/// Adds the `extensions` member the realm's attestation policy requires to
+/// a passkey registration's `PublicKeyCredentialCreationOptions` JSON, so the
+/// browser asks the authenticator for them. Adds nothing when the policy
+/// requires none or the realm cannot be read (the completion re-reads the
+/// policy and refuses what it does not meet).
+pub(crate) fn add_registration_extensions(
+    state: &super::WebState,
+    realm_id: &crate::core::RealmId,
+    options: &mut serde_json::Value,
+) {
+    let policy = state
+        .identity
+        .get_realm(realm_id)
+        .ok()
+        .flatten()
+        .and_then(|r| r.config().webauthn_attestation.clone());
+    let inputs = crate::identity::RegistrationExtensionInputs::for_policy(policy.as_ref());
+    if inputs.is_empty() {
+        return;
+    }
+    if let (Some(obj), Ok(value)) = (options.as_object_mut(), serde_json::to_value(&inputs)) {
+        obj.insert("extensions".to_string(), value);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Friendly form extractor
 // ---------------------------------------------------------------------------

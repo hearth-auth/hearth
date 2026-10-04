@@ -237,7 +237,7 @@ pub async fn passkey_begin(State(state): State<Arc<WebState>>, headers: HeaderMa
     };
     let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
     let challenge_b64 = b64.encode(&challenge);
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "challenge": challenge_b64,
         "rp": { "id": rp_id, "name": state.product_name },
         "user": {
@@ -255,6 +255,7 @@ pub async fn passkey_begin(State(state): State<Arc<WebState>>, headers: HeaderMa
         },
         "attestation": "none",
     });
+    handlers_common::add_registration_extensions(&state, &realm, &mut body);
     // INVARIANT: `pending_passkey_user` proved the RA cookie is present.
     let ra_token = read_ra_cookie(&headers).unwrap_or_default();
     let secure = state.is_secure_request(&headers);

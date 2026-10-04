@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::FormSecret;
 use crate::core::UserId;
-use crate::identity::ClientExtensionResults;
 use crate::identity::{verify_step_up, StepUpError};
+use crate::identity::{ClientExtensionResults, RegistrationExtensionInputs};
 use crate::protocol::client_info::PeerAddr;
 use crate::protocol::step_up::{StepUpAssertionBody, StepUpProofBody};
 
@@ -180,6 +180,10 @@ struct WbrBeginRes {
     user_display_name: String,
     attestation: String,
     timeout: u64,
+    /// The extensions the realm's attestation policy requires the
+    /// authenticator to report; omitted when it requires none.
+    #[serde(skip_serializing_if = "RegistrationExtensionInputs::is_empty")]
+    extensions: RegistrationExtensionInputs,
 }
 
 #[derive(Debug, Deserialize)]
@@ -324,6 +328,15 @@ async fn webauthn_register_begin(
                 user_display_name: user_id.to_string(),
                 attestation: "none".to_string(),
                 timeout: 60,
+                extensions: RegistrationExtensionInputs::for_policy(
+                    state
+                        .identity
+                        .get_realm(&realm_id)
+                        .ok()
+                        .flatten()
+                        .and_then(|r| r.config().webauthn_attestation.clone())
+                        .as_ref(),
+                ),
             }),
         )
             .into_response(),

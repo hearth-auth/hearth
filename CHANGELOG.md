@@ -166,6 +166,11 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   (`POST /webauthn/register/complete` and the browser passkey flows) now accept as
   `client_extension_results`. The `/webauthn/register/*` and `/webauthn/auth/*` request bodies
   refuse undeclared fields with `422`.
+- **WebAuthn registration options request the extensions the attestation policy requires.**
+  When a realm sets `require_prf` or `require_large_blob`, every registration-begin response
+  (`POST /webauthn/register/begin`, the account console and the required-action passkey
+  enrolment) now carries `extensions` (`prf: {}`, `largeBlob: {support: "required"}`), so a
+  browser can satisfy the policy.
 
 ### Fixed
 - The cluster-mode startup warning no longer says writes to a follower fail with HTTP 500

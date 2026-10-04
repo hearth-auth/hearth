@@ -149,8 +149,8 @@ pub use types::{
 pub use validation::fuzz_validate_redirect_uri;
 pub use webauthn::{
     fuzz_parse_webauthn, AuthenticationOptions, ClientExtensionResults,
-    CompleteAuthenticationParams, LargeBlobOutputs, RegistrationOptions, WebAuthnAuthResult,
-    WebAuthnCredentialInfo,
+    CompleteAuthenticationParams, LargeBlobInputs, LargeBlobOutputs, PrfInputs,
+    RegistrationExtensionInputs, RegistrationOptions, WebAuthnAuthResult, WebAuthnCredentialInfo,
 };
 
 use crate::audit::AuditContext;

@@ -1189,7 +1189,7 @@ pub async fn passkey_register_begin(
             let challenge_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&challenge);
             let user_id_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .encode(session.user_id.as_uuid().as_bytes());
-            let body = serde_json::json!({
+            let mut body = serde_json::json!({
                 "challenge": challenge_b64,
                 "rp": { "id": rp_id, "name": state.product_name },
                 "user": {
@@ -1207,6 +1207,11 @@ pub async fn passkey_register_begin(
                 },
                 "attestation": "none",
             });
+            super::handlers_common::add_registration_extensions(
+                &state,
+                &session.realm_id,
+                &mut body,
+            );
             Json(body).into_response()
         }
         Err(e) => {
