@@ -17677,6 +17677,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // HEA-1726). Both are used to intersect the delegated token's effective authorization.
         let (actor_sub, actor_scope_owned, actor_permissions_owned) =
             if let Some(ref actor_jwt) = request.actor_token {
+                // RFC 8693 §2.1: `actor_token_type` is REQUIRED with an
+                // `actor_token`. The actor token is a Hearth-signed JWT, so
+                // only the JWT token type is accepted.
+                const JWT_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:jwt";
+                if request.actor_token_type.as_deref() != Some(JWT_TOKEN_TYPE) {
+                    return Err(IdentityError::TokenExchangeRejected {
+                        reason: format!("actor_token_type must be {JWT_TOKEN_TYPE}"),
+                        oauth_error: "invalid_request",
+                    });
+                }
+
                 // F3 (HEA-1466): verify actor_token signature with the realm key before reading any
                 // claims. The prior jwt_payload_json path was unverified — fresh forgeries with
                 // arbitrary sub claims bypassed the JTI replay guard (confused-deputy attack).

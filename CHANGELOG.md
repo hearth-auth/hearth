@@ -153,6 +153,9 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
 - **Federated sign-in rotates the browser session.** Completing an OIDC or SAML login now
   revokes any session the browser already holds before issuing a new one, as password sign-in
   does.
+- **Token exchange: an `actor_token` requires `actor_token_type=urn:ietf:params:oauth:token-type:jwt`.**
+  An exchange that sends an actor token with any other type, or none, is refused with
+  `invalid_request` (RFC 8693 §2.1).
 
 ### Fixed
 - The cluster-mode startup warning no longer says writes to a follower fail with HTTP 500
