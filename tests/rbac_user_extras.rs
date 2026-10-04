@@ -54,6 +54,31 @@ fn realm_grant(realm: &RealmId, user: &UserId, perm: &Permission) -> UserPermiss
     }
 }
 
+/// `rbac-model` "Reserved permissions are not granted directly": the engine
+/// refuses a `hearth.*` direct grant, so the REST route and both console
+/// grant paths (which all call it) refuse it too, and nothing is stored.
+#[tokio::test]
+async fn grant_user_permission_refuses_a_reserved_permission() {
+    let h = common::TestHarness::in_process().await.expect("harness");
+    let realm = RealmId::generate();
+    let user = UserId::generate();
+    let perm = Permission::new("hearth.admin").expect("valid perm");
+
+    let err = h
+        .rbac()
+        .grant_user_permission(&realm, &realm_grant(&realm, &user, &perm))
+        .expect_err("a reserved permission is not granted directly");
+    assert!(
+        matches!(&err, hearth::rbac::RbacError::ReservedNamespace { permission } if permission == "hearth.admin"),
+        "got: {err:?}"
+    );
+    assert!(h
+        .rbac()
+        .list_user_permissions(&realm, &user)
+        .expect("list")
+        .is_empty());
+}
+
 #[tokio::test]
 async fn grant_user_permission_returns_identical_grant() {
     let h = common::TestHarness::in_process().await.expect("harness");

@@ -138,7 +138,7 @@ impl fmt::Display for RbacError {
             ),
             Self::ReservedNamespace { permission } => write!(
                 f,
-                "permission '{permission}' is in the reserved namespace and may not be granted by operator roles"
+                "permission '{permission}' is in the reserved namespace and may not be granted by operator roles or direct grants"
             ),
             Self::RoleArchived => f.write_str("role is archived; restore it before assigning"),
             Self::RoleInUse {

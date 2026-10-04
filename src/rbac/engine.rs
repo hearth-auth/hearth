@@ -810,6 +810,22 @@ impl RbacEngine for EmbeddedRbacEngine {
         realm_id: &RealmId,
         grant: &UserPermissionGrant,
     ) -> Result<UserPermissionGrant, RbacError> {
+        // `hearth.*` authority comes only from Hearth itself and the roles
+        // seeded at realm bootstrap, never from a direct grant. The check sits
+        // here so the REST route and both console grant paths share it.
+        if grant.permission.is_reserved() {
+            return Err(RbacError::ReservedNamespace {
+                permission: grant.permission.as_str().to_string(),
+            });
+        }
+        self.seed_user_permission_unchecked(realm_id, grant)
+    }
+
+    fn seed_user_permission_unchecked(
+        &self,
+        realm_id: &RealmId,
+        grant: &UserPermissionGrant,
+    ) -> Result<UserPermissionGrant, RbacError> {
         let primary = keys::encode_user_permission(
             realm_id,
             &grant.user_id,
@@ -3270,7 +3286,7 @@ mod tests {
             ),
             (&c, "docs.read", Scope::Realm),
         ] {
-            e.grant_user_permission(
+            e.seed_user_permission_unchecked(
                 &realm,
                 &UserPermissionGrant {
                     realm_id: realm.clone(),

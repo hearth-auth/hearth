@@ -158,7 +158,7 @@ impl Fixture {
         self.join(org, &id);
         self.h
             .rbac()
-            .grant_user_permission(
+            .seed_user_permission_unchecked(
                 &self.realm,
                 &UserPermissionGrant {
                     realm_id: self.realm.clone(),
@@ -689,7 +689,7 @@ async fn scim_groups_handle_every_member_beyond_the_first_page() {
         (hidden, all_but_hidden, keep)
     };
     f.h.rbac()
-        .grant_user_permission(
+        .seed_user_permission_unchecked(
             &f.realm,
             &UserPermissionGrant {
                 realm_id: f.realm.clone(),
@@ -1012,7 +1012,7 @@ async fn non_member_org_scoped_authority_counts_for_the_ceiling() {
     // Direct org-scoped grant, no membership.
     let granted = f.user("granted");
     f.h.rbac()
-        .grant_user_permission(
+        .seed_user_permission_unchecked(
             &f.realm,
             &UserPermissionGrant {
                 realm_id: f.realm.clone(),
@@ -1257,7 +1257,7 @@ async fn admin_holder_set_covers_every_source_of_admin_permission() {
     .expect("org-scoped assignment");
     // A direct grant of an admin permission the actor lacks.
     let granted = f.user("granted");
-    rbac.grant_user_permission(
+    rbac.seed_user_permission_unchecked(
         &f.realm,
         &UserPermissionGrant {
             realm_id: f.realm.clone(),

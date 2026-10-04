@@ -150,6 +150,10 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
 - **A recently deleted user's email address answers like one in use.** Creating a user or
   changing an email to a reserved address now returns the same `409` body as an address in use,
   and the console, SCIM and setup pages show the same message for both.
+- **Reserved `hearth.*` permissions cannot be granted directly.** `POST
+  /admin/users/{id}/permissions` and the console grant forms refuse a `hearth.*` permission with
+  `403 reserved_namespace`; reserved authority comes only from the roles seeded at realm
+  bootstrap. Existing direct grants are unchanged and still count for the admin ceiling.
 
 ### Fixed
 - The cluster-mode startup warning no longer says writes to a follower fail with HTTP 500
