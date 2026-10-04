@@ -606,6 +606,7 @@ async fn webauthn_delete_credential(
 
 /// Query parameters for the magic-link request.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MagicLinkRequestBody {
     email: String,
 }

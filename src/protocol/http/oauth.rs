@@ -386,6 +386,7 @@ fn exchange_magic_link(
 ///
 /// Uses a flat struct because the proto `TokenExchangeRequest` doesn't cover
 /// the multi-grant-type dispatch (`authorization_code` vs `refresh_token`).
+// A-47 exception: RFC 6749 §3.1 — unknown request parameters are ignored, not refused.
 #[derive(Deserialize)]
 struct HttpTokenRequest {
     /// RFC 6749 §3.2.1: REQUIRED only "if the client is not authenticating
@@ -476,6 +477,7 @@ impl std::fmt::Debug for HttpTokenRequest {
 /// Clients may authenticate via HTTP Basic Auth or via these body fields
 /// per RFC 6749 §2.3.1, or with a `private_key_jwt` assertion (RFC 7523
 /// §2.2) — the only method a secretless `private_key_jwt` client has.
+// A-47 exception: RFC 6749 §3.1 — unknown request parameters are ignored, not refused.
 #[derive(Debug, Deserialize)]
 struct HttpRevocationBody {
     token: FormSecret,
@@ -497,6 +499,7 @@ struct HttpRevocationBody {
 /// Clients may authenticate via HTTP Basic Auth or via these body fields
 /// per RFC 6749 §2.3.1, or with a `private_key_jwt` assertion (RFC 7523 §2.2).
 /// Only confidential clients are served (RFC 7662 §2.1, task 26.43).
+// A-47 exception: RFC 6749 §3.1 — unknown request parameters are ignored, not refused.
 #[derive(Debug, Deserialize)]
 struct HttpIntrospectionBody {
     token: FormSecret,
@@ -2245,6 +2248,7 @@ async fn authorize(
 /// Carries the client authentication fields the token endpoint accepts
 /// (RFC 9126 §2: "the same method it uses at the token endpoint"). No `Debug`:
 /// the body holds a client secret or assertion.
+// A-47 exception: RFC 6749 §3.1 — unknown request parameters are ignored, not refused.
 #[derive(serde::Deserialize)]
 struct HttpParRequest {
     /// Optional for a `client_secret_basic` client, which may carry its

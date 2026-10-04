@@ -1068,6 +1068,7 @@ pub struct AatClaims {
 /// Used by realm admins or trusted systems. For agent-to-agent delegation
 /// the agent calls `derive_aat` with its existing parent AAT.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IssueAatRequest {
     /// Agent the AAT is issued for.
     pub agent_id: AgentId,
@@ -1085,6 +1086,7 @@ pub struct IssueAatRequest {
 ///
 /// The child's permissions MUST be a subset of the parent's.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeriveAatRequest {
     /// The parent AAT JWT string.
     pub parent_aat: String,
@@ -1136,6 +1138,7 @@ pub struct TransactionTokenClaims {
 
 /// Request to issue a single-use transaction token.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateTransactionTokenRequest {
     /// The agent issuing the request (must be authenticated).
     pub requesting_agent_id: AgentId,
@@ -1183,6 +1186,7 @@ pub struct CrossRealmTrustPolicy {
 
 /// Request to create a cross-realm trust policy.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateCrossRealmPolicyRequest {
     /// The realm to trust (agents originate there).
     pub source_realm_id: RealmId,
@@ -1213,6 +1217,7 @@ pub struct SpiffeIdentityMapping {
 
 /// Request to register a SPIFFE ID → `AgentId` mapping.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RegisterSpiffeIdRequest {
     /// Agent to map.
     pub agent_id: AgentId,

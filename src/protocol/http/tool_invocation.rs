@@ -44,6 +44,7 @@ pub(super) fn routes() -> axum::Router<Arc<AppState>> {
 
 /// Request body for the tool invocation check.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct InvokeToolBody {
     /// Tool name being invoked (e.g. `"delete_file"`).
     tool: String,

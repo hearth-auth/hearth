@@ -1509,6 +1509,7 @@ pub async fn admin_api_audit_config_get(
 
 /// Request body for updating audit retention configuration.
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateAuditRetentionBody {
     pub retention_days: u32,
     #[serde(default)]

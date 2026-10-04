@@ -229,6 +229,7 @@ async fn agent_card(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateAgentBody {
     display_name: String,
     #[serde(default)]
@@ -463,6 +464,7 @@ async fn get_agent(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UpdateAgentBody {
     display_name: Option<String>,
     description: Option<String>,
@@ -694,6 +696,7 @@ async fn revoke_agent(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateApiKeyBody {
     label: String,
 }

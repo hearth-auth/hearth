@@ -140,6 +140,13 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   `<samlp:Status>`, for example, used to be ignored; it is now an error. Responses that sign the
   Response, the Assertion, or both are unaffected. The SP suite now also runs the eight published
   XML signature-wrapping variants (XSW1–XSW8).
+- **Admin and authentication request bodies refuse unknown fields.** Role assignment, direct
+  permission grants, application updates, webhooks, organizations, agents, approvals, tool
+  invocation, AATs, transaction tokens, SPIFFE mappings, cross-realm policies, email templates,
+  required actions and magic-link requests now answer `422` naming a field the body does not
+  declare, instead of ignoring it. An organization-scoped role assignment is `{"role_id": …,
+  "org_id": …}`; the guides showed a `scope` object, which is refused. OAuth/OIDC endpoint
+  parameters are still ignored when unknown, as RFC 6749 §3.1 requires.
 
 ### Fixed
 - The cluster-mode startup warning no longer says writes to a follower fail with HTTP 500

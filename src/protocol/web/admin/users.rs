@@ -3362,6 +3362,7 @@ pub async fn admin_admin_users_import_submit(
 
 /// Request body for `PATCH /admin/realms/{realm}/users/{user_id}/required-actions`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PatchRequiredActionsBody {
     /// Action type strings to add (e.g. `"VERIFY_EMAIL"`).
     #[serde(default)]
