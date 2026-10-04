@@ -56,8 +56,8 @@ Expected: exit 0 with no `FAIL` lines. Any failures name the offending test file
 
 ## Step 3 — Abuse coverage gate
 
-Runs `scripts/check-abuse-coverage.sh` (§3.41). Fails if any A-N row in
-`docs/plans/HEA-1114-abuse-prevention.md` lacks at least one negative-scenario test in
+Runs `scripts/check-abuse-coverage.sh` (§3.41). Fails if any A-N guard id in
+`openspec/specs/abuse-prevention/spec.md` lacks at least one negative-scenario test in
 `tests/abuse_*.rs`. This is a *coverage* gate — it proves each abuse scenario has a test,
 not that the tests pass (Step 1 covers that).
 

@@ -272,7 +272,7 @@ signal, not a soft warning.
 
 ## See also
 
-- [`AUTHORIZATION.md § 14`](../specs/AUTHORIZATION.md#14-session-version-sv-revocation) —
+- [`openspec/specs/rbac-token-claims/spec.md`](https://github.com/hearth-auth/hearth/blob/main/openspec/specs/rbac-token-claims/spec.md) —
   normative spec for `sv` claim semantics and fail-closed contract.
 - [`permission-delivery.md`](./permission-delivery.md) — choosing between `embedded`,
   `introspection`, and `decision` modes.

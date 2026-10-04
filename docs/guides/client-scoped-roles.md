@@ -3,9 +3,9 @@
 **Audience:** Hearth operators migrating from Keycloak, or anyone who wants per-OAuth-client role visibility on a single Hearth realm.
 
 **Related normative specs:**
-- [`AUTHORIZATION.md`](../specs/AUTHORIZATION.md) — RBAC model, role/permission grammar, scope semantics.
-- [`AUTHZ_EXPANSION.md`](../specs/AUTHZ_EXPANSION.md) — `ClaimProfile`, release gates, layered evaluation.
-- [`CONFIGURATION.md`](../specs/CONFIGURATION.md) — `realms.<id>.claims.mappings` YAML schema.
+- [`openspec/specs/rbac-model/spec.md`](https://github.com/hearth-auth/hearth/blob/main/openspec/specs/rbac-model/spec.md) — RBAC model, role/permission grammar, scope semantics.
+- [`openspec/specs/custom-permissions/spec.md`](https://github.com/hearth-auth/hearth/blob/main/openspec/specs/custom-permissions/spec.md) — `ClaimProfile`, release gates, layered evaluation.
+- [`docs/guides/configuration-reference.md`](configuration-reference.md) — `realms.<id>.claims.mappings` YAML schema.
 
 This guide is non-normative. Where it disagrees with the specs above, the specs win.
 
@@ -38,7 +38,7 @@ Verified with `hearth config validate <file>`; see [§6](#6-verifying-your-confi
 
 The full recipe, behavior breakdown, Keycloak-importer gap, and known limitations are below.
 
-> **Note on the nested `source:` shape.** Some shorthand examples in the spec docs ([`AUTHZ_EXPANSION.md`](../specs/AUTHZ_EXPANSION.md), [`CONFIGURATION.md`](../specs/CONFIGURATION.md)) show the source variant flattened onto the mapping (`source: role_subset, prefix: "..."`). The current implementation rejects that form — `ClaimMapping.source` deserializes as a nested `ClaimSource` value with `source` as its discriminator. Use the nested shape above. The spec docs need a follow-up correction; this guide reflects what `hearth config validate` accepts today.
+> **Note on the nested `source:` shape.** Some shorthand examples in the spec docs ([`openspec/specs/custom-permissions/spec.md`](https://github.com/hearth-auth/hearth/blob/main/openspec/specs/custom-permissions/spec.md), [`docs/guides/configuration-reference.md`](configuration-reference.md)) show the source variant flattened onto the mapping (`source: role_subset, prefix: "..."`). The current implementation rejects that form — `ClaimMapping.source` deserializes as a nested `ClaimSource` value with `source` as its discriminator. Use the nested shape above. The spec docs need a follow-up correction; this guide reflects what `hearth config validate` accepts today.
 
 ---
 
@@ -46,7 +46,7 @@ The full recipe, behavior breakdown, Keycloak-importer gap, and known limitation
 
 In Keycloak, every OAuth client carries its own role namespace. The `admin` role on client `my-app` and the `admin` role on client `other-app` are distinct entities: each is scoped to its own client, and a user's token for `my-app` carries only `my-app`'s view of the role set.
 
-Hearth intentionally does **not** model client-scoped roles as a first-class primitive. Roles live at the realm tier (with optional org-scope narrowing — see [AUTHORIZATION.md §2.4](../specs/AUTHORIZATION.md)). Every role is a single, realm-unique name.
+Hearth intentionally does **not** model client-scoped roles as a first-class primitive. Roles live at the realm tier (with optional org-scope narrowing — see [openspec/specs/rbac-model/spec.md](https://github.com/hearth-auth/hearth/blob/main/openspec/specs/rbac-model/spec.md)). Every role is a single, realm-unique name.
 
 To still deliver "client A sees one role vocabulary, client B sees another," Hearth operators compose two existing primitives:
 
@@ -75,7 +75,7 @@ Examples:
 
 Constraints worth knowing:
 
-- Role names are validated as `[A-Za-z0-9_\-]+(\.[A-Za-z0-9_\-]+)*` (see [AUTHORIZATION.md §2.5](../specs/AUTHORIZATION.md) for the permission grammar; role names follow a similar shape).
+- Role names are validated as `[A-Za-z0-9_\-]+(\.[A-Za-z0-9_\-]+)*` (see [openspec/specs/rbac-model/spec.md](https://github.com/hearth-auth/hearth/blob/main/openspec/specs/rbac-model/spec.md) for the permission grammar; role names follow a similar shape).
 - `.` is a readability separator, **not** a hierarchical operator. `my-app.admin` does not implicitly grant `my-app.admin.users` or anything else.
 - The prefix is operator-defined. The matcher in [§3](#3-claimprofile-recipe-yaml) does a literal `starts_with` check — leading-dot is conventional, not required.
 
@@ -85,7 +85,7 @@ Keep one prefix per logical application. Avoid overlapping prefixes (e.g., `my-a
 
 ## 3. ClaimProfile recipe (YAML)
 
-Append the override to `realms.<realm>.claims.mappings`. The default profile is always present as a fallback layer (see [AUTHZ_EXPANSION.md §"Evaluation and merge model"](../specs/AUTHZ_EXPANSION.md)), so this single entry is enough — you do **not** need to redeclare the built-in `roles` mapping for other clients.
+Append the override to `realms.<realm>.claims.mappings`. The default profile is always present as a fallback layer (see [openspec/specs/custom-permissions/spec.md §"Evaluation and merge model"](https://github.com/hearth-auth/hearth/blob/main/openspec/specs/custom-permissions/spec.md)), so this single entry is enough — you do **not** need to redeclare the built-in `roles` mapping for other clients.
 
 ```yaml
 realms:
@@ -239,7 +239,7 @@ These are intentional trade-offs of the convention-based approach. None of them 
 
 4. **No client-scoped permission grammar.** A permission like `my-app.docs.write` is still a flat string in Hearth's vocabulary. Two apps that want disjoint permission namespaces must apply the same prefix discipline at the permission tier — Hearth will not stop them from accidentally sharing names.
 
-5. **Effective-roles resolution still walks the whole realm.** Adding many prefixed roles to a realm increases the per-issue resolution cost slightly. This is a constant factor — within the depth bounds in [AUTHORIZATION.md](../specs/AUTHORIZATION.md) — but worth noting for realms with thousands of roles.
+5. **Effective-roles resolution still walks the whole realm.** Adding many prefixed roles to a realm increases the per-issue resolution cost slightly. This is a constant factor — within the depth bounds in [openspec/specs/rbac-model/spec.md](https://github.com/hearth-auth/hearth/blob/main/openspec/specs/rbac-model/spec.md) — but worth noting for realms with thousands of roles.
 
 6. **First-class client-scoped roles are tracked as a post-1.0 enhancement.** If operator feedback indicates the convention-based pattern is too painful, Hearth may add a `RoleScopeKind::Client` variant in a follow-up. Until then, the recipe above is the supported path.
 

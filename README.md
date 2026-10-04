@@ -217,7 +217,7 @@ Apache 2.0, self-hosted, no per-seat pricing, no vendor lock-in, no phone-home t
 **Protocols**
 - OIDC Core 1.0 + Discovery 1.0 + Dynamic Client Registration (RFC 7591; RFC 7592 management endpoints are roadmap)
 - Token Introspection (RFC 7662), Revocation (RFC 7009), RP-initiated logout
-- SAML 2.0 as a Service Provider (inbound federation from your corporate IdP — SP-initiated and IdP-initiated SSO). Hearth is not a SAML IdP; applications connect over OIDC. Encrypted assertions and Single Logout are not supported — see [docs/specs/SAML.md](docs/specs/SAML.md)
+- SAML 2.0 as a Service Provider (inbound federation from your corporate IdP — SP-initiated and IdP-initiated SSO). Hearth is not a SAML IdP; applications connect over OIDC. Encrypted assertions and Single Logout are not supported — see [openspec/specs/saml-sp-profile/spec.md](openspec/specs/saml-sp-profile/spec.md)
 - SCIM 2.0 provisioning (Users, Groups, Service Provider Config)
 - Signed webhook subscriptions for auth and admin events
 - REST/JSON over HTTP/1.1 and HTTP/2
@@ -309,7 +309,7 @@ Identity infrastructure has zero tolerance for data loss and low tolerance for i
 4. **Fuzz** — `cargo-fuzz` against wire parsers (CBOR, protobuf, JWT, authenticator data).
 5. **Crash-recovery simulation** — real-thread tests against real temp directories with oracle-checked invariants and a `FaultFs` I/O fault hook: [`realm_crash`](simulation/src/tests/realm_crash.rs), [`audit_crash`](simulation/src/tests/audit_crash.rs), [`realm_concurrent_io`](simulation/src/tests/realm_concurrent_io.rs), [`rbac_concurrent_assignments`](simulation/src/tests/rbac_concurrent_assignments.rs).
 6. **Adversarial** — timing attacks, brute-force lockout, enumeration resistance, TLS downgrade, privilege escalation.
-7. **Conformance** — in-repo suites for OIDC Core 1.0, Discovery 1.0, Dynamic Client Registration, PAR/JAR/DPoP, RFC 8693/8707/9728, and the WebAuthn Level 2 ceremony. These are Hearth's own tests read against the specs. The OpenID Foundation conformance suite (`v5.3.1`, Config OP profile) was run locally on 2026-09-21 and **failed**: 38 conditions passed, 1 failed (a Discovery 1.0 §3 deviation), 1 warned; the authorization-flow profiles were not run ([`reports/conformance-suite-run-2026-09-21.md`](reports/conformance-suite-run-2026-09-21.md)). **Hearth is not certified** against any standard.
+7. **Conformance** — in-repo suites for OIDC Core 1.0, Discovery 1.0, Dynamic Client Registration, PAR/JAR/DPoP, RFC 8693/8707/9728, and the WebAuthn Level 2 ceremony. These are Hearth's own tests read against the specs. The OpenID Foundation conformance suite (`v5.3.1`, Config OP profile) was run locally on 2026-09-21 and **failed**: 38 conditions passed, 1 failed (a Discovery 1.0 §3 deviation), 1 warned; the authorization-flow profiles were not run ([`reports/conformance-suite-run-2026-09-21.md`](https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/conformance-suite-run-2026-09-21.md)). **Hearth is not certified** against any standard.
 8. **Benchmarks** — `criterion`, with regression gating in CI.
 
 **Crash-survival is part of the spec.** The storage engine must survive `kill -9` at any point and recover to a consistent state. Every WAL invariant has a crash-recovery scenario that exercises it.
@@ -320,7 +320,7 @@ Identity infrastructure has zero tolerance for data loss and low tolerance for i
 
 The Rust suite, the seven SDK suites and the SDK conformance check are all in the `needs:` list of the `required-summary` job in [`.github/workflows/ci.yml`](.github/workflows/ci.yml), so a red suite blocks merge. This README does not assert a green result for any particular commit: look at the CI badge above, or at the `validation-summary.txt` asset on a given release.
 
-> **1 Phase 1 scenario open** (not yet covered by tests): pbjson int64-as-string coercion — `docs/specs/TEST_SCENARIOS.md` §Proto & API Contract Validation › Unit. Coverage tracked in HEA-1836.
+> **1 Phase 1 scenario open** (not yet covered by tests): pbjson int64-as-string coercion — [`docs/specs/TEST_SCENARIOS.md`](https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md) §Proto & API Contract Validation › Unit. Coverage tracked in HEA-1836.
 
 ---
 
@@ -356,7 +356,7 @@ featureless binary still starts, and logs that bootstrap is unavailable.
 
 Dev mode uses `debug` logging, `fsync` disabled, and enables the `/admin/bootstrap` endpoint. The server binds to `127.0.0.1:8420`.
 
-Storage is still a real WAL + SST store, not a RAM-only mode — it just lives in a throwaway location. The effective directory follows a three-level rule: `HEARTH_DEV_DATA_DIR` if set, else an explicit non-default `storage.data_dir`, else a temp directory removed on exit. Bare `./target/release/hearth serve --dev` takes the third branch, so nothing survives a restart; **`make dev` takes the first** (it sets `HEARTH_DEV_DATA_DIR=./data/dev`, which is gitignored) and therefore **does** persist across restarts — `make dev-reset` wipes it. See [`docs/specs/CONFIGURATION.md`](docs/specs/CONFIGURATION.md#--dev-mode-and-hearth_dev_data_dir).
+Storage is still a real WAL + SST store, not a RAM-only mode — it just lives in a throwaway location. The effective directory follows a three-level rule: `HEARTH_DEV_DATA_DIR` if set, else an explicit non-default `storage.data_dir`, else a temp directory removed on exit. Bare `./target/release/hearth serve --dev` takes the third branch, so nothing survives a restart; **`make dev` takes the first** (it sets `HEARTH_DEV_DATA_DIR=./data/dev`, which is gitignored) and therefore **does** persist across restarts — `make dev-reset` wipes it. See [`docs/guides/configuration-reference.md`](docs/guides/configuration-reference.md#--dev-mode-and-hearth_dev_data_dir).
 
 ### 3. Verify
 
@@ -605,7 +605,7 @@ All theme tokens are `--ht-*` CSS custom properties. A custom CSS file need only
 }
 ```
 
-For the full token list and design rationale see [`docs/specs/THEME.md`](docs/specs/THEME.md).
+For the full token list and design rationale see [`docs/dev/THEME.md`](docs/dev/THEME.md).
 
 ---
 
@@ -933,7 +933,7 @@ There will never be an admin UI for adding federation connectors. This is Infras
 
 An end-to-end walkthrough with a local OIDC upstream lives at [`examples/federation-flow/`](examples/federation-flow/) — two processes (Hearth + a `node-oidc-provider`-based upstream) that reproduce JIT provisioning, confirm-to-link, auto-link, and self-service unlinking without any external credentials.
 
-For the full feature spec see [`docs/specs/ARCHITECTURE.md`](docs/specs/ARCHITECTURE.md).
+For the full feature spec see [`docs/dev/ARCHITECTURE.md`](docs/dev/ARCHITECTURE.md).
 
 ---
 

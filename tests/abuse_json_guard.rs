@@ -6,7 +6,7 @@
 //! [`hearth::abuse::guards::MAX_JSON_ARRAY_LEN`] array items.
 //!
 //! A-22 (decompression-bomb) is not tested here because Hearth does not
-//! install an inbound gzip decompressor — see ABUSE.md for rationale.
+//! install an inbound gzip decompressor — see openspec/specs/abuse-prevention/spec.md for rationale.
 
 mod common;
 

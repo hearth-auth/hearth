@@ -23,7 +23,7 @@ server trim could ship first. The rewrite work is still needed:
   wraps it. CI fails when a committed generated client is stale.
 - One end-to-end conformance harness runs the same scenario set against all four SDKs, against
   a live Hearth server. It extends `make sdk-smoke-local`.
-- `docs/specs/SDK.md` and the SDK guides describe the libraries, the generated clients and the
+- `openspec/specs/sdk-support-contract/spec.md` and the SDK guides describe the libraries, the generated clients and the
   harness.
 - **BREAKING** (SDK surface): the admin client method names and types follow the generated
   client. Hearth has no users, so there is no compatibility layer.

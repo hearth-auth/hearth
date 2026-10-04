@@ -1,7 +1,7 @@
 //! Guard: every `hearth ...` invocation printed in the upgrade and disaster-recovery
 //! guides must be accepted by the real CLI parser (HEA-2155).
 //!
-//! Motivation: `docs/specs/CONFIGURATION.md` once documented `branding.*` YAML keys
+//! Motivation: `docs/guides/configuration-reference.md` once documented `branding.*` YAML keys
 //! that did not exist, which — with `deny_unknown_fields` (HEA-2113) — meant an
 //! operator who copied our documentation could not start the server. The same class
 //! of defect exists for CLI invocations, and it is worse there: the disaster-recovery
@@ -247,7 +247,7 @@ fn check(inv: &Invocation) -> Result<(), String> {
 }
 
 /// The guides must contain invocations — an extractor that silently matches nothing
-/// would make every other assertion in this file vacuous (TESTING.md anti-pattern B).
+/// would make every other assertion in this file vacuous (docs/dev/TESTING.md anti-pattern B).
 #[test]
 fn extractor_finds_invocations_in_every_guide() {
     for guide in GUIDES {

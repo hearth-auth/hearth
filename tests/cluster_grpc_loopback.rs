@@ -10,7 +10,7 @@
 //! `simulation/src/tests/cluster_failover.rs` and `cluster_chaos.rs` cover
 //! failover and crash recovery through an in-process `RaftNetwork` instead.
 //! (An earlier version of this comment pointed at `tests/cluster_smoke.rs`,
-//! which does not exist — see `reports/cluster-ga-readiness-2026-09-21.md` D-5.)
+//! which does not exist — see `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/cluster-ga-readiness-2026-09-21.md` D-5.)
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -501,7 +501,7 @@ fn baseline_realm() -> RealmId {
 /// partition tests ran against an in-process `RaftNetwork`, and the only
 /// socket-backed test (`three_node_grpc_loopback_replicates_ten_writes`) did
 /// no failure injection at all
-/// (`reports/cluster-ga-readiness-2026-09-21.md`, "Failover and split-brain
+/// (`https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/cluster-ga-readiness-2026-09-21.md`, "Failover and split-brain
 /// test count").
 ///
 /// The naive attempts do not work, which is why the seam had to exist first.

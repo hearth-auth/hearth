@@ -128,7 +128,7 @@ define_id_type!(
     ///
     /// Agents are distinct from users and OAuth clients — they are autonomous
     /// actors with their own identity lifecycle, credential set, and delegation
-    /// chain support. See `AGENT_AUTH.md` for the full specification.
+    /// chain support. See `openspec/specs/agent-identity/spec.md` for the full specification.
     AgentId, "agt_"
 );
 
@@ -148,7 +148,7 @@ define_id_type!(
 define_id_type!(
     /// Unique identifier for a protected resource (MCP server) registered in a realm.
     ///
-    /// Used as the primary key for protected resource records. See AGENT_AUTH.md §2.5
+    /// Used as the primary key for protected resource records. See openspec/specs/mcp-authorization/spec.md
     /// and RFC 9728 for the Protected Resource Metadata discovery specification.
     ResourceServerId, "rs_"
 );

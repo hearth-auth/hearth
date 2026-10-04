@@ -1042,7 +1042,7 @@ pub fn router(state: WebState) -> Router {
                 .post(handlers::admin_reset_password_submit)
                 .route_layer(link.clone()),
         )
-        // Convenience alias: /ui/admin is the admin home per R-2 (UI_ROUTING.md).
+        // Convenience alias: /ui/admin is the admin home per R-2 (openspec/specs/ui-routing/spec.md).
         // Redirects to the realms list which is the canonical admin landing page.
         .route(
             "/admin",

@@ -158,13 +158,13 @@ pub enum AuditAction {
     /// are notified of YAML-storage drift without flooding the audit log.
     /// The `resource_id` field carries the opaque reference (e.g. a
     /// `role_<uuid>` string) that could not be resolved; `metadata` may
-    /// carry `ref_kind` for disambiguation. See `AUTHZ_EXPANSION.md`
+    /// carry `ref_kind` for disambiguation. See `openspec/specs/custom-permissions/spec.md`
     /// §"Dangling references".
     OrphanedReferenceSkipped,
     /// A direct permission was granted to a user outside any role.
     ///
     /// Metadata may carry `scope_type` (`"realm"` or `"org"`) and
-    /// `permission`. See `AUTHZ_EXPANSION.md` gap #6.
+    /// `permission`. See `openspec/specs/custom-permissions/spec.md` gap #6.
     UserPermissionGranted,
     /// A direct permission previously granted to a user was revoked.
     ///
@@ -320,7 +320,7 @@ pub enum AuditAction {
     /// (`"code_issued"` / `"consent_required"` / `"rate_limited"`).
     OidcSilentAuthProbed,
     /// A delegated token was issued via OBO or RFC 8693 token exchange
-    /// (§12.2 of AGENT_AUTH.md).
+    /// (§12.2 of openspec/specs/agent-identity/spec.md).
     ///
     /// Metadata carries `actor` (immediate actor subject), `on_behalf_of`
     /// (delegating principal), `delegation_chain` (JSON array), `token_jti`,

@@ -2,7 +2,7 @@
 
 Python client for the [Hearth](https://github.com/hearth-auth/hearth) identity API.
 
-> **SDK Specification:** This SDK must conform to the [Hearth SDK Common Specification](../../docs/specs/SDK.md).
+> **SDK Specification:** This SDK must conform to the [Hearth SDK Common Specification](../../openspec/specs/sdk-support-contract/spec.md).
 
 ## Installation
 
@@ -154,7 +154,7 @@ A non-success status raises `HearthError` (`status_code`, `message`).
 
 **`TokenAudienceError`** — the token's `aud` claim does not contain the configured audience. Verify `client_id` matches the audience your authorization server issues.
 
-See [docs/specs/SDK.md](../../docs/specs/SDK.md) Section 5 for the full error taxonomy.
+See [openspec/specs/sdk-support-contract/spec.md](../../openspec/specs/sdk-support-contract/spec.md) Section 5 for the full error taxonomy.
 
 ---
 

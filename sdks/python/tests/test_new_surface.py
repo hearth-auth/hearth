@@ -172,7 +172,7 @@ class TestJwksCache:
         assert call_count[0] == 2  # fetched twice (initial miss + retry)
 
     def test_raises_on_kid_not_found_after_refetch(self, respx_mock):
-        # SDK.md §5: JWKSFetchError is for an unreachable or invalid JWKS
+        # openspec/specs/sdk-support-contract/spec.md: JWKSFetchError is for an unreachable or invalid JWKS
         # endpoint. A kid the endpoint does not publish is a bad token.
         from hearth.errors import JWKSFetchError, TokenInvalidError
         from hearth.jwks import JwksCache

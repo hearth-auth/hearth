@@ -196,7 +196,7 @@ scanners or unauthorized callers ([HEA-1138](/HEA/issues/HEA-1138)).
 | `capabilities.advanced: true` | `POST /v1/aats` • `POST /v1/aats/derive` • `POST /v1/aats/validate` • `DELETE /v1/aats/{jti}` • `POST /v1/transaction-tokens` • `POST /v1/transaction-tokens/consume` • `POST /v1/spiffe-mappings` • `GET/DELETE /v1/spiffe-mappings/{agent_id}` • `GET/POST /v1/cross-realm-policies` • `GET/DELETE /v1/cross-realm-policies/{id}` | Phase D |
 
 These routes are absent from the default `openapi.json` when the capabilities are disabled.
-Enable the relevant capability in `agent_auth.capabilities` (see [CONFIGURATION.md](../specs/CONFIGURATION.md#agent_auth))
+Enable the relevant capability in `agent_auth.capabilities` (see [docs/guides/configuration-reference.md](configuration-reference.md#agent_auth))
 before importing the spec into a client that requires them.
 
 All `Phase A` routes require a Bearer token in the `Authorization` header. Requests without
@@ -324,7 +324,7 @@ curl -s -X POST http://127.0.0.1:8420/register \
 
 The realm-scoped equivalent is `POST /realms/<realm-name>/register`. Whether DCR is
 open, token-gated, or disabled is controlled by `realms.<name>.auth.dcr.mode` in
-`hearth.yaml` (see [CONFIGURATION.md — `realms.<name>.auth.dcr`](../specs/CONFIGURATION.md#realmsnameathdcr))
+`hearth.yaml` (see [docs/guides/configuration-reference.md — `realms.<name>.auth.dcr`](configuration-reference.md#realmsnameauthdcr))
 or at runtime via `PATCH /admin/realms/{realm_id}/config` with the `dcr_policy` field.
 
 ### ID-token signing algorithm (`id_token_signed_response_alg`)
@@ -335,7 +335,7 @@ Every registration surface above — and `PATCH /admin/applications/{id}` — ac
 `400` on the admin routes. When the field is omitted, **dynamic registration defaults to
 `RS256`** (OpenID Connect Registration §2) and the admin routes default to `EdDSA`; the
 registration response and the client record always report the resolved value. The setting
-affects ID tokens only — access and refresh tokens are EdDSA for every client. See [OIDC.md §1.2](../specs/OIDC.md#12-signing).
+affects ID tokens only — access and refresh tokens are EdDSA for every client. See [openspec/specs/oidc-provider/spec.md](https://github.com/hearth-auth/hearth/blob/main/openspec/specs/oidc-provider/spec.md).
 
 ---
 

@@ -49,7 +49,7 @@ module.exports = {
     { pattern: /^[hw]-([2-6])$/ },
   ],
   theme: {
-    // ── Shape tokens (THEME.md § Shape) ──────────────────────────
+    // ── Shape tokens (docs/dev/THEME.md § Shape) ──────────────────────────
     borderRadius: {
       none: "0",
       sm: "6px",       // inputs, tags, inline chips
@@ -59,7 +59,7 @@ module.exports = {
       xl: "20px",      // hero visuals, feature blocks
       full: "999px",   // pills — reserved for badges
     },
-    // ── Shadow tokens (THEME.md § Shadows) ───────────────────────
+    // ── Shadow tokens (docs/dev/THEME.md § Shadows) ───────────────────────
     boxShadow: {
       none: "none",
       sm: "0 1px 2px rgba(0, 0, 0, 0.3)",
@@ -69,7 +69,7 @@ module.exports = {
       "cta-hover": "0 8px 24px -4px color-mix(in srgb, var(--ht-brand-via) 35%, transparent)",
     },
     extend: {
-      // ── Color tokens (THEME.md § Colors) ─────────────────────
+      // ── Color tokens (docs/dev/THEME.md § Colors) ─────────────────────
       colors: {
         // ── Semantic tokens — theme-overridable via CSS vars ──────────
         // Each token maps to a CSS custom property defined in :root in
@@ -157,18 +157,18 @@ module.exports = {
           fg: "#8aa8e0",
         },
       },
-      // ── Typography tokens (THEME.md § Typography) ────────────
+      // ── Typography tokens (docs/dev/THEME.md § Typography) ────────────
       fontFamily: {
         sans: ["Manrope", "system-ui", "sans-serif"],
         display: ["Fraunces", "Georgia", "serif"],
         mono: ['"JetBrains Mono"', "monospace"],
       },
-      // ── Border tokens (THEME.md § Borders) ───────────────────
+      // ── Border tokens (docs/dev/THEME.md § Borders) ───────────────────
       borderColor: {
         subtle: "color-mix(in srgb, var(--ht-divider) 6%, transparent)",
         strong: "color-mix(in srgb, var(--ht-divider) 18%, transparent)",
       },
-      // ── Motion tokens (THEME.md § Motion) ────────────────────
+      // ── Motion tokens (docs/dev/THEME.md § Motion) ────────────────────
       keyframes: {
         "fade-in": {
           from: { opacity: "0", transform: "translateY(-4px)" },

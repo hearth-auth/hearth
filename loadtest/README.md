@@ -372,6 +372,24 @@ The `lookup_hot` / `lookup_cold` journeys also appear as normal rows in the
 not a per-request server signal — the HTTP client cannot see which tier served a
 given lookup.
 
+## Artifact contract and admissibility rules
+
+Every performance figure that a published doc cites (`docs/perf/PUBLISHED_FIGURES.md`,
+`docs/perf/PERFORMANCE_REPORT_2_1.md`) is backed by a committed artifact. Measurement
+artifacts go under `docs/perf/artifacts/<child>-<axis>.json` (schema 1). Load-test report
+JSON goes under `loadtest/reports/published/` (see its `README.md`).
+
+These rules are binding. `loadtest/src/report.rs` enforces rule 3.
+
+1. **Every figure carries the hardware it was measured on.** A number without a host is not a number.
+2. **No PASS, and no "flat" / "scales well" / "linear" adjective, without a fitted number behind it.**
+   Degradation verdicts are fitted exponents with a confidence interval, not spot-checks of two points.
+3. **Nothing is graded PASS on a run whose ceiling attribution was the generator.**
+4. **Ratios are not costs.** Only the *slope* of a multi-point regression yields a per-unit cost.
+5. **A run that touched swap is void.**
+
+`loadtest/baseline/steady-baseline.json` (schema 2) is the committed steady-state baseline.
+
 ## Reading the report
 
 Every run writes two artifacts into `--report-dir` (default `loadtest/reports/`,
@@ -465,7 +483,7 @@ CPU-hungry regression shows up here before it shows up as a p99 breach.
 
 Budgets are **sourced**, not invented (see [src/budget.rs](src/budget.rs)):
 each journey's engine p99 target is lifted verbatim from
-`docs/specs/TESTING.md`, and the HTTP budget adds a CTO-approved ~1 ms loopback
+`openspec/specs/performance-budgets/spec.md`, and the HTTP budget adds a CTO-approved ~1 ms loopback
 envelope (axum routing + (de)serialization + loopback syscalls), per the
 HEA-1787 plan §6/§9.
 
@@ -810,7 +828,7 @@ the CI job itself is deliberately out of scope for this crate (see below).
   check. Sub-ms hot-path regression gating lives in the in-process
   `make bench-gate`.
 - **Budgets are sourced, not tuned here.** They come verbatim from
-  `docs/specs/TESTING.md` + a fixed loopback envelope (see
+  `docs/dev/TESTING.md` + a fixed loopback envelope (see
   [src/budget.rs](src/budget.rs)); this crate does not invent or relax them.
 - **No CI wiring.** The nightly job + baseline-diff automation above is a
   sketch; wiring it into GitHub Actions is a separate ticket.

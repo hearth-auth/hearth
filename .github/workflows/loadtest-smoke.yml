@@ -11,7 +11,7 @@ name: loadtest-smoke
 # job completes in under 5 minutes on a standard GitHub runner.
 
 # FOLDED INTO ci.yml (production-readiness task 26.29, audit
-# reports/subsystem-audit-fuzz-loadtest-2026-09-21.md L-1).
+# https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/subsystem-audit-fuzz-loadtest-2026-09-21.md L-1).
 #
 # `required-summary` in ci.yml is the ONLY required context on main
 # (scripts/check-branch-protection.sh asserts exactly that), and GitHub cannot

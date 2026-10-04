@@ -245,4 +245,4 @@ When a federated login arrives with an email that matches an existing local acco
 - [Organizations guide](organizations.md) — B2B multi-tenancy within a realm
 - [Federation examples](hearth-yaml-examples/federation.md) — Google, GitHub, Microsoft, Apple, SAML YAML config
 - [Security hardening](security-hardening.md) — production TLS, token TTLs, rate limiting
-- [Configuration reference](../specs/CONFIGURATION.md#realmsnamedfederation) — full federation field reference
+- [Configuration reference](configuration-reference.md#realmsnamefederation) — full federation field reference

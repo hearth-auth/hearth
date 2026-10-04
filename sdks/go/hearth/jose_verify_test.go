@@ -108,7 +108,7 @@ func TestJoseVerify_WrongKidFails(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected an error for an unknown kid, got claims %+v", claims)
 	}
-	// SDK.md §5: JWKSFetchError is for an unreachable or invalid JWKS
+	// openspec/specs/sdk-support-contract/spec.md: JWKSFetchError is for an unreachable or invalid JWKS
 	// endpoint. A kid still absent after the one re-fetch is a bad token.
 	var invalid *TokenInvalidError
 	if !errors.As(err, &invalid) {

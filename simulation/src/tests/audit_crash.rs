@@ -164,7 +164,7 @@ fn simulation_audit_crash_corrupt_crc_rolls_back_last_event() {
 }
 
 /// Sustained concurrent write load: multiple writers must not corrupt the
-/// hash chain. This covers `TEST_SCENARIOS.md` §Audit Logging Simulation
+/// hash chain. This covers `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md` §Audit Logging Simulation
 /// bullet 2.
 ///
 /// Eight threads each append 250 events; the engine must durably store

@@ -269,7 +269,7 @@ fn a9_allow_list_denies_non_matching_ip() {
 // CidrFilter — combined allow + deny
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// CONFIGURATION.md §`cidr_policy`: Evaluation is deny first, then allow: a
+/// docs/guides/configuration-reference.md §`cidr_policy`: Evaluation is deny first, then allow: a
 /// `deny` match refuses outright; otherwise a non-empty `allow` list refuses
 /// every address it does not contain. Both lists empty means no network
 /// restriction. So a deny exception inside an allowed range refuses its

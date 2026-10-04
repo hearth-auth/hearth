@@ -1,6 +1,6 @@
 //! P0 RBAC scenario tests.
 //!
-//! Covers `docs/specs/TEST_SCENARIOS.md` §"Authorization (RBAC) Engine":
+//! Covers `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md` §"Authorization (RBAC) Engine":
 //! - Unit: Permission string grammar (external test)
 //! - Unit: Group caps (depth > 10)
 //! - Adversarial: Invalid permission strings rejected at role creation

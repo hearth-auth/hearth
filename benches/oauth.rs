@@ -1,6 +1,6 @@
 //! Criterion benchmarks for OAuth 2.0 client credentials and token introspection.
 //!
-//! Covers `TEST_SCENARIOS.md` § OAuth — Benchmark:
+//! Covers `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md` § OAuth — Benchmark:
 //! - G1: Client credentials issuance: p50 < 500 μs, p99 < 2 ms
 //! - G2: Token introspection: p50 < 50 μs, p99 < 500 μs
 

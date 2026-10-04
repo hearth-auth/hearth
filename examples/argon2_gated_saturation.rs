@@ -14,7 +14,7 @@
 //!
 //! The mechanism is proved deterministically by the `identity::kdf_gate` unit
 //! tests; this example demonstrates it under the real Argon2id cost so the delta
-//! can be appended to `docs/perf/HEA-1879-C9-issuance-triage.md`.
+//! can be appended to `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/perf/HEA-1879-C9-issuance-triage.md`.
 //!
 //! Run (permits default to the core count, matching the shipped default):
 //! `cargo run --release --example argon2_gated_saturation -- \

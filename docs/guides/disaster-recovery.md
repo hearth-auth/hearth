@@ -812,7 +812,7 @@ drill](#test-restore-drill-checklist).
 > backup. See the [backup guide's RPO
 > statement](./backup.md#recovery-point-objective-rpo) for the canonical
 > operator-facing wording and the [design
-> spike](../plans/HEA-2170-pitr-wal-archiving-design.md) for the post-1.x
+> spike](https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/plans/HEA-2170-pitr-wal-archiving-design.md) for the post-1.x
 > plan.
 
 Worst-case data loss is **the backup interval plus the duration of one

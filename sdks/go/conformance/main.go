@@ -136,7 +136,7 @@ func pick(claims *hearth.Claims, names []string) map[string]any {
 	return out
 }
 
-// failure maps an SDK error to its SDK.md §5 name.
+// failure maps an SDK error to its openspec/specs/sdk-support-contract/spec.md name.
 func failure(id string, err error) result {
 	return result{ID: id, Outcome: "error", Error: errorName(err)}
 }

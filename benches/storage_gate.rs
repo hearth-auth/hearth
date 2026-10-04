@@ -1,7 +1,7 @@
 //! CI threshold gates for storage hot-path latency targets.
 //!
 //! Enforces the p50 and p99 latency targets documented in
-//! `src/storage/tiered.rs` and `docs/specs/TEST_SCENARIOS.md`.
+//! `src/storage/tiered.rs` and `openspec/specs/performance-budgets/spec.md`.
 //!
 //! # CI Threshold Gates
 //!
@@ -20,9 +20,8 @@
 //! iterations, then assert p50 (`samples[len/2]`) and p99
 //! (`samples[len*99/100]`). Panicking here causes non-zero exit.
 //!
-//! Thresholds derive from `docs/specs/ARCHITECTURE.md` § Hot Path Rules and
-//! `TEST_SCENARIOS.md` § Storage Tiered Hot/Cold + Session Management +
-//! Identity Engine Benchmark scenarios.
+//! Thresholds derive from `docs/dev/ARCHITECTURE.md` § Hot Path Rules and
+//! `openspec/specs/performance-budgets/spec.md`.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

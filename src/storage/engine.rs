@@ -4587,7 +4587,7 @@ mod tests {
         // The merge must actually have consumed the older SSTs. Without this, an
         // `Ok(0)` early return (e.g. a future refactor that skips the merge) would
         // leave the OLD SST unmerged and let the final recency check pass for a
-        // reason unrelated to what is under test (TESTING.md anti-pattern class B).
+        // reason unrelated to what is under test (docs/dev/TESTING.md anti-pattern class B).
         assert!(
             merged_inputs >= 3,
             "compact_ssts must merge at least the three older SSTs \

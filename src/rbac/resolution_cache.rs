@@ -38,7 +38,7 @@
 //! it would not be in `validate_token`. The hot call sites that were still on
 //! `ArcSwap` moved to the epoch-reclaimed [`EpochCell`](crate::core::EpochCell)
 //! in task 26.5, and the crate is no longer a dependency; see
-//! `reports/arc-swap-use-after-free-2026-09-21.md`.
+//! `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/arc-swap-use-after-free-2026-09-21.md`.
 //!
 //! # Correctness (security boundary)
 //!
@@ -427,7 +427,7 @@ mod tests {
         // three copies at a time. On `ArcSwap` that measured 3 failures in 150
         // runs (two SIGSEGV, one `free(): invalid size`); on `SwapCell` it
         // measures 0. Full evidence is in
-        // `reports/arc-swap-use-after-free-2026-09-21.md`. On glibc 2.34 and
+        // `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/arc-swap-use-after-free-2026-09-21.md`. On glibc 2.34 and
         // later `MALLOC_CHECK_` does nothing unless `libc_malloc_debug.so` is
         // preloaded (`LD_PRELOAD=<glibc>/lib/libc_malloc_debug.so`), which
         // leaves only glibc's always-on `free()` checks; `MALLOC_PERTURB_=165`

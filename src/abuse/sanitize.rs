@@ -1,7 +1,7 @@
 //! Tenant-content sanitizers (A-45).
 //!
 //! All tenant-supplied SVG and CSS must pass through these functions before
-//! being rendered into HTML without escaping. See `docs/specs/ABUSE.md` §A-45.
+//! being rendered into HTML without escaping. See `openspec/specs/abuse-prevention/spec.md` §A-45.
 //!
 //! # Fail mode
 //!

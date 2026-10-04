@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// SDK.md §2 step 3: `iss` must match the CONFIGURED issuer. Reaching the same
+// openspec/specs/sdk-support-contract/spec.md step 3: `iss` must match the CONFIGURED issuer. Reaching the same
 // server as `localhost` gives the same keys and the same discovery document,
 // but a token issued as 127.0.0.1 does not belong to the configured issuer.
 func TestVerifyToken_IssuerComparedWithConfiguredIssuer(t *testing.T) {

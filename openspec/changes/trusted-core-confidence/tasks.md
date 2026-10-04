@@ -24,7 +24,7 @@
 - [ ] 2.2 Run Config OP; confirm the RS256 failure from 2026-09-21 is gone
 - [ ] 2.3 Run Basic OP and Dynamic OP; fix each failure with a red test first
 - [ ] 2.4 Record each warning and its decision (design Open Question 1 for `resource_indicators_supported`)
-- [ ] 2.5 Write the run report under `reports/`, and update `docs/specs/TESTING.md` §7
+- [ ] 2.5 Write the run report under `reports/`, and update `docs/dev/TESTING.md` §7
 - [ ] 2.6 Add the run to `docs/release-runbook.md` as a release step
 
 ## 3. Entry-point invariant registry

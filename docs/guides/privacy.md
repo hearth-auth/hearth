@@ -398,7 +398,7 @@ redact metadata.
 
 - [`docs/guides/auditing.md`](auditing.md) — Configuring audit log retention, querying events, integrity verification
 - [`docs/guides/security-hardening.md`](security-hardening.md) — TLS, mTLS, cipher hardening, HTTP headers
-- [`docs/guides/ABUSE.md`](ABUSE.md) — Rate limiting, credential-attack mitigations, abuse-prevention controls
-- [`docs/specs/ARCHITECTURE.md`](../specs/ARCHITECTURE.md) — §15.2 approved crates; storage engine guarantees
-- [`docs/specs/AUTHORIZATION.md`](../specs/AUTHORIZATION.md) — RBAC roles, permissions, JWT claims schema
-- [`docs/specs/CONFIGURATION.md`](../specs/CONFIGURATION.md) — Full `hearth.yaml` reference including `audit.retention_days` and `security.rate_limiting`
+- [`openspec/specs/abuse-prevention/spec.md`](https://github.com/hearth-auth/hearth/blob/main/openspec/specs/abuse-prevention/spec.md) — Rate limiting, credential-attack mitigations, abuse-prevention controls
+- [`docs/dev/ARCHITECTURE.md`](https://github.com/hearth-auth/hearth/blob/main/docs/dev/ARCHITECTURE.md) — §15.2 approved crates; storage engine guarantees
+- [`openspec/specs/rbac-model/spec.md`](https://github.com/hearth-auth/hearth/blob/main/openspec/specs/rbac-model/spec.md) — RBAC roles, permissions, JWT claims schema
+- [`docs/guides/configuration-reference.md`](configuration-reference.md) — Full `hearth.yaml` reference including `audit.retention_days` and `security.rate_limiting`

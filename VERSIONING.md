@@ -58,7 +58,7 @@ The table below defines what counts as breaking for **every** committed family a
 | Change an error message string | No (codes are stable) |
 | Change an HTTP status code | Yes |
 
-For a URL-versioned family, a breaking change requires a new prefix (`/v2/…`) and the previous version must be served for at least one full major release. For an unprefixed family, a breaking change requires a major version bump of Hearth itself plus the deprecation notice period below. Concurrent support of two active versions will be documented in [`docs/specs/ARCHITECTURE.md`](docs/specs/ARCHITECTURE.md) § 4.3 and the CHANGELOG.
+For a URL-versioned family, a breaking change requires a new prefix (`/v2/…`) and the previous version must be served for at least one full major release. For an unprefixed family, a breaking change requires a major version bump of Hearth itself plus the deprecation notice period below. Concurrent support of two active versions will be documented in [`docs/dev/ARCHITECTURE.md`](docs/dev/ARCHITECTURE.md) § 4.3 and the CHANGELOG.
 
 ### gRPC API
 
@@ -178,4 +178,4 @@ The GitHub issue will link to a migration guide for the 2.x line.
 
 - [CHANGELOG.md](CHANGELOG.md) — per-release record of breaking changes, deprecations, and removals
 - [docs/guides/upgrading.md](docs/guides/upgrading.md) — upgrade procedure and per-version operator notes
-- [docs/specs/ARCHITECTURE.md](docs/specs/ARCHITECTURE.md) § 4.3 API Versioning and § 6.4 Format Versioning — structural rules enforced at the code level
+- [docs/dev/ARCHITECTURE.md](docs/dev/ARCHITECTURE.md) § 4.3 API Versioning and § 6.4 Format Versioning — structural rules enforced at the code level

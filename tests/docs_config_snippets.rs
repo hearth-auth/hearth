@@ -44,7 +44,7 @@ use std::path::{Path, PathBuf};
 use hearth::config::Config;
 
 /// Markdown documents whose fenced `yaml` blocks are checked.
-const DOC_SOURCES: &[&str] = &["docs/specs/CONFIGURATION.md"];
+const DOC_SOURCES: &[&str] = &["docs/guides/configuration-reference.md"];
 
 /// Whole YAML files shipped to operators, checked end to end.
 const FILE_SOURCES: &[&str] = &["hearth.example.yaml", "hearth.maximal.yaml"];
@@ -60,17 +60,17 @@ const KNOWN_BROKEN_SNIPPETS: &[(&str, &str, &str)] = &[
     // hearth.yaml" admonition above each block; the snippet is retained as a shape
     // illustration. Delete the entry in the same change that adds the YAML key.
     (
-        "docs/specs/CONFIGURATION.md",
+        "docs/guides/configuration-reference.md",
         "adaptive_mfa:",
         "adaptive_mfa has no realm YAML key (src/config/types.rs maps it to ::default())",
     ),
     (
-        "docs/specs/CONFIGURATION.md",
+        "docs/guides/configuration-reference.md",
         "breach_check:",
         "breach_check has no realm YAML key (src/config/types.rs maps it to ::default())",
     ),
     (
-        "docs/specs/CONFIGURATION.md",
+        "docs/guides/configuration-reference.md",
         "pre_token_webhook:",
         "pre_token_webhook has no realm YAML key (src/config/types.rs maps it to None)",
     ),

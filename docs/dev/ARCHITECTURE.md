@@ -1,0 +1,705 @@
+# Hearth Architecture
+
+## Purpose
+
+This document defines the structural rules that govern all Hearth source code. It is enforced in every PR. Violations of MUST-level rules block merge.
+
+Terminology follows [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119): **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY** carry their standard meaning. MUST-level rules are hard gates — violations block merge with no exceptions. SHOULD-level rules are strong preferences — violations require a comment in the PR explaining the justification for deviation.
+
+Changes to this document require the same review rigor as breaking API changes.
+
+### Related Documents
+
+- [VISION.md](../vision/VISION.md) — design rationale, performance targets, competitive positioning, and roadmap. The "why" and "what."
+- [TESTING.md](./TESTING.md) — verification strategy, eight testing layers, tooling, and CI tiers. The "how we prove it works."
+- [openspec/specs/rbac-model/spec.md](../../openspec/specs/rbac-model/spec.md) — normative spec for Hearth's authorization model (roles, groups, permissions, JWT claims). Referenced from § 1.1, § 4.2, § 5, § 7.
+- This document — structural rules, constraints, and architectural decisions. The "how code must be written."
+
+---
+
+## 1. Layer Architecture
+
+### 1.1 The Six Modules
+
+Hearth is organized into five architectural layers plus a shared core module:
+
+| Module | Path | Responsibility |
+|--------|------|----------------|
+| **Core** | `src/core/` | Shared types (`UserId`, `RealmId`, `SessionId`, `Timestamp`), error traits, the `Clock` trait, and other foundational types used by every layer. Contains only types and traits — no logic, no state, no I/O. |
+| **Protocol** | `src/protocol/` | Wire format translation: HTTP REST, OIDC, OAuth 2.0, SAML, SCIM, WebAuthn. Thin adapters that translate wire requests into Identity Engine calls and serialize responses. Stateless. |
+| **Identity Engine** | `src/identity/` | Domain logic: users, credentials, sessions, realms, tokens, audit. Orchestrates authentication flows. Enforces the opinionated decisions about supported flows. |
+| **Authorization Engine** | `src/rbac/` | Claims-based RBAC: roles, groups, permissions, role assignments. Resolves a user's effective permissions at token-issue time for embedding in JWT claims. See [openspec/specs/rbac-model/spec.md](../../openspec/specs/rbac-model/spec.md) for the normative model. |
+| **Cluster** | `src/cluster/` | Raft consensus via `openraft`, log replication, leader election, membership changes, snapshots. Wraps the storage engine — in clustered mode, writes go through Raft before reaching storage. Skipped entirely in single-node mode. |
+| **Storage Engine** | `src/storage/` | WAL, memtable, SSTs, hot/cold tiered storage, indexes, encryption at rest. The leaf layer. Pure data persistence with no knowledge of identity, auth, or authorization concepts. |
+
+### 1.2 Dependency Direction
+
+Dependencies flow strictly downward. The dependency graph is:
+
+```
+         core/  ←──────────────── (available to all layers)
+           │
+    ┌──────┴──────┐
+    │  protocol/   │
+    └──────┬──────┘
+           │
+    ┌──────┴──────┐      ┌──────────┐
+    │  identity/   │─────→│  rbac/   │  (lateral: identity calls rbac during token issuance)
+    └──────┬──────┘      └────┬─────┘
+           │                  │
+           └────────┬─────────┘
+                    │
+           ┌────────┴────────┐
+           │    cluster/      │
+           └────────┬────────┘
+                    │
+           ┌────────┴────────┐
+           │    storage/      │
+           └─────────────────┘
+```
+
+**Rules:**
+
+- Every layer MAY depend on `core/`.
+- Dependencies MUST flow downward. No layer MAY import from a layer above it. `storage/` MUST NOT import from `cluster/`, `rbac/`, `identity/`, or `protocol/`. `rbac/` MUST NOT import from `identity/` or `protocol/`.
+- **One lateral exception**: `identity/` MAY call into `rbac/` to resolve a user's effective permissions during token issuance. `rbac/` MUST NOT call into `identity/`.
+- Lateral dependencies within the same layer are permitted but SHOULD be minimized.
+- `src/main.rs` is the binary entry point. It wires layers together and starts the server. It MAY import from any layer.
+
+### 1.3 Inter-Layer Communication
+
+- Layers communicate through **trait interfaces** defined in each layer's `mod.rs`. Internal implementation details MUST NOT leak upward.
+- Each layer MUST define its public interface as traits and types in its `mod.rs`. Internal types MUST be `pub(crate)` or private.
+- The storage engine MUST NOT expose WAL, memtable, or SST types to upper layers. It exposes a storage trait with get/put/delete/scan operations.
+- The RBAC engine MUST NOT expose storage internals or resolution graph state. It exposes role/group/assignment CRUD, `resolve_permissions()`, and `seed_realm()`. See [`AUTHORIZATION.md` § 6 (archived)](https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/AUTHORIZATION.md#6-engine-api--srcrbac) for the full trait.
+
+---
+
+## 2. Async Model
+
+Hearth uses **Tokio** as its async runtime. No other async runtime MAY be used.
+
+All layers expose `async fn` interfaces. This provides a uniform API and ensures the cluster layer (which is inherently asynchronous due to Raft network operations) integrates without sync/async boundary friction.
+
+**Rules:**
+
+- Blocking operations (file I/O, cryptographic hashing, DNS) MUST be offloaded to `tokio::task::spawn_blocking` or a dedicated blocking thread pool. They MUST NOT execute on Tokio worker threads.
+- Long-running CPU-bound work MUST use `spawn_blocking` or `tokio::task::yield_now()` to avoid starving other tasks.
+- Hot path functions (see [Section 3](#3-hot-path-rules)) are `async fn` but MUST NOT yield — they complete synchronously within an async context, performing no `.await` on I/O operations.
+
+---
+
+## 3. Hot Path Rules
+
+The hot path is the most performance-critical code in the system — it executes on every authenticated request. The vision document targets sub-millisecond p99 latency for these operations (see [VISION.md Section 7](../vision/VISION.md) for specific targets).
+
+### 3.1 Definition
+
+The hot path is any code reachable from these operations **when data is in the hot tier**:
+
+- `validate_token()` — session lookup (not signature re-verification; see [Section 10.1](#101-token-validation))
+- `lookup_session()` — session by ID
+- `lookup_user()` — by indexed field (email, ID)
+
+Authorization decisions are NOT on the hot path. Permissions are resolved at token-issue time by the RBAC engine (off the hot path) and embedded in the JWT. Client-side permission checks read from the decoded token with no server round trip; server-side checks read from verified claims in-process.
+
+**Everything else is off the hot path**: user creation, credential hashing, token issuance, RBAC permission resolution, WAL writes, cold-tier promotion, audit materialization, SAML/SCIM handling, admin API operations.
+
+### 3.2 Hard Rules
+
+Hot path code MUST obey all of the following:
+
+1. **Zero heap allocations.** MUST NOT call `Box::new`, `Vec::new`, `String::from`, `format!()`, `to_string()`, or any other allocating operation in the steady state. Pre-allocated buffers and arena allocators are the alternatives.
+   - The one sanctioned exception is the bookkeeping of the epoch collector that rule 3 requires. A read through `core::EpochCell` pins its thread in the cells' `crossbeam-epoch` collector, and every 128th pin on a thread runs a slice of that collector's pending work, which allocates at most once per 1,024 loads on the thread — and only while there is collector work pending, which `EpochCell` writes (and threads that used a cell exiting) produce; with neither, a warm load allocates nothing. The cells have a collector of their own, so no other code's deferred work (such as `crossbeam-skiplist`'s node frees) runs in, or allocates in, a hot-path read. `src/core/epoch_cell.rs` explains the mechanism and `tests/epoch_cell_hot_path.rs` gates both bounds, measuring the second with a writer running. Hot-path code MUST NOT add any other allocation, amortised or not.
+2. **No syscalls for reads.** Hot-tier reads MUST be satisfied from memory-mapped structures or in-process data. No `read()`, `pread()`, or file I/O.
+3. **No locks on the read path.** Readers MUST NOT acquire mutexes, `RwLock` write locks, or any blocking synchronization primitive. Epoch-based reclamation (e.g., `crossbeam-epoch`) or read-copy-update patterns are required.
+4. **No yielding.** Hot path async functions MUST NOT `.await` on I/O operations. They complete synchronously within the async context.
+5. **Cache-line alignment.** Hot path data structures SHOULD use `#[repr(C)]` and align to 64-byte cache lines where beneficial.
+
+### 3.3 Cold Path Exemptions
+
+- Cold-tier promotion (disk I/O to load evicted records) is NOT hot path. It MAY allocate, perform I/O, and acquire locks.
+- Write path code (WAL append, memtable insert) is NOT hot path and has different constraints (see [Section 6.1](#61-write-path-invariants)).
+- RBAC resolution (role/group/assignment traversal during `resolve_permissions`) is NOT hot path — it runs at token issuance. Its performance budget is enforced by benchmarks, not by allocation rules.
+- Cold path reads MUST NOT degrade hot path performance. Cold-tier promotion MUST NOT lock or invalidate hot-tier data structures.
+- Control-cache reloads are NOT hot path. The revoked-JTI blocklist, the DPoP blocklist and realm statuses are rebuilt from storage when the replicated control epoch moves (a control asserted on another node). The rebuild runs on a dedicated reloader thread (`src/identity/engine/control.rs`); the validation path only compares the epoch — at most one debounced storage read per `EPOCH_SYNC_INTERVAL_MICROS` — and, when it moved, signals that thread with an atomic store and an `unpark`. In cluster mode the replicated epoch row signals it from the Raft observer. Control writers and the reloader order their cache changes under a lock that covers in-memory work only and that validation MUST NOT take. The reloader holds a reload back (at most 100 ms) while the node's own control bumps are in flight, so a node — a cluster leader whose observer sees its own bump first — does not reload for a control it applied itself. The consequence is bounded staleness on the nodes that did not serve the control, never a blocked validation. The epoch is bumped with one Raft `IncrementU64` command whose successor the state machine computes at apply time. That command MUST count at most once per log entry. The state machine persists its applied index with every entry (§16.1), so a restart does not re-apply entries — but a node installing a snapshot re-applies every entry after the snapshot's declared index, and the snapshot's data may already hold their effects (it is scanned while the leader keeps applying). So the counter carries a sidecar row with the index of the last entry that moved it, written in the same atomic batch; an entry at or below it has already been counted and changes nothing; and any other command that writes a counter key (a `Put` from an older binary) moves the sidecar to its own index in the same batch, so the increments after it apply again and the counter converges. Every other Raft command converges when applied twice. A counter or sidecar row that does not decode is repaired, identically on every node, to the incrementing entry's log index (above every value ever handed out) rather than refused, and a bump that cannot be persisted MUST be alertable and MUST NOT be forgotten: it is logged at `ERROR`, counted in `hearth_control_epoch_bump_failures_total`, and recorded as owed; a dedicated bump thread — never the reloader, which must keep reloading while a retry blocks for up to `write_timeout` — retries the owed bump with bounded backoff until it succeeds (one extra bump only costs other nodes a reload), exporting the owed count as `hearth_control_epoch_bumps_owed` (summed over the process's engines). Cluster storage does not forward a follower's writes, so a bump lost to a leader change can never be made by the node that owes it: a node that becomes leader MUST bump the epoch once (every row committed under an earlier leader precedes that bump in its log, so every node, the new leader included, reloads), and a node whose owed bump is refused as `NotLeader` drops it. The control still binds on the serving node meanwhile. A bump is not folded into the control row's own Raft proposal: the rows are plain batches and the increment is its own command, and the retry closes the window without a new command. A snapshot install can still lower a node's persisted epoch; the reload that follows it re-bases the node's epoch bookkeeping on the value it reads, so later controls bind.
+- Raft observers (`ReplicatedWriteObserver`) run on the state machine's apply path on every node, the leader included. They MUST NOT write to storage: a write is a Raft proposal, and a proposal made from inside an apply waits for that apply.
+
+### 3.4 Benchmark Enforcement
+
+Any PR that touches hot path code MUST include benchmark results demonstrating no regression beyond the thresholds defined in [TESTING.md Section 8](./TESTING.md). A regression beyond threshold blocks merge.
+
+Hot path benchmarks MUST demonstrate that the async function wrapper has zero measurable overhead compared to a synchronous equivalent. If a regression is detected, the hot path trait MUST be split into sync/async variants.
+
+---
+
+## 4. API Contracts and Wire Protocols
+
+### 4.1 Protobuf as Single Source of Truth
+
+All API contracts MUST be defined in `.proto` files. Protobuf is the single source of truth for request/response shapes, event schemas, and SDK type generation.
+
+**Rules:**
+
+- `.proto` files MUST live in `proto/` at the project root.
+- REST endpoints MUST serialize from protobuf-generated Rust types (via `prost`, with the `pbjson` JSON codec). The `service` blocks in `proto/` are schema only: no gRPC server or client code is generated for them (see [`PROTO.md`](./PROTO.md)).
+- Event schemas (webhooks, streaming) MUST use protobuf definitions from the same `.proto` files.
+- Standard protocol shapes (OIDC, OAuth 2.0) MUST have `.proto` definitions that mirror their RFC-mandated schemas.
+- SDK type generation SHOULD be derived from the `.proto` definitions.
+- `buf` is the protobuf toolchain for linting, breaking change detection, and code generation.
+
+### 4.2 Wire Protocols
+
+- **REST** (JSON over HTTP) is the primary wire protocol, required from Phase 0. Standard protocol endpoints (OIDC, OAuth 2.0, SAML, SCIM) MUST conform strictly to their respective RFCs.
+- **There is no public gRPC API.** It was removed in 3.0.0; every admin operation is served over REST under `/admin`. gRPC (`tonic`) remains only as the internal node-to-node Raft transport of the cluster layer (§16), which is not a client API.
+- The HTTP framework MUST be `tower`-compatible. The specific framework choice is an implementation decision.
+- The **Identity Engine MUST NOT depend on any wire format or serialization framework.** Protocol adapters are thin translation layers that call into the Identity Engine's trait interface. This decoupling ensures new wire formats can be added without restructuring the core.
+
+### 4.2.1 Authorization HTTP Surface
+
+Full reference: [`openspec/specs/rbac-model/spec.md`](../../openspec/specs/rbac-model/spec.md) — normative model, JWT claim schema, HTTP endpoints, SDK contract.
+
+Summary of the surface this document is responsible for:
+
+- **JWT claims** carry `roles`, `groups`, `permissions`, and (when org-scoped) `oid`. Clients read these synchronously for authorization decisions. See [openspec/specs/rbac-token-claims/spec.md](../../openspec/specs/rbac-token-claims/spec.md).
+- **`GET /v1/me/permissions`** — live-introspection escape hatch for backends that want to re-resolve permissions during long-running operations without trusting a possibly-stale JWT. See [openspec/specs/rbac-admin-api/spec.md](../../openspec/specs/rbac-admin-api/spec.md).
+- **Admin endpoints** under `/admin/roles`, `/admin/groups`, `/admin/users/{id}/roles`, `/admin/groups/{id}/members`, `/admin/groups/{id}/roles` — full CRUD and introspection. Gated by the `hearth.admin` permission. See [openspec/specs/rbac-admin-api/spec.md](../../openspec/specs/rbac-admin-api/spec.md).
+- No service-to-service `Check` endpoint; callers decode the JWT locally.
+
+#### Permission-delivery modes and hot-path designation
+
+`OAuthClient.access_token_authorization` controls how RBAC data reaches resource
+servers. There are three modes; see [openspec/specs/rbac-token-claims/spec.md](../../openspec/specs/rbac-token-claims/spec.md) for the
+normative specification.
+
+**Hot-path designation:**
+
+| Endpoint | Path classification | Reason |
+|---|---|---|
+| Token signature verify + claim read (embedded mode) | **Hot path** | In-process; zero allocations, zero syscalls, no network. |
+| `POST /introspect` | **Off hot path** | Validates signature + session liveness then resolves live RBAC in-process; cost is one network round-trip at the resource server. |
+| `POST /oauth/authorize` | **Off hot path** | Validates token + resolves live RBAC in-process for one permission; cost is one network round-trip at the resource server. |
+
+`embedded` mode preserves the hot-path invariant defined in [§ 3.1](#31-definition): token
+validation requires zero heap allocations, no syscalls, and no `.await` on I/O.
+`introspection` and `decision` modes are off the hot path — they each perform in-process
+token validation and RBAC resolution before responding, but the round-trip latency is
+dominated by the resource server's outbound call, not by Hearth's internal processing.
+
+### 4.3 API Versioning
+
+See [`VERSIONING.md`](../../VERSIONING.md) for the full operator-facing SemVer policy, support window, deprecation rules, and EOL communication process. The structural rules below are normative for engineers working on this codebase.
+
+**1.0 GA shipped on 2026-06-21** (tag `v1.0.0`); the current line is 1.6.x. The rules below are in
+force now. A breaking change is no longer authorized merely by adding a changelog entry — it requires
+a major version bump. On-disk format changes MUST NOT silently corrupt data: if the format is
+incompatible, startup MUST fail with a clear error directing the operator to re-initialize.
+
+**Post-1.0-GA (in force)**:
+
+- HTTP endpoints MUST be versioned (`/v1/...`). Breaking changes require a new API version. Previous versions MUST be supported for at least one major release.
+- Config changes MUST NOT break existing config files. New required fields MUST have defaults. Removed fields MUST produce a clear error, not silent behavior change.
+- On-disk format changes MUST include automatic migration on startup. Hearth MUST read data written by the previous minor version without manual intervention.
+
+---
+
+## 5. Error Handling
+
+### 5.1 Error Types
+
+- Each layer MUST define its own error enum (`StorageError`, `IdentityError`, `RbacError`, `ProtocolError`, `ClusterError`).
+- All error enums MUST be `#[non_exhaustive]`.
+- All error enums MUST implement `std::error::Error` and `Display`.
+- Errors MUST NOT cross layer boundaries as concrete types. Upper layers convert lower-layer errors into their own types via `From` implementations, using categorized conversion: `LayerError::Internal { source: Box<dyn Error> }`. Upper layers see "internal failure" and can walk the error chain via `source()`, but do not match on lower-layer error variants.
+
+### 5.2 Error Content
+
+- Error messages MUST NOT include sensitive data: passwords, tokens, session IDs, cryptographic keys, PII.
+- Error messages SHOULD include enough context for debugging: operation attempted, entity ID (if non-sensitive), reason for failure.
+- Internal errors (storage corruption, invariant violations) MUST be logged at `error` level with full context before being converted to an opaque error for the caller.
+
+### 5.3 Panic Policy
+
+- Production code MUST NOT use `unwrap()` or `expect()` on fallible operations.
+- `#[deny(clippy::unwrap_used)]` MUST be enabled for all non-test code, from day one.
+- `unwrap()` is permitted ONLY when the invariant is provably unreachable, annotated with `#[allow(clippy::unwrap_used)]` and a `// INVARIANT:` comment explaining why it cannot fail. These sites are auditable by grepping for `allow(clippy::unwrap_used)`.
+- `expect()` is permitted in test code and one-time initialization (startup).
+- Public functions MUST return `Result<T, LayerError>`.
+
+---
+
+## 6. Storage Engine
+
+### 6.1 Write Path Invariants
+
+- Every mutation MUST be written to the WAL before being acknowledged. No write is considered committed until the WAL entry is `fsync`'d.
+- A mutation is applied to the memtable inside the WAL critical section that assigns its record a position, and before the `fsync` that acknowledges it. So the memtable applies writes in WAL order (replay after a crash reproduces what the node served), and a record the WAL has made durable is never missing from the memtable when a rotation flushes it and truncates the segment. If the process crashes before the `fsync`, WAL replay MUST reconstruct the correct state. A write that returns an error has an unknown outcome: a concurrent flush may already have persisted it.
+- Writes SHOULD be batched where possible to amortize `fsync` cost.
+- `fsync()` is non-optional in production builds. A `--dev` flag MAY relax this for development mode only.
+- The storage engine MUST survive `kill -9` at any point and recover to a consistent state. This is verified by crash-recovery simulation tests (see [TESTING.md Section 5](./TESTING.md)).
+- The storage engine MUST support **atomic batch writes**. Multiple operations (puts and deletes) MUST be writable as a single WAL entry with a single `fsync`. Either all operations in the batch are durable, or none are.
+- Identity operations that span multiple records (e.g., create user + index entry + credential) MUST use batch writes to maintain consistency.
+
+### 6.2 Tiered Storage
+
+- The hot tier MUST auto-size based on available system memory (physical memory or cgroup limit) unless overridden by operator configuration.
+- Hot-to-cold eviction MUST NOT block the read path.
+- Cold-to-hot promotion MUST be asynchronous with respect to hot-tier readers — it MUST NOT lock or invalidate hot-tier data structures.
+- The eviction policy is clock-based LRU approximation. Strict LRU is prohibited because it requires linked-list mutation on every access, violating hot path constraints.
+
+### 6.3 Encryption at Rest
+
+- Credentials and sensitive fields MUST be encrypted at rest.
+- **Blast radius (as implemented):** the key-encryption key is **not** per realm. `KeyRegistry`
+  is a realm-keyed map, but the storage engine only ever provisions and uses the **system
+  realm's** KEK (`RealmId::nil()`) to wrap every WAL-segment and SST data-encryption key
+  (`src/storage/engine.rs` — `ensure_kek_for_realm(&system_realm)` at open, and
+  `get_kek_for_realm(&self.system_realm)` on the flush and both compaction paths). Recovering
+  that one KEK unwraps every realm's on-disk data. Operators MUST size key-compromise blast
+  radius against a single KEK, not against one KEK per tenant. Per-realm KEK provisioning is a
+  future change; it is not shipped.
+- Encryption keys MUST NOT appear in log output, error messages, or debug dumps.
+- The storage engine MUST support key rotation without downtime.
+
+**Envelope encryption**: Each SST file MUST be encrypted with a random Data Encryption Key (DEK) using AES-256-GCM applied to the entire data section. The DEK is wrapped by a Key Encryption Key (KEK) and stored in the SST file header.
+
+**SST header encryption fields**: KEK identifier (16 bytes), encrypted DEK (32 bytes), nonce (12 bytes), authentication tag (16 bytes).
+
+**Key rotation**: Key rotation MUST re-wrap DEKs with the new KEK. Data sections MUST NOT be re-encrypted during rotation — only the wrapped DEK in each file header changes. This makes rotation O(number of files), not O(data size).
+
+**WAL encryption**: The WAL MUST use the same envelope encryption pattern, with a per-segment DEK. Each WAL segment has its own random DEK, wrapped by the same single system-realm KEK described above (the WAL is a shared, cross-realm log — it has no single owning realm).
+
+### 6.4 Format Versioning
+
+- A node MUST be able to read storage formats (WAL, SST) from the previous minor version.
+- Format version migration machinery is deferred until the first format-breaking change post-v1.0.
+
+---
+
+## 7. Multi-Tenancy
+
+Hearth uses **logical isolation** with type-system-enforced realm scoping. This is a MUST-level invariant — the highest enforcement tier.
+
+### 7.1 Isolation Rules
+
+1. **Type-system enforcement.** Every storage operation MUST require a `RealmId` parameter (a newtype, not a raw string). The storage API MUST make it impossible to construct a query without a realm context. This is enforced at compile time.
+2. **Key prefix encoding.** The storage engine MUST prefix all keys with the realm ID. There is no code path to construct a storage key without a `RealmId`.
+3. **Bounded scans.** All scan operations MUST be bounded to a single realm's key space. The storage engine MUST NOT return results spanning multiple realms from a single query.
+4. **No cross-realm API.** The standard storage API MUST NOT expose operations that query across realms. Cross-realm operations (admin, migration) MUST use a separate, explicitly privileged API path.
+
+### 7.2 Verification
+
+Realm isolation MUST be verified by:
+
+- **Property-based tests**: Random sequences of operations across random realms, asserting that data written under realm A is never readable under realm B. 10,000+ cases in CI.
+- **Adversarial tests**: Write data under realm A, attempt every read operation under realm B, assert zero results. Concurrent writes across realms asserting no cross-contamination. Realm deletion followed by recreation with the same ID asserting no ghost data.
+- **Debug-mode runtime assertions**: In debug builds, every value returned from the storage engine is checked — does this record's realm ID match the requested realm ID? A redundant tripwire on top of the key prefix guarantee.
+
+### 7.3 Realm Lifecycle
+
+- **Creation**: Write a realm record. No special constraints beyond standard storage operations.
+- **Suspension**: Realm records MUST include a `status` field (`Active`, `Suspended`). The identity layer MUST check realm status before processing any request. Suspended realms MUST reject all authentication and authorization operations. Data is preserved.
+- **Deletion**: Realm deletion MUST write tombstones for all realm-prefixed keys. Compaction removes the data physically. Logical deletion (no reads return data) is immediate. Physical deletion occurs during compaction.
+
+---
+
+## 8. Security
+
+### 8.1 Token Validation and Signing
+
+Hearth's internal hot path validates tokens via **session lookup**, not signature re-verification. Hearth issued the token and stores the session — it does not need to cryptographically re-verify its own signatures on every request. The hot path extracts the session reference from the token, looks up the session in the hot tier, and checks expiration/revocation status.
+
+**Signing:**
+
+- Token signing MUST use asymmetric algorithms only. **Ed25519 (EdDSA)** signs everything Hearth issues and validates. The one exception is RS256 for the **ID tokens** of a client that registered `id_token_signed_response_alg: RS256` (OIDC Core §15.1 interop; see [openspec/specs/oidc-provider/spec.md](../../openspec/specs/oidc-provider/spec.md)). RS256 MUST NOT be accepted by any path that validates an access, refresh, logout or required-action token.
+- Symmetric signing algorithms (HS256, HS384, HS512) MUST NOT be supported. This eliminates the class of vulnerabilities where a verification key can forge tokens.
+- `alg: none` MUST be rejected unconditionally.
+- Hearth MUST manage its own signing key lifecycle: generation, rotation, and JWKS endpoint for external consumers. Operators MUST NOT need to manually generate or distribute keys in the default configuration.
+
+**External consumers** (microservices that verify tokens offline without calling Hearth) use the JWKS endpoint and perform their own asymmetric signature verification.
+
+### 8.2 Cryptographic Primitives
+
+- Use `ring` or `RustCrypto` crates only. No hand-rolled cryptography.
+- `aws-lc-rs` is permitted for exactly one purpose: `rcgen`'s RSA-2048 key
+  generation, which `ring` cannot do and which replaces the unpatched `rsa`
+  crate (RUSTSEC-2023-0071). It MUST NOT be selected as a TLS provider — pin
+  `ring` on `rustls` and `tokio-rustls`. `deny.toml` enforces this with
+  `wrappers = ["rcgen"]`.
+- All comparisons of secrets (tokens, hashes, keys) MUST use constant-time comparison functions.
+
+### 8.3 Password Hashing
+
+- Argon2id MUST be the default algorithm for new password hashes.
+- Parameters MUST meet or exceed current OWASP recommendations at time of implementation.
+- Parameters MUST be stored alongside the hash so they can be upgraded without rehashing all users.
+- Verification of legacy hashes (bcrypt, PBKDF2, scrypt) MUST be supported for migration, with automatic upgrade-on-login to Argon2id.
+- Security parameters MUST NOT be weakened to meet latency targets. Password hashing is off the hot path and has no latency constraint.
+
+### 8.4 Input Validation
+
+Each layer validates what it is responsible for. **Each layer MUST validate its own invariants and MUST NOT assume upstream validation occurred.**
+
+- **Protocol layer**: Wire-level validation. Max request size, content type, required fields present, string length limits, null byte rejection, Unicode NFC normalization on usernames and email addresses.
+- **Identity layer**: Domain validation. Email format, password policy, username rules, realm existence, session not expired.
+- **Storage layer**: Structural validation. Key fits in index, value within size bounds, realm ID present.
+
+### 8.5 Audit Trail
+
+- Security-critical mutations MUST emit structured `tracing` events at `info` level with sufficient context for forensic investigation: actor, action, target entity, realm, result (success/failure). This provides real-time breach detection via log alerting from Phase 0.
+- The WAL is the authoritative durable record of all mutations.
+- An audit trail MAY be materialized asynchronously from the WAL as a background process in Phase 1+. This background job tails the WAL, extracts mutation events, and writes them into a separate append-only, queryable audit store. The write path MUST NOT block on audit trail materialization.
+- The WAL MUST NOT be truncated past the audit materialization job's read cursor.
+- When present, the audit store MUST be append-only and immutable — no update, no delete through any API.
+
+### 8.6 Rate Limiting and Brute-Force Protection
+
+- **Protocol layer**: Per-IP rate limiting MUST be enforced as middleware. Limits MUST be configurable per endpoint category (authentication endpoints stricter than read endpoints).
+- **Identity layer**: Per-account lockout policy MUST be enforced. After N failed authentication attempts within a configurable time window, the account MUST be locked or subject to escalating delays.
+- Failed attempt counts MUST be persisted (survive restarts).
+
+### 8.7 Backpressure and Admission Control
+
+- The protocol layer MUST enforce a configurable request queue depth. When the queue is full, new requests MUST be rejected with HTTP 503.
+- A configurable request timeout MUST be enforced. Requests exceeding the timeout MUST be cancelled.
+- Implementation: `tower::buffer::Buffer` for queue depth, `tower::timeout::Timeout` for request timeout.
+
+---
+
+## 9. Concurrency and Safety
+
+### 9.1 Shared State
+
+- Global mutable state is prohibited. All shared state MUST be passed explicitly via function parameters or held in typed state containers (e.g., `Arc<AppState>`).
+- Read-heavy shared data MUST use lock-free structures: `core::EpochCell` (built on `crossbeam-epoch`) on the hot path. `RwLock` (`core::SwapCell`) is a fallback when lock-free is impractical, and is not permitted on the hot path.
+- `arc-swap` MUST NOT be used: 1.9.2 corrupts the heap under the `load` + `rcu` pattern and no release fixes it (tasks 26.1 and 26.5, [`reports/arc-swap-use-after-free-2026-09-21.md`](https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/arc-swap-use-after-free-2026-09-21.md)). `deny.toml` bans it.
+- `Mutex` MUST NOT be held across `.await` points. Use `tokio::sync::Mutex` only when necessary, with a comment explaining why.
+
+### 9.2 Unsafe Code
+
+`unsafe` MUST be minimized and isolated. Hearth leans on well-audited crates (`memmap2`, `crossbeam-epoch`) for operations that would otherwise require custom `unsafe` code.
+
+- Every `unsafe` block MUST have a `// SAFETY:` comment explaining why the operation is sound.
+- `unsafe` MUST NOT appear in the protocol or identity layers. It is permitted only in:
+  - Storage engine (memory-mapped I/O, pointer arithmetic for data structures) — only if crate abstractions prove insufficient via profiling
+  - `src/core/epoch_cell.rs` — the `Arc` raw-pointer round trip and pinned dereference behind `EpochCell`, the hot path's epoch-reclaimed atomic `Arc` (task 26.5). The grace period itself is `crossbeam-epoch`'s; the cell adds four small blocks, each with its `// SAFETY:` argument
+  - Performance-critical data structures in the RBAC engine (if profiling shows crate abstractions are insufficient; this is unlikely given RBAC runs off the hot path)
+- All `unsafe` code MUST be covered by Miri tests where feasible, and by address sanitizer runs in CI.
+  - Hearth cannot be built for Miri (`ring`, `aws-lc-sys` and `zstd-sys` are C), so `unsafe-check/` compiles each source file that holds `unsafe` on its own, with its unit tests, against the dependency releases Hearth ships. `make miri` runs those tests under Miri (Tree Borrows, several scheduler seeds) and `make asan` under AddressSanitizer; CI runs both in the `unsafe-code` job, on the nightly `unsafe-check/rust-toolchain.toml` pins.
+  - The cells built on `EpochCell` (hot tier, block cache, memtable, identity caches) run their concurrency tests under glibc heap checking: `make heap-check`, a step of CI's `quality` job.
+  - `tests/unsafe_check_harness.rs` fails when a file in `src/` gains `unsafe` that `unsafe-check/` does not compile, unless the file is listed there with the reason Miri cannot run it. The one such file is `src/storage/fs.rs`, whose `memmap2::Mmap::map` call Miri cannot model; its soundness rests on the data directory's files not being truncated under a mapping.
+- New `unsafe` blocks require explicit reviewer approval.
+
+---
+
+## 10. Development Process
+
+### 10.1 Test-Driven Development
+
+All code MUST be developed test-first, following strict TDD (red-green-refactor):
+
+1. **Write a failing test** that describes the expected behavior.
+2. **Run it — confirm it fails** (red).
+3. **Write the minimal implementation** to make it pass (green).
+4. **Refactor** while keeping tests green.
+
+**Rules:**
+
+- All new functionality MUST have a failing test written before the implementation.
+- All bug fixes MUST start with a failing test that reproduces the bug before the fix is written.
+- A PR that adds functionality without corresponding tests written *before* the implementation is incomplete.
+
+See [TESTING.md](./TESTING.md) for the full eight-layer testing strategy, tooling, and CI tiers.
+
+### 10.2 Code Style
+
+- `clippy::pedantic` MUST pass. Allowed lints MUST be documented in `Cargo.toml` or `clippy.toml`.
+- `rustfmt` with the project's `rustfmt.toml`. No formatting debates in PRs.
+- Follow the [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/).
+- All `pub` and `pub(crate)` items MUST have doc comments describing behavior and invariants, not implementation details.
+- Doc comments MUST NOT contain Rust doctests. Hearth does not use doctests as a testing layer (see TESTING.md § "No doctests"). Fenced code blocks inside `///` / `//!` MUST use non-Rust languages (`text`, `json`, `yaml`, etc.) or be omitted. Runnable examples belong under `examples/`; behavioral tests in `#[cfg(test)] mod tests` or under `tests/`.
+
+---
+
+## 11. Configuration
+
+### 11.1 Format and Lifecycle
+
+- Server configuration uses **YAML** — a single `hearth.yaml` file. YAML is familiar to operators managing infrastructure, regardless of Hearth's implementation language.
+- Config MUST be validated at startup. Invalid config MUST cause a fast failure with a clear error message pointing to the exact problem.
+- Config is **immutable after startup** in production mode. Config changes require a process restart. No `SIGHUP` reload, no runtime mutation.
+- The `--dev` flag enables development mode: in-memory storage, no TLS, relaxed security, pre-configured test data, hot-reload for config changes. `--dev` mode is explicitly not for production.
+
+### 11.2 Sensitive Values
+
+Sensitive config values (signing keys, encryption keys, secrets) MUST support environment variable substitution (e.g., `${HEARTH_SIGNING_KEY}`). Secrets MUST NOT be required in plaintext in the config file.
+
+### 11.3 Config Categories
+
+The configuration file covers these categories:
+
+- **Server**: bind address, ports, TLS certificate paths
+- **Storage**: data directory, hot-tier memory limit (optional override), fsync policy
+- **Auth**: token lifetimes, supported authentication flows, MFA policy
+- **Cluster**: node ID, peer addresses, Raft timeouts (Phase 2+)
+- **Observability**: log level, log format (human-readable or JSON), metrics endpoint
+- **Operational**: request queue depth, request timeout, connection limits, graceful shutdown timeout, backup schedule and destination
+
+---
+
+## 12. Type and Data Model Conventions
+
+### 12.1 Newtype IDs
+
+All entity IDs MUST be distinct newtypes: `struct UserId(Uuid)`, `struct SessionId(Uuid)`, `struct RealmId(Uuid)`, etc.
+
+- Newtypes MUST NOT implement `Deref` to their inner type.
+- Access to the inner value is via an explicit method (e.g., `.as_uuid()`, `.as_bytes()`).
+- This prevents accidentally passing a `UserId` where a `SessionId` is expected.
+
+### 12.2 Time
+
+- All timestamps MUST be stored as UTC.
+- Internal representation SHOULD be Unix timestamps in microseconds.
+- The clock MUST be injectable via a `Clock` trait for deterministic testing (see [TESTING.md — Minimal Mocking](./TESTING.md)).
+
+### 12.3 Sensitive Data
+
+- Passwords, tokens, and cryptographic keys MUST be wrapped in types that implement `Zeroize` on drop.
+- Sensitive types MUST NOT implement `Debug`, `Display`, or `Serialize` in ways that reveal their contents. Use a redacted placeholder (e.g., `Password(***)`).
+- Sensitive types MUST NOT appear in log output at any level.
+
+### 12.4 Serialization
+
+- **Wire format**: JSON for REST, with request/response types generated from `.proto` definitions (see [Section 4.1](#41-protobuf-as-single-source-of-truth)).
+- **Storage format**: A compact binary format defined by the storage engine, optimized for identity access patterns. NOT JSON. NOT Protobuf. The storage format is internal and opaque to upper layers.
+- Serialization round-trips (`deserialize(serialize(x)) == x`) MUST be verified by property tests.
+
+### 12.5 Graceful Shutdown
+
+- On SIGTERM, the server MUST stop accepting new connections.
+- In-flight requests MUST be drained with a configurable timeout (default: 30 seconds).
+- After the drain timeout, remaining requests MUST be forcefully terminated.
+- In cluster mode, the node MUST initiate Raft leadership transfer before beginning the drain period.
+
+---
+
+## 13. Module Internal Structure
+
+### 13.1 File Organization
+
+Each layer module SHOULD follow this pattern:
+
+```
+src/storage/
+├── mod.rs          # Public trait definitions and re-exports ONLY — no implementation logic
+├── wal.rs          # WAL implementation
+├── memtable.rs     # Memtable implementation
+├── sst.rs          # SST implementation
+├── tiered.rs       # Hot/cold tier management
+├── error.rs        # StorageError enum
+└── types.rs        # Internal types (pub(crate))
+```
+
+- `mod.rs` MUST contain only trait definitions, re-exports, and module declarations. No implementation logic.
+- Each implementation file SHOULD contain a single major type or concept.
+- Inline `#[cfg(test)] mod tests` at the bottom of each implementation file.
+
+### 13.2 Visibility
+
+- Default to private. Make things `pub(crate)` only when another module needs access.
+- `pub` (fully public) is reserved for types and functions exported as public API.
+- MUST NOT use `pub` on struct fields unless they are part of the public API.
+
+---
+
+## 14. Logging and Observability
+
+### 14.1 Logging
+
+- Use `tracing` exclusively. No `println!`, `eprintln!`, or the `log` crate.
+- **Log levels**: `error` (system is degraded), `warn` (unexpected but recoverable), `info` (significant events — startup, shutdown, config changes, security-critical mutations), `debug` (internal state for troubleshooting), `trace` (hot path tracing, disabled by default).
+- Hot path code MUST NOT log at `info` level or above in the steady state.
+- Use structured fields: user IDs, realm IDs, operation names. MUST NOT log passwords, tokens, keys, or PII.
+- Default output format is human-readable text. JSON format MUST be available via config for production log aggregation.
+
+### 14.2 Metrics
+
+- Prometheus-compatible metrics MUST be exposed via a `/metrics` endpoint.
+- Key metrics: request latency histograms (by operation), active sessions gauge, error counters (by layer and error type), hot/cold tier sizes, WAL size.
+
+### 14.3 Distributed Tracing
+
+- OpenTelemetry-compatible distributed tracing SHOULD be supported for requests spanning protocol → identity → rbac → storage.
+- Trace spans MUST NOT be created on the hot read path unless tracing is explicitly enabled by the operator.
+
+---
+
+## 15. Dependency Policy
+
+### 15.1 Adding Dependencies
+
+- Adding a new dependency MUST be justified in the PR description: what it provides, why a hand-written solution is not appropriate, and its maintenance status (last release, bus factor, known issues).
+- All new dependencies MUST pass `cargo-audit` with no known vulnerabilities.
+- All new dependencies MUST be reviewed for license compatibility. Acceptable: Apache 2.0, MIT, BSD, MPL-2.0. Not acceptable: GPL, AGPL, SSPL. (Hearth is Apache-2.0; copyleft dependencies are banned because they would impose incompatible downstream obligations.)
+- Dependencies MUST NOT introduce a C/C++ build toolchain requirement unless absolutely necessary (`ring` is acceptable; a dependency requiring `cmake` is suspect).
+
+### 15.2 Approved Crates
+
+These crates are pre-approved and need no additional justification:
+
+| Purpose | Crate | Notes |
+|---------|-------|-------|
+| Async runtime | `tokio` | Full features |
+| TLS | `rustls` | No OpenSSL dependency |
+| Crypto primitives | `ring` | |
+| Password hashing | `argon2` | Argon2id default |
+| Serialization | `serde`, `serde_json` | Derive-based |
+| Protobuf | `prost`, `prost-build`, `pbjson` | API contract codegen |
+| Protobuf toolchain | `buf` | Linting, breaking change detection, codegen |
+| gRPC (internal Raft peer transport only) | `tonic` | `tower`-compatible; no public gRPC API |
+| Logging | `tracing`, `tracing-subscriber` | Structured, async-aware |
+| CLI | `clap` | Derive-based |
+| Lock-free concurrency | `crossbeam-epoch` (via `core::EpochCell`) | `arc-swap` is banned — see §9.1 |
+| Memory-mapped I/O | `memmap2` | |
+| Raft consensus | `openraft` | Implemented — `src/cluster/`; gated on `cluster:` config; **EXPERIMENTAL in 1.x — not production-supported.** Known defects: C-5 (no follower cache invalidation), C-6 (immutable membership), H-3 fixed: follower writes are forwarded to the leader. |
+| HTTP framework | `axum` | `tower`-compatible |
+| Time handling | `std::time`, `tokio::time` | |
+| Testing | `proptest`, `criterion`, `insta` | Test-only |
+| HTTP client (test) | `reqwest` | Test-only |
+
+### 15.3 Banned Patterns
+
+- No ORM crates. There is no external database.
+- No `lazy_static`. Use `std::sync::OnceLock` or `std::sync::LazyLock`.
+- No `async-trait` on hot path code — it heap-allocates. Use return-position `impl Trait` in traits (RPITIT, stable since Rust 1.75).
+- No `reqwest` in production code. Hearth is a server, not an HTTP client. Test-only is fine.
+  Enforced by `deny.toml` and by `scripts/check-production-deps.sh`, which fails if a banned
+  crate reaches `cargo tree -e normal` — the transitive route that put `reqwest` in the
+  published binary via `opentelemetry-otlp`'s default exporter (audit 2026-08-28 §4.8#9).
+- No second TLS or crypto backend. `openssl`, `native-tls`, `hyper-tls` and `boring` are denied
+  outright in `deny.toml`.
+
+### 15.4 Auditing
+
+- `cargo-audit` MUST run in CI on every PR.
+- `cargo-deny` MUST be configured to enforce license, duplicate-crate, and dependency-ban
+  policies. The crypto-backend and HTTP-client bans above are encoded in `deny.toml`.
+- `cargo-vet` SHOULD be used to track audit status of third-party crates.
+
+---
+
+## 16. Cluster Layer
+
+### 16.1 Raft Implementation
+
+The cluster layer MUST use `openraft` for Raft consensus. A custom Raft implementation MUST NOT be written — Raft is a well-specified but notoriously subtle protocol, and `openraft` is battle-tested with existing production users.
+
+Hearth provides the `RaftLogStorage` and `RaftStateMachine` trait implementations, giving full control over the storage and application layer while relying on `openraft` for leader election, log replication, and membership management.
+
+The state machine MUST persist its applied state. openraft 0.9 recovers a restarting node by re-applying the log from the state machine's reported applied index; a state machine that reports none is re-fed the log from index 0, which the log no longer holds once a snapshot let it be purged (with the default policy, after about 5,000 entries), and the node cannot restart. So every applied entry writes an applied-state row (`\0raft:sm:applied`, its `LogId`) in the SAME atomic storage batch as its effect — in the command's realm for a data entry, in the nil-UUID meta realm for blank and membership entries (with the stored membership, `\0raft:sm:membership`) — and a snapshot install writes the snapshot's applied state inside its restore window. On open, the greatest applied-state row across realms is the applied index: entries apply in order, each durable before the next, so every entry at or below it is durable and none above it. These rows are node-local and are excluded from snapshots. A data directory written by a release that did not persist them, over a purged log, is refused at startup with re-seed instructions.
+
+### 16.2 Single-Node Mode
+
+The cluster layer MUST be invisible in single-node mode — no configuration, no port allocation, no performance overhead. Writes go directly to the storage engine, bypassing Raft entirely.
+
+### 16.3 Cluster Read Consistency
+
+- Followers MAY serve read traffic with bounded staleness (typically 50–100ms replication lag).
+- A follower MUST stop serving reads if its replication lag exceeds a configurable threshold (default: 500ms). It MUST return an error or redirect the client to the leader.
+- Write operations MUST use the Raft leader's timestamp for consistency across nodes.
+- Because reads are local and possibly stale, a single-use decision MUST NOT be a read followed by a write, even under a per-node lock: a redemption that read an artifact before another node spent it can write after leadership moves to its own node. The decision MUST be one conditional Raft command evaluated in the state machine's apply. PAR `request_uri`s, authorization codes, device codes, magic links, password-reset links, email-verification links, presented refresh tokens, SAML and federation state bags, confirm-link and consent tickets, approval-request decisions, transaction tokens, email OTPs, TOTP steps, recovery codes, email-change confirmations, device approve/deny decisions and organization-invitation accept/revoke decisions are redeemed by claiming a `consumed:` marker with `put_if_absent` (`PutIfAbsent`), dated to the artifact's expiry plus the clock-skew grace and reclaimed by the cleanup sweep; replay stores that already hold a dated marker (pending-MFA and required-action nonces, DPoP, JWT-bearer, JAR, actor and client-assertion `jti`s, OIDC nonces, SAML assertion IDs) record it with `put_if_absent` directly. The per-node lock remains only to keep same-node racers from each proposing a write. A guess budget (TOTP and recovery codes per user and window, email OTP per code) is a set of `consumed:guess:` slots, one claimed before each guess is checked, so every node draws from one budget; a count kept in a record the verifier rewrites is reset by any stale node. A state that a later full-row write could undo is recorded in a key that write never touches: grant-family revocation writes a write-once `oauth:family-revoked:{fid}` tombstone (and spends the family's current refresh token), and every family reader consults it, so a rotation that read the family before a revocation cannot write it back live.
+
+### 16.4 Clock Synchronization
+
+- NTP is a deployment prerequisite for cluster mode. Deployment documentation MUST state this requirement.
+- On startup in cluster mode, a node SHOULD compare its clock with the Raft leader's clock and log a warning if skew exceeds 1 second.
+- All mutation timestamps MUST use the leader's clock, not the local node's clock.
+
+---
+
+## 17. Project Structure
+
+```
+hearth/
+├── Cargo.toml
+├── hearth.yaml                 # Example / default config
+├── proto/                      # Protobuf contract definitions (single source of truth)
+│   ├── buf.yaml
+│   ├── hearth/
+│   │   ├── identity/v1/        # User, session, realm contracts
+│   │   ├── rbac/v1/            # Role, group, assignment, permission contracts
+│   │   ├── admin/v1/           # Admin API contracts
+│   │   └── events/v1/          # Event schemas
+│   └── third_party/
+│       └── oidc/               # RFC-mirroring .proto for OIDC/OAuth2
+├── src/
+│   ├── main.rs                 # Binary entry point
+│   ├── core/                   # Shared types, traits, error foundations
+│   ├── protocol/               # Wire format adapters (REST, OIDC, SAML, SCIM)
+│   ├── identity/               # Domain logic (users, credentials, sessions, realms)
+│   ├── rbac/                   # Claims-based RBAC engine (see openspec/specs/rbac-model/spec.md)
+│   ├── cluster/                # Raft consensus (openraft)
+│   └── storage/                # WAL, memtable, SSTs, tiered storage
+├── tests/                      # Black box integration tests
+├── fuzz/                       # cargo-fuzz targets
+├── benches/                    # Criterion benchmarks
+└── simulation/                 # real-thread crash-recovery simulation tests
+```
+
+---
+
+## 18. SDK Strategy
+
+SDKs are the primary interface between application developers and Hearth. They are separate repositories, not part of the core binary. Architectural constraints that affect SDK design:
+
+- SDK types SHOULD be generated from the `.proto` contract definitions (see [Section 4.1](#41-protobuf-as-single-source-of-truth)), ensuring type safety and eliminating drift between server and client.
+- The server API MUST be SDK-friendly: consistent naming, predictable error shapes, pagination patterns, and idempotency keys where appropriate.
+- SDKs MUST be idiomatic to their target language — a Go SDK feels like Go, not like a TypeScript SDK ported to Go.
+
+SDK priority order is defined in [VISION.md Section 8.2](../vision/VISION.md).
+
+---
+
+## 19. Backup and Restore
+
+- The admin API MUST expose a backup endpoint (`POST /admin/v1/backup`) that triggers a consistent snapshot of SST files and completed WAL segments and writes them to a configurable destination.
+- Backup destinations MUST support at minimum: local filesystem path. Cloud storage (S3, GCS) SHOULD be supported.
+- Scheduled automatic backups MAY be configured in `hearth.yaml` with a cron-like schedule and destination.
+- SST files and completed WAL segments MUST be safe to copy while the server is running (guaranteed by SST immutability and WAL append-only semantics).
+- In cluster mode, backups SHOULD be taken from a follower to avoid impacting the leader.
+
+---
+
+## Appendix: Decision Log
+
+Key architectural decisions codified in this document, with rationale:
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Language | Rust | Memory safety for credentials, no GC for sub-ms latency, mature async ecosystem |
+| Async runtime | Tokio, async all layers | Uniform API, cluster layer needs async for Raft network I/O |
+| Storage | Custom embedded engine | Purpose-built for identity access patterns, no external dependencies |
+| Authorization model | Claims-based RBAC (roles, groups, permissions embedded in JWT) | Matches industry convention (Auth0/Clerk/Keycloak/Okta). Synchronous client checks with zero network cost. Resource-specific authz lives in the application layer; teams needing graph-shaped ACLs pair Hearth with a dedicated authz service (SpiceDB, OpenFGA). |
+| Token validation (hot path) | Session lookup, not signature re-verification | Sub-microsecond vs 5-50μs, instant revocation, smaller key exposure surface |
+| Signing algorithm | Ed25519 (asymmetric only); RS256 for ID tokens a client opts into | No HS256 eliminates token forgery from compromised verification keys; RS256 ID tokens are mandatory for OpenID certification and are never accepted as access tokens |
+| Password hashing | Argon2id, OWASP parameters | Security over latency — hashing is off the hot path |
+| Multi-tenancy | Logical isolation, type-enforced | Cross-realm users are inherent to identity systems; physical isolation makes this painful |
+| Cluster consensus | `openraft` | Proven library, not custom — Raft is subtle and `openraft` is battle-tested |
+| Config format | YAML | Operators manage infrastructure with YAML; Hearth targets ops engineers, not Rust developers |
+| Config lifecycle | Immutable after startup | Simplifies concurrency model — config loaded once into `Arc<Config>`, no synchronization |
+| API contracts | Protobuf (`.proto` files) | Single source of truth for REST, events, and SDK codegen |
+| Audit trail | WAL-derived, async materialization | Zero write-path overhead; WAL is the durable record, audit store is a materialized view |
+| Embedded (library) mode | Not supported | Hearth ships only as a server. The in-process test harness is a test tool, not a deployment mode |
+| Unsafe code | Lean on crates | `memmap2`, `crossbeam-epoch` over custom `unsafe`. Matches Hearth's "leverage ecosystem" philosophy |
+| TDD | Strict, test-first | Database + security = zero tolerance for "I think this works." Tests define correctness before implementation. |
+| Compatibility | **Strict SemVer, in force now** | 1.0 GA shipped 2026-06-21 (`git tag v1.0.0`; CHANGELOG `[1.0.0]`), so the rules in [`VERSIONING.md`](../../VERSIONING.md) — per-surface breaking-change definitions, the support window, the deprecation policy and the 2.0 process — are **normative today**, not aspirational. The earlier "pre-1.0-GA: breaking changes permitted" entry in this row outlived the release that ended it and is withdrawn. |
+| Encryption at rest mechanism | Envelope encryption (AES-256-GCM) | Key rotation is O(DEKs) not O(data). Industry standard (AWS KMS, GCP KMS). |
+| Batch writes | Atomic multi-op WAL entries | Identity operations span multiple records; individual fsyncs are both slow and unsafe (crash between ops = inconsistency). |
+| Cluster read consistency | Follower reads, bounded staleness | 50–100ms staleness acceptable for auth; linearizable reads bottleneck the leader. Followers stop serving if lag exceeds threshold. |
+| Clock strategy | Require NTP, leader timestamps for writes | Clock sync is a solved problem (NTP). Building custom sync would reinvent it poorly. |
+| Rate limiting | Per-IP in protocol, per-account in identity | Different concerns at different layers. IP limits are wire-level; account lockout is domain logic. |
+| Backpressure | Request queue + timeout (Tower) | Prevents cascading failure under load. Tower provides both primitives. |
+| Graceful shutdown | Drain with timeout + Raft leadership transfer | Zero-downtime deployments require clean shutdown. Leadership transfer prevents cluster disruption. |
+| Realm lifecycle | Status field + tombstone deletion | Suspension is reversible (non-payment, investigation). Tombstone deletion is consistent with LSM-tree architecture. |
+| Backup mechanism | Admin API + scheduled config | CLI impractical in containerized deployments. API-driven backups work with any orchestration tool. |

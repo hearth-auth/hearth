@@ -602,7 +602,7 @@ To provision a realm:
    realm `status:` key, and reconciliation never clears a suspension.
 4. To permanently delete a realm, remove it from `hearth.yaml` and restart. Hearth archives it automatically. Then call `DELETE /admin/realms/{id}` to purge the archived realm's data.
 
-→ See [Configuration reference](../specs/CONFIGURATION.md#realmsname) for the full `realms.<name>` YAML schema.
+→ See [Configuration reference](configuration-reference.md#realmsname) for the full `realms.<name>` YAML schema.
 
 **Authentication:** Realm admin endpoints need a **system-realm** token — the system realm is the nil UUID, `00000000-0000-0000-0000-000000000000` — that carries `hearth.admin` or `hearth.realm.admin`, sent with that UUID as `X-Realm-ID`. A per-realm admin token cannot list or delete realms.
 
@@ -778,4 +778,4 @@ To manage federation providers:
 2. Reload: restart the server, or send `SIGHUP` for a hot reload.
 
 → See [Federation examples](hearth-yaml-examples/federation.md) for YAML configuration for Google, GitHub, Microsoft, Apple, SAML, and generic OIDC.
-→ See [Configuration reference](../specs/CONFIGURATION.md#realmsnamedfederation) for the full field reference.
+→ See [Configuration reference](configuration-reference.md#realmsnamefederation) for the full field reference.

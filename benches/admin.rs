@@ -1,6 +1,6 @@
 //! Criterion benchmark for the Admin API user listing path (Step 31.4).
 //!
-//! Targets (per `TEST_SCENARIOS.md` § Phase 1 cross-cutting):
+//! Targets (per `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md` § Phase 1 cross-cutting):
 //! - Admin user listing: p50 < 5 ms, p99 < 50 ms per page.
 //!
 //! The benchmark pre-populates a realm with 10,000 users and then

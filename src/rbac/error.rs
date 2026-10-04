@@ -1,6 +1,6 @@
 //! RBAC engine error types.
 //!
-//! Errors are layer-local per ARCHITECTURE.md § 5: upper layers convert via
+//! Errors are layer-local per docs/dev/ARCHITECTURE.md § 5: upper layers convert via
 //! `From` rather than passing `RbacError` through.
 
 use std::fmt;
@@ -45,14 +45,14 @@ pub enum RbacError {
         /// The offending entity (e.g. role ID / group slug involved in the cycle).
         entity: String,
     },
-    /// A traversal exceeded the depth limit declared in AUTHORIZATION.md § 2.6.
+    /// A traversal exceeded the depth limit declared in openspec/specs/rbac-model/spec.md.
     DepthExceeded {
         /// Which traversal the limit applies to.
         kind: TraversalKind,
         /// The configured depth limit.
         limit: usize,
     },
-    /// A traversal exceeded the breadth limit declared in AUTHORIZATION.md § 2.6.
+    /// A traversal exceeded the breadth limit declared in openspec/specs/rbac-model/spec.md.
     BreadthExceeded {
         /// Which traversal the limit applies to.
         kind: TraversalKind,

@@ -8,7 +8,7 @@ each layer defends against.
 **Related documents:**
 - [SECURITY.md](../../SECURITY.md) — cryptographic primitive choices, CVD process, encryption-at-rest key hierarchy
 - [docs/guides/security-hardening.md](./security-hardening.md) — operational configuration for production deployments
-- [docs/specs/ARCHITECTURE.md](../specs/ARCHITECTURE.md) — normative layer rules including §8 Security
+- [docs/dev/ARCHITECTURE.md](https://github.com/hearth-auth/hearth/blob/main/docs/dev/ARCHITECTURE.md) — normative layer rules including §8 Security
 
 ---
 
@@ -253,6 +253,6 @@ known limitation. See [docs/guides/security-hardening.md](./security-hardening.m
 | Coordinated vulnerability disclosure process | [SECURITY.md § Reporting a Vulnerability](../../SECURITY.md#reporting-a-vulnerability) |
 | Encryption at rest — host key, KEK, DEK hierarchy | [SECURITY.md § Encryption at Rest](../../SECURITY.md#encryption-at-rest) |
 | Operational hardening (session TTL, SAML algorithm suite, secret rotation) | [docs/guides/security-hardening.md](./security-hardening.md) |
-| Normative multi-tenancy isolation rules | [docs/specs/ARCHITECTURE.md § 7](../specs/ARCHITECTURE.md) |
-| RBAC, roles, groups, permission embedding in JWT | [docs/specs/AUTHORIZATION.md](../specs/AUTHORIZATION.md) |
-| OIDC / OAuth 2.0 (PAR, JAR, PKCE, DPoP) | [docs/specs/OIDC.md](../specs/OIDC.md) |
+| Normative multi-tenancy isolation rules | [docs/dev/ARCHITECTURE.md § 7](https://github.com/hearth-auth/hearth/blob/main/docs/dev/ARCHITECTURE.md) |
+| RBAC, roles, groups, permission embedding in JWT | [openspec/specs/rbac-model/spec.md](https://github.com/hearth-auth/hearth/blob/main/openspec/specs/rbac-model/spec.md) |
+| OIDC / OAuth 2.0 (PAR, JAR, PKCE, DPoP) | [openspec/specs/oidc-provider/spec.md](https://github.com/hearth-auth/hearth/blob/main/openspec/specs/oidc-provider/spec.md) |

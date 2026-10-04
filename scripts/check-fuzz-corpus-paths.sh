@@ -3,7 +3,7 @@
 # TRACKED seed corpus as the directory it writes into.
 #
 # Production-readiness task 26.30 (audit
-# reports/subsystem-audit-fuzz-loadtest-2026-09-21.md, finding F-7):
+# https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/subsystem-audit-fuzz-loadtest-2026-09-21.md, finding F-7):
 #
 #   `.github/workflows/fuzz.yml` ran `cargo fuzz run <target> "$SEEDS"`.
 #   libFuzzer treats its FIRST corpus argument as the directory it WRITES

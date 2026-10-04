@@ -656,7 +656,7 @@ mod tests {
     use std::sync::atomic::AtomicBool;
 
     // ===== Phase A: P0 Fast Unit Tests =====
-    // TEST_SCENARIOS.md: "Insert and retrieve key-value pairs (single and multiple)"
+    // https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md: "Insert and retrieve key-value pairs (single and multiple)"
 
     #[test]
     fn insert_and_retrieve_single_key() {
@@ -1090,7 +1090,7 @@ mod tests {
         assert_eq!(mt.get(&realm, b"concurrent"), Some(b"w".to_vec()));
     }
 
-    // TEST_SCENARIOS.md: "Update existing key overwrites value"
+    // https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md: "Update existing key overwrites value"
 
     #[test]
     fn update_overwrites_value() {
@@ -1104,7 +1104,7 @@ mod tests {
         assert_eq!(mt.get(&realm, b"key1"), Some(b"updated".to_vec()));
     }
 
-    // TEST_SCENARIOS.md: "Delete key removes entry; subsequent lookup returns None"
+    // https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md: "Delete key removes entry; subsequent lookup returns None"
 
     #[test]
     fn delete_key_returns_none_on_lookup() {
@@ -1140,7 +1140,7 @@ mod tests {
         assert_eq!(entries[0], (b"key1".to_vec(), MemtableValue::Tombstone));
     }
 
-    // TEST_SCENARIOS.md: "Flush threshold triggers when memtable reaches configured byte size"
+    // https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md: "Flush threshold triggers when memtable reaches configured byte size"
 
     #[test]
     fn flush_threshold_triggers_at_configured_size() {
@@ -1181,7 +1181,7 @@ mod tests {
         );
     }
 
-    // TEST_SCENARIOS.md: "Iterator returns entries in sorted key order"
+    // https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md: "Iterator returns entries in sorted key order"
 
     #[test]
     fn iterator_returns_sorted_key_order() {
@@ -1388,7 +1388,7 @@ mod tests {
     }
 
     proptest! {
-        /// TEST_SCENARIOS.md: "Random insert/update/delete sequences maintain correct key set"
+        /// https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md: "Random insert/update/delete sequences maintain correct key set"
         #[test]
         fn proptest_random_ops_maintain_correct_key_set(
             ops in prop::collection::vec(arb_test_op(), 1..200)
@@ -1434,7 +1434,7 @@ mod tests {
         }
     }
 
-    /// `TEST_SCENARIOS.md`: "Concurrent reads during writes see consistent snapshots"
+    /// `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md`: "Concurrent reads during writes see consistent snapshots"
     ///
     /// A start [`Barrier`](std::sync::Barrier) rendezvouses all four readers with
     /// the writer before the first put, and each reader takes its snapshot

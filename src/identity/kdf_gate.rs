@@ -9,7 +9,7 @@
 //! ~7 s token-issuance p99 in the baseline was **queueing under this
 //! oversubscription, not Argon2id compute** (`throughput_scaling_past_cores =
 //! 1.02×` while `latency_growth_past_cores = 2.50×`). See
-//! `docs/perf/HEA-1879-C9-issuance-triage.md`.
+//! `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/perf/HEA-1879-C9-issuance-triage.md`.
 //!
 //! # What it does
 //!

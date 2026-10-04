@@ -136,7 +136,7 @@ fn build_rig() -> Rig {
                 grant_types: vec!["authorization_code".to_string()],
                 require_consent: false,
                 client_logo_url: None,
-                // Per AUTHZ_EXPANSION.md the consent gate is driven by
+                // Per openspec/specs/custom-permissions/spec.md the consent gate is driven by
                 // `trust_level`. FirstParty bypasses the consent ceremony.
                 trust_level: hearth::identity::oidc::ClientTrustLevel::FirstParty,
                 ..Default::default()

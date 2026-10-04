@@ -1,6 +1,6 @@
 //! Concurrent realm ops under simulated I/O delays and faults.
 //!
-//! Oracle invariant (from `TEST_SCENARIOS.md` § Multi-Tenancy — Simulation):
+//! Oracle invariant (from `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md` § Multi-Tenancy — Simulation):
 //! "Concurrent realm operations under simulated I/O delays produce no data
 //!  corruption."
 //!

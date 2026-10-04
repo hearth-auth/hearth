@@ -3,11 +3,11 @@
 Hearth 3.0.0 is the trusted core that `scope-trim-trusted-core` left behind. The state of each
 confidence tool at the start of this change (2026-10-02):
 
-- **OpenID Foundation suite.** `reports/conformance-suite-run-2026-09-21.md` records one run of
+- **OpenID Foundation suite.** [`reports/conformance-suite-run-2026-09-21.md`](https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/conformance-suite-run-2026-09-21.md) records one run of
   `oidcc-config-certification-test-plan` against `release-v5.3.1`: 38 passed, 1 failed, 1
   warned. The failure (no RS256 in discovery) is fixed: discovery now lists
   `IdTokenSigningAlg::SUPPORTED`. The warning is `resource_indicators_supported`, an
-  unregistered metadata name that `docs/specs/AGENT_AUTH.md` requires. The run was manual.
+  unregistered metadata name that `openspec/specs/agent-identity/spec.md` requires. The run was manual.
 - **In-repo conformance.** `tests/oidc_conformance.rs`, `tests/rfc8693_conformance.rs`,
   `tests/rfc8707_conformance.rs`, `tests/rfc9728_conformance.rs`,
   `tests/federation_conformance.rs`. They are hand-written, not the certifying bodies' suites.

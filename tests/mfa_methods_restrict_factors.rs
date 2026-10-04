@@ -1,7 +1,7 @@
 //! 19.15 (audit 2026-08-28 §4.18#10) — `mfa_methods` must restrict which
 //! second factors a user may enrol and present.
 //!
-//! CONFIGURATION.md says of `mfa_methods`: *"When set, only the listed methods
+//! docs/guides/configuration-reference.md says of `mfa_methods`: *"When set, only the listed methods
 //! are offered for enrollment and challenge; methods not in the list are
 //! rejected. Absent = all methods allowed."* Nothing enforced that. The list
 //! was read in exactly three places, each of them a *positive* trigger —

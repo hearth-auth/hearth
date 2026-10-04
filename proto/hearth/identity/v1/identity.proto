@@ -260,7 +260,7 @@ message UpdateOrganizationCall {
 message Empty {}
 
 // ---------------------------------------------------------------------------
-// Agents (AGENT_AUTH.md Phase A, HEA-1405)
+// Agents (openspec/specs/agent-identity/spec.md Phase A, HEA-1405)
 // ---------------------------------------------------------------------------
 
 // Lifecycle status of an agent.

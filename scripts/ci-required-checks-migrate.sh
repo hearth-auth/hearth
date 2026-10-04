@@ -62,7 +62,7 @@ TARGET_CHECKS=(
   "CI / filter (paths-filter)"
   "CI / quality (clippy + fmt + nextest + css/proto check)"
   "CI / ui (Playwright — smoke + regression + accessibility + exploratory)"
-  "CI / sdk-conformance (docs/specs/SDK.md)"
+  "CI / sdk-conformance"
   "Security / codeql (rust)"
   "Security / codeql (go)"
   "Security / codeql (javascript-typescript)"

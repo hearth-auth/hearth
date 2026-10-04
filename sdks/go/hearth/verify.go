@@ -113,7 +113,7 @@ func (c *Client) VerifyToken(ctx context.Context, token string, audience ...stri
 
 	pubKey, err := cache.GetKey(jws.Headers[0].KeyID)
 	if errors.Is(err, errKidNotFound) {
-		// SDK.md §5: the JWKS endpoint answered; the token names a key it
+		// openspec/specs/sdk-support-contract/spec.md: the JWKS endpoint answered; the token names a key it
 		// does not publish. That is a bad token, not a fetch failure.
 		return nil, &TokenInvalidError{Reason: "unknown signing key: kid=" + jws.Headers[0].KeyID}
 	}
@@ -135,7 +135,7 @@ func (c *Client) VerifyToken(ctx context.Context, token string, audience ...stri
 
 	// 5. Registered claims (spec §2): go-jose checks iss, aud, nbf, exp and
 	// iat with one 5 s clock-skew allowance.
-	// SDK.md §2 step 3: compare with the CONFIGURED issuer (the client's
+	// openspec/specs/sdk-support-contract/spec.md step 3: compare with the CONFIGURED issuer (the client's
 	// base URL), never with what discovery reports.
 	issuer := strings.TrimRight(c.baseURL, "/")
 	expected := jwt.Expected{Issuer: issuer, Time: c.clock()}

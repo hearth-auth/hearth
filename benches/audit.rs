@@ -1,6 +1,6 @@
 //! Criterion benchmark for the Audit query path (Step 31.5).
 //!
-//! Targets (per `TEST_SCENARIOS.md` § Phase 1 cross-cutting):
+//! Targets (per `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md` § Phase 1 cross-cutting):
 //! - Audit time-range query: p50 < 10 ms, p99 < 100 ms.
 //!
 //! The benchmark pre-populates a realm with 100,000 audit events

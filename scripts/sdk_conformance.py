@@ -43,7 +43,7 @@ APP_NAMESPACE = uuid.UUID(bytes=bytes([
 CONFORMANCE_REALM = "conformance"
 M2M_SECRET = "conformance-secret-not-for-production"
 AUDIENCE = "hearth"
-# SDK.md §2: one 5 s clock-skew allowance. Wait past it, with margin.
+# openspec/specs/sdk-support-contract/spec.md: one 5 s clock-skew allowance. Wait past it, with margin.
 EXPIRY_WAIT_SECS = 1 + 5 + 2
 
 

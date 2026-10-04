@@ -1,6 +1,6 @@
 //! RBAC domain types.
 //!
-//! See `docs/specs/AUTHORIZATION.md` § 2 and § 6.3 for the normative model.
+//! See `openspec/specs/rbac-model/spec.md` and § 6.3 for the normative model.
 //!
 //! Identifier newtypes introduced here (`RoleId`, `GroupId`, `AssignmentId`)
 //! follow the same wrap-a-UUID, prefixed-display pattern as the global
@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::core::{OrganizationId, RealmId, Timestamp, UserId};
 
-/// Maximum length of a permission string, per AUTHORIZATION.md § 2.5.
+/// Maximum length of a permission string, per openspec/specs/rbac-model/spec.md.
 pub const MAX_PERMISSION_LENGTH: usize = 128;
 
 /// Reserved global permission namespace prefix.
@@ -76,7 +76,7 @@ define_rbac_id!(
 // Permission (validated newtype)
 // ---------------------------------------------------------------------------
 
-/// A validated permission string, per AUTHORIZATION.md § 2.5.
+/// A validated permission string, per openspec/specs/rbac-model/spec.md.
 ///
 /// Grammar:
 /// `^[A-Za-z0-9_\\-]+(\\.[A-Za-z0-9_\\-]+)+$`, max 128 chars.
@@ -114,7 +114,7 @@ impl Permission {
 
     /// Validates a candidate permission string without constructing one.
     ///
-    /// Rules (AUTHORIZATION.md § 2.5):
+    /// Rules (openspec/specs/rbac-model/spec.md):
     /// - non-empty, max 128 chars
     /// - dot-delimited segments, at least two
     /// - each segment is non-empty and contains only ASCII alnum, `_`, `-`
@@ -257,7 +257,7 @@ pub enum RoleStatus {
 /// A named set of permissions with optional parent-role composition edges.
 ///
 /// Effective permissions are the union of `permissions` and the transitive
-/// effective sets of `parent_roles`. See AUTHORIZATION.md § 2.3.
+/// effective sets of `parent_roles`. See openspec/specs/rbac-model/spec.md.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Role {
     /// Opaque role identifier.
@@ -608,7 +608,7 @@ mod tests {
 
     // ===== Permission grammar (§ 2.5) =====
 
-    // Per AUTHZ_EXPANSION.md the permission grammar is
+    // Per openspec/specs/custom-permissions/spec.md the permission grammar is
     // `^[A-Za-z0-9_\-]+(\.[A-Za-z0-9_\-]+)+$` — at least one dot required,
     // case-insensitive, leading digits / underscores / hyphens permitted.
     // Single-word names are reserved for IETF OIDC scopes.
@@ -666,7 +666,7 @@ mod tests {
 
     #[test]
     fn permission_accepts_mixed_case() {
-        // Per AUTHZ_EXPANSION.md the grammar is case-insensitive.
+        // Per openspec/specs/custom-permissions/spec.md the grammar is case-insensitive.
         assert_eq!(
             Permission::new("Docs.edit")
                 .expect("Docs.edit is valid")
@@ -755,7 +755,7 @@ mod tests {
 
     #[test]
     fn permission_is_reserved_detects_hearth_prefix() {
-        // Per AUTHZ_EXPANSION.md the global namespace prefix is `hearth.*`.
+        // Per openspec/specs/custom-permissions/spec.md the global namespace prefix is `hearth.*`.
         let p = Permission::new("hearth.admin").expect("valid");
         assert!(p.is_reserved());
         let q = Permission::new("docs.edit").expect("valid");

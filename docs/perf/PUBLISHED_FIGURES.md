@@ -26,7 +26,7 @@ Two planes are reported and they are **not interchangeable**:
 **Every competitor figure we compare against is end-to-end HTTP.** An engine figure
 placed next to a competitor's HTTP figure is not a comparison — it is a category
 error. This has already been recorded as a blocker on the competitive analysis
-(`docs/perf/HEA-1867-COMPETITIVE-COMPARISON.md`).
+([`docs/perf/HEA-1867-COMPETITIVE-COMPARISON.md`](https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/perf/HEA-1867-COMPETITIVE-COMPARISON.md)).
 
 ### 0.2 The published number is the conservative one
 

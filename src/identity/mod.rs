@@ -2511,7 +2511,7 @@ pub trait IdentityEngine: Send + Sync {
     ) -> Result<(), IdentityError>;
 
     // =========================================================================
-    // Agents (AGENT_AUTH.md Phase A, HEA-1325)
+    // Agents (openspec/specs/agent-identity/spec.md Phase A, HEA-1325)
     // =========================================================================
 
     /// Creates a new agent in the given realm.
@@ -2674,7 +2674,7 @@ pub trait IdentityEngine: Send + Sync {
     /// An approval request writes its outbox row BEFORE the delivery attempt
     /// and deletes it only once the endpoint has answered 2xx, so a row that
     /// survives is a notification nobody received. This is the retry half of
-    /// the "durable at-least-once" guarantee `AGENT_AUTH.md` states: without a
+    /// the "durable at-least-once" guarantee `openspec/specs/agent-identity/spec.md` states: without a
     /// caller the delivery is at-MOST-once, and the row leaks permanently
     /// (task 26.13).
     ///
@@ -3086,7 +3086,7 @@ pub trait IdentityEngine: Send + Sync {
     /// off for the realm.
     fn sv_bump_all(&self, realm_id: &RealmId) -> Result<usize, IdentityError>;
 
-    // ===== DPoP storage operations (AGENT_AUTH.md §13.2) =====
+    // ===== DPoP storage operations (https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/AGENT_AUTH.md §13.2) =====
 
     /// Checks a DPoP proof `jti` for replay and records it in persistent storage.
     ///
@@ -3115,7 +3115,7 @@ pub trait IdentityEngine: Send + Sync {
     /// to generate and validate per-realm DPoP nonces.
     fn get_realm_dpop_nonce_secret(&self, realm_id: &RealmId) -> Result<[u8; 32], IdentityError>;
 
-    // ── B.1 Protected Resource Registration (AGENT_AUTH.md §2.5) ─────────────
+    // ── B.1 Protected Resource Registration (openspec/specs/mcp-authorization/spec.md) ─────────────
 
     /// Registers a new protected resource (MCP server) within a realm.
     ///
@@ -3152,7 +3152,7 @@ pub trait IdentityEngine: Send + Sync {
         request: &types::UpdateProtectedResourceRequest,
     ) -> Result<types::ProtectedResource, IdentityError>;
 
-    /// Deletes a protected resource and stops its tokens (AGENT_AUTH.md §2.5).
+    /// Deletes a protected resource and stops its tokens (openspec/specs/mcp-authorization/spec.md).
     ///
     /// Before the registry rows go, an audience cutoff for the canonical
     /// `resource_uri` is written into the revoked-JTI projection — every
@@ -3174,10 +3174,10 @@ pub trait IdentityEngine: Send + Sync {
     /// or required claims differ is updated in place (its id is kept); a
     /// registered URI that is not declared is deleted — which, like
     /// [`Self::delete_protected_resource`], stops every token minted for it
-    /// (AGENT_AUTH.md §2.5). The declared
+    /// (openspec/specs/mcp-authorization/spec.md). The declared
     /// set is the realm's YAML `protected_resources` and is the registry's only
     /// source of truth: this is what `audience` / `resource` of an RFC 8693
-    /// token exchange are checked against (OIDC.md §3.4.1a).
+    /// token exchange are checked against (openspec/specs/dpop/spec.md).
     ///
     /// Every declared entry is validated before anything is written, so an
     /// invalid set changes nothing.

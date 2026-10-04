@@ -34,8 +34,8 @@
 //! Run:
 //!   cargo run --release --example argon2_saturation -- <git_sha> <timestamp_utc>
 //!
-//! Emits a schema-1 artifact (see `docs/perf/PERFORMANCE_REPORT_1_0.md` §7) to
-//! stdout. Redirect it to `docs/perf/artifacts/c9-issuance-argon2.json`.
+//! Emits a schema-1 artifact (see `loadtest/README.md` § "Artifact contract and admissibility
+//! rules") to stdout. Redirect it to `docs/perf/artifacts/c9-issuance-argon2.json`.
 
 // Measurement binary: casts are for reporting math on small magnitudes.
 #![allow(

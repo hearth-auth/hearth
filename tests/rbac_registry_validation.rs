@@ -1,7 +1,7 @@
 //! Tests for `RealmPermissionRegistry::validate()`.
 //!
 //! Layer: unit tests exercising registry cross-reference and structural rules
-//! defined in `docs/specs/AUTHZ_EXPANSION.md` §"Registry validators".
+//! defined in `openspec/specs/custom-permissions/spec.md` §"Registry validators".
 
 use hearth::core::{RealmId, Timestamp};
 use hearth::identity::claims_config::{ClaimMapping, ClaimProfile, ClaimSource};

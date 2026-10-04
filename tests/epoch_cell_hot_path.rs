@@ -19,7 +19,7 @@
 //!    `crossbeam-skiplist` frees memtable nodes — never runs inside a load and
 //!    never costs one an allocation: the cells have a collector of their own.
 //! 5. While another thread writes, a load's share of the cells' collector
-//!    costs at most one allocation per 1,024 loads (`ARCHITECTURE.md` §3.2) —
+//!    costs at most one allocation per 1,024 loads (`docs/dev/ARCHITECTURE.md` §3.2) —
 //!    measured with the writer running, not after it has stopped.
 
 use std::alloc::{GlobalAlloc, Layout, System};

@@ -1,6 +1,6 @@
 //! hearth's `unsafe` code, compiled on its own for Miri and AddressSanitizer.
 //!
-//! `docs/specs/ARCHITECTURE.md` §9.2: all `unsafe` code MUST be covered by
+//! `docs/dev/ARCHITECTURE.md` §9.2: all `unsafe` code MUST be covered by
 //! Miri tests where feasible, and by address-sanitizer runs in CI. hearth
 //! itself cannot be built for Miri — `ring`, `aws-lc-sys` and `zstd-sys` are
 //! C — so each source file that holds `unsafe` is compiled here from the same

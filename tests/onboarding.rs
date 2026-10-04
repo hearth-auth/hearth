@@ -1,6 +1,6 @@
 //! Integration tests for production onboarding (Phase 1.5 / Step 32).
 //!
-//! Covers `TEST_SCENARIOS.md` § Onboarding (Setup + Email Verification):
+//! Covers `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md` § Onboarding (Setup + Email Verification):
 //! - First-run detection toggles when the first realm is created.
 //! - Setup-token lifecycle: generated once, consumed on success, removed
 //!   automatically when the deployment becomes configured.

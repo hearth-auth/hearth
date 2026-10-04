@@ -5,7 +5,7 @@
 #
 # WHY THIS IS INFORMATIONAL, NOT FATAL:
 #   The storage_gate bench binary runs hard absolute latency gates (p50/p99
-#   limits from ARCHITECTURE.md) in its custom main() before criterion
+#   limits from docs/dev/ARCHITECTURE.md) in its custom main() before criterion
 #   sampling. Those gates panic — and fail the CI job — if any target is
 #   breached. Relative % comparison against a cached baseline is inherently
 #   unreliable on shared GitHub Actions runners because the same benchmark

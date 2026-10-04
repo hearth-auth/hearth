@@ -1,4 +1,4 @@
-//! Integration tests for the consent delegation management (AGENT_AUTH.md §3.5).
+//! Integration tests for the consent delegation management (openspec/specs/delegated-authorization/spec.md).
 //!
 //! TDD — tests written before implementation. Covers:
 //! - §3.5: Delegation grant persisted after RFC 8693 token exchange
@@ -316,7 +316,7 @@ async fn revoked_delegation_is_inactive_on_introspect_and_decide() {
     // No actor token: the exchanging client acts on its own behalf, so the
     // delegation carries the subject's `tools.invoke`. A client-credentials
     // actor token carries no permissions, and a delegated token is capped at
-    // the actor ∩ subject intersection fixed at exchange (AUTHORIZATION.md
+    // the actor ∩ subject intersection fixed at exchange (openspec/specs/rbac-model/spec.md
     // §16) — `decide` ignoring that cap is what let this test's former
     // fixture pass (GA audit 3 C-8).
     let (actor_client_id, _actor_token) = make_actor_token(identity, &realm_id, scope);

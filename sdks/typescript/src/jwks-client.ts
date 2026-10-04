@@ -162,7 +162,7 @@ export class JwksClient {
   }
 
   /**
-   * Map a `jose` error onto the SDK error taxonomy (docs/specs/SDK.md §5).
+   * Map a `jose` error onto the SDK error taxonomy (openspec/specs/sdk-support-contract/spec.md).
    * `issuer` and `audience` are the values the check actually used.
    */
   private mapJoseError(

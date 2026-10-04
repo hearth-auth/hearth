@@ -1,6 +1,6 @@
 # Hearth default configuration template.
 # Copy relevant sections into hearth.yaml; these are reference defaults only.
-# See docs/specs/AUTHZ_EXPANSION.md for the full model.
+# See openspec/specs/custom-permissions/spec.md for the full model.
 
 # Token TTL defaults (shown here for reference; all values are optional).
 # auth:

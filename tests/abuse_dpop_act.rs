@@ -197,11 +197,11 @@ async fn a38c_unbound_client_credentials_without_dpop_ok() {
 
 /// Verifies the constant equals the documented default so spec and code
 /// stay in sync. Raised from 3 → 10 in HEA-1406 (M2 Phase B: delegation chains
-/// need deeper `max_delegation_depth` per AGENT_AUTH.md §3.4).
+/// need deeper `max_delegation_depth` per openspec/specs/delegated-authorization/spec.md).
 #[test]
 fn a38d_max_act_chain_depth_is_10() {
     assert_eq!(
         MAX_ACT_CHAIN_DEPTH, 10,
-        "constant changed — update docs/specs/AGENT_AUTH.md and CHANGELOG"
+        "constant changed — update openspec/specs/agent-identity/spec.md and CHANGELOG"
     );
 }

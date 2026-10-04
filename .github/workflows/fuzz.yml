@@ -121,7 +121,7 @@ jobs:
         # accumulates discovered inputs.
         #
         # ORDER MATTERS (production-readiness task 26.30, audit
-        # reports/subsystem-audit-fuzz-loadtest-2026-09-21.md F-7). libFuzzer
+        # https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/subsystem-audit-fuzz-loadtest-2026-09-21.md F-7). libFuzzer
         # treats its FIRST corpus argument as the directory it WRITES newly
         # discovered units into; every later one is a read-only input. Passing
         # "$SEEDS" first therefore made the tracked, hand-reviewed seed corpus

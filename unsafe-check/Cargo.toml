@@ -1,5 +1,5 @@
 # hearth's `unsafe` code, compiled on its own so Miri and AddressSanitizer can
-# run its unit tests (docs/specs/ARCHITECTURE.md §9.2). See src/lib.rs.
+# run its unit tests (docs/dev/ARCHITECTURE.md §9.2). See src/lib.rs.
 #
 #   make miri    the tests under Miri (tree borrows)
 #   make asan    the tests natively under AddressSanitizer

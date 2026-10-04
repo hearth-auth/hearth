@@ -32,6 +32,7 @@ const sidebars = {
             'hearth-yaml-examples/branding-and-complex',
           ],
         },
+        'configuration-reference',
         'config-migration',
         'error-codes',
       ],

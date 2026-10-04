@@ -728,7 +728,7 @@ concurrent writer and so is trivially consistent.
 ### Roadmap
 
 PITR, WAL archiving, and incremental backup are designed but **not in 1.x** —
-see the [design spike](../plans/HEA-2170-pitr-wal-archiving-design.md) for the
+see the [design spike](https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/plans/HEA-2170-pitr-wal-archiving-design.md) for the
 approach, the phasing, and an explicit list of what will not be built.
 
 ---

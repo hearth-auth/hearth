@@ -4,7 +4,7 @@
 **Owner:** CTO (HEA-1956, amended HEA-1959) · **QA:** HEA-1940 (QA) · **Parent:** HEA-1867
 **Last updated:** 2026-07-29 · **Branch:** `feature/perf-updates-7-28-26` · **Head SHA:** `873263d0`
 (2.1 as originally graded: head `c709fa58`)
-**Previous report:** `docs/perf/PERFORMANCE_REPORT_2_0.md` (v2, graded 2026-07-29, head `981516f1`)
+**Previous report:** [`docs/perf/PERFORMANCE_REPORT_2_0.md`](https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/perf/PERFORMANCE_REPORT_2_0.md) (v2, graded 2026-07-29, head `981516f1`)
 
 > ## ⛔ Superseded — read `docs/perf/PUBLISHED_FIGURES.md` first
 >
@@ -35,7 +35,7 @@
 >    and a one-syscall batched WAL commit: **33,724 → 41,255 ops/s at T=256**, head `873263d0`,
 >    `fsync`-before-ack fully intact. Artifact
 >    `docs/perf/artifacts/c7-saturation-post-hea1959-sample2-raw.json`; analysis
->    `docs/perf/HEA-1959-commit-cycle.md`.
+>    [`docs/perf/HEA-1959-commit-cycle.md`](https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/perf/HEA-1959-commit-cycle.md).
 > 3. **The `T × F / W` ceiling and its "coalescing efficiency" ratio are struck.** They assume
 >    `T` independent fsync streams; there is one WAL, one leader, one commit stream, so that
 >    denominator grows linearly in `T` while the achievable numerator cannot. The efficiency
@@ -88,7 +88,7 @@ MISS.** The one gap that survived into 2.1 closed as follows:
    for appends, one `write_all` per batch, one AES key schedule per batch). **No durability
    guarantee was relaxed at any point.** Artifact:
    `docs/perf/artifacts/c7-saturation-post-hea1959-sample2-raw.json`; analysis:
-   `docs/perf/HEA-1959-commit-cycle.md`.
+   [`docs/perf/HEA-1959-commit-cycle.md`](https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/perf/HEA-1959-commit-cycle.md).
 
    Two things this report previously asserted are **withdrawn**, both from instrumentation
    rather than argument (HEA-1959 §1–§5):
@@ -118,7 +118,7 @@ MISS on a 2,840 B/user figure taken at N=12,000 — before the WAL's first rotat
 N = 5k…200k, WAL/user collapses 1,662 → 326 B as rotation kicks in (it is O(1), bounded by
 `max_size`), and the SST slope converges to **1,195.6 B/user** (OLS on N≥60k, R²=0.9998).
 That projects to **111.3 GiB at 100M users against a 200 GiB budget — 1.80× headroom.**
-The gap never existed. Artifact: `docs/perf/HEA-1951-disk-slope-sweep.md`.
+The gap never existed. Artifact: [`docs/perf/HEA-1951-disk-slope-sweep.md`](https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/perf/HEA-1951-disk-slope-sweep.md).
 
 **All other targets PASS on this hardware.** The RAM ceiling for K4–K6 (capacity at 1M/10M/100M
 hot users) has been eliminated by SST v3 (HEA-1914): RAM is now bounded by the block cache cap
@@ -281,7 +281,7 @@ HTTP-layer `NOT-MEASURABLE` finding of HEA-1871/HEA-1876; method and admissibili
 > rate) — which is exactly what group commit is supposed to achieve, and what the struck
 > `T × F / W` model could not express. The entire residual is the serial term, and `signal`
 > — releasing ~100 blocked writers at ~3.5 µs each — is **78%** of it. Full mechanism,
-> the two fixes, and the four-run variance envelope: `docs/perf/HEA-1959-commit-cycle.md`.
+> the two fixes, and the four-run variance envelope: [`docs/perf/HEA-1959-commit-cycle.md`](https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/perf/HEA-1959-commit-cycle.md).
 >
 > **Verdict: PASS at 1.38×** (41,255 vs the revised 30,000 target).
 
@@ -330,7 +330,7 @@ HTTP-layer `NOT-MEASURABLE` finding of HEA-1871/HEA-1876; method and admissibili
 | K4 ▲ | Memory (idle, 1M hot users) | < 500 MB | **~329 MB** est. (97.1 MiB at 1M with 64 MiB cache → scaled to 256 MiB prod cache + overhead) | `dev-ryzen-7840hs` | **PASS** ▲ (was MISS at 20×) | C0-v3 `981516f1` `docs/perf/artifacts/c0-sst-v3-memory-raw.txt` |
 | K5 ▲ | Memory (idle, 10M hot users) | < 8 GB | **~0.9 GB** est. (97.1 MiB at 1M + 9M × 66 B/user + 192 MiB cache upgrade) | `dev-ryzen-7840hs` | **PASS** ▲ (was MISS at 12×) | C0-v3 `981516f1` |
 | K6 ▲ | Memory (idle, 100M hot users) | < 50 GB | **~6.5 GB** est. (97.1 MiB at 1M + 99M × 66 B/user + 192 MiB cache upgrade) | `dev-ryzen-7840hs` | **PASS** ▲ (was MISS at 20×) | C0-v3 `981516f1` |
-| K7 ▲ | Disk (100M total users) | < 200 GB | **≈ 111.3 GiB** (OLS slope 1,195.6 B/user, R²=0.9998, N≥60k) | `dev-ryzen-7840hs` | **PASS** ▲ (1.80× headroom; was MISS 1.4× in v2) | HEA-1951 `abf179ba` `docs/perf/HEA-1951-disk-slope-sweep.md` |
+| K7 ▲ | Disk (100M total users) | < 200 GB | **≈ 111.3 GiB** (OLS slope 1,195.6 B/user, R²=0.9998, N≥60k) | `dev-ryzen-7840hs` | **PASS** ▲ (1.80× headroom; was MISS 1.4× in v2) | HEA-1951 `abf179ba` [`docs/perf/HEA-1951-disk-slope-sweep.md`](https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/perf/HEA-1951-disk-slope-sweep.md) |
 | K8 | Binary size | < 50 MB | **41.6 MB** (39.7 MiB, v2 build `981516f1`) | `dev-ryzen-7840hs` | **PASS** | C10 artifact; check `ls -l target/release/hearth` |
 | K9 | Cold start to serving | < 2 s | **70 ms** (worst-of-5, empty data dir, v1) | `dev-ryzen-7840hs` | **PASS** | C10 `6e6a24c4` |
 | K10 | Cold-to-hot promotion latency | < 5 ms | — | — | `NOT-MEASURED` | C1 shipped telemetry; p50/p99 not benchmarked |
@@ -434,7 +434,7 @@ HTTP-layer `NOT-MEASURABLE` finding of HEA-1871/HEA-1876; method and admissibili
 
 ### 3.5 Axis C11 — the end-to-end HTTP delta ▲ (new; supersedes HEA-1871/HEA-1876 `NOT-MEASURABLE`)
 
-Full analysis: `docs/perf/HEA-1957-HTTP-DELTA.md`.
+Full analysis: [`docs/perf/HEA-1957-HTTP-DELTA.md`](https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/perf/HEA-1957-HTTP-DELTA.md).
 Raw: `docs/perf/artifacts/c11-http-delta-raw.json` · Harness: `examples/http_delta.rs`.
 
 Engine phase and HTTP phase run **in the same process, in the same run, against the same
@@ -600,11 +600,11 @@ unstaffed in the backlog. **No durability trade is involved or required at any p
 | `docs/perf/artifacts/c7-hea1959-phase-baseline-console.txt` | pre-fix commit-phase split | T4 (mechanism) |
 | `docs/perf/artifacts/c7-hea1959-fdatasync-only-console.txt` | fix 1 in isolation | T4 (mechanism) |
 | `docs/perf/artifacts/c7-hea1959-batched-writes-console.txt` | fixes 1+2 | T4 (mechanism) |
-| `docs/perf/HEA-1959-commit-cycle.md` | HEA-1959 analysis, 2026-07-29 | **T4 (v2.1a — the PASS proof)** |
+| [`docs/perf/HEA-1959-commit-cycle.md`](https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/perf/HEA-1959-commit-cycle.md) | HEA-1959 analysis, 2026-07-29 | **T4 (v2.1a — the PASS proof)** |
 | `docs/perf/artifacts/c7-saturation-post-hea1955-raw.json` | C7 post-1955, `c709fa58`, 2026-07-29 | T4 (v2.1 — superseded) |
 | `docs/perf/artifacts/c7-saturation-post-hea1955-console.txt` | same run, human-readable | T4 (v2.1 — superseded) |
-| `docs/perf/HEA-1956-T4-remeasure.md` | HEA-1956 analysis, 2026-07-29 | T4 (v2.1 — superseded) |
-| `docs/perf/HEA-1951-disk-slope-sweep.md` | HEA-1951 disk slope, `abf179ba`, 2026-07-29 | **K7 (v2.1 — the PASS proof)** |
+| [`docs/perf/HEA-1956-T4-remeasure.md`](https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/perf/HEA-1956-T4-remeasure.md) | HEA-1956 analysis, 2026-07-29 | T4 (v2.1 — superseded) |
+| [`docs/perf/HEA-1951-disk-slope-sweep.md`](https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/perf/HEA-1951-disk-slope-sweep.md) | HEA-1951 disk slope, `abf179ba`, 2026-07-29 | **K7 (v2.1 — the PASS proof)** |
 | `docs/perf/artifacts/c7-saturation-hea1949-raw.json` | C7 HEA-1949 pre-1948 baseline, 2026-07-29 | T4 (baseline) |
 | `docs/perf/artifacts/c7-saturation-post-hea1948-raw.json` | C7 post-1948, `daf65d9c`, 2026-07-29 | T4 (intermediate) |
 | `docs/perf/artifacts/c0-sst-v3-memory-raw.txt` | C0-v3, `981516f1`, 2026-07-29 | K4–K6, §4 per-user memory |
@@ -615,7 +615,7 @@ unstaffed in the backlog. **No durability trade is involved or required at any p
 | `docs/perf/artifacts/c10-artifact-facts.json` | C10, `6e6a24c4`, 2026-07-28 | K8, K9 |
 | `docs/perf/artifacts/c11-http-delta-raw.json` | C11, `1b2fda55`, 2026-07-29 | **§3.5 HTTP delta — L1, L5, L9, T1, T5** |
 | `docs/perf/artifacts/c11-http-delta-console.txt` | same run, human-readable | §3.5 |
-| `docs/perf/HEA-1957-HTTP-DELTA.md` | HEA-1957 analysis, 2026-07-29 | §3.5, competitive restatement |
+| [`docs/perf/HEA-1957-HTTP-DELTA.md`](https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/perf/HEA-1957-HTTP-DELTA.md) | HEA-1957 analysis, 2026-07-29 | §3.5, competitive restatement |
 
 ### 7.2 How to reproduce v2 runs
 

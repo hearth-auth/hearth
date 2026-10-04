@@ -2897,7 +2897,7 @@ impl EmbeddedIdentityEngine {
         // unless the caller is the resource server a token exchanged with
         // `audience=` only was minted for: it carries no Hearth audience, and
         // introspection is how that server learns the token is still live
-        // (AGENT_AUTH.md §2.5).
+        // (openspec/specs/mcp-authorization/spec.md).
         if !claims.aud.contains(&self.config.token.audience) && !caller_is_resource_server {
             return Ok(IntrospectionResponse::inactive());
         }
@@ -2970,7 +2970,7 @@ impl EmbeddedIdentityEngine {
             return Ok(IntrospectionResponse::inactive());
         }
         // A token for a protected resource removed since it was minted is
-        // inactive (AGENT_AUTH.md §2.5), as in `validate_token`.
+        // inactive (openspec/specs/mcp-authorization/spec.md), as in `validate_token`.
         if self.is_audience_cut_off(realm_id, &claims) {
             return Ok(IntrospectionResponse::inactive());
         }
@@ -3186,7 +3186,7 @@ impl EmbeddedIdentityEngine {
             return Ok(DENY);
         };
 
-        // RFC 8707 audience check (AUTHORIZATION.md §7.4.3): a resource
+        // RFC 8707 audience check (openspec/specs/rbac-token-claims/spec.md): a resource
         // server that names itself is answered only for a token minted for
         // it. Dropping `resource` let a token for server A be replayed at
         // server B (GA audit 3 C-8).
@@ -3337,7 +3337,7 @@ impl EmbeddedIdentityEngine {
         );
 
         // A delegated token (RFC 8693 `act`) carries the intersection fixed
-        // at exchange (AUTHORIZATION.md §16): the actor never gains more than
+        // at exchange (openspec/specs/rbac-token-claims/spec.md): the actor never gains more than
         // it was delegated, and roles/groups describe the subject, not the
         // delegation — exactly as the exchanged token itself is minted.
         if claims.act.is_some() {
@@ -3822,7 +3822,7 @@ impl EmbeddedIdentityEngine {
     /// surrounding whitespace. The registry keys and stores the canonical
     /// form, which is what exchange `audience` / `resource` values are
     /// canonicalized to before the lookup. Every `mcp:`-prefixed scope must be
-    /// `{namespace}:{category}:{action}` (AGENT_AUTH.md §2.6, A-10).
+    /// `{namespace}:{category}:{action}` (openspec/specs/mcp-authorization/spec.md, A-10).
     pub(super) fn validate_protected_resource_request(
         request: &crate::identity::types::RegisterProtectedResourceRequest,
     ) -> Result<Uri, IdentityError> {
@@ -4424,7 +4424,7 @@ impl EmbeddedIdentityEngine {
     }
 
     /// Stops every token bound to a protected resource that is being removed
-    /// (AGENT_AUTH.md §2.5):
+    /// (openspec/specs/mcp-authorization/spec.md):
     ///
     /// 1. an audience cutoff for `resource_uri` (canonical) is projected into
     ///    the revoked-JTI cache. Its value is the latest `exp` any token minted

@@ -30,8 +30,8 @@
 //! + base64 decode + JSON parse — allocates by construction and is covered by
 //! the latency gate only, not the allocation gate.)
 //!
-//! Thresholds derive from `docs/specs/TESTING.md` (Standard CI tier) and
-//! `docs/specs/AUTHORIZATION.md` § 10. These checks intentionally use
+//! Thresholds derive from `docs/dev/TESTING.md` (Standard CI tier) and
+//! `openspec/specs/rbac-model/spec.md`. These checks intentionally use
 //! hard thresholds to prevent drift on the two P0 RBAC latency scenarios.
 //!
 //! Aspirational design targets (tighter, not enforced in CI):

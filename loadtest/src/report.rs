@@ -148,7 +148,7 @@ pub enum Ceiling {
     /// confirm it was absent (`--server-pid` not supplied, or fewer than two
     /// samples were gathered). Cannot distinguish server saturation from
     /// generator collapse — the run is inadmissible for grading
-    /// (`PERFORMANCE_REPORT_1_0.md §7`).
+    /// (`loadtest/README.md` § "Artifact contract and admissibility rules").
     Unknown,
 }
 
@@ -261,8 +261,8 @@ pub fn summarize(rows: &[JourneyRow], achieved_users: usize, achieved_rps: f64) 
 /// 1. **No samples → `Unknown`**: a `Server` verdict without resource evidence is
 ///    inadmissible. The generator may have saturated before the server was ever
 ///    meaningfully stressed; without CPU data we cannot tell the two apart.
-///    Programme rule 3 (`PERFORMANCE_REPORT_1_0.md §7`) rejects any row whose
-///    `ceiling.attribution` resolves to this variant.
+///    Admissibility rule 3 (`loadtest/README.md` § "Artifact contract and admissibility
+///    rules") rejects any row whose `ceiling.attribution` resolves to this variant.
 ///
 /// 2. **Idle server → `GeneratorSaturated`**: when the server's mean and peak CPU
 ///    are both below their respective floors ([`SERVER_CPU_FLOOR_MEAN_PCT`] /
@@ -288,7 +288,7 @@ pub fn correct_ceiling_with_resources(
                 "a latency breach was observed but no server resource samples were collected \
                  (--server-pid not supplied, or fewer than two samples gathered); cannot \
                  distinguish server saturation from generator collapse — this run is \
-                 inadmissible for grading (PERFORMANCE_REPORT_1_0.md §7)"
+                 inadmissible for grading (loadtest/README.md admissibility rule 3)"
                     .to_string();
         }
         Some(res)

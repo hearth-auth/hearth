@@ -9,7 +9,7 @@
 //! ## History (HEA-1825)
 //!
 //! This file used to contain 18 empty test bodies (`{}`) that passed
-//! unconditionally — a false-confidence anti-pattern (TESTING.md §"Test Quality
+//! unconditionally — a false-confidence anti-pattern (docs/dev/TESTING.md §"Test Quality
 //! Anti-Patterns", class B: zero-assert bodies). The stale docstrings also
 //! claimed behaviours that do **not** match the implementation (e.g. HTTP 413
 //! for JSON bombs — the guard actually returns 400; pagination "clamped to
@@ -376,7 +376,7 @@ async fn a47_unknown_fields_in_request_body_rejected() {
 ///
 /// A-1 — the unified `AbuseGuard` facade is not yet built; today's checks live
 /// in `src/abuse/{shaper,detector,guards}.rs`. Ignored (not a vacuous pass)
-/// until the facade lands. See docs/plans/HEA-1114-abuse-prevention.md row A-1.
+/// until the facade lands. See openspec/specs/abuse-prevention/spec.md row A-1.
 #[test]
 #[ignore = "A-1 unified AbuseGuard facade blocked on HEA-1114 (facade not yet built)"]
 fn a1_abuse_guard_deny_decision_rejects_request() {
@@ -386,7 +386,7 @@ fn a1_abuse_guard_deny_decision_rejects_request() {
 /// A `Challenge` decision must surface `HEARTH_ABUSE_CHALLENGE_REQUIRED`
 /// without leaking the underlying signal that tripped the policy.
 ///
-/// A-1 — see docs/plans/HEA-1114-abuse-prevention.md row A-1.
+/// A-1 — see openspec/specs/abuse-prevention/spec.md row A-1.
 #[test]
 #[ignore = "A-1 unified AbuseGuard facade blocked on HEA-1114 (facade not yet built)"]
 fn a1_abuse_guard_challenge_decision_returns_challenge_required() {
@@ -400,7 +400,7 @@ fn a1_abuse_guard_challenge_decision_returns_challenge_required() {
 ///
 /// A-51 — external attestation shipping is not yet implemented. Ignored (not a
 /// vacuous pass) until it lands. The in-process hash chain it would anchor is
-/// verified in `tests/audit.rs`. See docs/plans/HEA-1114-abuse-prevention.md
+/// verified in `tests/audit.rs`. See openspec/specs/abuse-prevention/spec.md
 /// row A-51.
 #[test]
 #[ignore = "A-51 external attestation blocked on HEA-1114 (shipping not yet started)"]
@@ -411,7 +411,7 @@ fn a51_tampered_row_between_attestations_detected() {
 /// On restart, a missing or mismatched prior attestation must fail closed
 /// rather than silently re-seeding the chain.
 ///
-/// A-51 — see docs/plans/HEA-1114-abuse-prevention.md row A-51.
+/// A-51 — see openspec/specs/abuse-prevention/spec.md row A-51.
 #[test]
 #[ignore = "A-51 external attestation blocked on HEA-1114 (shipping not yet started)"]
 fn a51_missing_prior_attestation_fails_closed() {

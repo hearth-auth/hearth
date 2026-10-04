@@ -1865,7 +1865,7 @@ pub(crate) fn config_migration_history_scan_prefix() -> Vec<u8> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Agent key encoding (AGENT_AUTH.md §13.1)
+// Agent key encoding (https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/AGENT_AUTH.md §13.1)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Prefix for agent primary keys.
@@ -1952,7 +1952,7 @@ pub(crate) fn agent_credential_scan_prefix(agent_id: &AgentId) -> Vec<u8> {
     format!("{AGENT_CRED_PREFIX}{}:", agent_id.as_uuid()).into_bytes()
 }
 
-// ===== DPoP storage keys (AGENT_AUTH.md §13.2) =====
+// ===== DPoP storage keys (https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/AGENT_AUTH.md §13.2) =====
 
 /// Prefix for DPoP proof JTI replay-prevention entries.
 ///
@@ -2476,7 +2476,7 @@ pub(crate) fn encode_org_slug_reservation(realm_id: &RealmId, slug: &str) -> Vec
     k
 }
 
-// ── Protected Resource keys (AGENT_AUTH.md §2.5 / RFC 9728) ──────────────────
+// ── Protected Resource keys (openspec/specs/mcp-authorization/spec.md / RFC 9728) ──────────────────
 
 /// Prefix for protected resource primary records.
 ///
@@ -2509,7 +2509,7 @@ pub(crate) fn encode_resource_server_uri_index(uri: &str) -> Vec<u8> {
     format!("{RESOURCE_SERVER_URI_PREFIX}{hex}").into_bytes()
 }
 
-// ── Actor JTI replay cache (RFC 8693 §4 / AGENT_AUTH.md §3.3) ────────────────
+// ── Actor JTI replay cache (RFC 8693 §4 / openspec/specs/delegated-authorization/spec.md) ────────────────
 
 /// Prefix for actor-token JTI replay entries.
 ///

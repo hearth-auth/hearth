@@ -12,7 +12,7 @@ use Throwable;
  *
  * It extends JWKSFetchException so callers of JwksClient::getKey() that catch
  * that class keep working. TokenVerifier turns it into TokenInvalidException:
- * SDK.md §5 keeps `JWKSFetchError` for an unreachable or invalid JWKS
+ * openspec/specs/sdk-support-contract/spec.md keeps `JWKSFetchError` for an unreachable or invalid JWKS
  * endpoint, and a token signed with an unknown key is a bad token.
  */
 class JwksKeyNotFoundException extends JWKSFetchException

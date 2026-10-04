@@ -1,5 +1,5 @@
 //! Tests for A-30 (backup/export hardening) from
-//! `docs/plans/HEA-1114-abuse-prevention.md` §4.1.
+//! `openspec/specs/abuse-prevention/spec.md`.
 //!
 //! Coverage (D-4 taxonomy):
 //! - Unit: `ExportRateLimiter` (in `src/protocol/admin_auth.rs` — dedicated tests)

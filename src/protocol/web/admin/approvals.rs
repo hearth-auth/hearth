@@ -1,4 +1,4 @@
-//! Admin UI handlers for the agent approval-request queue (Phase C.6 — AGENT_AUTH.md §9).
+//! Admin UI handlers for the agent approval-request queue (Phase C.6 — openspec/specs/agent-approvals/spec.md).
 //!
 //! Routes:
 //!   GET  /ui/admin/realms/{realm}/approvals          — pending queue

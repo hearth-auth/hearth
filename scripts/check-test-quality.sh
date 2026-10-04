@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/check-test-quality.sh — CI guardrail for false-confidence test patterns.
 #
-# Tracks: HEA-571. Anti-pattern taxonomy: docs/specs/TESTING.md § "Test Quality
+# Tracks: HEA-571. Anti-pattern taxonomy: docs/dev/TESTING.md § "Test Quality
 # Anti-Patterns".
 #
 # FAILS on:
@@ -285,6 +285,6 @@ else
   printf "%s%s✗ test-quality lint: %d violation(s)" "$RED" "$BLD" "$VIOLATIONS"
   [ "$WARNINGS" -gt 0 ] && printf ", %d warning(s)" "$WARNINGS"
   printf "%s\n" "$RST"
-  printf "  See docs/specs/TESTING.md § \"Test Quality Anti-Patterns\" for context.\n"
+  printf "  See docs/dev/TESTING.md § \"Test Quality Anti-Patterns\" for context.\n"
   exit 1
 fi

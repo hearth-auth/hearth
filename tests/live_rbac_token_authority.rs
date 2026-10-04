@@ -481,7 +481,7 @@ async fn decide_caps_a_delegated_token_at_its_delegated_permissions() {
 /// holds no permissions) exchanges the user's token. The delegation carries
 /// actor ∩ subject = nothing; the decision endpoint answered from the user's
 /// full live set instead ("an actor cannot gain RBAC permissions that it does
-/// not already hold", AGENT_AUTH.md §3.3). The pre-fix `consent_delegations`
+/// not already hold", openspec/specs/delegated-authorization/spec.md). The pre-fix `consent_delegations`
 /// fixture relied on exactly this.
 #[tokio::test]
 async fn decide_denies_a_delegation_beyond_the_actors_permissions() {
@@ -551,7 +551,7 @@ async fn decide_denies_a_delegation_beyond_the_actors_permissions() {
 // ── C-9: the audience cutoff applies to decisions ───────────────────────────
 
 /// Deleting a protected resource stops every token minted for it
-/// (AGENT_AUTH.md §2.5). `validate_token` and introspection honoured the
+/// (openspec/specs/mcp-authorization/spec.md). `validate_token` and introspection honoured the
 /// cutoff; the decision path, engine and REST alike, did not.
 #[tokio::test]
 async fn decide_denies_a_token_for_a_removed_protected_resource() {

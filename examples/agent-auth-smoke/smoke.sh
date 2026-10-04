@@ -159,7 +159,7 @@ echo "    agent_b key issued"
 
 # ── 7. DPoP-bound token issuance (RFC 9449) ───────────────────────────────────
 #
-# Demonstrates §6 of AGENT_AUTH.md:
+# Demonstrates §6 of openspec/specs/agent-identity/spec.md:
 #   - Register a confidential OAuth client
 #   - Generate EC P-256 key pair (in Node.js native crypto)
 #   - Issue a DPoP proof JWT (typ: dpop+jwt, ES256)

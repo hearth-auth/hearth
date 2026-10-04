@@ -125,7 +125,7 @@ endif
 ## cargo check cannot catch runtime "no live tokens" aborts (HEA-1991).
 ##
 ## Clippy is NOT optional here (production-readiness task 26.32, audit
-## reports/subsystem-audit-fuzz-loadtest-2026-09-21.md L-7). The crate is in the
+## https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/subsystem-audit-fuzz-loadtest-2026-09-21.md L-7). The crate is in the
 ## root Cargo.toml's `exclude` list, so `make clippy --all-targets` over the
 ## workspace never reaches it and for its whole life nothing in the repo linted
 ## it. `cargo clippy --manifest-path loadtest/Cargo.toml --all-targets -- -D
@@ -217,11 +217,11 @@ check:
 
 ## Grep-based guardrail against false-confidence test patterns
 ## (weak is_ok/is_err asserts, unconditional sleeps, untracked #[ignore]).
-## See docs/specs/TESTING.md § "Test Quality Anti-Patterns" and HEA-571.
+## See docs/dev/TESTING.md § "Test Quality Anti-Patterns" and HEA-571.
 test-quality:
 	@bash scripts/check-test-quality.sh
 
-# ── Unsafe code (ARCHITECTURE.md §9.2) ────────────────
+# ── Unsafe code (docs/dev/ARCHITECTURE.md §9.2) ────────────────
 
 ## §9.2: all `unsafe` MUST be covered by Miri tests where feasible, and by
 ## address-sanitizer runs in CI. Hearth cannot be built for Miri (ring,
@@ -302,7 +302,7 @@ unsafe-check: ## Run Miri, AddressSanitizer and heap checking over the unsafe co
 	echo "make unsafe-check: all gates passed"
 
 ## §3.41 adversarial test-quality gate: every A-N row in the abuse-prevention
-## plan (docs/plans/HEA-1114-abuse-prevention.md) must have at least one
+## plan (openspec/specs/abuse-prevention/spec.md) must have at least one
 ## adversarial test in tests/abuse_*.rs that references the row identifier.
 ## Rollback: set SKIP_ABUSE_COVERAGE_CHECK=1 (see scripts/check-abuse-coverage.sh).
 abuse-check:

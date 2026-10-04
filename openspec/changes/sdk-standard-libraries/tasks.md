@@ -1,6 +1,7 @@
 ## 0. Precondition
 
 - [ ] 0.1 Archive `scope-trim-trusted-core` first, so the `sdk-support-contract` capability exists in `openspec/specs/` (this change only adds requirements to it) **Deferred during apply (owner, 2026-10-03):** scope-trim still has 14.3 (cut v3.0.0) open. The code tasks do not need the archive; archive scope-trim after the release cut and before archiving this change
+- [ ] 0.2 Rebase the delta on the `sdk-support-contract` baseline that `adopt-openspec-specs` archived into `openspec/specs/`. That baseline holds the CURRENT contract (hand-rolled JWKS cache and verification, hand-written admin clients). Every baseline requirement that this change replaces moves into `## MODIFIED Requirements` (full block) or `## REMOVED Requirements` (with **Reason** and **Migration**) in `specs/sdk-support-contract/spec.md`; ADDED alone would leave the old rules in force
 
 ## 1. Spikes
 
@@ -20,7 +21,7 @@
 - [x] 2.2 Go: red tests first; add `github.com/go-jose/go-jose/v4`; replace `hearth/verify.go`'s `ed25519.Verify` path; keep the error taxonomy
 - [x] 2.3 Python: red tests first; verify with `jwt.decode(..., algorithms=["EdDSA"])` and `PyJWK`; delete the `Ed25519PublicKey.verify` path in `client.py` and the key cache in `jwks.py` it fed
 - [x] 2.4 PHP: red tests first; verify with `lcobucci/jwt` `Signer\Eddsa` and the validation constraints; delete the `sodium_crypto_sign_verify_detached` path in `TokenVerifier.php`
-  - Changed during apply (owner decision 2026-10-03): the JOSE libraries apply one clock skew to `exp`, `nbf` and `iat`, so all four SDKs now use one 5 s allowance (Go and PHP/Python were 0 s on `exp`; TypeScript defaulted to 60 s). `SDK.md` §2 must say so (task 5.1). Open: `jose` (TypeScript) refuses a future `iat` only when `maxTokenAge` is set, so TypeScript does not refuse it
+  - Changed during apply (owner decision 2026-10-03): the JOSE libraries apply one clock skew to `exp`, `nbf` and `iat`, so all four SDKs now use one 5 s allowance (Go and PHP/Python were 0 s on `exp`; TypeScript defaulted to 60 s). `openspec/specs/sdk-support-contract/spec.md` must say so (task 5.1). Open: `jose` (TypeScript) refuses a future `iat` only when `maxTokenAge` is set, so TypeScript does not refuse it
 - [x] 2.5 Add a CI grep that fails on a direct Ed25519 verify call in `sdks/` (the "No handwritten signature check remains" scenario) **Changed during apply:** section 5 of `scripts/check-sdk-conformance.sh` (already a CI step); it fails on the pre-change tree for Go, Python and PHP, and passes now
 
 ## 3. Generated admin clients
@@ -44,5 +45,5 @@
 
 ## 5. Docs and release
 
-- [x] 5.1 Update `docs/specs/SDK.md`, `docs/specs/SDK_SURFACE.md` and the four SDK guides: the libraries, the generated clients, the harness
+- [x] 5.1 Update `openspec/specs/sdk-support-contract/spec.md`, `openspec/specs/sdk-support-contract/spec.md` and the four SDK guides: the libraries, the generated clients, the harness
 - [x] 5.2 CHANGELOG `### Changed` entries per SDK (verification library, admin client method names)

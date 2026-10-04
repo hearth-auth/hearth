@@ -1,4 +1,4 @@
-//! Integration tests for RFC 8693 token exchange (AGENT_AUTH.md §3.3 / B.4).
+//! Integration tests for RFC 8693 token exchange (openspec/specs/delegated-authorization/spec.md / B.4).
 //!
 //! TDD — tests written before implementation. Covers:
 //! - B.4: Full token-exchange happy path (valid subject + actor tokens)

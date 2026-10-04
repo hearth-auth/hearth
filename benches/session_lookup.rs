@@ -1,6 +1,6 @@
 //! Criterion benchmarks and CI threshold gates for session management (E2).
 //!
-//! Covers `TEST_SCENARIOS.md` § Session Management — Benchmark:
+//! Covers `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md` § Session Management — Benchmark:
 //! 1. Session lookup by ID: p50 < 10 μs, p99 < 100 μs
 //! 2. Session creation throughput: > 50,000 ops/sec/core
 //!
@@ -13,7 +13,7 @@
 //!
 //! | Gate | Metric | Limit | Source |
 //! |------|--------|-------|--------|
-//! | `session_lookup_latency` | p99 | ≤ 1 ms (CI) | TEST_SCENARIOS.md (p99 < 100 µs prod) |
+//! | `session_lookup_latency` | p99 | ≤ 1 ms (CI) | https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md (p99 < 100 µs prod) |
 //! | `session_lookup_allocs`  | allocs / call | ≤ [`MAX_ALLOCS_PER_CALL`] (0) | see below |
 //!
 //! This locks the §2 Big-O baseline for the E2 `lookup_session` endpoint so
@@ -22,7 +22,7 @@
 //!
 //! ## Latency ceiling (informational vs blocking)
 //!
-//! TEST_SCENARIOS.md targets p50 < 10 µs and p99 < 100 µs on production
+//! https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md targets p50 < 10 µs and p99 < 100 µs on production
 //! hardware (informational). Shared GitHub Actions runners add 2–4× overhead
 //! and scheduler jitter, so the **blocking** CI gate is 1 ms — strict enough to
 //! catch multi-ms regressions (e.g. an accidental storage read on the hot path)
@@ -112,7 +112,7 @@ static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 /// Hard p99 limit for `get_session` on CI runners.
 ///
-/// TEST_SCENARIOS.md targets p99 < 100 µs on production hardware; the CI gate
+/// https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md targets p99 < 100 µs on production hardware; the CI gate
 /// uses 1 ms to accommodate shared-runner overhead while still catching
 /// multi-ms regressions (e.g. an accidental cold storage read).
 const SESSION_LOOKUP_P99: Duration = Duration::from_millis(1);
@@ -216,7 +216,7 @@ fn assert_p99(samples: &mut [Duration], gate: &str, p99_limit: Duration) {
     assert!(
         p99 <= p99_limit,
         "{gate} p99 {p99:?} exceeds CI limit {p99_limit:?} \
-         — see benches/session_lookup.rs and TEST_SCENARIOS.md § Session Management"
+         — see benches/session_lookup.rs and https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md § Session Management"
     );
 }
 

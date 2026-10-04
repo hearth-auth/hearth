@@ -440,7 +440,7 @@ pub enum PreTokenWebhookErrorPolicy {
 /// before issuing an access token. The response may include `extra_claims`
 /// that are merged into the token.
 ///
-/// See `docs/specs/CONFIGURATION.md §realms.<name>.pre_token_webhook` for
+/// See `docs/guides/configuration-reference.md §realms.<name>.pre_token_webhook` for
 /// the full YAML reference.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreTokenWebhookConfig {

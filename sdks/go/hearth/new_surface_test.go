@@ -282,7 +282,7 @@ func verifyTestClient(
 		mainSrv.Close()
 	})
 
-	// The client is configured with the issuer the tokens carry (SDK.md §2
+	// The client is configured with the issuer the tokens carry (openspec/specs/sdk-support-contract/spec.md
 	// step 3); only the JWKS fetch goes to the test server.
 	c := NewClient(issuer, "realm-1")
 	// Override jwksURL to point to our test server

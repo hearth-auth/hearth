@@ -23,7 +23,7 @@ pub const MAX_ROLE_PARENT_DEPTH: usize = 10;
 /// overridden shape when a Tier 2 claim is overridden. An operator overriding
 /// any of these should be aware of the downstream consequences.
 ///
-/// See `docs/specs/AUTHZ_EXPANSION.md` §"Claim name tiers".
+/// See `openspec/specs/custom-permissions/spec.md` §"Claim name tiers".
 pub const TIER2_CLAIMS: &[&str] = &[
     "employee_id",
     "department",
@@ -38,7 +38,7 @@ pub const TIER2_CLAIMS: &[&str] = &[
 
 /// Tier 1 JWT / OIDC claims that mappers MUST NOT target.
 ///
-/// See `docs/specs/AUTHZ_EXPANSION.md` §"Claim name tiers" for the
+/// See `openspec/specs/custom-permissions/spec.md` §"Claim name tiers" for the
 /// authoritative list and rationale.
 pub const TIER1_CLAIMS: &[&str] = &[
     // JWT registered (RFC 7519)
@@ -97,7 +97,7 @@ pub enum RegistryError {
     /// A scope bundle has an invalid name.
     ///
     /// Bundle names must match `^[A-Za-z0-9_\-]+(:[A-Za-z0-9_\-]+)+$`
-    /// (≥1 colon, no dot, ≤128 chars). See `AUTHZ_EXPANSION.md` §"Naming
+    /// (≥1 colon, no dot, ≤128 chars). See `openspec/specs/custom-permissions/spec.md` §"Naming
     /// convention".
     InvalidScopeBundleName {
         /// The offending bundle name.
@@ -145,7 +145,7 @@ pub enum RegistryError {
     /// A claim mapping targets a Tier 1 (forbidden) claim name.
     ///
     /// Tier 1 claims are reserved for core issuance code; mappers must
-    /// never override them. See `AUTHZ_EXPANSION.md` §"Claim name tiers".
+    /// never override them. See `openspec/specs/custom-permissions/spec.md` §"Claim name tiers".
     ForbiddenClaimTarget {
         /// The forbidden claim name.
         claim: String,
@@ -155,7 +155,7 @@ pub enum RegistryError {
     /// Custom names must be either a short `^[a-z][a-z0-9_]*$` identifier
     /// (≤64 chars) or an HTTPS-namespaced URL (≤256 chars). HTTP URLs and
     /// URN-form names are not permitted in this version.
-    /// See `AUTHZ_EXPANSION.md` §"Claim name tiers" for the grammar rules.
+    /// See `openspec/specs/custom-permissions/spec.md` §"Claim name tiers" for the grammar rules.
     InvalidClaimName {
         /// The offending claim name.
         claim: String,

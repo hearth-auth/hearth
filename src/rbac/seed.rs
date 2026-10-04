@@ -1,6 +1,6 @@
 //! Bootstrap seeding for new realms.
 //!
-//! Implements AUTHORIZATION.md § 9.1–§ 9.3: registers the default
+//! Implements openspec/specs/rbac-admin-api/spec.md–§ 9.3: registers the default
 //! permission set, installs the five seed roles, and establishes the
 //! default OAuth scope-to-permission mapping.
 //!

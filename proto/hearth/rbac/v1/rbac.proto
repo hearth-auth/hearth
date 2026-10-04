@@ -7,7 +7,7 @@ import "google/api/annotations.proto";
 option go_package = "github.com/hearthdb/hearth/sdks/go/generated/rbac/v1;rbacv1";
 
 // RBAC admin service: roles, groups, assignments. Mirrors the HTTP admin
-// surface in `docs/specs/AUTHORIZATION.md § 8.2`. There is NO service-to-service
+// surface in `openspec/specs/rbac-admin-api/spec.md`. There is NO service-to-service
 // Check RPC; callers decode the JWT's `permissions` claim locally.
 service RbacAdminService {
   rpc ListRoles(ListRolesRequest) returns (ListRolesResponse) {

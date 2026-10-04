@@ -1,4 +1,4 @@
-//! Integration tests for Protected Resource registration (AGENT_AUTH.md §2.5 / B.1).
+//! Integration tests for Protected Resource registration (openspec/specs/mcp-authorization/spec.md / B.1).
 //!
 //! Covers:
 //! - B.1: CRUD for protected resources

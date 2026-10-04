@@ -422,7 +422,7 @@ pub struct UpdateWebhookRequest {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Agent entity types (AGENT_AUTH.md Phase A, HEA-1325)
+// Agent entity types (openspec/specs/agent-identity/spec.md Phase A, HEA-1325)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Lifecycle state of an agent entity.
@@ -474,7 +474,7 @@ impl AgentOwner {
 /// Agents are distinct from users and OAuth clients. They represent
 /// autonomous software entities with their own identity lifecycle,
 /// credential set, capability declarations, and delegation chain support.
-/// See `AGENT_AUTH.md` for the normative specification.
+/// See `openspec/specs/agent-identity/spec.md` for the normative specification.
 ///
 /// Fields are private; access via accessor methods.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -783,7 +783,7 @@ impl Drop for PlaintextApiKey {
     }
 }
 
-// ── Protected Resource / MCP Authorization Server (AGENT_AUTH.md §2.5) ───────
+// ── Protected Resource / MCP Authorization Server (openspec/specs/mcp-authorization/spec.md) ───────
 
 /// A protected resource (MCP tool server) registered within a realm.
 ///
@@ -958,7 +958,7 @@ pub struct DelegationGrantEntry {
     pub expires_at: Timestamp,
 }
 
-// Approval Request Lifecycle (AGENT_AUTH.md §9 / Phase C.4)
+// Approval Request Lifecycle (openspec/specs/agent-approvals/spec.md / Phase C.4)
 
 /// Status of a human-in-the-loop approval request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

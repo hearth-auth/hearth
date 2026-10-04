@@ -1,6 +1,6 @@
 //! Tasks 23.1 / 23.16 — the empirical half of the follower-bypass enumeration.
 //!
-//! `reports/follower-bypass-enumeration-2026-09-21.md` reasoned about follower
+//! `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/follower-bypass-enumeration-2026-09-21.md` reasoned about follower
 //! cache coherence with **two identity engines over one storage engine**. That
 //! shape proves the engine-side logic but proves nothing about replication: a
 //! single storage handle makes every write instantly visible to both engines,
@@ -17,7 +17,7 @@
 //!
 //! The cert/port/bootstrap fixture mirrors `tests/cluster_grpc_loopback.rs`.
 //!
-//! Findings are written up in `reports/cluster-ga-readiness-2026-09-21.md`.
+//! Findings are written up in `https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/cluster-ga-readiness-2026-09-21.md`.
 
 #![allow(clippy::unwrap_used)]
 

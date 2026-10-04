@@ -855,7 +855,7 @@ pub fn resolve_session(
 /// for tenant users, OAuth clients, or organizations. The admin UI
 /// operates on tenant realms via this extractor.
 ///
-/// **Resolution rules** (per `docs/specs/UI_ROUTING.md` R-5):
+/// **Resolution rules** (per `openspec/specs/ui-routing/spec.md` R-5):
 ///
 /// 1. If `?admin_target=system` is present in the query, resolve to
 ///    the system realm. This is the only query-based signal that

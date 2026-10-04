@@ -524,7 +524,7 @@ fn reconcile_rbac_for_realm(
 }
 
 /// Makes the realm's identity protected-resource registry equal its YAML
-/// `protected_resources` (OIDC.md §3.4.1a).
+/// `protected_resources` (openspec/specs/dpop/spec.md).
 ///
 /// The YAML block is the registry's only source of truth — there is no admin
 /// write API — so an absent block means an empty registry, and an entry

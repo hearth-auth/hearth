@@ -37,7 +37,7 @@ interface Case {
   claims: string[];
 }
 
-// SDK.md §5 names, in subclass-before-superclass order.
+// openspec/specs/sdk-support-contract/spec.md names, in subclass-before-superclass order.
 const SECTION_5_ERRORS: Array<[new (...args: never[]) => Error, string]> = [
   [ConfigurationError, "ConfigurationError"],
   [DiscoveryError, "DiscoveryError"],
