@@ -26,10 +26,11 @@
 //!
 //! # CSS sanitizer
 //!
-//! Scans each line of the CSS text. Lines (declarations or at-rules) whose
-//! lowercased content matches any entry in [`CSS_DANGEROUS_PATTERNS`] are
-//! dropped.  `@import` rules are also dropped — they could load external
-//! sheets containing arbitrary content.
+//! Splits the CSS into statements and blocks. Declarations whose lowercased
+//! content matches any entry in [`CSS_DANGEROUS_PATTERNS`] are dropped, a rule
+//! whose selector or prelude matches is dropped whole, and `@import` rules are
+//! dropped — they could load external sheets containing arbitrary content.
+//! The output always has balanced braces.
 
 use quick_xml::events::Event;
 use quick_xml::{Reader, Writer};
@@ -198,78 +199,175 @@ const CSS_DANGEROUS_PATTERNS: &[&str] = &[
 
 /// Sanitizes a tenant-supplied CSS string for safe injection into HTML pages.
 ///
-/// Processes CSS at the **declaration level** (bounded by `;`, `{`, `}`) rather
-/// than line-by-line so that a single dangerous declaration inside a multi-
-/// declaration `:root {}` block is dropped without discarding its safe siblings.
+/// Works at the **statement level** rather than line by line, so a single
+/// dangerous declaration inside a multi-declaration `:root {}` block is dropped
+/// without discarding its safe siblings. `;`, `{` and `}` inside comments,
+/// quoted strings and parentheses (`url(data:…;base64,…)`) do not split
+/// statements.
 ///
-/// Dropped segments:
-/// - Any declaration (`;`-terminated) containing a pattern from
-///   [`CSS_DANGEROUS_PATTERNS`].
-/// - Any `@import` rule (could load external sheets with arbitrary content).
+/// Dropped:
+/// - Any declaration or statement containing a pattern from
+///   [`CSS_DANGEROUS_PATTERNS`], and every `@import` rule.
+/// - Any rule or at-rule whose selector or prelude contains such a pattern,
+///   **whole**: its block, nested blocks and closing `}` go with it.
 ///
-/// Block structure (selectors, `{`, `}`, `@media` etc.) is preserved; only
-/// individual dangerous declarations are removed.
+/// The output always has balanced braces: a stray `}` is dropped, a block left
+/// open at end of input is closed, and trailing text that would carry a brace
+/// is dropped. Everything else, including `@media`, `@keyframes`, `:root {}`
+/// blocks and `--ht-*` custom properties, is kept as written.
 #[must_use]
 pub fn sanitize_css(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
-    // Accumulates characters for the current CSS token (selector, declaration,
-    // or block boundary).
+    // Text of the current statement, selector or prelude.
     let mut buf = String::new();
+    // One entry per open block: `true` when its contents are emitted.
+    let mut blocks: Vec<bool> = Vec::new();
+    // Open blocks being dropped (a dropped block drops everything inside it).
+    let mut dropped_depth: usize = 0;
+    let mut scan = CssScan::default();
 
     for ch in input.chars() {
+        if !scan.is_structural(ch) {
+            buf.push(ch);
+            continue;
+        }
         match ch {
             ';' => {
-                // End of a CSS declaration or at-rule.
                 buf.push(';');
-                let lower = buf.trim().to_ascii_lowercase();
-                // Drop @import rules and dangerous declarations.
-                if !lower.starts_with("@import")
-                    && !CSS_DANGEROUS_PATTERNS.iter().any(|p| lower.contains(p))
-                {
+                if dropped_depth == 0 && css_statement_is_safe(&buf) {
                     output.push_str(&buf);
                 }
                 buf.clear();
             }
             '{' => {
-                // Block opener — flush the selector/at-rule.
-                let lower = buf.trim().to_ascii_lowercase();
-                if lower.starts_with("@import") {
-                    // @import with a block body (unusual but possible) — drop.
-                    buf.clear();
-                } else if !CSS_DANGEROUS_PATTERNS.iter().any(|p| lower.contains(p)) {
+                if dropped_depth == 0 && css_statement_is_safe(&buf) {
                     output.push_str(&buf);
                     output.push('{');
+                    blocks.push(true);
+                } else {
+                    dropped_depth += 1;
+                    blocks.push(false);
                 }
-                // If the selector itself was dangerous, we still emit `{` so
-                // the closing `}` pairs correctly and the block body can be
-                // individually evaluated.
                 buf.clear();
             }
-            '}' => {
-                // Block closer — flush any partial declaration before the `}`.
-                let lower = buf.trim().to_ascii_lowercase();
-                if !lower.is_empty() && !CSS_DANGEROUS_PATTERNS.iter().any(|p| lower.contains(p)) {
-                    output.push_str(&buf);
-                }
-                output.push('}');
-                buf.clear();
-            }
+            // '}'
             _ => {
-                buf.push(ch);
+                match blocks.pop() {
+                    Some(true) => {
+                        if css_statement_is_safe(&buf) {
+                            output.push_str(&buf);
+                        }
+                        output.push('}');
+                    }
+                    Some(false) => dropped_depth -= 1,
+                    // A stray `}` closes nothing; keep the text before it.
+                    None => {
+                        if css_statement_is_safe(&buf) {
+                            output.push_str(&buf);
+                        }
+                    }
+                }
+                buf.clear();
             }
         }
     }
 
-    // Flush any trailing content that had no terminator.
-    let lower = buf.trim().to_ascii_lowercase();
-    if !lower.is_empty()
-        && !lower.starts_with("@import")
-        && !CSS_DANGEROUS_PATTERNS.iter().any(|p| lower.contains(p))
-    {
+    // Trailing text with no terminator. Text the scanner never released (an
+    // unclosed string, comment or parenthesis) may hide a brace, so it is
+    // kept only when it carries none.
+    if dropped_depth == 0 && !buf.contains(['{', '}']) && css_statement_is_safe(&buf) {
         output.push_str(&buf);
     }
+    // Close every emitted block still open.
+    let still_open = blocks.iter().filter(|kept| **kept).count();
+    output.extend(std::iter::repeat_n('}', still_open));
 
     output
+}
+
+/// Lexical state that decides whether `;`, `{` and `}` are structural.
+#[derive(Default)]
+struct CssScan {
+    /// Inside `/* … */`.
+    in_comment: bool,
+    /// Inside a quoted string: the quote character.
+    quote: Option<char>,
+    /// The previous character was a backslash inside a string.
+    escaped: bool,
+    /// Nesting depth of `(`.
+    parens: u32,
+    /// The previous character (for `/*` and `*/`).
+    prev: char,
+}
+
+impl CssScan {
+    /// Advances over `ch` and returns `true` when it is a structural `;`,
+    /// `{` or `}` (outside comments, strings and parentheses).
+    fn is_structural(&mut self, ch: char) -> bool {
+        let prev = std::mem::replace(&mut self.prev, ch);
+        if self.in_comment {
+            if prev == '*' && ch == '/' {
+                self.in_comment = false;
+                // `*/` must not also open a comment with a following `*`.
+                self.prev = '\0';
+            }
+            return false;
+        }
+        if let Some(q) = self.quote {
+            if self.escaped {
+                self.escaped = false;
+            } else if ch == '\\' {
+                self.escaped = true;
+            } else if ch == q || ch == '\n' {
+                self.quote = None;
+            }
+            return false;
+        }
+        match ch {
+            '*' if prev == '/' => {
+                self.in_comment = true;
+                false
+            }
+            '"' | '\'' => {
+                self.quote = Some(ch);
+                false
+            }
+            '(' => {
+                self.parens = self.parens.saturating_add(1);
+                false
+            }
+            ')' => {
+                self.parens = self.parens.saturating_sub(1);
+                false
+            }
+            ';' | '{' | '}' => self.parens == 0,
+            _ => false,
+        }
+    }
+}
+
+/// `true` when a CSS statement, selector or prelude may be emitted: it is not
+/// an `@import` rule and contains no [`CSS_DANGEROUS_PATTERNS`] entry, with
+/// comments removed so `expr/**/ession(` is caught too.
+fn css_statement_is_safe(text: &str) -> bool {
+    let lower = strip_css_comments(text).to_ascii_lowercase();
+    !lower.trim_start().starts_with("@import")
+        && !CSS_DANGEROUS_PATTERNS.iter().any(|p| lower.contains(p))
+}
+
+/// Removes `/* … */` comments; an unterminated comment runs to the end.
+fn strip_css_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("/*") {
+        out.push_str(&rest[..start]);
+        match rest[start + 2..].find("*/") {
+            Some(end) => rest = &rest[start + 2 + end + 2..],
+            None => return out,
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]

@@ -161,6 +161,9 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   script-bearing declarations) before they are served in the theme CSS.
 - **An SVG logo that fails to parse renders as no logo.** The SVG sanitizer used to keep the
   part of the document written before the parse error.
+- **Sanitized custom CSS keeps its braces balanced.** A rule whose selector or at-rule prelude
+  matches a blocked pattern is now dropped whole, including its block, so the rules after it
+  (inside or outside `@media`) are no longer misnested.
 
 ### Fixed
 - The cluster-mode startup warning no longer says writes to a follower fail with HTTP 500

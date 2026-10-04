@@ -292,6 +292,109 @@ fn a45_css_safe_siblings_preserved_in_mixed_block() {
     );
 }
 
+/// `true` when every `}` closes an earlier `{` and none is left open.
+fn braces_balanced(css: &str) -> bool {
+    let mut depth: i64 = 0;
+    for ch in css.chars() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    depth == 0
+}
+
+/// A rule whose selector or at-rule prelude is dangerous is dropped whole,
+/// inside and outside `@media`, and the output stays well-formed.
+#[test]
+fn a45_css_dangerous_rules_dropped_whole_and_braces_stay_balanced() {
+    let css = "@media screen {\n  .evil[title=\"expression(\"] { color: red; }\n  \
+               .ok { color: blue; }\n}\n\
+               .evil2[title=\"javascript:\"] { color: green; }\n\
+               @media (-ms-filter: x) { .z { color: purple; } }\n\
+               .safe { margin: 0; }\n";
+    let out = sanitize_css(css);
+    assert!(
+        braces_balanced(&out),
+        "braces must stay balanced; got: {out}"
+    );
+    for gone in [
+        "expression(",
+        "javascript:",
+        "-ms-filter",
+        "color: red",
+        "color: green",
+    ] {
+        assert!(!out.contains(gone), "`{gone}` must be dropped; got: {out}");
+    }
+    assert!(
+        !out.contains("color: purple"),
+        "a dangerous at-rule drops its whole block; got: {out}"
+    );
+    assert!(
+        out.contains("@media screen {"),
+        "safe @media kept; got: {out}"
+    );
+    assert!(
+        out.contains(".ok { color: blue; }"),
+        "safe nested rule kept; got: {out}"
+    );
+    assert!(
+        out.contains(".safe { margin: 0; }"),
+        "safe top rule kept; got: {out}"
+    );
+}
+
+/// Stray and unclosed braces in the input never produce unbalanced output.
+#[test]
+fn a45_css_stray_and_unclosed_braces_are_balanced() {
+    for css in [
+        "}} .a { color: red; }",
+        ".a { color: red; } .b { color: blue;",
+        "@media screen { .a { color: red; }",
+        ".a { color: red; } } }",
+    ] {
+        let out = sanitize_css(css);
+        assert!(
+            braces_balanced(&out),
+            "unbalanced output for {css:?}: {out}"
+        );
+        assert!(
+            out.contains("color: red"),
+            "safe rule kept for {css:?}: {out}"
+        );
+    }
+}
+
+/// A comment inside a dangerous pattern, or a `;` inside `url(…)`, does not
+/// let the declaration through or split it.
+#[test]
+fn a45_css_comment_and_paren_do_not_hide_a_pattern() {
+    let out = sanitize_css(
+        ".a { width: expr/**/ession(alert(1)); color: blue; }\n\
+         .b { background: url(data:image/png;base64,QUJD); margin: 0; }",
+    );
+    assert!(
+        !out.contains("ession("),
+        "comment-split pattern dropped; got: {out}"
+    );
+    assert!(
+        !out.contains("base64"),
+        "the whole url(data:…) declaration dropped; got: {out}"
+    );
+    assert!(
+        out.contains("color: blue;") && out.contains("margin: 0;"),
+        "siblings kept: {out}"
+    );
+    assert!(braces_balanced(&out), "balanced: {out}");
+}
+
 /// An SVG that fails to parse yields the empty string, not the part written
 /// before the error.
 #[test]
@@ -300,7 +403,11 @@ fn a45_svg_unparseable_yields_empty() {
         r#"<svg xmlns="http://www.w3.org/2000/svg"><circle r="4"/><g"#,
         r#"<svg xmlns="http://www.w3.org/2000/svg"><circle r="4"/><!-- never closed"#,
     ] {
-        assert_eq!(sanitize_svg(svg), "", "unparseable SVG must yield nothing: {svg}");
+        assert_eq!(
+            sanitize_svg(svg),
+            "",
+            "unparseable SVG must yield nothing: {svg}"
+        );
     }
 }
 
