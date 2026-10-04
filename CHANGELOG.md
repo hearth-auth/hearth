@@ -142,6 +142,10 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   XML signature-wrapping variants (XSW1–XSW8).
 
 ### Fixed
+- The cluster-mode startup warning no longer says writes to a follower fail with HTTP 500
+  (they are forwarded to the leader) or that followers never update cached RBAC and sessions.
+  It now names the open items and points to the new cluster consistency spec,
+  `docs/dev/CONSISTENCY.md`.
 - The TOTP step of the login page refused the first code with `422` ("Your session has
   expired"): its form did not carry the CSRF token. It now does.
 - A password sign-in by an account whose email is not verified, in a realm that requires MFA,

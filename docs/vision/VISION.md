@@ -212,7 +212,7 @@ The discipline of saying no is what makes the product coherent. Every "pluggable
 Identity infrastructure has zero tolerance for data loss and low tolerance for inconsistency. Hearth's design prioritizes:
 
 - **Crash safety**: every committed write survives a power failure. The WAL is fsync'd before acknowledgment.
-- **Consistency**: within a cluster, reads reflect the most recent committed write. No eventually-consistent session stores that lead to "phantom logout" bugs.
+- **Consistency**: within a cluster, a read on the node you wrote to shows your write, and other nodes lag by a bounded time; a node that loses contact with the leader stops serving instead of serving stale data (target — see [CONSISTENCY.md](../dev/CONSISTENCY.md)). No eventually-consistent session stores that lead to "phantom logout" bugs.
 - **Auditability**: every mutation to identity data is logged in an append-only audit log. Compliance teams can reconstruct the state of any identity at any point in time.
 - **Encryption at rest**: credentials and sensitive fields are encrypted with AES-256-GCM envelope encryption — a per-file data key wrapped by a key-encryption key that is itself wrapped by the host key. Compromising the storage layer alone does not compromise credentials. The key-encryption key is currently deployment-wide, not per realm, so it is not a tenant-isolation boundary.
 
