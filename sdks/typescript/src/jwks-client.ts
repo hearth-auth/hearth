@@ -16,9 +16,12 @@ import {
 export interface VerifyOptions {
   /** Expected `iss` claim. When provided, verification fails if the token's issuer differs. */
   issuer?: string;
-  /** Expected `aud` claim(s). Skipped when absent. */
+  /**
+   * Expected `aud` claim(s) for this call. Overrides the client's configured
+   * `audience`; the check itself always runs.
+   */
   audience?: string | string[];
-  /** Clock skew tolerance in seconds, applied to `exp` and `nbf`. Default: 5. */
+  /** Clock skew tolerance in seconds, applied to `exp`, `nbf` and `iat`. Default: 5. */
   clockSkewSeconds?: number;
 }
 
@@ -36,8 +39,11 @@ export interface JwksClientConfig {
    */
   issuer?: string;
   /**
-   * Expected `aud` claim(s), pinned for every {@link JwksClient.verify} call
-   * that does not override it. When neither is set the audience is not checked.
+   * Expected `aud` claim(s): the name of the API that verifies the token
+   * (RFC 9068 §4). Pinned for every {@link JwksClient.verify} call that does not
+   * override it. Default: {@link DEFAULT_AUDIENCE} (`"hearth"`), the audience
+   * Hearth mints when a client names no resource. An API registered as a
+   * protected resource sets its resource URI. The check is always on.
    */
   audience?: string | string[];
   /**
@@ -49,6 +55,12 @@ export interface JwksClientConfig {
   /** Timeout for outbound HTTP calls in milliseconds. Default: 10 000. */
   httpTimeout?: number;
 }
+
+/**
+ * The audience Hearth puts in an access token when the client names no
+ * resource. Every verifier checks `aud` against it unless configured otherwise.
+ */
+export const DEFAULT_AUDIENCE = "hearth";
 
 type JwkKeyResolver = GetKeyFunction<JWSHeaderParameters, FlattenedJWSInput>;
 
@@ -63,7 +75,7 @@ type JwkKeyResolver = GetKeyFunction<JWSHeaderParameters, FlattenedJWSInput>;
 export class JwksClient {
   private readonly jwksUri: string;
   readonly issuer: string | undefined;
-  readonly audience: string | string[] | undefined;
+  readonly audience: string | string[];
   readonly ttl: number | undefined;
   readonly httpTimeout: number;
   /** Cached local key set and when it was fetched. */
@@ -72,7 +84,7 @@ export class JwksClient {
   constructor(config: JwksClientConfig) {
     this.jwksUri = config.jwksUri;
     this.issuer = config.issuer;
-    this.audience = config.audience;
+    this.audience = config.audience ?? DEFAULT_AUDIENCE;
     this.ttl = config.ttl;
     this.httpTimeout = config.httpTimeout ?? 10_000;
   }
@@ -94,15 +106,18 @@ export class JwksClient {
   /**
    * Verify a JWT using Ed25519/EdDSA JWKS-based local signature verification (spec §2).
    *
-   * Executes all five spec §2 validation steps in order:
+   * Executes every validation step of the sdk-support-contract spec:
    * 1. Signature against cached JWKS — EdDSA only; RS256 and ES256 are refused.
    * 2. `exp` — rejects expired tokens.
    * 3. `iss` — always, against `options.issuer` or the client's configured
    *    `issuer`. Throws {@link ConfigurationError} when neither is set.
-   * 4. `aud` — when `options.audience` or the client's configured `audience` is set.
-   * 5. `nbf` — when present, within clock skew tolerance.
+   * 4. `aud` — always, against `options.audience` or the client's configured
+   *    `audience` (default `"hearth"`).
+   * 5. `iat` — not in the future, within clock skew tolerance.
+   * 6. `nbf` — when present, within clock skew tolerance.
    *
-   * `jose` performs every check above; this method only maps its errors.
+   * `jose` performs every check above except the `iat` one; this method
+   * maps its errors.
    *
    * @throws {@link TokenExpiredError} when the token is expired.
    * @throws {@link TokenInvalidError} when the signature or structure is invalid.
@@ -127,6 +142,12 @@ export class JwksClient {
       );
     }
     const audience = options?.audience ?? this.audience;
+    if (audience === "" || (Array.isArray(audience) && audience.length === 0)) {
+      throw new ConfigurationError(
+        "JwksClient.verify requires an expected audience — leave `audience` unset " +
+          'for the default "hearth", or set the API\'s resource URI.',
+      );
+    }
 
     let keySet = await this.getKeySet();
 
@@ -142,6 +163,14 @@ export class JwksClient {
         requiredClaims: ["exp"],
         clockTolerance,
       });
+      // jose checks that `iat` is a number but not that it lies in the past.
+      // A token issued "later than now" (beyond the skew) is refused.
+      if (
+        typeof payload.iat === "number" &&
+        payload.iat > Math.floor(Date.now() / 1000) + clockTolerance
+      ) {
+        throw new TokenInvalidError("JWT iat is in the future");
+      }
       return new Claims(payload as Record<string, unknown>);
     };
 
@@ -165,11 +194,8 @@ export class JwksClient {
    * Map a `jose` error onto the SDK error taxonomy (openspec/specs/sdk-support-contract/spec.md).
    * `issuer` and `audience` are the values the check actually used.
    */
-  private mapJoseError(
-    err: unknown,
-    issuer: string,
-    audience: string | string[] | undefined,
-  ): never {
+  private mapJoseError(err: unknown, issuer: string, audience: string | string[]): never {
+    if (err instanceof TokenInvalidError) throw err;
     if (err instanceof joseErrors.JWTExpired) {
       const exp = err.payload?.exp;
       throw new TokenExpiredError(exp ? new Date(exp * 1000) : new Date(0));
@@ -187,7 +213,7 @@ export class JwksClient {
       if (claim === "aud") {
         const raw = (err.payload as Record<string, unknown>)?.["aud"];
         const actual = Array.isArray(raw) ? (raw as string[]) : [String(raw ?? "")];
-        const expected = Array.isArray(audience) ? (audience[0] ?? "") : (audience ?? "");
+        const expected = Array.isArray(audience) ? (audience[0] ?? "") : audience;
         throw new TokenAudienceError(expected, actual);
       }
       throw new TokenInvalidError(`JWT claim validation failed (${claim}): ${err.message}`);

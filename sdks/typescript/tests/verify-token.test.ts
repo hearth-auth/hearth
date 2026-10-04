@@ -27,7 +27,7 @@ async function signToken(
   claims: Record<string, unknown> = {},
   expiresIn = "1h",
 ): Promise<string> {
-  return new SignJWT({ sub: "user123", ...claims })
+  return new SignJWT({ sub: "user123", aud: "hearth", ...claims })
     .setProtectedHeader({ alg: "EdDSA", kid: KID })
     .setIssuedAt()
     .setIssuer(ISSUER)
@@ -102,7 +102,7 @@ describe("HearthClient.verifyToken() — EdDSA / Ed25519", () => {
 
   it("throws TokenExpiredError for a token with exp in the past", async () => {
     // Set exp to 1970 by overriding iat/exp manually
-    const expiredToken = await new SignJWT({ sub: "user123" })
+    const expiredToken = await new SignJWT({ sub: "user123", aud: "hearth" })
       .setProtectedHeader({ alg: "EdDSA", kid: KID })
       .setIssuedAt(0)
       .setIssuer(ISSUER)
@@ -131,7 +131,7 @@ describe("HearthClient.verifyToken() — EdDSA / Ed25519", () => {
   });
 
   it("throws TokenIssuerError when issuer does not match", async () => {
-    const wrongIssuerToken = await new SignJWT({ sub: "user123" })
+    const wrongIssuerToken = await new SignJWT({ sub: "user123", aud: "hearth" })
       .setProtectedHeader({ alg: "EdDSA", kid: KID })
       .setIssuedAt()
       .setIssuer("https://wrong.issuer.com")
@@ -221,7 +221,7 @@ describe("HearthClient.verifyToken() — JWKS carrying an RS256 ID-token key", (
 
   it("refuses an RS256 token signed by the published RSA key", async () => {
     const rsa = await generateKeyPair("RS256", { modulusLength: 2048 });
-    const idToken = await new SignJWT({ sub: "user123", token_type: "id_token" })
+    const idToken = await new SignJWT({ sub: "user123", aud: "hearth", token_type: "id_token" })
       .setProtectedHeader({ alg: "RS256", kid: RSA_KID, typ: "JWT" })
       .setIssuedAt()
       .setIssuer(ISSUER)

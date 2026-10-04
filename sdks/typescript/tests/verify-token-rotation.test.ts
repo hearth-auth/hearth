@@ -10,7 +10,7 @@ import { HearthClient } from "../src/hearth-client.js";
 import { TokenExpiredError } from "../src/errors.js";
 
 const ISSUER = "https://auth.example.com";
-const SKEW = 60; // JwksClient default clock tolerance, seconds
+const SKEW = 5; // JwksClient default clock tolerance, seconds
 
 let kidCounter = 0;
 
@@ -24,7 +24,7 @@ async function sign(
   kp: { privateKey: KeyLike; kid: string },
   payload: Record<string, unknown>,
 ): Promise<string> {
-  return new SignJWT({ sub: "u1", iss: ISSUER, ...payload })
+  return new SignJWT({ sub: "u1", iss: ISSUER, aud: "hearth", ...payload })
     .setProtectedHeader({ alg: "EdDSA", kid: kp.kid })
     .sign(kp.privateKey);
 }
