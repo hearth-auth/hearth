@@ -72,6 +72,7 @@ func NewJwksCache(url string, httpClient *http.Client, ttl time.Duration) *JwksC
 // refresh found the key or not, if the key is still absent a second fetch is
 // performed (spec §2 rule 3: re-fetch once on cache miss). If the key is still
 // not found after that single re-fetch, JWKSFetchError is returned.
+// Its Cause wraps errKidNotFound, which VerifyToken reports as TokenInvalidError.
 func (j *JwksCache) GetKey(kid string) (ed25519.PublicKey, error) {
 	j.mu.RLock()
 	stale := j.fetchedAt.IsZero() || time.Since(j.fetchedAt) > j.ttl
@@ -97,7 +98,7 @@ func (j *JwksCache) GetKey(kid string) (ed25519.PublicKey, error) {
 		key, found = j.keys[kid]
 		j.mu.RUnlock()
 		if !found {
-			return nil, &JWKSFetchError{URL: j.url, Cause: fmt.Errorf("key not found: kid=%q", kid)}
+			return nil, &JWKSFetchError{URL: j.url, Cause: fmt.Errorf("%w: kid=%q", errKidNotFound, kid)}
 		}
 	}
 

@@ -107,8 +107,29 @@ final class AdminClientTest extends TestCase
 
     public function testUpdateClientSendsPatchToApplications(): void
     {
-        $this->client->updateClient('c1', ['name' => 'New']);
+        $this->client->updateClient('c1', ['client_name' => 'New']);
         $this->assertSent('PATCH', '/admin/applications/c1');
+        self::assertSame(['client_name' => 'New'], $this->sentJson());
+    }
+
+    /**
+     * The create/update bodies go through the generated models, which carry
+     * the REST field names (snake_case), whichever spelling the caller used.
+     */
+    public function testRoleAndGroupBodiesUseTheRestFieldNames(): void
+    {
+        $this->client->updateRole('r1', ['description' => 'New', 'parentRoles' => ['base']]);
+        self::assertSame(['description' => 'New', 'parent_roles' => ['base']], $this->sentJson());
+
+        $this->client->createGroup(['name' => 'Ops', 'slug' => 'ops']);
+        $this->assertSent('POST', '/admin/groups');
+        self::assertSame(['name' => 'Ops', 'slug' => 'ops'], $this->sentJson());
+    }
+
+    public function testAKeyTheApiDoesNotDefineIsRefusedBeforeSending(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->client->updateClient('c1', ['name' => 'New']);
     }
 
     public function testUpdateRoleSendsPatch(): void
@@ -140,22 +161,147 @@ final class AdminClientTest extends TestCase
             'createRealm() cannot succeed against any Hearth server — the route 405s',
         );
     }
-    /**
-     * Hearth serves no organization route over HTTP at all. There is no
-     * `/admin/orgs`, no `/admin/orgs/{id}/members` and no per-member route
-     * anywhere in the router, so every one of these methods 404'd. There is
-     * nothing to repoint them at (audit 2026-08-28 §25.19).
-     */
-    public function testOrgMembershipMethodsAreNotOffered(): void
+
+    // ── Organizations (`/admin/organizations`, typed by the generated models) ──
+
+    /** @return array<string, mixed> */
+    private function sentJson(): array
     {
-        foreach (
-            ['addOrgMember', 'getOrgMember', 'updateOrgMember', 'removeOrgMember', 'listOrgMembers']
-            as $dead
-        ) {
-            self::assertFalse(
-                method_exists(AdminClient::class, $dead),
-                "{$dead}() cannot succeed against any Hearth server — /admin/orgs is not a route",
-            );
+        self::assertNotNull($this->http->lastRequest, 'no request was sent');
+
+        return (array) json_decode((string) $this->http->lastRequest->getBody(), true);
+    }
+
+    public function testEveryRequestCarriesBearerAndRealmHeaders(): void
+    {
+        $this->client->getOrganization('o1');
+
+        self::assertSame('Bearer tok', $this->http->lastRequest?->getHeaderLine('Authorization'));
+        self::assertSame('realm_1', $this->http->lastRequest?->getHeaderLine('X-Realm-ID'));
+    }
+
+    public function testCreateOrganizationPostsTheTypedBodyAndReturnsTheOrganization(): void
+    {
+        $this->http->status = 201;
+        $this->http->body   = '{"id":"o1","slug":"acme","display_name":"Acme","status":"active",'
+            . '"member_limit":null,"mfa_required":true,"attributes":{},"created_at":1,"updated_at":1}';
+
+        $org = $this->client->createOrganization([
+            'slug'         => 'acme',
+            'display_name' => 'Acme',
+            'mfa_required' => true,
+        ]);
+
+        $this->assertSent('POST', '/admin/organizations');
+        self::assertSame(
+            ['slug' => 'acme', 'display_name' => 'Acme', 'mfa_required' => true],
+            $this->sentJson(),
+        );
+        self::assertSame('o1', $org['id']);
+        self::assertSame('active', $org['status']);
+    }
+
+    public function testOrganizationBodyAcceptsCamelCaseKeys(): void
+    {
+        $this->client->createOrganization(['slug' => 'acme', 'displayName' => 'Acme']);
+
+        self::assertSame(['slug' => 'acme', 'display_name' => 'Acme'], $this->sentJson());
+    }
+
+    public function testOrganizationBodyRefusesAnUnknownKeyBeforeSending(): void
+    {
+        try {
+            $this->client->updateOrganization('o1', ['dispaly_name' => 'typo']);
+            self::fail('an unknown key must be refused');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('dispaly_name', $e->getMessage());
         }
+        self::assertNull($this->http->lastRequest, 'nothing may be sent for a refused body');
+    }
+
+    public function testUpdateOrganizationSendsPatch(): void
+    {
+        $this->client->updateOrganization('o1', ['status' => 'suspended']);
+
+        $this->assertSent('PATCH', '/admin/organizations/o1');
+        self::assertSame(['status' => 'suspended'], $this->sentJson());
+    }
+
+    public function testDeleteOrganizationSendsDelete(): void
+    {
+        $this->http->status = 204;
+        $this->http->body   = '';
+
+        $this->client->deleteOrganization('o1');
+
+        $this->assertSent('DELETE', '/admin/organizations/o1');
+    }
+
+    public function testListOrganizationsPaginates(): void
+    {
+        $this->http->body = '{"items":[{"id":"o1"},{"id":"o2"}],"next_cursor":"2"}';
+
+        $page = $this->client->listOrganizations(limit: 2, cursor: '0');
+
+        $uri = $this->http->lastRequest?->getUri();
+        self::assertSame('/admin/organizations', $uri?->getPath());
+        parse_str((string) $uri?->getQuery(), $query);
+        self::assertSame(['limit' => '2', 'cursor' => '0'], $query);
+        self::assertSame(['o1', 'o2'], array_column($page->items, 'id'));
+        self::assertSame('2', $page->nextCursor);
+    }
+
+    public function testListOrganizationMemberRolesReturnsRoleNames(): void
+    {
+        $this->http->body = '{"items":["billing","support"]}';
+
+        $roles = $this->client->listOrganizationMemberRoles('o1', 'u1');
+
+        $this->assertSent('GET', '/admin/organizations/o1/members/u1/roles');
+        self::assertSame(['billing', 'support'], $roles);
+    }
+
+    public function testAddOrganizationMemberRolePostsTheRoleName(): void
+    {
+        $this->http->status = 204;
+        $this->http->body   = '';
+
+        $this->client->addOrganizationMemberRole('o1', 'u1', 'billing');
+
+        $this->assertSent('POST', '/admin/organizations/o1/members/u1/roles');
+        self::assertSame(['role_name' => 'billing'], $this->sentJson());
+    }
+
+    public function testRemoveOrganizationMemberRoleSendsDelete(): void
+    {
+        $this->http->status = 204;
+        $this->http->body   = '';
+
+        $this->client->removeOrganizationMemberRole('o1', 'u1', 'billing');
+
+        $this->assertSent('DELETE', '/admin/organizations/o1/members/u1/roles/billing');
+    }
+
+    // ── Error taxonomy and raw bodies ───────────────────────────────────────
+
+    public function testNon2xxRaisesRuntimeExceptionNamingTheRoute(): void
+    {
+        $this->http->status = 404;
+        $this->http->body   = '{"error":"organization not found"}';
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('HTTP 404 for GET https://auth.example.com/admin/organizations/missing');
+
+        $this->client->getOrganization('missing');
+    }
+
+    public function testNonOrganizationBodiesAreSentAsGiven(): void
+    {
+        // The proto-derived request models for users do not yet match the REST
+        // JSON, so the caller's keys go on the wire unchanged.
+        $this->client->createUser(['email' => 'a@example.com', 'display_name' => 'A']);
+
+        $this->assertSent('POST', '/admin/users');
+        self::assertSame(['email' => 'a@example.com', 'display_name' => 'A'], $this->sentJson());
     }
 }

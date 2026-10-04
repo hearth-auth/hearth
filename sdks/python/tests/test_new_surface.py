@@ -172,14 +172,19 @@ class TestJwksCache:
         assert call_count[0] == 2  # fetched twice (initial miss + retry)
 
     def test_raises_on_kid_not_found_after_refetch(self, respx_mock):
-        from hearth.errors import JWKSFetchError
+        # SDK.md §5: JWKSFetchError is for an unreachable or invalid JWKS
+        # endpoint. A kid the endpoint does not publish is a bad token.
+        from hearth.errors import JWKSFetchError, TokenInvalidError
         from hearth.jwks import JwksCache
 
         respx_mock.get("http://localhost:8420/.well-known/jwks.json").mock(
             return_value=httpx.Response(200, json={"keys": []})
         )
         cache = JwksCache("http://localhost:8420/.well-known/jwks.json")
-        with pytest.raises(JWKSFetchError):
+        with pytest.raises(TokenInvalidError) as excinfo:
+            cache.get_key("missing-kid")
+        assert not isinstance(excinfo.value, JWKSFetchError)
+        with pytest.raises(TokenInvalidError):
             cache.get_key("missing-kid")
 
     def test_skips_non_okp_keys_without_error(self, respx_mock):

@@ -5,7 +5,7 @@
 //! public client, its `client_id` alone — but read no assertion fields: the
 //! header route rejected a `client_assertion` as an unknown field (`400`) and
 //! the realm route ignored it and answered `401`, because a client with keys
-//! and no secret is not public. A FAPI 2.0 client (JWKS, no secret) could
+//! and no secret is not public. A `private_key_jwt` client (JWKS, no secret) could
 //! therefore never start a device flow. Both routes (form and JSON) now
 //! accept and verify `client_assertion_type` +
 //! `client_assertion`; the poll at `/token` (`device_code` grant) takes the

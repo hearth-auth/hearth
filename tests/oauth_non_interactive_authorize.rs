@@ -670,7 +670,7 @@ async fn realm_authorize_refuses_a_dpop_bound_token_without_a_proof() {
 // ── Round 2: PAR on the realm twin ──────────────────────────────────────────
 
 /// `POST /realms/{realm}/authorize` ignored `request_uri`: a client that had
-/// pushed its request (RFC 9126) — mandatory in a FAPI realm — could use only
+/// pushed its request (RFC 9126) could use only
 /// the header-routed `POST /authorize`. The realm twin now consumes the pushed
 /// request exactly as the global handler does.
 #[tokio::test]

@@ -1,5 +1,5 @@
 /**
- * §5.2 — Admin CRUD extended: Clients, Roles, Groups, Org Members.
+ * §5.2 — Admin CRUD extended: Clients, Roles, Groups, Organizations.
  * TDD tests written before implementation.
  */
 
@@ -136,7 +136,7 @@ describe("AdminClient — Roles CRUD", () => {
 describe("AdminClient — Groups CRUD", () => {
   it("createGroup POSTs to /admin/groups", async () => {
     vi.mocked(fetch).mockResolvedValue(mockOk({ id: "grp1", name: "engineers" }, 201));
-    const result = await makeAdmin().createGroup({ name: "engineers" });
+    const result = await makeAdmin().createGroup({ name: "engineers", slug: "engineers" });
     const [url, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
     expect(url).toBe(`${BASE}/admin/groups`);
     expect(init.method).toBe("POST");
@@ -173,25 +173,129 @@ describe("AdminClient — Groups CRUD", () => {
   });
 });
 
-// ── Org Members — removed ───────────────────────────────────────────────────
-//
-// Hearth serves no organization route over HTTP: there is no /admin/orgs, no
-// /admin/orgs/:orgId/members and no per-member route anywhere in the router,
-// so addOrgMember, listOrgMembers and removeOrgMember every one 404'd
-// (audit 2026-08-28 §25.19). Organization membership is administered through
-// the admin console, not the admin API.
+// ── Organizations ──────────────────────────────────────────────────────────
 
-describe("AdminClient — Org Members are removed", () => {
-  it("exposes no /admin/orgs method", () => {
+const ORG = {
+  id: "0b6c1f0e-0000-4000-8000-000000000001",
+  slug: "acme",
+  display_name: "Acme",
+  status: "active",
+  member_limit: null,
+  mfa_required: false,
+  attributes: { tier: "gold" },
+  created_at: 1_700_000_000_000_000,
+  updated_at: 1_700_000_000_000_000,
+};
+
+function lastCall(): [string, RequestInit] {
+  const calls = vi.mocked(fetch).mock.calls;
+  return calls[calls.length - 1] as [string, RequestInit];
+}
+
+describe("AdminClient — Organizations", () => {
+  it("listOrganizations GETs /admin/organizations with page options and decodes the page", async () => {
+    vi.mocked(fetch).mockResolvedValue(mockOk({ items: [ORG], next_cursor: "50" }));
+    const page = await makeAdmin().listOrganizations({ limit: 50, cursor: "0" });
+    const [url, init] = lastCall();
+    const parsed = new URL(url);
+    expect(parsed.pathname).toBe("/admin/organizations");
+    expect(parsed.searchParams.get("limit")).toBe("50");
+    expect(parsed.searchParams.get("cursor")).toBe("0");
+    expect(init.method).toBe("GET");
+    expect(page).toEqual({ items: [ORG], next_cursor: "50" });
+  });
+
+  it("listOrganizations maps an absent next_cursor to null", async () => {
+    vi.mocked(fetch).mockResolvedValue(mockOk({ items: [] }));
+    expect(await makeAdmin().listOrganizations()).toEqual({ items: [], next_cursor: null });
+    expect(lastCall()[0]).toBe(`${BASE}/admin/organizations`);
+  });
+
+  it("createOrganization POSTs the snake_case body and decodes the 201", async () => {
+    vi.mocked(fetch).mockResolvedValue(mockOk(ORG, 201));
+    const org = await makeAdmin().createOrganization({
+      slug: "acme",
+      display_name: "Acme",
+      mfa_required: true,
+      attributes: { tier: "gold" },
+    });
+    const [url, init] = lastCall();
+    expect(url).toBe(`${BASE}/admin/organizations`);
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toEqual({
+      slug: "acme",
+      display_name: "Acme",
+      mfa_required: true,
+      attributes: { tier: "gold" },
+    });
+    expect(new Headers(init.headers).get("X-Realm-ID")).toBe(REALM);
+    expect(org).toEqual(ORG);
+  });
+
+  it("getOrganization GETs /admin/organizations/:id", async () => {
+    vi.mocked(fetch).mockResolvedValue(mockOk(ORG));
+    const org = await makeAdmin().getOrganization(ORG.id);
+    const [url, init] = lastCall();
+    expect(url).toBe(`${BASE}/admin/organizations/${ORG.id}`);
+    expect(init.method).toBe("GET");
+    expect(org.slug).toBe("acme");
+  });
+
+  it("updateOrganization PATCHes only the given fields", async () => {
+    vi.mocked(fetch).mockResolvedValue(mockOk({ ...ORG, status: "suspended" }));
+    const org = await makeAdmin().updateOrganization(ORG.id, { status: "suspended" });
+    const [url, init] = lastCall();
+    expect(url).toBe(`${BASE}/admin/organizations/${ORG.id}`);
+    expect(init.method).toBe("PATCH");
+    expect(JSON.parse(String(init.body))).toEqual({ status: "suspended" });
+    expect(org.status).toBe("suspended");
+  });
+
+  it("deleteOrganization DELETEs /admin/organizations/:id and accepts 204", async () => {
+    vi.mocked(fetch).mockResolvedValue(mockNoContent());
+    await expect(makeAdmin().deleteOrganization(ORG.id)).resolves.toBeUndefined();
+    const [url, init] = lastCall();
+    expect(url).toBe(`${BASE}/admin/organizations/${ORG.id}`);
+    expect(init.method).toBe("DELETE");
+  });
+
+  it("listMemberRoles GETs the member's extra roles and returns the names", async () => {
+    vi.mocked(fetch).mockResolvedValue(mockOk({ items: ["billing", "support"] }));
+    const roles = await makeAdmin().listMemberRoles(ORG.id, "usr_1");
+    const [url, init] = lastCall();
+    expect(url).toBe(`${BASE}/admin/organizations/${ORG.id}/members/usr_1/roles`);
+    expect(init.method).toBe("GET");
+    expect(roles).toEqual(["billing", "support"]);
+  });
+
+  it("addMemberRole POSTs {role_name} and accepts 204", async () => {
+    vi.mocked(fetch).mockResolvedValue(mockNoContent());
+    await expect(makeAdmin().addMemberRole(ORG.id, "usr_1", "billing")).resolves.toBeUndefined();
+    const [url, init] = lastCall();
+    expect(url).toBe(`${BASE}/admin/organizations/${ORG.id}/members/usr_1/roles`);
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toEqual({ role_name: "billing" });
+  });
+
+  it("addMemberRole throws HearthError 409 when the user is not a member", async () => {
+    vi.mocked(fetch).mockResolvedValue(mockOk({ error: "not a member" }, 409));
+    await expect(makeAdmin().addMemberRole(ORG.id, "usr_2", "billing")).rejects.toMatchObject({
+      status: 409,
+      body: { error: "not a member" },
+    });
+  });
+
+  it("removeMemberRole DELETEs the role path", async () => {
+    vi.mocked(fetch).mockResolvedValue(mockNoContent());
+    await makeAdmin().removeMemberRole(ORG.id, "usr_1", "billing");
+    const [url, init] = lastCall();
+    expect(url).toBe(`${BASE}/admin/organizations/${ORG.id}/members/usr_1/roles/billing`);
+    expect(init.method).toBe("DELETE");
+  });
+
+  it("exposes no method for the never-served /admin/orgs routes", () => {
     const admin = makeAdmin() as unknown as Record<string, unknown>;
-    const dead = [
-      "addOrgMember",
-      "listOrgMembers",
-      "removeOrgMember",
-      "getOrgMember",
-      "updateOrgMember",
-    ];
-    const present = dead.filter((name) => typeof admin[name] === "function");
-    expect(present).toEqual([]);
+    const dead = ["addOrgMember", "listOrgMembers", "removeOrgMember"];
+    expect(dead.filter((name) => typeof admin[name] === "function")).toEqual([]);
   });
 });

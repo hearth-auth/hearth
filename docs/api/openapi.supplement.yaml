@@ -3,7 +3,8 @@ info:
   title: Hearth API — supplement
   description: |
     Hand-written routes that have no proto service definition yet.
-    These are merged with docs/api/openapi.proto-derived.json by `make openapi`
+    These are merged with docs/api/openapi_proto_derived.swagger.json (written
+    by `make proto-gen`) by `make openapi`
     to produce docs/api/openapi.json (the authoritative merged spec).
     When HEA-969 adds proto definitions for these endpoints, remove them here.
   version: 0.1.0
@@ -16,6 +17,46 @@ info:
 x-hearth-omit-operations:
   - IdentityAdminService_CreateRealm
   - IdentityAdminService_UpdateRealm
+  # The proto annotations below disagree with the handlers (path parameter
+  # name, query key, 204 vs a typed 200). The supplement documents the served
+  # shape: `/admin/assignments/{id}` and `/admin/groups/{id}/members/{member_id}`.
+  - RbacAdminService_UnassignUserRole
+  - RbacAdminService_RemoveGroupMember
+  # The RBAC admin handlers serialize the domain types (snake_case serde), not
+  # the proto messages, and name the path parameter `{id}`. The supplement
+  # documents them under the router's paths; tests/openapi_contract.rs holds
+  # it to the handlers. (`/admin/roles`, `/admin/groups` and `/admin/audit`
+  # are replaced by the identical supplement path key.)
+  - RbacAdminService_GetRole
+  - RbacAdminService_UpdateRole
+  - RbacAdminService_DeleteRole
+  - RbacAdminService_GetGroup
+  - RbacAdminService_UpdateGroup
+  - RbacAdminService_DeleteGroup
+  - RbacAdminService_ListGroupMembers
+  - RbacAdminService_AddGroupMember
+  - RbacAdminService_ListUserAssignments
+  - RbacAdminService_AssignUserRole
+
+# Proto-derived operations that answer `201 Created`. protoc-gen-openapiv2
+# documents every success as `200`; `scripts/merge_openapi.py` renames it.
+x-hearth-created-operations:
+  - ApplicationAdminService_CreateApplication
+  - IdentityAdminService_CreateUser
+  - OAuthService_RegisterClient
+  - OAuthService_RegisterClient2
+
+# Proto-derived operations that answer `204 No Content` (no body).
+x-hearth-no-content-operations:
+  - ApplicationAdminService_DeleteApplication
+  - IdentityAdminService_DeleteUser
+
+# Facts the proto cannot carry, merged into proto-derived schemas by property.
+x-hearth-schema-patches:
+  v1RegisterClientRequest:
+    properties:
+      token_endpoint_auth_method:
+        enum: [client_secret_basic, client_secret_post, private_key_jwt, none]
 
 paths:
   # ── Health / liveness ────────────────────────────────────────────────────
@@ -1072,15 +1113,22 @@ paths:
         - {name: cursor, in: query, schema: {type: string}}
         - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100}}
       responses:
-        "200": {description: "`{items: [Organization], next_cursor}`"}
+        "200":
+          description: A page of organizations; `next_cursor` is null on the last page
+          content: {application/json: {schema: {$ref: '#/components/schemas/AdminOrganizationPage'}}}
     post:
       summary: Create an organization
       description: "Requires `hearth.realm.admin`. Body: `{slug, display_name, member_limit?, mfa_required?, attributes?}`. `mfa_required` (default `false`) makes members need MFA even where the realm does not; it can only tighten. Refused in the system realm."
       operationId: adminCreateOrganization
       tags: [Admin]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AdminCreateOrganizationRequest'}}}
       responses:
-        "201": {description: The created organization}
-        "403": {description: Missing `hearth.realm.admin`, or the system realm}
+        "201":
+          description: The created organization
+          content: {application/json: {schema: {$ref: '#/components/schemas/AdminOrganization'}}}
+        "403": {description: "Missing `hearth.realm.admin`, or the system realm"}
   /admin/organizations/{id}:
     parameters:
       - {name: id, in: path, required: true, schema: {type: string}}
@@ -1089,15 +1137,22 @@ paths:
       operationId: adminGetOrganization
       tags: [Admin]
       responses:
-        "200": {description: The organization}
+        "200":
+          description: The organization
+          content: {application/json: {schema: {$ref: '#/components/schemas/AdminOrganization'}}}
         "404": {description: No such organization in the realm}
     patch:
       summary: Update an organization
       description: "Body: `{display_name?, status? (active|suspended), member_limit?, mfa_required?, attributes?}`. A field left out keeps its value. A `slug` is refused with 400 (it is immutable). Suspending is checked against the admin privilege ceiling, like a delete."
       operationId: adminUpdateOrganization
       tags: [Admin]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AdminUpdateOrganizationRequest'}}}
       responses:
-        "200": {description: The updated organization}
+        "200":
+          description: The updated organization
+          content: {application/json: {schema: {$ref: '#/components/schemas/AdminOrganization'}}}
         "400": {description: A slug change or an unknown status}
         "403": {description: A member holds admin authority the caller lacks}
     delete:
@@ -1117,16 +1172,21 @@ paths:
       operationId: adminListAdditionalRoles
       tags: [Admin]
       responses:
-        "200": {description: "`{items: [role_name]}`"}
+        "200":
+          description: The member's extra org role names
+          content: {application/json: {schema: {$ref: '#/components/schemas/AdminRoleNameList'}}}
     post:
       summary: Give a member an extra org role
       description: "Body: `{role_name}`. The user must be a member (409 otherwise); a sub-admin may only give roles within its own permissions."
       operationId: adminAddAdditionalRole
       tags: [Admin]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AdminAddAdditionalRoleRequest'}}}
       responses:
         "204": {description: Added}
         "403": {description: The role holds permissions the caller lacks}
-        "404": {description: No such organization, user or role}
+        "404": {description: "No such organization, user or role"}
         "409": {description: The user is not a member of the organization}
   /admin/organizations/{id}/members/{user_id}/roles/{role_name}:
     delete:
@@ -1142,6 +1202,217 @@ paths:
         "204": {description: Removed}
 
   # ── Admin — RBAC extras (3.0.0; formerly gRPC-only) ────────────────────
+  /admin/roles:
+    get:
+      summary: List roles
+      description: Requires `hearth.realm.admin`. Follow `next_cursor` until it is null.
+      operationId: adminListRoles
+      tags: [Admin]
+      parameters:
+        - {name: cursor, in: query, schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1}}
+      responses:
+        "200":
+          description: A page of roles
+          content: {application/json: {schema: {$ref: '#/components/schemas/AdminRolePage'}}}
+    post:
+      summary: Create a role
+      operationId: adminCreateRole
+      tags: [Admin]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AdminCreateRoleRequest'}}}
+      responses:
+        "201":
+          description: The created role
+          content: {application/json: {schema: {$ref: '#/components/schemas/AdminRole'}}}
+        "400": {description: "Invalid name, permission or parent role"}
+        "409": {description: A role with this name exists}
+  /admin/roles/{id}:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string}}
+    get:
+      summary: Get a role
+      operationId: adminGetRole
+      tags: [Admin]
+      responses:
+        "200":
+          description: The role
+          content: {application/json: {schema: {$ref: '#/components/schemas/AdminRole'}}}
+        "404": {description: No such role in the realm}
+    patch:
+      summary: Update a role
+      description: Absent fields are unchanged; `description` null clears it.
+      operationId: adminUpdateRole
+      tags: [Admin]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AdminUpdateRoleRequest'}}}
+      responses:
+        "200":
+          description: The updated role
+          content: {application/json: {schema: {$ref: '#/components/schemas/AdminRole'}}}
+        "404": {description: No such role in the realm}
+    delete:
+      summary: Delete a role
+      operationId: adminDeleteRole
+      tags: [Admin]
+      parameters:
+        - name: cascade
+          in: query
+          description: Also remove the role's assignments, parent links and extra org-role rows. Without it a referenced role answers `409 role_in_use`.
+          schema: {type: boolean, default: false}
+      responses:
+        "204": {description: Deleted}
+        "404": {description: No such role in the realm}
+        "409": {description: The role is in use and `cascade` is not set}
+  /admin/groups:
+    get:
+      summary: List groups
+      description: "`cursor` is a decimal offset; follow `next_cursor` until it is null."
+      operationId: adminListGroups
+      tags: [Admin]
+      parameters:
+        - {name: cursor, in: query, schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1}}
+      responses:
+        "200":
+          description: A page of groups
+          content: {application/json: {schema: {$ref: '#/components/schemas/AdminGroupPage'}}}
+    post:
+      summary: Create a group
+      operationId: adminCreateGroup
+      tags: [Admin]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AdminCreateGroupRequest'}}}
+      responses:
+        "201":
+          description: The created group
+          content: {application/json: {schema: {$ref: '#/components/schemas/AdminGroup'}}}
+        "409": {description: A group with this slug exists}
+  /admin/groups/{id}:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string}}
+    get:
+      summary: Get a group
+      operationId: adminGetGroup
+      tags: [Admin]
+      responses:
+        "200":
+          description: The group
+          content: {application/json: {schema: {$ref: '#/components/schemas/AdminGroup'}}}
+        "404": {description: No such group in the realm}
+    patch:
+      summary: Update a group
+      description: Absent fields are unchanged; `description` null clears it.
+      operationId: adminUpdateGroup
+      tags: [Admin]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AdminUpdateGroupRequest'}}}
+      responses:
+        "200":
+          description: The updated group
+          content: {application/json: {schema: {$ref: '#/components/schemas/AdminGroup'}}}
+        "404": {description: No such group in the realm}
+    delete:
+      summary: Delete a group
+      operationId: adminDeleteGroup
+      tags: [Admin]
+      responses:
+        "204": {description: Deleted}
+        "404": {description: No such group in the realm}
+  /admin/groups/{id}/members:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string}}
+    get:
+      summary: List a group's members
+      operationId: adminListGroupMembers
+      tags: [Admin]
+      parameters:
+        - {name: cursor, in: query, schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1}}
+      responses:
+        "200":
+          description: A page of members
+          content: {application/json: {schema: {$ref: '#/components/schemas/AdminGroupMemberPage'}}}
+        "404": {description: No such group in the realm}
+    post:
+      summary: Add a member to a group
+      operationId: adminAddGroupMember
+      tags: [Admin]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AdminAddGroupMemberRequest'}}}
+      responses:
+        "201":
+          description: The new membership
+          content: {application/json: {schema: {$ref: '#/components/schemas/AdminGroupMembership'}}}
+        "400": {description: Invalid member type or id}
+        "404": {description: No such group in the realm}
+  /admin/users/{id}/roles:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string}}
+    get:
+      summary: List a user's role assignments
+      operationId: adminListUserAssignments
+      tags: [Admin]
+      responses:
+        "200":
+          description: The user's direct role assignments
+          content: {application/json: {schema: {$ref: '#/components/schemas/AdminRoleAssignmentList'}}}
+        "404": {description: No such user in the realm}
+    post:
+      summary: Assign a role to a user
+      description: Realm-wide, or inside one organization when `org_id` is set.
+      operationId: adminAssignUserRole
+      tags: [Admin]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AdminAssignRoleRequest'}}}
+      responses:
+        "201":
+          description: The new assignment
+          content: {application/json: {schema: {$ref: '#/components/schemas/AdminRoleAssignment'}}}
+        "403": {description: The role holds permissions the caller lacks}
+        "404": {description: No such user or role in the realm}
+  /admin/audit:
+    get:
+      summary: List audit events
+      description: Requires `hearth.realm.admin`. Newest first.
+      operationId: adminListAuditEvents
+      tags: [Admin]
+      parameters:
+        - {name: actor, in: query, schema: {type: string}}
+        - {name: action, in: query, description: "An audit action name, e.g. `UserCreated`.", schema: {type: string}}
+        - {name: start_time, in: query, description: Microseconds since the Unix epoch., schema: {type: integer, format: int64}}
+        - {name: end_time, in: query, description: Microseconds since the Unix epoch., schema: {type: integer, format: int64}}
+        - {name: limit, in: query, description: "Default 50, at most 200.", schema: {type: integer, minimum: 1}}
+      responses:
+        "200":
+          description: Matching audit events
+          content: {application/json: {schema: {$ref: '#/components/schemas/AdminAuditEventList'}}}
+        "400": {description: "`start_time` is after `end_time`"}
+  /admin/groups/{id}/members/{member_id}:
+    delete:
+      summary: Remove a member from a group
+      operationId: adminRemoveGroupMember
+      tags: [Admin]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: member_id, in: path, required: true, schema: {type: string}}
+        - name: type
+          in: query
+          required: false
+          description: Member kind; defaults to `user`.
+          schema: {type: string, enum: [user, group], default: user}
+      responses:
+        "204":
+          description: Member removed
+        "400":
+          description: Invalid member type
+
   /admin/groups/{id}/roles:
     post:
       summary: Assign a role to a group
@@ -1436,6 +1707,211 @@ paths:
                 type: string
 
 components:
+  schemas:
+    # RBAC admin shapes: the serde form of src/rbac/types.rs (snake_case).
+    AdminRole:
+      type: object
+      required: [id, realm_id, name, description, permissions, parent_roles, scope_kind, status, yaml_managed, created_at, updated_at]
+      properties:
+        id: {type: string, format: uuid}
+        realm_id: {type: string, format: uuid}
+        name: {type: string}
+        description: {type: string, nullable: true}
+        permissions: {type: array, items: {type: string}}
+        parent_roles: {type: array, items: {type: string, format: uuid}}
+        scope_kind: {type: string, enum: [realm, organization, any]}
+        status: {type: string, enum: [active, archived]}
+        yaml_managed:
+          type: boolean
+          description: Declared in hearth.yaml; the admin API cannot change it.
+        created_at: {type: integer, format: int64, description: Microseconds since the Unix epoch.}
+        updated_at: {type: integer, format: int64, description: Microseconds since the Unix epoch.}
+    AdminRolePage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/AdminRole'}}
+        next_cursor: {type: string, nullable: true}
+    AdminCreateRoleRequest:
+      type: object
+      required: [name]
+      properties:
+        name: {type: string}
+        description: {type: string, nullable: true}
+        permissions: {type: array, items: {type: string}}
+        parent_roles: {type: array, items: {type: string, format: uuid}}
+    AdminUpdateRoleRequest:
+      type: object
+      description: Absent fields are unchanged.
+      properties:
+        name: {type: string}
+        description: {type: string, nullable: true, description: null clears the description.}
+        permissions: {type: array, items: {type: string}}
+        parent_roles: {type: array, items: {type: string, format: uuid}}
+    AdminGroup:
+      type: object
+      required: [id, realm_id, name, slug, description, created_at, updated_at]
+      properties:
+        id: {type: string, format: uuid}
+        realm_id: {type: string, format: uuid}
+        name: {type: string}
+        slug: {type: string}
+        description: {type: string, nullable: true}
+        created_at: {type: integer, format: int64, description: Microseconds since the Unix epoch.}
+        updated_at: {type: integer, format: int64, description: Microseconds since the Unix epoch.}
+    AdminGroupPage:
+      type: object
+      required: [items, next_cursor, total]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/AdminGroup'}}
+        next_cursor: {type: string, nullable: true}
+        total: {type: integer, format: int64}
+    AdminCreateGroupRequest:
+      type: object
+      required: [name, slug]
+      properties:
+        name: {type: string}
+        slug: {type: string}
+        description: {type: string, nullable: true}
+    AdminUpdateGroupRequest:
+      type: object
+      description: Absent fields are unchanged.
+      properties:
+        name: {type: string}
+        slug: {type: string}
+        description: {type: string, nullable: true, description: null clears the description.}
+    AdminSubject:
+      type: object
+      description: A user or a group, as a group member or a role-assignment subject.
+      required: [type, id]
+      properties:
+        type: {type: string, enum: [user, group]}
+        id: {type: string, format: uuid}
+    AdminGroupMembership:
+      type: object
+      required: [group_id, member, added_at, added_by]
+      properties:
+        group_id: {type: string, format: uuid}
+        member: {$ref: '#/components/schemas/AdminSubject'}
+        added_at: {type: integer, format: int64, description: Microseconds since the Unix epoch.}
+        added_by: {type: string, format: uuid, nullable: true}
+    AdminGroupMemberPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/AdminSubject'}}
+        next_cursor: {type: string, nullable: true}
+    AdminAddGroupMemberRequest:
+      type: object
+      required: [type, id]
+      properties:
+        type: {type: string, enum: [user, group]}
+        id: {type: string, format: uuid}
+    AdminAssignmentScope:
+      type: object
+      required: [type]
+      properties:
+        type: {type: string, enum: [realm, org]}
+        org_id: {type: string, format: uuid, description: Present when `type` is `org`.}
+    AdminRoleAssignment:
+      type: object
+      required: [id, realm_id, subject, role_id, scope, assigned_at, assigned_by]
+      properties:
+        id: {type: string, format: uuid}
+        realm_id: {type: string, format: uuid}
+        subject: {$ref: '#/components/schemas/AdminSubject'}
+        role_id: {type: string, format: uuid}
+        scope: {$ref: '#/components/schemas/AdminAssignmentScope'}
+        assigned_at: {type: integer, format: int64, description: Microseconds since the Unix epoch.}
+        assigned_by: {type: string, format: uuid, nullable: true}
+    AdminRoleAssignmentList:
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/AdminRoleAssignment'}}
+    AdminAssignRoleRequest:
+      type: object
+      required: [role_id]
+      properties:
+        role_id: {type: string, format: uuid}
+        org_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Assign inside this organization only; absent or null assigns realm-wide.
+    # The audit log's serde form (src/audit/types.rs `AuditEvent`).
+    AdminAuditEvent:
+      type: object
+      required: [id, realm_id, actor, action, resource_type, resource_id, timestamp, integrity_hash]
+      properties:
+        id: {type: string}
+        realm_id: {type: string, format: uuid}
+        actor: {type: string}
+        action: {type: string, description: "The audit action name, e.g. `UserCreated`."}
+        resource_type: {type: string}
+        resource_id: {type: string}
+        timestamp: {type: integer, format: int64, description: Microseconds since the Unix epoch.}
+        metadata: {type: object, additionalProperties: true, description: Present only when the event carries metadata.}
+        integrity_hash: {type: string}
+    AdminAuditEventList:
+      type: object
+      required: [events]
+      properties:
+        events: {type: array, items: {$ref: '#/components/schemas/AdminAuditEvent'}}
+    # Hand-written REST shapes (snake_case JSON). The proto `v1Organization`
+    # messages do not describe what `src/protocol/http/admin/orgs.rs` serves.
+    AdminOrganization:
+      type: object
+      required: [id, slug, display_name, status, mfa_required, attributes, created_at, updated_at]
+      properties:
+        id: {type: string, format: uuid}
+        slug: {type: string}
+        display_name: {type: string}
+        status: {type: string, enum: [active, suspended, archived]}
+        member_limit: {type: integer, format: int32, minimum: 0, nullable: true}
+        mfa_required:
+          type: boolean
+          description: Members need MFA even where the realm does not require it.
+        attributes: {type: object, additionalProperties: {type: string}}
+        created_at: {type: integer, format: int64, description: Microseconds since the Unix epoch.}
+        updated_at: {type: integer, format: int64, description: Microseconds since the Unix epoch.}
+    AdminOrganizationPage:
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/AdminOrganization'}}
+        next_cursor: {type: string, nullable: true}
+    AdminCreateOrganizationRequest:
+      type: object
+      required: [slug, display_name]
+      properties:
+        slug: {type: string}
+        display_name: {type: string}
+        member_limit: {type: integer, format: int32, minimum: 0, nullable: true}
+        mfa_required: {type: boolean, default: false}
+        attributes: {type: object, additionalProperties: {type: string}}
+    AdminUpdateOrganizationRequest:
+      type: object
+      description: Absent fields are unchanged. `slug` is immutable and is refused with 400.
+      properties:
+        display_name: {type: string}
+        status: {type: string, enum: [active, suspended]}
+        member_limit: {type: integer, format: int32, minimum: 0, nullable: true}
+        mfa_required: {type: boolean}
+        attributes:
+          type: object
+          additionalProperties: {type: string}
+          description: Replaces the whole attribute map.
+    AdminAddAdditionalRoleRequest:
+      type: object
+      required: [role_name]
+      properties:
+        role_name: {type: string}
+    AdminRoleNameList:
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, items: {type: string}}
   securitySchemes:
     bearerAuth:
       type: http

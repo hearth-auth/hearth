@@ -345,7 +345,8 @@ export class HearthClient {
    * 3. `nbf` claim (rejects post-dated tokens).
    * 4. `iss` claim (must match configured `issuerUrl`).
    * 5. `aud` claim (validated when `clientId` is set in config).
-   * 6. `iat` claim (within 60-second clock skew tolerance).
+   *
+   * `exp` and `nbf` allow a 5-second clock skew.
    *
    * @throws {@link TokenExpiredError} — token is expired.
    * @throws {@link TokenInvalidError} — signature invalid or JWT malformed.

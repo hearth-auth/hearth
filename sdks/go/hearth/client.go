@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // Client is a Go client for the Hearth identity API.
@@ -30,6 +32,10 @@ type Client struct {
 
 	// jwksURLOverride lets tests point the JWKS fetch at a different server.
 	jwksURLOverride string
+
+	// now is the clock VerifyToken checks exp/nbf/iat against. nil means
+	// time.Now; tests set it to pin the clock.
+	now func() time.Time
 
 	// Lazy-initialised JWKS cache and discovery document.
 	jwksMu    sync.Mutex
@@ -81,6 +87,16 @@ func WithSessionVersions(cfg SessionVersionConfig) ClientOption {
 		cache := newSessionVersionCache(c.baseURL, c.realmID, cfg, c.http)
 		cache.Start()
 		c.svCache = cache
+	}
+}
+
+// setRealmHeader sends X-Realm-ID only when the client's realm is a UUID.
+// The server reads the header as a realm UUID and refuses a realm-path request
+// whose header names another realm (400 realm_mismatch); a realm NAME is never
+// a valid value, and the realm in the issuer path already identifies it.
+func (c *Client) setRealmHeader(req *http.Request) {
+	if _, err := uuid.Parse(c.realmID); err == nil {
+		req.Header.Set("X-Realm-ID", c.realmID)
 	}
 }
 
@@ -309,7 +325,7 @@ func (c *Client) Permissions(ctx context.Context, token string) (*MePermissionsR
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("X-Realm-ID", c.realmID)
+	c.setRealmHeader(httpReq)
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 
 	var result MePermissionsResponse
@@ -325,7 +341,7 @@ func (c *Client) UserInfo(ctx context.Context, accessToken string) (*UserInfoRes
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("X-Realm-ID", c.realmID)
+	c.setRealmHeader(httpReq)
 	httpReq.Header.Set("Authorization", "Bearer "+accessToken)
 
 	var result UserInfoResponse
@@ -364,7 +380,7 @@ func (c *Client) Introspect(ctx context.Context, req IntrospectRequest) (*Intros
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("X-Realm-ID", c.realmID)
+	c.setRealmHeader(httpReq)
 
 	var result IntrospectResponse
 	if err := doRequest(c.http, httpReq, &result); err != nil {
@@ -389,7 +405,7 @@ func (c *Client) CheckPermission(ctx context.Context, token string, req CheckPer
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("X-Realm-ID", c.realmID)
+	c.setRealmHeader(httpReq)
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 
 	var result CheckPermissionResponse
@@ -430,7 +446,7 @@ func (c *Client) postWithToken(ctx context.Context, path string, body, result an
 		return err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("X-Realm-ID", c.realmID)
+	c.setRealmHeader(httpReq)
 	if token != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -440,6 +456,13 @@ func (c *Client) postWithToken(ctx context.Context, path string, body, result an
 
 func doRequest(client *http.Client, req *http.Request, result any) error {
 	resp, err := client.Do(req)
+	return decodeResponse(resp, err, result)
+}
+
+// decodeResponse maps an HTTP response onto the SDK error taxonomy (any
+// status >= 400 is an *APIError) and decodes a JSON body into result.
+// It closes the body.
+func decodeResponse(resp *http.Response, err error, result any) error {
 	if err != nil {
 		return err
 	}

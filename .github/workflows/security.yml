@@ -155,6 +155,10 @@ jobs:
             **/*.spec.js
             sdks/*/tests/**
             sdks/*/test/**
+            # The shared conformance harness's per-SDK runners: test tooling that
+            # reads its case file and configures an SDK client from it.
+            sdks/*/conformance/**
+            sdks/conformance/**
           queries: security-extended
 
       # Go autobuild calls `go get` to resolve module imports. Without git

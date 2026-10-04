@@ -81,9 +81,9 @@ def test_update_client_sends_client_name_not_name(respx_mock):
     assert updated.name == "Renamed"
 
 
-def test_update_client_keeps_snake_case_trust_level(respx_mock):
-    # PATCH reads `trust_level` as a plain string (`first_party` /
-    # `third_party`), not the proto enum.
+def test_update_client_sends_trust_level_as_proto_enum_name(respx_mock):
+    # The spec documents the proto `ClientTrustLevel` enum for this body; the
+    # route accepts both spellings (checked against a live server).
     route = respx_mock.patch(f"{BASE}/admin/applications/c-1").mock(
         return_value=httpx.Response(200, json=SERVER_CLIENT)
     )
@@ -91,7 +91,7 @@ def test_update_client_keeps_snake_case_trust_level(respx_mock):
     _admin().update_client("c-1", UpdateClientRequest(trust_level="first_party"))
 
     body = json.loads(route.calls.last.request.content)
-    assert body == {"trust_level": "first_party"}
+    assert body == {"trust_level": "CLIENT_TRUST_LEVEL_FIRST_PARTY"}
 
 
 def test_list_clients_parses_server_shape(respx_mock):

@@ -163,6 +163,48 @@ $userInfo = $hearth->getUserInfo($tokens->accessToken);
 // $userInfo->sub, $userInfo->name, $userInfo->email
 ```
 
+**How verification works.** The SDK has no signature code of its own. It parses
+the token with `lcobucci/jwt` v5 and validates it with four constraints:
+`SignedWith(new Eddsa(), <key chosen by kid>)`, `LooseValidAt` (one 5 s clock-skew
+allowance on `exp`, `nbf` and `iat`), `IssuedBy(<issuerUrl>)` and, when `clientId`
+is set, `PermittedFor(<clientId>)`. Each failure maps to the matching exception
+(`TokenExpiredException`, `TokenIssuerException`, …). A `kid` still unknown after
+one JWKS re-fetch throws `TokenInvalidException`; `JWKSFetchException` means the
+JWKS endpoint itself failed. `issuerUrl` must equal the `iss` your tokens carry
+(`https://hearth.example.com/realms/<realm>` for realm tokens). `ext-sodium` stays
+required: `lcobucci`'s `Eddsa` signer uses it.
+
+## Admin client
+
+```php
+use Hearth\AdminClient;
+
+$admin = new AdminClient('https://hearth.example.com', '<realm-id>', $adminToken);
+
+$org = $admin->createOrganization(['slug' => 'acme', 'display_name' => 'Acme']);
+$admin->addOrganizationMemberRole($org['id'], $userId, 'billing-admin');
+$roles = $admin->listOrganizationMemberRoles($org['id'], $userId); // list<string>
+$admin->removeOrganizationMemberRole($org['id'], $userId, 'billing-admin');
+```
+
+`listOrganizations`, `getOrganization`, `updateOrganization` and
+`deleteOrganization` complete the set; users, applications, roles, groups and
+realms keep their methods. An unknown key in an organization body throws
+`InvalidArgumentException` before anything is sent. Organization membership
+itself has no REST route.
+
+`AdminClient` is a thin layer over the client in `sdks/php/generated/admin`
+(`Hearth\Generated\Admin`), generated from `docs/api/openapi.json` by
+`jane-php/open-api-3` (`make sdk-admin-gen`) and committed; CI fails when it is
+stale.
+
+## Conformance
+
+`sdks/php/conformance/run.sh` runs the shared SDK scenarios
+(`sdks/conformance/scenarios.yaml`) through this SDK's public API. `make
+sdk-conformance` runs it against live servers, next to the TypeScript, Go and
+Python runners, and fails when an SDK gives a different answer.
+
 ## Framework middleware
 
 Apply token verification to your routes using the adapter for your framework. All adapters respond `401` on a missing or invalid token and `403` on a permission failure.

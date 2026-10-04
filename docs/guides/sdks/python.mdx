@@ -172,12 +172,15 @@ This eliminates the XSS risk of browser-side token storage. See [Browser SPA Tok
 from hearth import HearthClient
 
 client = HearthClient(
-    issuer_url="https://hearth.example.com",
-    client_id="<your-client-id>",
+    base_url="https://hearth.example.com/realms/<realm>",  # the realm's issuer URL
+    realm_id="<realm>",
 )
 ```
 
-`HearthClient` auto-discovers endpoint URLs from the OIDC discovery document and caches the JWKS with auto-refresh on key miss.
+For token verification, `base_url` is the issuer your tokens carry: `verify_token`
+reads keys from `{base_url}/.well-known/jwks.json` and expects `iss == base_url`
+(pass `issuer_url=` to `verify_token` to expect another value). The JWKS is cached
+and re-fetched once on a key miss.
 
 ## Verify tokens
 
@@ -185,13 +188,20 @@ client = HearthClient(
 from hearth.errors import TokenExpiredError, TokenInvalidError
 
 try:
-    claims = client.verify_token(access_token)
-    # claims.sub, claims.roles, claims.groups, claims.permissions
+    claims = client.verify_token(access_token, audience="hearth")
+    # claims.subject(), claims.has_role("admin"), claims.has_permission("docs.write")
 except TokenExpiredError:
     pass  # 401 — ask client to refresh
 except TokenInvalidError:
     pass  # 401 — reject the request
 ```
+
+**How verification works.** The SDK has no signature code of its own. It calls
+PyJWT's `jwt.decode(token, key, algorithms=["EdDSA"], issuer=..., audience=...,
+leeway=5)` with a `PyJWK` key chosen by `kid`, so PyJWT checks the signature, the
+algorithm, `exp`, `nbf`, `iat`, `iss` and `aud`, with one 5 s clock-skew
+allowance. A `kid` still unknown after the re-fetch raises `TokenInvalidError`;
+`JWKSFetchError` means the JWKS endpoint itself failed.
 
 ## RBAC permission checks
 
@@ -386,8 +396,8 @@ For service-to-service calls where your server authenticates as its own principa
 from hearth import HearthClient
 
 client = HearthClient(
-    issuer_url="https://hearth.example.com",
-    realm_id="<realm_id>",
+    base_url="https://hearth.example.com",
+    realm_id="<realm>",  # the realm name; the token endpoint is /realms/<realm>/token
     client_id="<service-client-id>",
     client_secret="<service-client-secret>",
 )
@@ -429,6 +439,35 @@ client.request_magic_link("user@example.com")
 # Returns None whether or not the email is registered (enumeration resistance)
 # Raises OAuthFlowError on HTTP 429
 ```
+
+## Admin client
+
+```python
+from hearth import AdminClient, CreateOrganizationRequest
+
+with AdminClient("https://hearth.example.com", admin_token, realm_id) as admin:
+    org = admin.create_organization(
+        CreateOrganizationRequest(slug="acme", display_name="Acme")
+    )
+    admin.add_member_role(org.id, user_id, "billing-admin")
+    roles = admin.list_member_roles(org.id, user_id)  # list[str]
+    admin.remove_member_role(org.id, user_id, "billing-admin")
+```
+
+`list_organizations`, `get_organization`, `update_organization` and
+`delete_organization` complete the set; users, applications, roles, groups and
+realms keep their methods. Organization membership itself has no REST route.
+
+`AdminClient` is a thin layer over the client in `hearth.generated.admin`,
+generated from `docs/api/openapi.json` by `openapi-python-client`
+(`make sdk-admin-gen`) and committed; CI fails when it is stale.
+
+## Conformance
+
+`sdks/python/conformance/run.sh` runs the shared SDK scenarios
+(`sdks/conformance/scenarios.yaml`) through this SDK's public API. `make
+sdk-conformance` runs it against live servers, next to the TypeScript, Go and
+PHP runners, and fails when an SDK gives a different answer.
 
 ## Error types
 

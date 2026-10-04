@@ -7,18 +7,39 @@ namespace Hearth;
 use GuzzleHttp\Client as GuzzleClient;
 use GuzzleHttp\Psr7\HttpFactory;
 use Hearth\Exceptions\NetworkException;
+use Hearth\Generated\Admin\Client as GeneratedClient;
+use Hearth\Generated\Admin\Endpoint;
+use Hearth\Generated\Admin\Model;
+use Hearth\Generated\Admin\Normalizer\JaneObjectNormalizer;
+use Hearth\Generated\Admin\Runtime\Client\Endpoint as GeneratedEndpoint;
 use Hearth\Types\PageResponse;
+use Http\Client\Common\Plugin\AddHostPlugin;
+use Http\Client\Common\Plugin\AddPathPlugin;
+use Http\Client\Common\Plugin\HeaderSetPlugin;
+use Http\Client\Common\PluginClient;
+use InvalidArgumentException;
 use JsonException;
+use Psr\Http\Client\ClientExceptionInterface;
 use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestFactoryInterface;
+use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\StreamFactoryInterface;
 use RuntimeException;
-use Throwable;
+use Symfony\Component\Serializer\Encoder\JsonDecode;
+use Symfony\Component\Serializer\Encoder\JsonEncode;
+use Symfony\Component\Serializer\Encoder\JsonEncoder;
+use Symfony\Component\Serializer\Normalizer\ArrayDenormalizer;
+use Symfony\Component\Serializer\Serializer;
 
 /**
  * Admin SDK entry point for managing Hearth resources.
  *
  * Conforms to §12 of the Hearth SDK Common Specification.
+ *
+ * A thin wrapper over the client generated from `docs/api/openapi.json`
+ * (`Hearth\Generated\Admin`, see `gen-admin.sh`): the generated endpoints own
+ * the routes, verbs, query options and request-body models. This class keeps
+ * the ergonomic method names, the auth headers and the error taxonomy.
  *
  * This class is intentionally separate from HearthClient — it performs no OIDC
  * discovery and does not manage token lifecycle. The caller is responsible for
@@ -27,6 +48,13 @@ use Throwable;
  * Every request includes:
  *   Authorization: Bearer {access_token}
  *   X-Realm-ID: {realm_id}
+ *
+ * Request bodies are arrays keyed by the API's JSON field names. Every body
+ * goes through its generated model: snake_case (`display_name`) or camelCase
+ * (`displayName`) keys both work, and a key the API does not define throws
+ * InvalidArgumentException before any request is sent. Responses are the
+ * decoded JSON body, as arrays: Jane's generated parsers model only `200`,
+ * and several admin routes answer `201` or `204`.
  */
 final class AdminClient
 {
@@ -42,9 +70,9 @@ final class AdminClient
     /** `token_endpoint_auth_method`: a public client. */
     public const AUTH_NONE = 'none';
 
-    private readonly ClientInterface $httpClient;
-    private readonly RequestFactoryInterface $requestFactory;
-    private readonly StreamFactoryInterface $streamFactory;
+    private readonly GeneratedClient $api;
+
+    private readonly Serializer $serializer;
 
     /** @var string Base URL without trailing slash */
     private readonly string $baseUrl;
@@ -59,8 +87,8 @@ final class AdminClient
      */
     public function __construct(
         string $baseUrl,
-        private readonly string $realmId,
-        private readonly string $accessToken,
+        string $realmId,
+        string $accessToken,
         ?ClientInterface $httpClient = null,
         ?RequestFactoryInterface $requestFactory = null,
         ?StreamFactoryInterface $streamFactory = null,
@@ -68,9 +96,28 @@ final class AdminClient
         $this->baseUrl = rtrim($baseUrl, '/');
 
         $factory = new HttpFactory();
-        $this->httpClient     = $httpClient     ?? new GuzzleClient(['timeout' => 10]);
-        $this->requestFactory = $requestFactory ?? $factory;
-        $this->streamFactory  = $streamFactory  ?? $factory;
+        $base    = $factory->createUri($this->baseUrl);
+        $plugins = [
+            new AddHostPlugin($base),
+            new HeaderSetPlugin([
+                'Authorization' => "Bearer {$accessToken}",
+                'X-Realm-ID'    => $realmId,
+            ]),
+        ];
+        if ($base->getPath() !== '') {
+            $plugins[] = new AddPathPlugin($base);
+        }
+
+        $this->serializer = new Serializer(
+            [new ArrayDenormalizer(), new JaneObjectNormalizer()],
+            [new JsonEncoder(new JsonEncode(), new JsonDecode(['json_decode_associative' => true]))],
+        );
+        $this->api = new GeneratedClient(
+            new PluginClient($httpClient ?? new GuzzleClient(['timeout' => 10]), $plugins),
+            $requestFactory ?? $factory,
+            $this->serializer,
+            $streamFactory ?? $factory,
+        );
     }
 
     // =========================================================================
@@ -80,12 +127,12 @@ final class AdminClient
     /**
      * Creates a new user in the administered realm.
      *
-     * @param array<string, mixed> $params User attributes (email, username, etc.)
+     * @param array<string, mixed> $params User attributes (email, display_name, etc.)
      * @return array<string, mixed>
      */
     public function createUser(array $params): array
     {
-        return $this->post('/admin/users', $params);
+        return $this->call(new Endpoint\IdentityAdminServiceCreateUser($this->body($params, Model\V1CreateUserRequest::class)));
     }
 
     /**
@@ -95,7 +142,7 @@ final class AdminClient
      */
     public function getUser(string $id): array
     {
-        return $this->get("/admin/users/{$id}");
+        return $this->call(new Endpoint\IdentityAdminServiceGetUser($id));
     }
 
     /**
@@ -106,13 +153,13 @@ final class AdminClient
      */
     public function updateUser(string $id, array $params): array
     {
-        return $this->patch("/admin/users/{$id}", $params);
+        return $this->call(new Endpoint\IdentityAdminServiceUpdateUser($id, $this->body($params, Model\V1UpdateUserRequest::class)));
     }
 
     /** Deletes a user by ID. */
     public function deleteUser(string $id): void
     {
-        $this->delete("/admin/users/{$id}");
+        $this->call(new Endpoint\IdentityAdminServiceDeleteUser($id));
     }
 
     /**
@@ -124,9 +171,7 @@ final class AdminClient
      */
     public function listUsers(?int $limit = null, ?string $cursor = null): PageResponse
     {
-        $data = $this->get('/admin/users', $this->paginationQuery($limit, $cursor));
-
-        return PageResponse::fromArray($data, static fn (mixed $item): array => (array) $item);
+        return $this->page(new Endpoint\IdentityAdminServiceListUsers($this->paginationQuery($limit, $cursor)));
     }
 
     // =========================================================================
@@ -146,13 +191,13 @@ final class AdminClient
      */
     public function getRealm(string $id): array
     {
-        return $this->get("/admin/realms/{$id}");
+        return $this->call(new Endpoint\IdentityAdminServiceGetRealm($id));
     }
 
     /** Deletes a realm by ID. */
     public function deleteRealm(string $id): void
     {
-        $this->delete("/admin/realms/{$id}");
+        $this->call(new Endpoint\IdentityAdminServiceDeleteRealm($id));
     }
 
     /**
@@ -162,9 +207,7 @@ final class AdminClient
      */
     public function listRealms(?int $limit = null, ?string $cursor = null): PageResponse
     {
-        $data = $this->get('/admin/realms', $this->paginationQuery($limit, $cursor));
-
-        return PageResponse::fromArray($data, static fn (mixed $item): array => (array) $item);
+        return $this->page(new Endpoint\IdentityAdminServiceListRealms($this->paginationQuery($limit, $cursor)));
     }
 
     // =========================================================================
@@ -187,7 +230,9 @@ final class AdminClient
      */
     public function createClient(array $params): array
     {
-        return $this->post('/admin/applications', $params);
+        return $this->call(new Endpoint\ApplicationAdminServiceCreateApplication(
+            $this->body($params, Model\V1RegisterClientRequest::class),
+        ));
     }
 
     /**
@@ -197,7 +242,7 @@ final class AdminClient
      */
     public function getClient(string $id): array
     {
-        return $this->get("/admin/applications/{$id}");
+        return $this->call(new Endpoint\ApplicationAdminServiceGetApplication($id));
     }
 
     /**
@@ -208,7 +253,10 @@ final class AdminClient
      */
     public function updateClient(string $id, array $params): array
     {
-        return $this->patch("/admin/applications/{$id}", $params);
+        return $this->call(new Endpoint\ApplicationAdminServiceUpdateApplication(
+            $id,
+            $this->body($params, Model\V1UpdateClientRequest::class),
+        ));
     }
 
     /**
@@ -222,13 +270,13 @@ final class AdminClient
      */
     public function regenerateClientSecret(string $id): array
     {
-        return $this->post("/admin/applications/{$id}/regenerate-secret", []);
+        return $this->call(new Endpoint\ApplicationAdminServiceRegenerateApplicationSecret($id));
     }
 
     /** Deletes an OAuth client by ID. */
     public function deleteClient(string $id): void
     {
-        $this->delete("/admin/applications/{$id}");
+        $this->call(new Endpoint\ApplicationAdminServiceDeleteApplication($id));
     }
 
     /**
@@ -238,9 +286,9 @@ final class AdminClient
      */
     public function listClients(?int $limit = null, ?string $cursor = null): PageResponse
     {
-        $data = $this->get('/admin/applications', $this->paginationQuery($limit, $cursor));
-
-        return PageResponse::fromArray($data, static fn (mixed $item): array => (array) $item);
+        return $this->page(new Endpoint\ApplicationAdminServiceListApplications(
+            $this->paginationQuery($limit, $cursor),
+        ));
     }
 
     // =========================================================================
@@ -255,7 +303,7 @@ final class AdminClient
      */
     public function createRole(array $params): array
     {
-        return $this->post('/admin/roles', $params);
+        return $this->call(new Endpoint\AdminCreateRole($this->body($params, Model\AdminCreateRoleRequest::class)));
     }
 
     /**
@@ -265,7 +313,7 @@ final class AdminClient
      */
     public function getRole(string $id): array
     {
-        return $this->get("/admin/roles/{$id}");
+        return $this->call(new Endpoint\AdminGetRole($id));
     }
 
     /**
@@ -276,13 +324,13 @@ final class AdminClient
      */
     public function updateRole(string $id, array $params): array
     {
-        return $this->patch("/admin/roles/{$id}", $params);
+        return $this->call(new Endpoint\AdminUpdateRole($id, $this->body($params, Model\AdminUpdateRoleRequest::class)));
     }
 
     /** Deletes a role by ID. */
     public function deleteRole(string $id): void
     {
-        $this->delete("/admin/roles/{$id}");
+        $this->call(new Endpoint\AdminDeleteRole($id));
     }
 
     /**
@@ -292,9 +340,7 @@ final class AdminClient
      */
     public function listRoles(?int $limit = null, ?string $cursor = null): PageResponse
     {
-        $data = $this->get('/admin/roles', $this->paginationQuery($limit, $cursor));
-
-        return PageResponse::fromArray($data, static fn (mixed $item): array => (array) $item);
+        return $this->page(new Endpoint\AdminListRoles($this->paginationQuery($limit, $cursor)));
     }
 
     // =========================================================================
@@ -309,7 +355,7 @@ final class AdminClient
      */
     public function createGroup(array $params): array
     {
-        return $this->post('/admin/groups', $params);
+        return $this->call(new Endpoint\AdminCreateGroup($this->body($params, Model\AdminCreateGroupRequest::class)));
     }
 
     /**
@@ -319,7 +365,7 @@ final class AdminClient
      */
     public function getGroup(string $id): array
     {
-        return $this->get("/admin/groups/{$id}");
+        return $this->call(new Endpoint\AdminGetGroup($id));
     }
 
     /**
@@ -330,13 +376,13 @@ final class AdminClient
      */
     public function updateGroup(string $id, array $params): array
     {
-        return $this->patch("/admin/groups/{$id}", $params);
+        return $this->call(new Endpoint\AdminUpdateGroup($id, $this->body($params, Model\AdminUpdateGroupRequest::class)));
     }
 
     /** Deletes a group by ID. */
     public function deleteGroup(string $id): void
     {
-        $this->delete("/admin/groups/{$id}");
+        $this->call(new Endpoint\AdminDeleteGroup($id));
     }
 
     /**
@@ -346,149 +392,145 @@ final class AdminClient
      */
     public function listGroups(?int $limit = null, ?string $cursor = null): PageResponse
     {
-        $data = $this->get('/admin/groups', $this->paginationQuery($limit, $cursor));
-
-        return PageResponse::fromArray($data, static fn (mixed $item): array => (array) $item);
+        return $this->page(new Endpoint\AdminListGroups($this->paginationQuery($limit, $cursor)));
     }
 
     // =========================================================================
-    // Organization Memberships — removed
-    // =========================================================================
-    //
-    // Hearth serves no organization route over HTTP: there is no /admin/orgs,
-    // no /admin/orgs/{id}/members and no per-member route anywhere in the
-    // router, so addOrgMember(), getOrgMember(), updateOrgMember(),
-    // removeOrgMember() and listOrgMembers() every one 404'd
-    // (audit 2026-08-28 §25.19). Organization membership is administered
-    // through the admin console, not the admin API.
-
-    // =========================================================================
-    // HTTP primitives
+    // Organizations
     // =========================================================================
 
     /**
-     * Sends a GET request and returns the decoded JSON body.
+     * Creates an organization (`POST /admin/organizations`).
      *
-     * @param array<string, string> $query
-     * @return array<string, mixed>
+     * @param array<string, mixed> $params slug, display_name, member_limit, mfa_required, attributes
+     * @return array<string, mixed> The created organization
      */
-    private function get(string $path, array $query = []): array
+    public function createOrganization(array $params): array
     {
-        $url = $this->baseUrl . $path;
-        if ($query !== []) {
-            $url .= '?' . http_build_query($query);
-        }
-
-        $request = $this->requestFactory
-            ->createRequest('GET', $url)
-            ->withHeader('Authorization', "Bearer {$this->accessToken}")
-            ->withHeader('X-Realm-ID', $this->realmId)
-            ->withHeader('Accept', 'application/json');
-
-        return $this->sendAndDecode($request);
+        return $this->call(new Endpoint\AdminCreateOrganization(
+            $this->body($params, Model\AdminCreateOrganizationRequest::class),
+        ));
     }
 
     /**
-     * Sends a POST request with a JSON body.
+     * Retrieves an organization by ID.
      *
-     * @param array<string, mixed> $body
      * @return array<string, mixed>
      */
-    private function post(string $path, array $body): array
+    public function getOrganization(string $id): array
     {
-        $encoded = json_encode($body, JSON_THROW_ON_ERROR);
-        $request = $this->requestFactory
-            ->createRequest('POST', $this->baseUrl . $path)
-            ->withHeader('Authorization', "Bearer {$this->accessToken}")
-            ->withHeader('X-Realm-ID', $this->realmId)
-            ->withHeader('Content-Type', 'application/json')
-            ->withHeader('Accept', 'application/json')
-            ->withBody($this->streamFactory->createStream($encoded));
-
-        return $this->sendAndDecode($request);
+        return $this->call(new Endpoint\AdminGetOrganization($id));
     }
 
     /**
-     * Sends a PATCH request with a JSON body.
+     * Updates an organization (`PATCH`). Absent fields keep their value; the
+     * slug is immutable.
      *
-     * Every Hearth admin mutation is a PATCH. The server answers a bare 405
-     * to PUT — no body, no error code — so the verb is part of the wire
-     * contract, not a style choice (audit 2026-08-28 §25.4).
-     *
-     * @param array<string, mixed> $body
-     * @return array<string, mixed>
+     * @param array<string, mixed> $params display_name, status (active|suspended), member_limit, mfa_required, attributes
+     * @return array<string, mixed> The updated organization
      */
-    private function patch(string $path, array $body): array
+    public function updateOrganization(string $id, array $params): array
     {
-        return $this->sendJson('PATCH', $path, $body);
+        return $this->call(new Endpoint\AdminUpdateOrganization(
+            $id,
+            $this->body($params, Model\AdminUpdateOrganizationRequest::class),
+        ));
     }
 
-    // put() was removed with updateOrgMember(), its only caller: Hearth
-    // implements every admin mutation as PATCH (audit 2026-08-28 §25.4, §25.19).
-
-    /**
-     * Sends a JSON-bodied request with the given method.
-     *
-     * @param array<string, mixed> $body
-     * @return array<string, mixed>
-     */
-    private function sendJson(string $method, string $path, array $body): array
+    /** Deletes an organization by ID. */
+    public function deleteOrganization(string $id): void
     {
-        $encoded = json_encode($body, JSON_THROW_ON_ERROR);
-        $request = $this->requestFactory
-            ->createRequest($method, $this->baseUrl . $path)
-            ->withHeader('Authorization', "Bearer {$this->accessToken}")
-            ->withHeader('X-Realm-ID', $this->realmId)
-            ->withHeader('Content-Type', 'application/json')
-            ->withHeader('Accept', 'application/json')
-            ->withBody($this->streamFactory->createStream($encoded));
-
-        return $this->sendAndDecode($request);
-    }
-
-    /** Sends a DELETE request. */
-    private function delete(string $path): void
-    {
-        $request = $this->requestFactory
-            ->createRequest('DELETE', $this->baseUrl . $path)
-            ->withHeader('Authorization', "Bearer {$this->accessToken}")
-            ->withHeader('X-Realm-ID', $this->realmId);
-
-        try {
-            $response = $this->httpClient->sendRequest($request);
-        } catch (Throwable $e) {
-            throw new NetworkException($this->baseUrl . $path, $e->getMessage(), 0, $e);
-        }
-
-        $status = $response->getStatusCode();
-        if ($status < 200 || $status >= 300) {
-            throw new RuntimeException("Admin API returned HTTP {$status} for DELETE {$path}");
-        }
+        $this->call(new Endpoint\AdminDeleteOrganization($id));
     }
 
     /**
-     * Sends a request and JSON-decodes the response body.
+     * Lists organizations with optional pagination.
+     *
+     * @return PageResponse<array<string, mixed>>
+     */
+    public function listOrganizations(?int $limit = null, ?string $cursor = null): PageResponse
+    {
+        return $this->page(new Endpoint\AdminListOrganizations($this->paginationQuery($limit, $cursor)));
+    }
+
+    /**
+     * Lists the extra org roles a member holds in an organization.
+     *
+     * @return list<string> Role names
+     */
+    public function listOrganizationMemberRoles(string $organizationId, string $userId): array
+    {
+        $data = $this->call(new Endpoint\AdminListAdditionalRoles($organizationId, $userId));
+
+        return array_values(array_map('strval', (array) ($data['items'] ?? [])));
+    }
+
+    /**
+     * Gives an organization member an extra org role. The user must already be
+     * a member (the server answers 409 otherwise).
+     */
+    public function addOrganizationMemberRole(string $organizationId, string $userId, string $roleName): void
+    {
+        $this->call(new Endpoint\AdminAddAdditionalRole(
+            $organizationId,
+            $userId,
+            $this->body(['role_name' => $roleName], Model\AdminAddAdditionalRoleRequest::class),
+        ));
+    }
+
+    /** Removes an extra org role from an organization member. */
+    public function removeOrganizationMemberRole(string $organizationId, string $userId, string $roleName): void
+    {
+        $this->call(new Endpoint\AdminRemoveAdditionalRole($organizationId, $userId, $roleName));
+    }
+
+    // =========================================================================
+    // Transport
+    // =========================================================================
+
+    /**
+     * Sends a generated endpoint and returns the decoded JSON body (`[]` when
+     * the body is empty, e.g. a 204).
      *
      * @return array<string, mixed>
      * @throws NetworkException
      * @throws RuntimeException
      */
-    private function sendAndDecode(\Psr\Http\Message\RequestInterface $request): array
+    private function call(GeneratedEndpoint $endpoint): array
     {
-        $url = (string) $request->getUri();
+        $url = $this->baseUrl . $endpoint->getUri();
 
         try {
-            $response = $this->httpClient->sendRequest($request);
-        } catch (Throwable $e) {
+            $response = $this->api->executeRawEndpoint($endpoint);
+        } catch (ClientExceptionInterface $e) {
             throw new NetworkException($url, $e->getMessage(), 0, $e);
         }
 
         $status = $response->getStatusCode();
         if ($status < 200 || $status >= 300) {
-            throw new RuntimeException("Admin API returned HTTP {$status} for {$request->getMethod()} {$url}");
+            throw new RuntimeException("Admin API returned HTTP {$status} for {$endpoint->getMethod()} {$url}");
         }
 
-        $body = $response->getBody()->getContents();
+        return $this->decode($response);
+    }
+
+    /**
+     * Sends a list endpoint and wraps its `{items, next_cursor}` body.
+     *
+     * @return PageResponse<array<string, mixed>>
+     */
+    private function page(GeneratedEndpoint $endpoint): PageResponse
+    {
+        return PageResponse::fromArray($this->call($endpoint), static fn (mixed $item): array => (array) $item);
+    }
+
+    /**
+     * @return array<string, mixed>
+     * @throws RuntimeException
+     */
+    private function decode(ResponseInterface $response): array
+    {
+        $body = (string) $response->getBody();
         if ($body === '') {
             return [];
         }
@@ -503,15 +545,70 @@ final class AdminClient
     }
 
     /**
-     * Builds the query string array for paginated list endpoints.
+     * Builds the generated request-body model from a caller's array.
      *
-     * @return array<string, string>
+     * Accepts each field under its snake_case or camelCase name. Throws on a
+     * key the model does not define, so a typo is not silently dropped.
+     *
+     * @template T of object
+     * @param array<string, mixed> $params
+     * @param class-string<T>      $model
+     * @return T
+     * @throws InvalidArgumentException
+     */
+    private function body(array $params, string $model): object
+    {
+        // Jane keeps unknown keys as extra properties, so each key is renamed
+        // to the one JSON name the model reads before the real denormalize.
+        $data = [];
+        foreach ($params as $key => $value) {
+            $data[$this->fieldName($key, $model)] = $value;
+        }
+
+        /** @var T */
+        return $this->serializer->denormalize($data, $model, 'json');
+    }
+
+    /**
+     * Returns the JSON name under which `$model` reads `$key` (as given, or its
+     * snake_case or camelCase form).
+     *
+     * @param class-string $model
+     * @throws InvalidArgumentException
+     */
+    private function fieldName(string $key, string $model): string
+    {
+        foreach (array_unique([$key, self::snake($key), self::camel($key)]) as $candidate) {
+            $probe = $this->serializer->denormalize([$candidate => null], $model, 'json');
+            if (is_object($probe) && method_exists($probe, 'isInitialized') && $probe->isInitialized(self::camel($key))) {
+                return $candidate;
+            }
+        }
+
+        $short = substr($model, (int) strrpos($model, '\\') + 1);
+        throw new InvalidArgumentException("'{$key}' is not a field of the admin API's {$short}");
+    }
+
+    private static function camel(string $key): string
+    {
+        return lcfirst(str_replace('_', '', ucwords($key, '_')));
+    }
+
+    private static function snake(string $key): string
+    {
+        return strtolower((string) preg_replace('/(?<!^)[A-Z]/', '_$0', $key));
+    }
+
+    /**
+     * Builds the query options for paginated list endpoints.
+     *
+     * @return array{limit?: int, cursor?: string}
      */
     private function paginationQuery(?int $limit, ?string $cursor): array
     {
         $query = [];
         if ($limit !== null) {
-            $query['limit'] = (string) $limit;
+            $query['limit'] = $limit;
         }
         if ($cursor !== null) {
             $query['cursor'] = $cursor;

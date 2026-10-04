@@ -167,7 +167,8 @@ type CreateUserRequest struct {
 	DisplayName string `json:"display_name"`
 }
 
-// User represents a user record from the API.
+// User represents a user record from the API. Status is the proto name, e.g.
+// `USER_STATUS_ACTIVE`.
 type User struct {
 	ID          string `json:"id"`
 	Email       string `json:"email"`
@@ -178,6 +179,11 @@ type User struct {
 }
 
 // UpdateUserRequest contains parameters for updating a user.
+//
+// Status takes the proto name (`USER_STATUS_ACTIVE`, `USER_STATUS_DISABLED`,
+// `USER_STATUS_PENDING_VERIFICATION`) or its short form (`active`, `disabled`,
+// `pending_verification`); the client sends the proto name, the only form the
+// server accepts.
 type UpdateUserRequest struct {
 	Email       *string `json:"email,omitempty"`
 	DisplayName *string `json:"display_name,omitempty"`
@@ -380,46 +386,60 @@ type UpdateClientRequest struct {
 
 // Role represents a realm-level role definition.
 type Role struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Description string   `json:"description,omitempty"`
+	Permissions []string `json:"permissions,omitempty"`
+	// ParentRoles holds the IDs of the roles this role inherits from.
+	ParentRoles []string `json:"parent_roles,omitempty"`
+	CreatedAt   int64    `json:"created_at,omitempty"`
+	UpdatedAt   int64    `json:"updated_at,omitempty"`
+}
+
+// CreateRoleRequest contains parameters for creating a role via the admin API.
+type CreateRoleRequest struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description,omitempty"`
+	Permissions []string `json:"permissions,omitempty"`
+	// ParentRoles holds the IDs (UUIDs) of the roles to inherit from.
+	ParentRoles []string `json:"parent_roles,omitempty"`
+}
+
+// UpdateRoleRequest contains parameters for updating a role via the admin API.
+// Nil fields are unchanged; a non-nil Permissions or ParentRoles replaces the
+// whole list.
+type UpdateRoleRequest struct {
+	Name        *string  `json:"name,omitempty"`
+	Description *string  `json:"description,omitempty"`
+	Permissions []string `json:"permissions,omitempty"`
+	ParentRoles []string `json:"parent_roles,omitempty"`
+}
+
+// Group represents a realm-level group definition.
+type Group struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
+	Slug        string `json:"slug"`
 	Description string `json:"description,omitempty"`
 	CreatedAt   int64  `json:"created_at,omitempty"`
 	UpdatedAt   int64  `json:"updated_at,omitempty"`
 }
 
-// CreateRoleRequest contains parameters for creating a role via the admin API.
-type CreateRoleRequest struct {
+// CreateGroupRequest contains parameters for creating a group via the admin
+// API. Slug is required: the server refuses a group without one.
+type CreateGroupRequest struct {
 	Name        string `json:"name"`
+	Slug        string `json:"slug"`
 	Description string `json:"description,omitempty"`
 }
 
-// UpdateRoleRequest contains parameters for updating a role via the admin API.
-type UpdateRoleRequest struct {
+// UpdateGroupRequest contains parameters for updating a group via the admin
+// API. Nil fields are unchanged.
+type UpdateGroupRequest struct {
 	Name        *string `json:"name,omitempty"`
+	Slug        *string `json:"slug,omitempty"`
 	Description *string `json:"description,omitempty"`
 }
-
-// Group represents a realm-level group definition.
-type Group struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	CreatedAt int64  `json:"created_at,omitempty"`
-	UpdatedAt int64  `json:"updated_at,omitempty"`
-}
-
-// CreateGroupRequest contains parameters for creating a group via the admin API.
-type CreateGroupRequest struct {
-	Name string `json:"name"`
-}
-
-// UpdateGroupRequest contains parameters for updating a group via the admin API.
-type UpdateGroupRequest struct {
-	Name *string `json:"name,omitempty"`
-}
-
-// OrgMember, AddOrgMemberRequest and UpdateOrgMemberRequest were removed with
-// the org-membership methods: Hearth serves no organization route over HTTP
-// (audit 2026-08-28 §25.19).
 
 // APIError represents an error from the Hearth API.
 type APIError struct {

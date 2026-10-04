@@ -1,0 +1,11 @@
+from enum import StrEnum
+
+
+class V1UserStatus(StrEnum):
+    USER_STATUS_ACTIVE = "USER_STATUS_ACTIVE"
+    USER_STATUS_DISABLED = "USER_STATUS_DISABLED"
+    USER_STATUS_PENDING_VERIFICATION = "USER_STATUS_PENDING_VERIFICATION"
+    USER_STATUS_UNSPECIFIED = "USER_STATUS_UNSPECIFIED"
+
+    def __str__(self) -> str:
+        return str(self.value)

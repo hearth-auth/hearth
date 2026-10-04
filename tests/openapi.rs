@@ -140,12 +140,10 @@ fn proto_derived_routes_present_in_merged_spec() {
         "/admin/realms",
         "/admin/realms/{id}",
         "/admin/applications",
-        "/admin/applications/{clientId}",
-        "/admin/roles",
-        "/admin/roles/{roleId}",
-        "/admin/groups",
-        "/admin/groups/{groupId}",
-        "/admin/audit",
+        "/admin/applications/{client_id}",
+        "/admin/realms/{id}/suspend",
+        "/admin/users/{user_id}/consents",
+        "/admin/users/{user_id}/effective-permissions",
     ];
 
     let mut missing = Vec::new();
@@ -271,7 +269,7 @@ fn client_create_routes_document_201_and_regeneration_200() {
         assert!(responses.contains_key("201"), "POST {path}: {responses:?}");
         assert!(!responses.contains_key("200"), "POST {path}: {responses:?}");
     }
-    let regen = &v["paths"]["/admin/applications/{clientId}/regenerate-secret"]["post"];
+    let regen = &v["paths"]["/admin/applications/{client_id}/regenerate-secret"]["post"];
     assert_eq!(
         regen["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
         "#/components/schemas/v1OAuthClient",

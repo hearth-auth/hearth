@@ -261,9 +261,16 @@ try {
 }
 ```
 
-`verifyToken()` caches JWKS keys by `kid`, re-fetches once on a key miss
-(transparent key rotation), and validates signature, `exp`, `iss`, `aud`, and
-`iat` in that order. It never falls back to introspection.
+`verifyToken()` caches JWKS keys by `kid` and re-fetches once on a key miss
+(transparent key rotation). It never falls back to introspection.
+
+**How verification works.** The SDK has no signature code of its own. It calls
+`jose`'s `jwtVerify` over a local JWKS set with `algorithms: ["EdDSA"]`, so `jose`
+checks the signature, the algorithm, the `kid` match, `exp`, `nbf`, `iss` and
+`aud`. The clock-skew allowance is 5 s on every time claim (`clockSkewSeconds`
+widens it). A `kid` still unknown after the re-fetch throws `TokenInvalidError`;
+`JWKSFetchError` means the JWKS endpoint itself failed. `jose` does not refuse a
+token whose `iat` is in the future.
 
 :::note[`iss` validation and `issuerUrl`]
 `verifyToken()` checks that the token's `iss` claim exactly matches `issuerUrl`. System tokens (admin bootstrap) carry `iss = <baseUrl>`. User/client tokens issued by a realm carry `iss = <baseUrl>/realms/<realm-slug>`. Configure `issuerUrl` to match the issuer your tokens actually contain, or set `expectedMode: "introspection"` to skip local `iss` validation.
@@ -528,7 +535,25 @@ const page = await admin.listUsers({ limit: 50 });
 await admin.deleteUser(user.id);
 ```
 
+Organizations and a member's extra organization roles:
+
+```typescript
+const org = await admin.createOrganization({ slug: "acme", display_name: "Acme" });
+await admin.updateOrganization(org.id, { status: "suspended" });
+await admin.addMemberRole(org.id, userId, "billing-admin");
+const roles = await admin.listMemberRoles(org.id, userId); // { items: string[] }
+await admin.removeMemberRole(org.id, userId, "billing-admin");
+```
+
+`listOrganizations`, `getOrganization` and `deleteOrganization` complete the set.
+Organization membership itself has no REST route.
+
 A non-2xx response throws `HearthError` with `status` and `body`.
+
+`AdminClient` is a thin layer over an `openapi-fetch` client typed by
+`src/generated/admin/schema.ts`. That file is generated from
+`docs/api/openapi.json` (`make sdk-admin-gen`) and committed; CI fails when it is
+stale.
 
 ## Error handling
 
@@ -585,6 +610,13 @@ try {
 
 The middleware in [Server-side (Node.js)](#server-side-nodejs) answers 401 to a
 `required_action` token for you.
+
+## Conformance
+
+`sdks/typescript/conformance/run.sh` runs the shared SDK scenarios
+(`sdks/conformance/scenarios.yaml`) through this SDK's public API. `make
+sdk-conformance` runs it against live servers, next to the Go, Python and PHP
+runners, and fails when an SDK gives a different answer.
 
 ## Runnable example
 

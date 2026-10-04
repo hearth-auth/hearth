@@ -24,7 +24,7 @@ except ImportError:
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_OUT = os.path.join(REPO_ROOT, "docs", "api", "openapi.json")
-PROTO_DERIVED = os.path.join(REPO_ROOT, "docs", "api", "openapi.proto-derived.json")
+PROTO_DERIVED = os.path.join(REPO_ROOT, "docs", "api", "openapi_proto_derived.swagger.json")
 SUPPLEMENT = os.path.join(REPO_ROOT, "docs", "api", "openapi.supplement.yaml")
 
 
@@ -34,9 +34,16 @@ def upgrade_ref(ref: str) -> str:
 
 
 def upgrade_schema(schema: dict) -> dict:
-    """Recursively rewrite $ref in a schema object."""
+    """Recursively rewrite $ref in a schema object.
+
+    The proto3 JSON mapping writes 64-bit integers as strings, and the Swagger
+    says so. The REST handlers send numbers (`proto_to_rest_json` turns every
+    integer-like string into a JSON number), so 64-bit fields become integers.
+    """
     if not isinstance(schema, dict):
         return schema
+    if schema.get("type") == "string" and schema.get("format") in ("int64", "uint64"):
+        schema = {**schema, "type": "integer", "format": "int64"}
     out = {}
     for k, v in schema.items():
         if k == "$ref" and isinstance(v, str):
@@ -60,6 +67,31 @@ def upgrade_response(resp: dict) -> dict:
     return out
 
 
+# Swagger 2.0 keeps a non-body parameter's type inline; OpenAPI 3.0 moves it
+# under `schema`. Generators reject the inline form.
+PARAM_SCHEMA_KEYS = (
+    "type", "format", "items", "enum", "default", "minimum", "maximum",
+    "pattern", "minLength", "maxLength",
+)
+
+
+def upgrade_parameter(param: dict) -> dict:
+    """Convert a Swagger 2.0 non-body parameter to OpenAPI 3.0."""
+    out = {k: v for k, v in param.items() if k not in PARAM_SCHEMA_KEYS}
+    out.pop("collectionFormat", None)
+    if "schema" in param:
+        out["schema"] = upgrade_schema(param["schema"])
+    else:
+        out["schema"] = {
+            k: upgrade_schema(v) if isinstance(v, dict) else v
+            for k, v in param.items()
+            if k in PARAM_SCHEMA_KEYS
+        }
+    if param.get("collectionFormat") == "multi":
+        out["explode"] = True
+    return out
+
+
 def upgrade_operation(op: dict) -> dict:
     """Convert a Swagger 2.0 operation to OpenAPI 3.0."""
     out: dict = {}
@@ -74,10 +106,7 @@ def upgrade_operation(op: dict) -> dict:
         if p.get("in") == "body":
             body_param = p
         else:
-            upgraded_p = dict(p)
-            if "schema" in upgraded_p:
-                upgraded_p["schema"] = upgrade_schema(upgraded_p["schema"])
-            params.append(upgraded_p)
+            params.append(upgrade_parameter(p))
     if params:
         out["parameters"] = params
 
@@ -176,6 +205,51 @@ def omit_operations(paths: dict, operation_ids: list) -> dict:
     return out
 
 
+def rename_success(paths: dict, operation_ids: list, status: str, key: str) -> dict:
+    """Rename the `200` response of each listed operation to `status`.
+
+    protoc-gen-openapiv2 documents every success as `200`; these operations
+    answer `201 Created` or `204 No Content`. A `204` keeps no body. Fails
+    when a listed operationId has no `200`, so the supplement list cannot go
+    stale (`key` names the list in the error).
+    """
+    wanted = set(operation_ids)
+    found = set()
+    for item in paths.values():
+        for op in item.values():
+            if isinstance(op, dict) and op.get("operationId") in wanted:
+                responses = op.get("responses", {})
+                if "200" in responses:
+                    found.add(op["operationId"])
+                    ok = dict(responses.pop("200"))
+                    if status == "204":
+                        ok.pop("content", None)
+                        ok["description"] = ok.get("description") or "No Content"
+                    responses[status] = ok
+                    op["responses"] = dict(sorted(responses.items()))
+    missing = wanted - found
+    if missing:
+        sys.exit(f"{key}: no `200` operation matches {sorted(missing)}")
+    return paths
+
+
+def patch_schemas(schemas: dict, patches: dict) -> dict:
+    """Merge each property patch into the named proto-derived schema.
+
+    For facts the proto cannot express (a string enum on a plain `string`
+    field). Fails when a patch names a schema or property that does not exist.
+    """
+    for name, patch in patches.items():
+        if name not in schemas:
+            sys.exit(f"x-hearth-schema-patches: no schema {name}")
+        props = schemas[name].get("properties", {})
+        for prop, fields in patch.get("properties", {}).items():
+            if prop not in props:
+                sys.exit(f"x-hearth-schema-patches: no property {name}.{prop}")
+            props[prop].update(fields)
+    return schemas
+
+
 def merge_components(base: dict | None, overlay: dict | None) -> dict:
     """Merge components sections (schemas, securitySchemes, etc.)."""
     out: dict = {}
@@ -208,6 +282,17 @@ def main() -> None:
 
     # Convert proto-derived Swagger 2.0 → OpenAPI 3.0
     proto_oas3 = convert_swagger2_to_openapi3(swagger2)
+    for status, key in (
+        ("201", "x-hearth-created-operations"),
+        ("204", "x-hearth-no-content-operations"),
+    ):
+        proto_oas3["paths"] = rename_success(
+            proto_oas3.get("paths", {}), supplement.get(key) or [], status, key
+        )
+    patch_schemas(
+        proto_oas3.get("components", {}).get("schemas", {}),
+        supplement.get("x-hearth-schema-patches") or {},
+    )
 
     # Merge: supplement paths win over proto paths
     merged_paths = merge_paths(proto_oas3.get("paths", {}), supplement.get("paths", {}))

@@ -10,9 +10,8 @@
 //! installed was an in-crate unit test.
 //!
 //! Discovery meanwhile advertised `private_key_jwt` in
-//! `token_endpoint_auth_methods_supported`, and the FAPI 2.0 Advanced profile
-//! depends on it. Both were advertised against a key an operator had no way to
-//! install.
+//! `token_endpoint_auth_methods_supported`. It was advertised against a key an
+//! operator had no way to install.
 //!
 //! These tests drive `PATCH /admin/applications/{id}` — the surface that was
 //! added — rather than the engine, because the engine half already worked.

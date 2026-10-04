@@ -21,26 +21,60 @@ class BootstrapResponse(BaseModel):
 
 
 class User(BaseModel):
+    """A user as ``/admin/users`` returns it (the proto ``User``)."""
+
     id: str
-    username: str
     email: str | None = None
+    display_name: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+    #: The proto ``UserStatus`` name, e.g. ``USER_STATUS_ACTIVE``.
     status: str
-    created_at: str | None = None
-    updated_at: str | None = None
+    #: Microseconds since the Unix epoch.
+    created_at: int | None = None
+    #: Microseconds since the Unix epoch.
+    updated_at: int | None = None
+    required_actions: list[str] = []
 
 
 class CreateUserRequest(BaseModel):
-    username: str
+    """Body of ``POST /admin/users``. The route takes no password or username:
+    it answers ``422`` to an unknown field."""
+
     email: str | None = None
-    password: str | None = None
+    display_name: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
     attributes: dict | None = None
+
+
+# Proto ``UserStatus`` names for the SDK's snake_case user statuses.
+# ``PATCH /admin/users/{id}`` deserializes the proto ``UpdateUserRequest``: it
+# answers ``invalid status`` for ``active``.
+_PROTO_USER_STATUS = {
+    "active": "USER_STATUS_ACTIVE",
+    "disabled": "USER_STATUS_DISABLED",
+    "pending_verification": "USER_STATUS_PENDING_VERIFICATION",
+}
 
 
 class UpdateUserRequest(BaseModel):
-    username: str | None = None
     email: str | None = None
+    display_name: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+    #: ``active``, ``disabled`` or ``pending_verification`` (or the proto
+    #: ``USER_STATUS_*`` name).
     status: str | None = None
     attributes: dict | None = None
+    #: Remove every attribute before applying ``attributes``.
+    clear_attributes: bool | None = None
+
+    @field_serializer("status")
+    def _serialize_status(self, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _PROTO_USER_STATUS.get(value, value)
 
 
 class PageResponse(BaseModel, Generic[T]):
@@ -52,9 +86,13 @@ class PageResponse(BaseModel, Generic[T]):
 class Realm(BaseModel):
     id: str
     name: str
+    #: The proto ``RealmStatus`` name, e.g. ``REALM_STATUS_ACTIVE``.
     status: str
     config: dict | None = None
-    created_at: str | None = None
+    #: Microseconds since the Unix epoch.
+    created_at: int | None = None
+    #: Microseconds since the Unix epoch.
+    updated_at: int | None = None
 
 
 class UpdateRealmRequest(BaseModel):
@@ -191,6 +229,10 @@ class CreateClientRequest(BaseModel):
 
     name: str = Field(validation_alias="client_name", serialization_alias="client_name")
     redirect_uris: list[str] = []
+    #: e.g. ``["authorization_code", "refresh_token"]`` or
+    #: ``["client_credentials"]``. The server refuses a client with no usable
+    #: grant (``400 HEARTH_INVALID_INPUT``).
+    grant_types: list[str] | None = None
     trust_level: str | None = None
     #: RFC 7591 §2: ``client_secret_basic`` / ``client_secret_post`` make the
     #: server generate the secret and return it once (``OAuthClient.secret``);
@@ -206,9 +248,9 @@ class UpdateClientRequest(BaseModel):
     """Body of ``PATCH /admin/applications/{id}``.
 
     ``name`` is sent as ``client_name``. The route ignores unknown keys, so a
-    ``name`` key would answer ``200`` and rename nothing. ``trust_level`` stays
-    snake_case (``first_party`` / ``third_party``), which is what this route
-    reads.
+    ``name`` key would answer ``200`` and rename nothing. ``trust_level``
+    (``first_party`` / ``third_party``) is sent as the proto enum name, the
+    spelling the spec documents; the route accepts both.
     """
 
     model_config = ConfigDict(populate_by_name=True)
@@ -217,7 +259,12 @@ class UpdateClientRequest(BaseModel):
         default=None, validation_alias="client_name", serialization_alias="client_name"
     )
     redirect_uris: list[str] | None = None
+    grant_types: list[str] | None = None
     trust_level: str | None = None
+
+    @field_serializer("trust_level")
+    def _serialize_trust_level(self, value: str | None) -> str | None:
+        return _proto_trust_level(value)
 
 
 class Role(BaseModel):
@@ -226,6 +273,19 @@ class Role(BaseModel):
     id: str
     name: str
     description: str | None = None
+    realm_id: str | None = None
+    permissions: list[str] = []
+    #: Names of the roles this role inherits from.
+    parent_roles: list[str] = []
+    #: ``realm`` or ``org``.
+    scope_kind: str | None = None
+    status: str | None = None
+    #: Declared in ``hearth.yaml`` (read-only through the API).
+    yaml_managed: bool = False
+    #: Microseconds since the Unix epoch.
+    created_at: int | None = None
+    #: Microseconds since the Unix epoch.
+    updated_at: int | None = None
 
 
 class CreateRoleRequest(BaseModel):
@@ -233,13 +293,17 @@ class CreateRoleRequest(BaseModel):
 
     name: str
     description: str | None = None
+    permissions: list[str] | None = None
+    parent_roles: list[str] | None = None
 
 
 class UpdateRoleRequest(BaseModel):
-    """Request body for PUT /admin/roles/{id}."""
+    """Request body for PATCH /admin/roles/{id}."""
 
     name: str | None = None
     description: str | None = None
+    permissions: list[str] | None = None
+    parent_roles: list[str] | None = None
 
 
 class Group(BaseModel):
@@ -247,26 +311,79 @@ class Group(BaseModel):
 
     id: str
     name: str
+    slug: str | None = None
     description: str | None = None
+    realm_id: str | None = None
+    #: Microseconds since the Unix epoch.
+    created_at: int | None = None
+    #: Microseconds since the Unix epoch.
+    updated_at: int | None = None
 
 
 class CreateGroupRequest(BaseModel):
     """Request body for POST /admin/groups."""
 
     name: str
+    #: URL-safe identifier, unique in the realm. Required by the server.
+    slug: str
     description: str | None = None
 
 
 class UpdateGroupRequest(BaseModel):
-    """Request body for PUT /admin/groups/{id}."""
+    """Request body for PATCH /admin/groups/{id}."""
 
     name: str | None = None
+    slug: str | None = None
     description: str | None = None
 
 
+class Organization(BaseModel):
+    """An organization, as ``/admin/organizations`` returns it."""
+
+    id: str
+    slug: str
+    display_name: str
+    #: ``active``, ``suspended`` or ``archived``.
+    status: str
+    member_limit: int | None = None
+    #: Members need MFA even where the realm does not require it.
+    mfa_required: bool = False
+    attributes: dict[str, str] = {}
+    #: Microseconds since the Unix epoch.
+    created_at: int | None = None
+    #: Microseconds since the Unix epoch.
+    updated_at: int | None = None
+
+
+class CreateOrganizationRequest(BaseModel):
+    """Request body for POST /admin/organizations."""
+
+    slug: str
+    display_name: str
+    member_limit: int | None = None
+    #: Default ``False``; it can only tighten the realm's MFA policy.
+    mfa_required: bool | None = None
+    attributes: dict[str, str] | None = None
+
+
+class UpdateOrganizationRequest(BaseModel):
+    """Request body for PATCH /admin/organizations/{id}.
+
+    Fields left as ``None`` keep their value. The slug is immutable.
+    """
+
+    display_name: str | None = None
+    #: ``active`` or ``suspended``.
+    status: str | None = None
+    member_limit: int | None = None
+    mfa_required: bool | None = None
+    #: Replaces the whole attribute map.
+    attributes: dict[str, str] | None = None
+
+
 # OrgMember and AddOrgMemberRequest were removed with the org-membership
-# methods: Hearth serves no organization route over HTTP
-# (audit 2026-08-28 §25.19).
+# methods: Hearth serves no `/admin/orgs` route (audit 2026-08-28 §25.19).
+# Organizations are administered at `/admin/organizations` (Organization).
 
 
 class Jwk(BaseModel):

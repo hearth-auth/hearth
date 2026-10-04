@@ -210,11 +210,18 @@ export interface User {
   updated_at?: number;
 }
 
+/**
+ * A user's lifecycle status, as `PATCH /admin/users/{id}` accepts it: the
+ * proto enum name. The server refuses the short form (`"active"`).
+ */
+export type UserStatus =
+  "USER_STATUS_ACTIVE" | "USER_STATUS_DISABLED" | "USER_STATUS_PENDING_VERIFICATION";
+
 /** Parameters for updating a user. */
 export interface UpdateUserParams {
   email?: string;
   displayName?: string;
-  status?: string;
+  status?: UserStatus;
 }
 
 /** Realm record from the API. */
