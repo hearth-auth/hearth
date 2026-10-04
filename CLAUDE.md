@@ -52,6 +52,7 @@ specs of the active changes in `openspec/changes/` are part of the contract too.
 ### Contributor docs
 
 - `docs/dev/ARCHITECTURE.md` — structural rules (MUST/SHOULD per RFC 2119).
+- `docs/dev/CONSISTENCY.md` — cluster consistency model: write, read, revocation and clock promises with status, open items (G1–G9), Jepsen test mapping.
 - `docs/dev/DEVELOPMENT.md` — all `make` targets, first-clone setup, dev bootstrap + browser login recipe, release cut.
 - `docs/dev/TESTING.md` — eight testing layers, TDD workflow, tooling, CI tiers.
 - `docs/dev/PROTO.md` — **proto authoring guide.** RPC naming, `google.api.http` conventions, `json_name`, backward-compat rules. Read before touching `proto/`.

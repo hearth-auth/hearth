@@ -1333,21 +1333,19 @@ async fn run_serve(
                             error!(error = %e, "Raft peer gRPC server terminated");
                         }
                     }));
-                    // HEA-2154: multi-node clustering is EXPERIMENTAL in 1.x.
-                    // Known defects: followers never invalidate RBAC/session
-                    // caches (C-5), membership is immutable after bootstrap
-                    // (C-6), and writes to a follower return HTTP 500 (H-3).
-                    // Operators must not learn this from the docs alone —
-                    // enabling `cluster:` warns on every startup.
+                    // HEA-2154: multi-node clustering is EXPERIMENTAL. The
+                    // consistency model and its open items (G1–G9) are in
+                    // docs/dev/CONSISTENCY.md. Operators must not learn this
+                    // from the docs alone — enabling `cluster:` warns on every
+                    // startup.
                     warn!(
                         node_id = cluster_cfg.node_id,
                         peer_address = %cluster_cfg.peer_address,
                         "EXPERIMENTAL: Raft cluster mode active. Multi-node clustering is NOT \
-                         production-supported in Hearth 1.x — followers serve stale RBAC and \
-                         session state after a revocation (C-5), cluster membership cannot be \
-                         changed without a full-cluster restart (C-6), and writes routed to a \
-                         follower fail with HTTP 500 (H-3). The supported production topology \
-                         is single-node: omit the `cluster:` section. See \
+                         production-supported — a node that loses contact with the leader can \
+                         still serve stale reads, and cluster membership cannot be changed \
+                         after bootstrap. The supported production topology is single-node: \
+                         omit the `cluster:` section. See docs/dev/CONSISTENCY.md and \
                          docs/guides/clustering.md."
                     );
                     engine
