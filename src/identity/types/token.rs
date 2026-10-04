@@ -922,7 +922,9 @@ pub struct Rfc8693Response {
 /// Created when `rfc8693_token_exchange` issues a delegated access token.
 /// Stored so the user can list active delegations and revoke them via
 /// `GET /ui/consent/delegations`. Revoking adds `token_jti` to the
-/// JTI blocklist, immediately invalidating the issued access token.
+/// JTI blocklist, immediately invalidating the issued access token, and
+/// revokes every grant whose `parent_token_jti` is that `token_jti`, down the
+/// whole tree of onward exchanges.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StoredDelegationGrant {
     /// Unique ID for this delegation record (UUID string).
@@ -941,6 +943,11 @@ pub struct StoredDelegationGrant {
     pub revoked: bool,
     /// JTI of the issued delegated access token, for immediate revocation.
     pub token_jti: String,
+    /// JTI of the exchange's subject token. Revoking the grant that issued
+    /// that token revokes this grant too. `None` when the subject token
+    /// carried no `jti`.
+    #[serde(default)]
+    pub parent_token_jti: Option<String>,
 }
 
 /// Listing entry returned from [`IdentityEngine::list_delegation_grants`].

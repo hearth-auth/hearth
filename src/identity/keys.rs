@@ -2528,6 +2528,7 @@ pub(crate) fn actor_jti_scan_prefix() -> Vec<u8> {
 
 const DELEGATION_GRANT_PREFIX: &str = "dgrant:id:";
 const DELEGATION_GRANT_USER_PREFIX: &str = "dgrant:user:";
+const DELEGATION_GRANT_PARENT_PREFIX: &str = "dgrant:parent:";
 
 /// Encodes the primary storage key for a delegation grant.
 pub(crate) fn encode_delegation_grant(delegation_id: &str) -> Vec<u8> {
@@ -2542,6 +2543,30 @@ pub(crate) fn encode_delegation_grant_user_index(user_sub: &str, delegation_id: 
 /// Returns the scan prefix for all delegation grants belonging to a user.
 pub(crate) fn delegation_grant_user_prefix(user_sub: &str) -> Vec<u8> {
     format!("{DELEGATION_GRANT_USER_PREFIX}{user_sub}:").into_bytes()
+}
+
+/// Encodes the parent-index key of a delegation grant:
+/// `dgrant:parent:{parent_jti}:{delegation_id}`.
+///
+/// It points from the subject token of an exchange to the grant the exchange
+/// created, so revoking a delegation can find every token exchanged onward
+/// from its token. The value is the child token's `exp` (Unix seconds,
+/// 8 bytes little-endian), for the cleanup sweep.
+pub(crate) fn encode_delegation_grant_parent_index(
+    parent_jti: &str,
+    delegation_id: &str,
+) -> Vec<u8> {
+    format!("{DELEGATION_GRANT_PARENT_PREFIX}{parent_jti}:{delegation_id}").into_bytes()
+}
+
+/// Returns the scan prefix for the grants exchanged onward from `parent_jti`.
+pub(crate) fn delegation_grant_parent_prefix(parent_jti: &str) -> Vec<u8> {
+    format!("{DELEGATION_GRANT_PARENT_PREFIX}{parent_jti}:").into_bytes()
+}
+
+/// Returns the scan prefix for every delegation parent-index row (cleanup).
+pub(crate) fn delegation_grant_parent_scan_prefix() -> Vec<u8> {
+    DELEGATION_GRANT_PARENT_PREFIX.as_bytes().to_vec()
 }
 
 // Approval Request keys (Phase C.4)

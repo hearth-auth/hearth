@@ -413,6 +413,107 @@ async fn revoked_delegation_is_inactive_on_introspect_and_decide() {
     );
 }
 
+/// Exchanges `subject_token` once more, as a new actor client with its own
+/// actor token. Returns the onward access token.
+fn exchange_onward(
+    identity: &dyn IdentityEngine,
+    realm_id: &RealmId,
+    subject_token: String,
+) -> String {
+    let (actor_client_id, actor_token) = make_actor_token(identity, realm_id, "mcp:tools:invoke");
+    identity
+        .rfc8693_token_exchange(
+            realm_id,
+            &Rfc8693Request {
+                client_id: actor_client_id,
+                subject_token,
+                subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
+                actor_token: Some(actor_token),
+                actor_token_type: Some("urn:ietf:params:oauth:token-type:jwt".to_string()),
+                requested_token_type: None,
+                scope: Some("mcp:tools:invoke".to_string()),
+                resource: None,
+                audience: None,
+                dpop_jkt: None,
+            },
+        )
+        .expect("exchange should succeed")
+        .access_token
+}
+
+fn introspects_active(identity: &dyn IdentityEngine, realm_id: &RealmId, token: &str) -> bool {
+    use hearth::identity::TokenIntrospectionRequest;
+    identity
+        .introspect_token(
+            realm_id,
+            &TokenIntrospectionRequest {
+                token: token.to_string(),
+                token_type_hint: None,
+                introspecting_client_id: None,
+            },
+        )
+        .expect("introspect")
+        .active
+}
+
+/// `delegated-authorization` scenario "Revoking a delegation revokes onward
+/// exchanges": a token exchanged onward from a delegated token, and one
+/// exchanged onward again from that, both die with the first delegation.
+#[tokio::test]
+async fn revoking_a_delegation_revokes_onward_exchanges() {
+    let harness = common::TestHarness::in_process()
+        .await
+        .expect("test setup failed");
+    let identity = harness.identity();
+    let realm_id = make_realm(identity);
+    let user_id = make_user(identity, &realm_id);
+    let user_sub = user_id.to_string();
+
+    let subject = build_subject_jwt(identity, &user_id, &realm_id, "mcp:tools:invoke");
+    let first = exchange_onward(identity, &realm_id, subject);
+    let first_delegation = identity
+        .list_delegation_grants(&realm_id, &user_sub)
+        .expect("list")[0]
+        .delegation_id
+        .clone();
+    let second = exchange_onward(identity, &realm_id, first.clone());
+    let third = exchange_onward(identity, &realm_id, second.clone());
+    for token in [&first, &second, &third] {
+        identity
+            .validate_token(&realm_id, token)
+            .expect("setup: every hop validates before the revoke");
+    }
+
+    identity
+        .revoke_delegation_grant(&realm_id, &first_delegation, &user_sub)
+        .expect("revoke the first delegation");
+
+    for (hop, token) in [(1, &first), (2, &second), (3, &third)] {
+        let err = identity
+            .validate_token(&realm_id, token)
+            .expect_err("every onward token dies with the first delegation");
+        assert!(
+            matches!(
+                err,
+                IdentityError::TokenRevoked | IdentityError::InvalidToken
+            ),
+            "hop {hop}: got {err:?}"
+        );
+        assert!(
+            !introspects_active(identity, &realm_id, token),
+            "hop {hop} must introspect inactive"
+        );
+    }
+    assert_eq!(
+        identity
+            .list_delegation_grants(&realm_id, &user_sub)
+            .expect("list after revoke")
+            .len(),
+        0,
+        "every delegation in the tree is revoked"
+    );
+}
+
 /// Revocation of another user's grant returns DelegationGrantNotFound.
 #[tokio::test]
 async fn revoke_other_users_delegation_is_not_found() {

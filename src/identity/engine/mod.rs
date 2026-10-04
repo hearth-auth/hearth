@@ -17939,8 +17939,24 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             expires_at: expires_ts,
             revoked: false,
             token_jti: jti.clone(),
+            parent_token_jti: subject_claims.jti.clone(),
         };
-        let _ = self.store_delegation_grant_inner(realm_id, &grant);
+        // A grant that is not stored cannot be revoked, so a failed write
+        // fails the exchange: the token is never handed out.
+        self.store_delegation_grant_inner(realm_id, &grant)?;
+        // Store, then re-check (delegation-chain-integrity design §2): a
+        // revoke of the parent that scanned for onward grants before this
+        // grant's index row existed has already blocklisted the parent's
+        // `jti`, and this read sees it.
+        if let Some(parent_jti) = &grant.parent_token_jti {
+            if self.jti_revoked_in_storage(realm_id, parent_jti)? {
+                self.revoke_delegation_tree(realm_id, grant, "parent_revoked")?;
+                return Err(IdentityError::TokenExchangeRejected {
+                    reason: "the subject token was revoked".to_string(),
+                    oauth_error: "invalid_grant",
+                });
+            }
+        }
 
         Ok(Rfc8693Response {
             access_token,
@@ -19049,6 +19065,8 @@ mod tests {
 
     /// `security.max_act_chain_depth` bounds validation, exchange and agents.
     mod act_chain_ceiling;
+    /// A revoke racing an onward exchange cannot leave the onward token alive.
+    mod delegation_revoke_race;
 
     /// Hot-path epoch reconciliation: debounced storage reads, bounded staleness.
     mod epoch_sync_debounce;

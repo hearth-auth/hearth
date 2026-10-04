@@ -13,7 +13,7 @@
 
 ## 2. Delegation revocation
 
-- [ ] 2.1 Enforce: Revoking a delegation revokes onward exchanges. Test: scenario "Revoking a delegation revokes onward exchanges" (`tests/consent_delegations.rs`)
+- [x] 2.1 Enforce: Revoking a delegation revokes onward exchanges. Test: scenario "Revoking a delegation revokes onward exchanges" (`tests/consent_delegations.rs`, `src/identity/engine/tests/delegation_revoke_race.rs`)
 
 ## 3. AAT chain validation
 
