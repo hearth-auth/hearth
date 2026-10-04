@@ -534,3 +534,36 @@ async fn realm_theme_found_returns_css() {
         "realm CSS not found in response: {body_str}"
     );
 }
+
+/// A-45: a configured `custom_css` with an `@import` rule loads, and the
+/// served theme CSS keeps the harmless `:root` block and drops the `@import`.
+#[tokio::test]
+async fn custom_css_import_rule_is_dropped_from_served_theme() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("brand.css");
+    std::fs::write(
+        &path,
+        "@import url(https://evil.example/x.css);\n:root { --ht-accent: red; }\n",
+    )
+    .expect("write css");
+    let css = web::themes::load_custom_css(&path.to_string_lossy())
+        .expect("a stylesheet with an @import rule must still load");
+
+    let app = web::router(minimal_web_state().with_theme_css(css));
+    let req = Request::builder()
+        .uri("/ui/static/theme.css")
+        .body(Body::empty())
+        .expect("build request");
+    let resp = app.oneshot(req).await.expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_bytes(resp, 8192).await;
+    let body_str = String::from_utf8_lossy(&body);
+    assert!(
+        body_str.contains(":root") && body_str.contains("--ht-accent: red"),
+        "the harmless :root block must be served: {body_str}"
+    );
+    assert!(
+        !body_str.to_ascii_lowercase().contains("@import"),
+        "the served theme CSS must not contain @import: {body_str}"
+    );
+}

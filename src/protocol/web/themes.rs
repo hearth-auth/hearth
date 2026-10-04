@@ -99,7 +99,8 @@ impl std::error::Error for CustomCssError {}
 ///
 /// Four gates, in order: the path must be a regular file, the filename must
 /// end in `.css`, the file must be at most [`MAX_CUSTOM_CSS_BYTES`], and the
-/// decoded text must pass [`validate_custom_css_text`].
+/// decoded text must pass [`validate_custom_css_text`]. The text returned has
+/// then been through [`crate::abuse::sanitize::sanitize_css`] (A-45).
 ///
 /// # Errors
 ///
@@ -123,7 +124,9 @@ pub fn load_custom_css(path: &str) -> Result<String, CustomCssError> {
     }
     let text = std::str::from_utf8(&bytes).map_err(|_| CustomCssError::NotUtf8)?;
     validate_custom_css_text(text)?;
-    Ok(text.to_string())
+    // A-45: drop `@import` rules and dangerous declarations before the text is
+    // composed into the served theme CSS.
+    Ok(crate::abuse::sanitize::sanitize_css(text))
 }
 
 /// Returns `true` when `path`'s filename ends in `.css`, case-insensitively.

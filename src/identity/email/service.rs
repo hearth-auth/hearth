@@ -10,6 +10,8 @@
 
 use std::path::Path;
 
+use crate::abuse::sanitize::sanitize_svg;
+
 use super::branding::{EmailBranding, ResolvedBranding};
 use super::placeholder;
 use super::stored_templates::{EmailTemplateBody, LocalizedEmailTemplate};
@@ -373,14 +375,16 @@ impl EmailService {
 
         // Local paths are never valid as email <img src> — always clear them.
         // If inlining failed (I/O error or non-SVG), fall back to the default logo.
+        // A-45: every inlined SVG passes the sanitizer before it reaches the
+        // template, which renders it unescaped.
         if is_local_path {
             resolved.logo_url = None;
             resolved.logo_svg_inline = logo_svg_inline
-                .map(|svg| prepare_svg_for_email(&svg))
-                .or_else(|| Some(prepare_svg_for_email(&self.default_logo_svg)));
+                .map(|svg| prepare_svg_for_email(&sanitize_svg(&svg)))
+                .or_else(|| Some(prepare_svg_for_email(&sanitize_svg(&self.default_logo_svg))));
         } else if let Some(svg) = logo_svg_inline {
             resolved.logo_url = None;
-            resolved.logo_svg_inline = Some(prepare_svg_for_email(&svg));
+            resolved.logo_svg_inline = Some(prepare_svg_for_email(&sanitize_svg(&svg)));
         }
 
         resolved

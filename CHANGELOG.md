@@ -155,6 +155,10 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   `realms.<name>.session_idle_timeout_secs` / `session_absolute_timeout_secs`, now load and apply
   to new sessions. Before, these documented keys were refused as unknown and the timeouts could
   not be turned on from `hearth.yaml`.
+- **Operator logos and custom CSS are sanitized where they are rendered.** A local SVG logo is
+  passed through the SVG sanitizer before it is inlined into an email, and `branding.custom_css` /
+  `realms.<name>.web.custom_css` are passed through the CSS sanitizer (which drops `@import` and
+  script-bearing declarations) before they are served in the theme CSS.
 
 ### Fixed
 - The cluster-mode startup warning no longer says writes to a follower fail with HTTP 500

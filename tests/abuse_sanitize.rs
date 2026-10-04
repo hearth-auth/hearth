@@ -291,3 +291,101 @@ fn a45_css_safe_siblings_preserved_in_mixed_block() {
         "safe custom prop after dangerous one must survive; got: {out}"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A-45 — Render paths run the sanitizers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Collects every message handed to the transport.
+#[derive(Default)]
+struct CapturingSender(std::sync::Mutex<Vec<hearth::identity::email::EmailMessage>>);
+
+impl hearth::identity::email::EmailSender for CapturingSender {
+    fn send(
+        &self,
+        message: &hearth::identity::email::EmailMessage,
+    ) -> Result<(), hearth::identity::email::EmailError> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(message.clone());
+        Ok(())
+    }
+}
+
+/// Renders a verification email whose configured logo is `logo_svg` and
+/// returns the HTML body.
+fn render_email_with_logo(logo_svg: &str) -> String {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let logo_path = dir.path().join("logo.svg");
+    std::fs::write(&logo_path, logo_svg).expect("write logo");
+    let sender = std::sync::Arc::new(CapturingSender::default());
+    let service = hearth::identity::email::EmailService::new(
+        std::sync::Arc::clone(&sender) as hearth::identity::email::SharedEmailSender,
+        "Hearth".to_string(),
+        Some(logo_path.to_string_lossy().into_owned()),
+        hearth::identity::email::EmailBranding::default(),
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1 1\"></svg>".to_string(),
+        None,
+    )
+    .expect("email service");
+    service
+        .send_verification_email(
+            "user@example.com",
+            "https://auth.example.com/verify?token=t",
+            None,
+            None,
+            None,
+        )
+        .expect("send");
+    let sent = sender
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(sent.len(), 1, "exactly one email must be sent");
+    sent[0].html_body.clone()
+}
+
+/// The built-in logo, now sanitized on every email render, keeps its drawing:
+/// gradients, their `#` references and both paths.
+#[test]
+fn a45_builtin_logo_survives_the_svg_sanitizer() {
+    let logo = String::from_utf8_lossy(hearth::protocol::web::HEARTH_WIDE_SVG);
+    let out = sanitize_svg(&logo);
+    assert_eq!(out.matches("<path").count(), 2, "both paths kept: {out}");
+    assert_eq!(
+        out.matches("<linearGradient").count(),
+        3,
+        "gradients kept: {out}"
+    );
+    assert!(
+        out.contains("href=\"#linearGradient"),
+        "fragment refs kept: {out}"
+    );
+}
+
+/// A configured logo SVG carrying `<script>` and `onload` reaches the
+/// outgoing email without either, and keeps its drawing.
+#[test]
+fn a45_email_render_path_sanitizes_logo_svg() {
+    let html = render_email_with_logo(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10" onload="alert(1)"><script>alert(2)</script><circle cx="5" cy="5" r="4" fill="red"/></svg>"#,
+    );
+    assert!(
+        html.contains("<circle"),
+        "the sanitized logo must still be inlined: {html}"
+    );
+    let lower = html.to_ascii_lowercase();
+    assert!(
+        !lower.contains("<script"),
+        "the email must not carry <script>: {html}"
+    );
+    assert!(
+        !lower.contains("onload"),
+        "the email must not carry onload: {html}"
+    );
+    assert!(
+        !lower.contains("alert("),
+        "no script body may survive: {html}"
+    );
+}

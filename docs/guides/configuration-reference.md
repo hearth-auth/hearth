@@ -374,9 +374,9 @@ Global UI and email branding. Controls the product name, logo, and visual theme 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `product_name` | string | `"Hearth"` | Shown in logo alt text, page titles, and email subjects. |
-| `logo_url` | string | built-in Hearth SVG | Logo image URL. Can be a remote URL (used directly in `<img>`) or a local file path (read at startup, served at `/ui/static/custom-logo`). Supported formats: SVG, PNG, JPEG. |
+| `logo_url` | string | built-in Hearth SVG | Logo image URL. Can be a remote URL (used directly in `<img>`) or a local file path (read at startup, served at `/ui/static/custom-logo`). Supported formats: SVG, PNG, JPEG. A local SVG inlined into emails is sanitized first: `<script>`, `<foreignObject>`, `<iframe>`, `<object>`, `<embed>`, `on*` attributes and non-`#` `href`s are removed, and an SVG that cannot be parsed renders as no logo. |
 | `theme` | string | `"ember"` | Named UI theme. See [Themes](#themes) below. |
-| `custom_css` | string | — | Path to a CSS file appended after the named theme. Use this to override `--ht-*` CSS variables without forking a theme. Read once at startup. **Validated:** must be a regular file whose name ends in `.css`, at most 256 KiB, valid UTF-8, and recognisable as CSS (a declaration block, no control characters, no markup). Its bytes are served to unauthenticated clients at `GET /ui/static/theme.css`, so a file that fails any of these is refused at startup rather than published. |
+| `custom_css` | string | — | Path to a CSS file appended after the named theme. Use this to override `--ht-*` CSS variables without forking a theme. Read once at startup. **Validated:** must be a regular file whose name ends in `.css`, at most 256 KiB, valid UTF-8, and recognisable as CSS (a declaration block, no control characters, no markup). Its bytes are served to unauthenticated clients at `GET /ui/static/theme.css`, so a file that fails any of these is refused at startup rather than published. **Sanitized:** a file that passes is then served without its `@import` rules and without any declaration containing `expression(`, `javascript:`, `behavior:`, `-moz-binding`, `url(data:`, `url(javascript:`, `-ms-filter` or `progid:`; everything else, including `:root` blocks and `--ht-*` properties, is served unchanged. |
 
 #### Themes
 
