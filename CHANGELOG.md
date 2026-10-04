@@ -221,6 +221,9 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   resolves the token's `oid` (realm-scoped assignments only when the token has none). An
   `org_id` query parameter must name an organization the user is a member of, or the request is
   refused with `403`; a malformed `org_id` is `400`. Group responses now include `yaml_managed`.
+- **The step-up proof body refuses undeclared fields.** A JSON step-up proof (console passkey
+  enrolment, REST passkey removal) that carries a field it does not declare, at the top level or
+  inside `assertion`, is refused instead of being read with the field dropped.
 
 ### Fixed
 - The cluster-mode startup warning no longer says writes to a follower fail with HTTP 500

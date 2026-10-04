@@ -424,3 +424,25 @@ fn a47_console_json_bodies_refuse_unknown_fields() {
         r#"{{{extra},"add":[]}}"#
     )));
 }
+
+/// The step-up proof is posted as JSON to the console passkey enrolment and to
+/// the REST passkey delete. Both decode it with serde, so the shape refuses an
+/// undeclared field, including one nested in the passkey assertion.
+#[test]
+fn a47_step_up_proof_bodies_refuse_unknown_fields() {
+    use hearth::protocol::step_up::StepUpProofBody;
+
+    let refused = |json: &str| match serde_json::from_str::<StepUpProofBody>(json) {
+        Ok(_) => false,
+        Err(e) => e
+            .to_string()
+            .contains(&format!("unknown field `{UNKNOWN}`")),
+    };
+
+    assert!(refused(&format!(
+        r#"{{"{UNKNOWN}":true,"totp_code":"123456"}}"#
+    )));
+    assert!(refused(&format!(
+        r#"{{"assertion":{{"{UNKNOWN}":true,"credential_id":"a","client_data_json":"b","authenticator_data":"c","signature":"d"}}}}"#
+    )));
+}
