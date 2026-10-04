@@ -148,12 +148,14 @@ impl Spec {
         resp: &Value,
         errs: &mut Vec<String>,
     ) {
-        let label = format!("{method} {path} → {status}");
+        // Messages name the route template, never the concrete path: the
+        // path carries test ids, and CodeQL treats them as sensitive data.
         let path_only = path.split('?').next().unwrap();
         let Some(tmpl) = self.template(path_only) else {
-            errs.push(format!("{label}: path not in the spec"));
+            errs.push(format!("{method} <a path not in the spec> → {status}"));
             return;
         };
+        let label = format!("{method} {tmpl} → {status}");
         let op = &self.0["paths"][&tmpl][method.to_ascii_lowercase()];
         if op.is_null() {
             errs.push(format!("{label}: method not in the spec ({tmpl})"));
@@ -362,7 +364,11 @@ impl Fixture {
         let status = resp.status().as_u16();
         let bytes = to_bytes(resp.into_body(), 1 << 22).await.expect("body");
         let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        assert_eq!(status, expect, "{method} {path}: {value}");
+        let route = self
+            .spec
+            .template(path.split('?').next().unwrap())
+            .unwrap_or_else(|| "<a path not in the spec>".to_string());
+        assert_eq!(status, expect, "{method} {route}: {value}");
         self.spec
             .exchange(method, path, body.as_ref(), status, &value, &mut self.errs);
         value
