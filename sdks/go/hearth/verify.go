@@ -83,9 +83,12 @@ func (c *Client) getDiscovery(ctx context.Context) (*oidcDiscovery, error) {
 }
 
 // VerifyToken verifies a JWT using JWKS-based Ed25519/EdDSA local signature
-// verification through go-jose and the mandatory five validation steps from spec §2.
+// verification through go-jose and the mandatory validation steps from the
+// sdk-support-contract spec.
 //
-// Optional audience — when supplied, the aud claim must contain it (step 4).
+// The aud claim must always contain the expected audience (step 4): the
+// optional audience argument when given and non-empty, else the client's
+// audience (WithAudience, default DefaultAudience).
 // Returns a typed Claims on success, or one of the §5 typed errors on failure.
 //
 // This method MUST NOT silently fall back to introspection.
@@ -138,10 +141,14 @@ func (c *Client) VerifyToken(ctx context.Context, token string, audience ...stri
 	// openspec/specs/sdk-support-contract/spec.md step 3: compare with the CONFIGURED issuer (the client's
 	// base URL), never with what discovery reports.
 	issuer := strings.TrimRight(c.baseURL, "/")
-	expected := jwt.Expected{Issuer: issuer, Time: c.clock()}
-	if len(audience) > 0 && audience[0] != "" {
-		expected.AnyAudience = jwt.Audience{audience[0]}
+	wantAud := c.audience
+	if wantAud == "" {
+		wantAud = DefaultAudience
 	}
+	if len(audience) > 0 && audience[0] != "" {
+		wantAud = audience[0]
+	}
+	expected := jwt.Expected{Issuer: issuer, AnyAudience: jwt.Audience{wantAud}, Time: c.clock()}
 
 	switch err := registered.ValidateWithLeeway(expected, clockSkew); {
 	case err == nil:
@@ -151,7 +158,7 @@ func (c *Client) VerifyToken(ctx context.Context, token string, audience ...stri
 	case errors.Is(err, jwt.ErrInvalidIssuer):
 		return nil, &TokenIssuerError{Expected: issuer, Actual: claims.Issuer()}
 	case errors.Is(err, jwt.ErrInvalidAudience):
-		return nil, &TokenAudienceError{Expected: audience[0], Actual: claims.Audiences()}
+		return nil, &TokenAudienceError{Expected: wantAud, Actual: claims.Audiences()}
 	case errors.Is(err, jwt.ErrNotValidYet):
 		return nil, &TokenNotYetValidError{NotBefore: claims.NotBefore()}
 	case errors.Is(err, jwt.ErrIssuedInTheFuture):

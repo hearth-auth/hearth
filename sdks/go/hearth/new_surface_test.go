@@ -89,7 +89,7 @@ func validPayload(issuer string) map[string]any {
 	return map[string]any{
 		"sub": "user-abc",
 		"iss": issuer,
-		"aud": "client-1",
+		"aud": DefaultAudience,
 		"exp": now + 3600,
 		"iat": now,
 	}
@@ -386,7 +386,7 @@ func TestVerifyToken_RaisesTokenAudienceError(t *testing.T) {
 	client, _ := verifyTestClient(t, x, kid, issuer)
 	token := signJWT(t, priv,
 		map[string]any{"alg": "EdDSA", "kid": kid},
-		validPayload(issuer), // aud is "client-1"
+		validPayload(issuer), // aud is "hearth"
 	)
 
 	_, err := client.VerifyToken(context.Background(), token, "wrong-audience")
@@ -398,23 +398,19 @@ func TestVerifyToken_RaisesTokenAudienceError(t *testing.T) {
 	}
 }
 
-func TestVerifyToken_AudienceCheckSkippedWhenNotSpecified(t *testing.T) {
+func TestVerifyToken_AudienceCheckedWhenNotSpecified(t *testing.T) {
 	priv, _, x := makeEd25519Key(t)
 	kid := "test-key"
 	issuer := "http://localhost:8420"
 
 	client, _ := verifyTestClient(t, x, kid, issuer)
-	token := signJWT(t, priv,
-		map[string]any{"alg": "EdDSA", "kid": kid},
-		validPayload(issuer),
-	)
+	payload := validPayload(issuer)
+	payload["aud"] = "client-1"
+	token := signJWT(t, priv, map[string]any{"alg": "EdDSA", "kid": kid}, payload)
 
-	claims, err := client.VerifyToken(context.Background(), token)
-	if err != nil {
-		t.Fatalf("VerifyToken without audience: %v", err)
-	}
-	if claims.Subject() != "user-abc" {
-		t.Fatalf("subject: %q", claims.Subject())
+	_, err := client.VerifyToken(context.Background(), token)
+	if _, ok := err.(*TokenAudienceError); !ok {
+		t.Fatalf("expected *TokenAudienceError, got %T: %v", err, err)
 	}
 }
 

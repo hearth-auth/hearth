@@ -75,6 +75,9 @@ func (ti *testIssuer) sign(t *testing.T, claims map[string]any) string {
 	if _, ok := body["exp"]; !ok {
 		body["exp"] = time.Now().Add(time.Hour).Unix()
 	}
+	if _, ok := body["aud"]; !ok {
+		body["aud"] = hearth.DefaultAudience
+	}
 
 	hb, err := json.Marshal(map[string]string{"alg": "EdDSA", "typ": "JWT", "kid": ti.kid})
 	if err != nil {
