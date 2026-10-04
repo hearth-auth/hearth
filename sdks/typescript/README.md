@@ -35,23 +35,30 @@ const client = new HearthClient({
   clientId: "<client-id>",
   clientSecret: "<client-secret>", // confidential clients only
   realmId: "<your-realm-id>",
+  audience: "https://api.example.com", // expected `aud`; default "hearth"
 });
 
 const claims = await client.verifyToken(accessToken); // throws on a bad token
 claims.subject();
 claims.hasPermission("docs.write");
 
-// RBAC facade — local, synchronous permission checks from the JWT
+// RBAC facade — verifies the token, then checks its claims
 const hearth = createHearth({
   baseUrl: "https://hearth.example.com",
   realmId: "<your-realm-id>",
-  getToken: () => localStorage.getItem("access_token"),
+  issuerUrl: "https://hearth.example.com/realms/<realm-slug>",
+  getToken: () => currentAccessToken,
 });
+await hearth.hasPermission("docs.write");
 ```
 
 `HearthClient` reads every endpoint URL from `{issuerUrl}/.well-known/openid-configuration` on first use and caches it. `httpTimeout` (default 10 000 ms) applies to every request it makes. Call `client.invalidateCache()` to drop the cached discovery document, JWKS and introspection client.
 
-`createHearth` gives you a zero-network RBAC facade that reads claims from the JWT in memory.
+`createHearth` gives you an RBAC facade over the token `getToken()` returns. Each check verifies that token against the realm JWKS (fetched once, then cached) before it reads a claim.
+
+### Audience
+
+`verifyToken` always checks `aud` (RFC 9068 §4); the check cannot be turned off. The expected audience is the `audience` option, default `"hearth"` (exported as `DEFAULT_AUDIENCE`): the audience Hearth mints when a client names no resource. An API registered as a protected resource sets its resource URI. The client ID is not the audience: only ID tokens are checked against a client ID (OIDC Core). An empty `audience` throws `ConfigurationError`; a token whose `aud` does not contain the expected audience throws `TokenAudienceError`. `JwksClient` takes the same option, and `VerifyOptions.audience` overrides it for one `verify()` call.
 
 ---
 
@@ -106,69 +113,93 @@ Every token-endpoint failure throws `OAuthFlowError` with `statusCode` and the O
 
 A single-page app has no server session to hold the verifier. Use `createHearthAuth`, or build the flow from `generateCodeVerifier`, `generateCodeChallenge` and `buildAuthorizationUrl`.
 
+```typescript
+import { createHearthAuth, HearthApiClient } from "@hearth-auth/sdk";
+
+const auth = createHearthAuth(
+  new HearthApiClient({ baseUrl: "https://hearth.example.com", realmId: "<realm-id>" }),
+  {
+    clientId: "<client-id>",
+    redirectUri: "https://app.example.com/callback",
+    hearthUrl: "https://hearth.example.com",
+    realmSlug: "<realm-slug>",
+    // storage: "sessionStorage" (default) | "localStorage" | "memory" | { getItem, setItem, removeItem }
+    // storageKeyPrefix: "hearth_" (default)
+  },
+);
+
+await auth.startLogin();
+// on the callback page: await auth.handleCallback(code, state);
+auth.getAccessToken(); // also getRefreshToken(), getIdToken(), isAuthenticated(), clearTokens()
+```
+
+The access token stays in memory. The refresh token, ID token and the PKCE verifier and `state` of a login in flight go to the configured `storage`, `sessionStorage` by default (scoped to one tab, cleared when it closes). `"memory"` does not survive the login redirect. At creation the facade removes `hearth_refresh_token` and `hearth_id_token` from `localStorage` unless `localStorage` is the configured store.
+
 ---
 
 ## RBAC capabilities
 
-All synchronous helpers decode the JWT returned by `getToken()` **locally** — no network call, no cache, no lock. When the token is absent or malformed, every predicate returns `false`.
+Every predicate verifies the token returned by `getToken()` before it reads a claim: the EdDSA signature against the realm JWKS (fetched from `issuerUrl` once, then cached), plus `exp`, `nbf`, `iat`, `iss` (must equal `issuerUrl`) and `aud` (must contain `audience`, default `"hearth"`). When the token is absent or does not verify, every predicate resolves `false`. With `sessionVersions` enabled, a predicate may reject with `SessionVersionRevokedError` or `SessionVersionCacheStaleError`.
 
 ```typescript
 const hearth = createHearth({
   baseUrl: "https://hearth.example.com",
   realmId: "<your-realm-id>",
-  getToken: () => sessionStorage.getItem("access_token"),
+  issuerUrl: "https://hearth.example.com/realms/<realm-slug>", // required: the realm issuer
+  audience: "hearth",                                           // optional; this is the default
+  getToken: () => auth.getAccessToken(), // may also return a Promise
 });
 ```
 
-### `hasPermission(permission: string): boolean`
+### `hasPermission(permission: string): Promise<boolean>`
 
-Returns `true` iff the JWT `permissions` claim contains `permission`. Use this for feature gates and API guards.
+Resolves `true` iff the token verifies and its `permissions` claim contains `permission`. Use this for feature gates and API guards.
 
 ```typescript
-if (hearth.hasPermission("docs.versions.read")) {
+if (await hearth.hasPermission("docs.versions.read")) {
   renderVersionHistory();
 }
 ```
 
-### `hasRole(role: string): boolean`
+### `hasRole(role: string): Promise<boolean>`
 
-Returns `true` iff the JWT `roles` claim contains `role`. Useful for UI personalization and coarse-grained access.
+Resolves `true` iff the token verifies and its `roles` claim contains `role`. Useful for UI personalization and coarse-grained access.
 
 ```typescript
-if (hearth.hasRole("billing-admin")) {
+if (await hearth.hasRole("billing-admin")) {
   renderBillingPanel();
 }
 ```
 
-### `inGroup(group: string): boolean`
+### `inGroup(group: string): Promise<boolean>`
 
-Returns `true` iff the JWT `groups` claim contains the group slug.
+Resolves `true` iff the token verifies and its `groups` claim contains the group slug.
 
 ```typescript
-if (hearth.inGroup("engineering")) {
+if (await hearth.inGroup("engineering")) {
   renderInternalToolingLink();
 }
 ```
 
-### `inOrg(org: string): boolean`
+### `inOrg(org: string): Promise<boolean>`
 
-Returns `true` iff the JWT `oid` claim equals the given org ID.
+Resolves `true` iff the token verifies and its `oid` claim equals the given org ID.
 
 ```typescript
-if (hearth.inOrg("org_acme")) {
+if (await hearth.inOrg("org_acme")) {
   renderAcmeContent();
 }
 ```
 
 ### `client.permissions(): Promise<MePermissionsResponse>`
 
-Calls `GET /v1/me/permissions` and returns the **freshly-resolved** RBAC claim set from the server. Unlike the synchronous helpers above, this reflects any role/group assignments made since the JWT was issued.
+Calls `GET /v1/me/permissions` and returns the **freshly-resolved** RBAC claim set from the server. Unlike the predicates above, this reflects any role/group assignments made since the JWT was issued.
 
 ```typescript
 const { roles, groups, permissions } = await hearth.client.permissions();
 ```
 
-Use `client.permissions()` when you need post-issuance accuracy (e.g., after an admin operation). For every other check, prefer the synchronous local helpers — they're faster and don't touch the network.
+Use `client.permissions()` when you need post-issuance accuracy (e.g., after an admin operation). For every other check, prefer the local predicates — once the JWKS is cached they make no network call.
 
 ---
 
@@ -190,7 +221,8 @@ import {
 const hearth = createHearth({
   baseUrl: "https://hearth.example.com",
   realmId: "<your-realm-id>",
-  getToken: () => localStorage.getItem("access_token"),
+  issuerUrl: "https://hearth.example.com/realms/<realm-slug>",
+  getToken: () => auth.getAccessToken(), // auth = createHearthAuth(...)
 });
 
 // 2. Mount the provider at the root of your React tree
@@ -220,7 +252,7 @@ function NavBar() {
 }
 ```
 
-All hooks return `false` when no `HearthProvider` is mounted, making them safe to call in tests without a provider.
+The hooks return `boolean`. Each runs the facade's asynchronous check after every render and returns its last result: `false` until the check resolves, and `false` when it rejects. All hooks return `false` when no `HearthProvider` is mounted, making them safe to call in tests without a provider.
 
 ---
 
@@ -259,7 +291,8 @@ const delta = await client.svDelta(serviceToken, snap.current_seq, 500); // null
 const discovery = await client.discover();
 
 // Verify an access token: EdDSA signature against the realm JWKS, then exp,
-// nbf, iss (must equal issuerUrl) and aud (must contain clientId, when set).
+// nbf, iat (not in the future), iss (must equal issuerUrl) and aud (must
+// contain `audience`, default "hearth").
 const claims = await client.verifyToken(accessToken);
 claims.subject();          // sub
 claims.scopes();           // scope split into an array
@@ -365,13 +398,13 @@ Errors raised by the SDK itself extend `HearthSdkError`:
 
 | Error | When |
 |---|---|
-| `ConfigurationError` | A required setting is missing (`clientId`, `realmId`, a discovery endpoint) |
+| `ConfigurationError` | A required setting is missing (`clientId`, `realmId`, a discovery endpoint) or `audience` is empty |
 | `DiscoveryError` | The discovery document cannot be fetched or is invalid |
 | `JWKSFetchError` | The JWKS cannot be fetched |
 | `TokenVerificationError` | Base class of every token failure below |
 | `TokenExpiredError`, `TokenNotYetValidError` | `exp` / `nbf` outside the clock-skew window |
-| `TokenInvalidError` | Bad signature, wrong algorithm, malformed JWT |
-| `TokenIssuerError`, `TokenAudienceError` | `iss` / `aud` mismatch |
+| `TokenInvalidError` | Bad signature, wrong algorithm, malformed JWT, `iat` in the future |
+| `TokenIssuerError`, `TokenAudienceError` | `iss` mismatch / `aud` does not contain the configured `audience` |
 | `IntrospectionError` | The introspection request failed or returned non-JSON |
 | `OAuthFlowError` | A token, userinfo, permissions or session-version request failed (`statusCode`, `errorCode`) |
 | `AuthorizationModeMismatchError` | Introspection echoed a mode other than `expectedMode` |
@@ -416,7 +449,8 @@ const admin = new AdminClient("http://127.0.0.1:8420", realm_id, access_token);
 // HearthClientConfig — constructor argument for HearthClient
 interface HearthClientConfig {
   issuerUrl: string;            // e.g. "https://hearth.example.com"; endpoints are discovered from it
-  clientId?: string;            // needed for login flows, introspection; pins `aud` on verifyToken
+  clientId?: string;            // needed for login flows, introspection
+  audience?: string;            // expected `aud` on verifyToken; default "hearth"; always checked
   clientSecret?: string;        // confidential clients only
   realmId?: string;             // sent as X-Realm-ID; needed by authorize, mePermissions, sv feed, magic link
   httpTimeout?: number;         // ms, default 10 000
@@ -429,16 +463,45 @@ interface HearthClientConfig {
 interface HearthOptions {
   baseUrl: string;
   realmId: string;
-  getToken: () => string | null | undefined; // called on every predicate check
+  issuerUrl: string;            // the realm issuer, e.g. "https://hearth.example.com/realms/acme"
+  audience?: string;            // expected `aud`; default "hearth"
+  // called on every predicate check
+  getToken: () => string | null | undefined | Promise<string | null | undefined>;
+  sessionVersions?: SessionVersionConfig;
 }
 
-// HearthFacade — returned by createHearth()
+// HearthFacade — returned by createHearth(); each predicate verifies the token first
 interface HearthFacade {
-  hasPermission(permission: string): boolean;
-  hasRole(role: string): boolean;
-  inGroup(group: string): boolean;
-  inOrg(org: string): boolean;
+  hasPermission(permission: string): Promise<boolean>;
+  hasRole(role: string): Promise<boolean>;
+  inGroup(group: string): Promise<boolean>;
+  inOrg(org: string): Promise<boolean>;
+  sessionVersionCacheAge(): number;
+  stop(): void;
   client: { permissions(): Promise<MePermissionsResponse> };
+}
+
+// AuthConfig — second argument to createHearthAuth(client, config)
+interface AuthConfig {
+  clientId: string;
+  redirectUri: string;
+  hearthUrl: string;            // e.g. "https://hearth.example.com"
+  realmSlug: string;            // e.g. "acme"
+  storage?: "sessionStorage" | "localStorage" | "memory" | TokenStorage; // default "sessionStorage"
+  storageKeyPrefix?: string;    // default "hearth_"
+}
+
+// HearthBrowserAuth — returned by createHearthAuth()
+interface HearthBrowserAuth {
+  startLogin(): Promise<void>;
+  handleCallback(code: string, state: string): Promise<void>;
+  refreshAccessToken(): Promise<void>;
+  logout(): Promise<void>;
+  getAccessToken(): string | null; // held in memory
+  getRefreshToken(): string | null;
+  getIdToken(): string | null;
+  isAuthenticated(): boolean;
+  clearTokens(): void;
 }
 
 // AuthorizeParams
@@ -550,7 +613,7 @@ class HearthError extends Error {
 
 **`TokenInvalidError`** — JWT signature does not match any key in the JWKS. If the server recently rotated keys the SDK will re-fetch once automatically; persistent failures indicate a key mismatch.
 
-**`TokenAudienceError`** — the token's `aud` claim does not contain the configured audience. Verify `clientId` matches the audience your authorization server issues.
+**`TokenAudienceError`** — the token's `aud` claim does not contain the configured `audience` (default `"hearth"`). Set `audience` to the resource URI the token was issued for; the client ID is not the audience.
 
 **`AuthorizationModeMismatchError`** — the server echoed an `access_token_authorization` mode
 that differs from the SDK's `expectedMode` config or the `mode` passed to `requirePermission`.
@@ -569,7 +632,7 @@ registering the OAuth client; the SDK validates you stay consistent.
 
 RBAC claims (`permissions`, `roles`, `groups`) are embedded in the JWT at issuance. The
 checker verifies the token first — EdDSA signature against the realm's JWKS, plus `exp`,
-`nbf`, `iss` and (when `clientId` is set) `aud` — and only then reads the claim. The JWKS
+`nbf`, `iat`, `iss` and `aud` — and only then reads the claim. The JWKS
 is cached, so after the first request there is no network traffic per check.
 
 A token that does not verify returns `false`; the checker never trusts an unverified
@@ -580,7 +643,7 @@ import { HearthClient, requirePermission } from "@hearth-auth/sdk";
 
 const client = new HearthClient({
   issuerUrl: "https://auth.example.com",
-  clientId: "<your-client-id>", // enables `aud` pinning
+  audience: "https://api.example.com", // expected `aud`; default "hearth"
 });
 
 const check = requirePermission("docs.write", { mode: "embedded", client });
@@ -659,7 +722,7 @@ const allowed = await check(accessToken);
 import express from "express";
 import { HearthClient, hearthMiddleware } from "@hearth-auth/sdk";
 
-const client = new HearthClient({ issuerUrl: "https://hearth.example.com", clientId: "my-api" });
+const client = new HearthClient({ issuerUrl: "https://hearth.example.com" });
 const app = express();
 
 app.get("/docs", hearthMiddleware({ client, requiredPermission: "docs.read" }), (req, res) => {

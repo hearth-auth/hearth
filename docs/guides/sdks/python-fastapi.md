@@ -39,6 +39,8 @@ auth = HearthFastAPIDep(client=client, mode="embedded")
 
 `HearthFastAPIDep` is a callable you pass to `Depends()`. It verifies the `Authorization: Bearer` header on every request and returns a `VerifiedClaims` object.
 
+Verification always checks the token's `aud` against the client's `audience`, default `"hearth"` — the audience Hearth mints when a client names no resource. If your API is registered as a protected resource, pass its resource URI: `HearthClient(..., audience="https://api.example.com")`. The client ID is not the audience.
+
 :::info[What is `mode`?]
 The `mode` parameter controls how Hearth checks permissions. `"embedded"` (the default) reads claims directly from the JWT — zero extra network calls. See [Permission delivery modes](#permission-delivery-modes) for all options.
 :::
@@ -131,7 +133,7 @@ def list_docs(claims: VerifiedClaims = Depends(auth)):
 auth = HearthFastAPIDep(
     client=client,
     mode="introspection",
-    audience="my-api",  # optional: expected `aud` value
+    audience="https://api.example.com",  # optional: overrides the client's `audience` for this dependency
 )
 ```
 

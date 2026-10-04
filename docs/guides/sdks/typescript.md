@@ -149,8 +149,11 @@ const refreshed = await client.refreshTokens("<client_id>", tokens.refresh_token
 ### React hooks
 
 Mount `HearthProvider` once at the root of your React tree and use hooks
-anywhere in the component tree. Permission checks are **synchronous and
-zero-network** — they decode the JWT in memory.
+anywhere in the component tree. Each check **verifies the token** before it
+reads a claim: the EdDSA signature against the realm JWKS (fetched once, then
+cached), plus `exp`, `nbf`, `iat`, `iss` and `aud`. A token that does not verify
+holds nothing. The hooks return `boolean`: `false` until the check resolves,
+and they re-check after every render.
 
 ```tsx
 import {
@@ -163,18 +166,21 @@ import {
   useInGroup,
 } from "@hearth-auth/sdk";
 
-// Initialize once at app startup — handles PKCE, in-memory token storage, and silent refresh.
-// Never store access tokens in localStorage or sessionStorage — see /docs/guides/browser-spa-tokens
+// Initialize once at app startup — handles PKCE, token storage, and silent refresh.
+// The access token stays in memory; see /docs/guides/browser-spa-tokens
 const apiClient = new HearthApiClient({ baseUrl: "http://127.0.0.1:8420", realmId: "<realm_id>" });
 const auth = createHearthAuth(apiClient, {
   clientId:    "<client_id>",
   redirectUri: "http://localhost:3000/callback",
+  hearthUrl:   "http://127.0.0.1:8420",
+  realmSlug:   "<realm-slug>",
 });
 
 const hearth = createHearth({
-  baseUrl: "http://127.0.0.1:8420",
-  realmId: "<realm_id>",
-  getToken: () => auth.getAccessToken(), // in-memory — never localStorage or sessionStorage
+  baseUrl:   "http://127.0.0.1:8420",
+  realmId:   "<realm_id>",
+  issuerUrl: "http://127.0.0.1:8420/realms/<realm-slug>", // the realm issuer (`iss`)
+  getToken:  () => auth.getAccessToken(),                  // in-memory access token
 });
 
 function App() {
@@ -200,7 +206,7 @@ function NavBar() {
 }
 ```
 
-### Non-React (synchronous facade)
+### Non-React facade
 
 ```typescript
 import { createHearth, createHearthAuth, HearthApiClient } from "@hearth-auth/sdk";
@@ -209,22 +215,51 @@ const apiClient = new HearthApiClient({ baseUrl: "http://127.0.0.1:8420", realmI
 const auth = createHearthAuth(apiClient, {
   clientId:    "<client_id>",
   redirectUri: "http://localhost:3000/callback",
+  hearthUrl:   "http://127.0.0.1:8420",
+  realmSlug:   "<realm-slug>",
 });
 
 const hearth = createHearth({
-  baseUrl: "http://127.0.0.1:8420",
-  realmId: "<realm_id>",
-  getToken: () => auth.getAccessToken(), // in-memory — never localStorage or sessionStorage
+  baseUrl:   "http://127.0.0.1:8420",
+  realmId:   "<realm_id>",
+  issuerUrl: "http://127.0.0.1:8420/realms/<realm-slug>",
+  getToken:  () => auth.getAccessToken(),
 });
 
-if (hearth.hasPermission("invoices.write")) {
+if (await hearth.hasPermission("invoices.write")) {
   renderInvoiceForm();
 }
 ```
 
+`hasPermission`, `hasRole`, `inGroup` and `inOrg` return `Promise<boolean>`.
+They resolve `false` when `getToken()` returns nothing or the token does not
+verify. `getToken` may return the token or a `Promise` of it. `audience`
+(default `"hearth"`) sets the `aud` the token must carry; see
+[Audience](#audience). With `sessionVersions` enabled, a check may reject with
+`SessionVersionRevokedError` or `SessionVersionCacheStaleError`.
+
+### Browser token storage
+
+`createHearthAuth` keeps the access token in memory. The refresh token, the ID
+token and the in-flight PKCE verifier and `state` go to `sessionStorage` by
+default, which is scoped to one tab and cleared when it closes. Read them from
+the object `createHearthAuth` returns: `auth.getAccessToken()`,
+`auth.getRefreshToken()`, `auth.getIdToken()`, `auth.isAuthenticated()` and
+`auth.clearTokens()`.
+
+| `AuthConfig` option | Meaning |
+|---|---|
+| `storage` | `"sessionStorage"` (default), `"localStorage"` (survives the tab closing), `"memory"` (lost on reload; does not survive the login redirect), or your own `{ getItem, setItem, removeItem }` object |
+| `storageKeyPrefix` | Prefix of every key the SDK writes. Default `"hearth_"`. |
+
+At creation, `createHearthAuth` removes `hearth_refresh_token` and
+`hearth_id_token` from `localStorage` unless `localStorage` is the configured
+store. See [Browser SPA Token Handling](../browser-spa-tokens.md) for the
+trade-offs.
+
 ### Live permission check (post-issuance)
 
-The synchronous helpers reflect only claims baked in at token issuance. For
+The facade checks reflect only claims baked in at token issuance. For
 post-issuance accuracy — e.g., after an admin grants a new role — call:
 
 ```typescript
@@ -243,7 +278,7 @@ import { HearthClient, TokenExpiredError, TokenInvalidError } from "@hearth-auth
 
 const client = new HearthClient({
   issuerUrl: "http://127.0.0.1:8420",
-  clientId: "<client_id>",
+  // audience: "https://api.example.com", // default "hearth" — see Audience below
 });
 
 try {
@@ -267,10 +302,32 @@ try {
 **How verification works.** The SDK has no signature code of its own. It calls
 `jose`'s `jwtVerify` over a local JWKS set with `algorithms: ["EdDSA"]`, so `jose`
 checks the signature, the algorithm, the `kid` match, `exp`, `nbf`, `iss` and
-`aud`. The clock-skew allowance is 5 s on every time claim (`clockSkewSeconds`
-widens it). A `kid` still unknown after the re-fetch throws `TokenInvalidError`;
-`JWKSFetchError` means the JWKS endpoint itself failed. `jose` does not refuse a
-token whose `iat` is in the future.
+`aud`. `jose` does not refuse a token whose `iat` is in the future, so the SDK
+checks that itself and throws `TokenInvalidError`. The clock-skew allowance is
+5 s on every time claim (`clockSkewSeconds` widens it). A `kid` still unknown
+after the re-fetch throws `TokenInvalidError`; `JWKSFetchError` means the JWKS
+endpoint itself failed.
+
+### Audience
+
+Every access-token verification checks `aud` (RFC 9068 §4); the check cannot
+be turned off. The expected audience is the `audience` option, default
+`"hearth"` (exported as `DEFAULT_AUDIENCE`): the audience Hearth mints when a
+client names no resource. If your API is registered as a protected resource,
+set its resource URI:
+
+```typescript
+const client = new HearthClient({
+  issuerUrl: "https://hearth.example.com",
+  audience: "https://api.example.com",
+});
+```
+
+The client ID is not the audience: only ID tokens are checked against a client
+ID (OIDC Core). An empty `audience` throws `ConfigurationError`. A token whose
+`aud` does not contain the expected audience throws `TokenAudienceError`.
+`JwksClient` takes the same `audience` option, and `VerifyOptions.audience`
+overrides it for one `verify()` call.
 
 :::note[`iss` validation and `issuerUrl`]
 `verifyToken()` checks that the token's `iss` claim exactly matches `issuerUrl`. System tokens (admin bootstrap) carry `iss = <baseUrl>`. User/client tokens issued by a realm carry `iss = <baseUrl>/realms/<realm-slug>`. Configure `issuerUrl` to match the issuer your tokens actually contain, or set `expectedMode: "introspection"` to skip local `iss` validation.
@@ -413,7 +470,7 @@ import { HearthClient, hearthMiddleware } from "@hearth-auth/sdk";
 
 const client = new HearthClient({
   issuerUrl: "https://hearth.example.com",
-  clientId: "my-api", // pins the `aud` claim
+  audience: "https://api.example.com", // the `aud` this API accepts; default "hearth"
 });
 const app = express();
 
@@ -432,7 +489,7 @@ app.post("/docs", hearthMiddleware({ client, requiredPermission: "docs.write" })
 import Fastify from "fastify";
 import { HearthClient, hearthFastifyHook } from "@hearth-auth/sdk";
 
-const client = new HearthClient({ issuerUrl: "https://hearth.example.com", clientId: "my-api" });
+const client = new HearthClient({ issuerUrl: "https://hearth.example.com" });
 const app = Fastify();
 
 app.addHook("onRequest", hearthFastifyHook({ client, requiredRole: "editor" }));
@@ -561,13 +618,13 @@ Errors raised by the SDK itself extend `HearthSdkError`:
 
 | Error | When |
 |---|---|
-| `ConfigurationError` | A required setting is missing (`clientId`, `realmId`, a discovery endpoint) |
+| `ConfigurationError` | A required setting is missing (`clientId`, `realmId`, a discovery endpoint) or `audience` is empty |
 | `DiscoveryError` | The discovery document cannot be fetched or is invalid |
 | `JWKSFetchError` | The JWKS cannot be fetched |
 | `TokenVerificationError` | Base class of every token failure below |
 | `TokenExpiredError`, `TokenNotYetValidError` | `exp` / `nbf` outside the clock-skew window |
-| `TokenInvalidError` | Bad signature, wrong algorithm, malformed JWT |
-| `TokenIssuerError`, `TokenAudienceError` | `iss` / `aud` mismatch |
+| `TokenInvalidError` | Bad signature, wrong algorithm, malformed JWT, `iat` in the future |
+| `TokenIssuerError`, `TokenAudienceError` | `iss` mismatch / `aud` does not contain the configured `audience` |
 | `IntrospectionError` | The introspection request failed or returned non-JSON |
 | `OAuthFlowError` | A token, userinfo, permissions or session-version request failed (`statusCode`, `errorCode`) |
 | `AuthorizationModeMismatchError` | Introspection echoed a mode other than `expectedMode` |

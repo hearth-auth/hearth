@@ -44,13 +44,15 @@ All SDKs expose the same surface (method names vary by language convention). See
 | Auth code + PKCE — begin | `startLogin()` (browser), `client.beginLogin()` (server) | `client.BeginLogin()` | `client.begin_login()` | `$client->beginLogin()` |
 | Auth code + PKCE — complete | `client.completeLogin()` | `client.CompleteLogin()` | `client.complete_login()` | `$client->completeLogin()` |
 | Verify token (EdDSA) | `client.verifyToken()` | `client.VerifyToken()` | `client.verify_token()` | `$client->verifyToken()` |
+| Expected access-token audience (default `"hearth"`) | `new HearthClient({ audience })` | `hearth.WithAudience()` | `HearthClient(…, audience=…)` | `new HearthClient(…, audience: …)` |
 | M2M (client credentials) | `client.clientCredentials()` | `client.ClientCredentials()` | `client.client_credentials()` | `$client->clientCredentials()` |
 | Device flow — start | `client.startDeviceFlow()` | `client.StartDeviceFlow()` | `client.start_device_flow()` | `$client->startDeviceFlow()` |
 | Device flow — poll | `client.pollDeviceToken()` | `client.PollDeviceToken()` ⚠ | `client.poll_device_token()` | `$client->pollDeviceToken()` |
 | Magic-link initiation | `client.requestMagicLink()` | `client.RequestMagicLink()` | `client.request_magic_link()` | `$client->requestMagicLink()` |
-| Role check (from claims) | `claims.hasRole()` | `client.HasRole(ctx, …)` | `claims.has_role()` | `$claims->hasRole()` |
-| Permission check (from claims) | `claims.hasPermission()` | `client.HasPermission(ctx, …)` | `claims.has_permission()` | `$claims->hasPermission()` |
-| Group check (local) | `claims.inGroup()` | `client.InGroup()` | `claims.in_group()` | `$claims->inGroup()` |
+| Role check (from verified claims) | `claims.hasRole()` | `claims.HasRole()` | `claims.hasRole()` | `$claims->hasRole()` |
+| Permission check (from verified claims) | `claims.hasPermission()` | `claims.HasPermission()` | `claims.hasPermission()` | `$claims->hasPermission()` |
+| Group check (from verified claims) | `claims.inGroup()` | `claims.InGroup()` | `claims.in_group()` | `$claims->inGroup()` |
+| Check on a raw token (verifies it first) | `await hearth.hasPermission()` (`createHearth`) | `client.HasPermission(ctx, token, …)` | `client.has_permission(token, …)` | — |
 | Token refresh | `client.refreshTokens()` | `client.RefreshTokens()` | `client.refresh_tokens()` | `$client->refreshToken()` |
 
 > ⚠ marks a [platform exception](https://github.com/hearth-auth/hearth/blob/main/openspec/specs/sdk-support-contract/spec.md). Read the linked spec section before using these methods.
@@ -61,7 +63,7 @@ All public clients (browser SPAs, mobile apps) must use PKCE. Hearth rejects aut
 
 ## Token verification without an SDK
 
-Every GA SDK exposes `verifyToken()` (or the language-idiomatic equivalent — see the table above). Prefer `verifyToken()` over manual JWKS calls: it runs the six mandatory validation steps through a standard JOSE library with one 5 s clock-skew allowance, caches keys, re-fetches on rotation, and returns typed errors. A shared conformance harness (`make sdk-conformance`) proves all four SDKs give the same answer for the same token.
+Every GA SDK exposes `verifyToken()` (or the language-idiomatic equivalent — see the table above). Prefer `verifyToken()` over manual JWKS calls: it runs the six mandatory validation steps through a standard JOSE library with one 5 s clock-skew allowance, always checks `aud` against the configured audience (default `hearth`, the audience Hearth mints when a client names no resource; an API registered as a protected resource sets its resource URI; the client ID is not the audience), caches keys, re-fetches on rotation, and returns typed errors. A shared conformance harness (`make sdk-conformance`) proves all four SDKs give the same answer for the same token.
 
 If you need to verify tokens from a language or framework that has no Hearth SDK, call the JWKS endpoint directly:
 

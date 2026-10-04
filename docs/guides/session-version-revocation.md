@@ -72,6 +72,7 @@ SDK configuration (TypeScript example):
 const hearth = createHearth({
   baseUrl: "https://auth.example.com",
   realmId: "acme",
+  issuerUrl: "https://auth.example.com/realms/acme",
   getToken: () => currentAccessToken,
   sessionVersions: {
     enabled: true,

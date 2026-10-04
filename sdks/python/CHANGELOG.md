@@ -4,7 +4,21 @@ All notable changes to `hearth-python` are documented here.
 
 ## [Unreleased]
 
+### Security
+- **Access-token audience is always checked** — `verify_token` requires `aud` to contain
+  the expected audience (RFC 9068 §4): the new `HearthClient(..., audience=...)` keyword,
+  default `"hearth"` (`hearth.client.DEFAULT_AUDIENCE`), the audience Hearth mints when a
+  client names no resource. An API registered as a protected resource sets its resource
+  URI. `verify_token(token, audience=...)` and the FastAPI dependency's `audience=`
+  override it. An empty `audience` raises `ConfigurationError`.
+- **RBAC predicates verify the token** — `has_permission`, `has_role`, `in_group` and
+  `in_org` call `verify_token` before reading a claim and return `False` for a token that
+  does not verify.
+
 ### Changed
+- **BREAKING: `has_permission`, `has_role`, `in_group` and `in_org` are instance
+  methods** — call them on a configured client:
+  `HearthClient(base_url, realm_id="acme").has_permission(token, "docs.write")`.
 - **`webauthn_register_begin()` now requires a step-up proof (audit 2026-08-28 §4.18#2)** —
   the server refuses passkey enrolment carried by an access token alone with
   `403 step_up_required`, because a stolen token would otherwise mint a permanent

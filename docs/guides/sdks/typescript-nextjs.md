@@ -44,13 +44,18 @@ import { HearthClient } from "@hearth-auth/sdk";
 
 export const hearth = new HearthClient({
   issuerUrl: process.env.HEARTH_ISSUER_URL!,
-  clientId: process.env.HEARTH_CLIENT_ID, // pins the `aud` claim
+  audience: process.env.HEARTH_AUDIENCE, // the `aud` this API accepts; default "hearth"
 });
 ```
 
 `HearthClient` reads every endpoint URL, including the JWKS URI, from
-`{issuerUrl}/.well-known/openid-configuration`. You do not configure the JWKS URI,
-audience or clock skew separately.
+`{issuerUrl}/.well-known/openid-configuration`. You do not configure the JWKS URI
+or clock skew separately.
+
+Every verification checks the token's `aud`. Leave `audience` unset to accept
+`"hearth"`, the audience Hearth mints when a client names no resource. If your
+API is registered as a protected resource, set its resource URI (for example
+`https://api.example.com`). The client ID is not the audience.
 
 ---
 
@@ -114,7 +119,7 @@ import { hearthEdgeMiddleware } from "@hearth-auth/sdk/nextjs/edge";
 const guard = hearthEdgeMiddleware({
   client: new HearthClient({
     issuerUrl: process.env.HEARTH_ISSUER_URL!,
-    clientId: process.env.HEARTH_CLIENT_ID,
+    audience: process.env.HEARTH_AUDIENCE,
   }),
   requiredPermission: "admin.write",
 });
@@ -297,7 +302,8 @@ defence, all three helpers refuse a token with `token_type: "required_action"`:
 | Variable | Used in | Description |
 |----------|---------|-------------|
 | `HEARTH_ISSUER_URL` | All | Hearth base URL, for example `https://hearth.example.com` |
-| `HEARTH_CLIENT_ID` | Token verification, login | OAuth client ID registered in Hearth |
+| `HEARTH_AUDIENCE` | Token verification | Optional. The `aud` access tokens must carry. Default `hearth`; set your resource URI if the API is a registered protected resource |
+| `HEARTH_CLIENT_ID` | Login | OAuth client ID registered in Hearth |
 | `HEARTH_CLIENT_SECRET` | Login and callback | Client secret. **Never** prefix it with `NEXT_PUBLIC_` |
 | `NEXT_PUBLIC_BASE_URL` | Login and callback | Public base URL, used to build the redirect URI |
 

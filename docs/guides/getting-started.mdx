@@ -594,7 +594,7 @@ curl -fsS -X POST http://localhost:8420/token -H "X-Realm-ID: $REALM_ID" \
 The access token is signed with your realm's Ed25519 key, and its `permissions` are resolved at issue time — checking them needs no network call (step 4).
 
 :::tip[Browser vs server]
-The TypeScript SDK ships `createHearthAuth` — a **stateful browser facade** that stores tokens in `sessionStorage` and handles silent refresh. For server code, `HearthClient` in the same package — and every other SDK (Go, Python, PHP) — ships **stateless** `beginLogin`/`completeLogin` helpers: `beginLogin` returns the values you persist in your session, `completeLogin` exchanges the code. See the [`full-stack-demo`](https://github.com/hearth-auth/hearth/tree/main/examples/full-stack-demo) for a complete Vite + React + Go example.
+The TypeScript SDK ships `createHearthAuth` — a **stateful browser facade** that keeps the access token in memory, stores the refresh token in `sessionStorage`, and handles silent refresh. For server code, `HearthClient` in the same package — and every other SDK (Go, Python, PHP) — ships **stateless** `beginLogin`/`completeLogin` helpers: `beginLogin` returns the values you persist in your session, `completeLogin` exchanges the code. See the [`full-stack-demo`](https://github.com/hearth-auth/hearth/tree/main/examples/full-stack-demo) for a complete Vite + React + Go example.
 :::
 
 :::note[Node server handling the callback?]
@@ -619,7 +619,8 @@ npm install @hearth-auth/sdk
 ```tsx
 import { useHasPermission } from '@hearth-auth/sdk';
 
-// Reads permissions from the JWT in context — no network call.
+// Verifies the token from the HearthProvider's createHearth facade against the
+// cached realm JWKS, then reads its permissions; `false` until the check resolves.
 // This only hides UI: pair it with server-side protection (the Node.js tab).
 function AdminPanel() {
   const canAdmin = useHasPermission('hearth.admin');
@@ -785,13 +786,16 @@ See the [Echo adapter guide](/docs/sdks/go-echo) for group middleware and error 
 <TabItem value="raw" label="Raw" default>
 
 ```python
+import os
 from hearth import HearthClient
 
+client = HearthClient(base_url=os.environ["HEARTH_BASE_URL"], realm_id=os.environ["HEARTH_REALM_ID"])
+
 def require_permission(permission: str):
-    """Generic dependency — checks permission from the JWT claim set."""
+    """Generic dependency — verifies the token, then checks its permission claim."""
     def check(authorization: str):
         token = authorization.removeprefix("Bearer ")
-        if not HearthClient.has_permission(token, permission):
+        if not client.has_permission(token, permission):
             raise HTTPException(status_code=403, detail="Forbidden")
         return token
     return check
@@ -813,7 +817,7 @@ def require_permission(permission: str):
         def wrapped(*args, **kwargs):
             token = request.headers.get('Authorization', '').removeprefix('Bearer ')
             claims = client.verify_token(token)
-            if not claims.has_permission(permission):
+            if not claims.hasPermission(permission):
                 abort(403)
             g.hearth_claims = claims
             return f(*args, **kwargs)
@@ -823,7 +827,7 @@ def require_permission(permission: str):
 @app.route('/admin/data')
 @require_permission('hearth.admin')
 def admin_data():
-    return {'sub': g.hearth_claims.sub}
+    return {'sub': g.hearth_claims.subject()}
 ```
 
 </TabItem>
@@ -924,7 +928,9 @@ See the [Laravel adapter guide](/docs/sdks/php-laravel) for service-provider set
 </TabItem>
 </Tabs>
 
-The local RBAC checks — `useHasPermission` (TypeScript), `HasPermission` (Go), `has_permission` (Python) — read the `permissions` array embedded in the token at issue time by Hearth's RBAC engine, with no network call. The `verifyToken()` calls (Node.js, PHP) and `hearthMiddleware` additionally validate the token's Ed25519 signature against the realm's cached JWKS before the check.
+The local RBAC checks — `useHasPermission` (TypeScript), `HasPermission` (Go), `has_permission` (Python) — first verify the token's Ed25519 signature against the realm's cached JWKS, together with `exp`, `iss` and `aud`, and then read the `permissions` array embedded in the token at issue time by Hearth's RBAC engine. After the first JWKS fetch they make no network call. A token that does not verify has no permissions. The `verifyToken()` calls (Node.js, PHP) and `hearthMiddleware` perform the same verification.
+
+Every SDK checks the access token's `aud` against a configured audience, default `hearth` — the audience Hearth mints when a client names no resource. If your API is registered as a protected resource, set the SDK's audience option to its resource URI; see each [SDK guide](/docs/sdks/overview).
 
 Prefer no SDK? Verify tokens directly against the realm's JWKS endpoint — see [Token verification without an SDK](/docs/sdks/overview#token-verification-without-an-sdk).
 

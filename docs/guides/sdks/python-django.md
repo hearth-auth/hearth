@@ -50,6 +50,10 @@ The middleware extracts the Bearer token from the `Authorization` header on ever
 You can omit `HEARTH_CLIENT` and set `HEARTH_BASE_URL` + `HEARTH_REALM_ID` instead. The middleware constructs a `HearthClient` on startup. The pre-built `HEARTH_CLIENT` option is preferred because it lets you reuse a single client across middleware and other code.
 :::
 
+:::note[Audience]
+Token verification always checks `aud` against the client's `audience`, default `"hearth"` — the audience Hearth mints when a client names no resource. If your API is registered as a protected resource, build `HEARTH_CLIENT` with its resource URI: `HearthClient(..., audience="https://api.example.com")`. A client built from `HEARTH_BASE_URL` + `HEARTH_REALM_ID` uses the default. The client ID is not the audience.
+:::
+
 ## Access the token in a view
 
 ```python

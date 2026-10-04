@@ -74,11 +74,20 @@ use Hearth\HearthClient;
 $hearth = new HearthClient(
     issuerUrl: 'https://auth.example.com',  // root URL of your Hearth instance
     clientId:  'my-app',                     // OAuth client ID registered in Hearth
+    audience:  'https://api.example.com',    // expected `aud`; optional, default 'hearth'
 );
 ```
 
 `HearthClient` performs OIDC discovery lazily — the first call to any method fetches
 `/.well-known/openid-configuration` once and caches it for the lifetime of the object.
+
+**Audience.** `verifyToken()` always checks `aud` (RFC 9068 §4); the check cannot be
+turned off. The expected audience is the `audience` named argument (the last
+constructor parameter), default `'hearth'` (`TokenVerifier::DEFAULT_AUDIENCE`): the
+audience Hearth mints when a client names no resource. An API registered as a protected
+resource sets its resource URI. The client ID is not the audience: only ID tokens are
+checked against a client ID (OIDC Core). An empty `audience` throws
+`ConfigurationException`. `TokenVerifier` takes the same value as its third argument.
 
 ### 2. Verify a token
 
@@ -219,6 +228,7 @@ This creates `config/hearth.php`. Alternatively, set environment variables direc
 
 ```dotenv
 HEARTH_ISSUER_URL=https://auth.example.com
+HEARTH_AUDIENCE=https://api.example.com   # expected `aud`; omit for the default "hearth"
 HEARTH_CLIENT_ID=my-laravel-app
 HEARTH_CLIENT_SECRET=          # only required for introspection mode
 HEARTH_JWKS_TTL=300            # seconds; omit to use SDK default (300)
@@ -297,8 +307,8 @@ Primary entry point for resource-server and server-side authentication flows.
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `__construct(issuerUrl, clientId?, clientSecret?, jwksTtl?, introspectionEndpoint?, httpTimeout, tokenAuthorizationMode?, httpClient?, requestFactory?, streamFactory?)` | — | Constructs the client. All HTTP calls are lazy. |
-| `verifyToken(string $rawToken)` | `Claims` | Verifies signature, expiry, issuer, and audience. Throws typed exceptions on failure. |
+| `__construct(issuerUrl, clientId?, clientSecret?, jwksTtl?, introspectionEndpoint?, httpTimeout, tokenAuthorizationMode?, httpClient?, requestFactory?, streamFactory?, audience = 'hearth')` | — | Constructs the client. All HTTP calls are lazy. `audience` is the expected `aud` of verified access tokens. |
+| `verifyToken(string $rawToken)` | `Claims` | Verifies signature, expiry, issuer, and audience (always checked against `audience`). Throws typed exceptions on failure. |
 | `exchangeCode(string $code, string $redirectUri, ?string $codeVerifier)` | `TokenResponse` | Authorization code → tokens. |
 | `getUserInfo(string $accessToken)` | `UserInfoResponse` | Calls the OIDC UserInfo endpoint. |
 | `getJwksClient()` | `JwksClient` | Returns the cached JWKS sub-client. |
@@ -357,7 +367,7 @@ All SDK exceptions extend `Hearth\Exceptions\HearthException`.
 | `TokenSignatureException` | Ed25519 signature verification failed |
 | `TokenExpiredException` | Token `exp` claim is in the past |
 | `TokenIssuerException` | `iss` claim does not match `issuerUrl` |
-| `TokenAudienceException` | `aud` claim does not contain `clientId` |
+| `TokenAudienceException` | `aud` claim does not contain the configured `audience` (default `hearth`) |
 | `RequiredActionException` | Token type is `required_action` (e.g. password reset) |
 | `JwksException` | JWKS fetch or key-parse failure |
 | `IntrospectionException` | Introspection endpoint returned inactive/error |

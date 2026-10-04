@@ -36,11 +36,18 @@ import (
 client := hearth.NewClient(
     "https://hearth.example.com",
     "<realm-id>",
+    // Optional: the `aud` this API accepts. Default "hearth".
+    hearth.WithAudience("https://api.example.com"),
 )
 
 r := gin.Default()
 r.Use(hearthgin.HearthMiddleware(client))
 ```
+
+Token verification always checks `aud`. Leave out `WithAudience` to accept
+`"hearth"`, the audience Hearth mints when a client names no resource; an API
+registered as a protected resource sets its resource URI. The client ID is not
+the audience.
 
 `HearthMiddleware` reads `Authorization: Bearer <token>` and stores two values in the Gin context for downstream handlers and middleware to use:
 

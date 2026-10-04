@@ -203,7 +203,8 @@ import (
 func main() {
     ctx := context.Background()
     client := hearth.NewClient("http://127.0.0.1:8420", "<realm_id>",
-        hearth.WithClientCredentials("<client_id>", ""),
+        // Optional: the `aud` this API accepts. Default hearth.DefaultAudience ("hearth").
+        hearth.WithAudience("https://api.example.com"),
     )
 
     claims, err := client.VerifyToken(ctx, accessToken)
@@ -231,16 +232,29 @@ It never falls back to introspection.
 **How verification works.** The SDK has no signature code of its own. It uses
 `github.com/go-jose/go-jose/v4`: `jwt.ParseSigned` accepts `EdDSA` only, `Claims`
 checks the signature against the key found by `kid`, and `ValidateWithLeeway`
-checks `exp`, `nbf`, `iat`, `iss` (against the configured issuer) and `aud` (when
-`client_id` is set) with one 5 s clock-skew allowance. A `kid` still unknown after
-the re-fetch returns `*TokenInvalidError`; `*JWKSFetchError` means the JWKS
-endpoint itself failed. A token with an unknown `crit` header or `b64: false` is
-refused.
+checks `exp`, `nbf`, `iat`, `iss` (against the configured issuer) and `aud` with
+one 5 s clock-skew allowance. A `kid` still unknown after the re-fetch returns
+`*TokenInvalidError`; `*JWKSFetchError` means the JWKS endpoint itself failed. A
+token with an unknown `crit` header or `b64: false` is refused.
 
-Pass additional audience values as variadic arguments:
+### Audience
+
+`VerifyToken` always checks `aud` (RFC 9068 §4); the check cannot be turned
+off. The expected audience defaults to `hearth.DefaultAudience` (`"hearth"`),
+the audience Hearth mints when a client names no resource. If your API is
+registered as a protected resource, set its resource URI with
+`hearth.WithAudience("https://api.example.com")`. An empty value is ignored and
+keeps the default.
+
+The client ID is not the audience: only ID tokens are checked against a client
+ID (OIDC Core). A token whose `aud` does not contain the expected audience
+returns `*hearth.TokenAudienceError`.
+
+To expect a different audience for one call, pass it as the optional last
+argument; it overrides the client's audience:
 
 ```go
-claims, err := client.VerifyToken(ctx, token, "other-service")
+claims, err := client.VerifyToken(ctx, token, "https://other-api.example.com")
 ```
 
 ## Machine-to-machine (client credentials)
@@ -318,9 +332,9 @@ HTTP 429 is surfaced as `*hearth.APIError` with `StatusCode == 429`.
 These read the claims out of the JWT itself rather than asking the server for a
 freshly-resolved permission set. They still **verify the token first** — the
 signature is checked against the realm JWKS (cached, so usually no network
-round-trip) and `exp`/`nbf`/`iss` are enforced before any claim is read. Each
+round-trip) and `exp`/`nbf`/`iss`/`aud` are enforced before any claim is read. Each
 takes a `context.Context` for that verification and returns `false` for an
-empty, malformed, unsigned, expired or unknown-key token.
+empty, malformed, unsigned, expired, unknown-key or wrong-audience token.
 
 ```go
 // Returns true if the token verifies and its permissions claim contains this permission.

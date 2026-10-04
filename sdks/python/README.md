@@ -16,10 +16,29 @@ pip install hearth-sdk
 from hearth import HearthClient
 
 client = HearthClient(
-    issuer_url="https://hearth.example.com",
-    client_id="<your-client-id>",
+    base_url="https://hearth.example.com/realms/acme",  # the realm issuer
+    realm_id="acme",
+    audience="https://api.example.com",  # optional; default "hearth"
 )
+
+claims = client.verify_token(token)          # raises on a token that does not verify
+client.has_permission(token, "docs.write")   # verifies, then checks; False if it does not verify
 ```
+
+`has_permission`, `has_role`, `in_group` and `in_org` are instance methods.
+Each calls `verify_token` first and returns `False` for a token that does not
+verify.
+
+### Audience
+
+`verify_token` always checks `aud` (RFC 9068 §4); the check cannot be turned
+off. The expected audience is the `audience` keyword, default `"hearth"`
+(`hearth.client.DEFAULT_AUDIENCE`): the audience Hearth mints when a client
+names no resource. An API registered as a protected resource sets its resource
+URI. `verify_token(token, audience=...)` overrides it for one call, as does the
+FastAPI dependency's `audience=`. The client ID is not the audience: only ID
+tokens are checked against a client ID (OIDC Core). An empty `audience` raises
+`ConfigurationError`.
 
 ## Permission delivery modes
 
@@ -31,8 +50,8 @@ JWT claim presence.**
 ### embedded (default)
 
 Permissions are embedded in the JWT at issuance. The middleware verifies the
-token's Ed25519 signature against the realm's cached JWKS — plus `exp`, `nbf`
-and `iss` — before reading the `permissions` claim, so there is no per-request
+token's Ed25519 signature against the realm's cached JWKS — plus `exp`, `nbf`,
+`iss` and `aud` — before reading the `permissions` claim, so there is no per-request
 network call once the JWKS is warm. A token that does not verify is denied.
 
 Embedded mode therefore requires a `HearthClient` (it is what holds the JWKS
@@ -152,7 +171,7 @@ A non-success status raises `HearthError` (`status_code`, `message`).
 
 **`TokenInvalidError`** — JWT signature does not match any key in the JWKS. If the server recently rotated keys the SDK will re-fetch once automatically; persistent failures indicate a key mismatch.
 
-**`TokenAudienceError`** — the token's `aud` claim does not contain the configured audience. Verify `client_id` matches the audience your authorization server issues.
+**`TokenAudienceError`** — the token's `aud` claim does not contain the expected audience (`audience`, default `"hearth"`). Set `audience` to the resource URI the token was issued for; the client ID is not the audience.
 
 See [openspec/specs/sdk-support-contract/spec.md](../../openspec/specs/sdk-support-contract/spec.md) Section 5 for the full error taxonomy.
 

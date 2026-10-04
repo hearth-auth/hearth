@@ -30,8 +30,8 @@ Every storage location in the browser involves a trade-off between **XSS risk** 
 
 | Location | XSS risk | CSRF risk | Verdict |
 |---|---|---|---|
-| `localStorage` | **High** — any injected script reads it | None | **Never** — persists across tabs and page reloads, so a single XSS vulnerability exposes the token forever |
-| `sessionStorage` | **High** — same as localStorage within the tab | None | **Avoid** — marginally better scope, but still readable by injected scripts |
+| `localStorage` | **High** — any injected script reads it | None | **Avoid** — persists across tabs and browser restarts, so a single XSS bug exposes the token until it is revoked. `createHearthAuth` uses it only when you set `storage: "localStorage"` |
+| `sessionStorage` | **High** — same as localStorage within the tab | None | **Refresh token only, when there is no BFF** — scoped to one tab and cleared when it closes, but still readable by injected scripts. The `createHearthAuth` default for the refresh token, ID token and PKCE state |
 | JavaScript variable (in-memory) | Low — injected script must be active in the same execution context | None | **OK for access tokens** — lost on page reload, short-lived by design |
 | `HttpOnly` cookie (set by a BFF server) | None — JS cannot read `HttpOnly` cookies | Mitigated by `SameSite=Strict` | **Best for refresh tokens** — requires a server-side component |
 
@@ -44,7 +44,7 @@ Every storage location in the browser involves a trade-off between **XSS risk** 
 Use the PKCE Authorization Code flow (the TypeScript `createHearthAuth` browser facade wraps this for you). After the token exchange:
 
 - **Access token**: keep in a module-scoped JavaScript variable. Never write it to `localStorage` or `sessionStorage`. On page reload, silently re-acquire it with the refresh token or a `prompt=none` silent redirect.
-- **Refresh token**: for most SPAs, store in-memory alongside the access token. Hearth rotates refresh tokens on every use, so a copied token stops working the moment the legitimate client refreshes, and presenting a rotated-out token revokes the entire grant family and its session. Note what rotation does *not* buy you: if the thief redeems the stolen token before the legitimate client does, the thief gets the live chain and the legitimate client's next refresh is the presentation that trips detection. Rotation bounds the damage and guarantees you find out; it does not decide who wins the race.
+- **Refresh token**: keep it in `sessionStorage` (the `createHearthAuth` default), so the session survives a page reload and the login redirect while staying scoped to one tab. Hearth rotates refresh tokens on every use, so a copied token stops working the moment the legitimate client refreshes, and presenting a rotated-out token revokes the entire grant family and its session. Note what rotation does *not* buy you: if the thief redeems the stolen token before the legitimate client does, the thief gets the live chain and the legitimate client's next refresh is the presentation that trips detection. Rotation bounds the damage and guarantees you find out; it does not decide who wins the race.
 
 The `createHearthAuth` browser facade from `@hearth-auth/sdk` implements this pattern and handles PKCE, token storage, scheduled silent refresh, and RP-initiated logout:
 
@@ -64,16 +64,27 @@ const auth = createHearthAuth(apiClient, {
 await auth.startLogin();                         // redirects browser to Hearth login page
 
 // In your /callback route handler
-await auth.handleCallback(code, state);          // exchanges code, stores tokens in memory, schedules refresh
+await auth.handleCallback(code, state);          // exchanges code, stores tokens, schedules refresh
 
 // On API requests
-const token = getAccessToken();                  // returns the in-memory access token (null if not logged in)
+const token = auth.getAccessToken();             // returns the in-memory access token (null if not logged in)
 
 // On logout
 await auth.logout();                             // clears tokens, redirects to Hearth end-session endpoint
 ```
 
-`getAccessToken()` returns the in-memory access token. `getRefreshToken()` returns the refresh token from the same in-memory store — neither token is written to `localStorage` or `sessionStorage`. If you want stricter XSS isolation, the BFF pattern below eliminates browser-side token storage entirely.
+`auth.getAccessToken()` returns the access token, which is held in memory only. `auth.getRefreshToken()` and `auth.getIdToken()` read the configured store: `sessionStorage` by default, under keys prefixed `hearth_` (`storageKeyPrefix` changes the prefix). The PKCE verifier and `state` of a login in flight are kept there too. `auth.isAuthenticated()` and `auth.clearTokens()` complete the set.
+
+The `storage` option picks the store:
+
+| `storage` | Behaviour |
+|---|---|
+| `"sessionStorage"` (default) | Scoped to one tab; cleared when the tab closes |
+| `"localStorage"` | Survives the tab closing; shared by every tab of the origin |
+| `"memory"` | Nothing is written to Web Storage. Lost on reload and does not survive the login redirect, so use it only with a flow that stays on the page |
+| a `{ getItem, setItem, removeItem }` object | Your own store |
+
+At creation, `createHearthAuth` removes `hearth_refresh_token` and `hearth_id_token` from `localStorage` unless `localStorage` is the configured store. If you want stricter XSS isolation, the BFF pattern below eliminates browser-side token storage entirely.
 
 ---
 

@@ -4,6 +4,15 @@ All notable changes to `hearth-go` are documented here.
 
 ## [Unreleased]
 
+### Security
+- **Access-token audience is always checked** — `VerifyToken`, and the `HasPermission`,
+  `HasRole`, `InGroup` and `InOrg` helpers that call it, require `aud` to contain the
+  expected audience (RFC 9068 §4). New option `WithAudience("https://api.example.com")`
+  and const `DefaultAudience` (`"hearth"`, the audience Hearth mints when a client names
+  no resource). The optional per-call `audience` argument of `VerifyToken` overrides the
+  client's. The client ID is not used as the audience; an empty `WithAudience` value
+  keeps the default.
+
 ### Changed
 - **`StartWebAuthnRegistration` now requires a step-up proof (audit 2026-08-28 §4.18#2)** —
   the server refuses passkey enrolment carried by an access token alone with
