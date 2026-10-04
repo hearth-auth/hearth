@@ -1819,6 +1819,17 @@ pub struct AuthConfig {
     /// An unrecognised value is a hard error at config parse time.
     #[serde(default)]
     pub session_over_limit_policy: Option<String>,
+    /// Global default session idle timeout in seconds (A-18): a session not
+    /// refreshed for this long is rejected. Per-realm overrides via
+    /// `realms.<name>.session_idle_timeout_secs`. `None` disables it.
+    #[serde(default)]
+    pub session_idle_timeout_secs: Option<u32>,
+    /// Global default session absolute timeout in seconds (A-18): a session
+    /// older than this is rejected however often it is refreshed. Per-realm
+    /// overrides via `realms.<name>.session_absolute_timeout_secs`. `None`
+    /// disables it.
+    #[serde(default)]
+    pub session_absolute_timeout_secs: Option<u32>,
     /// Global default for "every user in this realm must hold a passkey".
     ///
     /// Inherited by every realm that does not set
@@ -2621,6 +2632,14 @@ pub struct RealmYamlConfig {
     /// a hard error at config parse time.
     #[serde(default)]
     pub session_over_limit_policy: Option<String>,
+    /// Session idle timeout in seconds for this realm (A-18).
+    /// Overrides global `auth.session_idle_timeout_secs`. `None` inherits it.
+    #[serde(default)]
+    pub session_idle_timeout_secs: Option<u32>,
+    /// Session absolute timeout in seconds for this realm (A-18).
+    /// Overrides global `auth.session_absolute_timeout_secs`. `None` inherits it.
+    #[serde(default)]
+    pub session_absolute_timeout_secs: Option<u32>,
     /// Argon2id memory cost override.
     #[serde(default)]
     pub password_memory_cost: Option<u32>,
@@ -3070,6 +3089,13 @@ impl RealmYamlConfig {
         let max_concurrent_sessions = self
             .session_max_concurrent
             .or(global.session_max_concurrent);
+        // A-18: the deadlines are embedded in each session at creation.
+        let idle_timeout_secs = self
+            .session_idle_timeout_secs
+            .or(global.session_idle_timeout_secs);
+        let absolute_timeout_secs = self
+            .session_absolute_timeout_secs
+            .or(global.session_absolute_timeout_secs);
 
         // SEC-3: Hard error on unrecognised policy string — never silently default.
         let raw_policy = self
@@ -3629,8 +3655,8 @@ impl RealmYamlConfig {
             session_version: crate::identity::SessionVersionConfig::default(),
             max_concurrent_sessions,
             session_over_limit_policy,
-            idle_timeout_secs: None,
-            absolute_timeout_secs: None,
+            idle_timeout_secs,
+            absolute_timeout_secs,
             // A-9 (§4.17#9): `realms.<name>.security.cidr_policy`. There was no
             // field to land in, so the documented block refused to boot and the
             // `CidrFilter` guard had no per-realm input.
@@ -4109,6 +4135,8 @@ mod tests {
             passkey_requires_mfa: None,
             session_max_concurrent: None,
             session_over_limit_policy: None,
+            session_idle_timeout_secs: None,
+            session_absolute_timeout_secs: None,
             webauthn_required: None,
             webauthn_resident_key: None,
             webauthn_user_verification: None,

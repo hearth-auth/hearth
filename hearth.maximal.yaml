@@ -228,6 +228,8 @@ auth:
   passkey_requires_mfa: false
   session_max_concurrent: 5
   session_over_limit_policy: "reject_new"   # reject_new | evict_oldest
+  session_idle_timeout_secs: 3600           # reject a session not refreshed for 1 h
+  session_absolute_timeout_secs: 86400      # reject any session older than 24 h
   # Global WebAuthn defaults; every realm inherits these unless it overrides
   # them under `realms.<name>.auth.webauthn_*`.
   webauthn_required: false                  # true = every user must hold a passkey
@@ -254,6 +256,8 @@ realms:
     session_ttl: "12h"
     session_max_concurrent: 3
     session_over_limit_policy: "evict_oldest"
+    session_idle_timeout_secs: 1800
+    session_absolute_timeout_secs: 43200
     password_memory_cost: 65536
     password_time_cost: 3
     rotate_signing_key: false               # set true once to rotate, auto-cleared

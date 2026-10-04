@@ -534,6 +534,8 @@ Global authentication defaults. These apply to all realms unless overridden per-
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `session_ttl` | duration | `"24h"` | Default session lifetime. |
+| `session_idle_timeout_secs` | integer | `null` (off) | Seconds a session may go without a refresh. A session not refreshed for this long is rejected (`401`), and the background sweep revokes it with a `session_evicted` audit event (`reason: idle_timeout`). Each refresh restarts the window. The deadline is fixed in the session at creation, so a later config change does not affect existing sessions. Per-realm `realms.<name>.session_idle_timeout_secs` overrides. |
+| `session_absolute_timeout_secs` | integer | `null` (off) | Seconds after creation at which a session is rejected however often it is refreshed (`reason: absolute_timeout`). Fixed in the session at creation. Per-realm `realms.<name>.session_absolute_timeout_secs` overrides. |
 | `password_memory_cost` | integer | `19456` | Argon2id memory parameter in KiB. Floored at the OWASP minimum — see below. |
 | `password_time_cost` | integer | `2` | Argon2id time parameter (iterations). Floored at the OWASP minimum — see below. |
 | `mfa_required` | bool | `true` when unset | Whether MFA is required for all users. MFA is required by default; set `false` to opt out. Per-realm `auth.mfa_required` overrides. When a realm's MFA is off, startup logs one `WARN` that names every such realm. Only a passkey (WebAuthn, user-verified), a TOTP code or a recovery code satisfies MFA. Email OTP and magic links do not. |
@@ -1122,6 +1124,8 @@ Each realm entry supports:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `session_ttl` | duration | inherits `auth.session_ttl` | Per-realm session lifetime override. |
+| `session_idle_timeout_secs` | integer | inherits `auth.session_idle_timeout_secs` | Per-realm session idle timeout in seconds. |
+| `session_absolute_timeout_secs` | integer | inherits `auth.session_absolute_timeout_secs` | Per-realm session absolute timeout in seconds. |
 | `password_memory_cost` | integer | inherits `auth.password_memory_cost` | Per-realm Argon2id memory cost. Subject to the [Argon2id cost floor](#argon2id-cost-floor). |
 | `password_time_cost` | integer | inherits `auth.password_time_cost` | Per-realm Argon2id time cost. Subject to the [Argon2id cost floor](#argon2id-cost-floor). |
 | `email` | object | — | Per-realm email branding overrides. |
@@ -2115,6 +2119,8 @@ Every field's default value at a glance.
 | `token` | `access_token_ttl` | `"15m"` |
 | `token` | `refresh_token_ttl` | `"7d"` |
 | `auth` | `session_ttl` | `"24h"` |
+| `auth` | `session_idle_timeout_secs` | `null` (no idle timeout) |
+| `auth` | `session_absolute_timeout_secs` | `null` (no absolute timeout) |
 | `auth` | `mfa_required` | `true` (MFA required; set `false` to opt out) |
 | `auth` | `passkey_requires_mfa` | `false` |
 | `auth` | `password_memory_cost` | `19456` (19 MiB) |

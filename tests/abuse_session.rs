@@ -530,3 +530,86 @@ fn a18_adversarial_reaper_noop_on_no_policy_realm() {
         "policy sweep must not evict TTL-expired sessions (is_valid handles that)"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A-18 — The session timeout keys load from hearth.yaml
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `auth.session_idle_timeout_secs` / `auth.session_absolute_timeout_secs`
+/// parse, reach every realm, and a per-realm value overrides the global one;
+/// a session left idle for more than the configured hour is then rejected.
+#[test]
+fn a18_session_timeout_keys_load_from_yaml() {
+    let config = hearth::config::Config::from_yaml_str_unchecked(
+        "auth:\n  mfa_required: false\n  session_idle_timeout_secs: 3600\n  \
+         session_absolute_timeout_secs: 86400\n\
+         realms:\n  acme:\n    session_idle_timeout_secs: 600\n    \
+         session_absolute_timeout_secs: 7200\n  plain: {}\n",
+    )
+    .expect("the session timeout keys must parse");
+    let realms = config.realms.as_ref().expect("realms block");
+
+    let acme = realms["acme"]
+        .to_realm_config(&config.auth, None)
+        .expect("acme realm config");
+    assert_eq!(
+        acme.idle_timeout_secs,
+        Some(600),
+        "realm idle overrides global"
+    );
+    assert_eq!(
+        acme.absolute_timeout_secs,
+        Some(7_200),
+        "realm absolute overrides global"
+    );
+
+    let plain = realms["plain"]
+        .to_realm_config(&config.auth, None)
+        .expect("plain realm config");
+    assert_eq!(
+        plain.idle_timeout_secs,
+        Some(3_600),
+        "global idle is inherited"
+    );
+    assert_eq!(
+        plain.absolute_timeout_secs,
+        Some(86_400),
+        "global absolute is inherited"
+    );
+
+    let (_dir, engine, clock) = make_timed_engine(START_MICROS);
+    let (realm_id, user_id) = make_realm_and_user(&engine, plain);
+    let session = engine
+        .create_session(&realm_id, &user_id, &SessionContext::default())
+        .expect("create session");
+
+    clock.advance(ONE_HOUR_MICROS - 1_000_000);
+    assert!(
+        engine
+            .get_session(&realm_id, session.id())
+            .expect("get_session")
+            .is_some(),
+        "a session idle for under an hour is still valid"
+    );
+
+    clock.advance(2_000_000);
+    assert!(
+        engine
+            .get_session(&realm_id, session.id())
+            .expect("get_session")
+            .is_none(),
+        "a session idle for more than an hour must be rejected"
+    );
+}
+
+/// With neither key set, no realm gets a timeout (`null` disables each one).
+#[test]
+fn a18_session_timeout_keys_default_to_none() {
+    let config =
+        hearth::config::Config::from_yaml_str_unchecked("realms:\n  plain: {}\n").expect("parse");
+    let plain = config.realms.as_ref().expect("realms")["plain"]
+        .to_realm_config(&config.auth, None)
+        .expect("realm config");
+    assert_eq!(plain.idle_timeout_secs, None);
+    assert_eq!(plain.absolute_timeout_secs, None);
+}
