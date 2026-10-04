@@ -16403,6 +16403,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             RateDecision::Allow => {}
         }
 
+        // Only an Active agent's keys authenticate: revoking or suspending
+        // the agent disables every key it holds.
+        let agent = IdentityEngine::get_agent(self, realm_id, agent_id)?
+            .ok_or(IdentityError::AgentNotFound)?;
+        if agent.status() != AgentStatus::Active {
+            return Err(IdentityError::AgentRevoked);
+        }
+
         // Compute SHA-256 of the supplied plaintext
         use sha2::{Digest, Sha256};
         use subtle::ConstantTimeEq;

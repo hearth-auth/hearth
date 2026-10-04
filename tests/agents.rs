@@ -742,6 +742,67 @@ async fn agent_api_key_revoked_key_does_not_verify() {
     assert!(!verified, "revoked key must not verify");
 }
 
+/// A key that is still active itself must stop verifying once its agent is
+/// revoked: only an `Active` agent's keys authenticate.
+#[tokio::test]
+async fn agent_api_key_of_revoked_agent_does_not_verify() {
+    let harness = common::TestHarness::in_process().await.expect("harness");
+    let identity = harness.identity();
+    let realm_id = make_realm(identity);
+    let user_id = make_user(identity, &realm_id);
+    let agent = create_agent(identity, &realm_id, &user_id, "Revoked Agent Key");
+
+    let resp = identity
+        .create_agent_api_key(
+            &realm_id,
+            agent.id(),
+            &CreateAgentApiKeyRequest { label: "a".into() },
+            None,
+        )
+        .expect("create key");
+    let key_hex = resp.plaintext_key.expose_once().to_string();
+
+    identity
+        .revoke_agent(&realm_id, agent.id(), None)
+        .expect("revoke agent");
+
+    let result = identity.verify_agent_api_key(&realm_id, agent.id(), &key_hex);
+    assert!(
+        matches!(result, Err(IdentityError::AgentRevoked)),
+        "a revoked agent's key must not verify, got {result:?}"
+    );
+}
+
+/// A suspended agent's keys do not verify either.
+#[tokio::test]
+async fn agent_api_key_of_suspended_agent_does_not_verify() {
+    let harness = common::TestHarness::in_process().await.expect("harness");
+    let identity = harness.identity();
+    let realm_id = make_realm(identity);
+    let user_id = make_user(identity, &realm_id);
+    let agent = create_agent(identity, &realm_id, &user_id, "Suspended Agent Key");
+
+    let resp = identity
+        .create_agent_api_key(
+            &realm_id,
+            agent.id(),
+            &CreateAgentApiKeyRequest { label: "s".into() },
+            None,
+        )
+        .expect("create key");
+    let key_hex = resp.plaintext_key.expose_once().to_string();
+
+    identity
+        .suspend_agent(&realm_id, agent.id(), None)
+        .expect("suspend agent");
+
+    let result = identity.verify_agent_api_key(&realm_id, agent.id(), &key_hex);
+    assert!(
+        matches!(result, Err(IdentityError::AgentRevoked)),
+        "a suspended agent's key must not verify, got {result:?}"
+    );
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // M1 — delete_agent cascade: credentials purged
 // ──────────────────────────────────────────────────────────────────────────────

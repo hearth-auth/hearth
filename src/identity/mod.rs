@@ -2633,6 +2633,10 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// Returns `true` if any active credential's hash matches. Uses
     /// constant-time comparison to prevent timing attacks.
+    ///
+    /// Only an `Active` agent's keys verify: returns `AgentRevoked` when the
+    /// agent is revoked or suspended, and `AgentNotFound` when it does not
+    /// exist.
     fn verify_agent_api_key(
         &self,
         realm_id: &RealmId,

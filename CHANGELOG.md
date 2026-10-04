@@ -140,6 +140,8 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   `<samlp:Status>`, for example, used to be ignored; it is now an error. Responses that sign the
   Response, the Assertion, or both are unaffected. The SP suite now also runs the eight published
   XML signature-wrapping variants (XSW1–XSW8).
+- **Agent API keys verify only while their agent is `Active`.** Revoking or suspending an agent
+  now disables every API key it holds; verification answers `AgentRevoked`.
 
 ### Fixed
 - The cluster-mode startup warning no longer says writes to a follower fail with HTTP 500
