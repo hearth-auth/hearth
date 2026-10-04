@@ -52,13 +52,20 @@ def sign_jwt(
     issuer: str | None = "http://localhost:8420",
     kid: str = TEST_KID,
 ) -> str:
-    """Sign *payload* with the suite's Ed25519 key, filling in iss/exp/iat."""
+    """Sign *payload* with the suite's Ed25519 key, filling in iss/aud/exp/iat.
+
+    ``aud`` defaults to ``"hearth"`` (the SDK's default audience); pass
+    ``aud=None`` in *payload* to leave the claim out.
+    """
     import jwt as pyjwt
 
     body = dict(payload)
     now = int(time.time())
     if issuer is not None:
         body.setdefault("iss", issuer)
+    body.setdefault("aud", "hearth")
+    if body["aud"] is None:
+        del body["aud"]
     body.setdefault("exp", now + 3600)
     body.setdefault("iat", now)
     return pyjwt.encode(body, _PRIVATE_KEY, algorithm="EdDSA", headers={"kid": kid})

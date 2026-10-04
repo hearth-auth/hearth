@@ -59,7 +59,7 @@ def _valid_payload(issuer: str = "http://localhost:8420") -> dict:
     return {
         "sub": "user-abc",
         "iss": issuer,
-        "aud": "client-1",
+        "aud": "hearth",
         "exp": now + 3600,
         "iat": now,
     }
@@ -362,14 +362,15 @@ class TestVerifyToken:
         claims = self._client().verify_token(token)
         assert claims.subject() == "user-abc"
 
-    def test_audience_check_skipped_when_not_specified(self, respx_mock):
-        """Without audience param, aud claim is not validated."""
+    def test_audience_checked_when_not_specified(self, respx_mock):
+        """Without an audience param, aud is checked against the default "hearth"."""
+        from hearth.errors import TokenAudienceError
+
         private_key, x_b64, kid = _make_ed25519_key()
         self._setup_jwks_mock(respx_mock, x_b64, kid)
-        token = _sign_jwt(private_key, _valid_payload(), kid)
-        # Should not raise TokenAudienceError
-        claims = self._client().verify_token(token)
-        assert claims.subject() == "user-abc"
+        token = _sign_jwt(private_key, {**_valid_payload(), "aud": "client-1"}, kid)
+        with pytest.raises(TokenAudienceError):
+            self._client().verify_token(token)
 
     def test_reuses_jwks_cache_on_second_call(self, respx_mock):
         """JWKS should not be re-fetched when cache is fresh."""

@@ -67,7 +67,14 @@ def _mixed_jwks(ed_private: Ed25519PrivateKey, rsa_private) -> dict:
 
 def _payload(**extra) -> dict:
     now = int(time.time())
-    return {"sub": "user-abc", "iss": ISSUER, "exp": now + 3600, "iat": now, **extra}
+    return {
+        "sub": "user-abc",
+        "iss": ISSUER,
+        "aud": "hearth",
+        "exp": now + 3600,
+        "iat": now,
+        **extra,
+    }
 
 
 def _client():
