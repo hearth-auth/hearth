@@ -129,6 +129,25 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   workflows and guides are gone.
 
 ### Security
+- **SDKs: the access-token audience is checked by default** (`sdk-security-defaults`). All four
+  SDKs gain an `audience` option, default `hearth`, the audience Hearth mints when a client names
+  no resource; an API registered as a protected resource sets its resource URI (RFC 9068 §4).
+  Every verification checks `aud` against it and throws `TokenAudienceError` on a mismatch; the
+  check cannot be turned off. The client ID is no longer used as the expected audience.
+  TypeScript `HearthClient({ audience })` and `JwksClient`; Go `hearth.WithAudience(...)`;
+  Python `HearthClient(..., audience=...)`; PHP `new HearthClient(..., audience: ...)` and the
+  Laravel `audience` key (`HEARTH_AUDIENCE`).
+- **TypeScript SDK: a token whose `iat` is in the future is refused.** `verifyToken` throws
+  `TokenInvalidError` when `iat` is more than the 5 s clock skew ahead, as the other SDKs do.
+- **TypeScript SDK: `createHearth` claim checks verify the token.** `hasPermission`, `hasRole`,
+  `inGroup` and `inOrg` verify the EdDSA signature against the realm JWKS and the registered
+  claims before they read a claim, and resolve `false` for a token that does not verify.
+- **Python SDK: `has_permission`, `has_role`, `in_group` and `in_org` verify the token.** They run
+  `verify_token` first and return `False` for a token that does not verify.
+- **TypeScript SDK: `createHearthAuth` keeps tokens in `sessionStorage` by default.** The refresh
+  token, ID token and PKCE state live in `sessionStorage` (the access token stays in memory),
+  and the refresh and ID tokens earlier releases kept in `localStorage` are removed when the
+  facade is created.
 - **`GET /admin/users/{id}/effective-permissions?org_id=` no longer reports a suspended
   organization's permissions.** The REST handler passed `org_id` straight to the resolver, so an
   administrator was shown org-scoped authority that tokens never carried; it now applies the
@@ -260,6 +279,20 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   short form was refused as "invalid status".
 
 ### Changed
+- **TypeScript SDK: `createHearth` predicates are async.** **BREAKING:** `hasPermission`,
+  `hasRole`, `inGroup` and `inOrg` return `Promise<boolean>`; `createHearth` takes a required
+  `issuerUrl` (the realm issuer) and an optional `audience`, and `getToken` may return a promise.
+  With session versions enabled the predicates reject with `SessionVersionRevokedError` or
+  `SessionVersionCacheStaleError`. The React hooks still return `boolean`: `false` until the
+  check resolves.
+- **TypeScript SDK: `createHearthAuth` storage options.** `AuthConfig` gains `storage`
+  (`"sessionStorage"`, the default; `"localStorage"`; `"memory"`; or a custom `TokenStorage`) and
+  `storageKeyPrefix` (default `hearth_`). **BREAKING:** the module-level `getAccessToken`,
+  `getRefreshToken`, `getIdToken`, `isAuthenticated` and `clearTokens` exports are removed; they
+  are methods of the object `createHearthAuth` returns, and token state is per instance.
+- **Python SDK: the RBAC predicates are instance methods.** **BREAKING:**
+  `HearthClient.has_permission`, `has_role`, `in_group` and `in_org` are no longer static; call
+  them on a client (`client.has_permission(token, "docs.write")`).
 - **SDKs: token signatures are verified by a standard JOSE library** (`sdk-standard-libraries`).
   No SDK contains its own signature code any more; `scripts/check-sdk-conformance.sh` fails on a
   direct verify call.
