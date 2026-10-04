@@ -391,6 +391,115 @@ async fn update_password_completion_issues_session_and_redirects_to_ui() {
     );
 }
 
+/// A login that passes through a required action rotates the session too:
+/// the session the browser already held is revoked, and the flow ends in a
+/// session with a new ID. The prior session belongs to another account so the
+/// password change (which revokes the user's own sessions) cannot be what
+/// ends it.
+#[tokio::test]
+async fn required_action_login_revokes_the_prior_session() {
+    use hearth::identity::SessionContext;
+    use hearth::protocol::web::auth::{issue_auth_cookies, SESSION_COOKIE};
+
+    let rig = build_rig(vec![RequiredAction::UpdatePassword]);
+    create_user(&rig, "upw-rotate@ra-browser.test");
+    let other = rig
+        .identity
+        .create_user(
+            &rig.realm_id,
+            &CreateUserRequest {
+                email: "prior-holder@ra-browser.test".to_string(),
+                display_name: "Prior Holder".to_string(),
+                first_name: "P".to_string(),
+                last_name: "H".to_string(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create other user");
+    let prior = rig
+        .identity
+        .create_session(&rig.realm_id, other.id(), &SessionContext::default())
+        .expect("prior session");
+    let prior_cookie = issue_auth_cookies(
+        &CookieSecret::from_bytes(COOKIE_SECRET),
+        &rig.realm_id,
+        prior.id(),
+        false,
+    )
+    .session_cookie;
+    let prior_pair = prior_cookie
+        .split(';')
+        .next()
+        .expect("cookie pair")
+        .to_string();
+
+    // 1. Login (the form lives under /ui, where the browser sends the
+    //    session cookie) → intercepted by the required action.
+    let login_resp = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/ui/realms/{}/login", rig.realm_name))
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, prior_pair.clone())
+                .body(Body::from(format!(
+                    "email={}&password={}",
+                    url_encode("upw-rotate@ra-browser.test"),
+                    url_encode(PASSWORD),
+                )))
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        location_of(&login_resp).as_deref(),
+        Some("/required-action/UPDATE_PASSWORD"),
+        "control: the login is intercepted by the required action"
+    );
+    let ra_cookie_val = find_cookie(&set_cookies(&login_resp), "hearth_ra_session")
+        .expect("RA session cookie must be set after login intercept");
+
+    // 2. Complete the action; the flow ends in a session.
+    let body = format!(
+        "current_password={}&new_password={}&confirm_password={}",
+        url_encode(PASSWORD),
+        url_encode(NEW_PASSWORD),
+        url_encode(NEW_PASSWORD),
+    );
+    let complete_resp = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/required-action/UPDATE_PASSWORD")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, format!("hearth_ra_session={ra_cookie_val}"))
+                .body(Body::from(with_ra_csrf(&ra_cookie_val, body)))
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(complete_resp.status(), StatusCode::SEE_OTHER);
+    let new_session = find_cookie(&set_cookies(&complete_resp), SESSION_COOKIE)
+        .expect("the completed flow sets a session cookie");
+    assert_ne!(
+        format!("{SESSION_COOKIE}={new_session}"),
+        prior_pair,
+        "the new session must have a new ID"
+    );
+
+    assert!(
+        rig.identity
+            .get_session(&rig.realm_id, prior.id())
+            .expect("look up prior session")
+            .is_none(),
+        "the session the browser held before the login must be revoked"
+    );
+}
+
 #[tokio::test]
 async fn update_password_completion_with_return_to_redirects_to_original_dest() {
     let rig = build_rig(vec![RequiredAction::UpdatePassword]);

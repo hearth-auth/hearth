@@ -257,22 +257,26 @@ async fn actor_with_no_permissions_yields_empty_delegated_permissions() {
     );
 }
 
-/// When no actor_token is provided, the client acts as itself and the subject's
-/// full permission set is preserved (no attenuation — actor_permissions defaults
-/// to subject_permissions, so intersection = subject's permissions).
+/// Without an `actor_token` the exchanging client is the actor, and a client
+/// holds no RBAC permissions, so the delegated token carries none of the
+/// subject's permissions.
 #[tokio::test]
-async fn no_actor_token_preserves_subject_permissions() {
+async fn no_actor_token_attenuates_to_client_permissions() {
     let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
 
-    let subject_token =
-        make_subject_token_with_perms(&h, &realm, &["docs.edit", "docs.view"], "openid");
+    let subject_token = make_subject_token_with_perms(
+        &h,
+        &realm,
+        &["docs.delete", "docs.edit", "docs.view"],
+        "openid",
+    );
 
     // Register a client_credentials client to act as the requester (no actor_token presented).
     let (client_id, _) = make_actor_token_no_rbac(h.identity(), &realm, "openid");
 
     let request = Rfc8693Request {
-        client_id,
+        client_id: client_id.clone(),
         subject_token,
         subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
         actor_token: None,
@@ -294,13 +298,18 @@ async fn no_actor_token_preserves_subject_permissions() {
         .validate_token(&realm, &resp.access_token)
         .expect("validate delegated token");
 
-    // Without an actor_token, actor_permissions = subject_permissions → full set preserved.
-    assert!(
-        delegated.permissions.contains(&"docs.edit".to_string()),
-        "docs.edit must be present when no actor_token is provided"
+    let act = delegated
+        .act
+        .as_ref()
+        .expect("delegated token must carry an act claim");
+    assert_eq!(
+        act.sub,
+        client_id.as_uuid().to_string(),
+        "act.sub must name the exchanging client"
     );
-    assert!(
-        delegated.permissions.contains(&"docs.view".to_string()),
-        "docs.view must be present when no actor_token is provided"
+    assert_eq!(
+        delegated.permissions,
+        [] as [String; 0],
+        "the exchanging client holds no permissions, so the delegated token carries none"
     );
 }

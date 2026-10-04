@@ -13,13 +13,16 @@ use std::sync::Arc;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use hearth::core::RealmId;
+use hearth::core::{PageRequest, RealmId, Timestamp};
 use hearth::identity::{
     CreateRealmRequest, CreateUserRequest, RealmConfig, RealmStatus, SessionContext,
 };
 use hearth::protocol::admin_auth::REALMS_ARE_YAML_MANAGED;
 use hearth::protocol::http::{router, AppState};
-use hearth::rbac::{AssignRoleRequest, Scope, Subject};
+use hearth::rbac::{
+    AssignRoleRequest, CreateRoleRequest, Group, GroupId, Role, RoleScopeKind, RoleSpec, Scope,
+    Subject,
+};
 use serde_json::{json, Value};
 use tower::ServiceExt as _;
 
@@ -252,4 +255,182 @@ async fn create_realm_is_refused_for_system_admin() {
             .is_none(),
         "no realm may be created by a refused call"
     );
+}
+
+// ── YAML-managed roles and groups (rbac-admin-api "Declarative RBAC") ───────
+
+/// A realm whose `hearth.yaml` declares the role `support.agent` (held by one
+/// user) and the group `ops`, plus a realm-admin token.
+fn realm_with_yaml_rbac(h: &common::TestHarness) -> (RealmId, String, Role, Group) {
+    let (realm, token) = tenant_realm_with_config(h);
+    h.rbac()
+        .reconcile_permissions(&realm, &["billing.read".to_string()])
+        .expect("reconcile permissions");
+    h.rbac()
+        .reconcile_roles(
+            &realm,
+            &[RoleSpec {
+                name: "support.agent".into(),
+                description: Some("declared".into()),
+                permissions: vec!["billing.read".into()],
+                parent_names: vec![],
+                scope_kind: RoleScopeKind::Realm,
+            }],
+        )
+        .expect("reconcile roles");
+    h.rbac()
+        .reconcile_groups(
+            &realm,
+            &[Group {
+                id: GroupId::generate(),
+                realm_id: realm.clone(),
+                name: "Ops".into(),
+                slug: "ops".into(),
+                description: Some("declared".into()),
+                created_at: Timestamp::from_micros(0),
+                updated_at: Timestamp::from_micros(0),
+                yaml_managed: true,
+            }],
+        )
+        .expect("reconcile groups");
+    let role = h
+        .rbac()
+        .get_role_by_name(&realm, "support.agent")
+        .expect("lookup")
+        .expect("declared role");
+    let holder = h
+        .identity()
+        .create_user(
+            &realm,
+            &CreateUserRequest {
+                email: format!("holder-{}@ga3.test", uuid::Uuid::new_v4()),
+                display_name: "Holder".into(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create holder");
+    h.rbac()
+        .assign_role(
+            &realm,
+            &AssignRoleRequest {
+                subject: Subject::User(holder.id().clone()),
+                role_id: role.id.clone(),
+                scope: Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("assign declared role");
+    let group_id = h
+        .rbac()
+        .list_groups(&realm, &PageRequest::default())
+        .expect("list groups")
+        .items
+        .into_iter()
+        .find(|g| g.slug == "ops")
+        .expect("declared group")
+        .id;
+    let group = h
+        .rbac()
+        .get_group(&realm, &group_id)
+        .expect("get")
+        .expect("group");
+    (realm, token, role, group)
+}
+
+fn assert_points_to_hearth_yaml(status: StatusCode, body: &Value) {
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "yaml_managed", "{body}");
+    assert!(
+        body["error_description"]
+            .as_str()
+            .is_some_and(|d| d.contains("hearth.yaml")),
+        "the refusal must name hearth.yaml: {body}"
+    );
+}
+
+/// Scenario "An admin edits a YAML-managed role".
+#[tokio::test]
+async fn a_yaml_managed_role_cannot_be_edited_at_runtime() {
+    let h = common::TestHarness::in_process().await.expect("harness");
+    let (realm, token, role, _) = realm_with_yaml_rbac(&h);
+    let uri = format!("/admin/roles/{}", role.id.as_uuid());
+
+    let (status, body) = rest(
+        &h,
+        "PATCH",
+        &uri,
+        &realm,
+        &token,
+        Some(&json!({"description": "edited at runtime"})),
+    )
+    .await;
+    assert_points_to_hearth_yaml(status, &body);
+    let stored = h
+        .rbac()
+        .get_role(&realm, &role.id)
+        .expect("get")
+        .expect("role");
+    assert_eq!(stored.description.as_deref(), Some("declared"));
+}
+
+/// Scenario "A YAML-managed role cannot be deleted at runtime": refused even
+/// with `cascade=true`, and the role and its assignment remain.
+#[tokio::test]
+async fn a_yaml_managed_role_cannot_be_deleted_at_runtime() {
+    let h = common::TestHarness::in_process().await.expect("harness");
+    let (realm, token, role, _) = realm_with_yaml_rbac(&h);
+
+    let uri = format!("/admin/roles/{}?cascade=true", role.id.as_uuid());
+    let (status, body) = rest(&h, "DELETE", &uri, &realm, &token, None).await;
+    assert_points_to_hearth_yaml(status, &body);
+    assert!(h.rbac().get_role(&realm, &role.id).expect("get").is_some());
+    let members = h
+        .rbac()
+        .list_role_members(&realm, &role.id, None, 10)
+        .expect("members");
+    assert_eq!(members.items.len(), 1, "the assignment remains");
+
+    // Control: a role created at runtime is still deletable.
+    let runtime = h
+        .rbac()
+        .create_role(
+            &realm,
+            &CreateRoleRequest {
+                name: "runtime.role".into(),
+                ..Default::default()
+            },
+        )
+        .expect("create runtime role");
+    let uri = format!("/admin/roles/{}?cascade=true", runtime.id.as_uuid());
+    let (status, body) = rest(&h, "DELETE", &uri, &realm, &token, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+}
+
+/// A group declared in `hearth.yaml` is refused the same way: it cannot be
+/// edited or deleted at runtime.
+#[tokio::test]
+async fn a_yaml_managed_group_cannot_be_edited_or_deleted_at_runtime() {
+    let h = common::TestHarness::in_process().await.expect("harness");
+    let (realm, token, _, group) = realm_with_yaml_rbac(&h);
+    assert!(group.yaml_managed, "reconciliation marks a declared group");
+    let uri = format!("/admin/groups/{}", group.id.as_uuid());
+
+    let (status, body) = rest(
+        &h,
+        "PATCH",
+        &uri,
+        &realm,
+        &token,
+        Some(&json!({"name": "Renamed"})),
+    )
+    .await;
+    assert_points_to_hearth_yaml(status, &body);
+
+    let (status, body) = rest(&h, "DELETE", &uri, &realm, &token, None).await;
+    assert_points_to_hearth_yaml(status, &body);
+
+    let stored = h.rbac().get_group(&realm, &group.id).expect("get");
+    assert_eq!(stored.map(|g| g.name).as_deref(), Some("Ops"));
 }

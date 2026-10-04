@@ -29,6 +29,7 @@ use crate::identity::{CleartextPassword, StepUpAssertion, StepUpProof};
 /// Deliberately implements neither `Debug` nor `Serialize`: `password` holds a
 /// live credential.
 #[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StepUpProofBody {
     /// The account's current password.
     #[serde(default)]
@@ -43,6 +44,7 @@ pub struct StepUpProofBody {
 
 /// Base64url-encoded assertion offered as a step-up proof.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StepUpAssertionBody {
     /// Credential ID the assertion was produced with.
     pub credential_id: String,

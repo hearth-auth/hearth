@@ -410,6 +410,7 @@ def _group(group_id, name, description=None):
         "name": name,
         "slug": name,
         "description": description,
+        "yaml_managed": False,
         "created_at": 1,
         "updated_at": 1,
     }

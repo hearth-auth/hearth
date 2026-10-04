@@ -1725,7 +1725,7 @@ const REALM_SCOPED_ADMIN_ROUTES: &[(&str, &str, &str)] = &[
     (
         "PUT",
         "/email-templates/verify_email",
-        r#"{"subject":"s","body":"b"}"#,
+        r#"{"default":{"subject":"s","text_body":"b"}}"#,
     ),
     ("DELETE", "/email-templates/verify_email", ""),
     ("PATCH", "/config", r#"{"default_required_actions":[]}"#),

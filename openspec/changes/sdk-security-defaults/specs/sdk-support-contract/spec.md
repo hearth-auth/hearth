@@ -8,7 +8,7 @@
 | 1 | The signature verifies against the cached JWKS. | `TokenInvalidError` |
 | 2 | `exp` is not in the past. | `TokenExpiredError` |
 | 3 | `iss` equals the configured issuer (TypeScript and PHP `issuerUrl`, Go `baseURL`, Python `base_url` or the `issuer_url` argument). The issuer in the discovery document does not replace it. | `TokenIssuerError` |
-| 4 | `aud` contains the configured `client_id`. Server SDKs only; configurable. | `TokenAudienceError` |
+| 4 | `aud` contains the configured `audience`: the name of the API that verifies the token (RFC 9068 §4). It defaults to `hearth`, the audience Hearth mints when a client names no resource; an API registered as a protected resource sets its resource URI. The check is always on. Server SDKs only. An ID token is checked against the client ID instead (OIDC Core §3.1.3.7). | `TokenAudienceError` |
 | 5 | `iat` is not in the future. | — |
 | 6 | When `nbf` is present, `now` is not before `nbf`. | `TokenNotYetValidError` |
 
@@ -38,9 +38,13 @@ The SDK need not run the checks in this order. A token with two faults (for exam
 - **WHEN** the TypeScript SDK verifies a token whose `iat` is 60 s in the future
 - **THEN** the SDK rejects the token
 
-#### Scenario: Go and Python check the audience by default
-- **WHEN** the Go or Python client is configured with a client ID, and verifies a token whose `aud` does not contain it, with no per-call audience
-- **THEN** the SDK throws `TokenAudienceError`
+#### Scenario: Every SDK checks the audience by default
+- **WHEN** an SDK is configured with no `audience` and no per-call audience, and verifies a token whose `aud` is `other-api`
+- **THEN** the SDK throws `TokenAudienceError`, because the default audience is `hearth`
+
+#### Scenario: A protected resource sets its audience
+- **WHEN** an SDK is configured with `audience` `https://api.example.com`, and verifies a token minted with `resource=https://api.example.com`
+- **THEN** the audience check passes
 
 ### Requirement: Claim checks verify the token signature
 An SDK MUST verify the JWT signature against the realm's JWKS when it takes in a token for claim checks, and MUST reject unsigned or tampered tokens. The SDK MUST NOT call `/v1/me/permissions` for routine `hasPermission` checks; that endpoint is the escape hatch, not the primary path.

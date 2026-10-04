@@ -240,7 +240,15 @@ impl Fixture {
         let (cdj, att) = authenticator.build_registration_response(&challenge, ORIGIN);
         self.h
             .identity()
-            .complete_webauthn_registration(&self.realm, &self.user, &cdj, &att, ORIGIN, true)
+            .complete_webauthn_registration(
+                &self.realm,
+                &self.user,
+                &cdj,
+                &att,
+                ORIGIN,
+                true,
+                &Default::default(),
+            )
             .expect("complete registration");
         URL_SAFE_NO_PAD.encode(&authenticator.credential_id)
     }

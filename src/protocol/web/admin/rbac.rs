@@ -1332,12 +1332,21 @@ pub async fn admin_role_edit_submit(
         Err(crate::rbac::RbacError::RoleNotFound) => {
             super::handlers_common::not_found("Role not found")
         }
-        Err(crate::rbac::RbacError::DuplicateRoleName) => {
+        Err(
+            e @ (crate::rbac::RbacError::DuplicateRoleName
+            | crate::rbac::RbacError::YamlManaged { .. }),
+        ) => {
+            let message = match e {
+                crate::rbac::RbacError::DuplicateRoleName => {
+                    "A role with that name already exists in this realm.".to_string()
+                }
+                // Names `hearth.yaml` as the place to change the role.
+                other => other.to_string(),
+            };
             match state.rbac.get_role(target.id(), &role_id) {
                 Ok(Some(role)) => {
                     let mut tpl = RoleEditTemplate::from_role(role, realm_name, &session, &state);
-                    tpl.error =
-                        Some("A role with that name already exists in this realm.".to_string());
+                    tpl.error = Some(message);
                     tpl.form_name = form.name.clone();
                     tpl.form_description = form.description.clone();
                     tpl.form_scope_kind = form.scope_kind.clone();
@@ -1360,6 +1369,7 @@ pub async fn admin_role_delete(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath((_realm_name, rid)): AxumPath<(String, String)>,
+    headers: axum::http::HeaderMap,
     FriendlyForm(form): FriendlyForm<DeleteForm>,
 ) -> Response {
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
@@ -1382,6 +1392,19 @@ pub async fn admin_role_delete(
         }
         Err(crate::rbac::RbacError::RoleNotFound) => {
             super::handlers_common::not_found("Role not found")
+        }
+        // A role declared in hearth.yaml: back to its page, saying where to
+        // change it.
+        Err(e @ crate::rbac::RbacError::YamlManaged { .. }) => {
+            super::templates::redirect_with_flash(
+                &format!(
+                    "/ui/admin/realms/{realm_name}/rbac/roles/{}",
+                    role_id.as_uuid()
+                ),
+                &e.to_string(),
+                "error",
+                state.is_secure_request(&headers),
+            )
         }
         Err(e) => {
             tracing::warn!(error = %e, "delete_role failed");

@@ -158,6 +158,91 @@ pub struct RegistrationOptions {
     pub discoverable: bool,
 }
 
+/// The client extension outputs of a registration ceremony — the
+/// `getClientExtensionResults()` object the browser returns with the new
+/// credential.
+///
+/// Only the outputs Hearth checks are read; any other extension output the
+/// client reports is ignored. These outputs are reported by the client, not
+/// signed by the authenticator.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ClientExtensionResults {
+    /// The `largeBlob` extension output (WebAuthn L3 §10.1.5).
+    #[serde(default, rename = "largeBlob", skip_serializing_if = "Option::is_none")]
+    pub large_blob: Option<LargeBlobOutputs>,
+}
+
+/// The `largeBlob` client extension output of a registration.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct LargeBlobOutputs {
+    /// Whether the new credential supports storing a large blob.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supported: Option<bool>,
+}
+
+impl ClientExtensionResults {
+    /// Whether the client reported `largeBlob.supported: true`.
+    #[must_use]
+    pub fn large_blob_supported(&self) -> bool {
+        self.large_blob
+            .as_ref()
+            .and_then(|lb| lb.supported)
+            .unwrap_or(false)
+    }
+}
+
+/// The extension inputs a registration ceremony's creation options carry —
+/// the `extensions` member of `PublicKeyCredentialCreationOptions`.
+///
+/// Built from the realm's attestation policy, so that an authenticator that
+/// supports what the policy requires reports it: a browser implements `prf`
+/// with the CTAP2 `hmac-secret` extension and reports `largeBlob.supported`
+/// only when asked.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct RegistrationExtensionInputs {
+    /// `prf: {}` — asks the authenticator to enable PRF for the credential.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prf: Option<PrfInputs>,
+    /// `largeBlob: {support: "required"}`.
+    #[serde(rename = "largeBlob", skip_serializing_if = "Option::is_none")]
+    pub large_blob: Option<LargeBlobInputs>,
+}
+
+/// The `prf` registration input. Empty: no evaluation at registration.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct PrfInputs {}
+
+/// The `largeBlob` registration input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LargeBlobInputs {
+    /// `"required"` — the ceremony fails on an authenticator without it.
+    pub support: &'static str,
+}
+
+impl RegistrationExtensionInputs {
+    /// The inputs a realm's attestation policy requires: `prf` for
+    /// `require_prf`, `largeBlob` for `require_large_blob`, none without a
+    /// policy.
+    #[must_use]
+    pub fn for_policy(policy: Option<&crate::identity::WebAuthnAttestationPolicy>) -> Self {
+        let Some(p) = policy else {
+            return Self::default();
+        };
+        Self {
+            prf: p.require_prf.then_some(PrfInputs {}),
+            large_blob: p.require_large_blob.then_some(LargeBlobInputs {
+                support: "required",
+            }),
+        }
+    }
+
+    /// Whether no extension is requested (the `extensions` member is omitted).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.prf.is_none() && self.large_blob.is_none()
+    }
+}
+
 /// Options for starting a `WebAuthn` authentication ceremony.
 #[derive(Debug, Clone)]
 pub struct AuthenticationOptions {
@@ -468,35 +553,37 @@ fn parse_authenticator_data(data: &[u8]) -> Result<AuthenticatorData, IdentityEr
     })
 }
 
-/// Checks whether the authenticator data extensions contain a `prf` entry.
+/// Checks whether the authenticator data extensions report PRF support: a
+/// `prf` entry, or `hmac-secret`, the CTAP2 extension PRF is built on.
 ///
 /// Per WebAuthn §6.1, extensions are present when bit 7 (ED flag, 0x80) of the flags
 /// byte is set. Extensions are CBOR-encoded after the `attestedCredentialData`. This
 /// function performs a best-effort CBOR parse of any trailing extension bytes; on any
-/// parse error it conservatively returns `false` (fail-open for non-PRF authenticators).
+/// parse error it returns `false` ("not reported").
 fn parse_extensions_has_prf(auth_data: &[u8]) -> bool {
     parse_extension_key_present(auth_data, "prf")
-}
-
-/// Checks whether the authenticator data extensions contain a `largeBlob` entry.
-///
-/// Same conservative semantics as [`parse_extensions_has_prf`].
-fn parse_extensions_has_large_blob(auth_data: &[u8]) -> bool {
-    parse_extension_key_present(auth_data, "largeBlob")
+        || parse_extension_value(auth_data, "hmac-secret")
+            .is_some_and(|v| v == ciborium::Value::Bool(true))
 }
 
 /// Parses the extension CBOR map from authenticator data and returns `true` if
 /// `key` is present (regardless of value). Returns `false` on any parse error.
 fn parse_extension_key_present(auth_data: &[u8], key: &str) -> bool {
+    parse_extension_value(auth_data, key).is_some()
+}
+
+/// Parses the extension CBOR map from authenticator data and returns the value
+/// under `key`. Returns `None` when it is absent or on any parse error.
+fn parse_extension_value(auth_data: &[u8], key: &str) -> Option<ciborium::Value> {
     // Minimum authenticator data without extensions: 37 bytes.
     // ED flag (bit 7) must be set for extensions to be present.
     if auth_data.len() < 37 {
-        return false;
+        return None;
     }
     let flags = auth_data[32];
     // ED flag (bit 7 = 0x80): extensions data present.
     if flags & 0x80 == 0 {
-        return false;
+        return None;
     }
 
     // Skip to the start of the extensions CBOR map.
@@ -505,12 +592,12 @@ fn parse_extension_key_present(auth_data: &[u8], key: &str) -> bool {
     let ext_offset = if flags & 0x40 != 0 {
         // attestedCredentialData: aaguid(16) + credIdLen(2) + credId + coseKey
         if auth_data.len() < 55 {
-            return false;
+            return None;
         }
         let cred_id_len = u16::from_be_bytes([auth_data[53], auth_data[54]]) as usize;
         let cose_key_start = 55 + cred_id_len;
         if auth_data.len() <= cose_key_start {
-            return false;
+            return None;
         }
         // The COSE key length is determined by parsing its CBOR. Use a
         // conservative approach: parse a CBOR value at cose_key_start and
@@ -519,22 +606,23 @@ fn parse_extension_key_present(auth_data: &[u8], key: &str) -> bool {
         let mut cursor = std::io::Cursor::new(cose_bytes);
         match ciborium::from_reader::<ciborium::Value, _>(&mut cursor) {
             Ok(_) => cose_key_start + cursor.position() as usize,
-            Err(_) => return false,
+            Err(_) => return None,
         }
     } else {
         37
     };
 
     if auth_data.len() <= ext_offset {
-        return false;
+        return None;
     }
 
     let ext_bytes = &auth_data[ext_offset..];
     match ciborium::from_reader::<ciborium::Value, _>(ext_bytes) {
         Ok(ciborium::Value::Map(entries)) => entries
-            .iter()
-            .any(|(k, _)| k.as_text().is_some_and(|t| t == key)),
-        _ => false,
+            .into_iter()
+            .find(|(k, _)| k.as_text().is_some_and(|t| t == key))
+            .map(|(_, v)| v),
+        _ => None,
     }
 }
 
@@ -860,7 +948,9 @@ pub(crate) fn registration_user_verified(
 /// the credential public key, and returns the credential info + stored record.
 ///
 /// `policy` is the realm-level attestation policy (A-13). `None` = no
-/// restrictions (fail-open per §6.1 of the abuse plan).
+/// restrictions (fail-open per §6.1 of the abuse plan). `client_extensions`
+/// is the client's `getClientExtensionResults()` for the ceremony; the
+/// policy's `require_large_blob` reads it.
 #[allow(clippy::too_many_lines)] // A-13 policy checks legitimately extend this function
 pub(crate) fn complete_registration(
     pending: &PendingWebAuthnChallenge,
@@ -869,6 +959,7 @@ pub(crate) fn complete_registration(
     origin: &str,
     now_micros: i64,
     policy: Option<&crate::identity::WebAuthnAttestationPolicy>,
+    client_extensions: &ClientExtensionResults,
 ) -> Result<(WebAuthnCredentialInfo, StoredWebAuthnCredential), IdentityError> {
     // 1. Parse and validate clientDataJSON
     let client_data = parse_client_data_json(client_data_json)?;
@@ -990,30 +1081,28 @@ pub(crate) fn complete_registration(
             }
         }
 
-        // A-13: enforce PRF / largeBlob extension requirements.
-        // The ED (extensions data present) flag is bit 7 (0x80) of the flags byte.
-        // We only check the clientExtensionResults here; since browsers return extension
-        // outputs in the attestation response, we parse them from the authenticator data
-        // extensions if ED flag is set. A missing extensions map is treated as "no
-        // extensions present" — which fails open on unknown extensions but fails closed
-        // when the realm requires one.
-        if p.require_prf || p.require_large_blob {
-            let has_prf = parse_extensions_has_prf(&att_obj.auth_data);
-            let has_large_blob = parse_extensions_has_large_blob(&att_obj.auth_data);
-
-            if p.require_prf && p.require_large_blob && !has_prf && !has_large_blob {
-                return Err(IdentityError::AttestationPolicyViolation {
-                    reason: "realm policy requires PRF or largeBlob extension support; authenticator reported neither".to_string(),
-                });
-            } else if p.require_prf && !p.require_large_blob && !has_prf && !has_large_blob {
-                return Err(IdentityError::AttestationPolicyViolation {
-                    reason: "realm policy requires PRF extension support; authenticator did not report it".to_string(),
-                });
-            } else if p.require_large_blob && !p.require_prf && !has_prf && !has_large_blob {
-                return Err(IdentityError::AttestationPolicyViolation {
-                    reason: "realm policy requires largeBlob extension support; authenticator did not report it".to_string(),
-                });
-            }
+        // A-13: enforce the PRF and largeBlob extension requirements, each on
+        // its own — support for one never satisfies the other.
+        //
+        // PRF: the authenticator reports it in the authenticator-data
+        // extensions (present when the ED flag, bit 7 / 0x80, is set), either
+        // as `prf` or — CTAP2 implements PRF on top of it — as `hmac-secret`.
+        // A missing or unparseable extensions map counts as "not reported".
+        if p.require_prf && !parse_extensions_has_prf(&att_obj.auth_data) {
+            return Err(IdentityError::AttestationPolicyViolation {
+                reason: "realm policy requires PRF extension support; authenticator did not \
+                         report it"
+                    .to_string(),
+            });
+        }
+        // largeBlob: support is reported only in the client extension
+        // results (`largeBlob.supported`), never in the authenticator data.
+        if p.require_large_blob && !client_extensions.large_blob_supported() {
+            return Err(IdentityError::AttestationPolicyViolation {
+                reason: "realm policy requires largeBlob extension support; the client did not \
+                         report it"
+                    .to_string(),
+            });
         }
     }
 
@@ -1309,9 +1398,36 @@ pub(crate) mod test_helper {
             challenge: &[u8],
             origin: &str,
         ) -> (Vec<u8>, Vec<u8>) {
+            self.build_registration_response_with_extensions(challenge, origin, &[])
+        }
+
+        /// As [`Self::build_registration_response`], with authenticator
+        /// extension outputs `{ name: bool }` after the attested credential
+        /// data (ED flag set) when `extensions` is non-empty.
+        pub fn build_registration_response_with_extensions(
+            &self,
+            challenge: &[u8],
+            origin: &str,
+            extensions: &[(&str, bool)],
+        ) -> (Vec<u8>, Vec<u8>) {
             let client_data_json =
                 Self::build_client_data_json("webauthn.create", challenge, origin);
-            let auth_data = self.build_auth_data(0, true);
+            let mut auth_data = self.build_auth_data(0, true);
+            if !extensions.is_empty() {
+                auth_data[32] |= 0x80;
+                let map = ciborium::Value::Map(
+                    extensions
+                        .iter()
+                        .map(|(k, v)| {
+                            (
+                                ciborium::Value::Text((*k).to_string()),
+                                ciborium::Value::Bool(*v),
+                            )
+                        })
+                        .collect(),
+                );
+                ciborium::into_writer(&map, &mut auth_data).expect("encode extensions");
+            }
 
             // Attestation object: { fmt: "none", attStmt: {}, authData: bytes }
             let att_obj = ciborium::Value::Map(vec![
@@ -1646,6 +1762,7 @@ mod tests {
             origin,
             1_000_000,
             None,
+            &ClientExtensionResults::default(),
         )
         .expect("registration should succeed");
 
@@ -1681,6 +1798,7 @@ mod tests {
             origin,
             1_000_000,
             None,
+            &ClientExtensionResults::default(),
         )
         .expect("packed self-attestation registration should succeed");
 
@@ -1746,8 +1864,16 @@ mod tests {
         let shorter = challenge[..CHALLENGE_SIZE - 1].to_vec();
         for wrong in [same_len, shorter] {
             let (cdj, att) = helper.build_registration_response(&wrong, origin);
-            let err = complete_registration(&pending, &cdj, &att, origin, 1_000_000, None)
-                .expect_err("a mismatched challenge must be refused");
+            let err = complete_registration(
+                &pending,
+                &cdj,
+                &att,
+                origin,
+                1_000_000,
+                None,
+                &ClientExtensionResults::default(),
+            )
+            .expect_err("a mismatched challenge must be refused");
             assert!(
                 matches!(
                     &err,
@@ -1776,9 +1902,16 @@ mod tests {
             created_at: 1_000_000,
         };
         let (reg_cdj, reg_att) = helper.build_registration_response(&reg_challenge, origin);
-        let (_info, stored) =
-            complete_registration(&reg_pending, &reg_cdj, &reg_att, origin, 1_000_000, None)
-                .expect("registration");
+        let (_info, stored) = complete_registration(
+            &reg_pending,
+            &reg_cdj,
+            &reg_att,
+            origin,
+            1_000_000,
+            None,
+            &ClientExtensionResults::default(),
+        )
+        .expect("registration");
 
         let auth_challenge = generate_challenge().expect("generate");
         let auth_pending = PendingWebAuthnChallenge {
@@ -1837,9 +1970,16 @@ mod tests {
             created_at: 1_000_000,
         };
         let (reg_cdj, reg_att) = helper.build_registration_response(&challenge, origin);
-        let (_info, stored) =
-            complete_registration(&reg_pending, &reg_cdj, &reg_att, origin, 1_000_000, None)
-                .expect("registration");
+        let (_info, stored) = complete_registration(
+            &reg_pending,
+            &reg_cdj,
+            &reg_att,
+            origin,
+            1_000_000,
+            None,
+            &ClientExtensionResults::default(),
+        )
+        .expect("registration");
 
         // Now authenticate
         let auth_challenge = generate_challenge().expect("generate");
@@ -1881,8 +2021,16 @@ mod tests {
             created_at: 1_000_000,
         };
         let (cdj, att) = helper.build_registration_response(&challenge, origin);
-        let (_info, mut stored) =
-            complete_registration(&reg_pending, &cdj, &att, origin, 1_000_000, None).expect("reg");
+        let (_info, mut stored) = complete_registration(
+            &reg_pending,
+            &cdj,
+            &att,
+            origin,
+            1_000_000,
+            None,
+            &ClientExtensionResults::default(),
+        )
+        .expect("reg");
 
         // Auth with counter=1
         let c1 = generate_challenge().expect("gen");
@@ -1938,8 +2086,16 @@ mod tests {
             created_at: 1_000_000,
         };
         let (cdj1, att1) = helper1.build_registration_response(&c1, origin);
-        let (info1, stored1) =
-            complete_registration(&p1, &cdj1, &att1, origin, 1_000_000, None).expect("reg1");
+        let (info1, stored1) = complete_registration(
+            &p1,
+            &cdj1,
+            &att1,
+            origin,
+            1_000_000,
+            None,
+            &ClientExtensionResults::default(),
+        )
+        .expect("reg1");
 
         // Register credential 2
         let c2 = generate_challenge().expect("gen");
@@ -1952,8 +2108,16 @@ mod tests {
             created_at: 1_000_000,
         };
         let (cdj2, att2) = helper2.build_registration_response(&c2, origin);
-        let (info2, stored2) =
-            complete_registration(&p2, &cdj2, &att2, origin, 1_000_000, None).expect("reg2");
+        let (info2, stored2) = complete_registration(
+            &p2,
+            &cdj2,
+            &att2,
+            origin,
+            1_000_000,
+            None,
+            &ClientExtensionResults::default(),
+        )
+        .expect("reg2");
 
         // Each credential has a unique ID
         assert_ne!(info1.credential_id(), info2.credential_id());
@@ -2018,9 +2182,16 @@ mod tests {
             created_at: 1_000_000,
         };
         let (reg_cdj, reg_att) = helper.build_registration_response(&reg_challenge, origin);
-        let (_info, stored) =
-            complete_registration(&reg_pending, &reg_cdj, &reg_att, origin, 1_000_000, None)
-                .expect("registration");
+        let (_info, stored) = complete_registration(
+            &reg_pending,
+            &reg_cdj,
+            &reg_att,
+            origin,
+            1_000_000,
+            None,
+            &ClientExtensionResults::default(),
+        )
+        .expect("registration");
 
         // Authenticate WITHOUT user_id in pending (username-less)
         let auth_challenge = generate_challenge().expect("gen");
@@ -2074,8 +2245,16 @@ mod tests {
             created_at: 1_000_000,
         };
         let (cdj, att) = helper.build_registration_response(&reg_c, origin);
-        let (_info, stored) =
-            complete_registration(&reg_p, &cdj, &att, origin, 1_000_000, None).expect("reg");
+        let (_info, stored) = complete_registration(
+            &reg_p,
+            &cdj,
+            &att,
+            origin,
+            1_000_000,
+            None,
+            &ClientExtensionResults::default(),
+        )
+        .expect("reg");
 
         // Try discoverable auth without providing userHandle
         let auth_c = generate_challenge().expect("gen");
@@ -2143,6 +2322,7 @@ mod tests {
             origin,
             1_000_000,
             None,
+            &ClientExtensionResults::default(),
         )
         .expect_err("tpm should be rejected");
         assert!(err.to_string().contains("unsupported attestation format"));
@@ -2206,6 +2386,7 @@ mod tests {
             origin,
             1_000_000,
             None,
+            &ClientExtensionResults::default(),
         )
         .expect_err("packed with x5c should be rejected");
         assert!(err
@@ -2234,9 +2415,16 @@ mod tests {
             created_at: 1_000_000,
         };
         let (reg_cdj, reg_att) = helper.build_registration_response(&reg_challenge, origin);
-        let (_info, mut stored) =
-            complete_registration(&reg_pending, &reg_cdj, &reg_att, origin, 1_000_000, None)
-                .expect("registration");
+        let (_info, mut stored) = complete_registration(
+            &reg_pending,
+            &reg_cdj,
+            &reg_att,
+            origin,
+            1_000_000,
+            None,
+            &ClientExtensionResults::default(),
+        )
+        .expect("registration");
 
         // First auth with counter=1 — should succeed
         {
@@ -2296,9 +2484,16 @@ mod tests {
             created_at: 1_000_000,
         };
         let (reg_cdj, reg_att) = helper.build_registration_response(&reg_challenge, origin);
-        let (_info, stored) =
-            complete_registration(&reg_pending, &reg_cdj, &reg_att, origin, 1_000_000, None)
-                .expect("registration");
+        let (_info, stored) = complete_registration(
+            &reg_pending,
+            &reg_cdj,
+            &reg_att,
+            origin,
+            1_000_000,
+            None,
+            &ClientExtensionResults::default(),
+        )
+        .expect("registration");
         assert_eq!(stored.sign_count, 0);
 
         // Auth with counter=0 when stored is also 0 — accepted (both-zero exception)
@@ -2338,9 +2533,16 @@ mod tests {
             created_at: 1_000_000,
         };
         let (reg_cdj, reg_att) = helper.build_registration_response(&reg_challenge, origin);
-        let (_info, stored) =
-            complete_registration(&reg_pending, &reg_cdj, &reg_att, origin, 1_000_000, None)
-                .expect("registration");
+        let (_info, stored) = complete_registration(
+            &reg_pending,
+            &reg_cdj,
+            &reg_att,
+            origin,
+            1_000_000,
+            None,
+            &ClientExtensionResults::default(),
+        )
+        .expect("registration");
 
         // Build authenticator data with wrong RP ID hash
         let challenge = generate_challenge().expect("gen");
@@ -2398,9 +2600,16 @@ mod tests {
             created_at: 1_000_000,
         };
         let (reg_cdj, reg_att) = helper.build_registration_response(&reg_challenge, origin);
-        let (_info, stored) =
-            complete_registration(&reg_pending, &reg_cdj, &reg_att, origin, 1_000_000, None)
-                .expect("registration");
+        let (_info, stored) = complete_registration(
+            &reg_pending,
+            &reg_cdj,
+            &reg_att,
+            origin,
+            1_000_000,
+            None,
+            &ClientExtensionResults::default(),
+        )
+        .expect("registration");
 
         // Build a legitimate authentication response
         let real_challenge = generate_challenge().expect("gen");
@@ -2455,9 +2664,16 @@ mod tests {
             created_at: 1_000_000,
         };
         let (reg_cdj, reg_att) = helper.build_registration_response(&reg_challenge, origin);
-        let (_info, stored) =
-            complete_registration(&reg_pending, &reg_cdj, &reg_att, origin, 1_000_000, None)
-                .expect("registration");
+        let (_info, stored) = complete_registration(
+            &reg_pending,
+            &reg_cdj,
+            &reg_att,
+            origin,
+            1_000_000,
+            None,
+            &ClientExtensionResults::default(),
+        )
+        .expect("registration");
 
         // Build clientDataJSON with wrong origin
         let challenge = generate_challenge().expect("gen");
@@ -2529,8 +2745,16 @@ mod tests {
         assert_eq!(client_data["origin"], origin);
 
         // Registration should succeed with all fields valid
-        let (info, stored) = complete_registration(&pending, &cdj, &att, origin, 1_000_000, None)
-            .expect("conformant registration");
+        let (info, stored) = complete_registration(
+            &pending,
+            &cdj,
+            &att,
+            origin,
+            1_000_000,
+            None,
+            &ClientExtensionResults::default(),
+        )
+        .expect("conformant registration");
 
         // Verify credential info
         assert_ne!(info.credential_id(), [] as [u8; 0]);
@@ -2544,7 +2768,15 @@ mod tests {
             "origin": origin,
         }))
         .expect("json");
-        let err = complete_registration(&pending, &wrong_type_cdj, &att, origin, 1_000_000, None);
+        let err = complete_registration(
+            &pending,
+            &wrong_type_cdj,
+            &att,
+            origin,
+            1_000_000,
+            None,
+            &ClientExtensionResults::default(),
+        );
         assert!(err.is_err());
     }
 
@@ -2571,9 +2803,16 @@ mod tests {
             created_at: 1_000_000,
         };
         let (reg_cdj, reg_att) = helper.build_registration_response(&reg_c, origin);
-        let (_info, stored) =
-            complete_registration(&reg_p, &reg_cdj, &reg_att, origin, 1_000_000, None)
-                .expect("reg");
+        let (_info, stored) = complete_registration(
+            &reg_p,
+            &reg_cdj,
+            &reg_att,
+            origin,
+            1_000_000,
+            None,
+            &ClientExtensionResults::default(),
+        )
+        .expect("reg");
 
         // Authenticate
         let auth_c = generate_challenge().expect("gen");
@@ -2713,6 +2952,7 @@ mod tests {
             origin,
             1_000_000,
             Some(&policy),
+            &ClientExtensionResults::default(),
         )
         .expect_err("should reject none attestation");
 
@@ -2755,6 +2995,7 @@ mod tests {
             origin,
             1_000_000,
             Some(&policy),
+            &ClientExtensionResults::default(),
         )
         .expect_err("should reject AAGUID not in allowlist");
 
@@ -2797,6 +3038,7 @@ mod tests {
             origin,
             1_000_000,
             Some(&policy),
+            &ClientExtensionResults::default(),
         )
         .expect("registration should pass for AAGUID in allowlist");
     }
@@ -2827,7 +3069,182 @@ mod tests {
             origin,
             1_000_000,
             None,
+            &ClientExtensionResults::default(),
         )
         .expect("registration should succeed with no policy");
+    }
+
+    // ====================================================================
+    // A-13: `require_prf` and `require_large_blob` are independent checks
+    // ====================================================================
+
+    /// Runs `complete_registration` under a policy that sets only the two
+    /// extension requirements, with the given authenticator extension
+    /// outputs and client extension results.
+    fn register_under_extension_policy(
+        require_prf: bool,
+        require_large_blob: bool,
+        authenticator_extensions: &[(&str, bool)],
+        client_extensions: &ClientExtensionResults,
+    ) -> Result<(WebAuthnCredentialInfo, StoredWebAuthnCredential), IdentityError> {
+        let helper = WebAuthnTestHelper::new("example.com");
+        let challenge = generate_challenge().expect("generate");
+        let origin = "https://example.com";
+        let pending = PendingWebAuthnChallenge {
+            challenge: challenge.clone(),
+            rp_id: "example.com".to_string(),
+            user_id: Some(UserId::generate()),
+            realm_id: test_realm(),
+            ceremony_type: CeremonyType::Registration,
+            created_at: 1_000_000,
+        };
+        let (client_data_json, attestation_object) = helper
+            .build_registration_response_with_extensions(
+                &challenge,
+                origin,
+                authenticator_extensions,
+            );
+        let policy = crate::identity::WebAuthnAttestationPolicy {
+            allow_none: true,
+            aaguid_allowlist: vec![],
+            require_prf,
+            require_large_blob,
+        };
+        complete_registration(
+            &pending,
+            &client_data_json,
+            &attestation_object,
+            origin,
+            1_000_000,
+            Some(&policy),
+            client_extensions,
+        )
+    }
+
+    fn large_blob(supported: bool) -> ClientExtensionResults {
+        ClientExtensionResults {
+            large_blob: Some(LargeBlobOutputs {
+                supported: Some(supported),
+            }),
+        }
+    }
+
+    fn assert_policy_violation(
+        res: Result<(WebAuthnCredentialInfo, StoredWebAuthnCredential), IdentityError>,
+        case: &str,
+    ) {
+        assert!(
+            matches!(res, Err(IdentityError::AttestationPolicyViolation { .. })),
+            "{case}: expected AttestationPolicyViolation, got {res:?}"
+        );
+    }
+
+    #[test]
+    fn require_prf_is_not_satisfied_by_large_blob() {
+        assert_policy_violation(
+            register_under_extension_policy(true, false, &[("largeBlob", true)], &large_blob(true)),
+            "largeBlob in authData and client results",
+        );
+        assert_policy_violation(
+            register_under_extension_policy(true, false, &[], &ClientExtensionResults::default()),
+            "no extension",
+        );
+        assert_policy_violation(
+            register_under_extension_policy(
+                true,
+                false,
+                &[("hmac-secret", false)],
+                &ClientExtensionResults::default(),
+            ),
+            "hmac-secret: false",
+        );
+    }
+
+    #[test]
+    fn require_prf_accepts_prf_or_hmac_secret() {
+        for ext in ["prf", "hmac-secret"] {
+            register_under_extension_policy(
+                true,
+                false,
+                &[(ext, true)],
+                &ClientExtensionResults::default(),
+            )
+            .unwrap_or_else(|e| panic!("{ext}: PRF evidence must satisfy require_prf: {e:?}"));
+        }
+    }
+
+    #[test]
+    fn require_large_blob_reads_client_extension_results() {
+        assert_policy_violation(
+            register_under_extension_policy(
+                false,
+                true,
+                &[("hmac-secret", true)],
+                &ClientExtensionResults::default(),
+            ),
+            "PRF only",
+        );
+        assert_policy_violation(
+            register_under_extension_policy(false, true, &[], &large_blob(false)),
+            "largeBlob.supported = false",
+        );
+        register_under_extension_policy(false, true, &[], &large_blob(true))
+            .expect("largeBlob.supported = true satisfies require_large_blob");
+    }
+
+    #[test]
+    fn require_prf_and_large_blob_each_checked() {
+        assert_policy_violation(
+            register_under_extension_policy(
+                true,
+                true,
+                &[("hmac-secret", true)],
+                &ClientExtensionResults::default(),
+            ),
+            "PRF without largeBlob",
+        );
+        assert_policy_violation(
+            register_under_extension_policy(true, true, &[], &large_blob(true)),
+            "largeBlob without PRF",
+        );
+        register_under_extension_policy(true, true, &[("hmac-secret", true)], &large_blob(true))
+            .expect("both satisfied");
+    }
+
+    #[test]
+    fn registration_extension_inputs_follow_the_policy() {
+        let policy = |require_prf, require_large_blob| crate::identity::WebAuthnAttestationPolicy {
+            allow_none: true,
+            aaguid_allowlist: vec![],
+            require_prf,
+            require_large_blob,
+        };
+        assert!(RegistrationExtensionInputs::for_policy(None).is_empty());
+        assert!(RegistrationExtensionInputs::for_policy(Some(&policy(false, false))).is_empty());
+        let json = |p| {
+            serde_json::to_value(RegistrationExtensionInputs::for_policy(Some(&p)))
+                .expect("serialize")
+        };
+        assert_eq!(json(policy(true, false)), serde_json::json!({ "prf": {} }));
+        assert_eq!(
+            json(policy(false, true)),
+            serde_json::json!({ "largeBlob": { "support": "required" } })
+        );
+        assert_eq!(
+            json(policy(true, true)),
+            serde_json::json!({ "prf": {}, "largeBlob": { "support": "required" } })
+        );
+    }
+
+    #[test]
+    fn client_extension_results_parse_large_blob_and_ignore_other_outputs() {
+        let parsed: ClientExtensionResults = serde_json::from_value(serde_json::json!({
+            "largeBlob": { "supported": true },
+            "credProps": { "rk": true },
+            "prf": { "enabled": true }
+        }))
+        .expect("parse client extension results");
+        assert!(parsed.large_blob_supported());
+        assert!(!ClientExtensionResults::default().large_blob_supported());
     }
 }

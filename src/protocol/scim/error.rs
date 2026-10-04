@@ -172,7 +172,9 @@ pub fn from_identity_error(err: &crate::identity::IdentityError) -> ScimError {
         IdentityError::UserNotFound | IdentityError::OrganizationNotFound => {
             ScimError::not_found("resource not found")
         }
-        IdentityError::DuplicateEmail => ScimError::uniqueness("userName/email already in use"),
+        IdentityError::DuplicateEmail | IdentityError::EmailReserved => {
+            ScimError::uniqueness("userName/email already in use")
+        }
         IdentityError::DuplicateScimExternalId => {
             ScimError::uniqueness("externalId already in use")
         }

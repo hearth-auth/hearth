@@ -36,6 +36,12 @@ class AdminGroup implements AdditionalPropertiesInterface
      */
     protected $description;
     /**
+     * Declared in hearth.yaml; the admin API cannot change or delete it.
+     *
+     * @var bool|null
+     */
+    protected $yamlManaged;
+    /**
      * Microseconds since the Unix epoch.
      *
      * @var int|null
@@ -138,6 +144,28 @@ class AdminGroup implements AdditionalPropertiesInterface
         return $this;
     }
     /**
+     * Declared in hearth.yaml; the admin API cannot change or delete it.
+     *
+     * @return bool|null
+     */
+    public function getYamlManaged(): ?bool
+    {
+        return $this->yamlManaged;
+    }
+    /**
+     * Declared in hearth.yaml; the admin API cannot change or delete it.
+     *
+     * @param bool|null $yamlManaged
+     *
+     * @return self
+     */
+    public function setYamlManaged(?bool $yamlManaged): self
+    {
+        $this->initialized['yamlManaged'] = true;
+        $this->yamlManaged = $yamlManaged;
+        return $this;
+    }
+    /**
      * Microseconds since the Unix epoch.
      *
      * @return int|null
@@ -183,6 +211,6 @@ class AdminGroup implements AdditionalPropertiesInterface
     }
     public function definedProperties(): array
     {
-        return ['id' => ['id', 'getId', 'setId'], 'realmId' => ['realm_id', 'getRealmId', 'setRealmId'], 'name' => ['name', 'getName', 'setName'], 'slug' => ['slug', 'getSlug', 'setSlug'], 'description' => ['description', 'getDescription', 'setDescription'], 'createdAt' => ['created_at', 'getCreatedAt', 'setCreatedAt'], 'updatedAt' => ['updated_at', 'getUpdatedAt', 'setUpdatedAt']];
+        return ['id' => ['id', 'getId', 'setId'], 'realmId' => ['realm_id', 'getRealmId', 'setRealmId'], 'name' => ['name', 'getName', 'setName'], 'slug' => ['slug', 'getSlug', 'setSlug'], 'description' => ['description', 'getDescription', 'setDescription'], 'yamlManaged' => ['yaml_managed', 'getYamlManaged', 'setYamlManaged'], 'createdAt' => ['created_at', 'getCreatedAt', 'setCreatedAt'], 'updatedAt' => ['updated_at', 'getUpdatedAt', 'setUpdatedAt']];
     }
 }

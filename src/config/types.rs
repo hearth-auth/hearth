@@ -1819,6 +1819,17 @@ pub struct AuthConfig {
     /// An unrecognised value is a hard error at config parse time.
     #[serde(default)]
     pub session_over_limit_policy: Option<String>,
+    /// Global default session idle timeout in seconds (A-18): a session not
+    /// refreshed for this long is rejected. Per-realm overrides via
+    /// `realms.<name>.session_idle_timeout_secs`. `None` disables it.
+    #[serde(default)]
+    pub session_idle_timeout_secs: Option<u32>,
+    /// Global default session absolute timeout in seconds (A-18): a session
+    /// older than this is rejected however often it is refreshed. Per-realm
+    /// overrides via `realms.<name>.session_absolute_timeout_secs`. `None`
+    /// disables it.
+    #[serde(default)]
+    pub session_absolute_timeout_secs: Option<u32>,
     /// Global default for "every user in this realm must hold a passkey".
     ///
     /// Inherited by every realm that does not set
@@ -2621,6 +2632,14 @@ pub struct RealmYamlConfig {
     /// a hard error at config parse time.
     #[serde(default)]
     pub session_over_limit_policy: Option<String>,
+    /// Session idle timeout in seconds for this realm (A-18).
+    /// Overrides global `auth.session_idle_timeout_secs`. `None` inherits it.
+    #[serde(default)]
+    pub session_idle_timeout_secs: Option<u32>,
+    /// Session absolute timeout in seconds for this realm (A-18).
+    /// Overrides global `auth.session_absolute_timeout_secs`. `None` inherits it.
+    #[serde(default)]
+    pub session_absolute_timeout_secs: Option<u32>,
     /// Argon2id memory cost override.
     #[serde(default)]
     pub password_memory_cost: Option<u32>,
@@ -3070,6 +3089,13 @@ impl RealmYamlConfig {
         let max_concurrent_sessions = self
             .session_max_concurrent
             .or(global.session_max_concurrent);
+        // A-18: the deadlines are embedded in each session at creation.
+        let idle_timeout_secs = self
+            .session_idle_timeout_secs
+            .or(global.session_idle_timeout_secs);
+        let absolute_timeout_secs = self
+            .session_absolute_timeout_secs
+            .or(global.session_absolute_timeout_secs);
 
         // SEC-3: Hard error on unrecognised policy string — never silently default.
         let raw_policy = self
@@ -3480,6 +3506,7 @@ impl RealmYamlConfig {
                 description: g.description.clone(),
                 created_at: crate::core::Timestamp::from_micros(0),
                 updated_at: crate::core::Timestamp::from_micros(0),
+                yaml_managed: true,
             })
             .collect();
 
@@ -3629,8 +3656,8 @@ impl RealmYamlConfig {
             session_version: crate::identity::SessionVersionConfig::default(),
             max_concurrent_sessions,
             session_over_limit_policy,
-            idle_timeout_secs: None,
-            absolute_timeout_secs: None,
+            idle_timeout_secs,
+            absolute_timeout_secs,
             // A-9 (§4.17#9): `realms.<name>.security.cidr_policy`. There was no
             // field to land in, so the documented block refused to boot and the
             // `CidrFilter` guard had no per-realm input.
@@ -3751,6 +3778,22 @@ impl ClusterConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn url_host_takes_only_the_host_of_an_issuer() {
+        assert_eq!(
+            url_host("https://auth.example.com"),
+            Some("auth.example.com")
+        );
+        assert_eq!(
+            url_host("https://auth.example.com:8443/realms/x?a=b"),
+            Some("auth.example.com")
+        );
+        assert_eq!(url_host("http://user@10.0.0.1:80/"), Some("10.0.0.1"));
+        assert_eq!(url_host("https://[::1]:8420/"), Some("[::1]"));
+        assert_eq!(url_host("https:///path"), None);
+        assert_eq!(url_host("ftp://auth.example.com"), None);
+    }
 
     #[test]
     fn server_config_defaults() {
@@ -4093,6 +4136,8 @@ mod tests {
             passkey_requires_mfa: None,
             session_max_concurrent: None,
             session_over_limit_policy: None,
+            session_idle_timeout_secs: None,
+            session_absolute_timeout_secs: None,
             webauthn_required: None,
             webauthn_resident_key: None,
             webauthn_user_verification: None,
@@ -4237,4 +4282,42 @@ pub struct Config {
     /// fail closed on the same set.
     #[serde(skip)]
     pub key_liveness_issues: Vec<ValidationIssue>,
+}
+
+impl Config {
+    /// The `Host` allowlist the HTTP listener enforces (A-40).
+    ///
+    /// `security.allowed_hosts` when set; otherwise the host of `oidc.issuer`,
+    /// which production configuration requires. With neither (reachable only
+    /// under `--dev`, where validation does not demand an issuer) the list is
+    /// `["localhost"]`, so with the dev-mode loopback grace only loopback
+    /// hosts are admitted.
+    ///
+    /// The result is never empty: an empty list disables the check.
+    #[must_use]
+    pub fn effective_allowed_hosts(&self) -> Vec<String> {
+        if !self.security.allowed_hosts.is_empty() {
+            return self.security.allowed_hosts.clone();
+        }
+        if let Some(host) = self.oidc.issuer.as_deref().and_then(url_host) {
+            return vec![host.to_string()];
+        }
+        vec!["localhost".to_string()]
+    }
+}
+
+/// The host component of an absolute `http(s)://` URL, without userinfo or
+/// port. IPv6 literals keep their brackets. `None` when there is no host.
+fn url_host(url: &str) -> Option<&str> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, hp)| hp);
+    let host = if host_port.starts_with('[') {
+        host_port.split_inclusive(']').next().unwrap_or(host_port)
+    } else {
+        host_port.split(':').next().unwrap_or(host_port)
+    };
+    (!host.is_empty()).then_some(host)
 }

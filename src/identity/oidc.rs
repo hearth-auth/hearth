@@ -1071,6 +1071,7 @@ impl std::str::FromStr for ResponseMode {
 }
 
 /// Request to initiate an OAuth 2.0 authorization.
+// A-47 exception: RFC 6749 §3.1 — unknown request parameters are ignored, not refused.
 #[derive(Debug, Clone)]
 pub struct AuthorizationRequest {
     /// The client requesting authorization.
@@ -1682,6 +1683,7 @@ pub struct PendingDeviceAuthorization {
 }
 
 /// Request for the Device Authorization Grant (RFC 8628).
+// A-47 exception: RFC 6749 §3.1 — unknown request parameters are ignored, not refused.
 #[derive(Debug, Clone)]
 pub struct DeviceAuthorizationRequest {
     /// The client requesting device authorization.

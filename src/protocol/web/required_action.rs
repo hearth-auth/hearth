@@ -363,6 +363,17 @@ pub fn required_action_check_browser(
         }
     };
 
+    // A-41: the login continues into a required-action flow that ends in a
+    // new session (`resume_browser_flow`). Rotate here: the `/required-action`
+    // pages sit outside the session cookie's `Path=/ui`, so this request — the
+    // login hop under `/ui` — is the last one that carries the browser's
+    // prior session cookie.
+    super::auth::revoke_prior_session_cookie(
+        state.identity.as_ref(),
+        headers,
+        &state.cookie_secret,
+    );
+
     let cookie = ra_token::ra_session_cookie(&token, secure);
     let path = format!("/required-action/{}", first.as_path_segment());
     let mut response = Redirect::to(&path).into_response();

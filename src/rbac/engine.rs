@@ -299,6 +299,17 @@ impl EmbeddedRbacEngine {
         }
     }
 
+    /// Refuses a runtime change to a role `hearth.yaml` declares. An archived
+    /// role is no longer declared (reconciliation archived it when the YAML
+    /// dropped it), so it may be edited or deleted. Reconciliation writes
+    /// roles directly and never comes through here.
+    fn refuse_yaml_managed_role(role: &Role) -> Result<(), RbacError> {
+        if role.yaml_managed && role.status != RoleStatus::Archived {
+            return Err(RbacError::YamlManaged { kind: "role" });
+        }
+        Ok(())
+    }
+
     fn validate_role_name(name: &str) -> Result<(), RbacError> {
         if name.is_empty() {
             return Err(RbacError::InvalidRoleName {
@@ -810,6 +821,22 @@ impl RbacEngine for EmbeddedRbacEngine {
         realm_id: &RealmId,
         grant: &UserPermissionGrant,
     ) -> Result<UserPermissionGrant, RbacError> {
+        // `hearth.*` authority comes only from Hearth itself and the roles
+        // seeded at realm bootstrap, never from a direct grant. The check sits
+        // here so the REST route and both console grant paths share it.
+        if grant.permission.is_reserved() {
+            return Err(RbacError::ReservedNamespace {
+                permission: grant.permission.as_str().to_string(),
+            });
+        }
+        self.seed_user_permission_unchecked(realm_id, grant)
+    }
+
+    fn seed_user_permission_unchecked(
+        &self,
+        realm_id: &RealmId,
+        grant: &UserPermissionGrant,
+    ) -> Result<UserPermissionGrant, RbacError> {
         let primary = keys::encode_user_permission(
             realm_id,
             &grant.user_id,
@@ -1096,6 +1123,7 @@ impl RbacEngine for EmbeddedRbacEngine {
         let Some(mut role) = self.load_role(realm_id, role_id)? else {
             return Err(RbacError::RoleNotFound);
         };
+        Self::refuse_yaml_managed_role(&role)?;
 
         let mut rename: Option<(Vec<u8>, Vec<u8>)> = None;
         if let Some(new_name) = &req.name {
@@ -1166,6 +1194,7 @@ impl RbacEngine for EmbeddedRbacEngine {
         let Some(role) = self.load_role(realm_id, role_id)? else {
             return Err(RbacError::RoleNotFound);
         };
+        Self::refuse_yaml_managed_role(&role)?;
 
         let RoleReferences {
             assignments,
@@ -1280,6 +1309,7 @@ impl RbacEngine for EmbeddedRbacEngine {
             description: req.description.clone(),
             created_at: now,
             updated_at: now,
+            yaml_managed: false,
         };
 
         self.write_put_batch(
@@ -1313,6 +1343,9 @@ impl RbacEngine for EmbeddedRbacEngine {
         let Some(mut group) = self.load_group(realm_id, group_id)? else {
             return Err(RbacError::GroupNotFound);
         };
+        if group.yaml_managed {
+            return Err(RbacError::YamlManaged { kind: "group" });
+        }
 
         let mut reslug: Option<(Vec<u8>, Vec<u8>)> = None;
         if let Some(new_slug) = &req.slug {
@@ -1355,6 +1388,9 @@ impl RbacEngine for EmbeddedRbacEngine {
         let Some(group) = self.load_group(realm_id, group_id)? else {
             return Err(RbacError::GroupNotFound);
         };
+        if group.yaml_managed {
+            return Err(RbacError::YamlManaged { kind: "group" });
+        }
 
         // Cascade: remove forward + reverse memberships and group-scoped assignments.
         let fwd_prefix = keys::gm_forward_scan_prefix(group_id);
@@ -2018,25 +2054,30 @@ impl RbacEngine for EmbeddedRbacEngine {
 
     fn reconcile_groups(&self, realm_id: &RealmId, groups: &[Group]) -> Result<(), RbacError> {
         let now = self.clock.now();
+        let mut declared = std::collections::HashSet::new();
         for group in groups {
             let slug = if group.slug.is_empty() {
                 continue;
             } else {
                 &group.slug
             };
+            declared.insert(slug.clone());
 
             match self.load_group_id_by_slug(realm_id, slug)? {
                 Some(gid) => {
                     if let Some(mut existing) = self.load_group(realm_id, &gid)? {
+                        // A missing marker is drift too: a group created at
+                        // runtime and then declared in YAML becomes YAML-managed.
                         let drift = existing.name != group.name
-                            || existing.description != group.description;
+                            || existing.description != group.description
+                            || !existing.yaml_managed;
                         if drift {
                             existing.name.clone_from(&group.name);
                             existing.description.clone_from(&group.description);
+                            existing.yaml_managed = true;
                             existing.updated_at = now;
                             let group_key = keys::encode_group(&existing.id);
-                            self.storage
-                                .put(realm_id, &group_key, &Self::ser(&existing)?)?;
+                            self.write_put(realm_id, &group_key, &Self::ser(&existing)?)?;
                         }
                     }
                 }
@@ -2049,6 +2090,7 @@ impl RbacEngine for EmbeddedRbacEngine {
                         description: group.description.clone(),
                         created_at: now,
                         updated_at: now,
+                        yaml_managed: true,
                     };
                     let group_key = keys::encode_group(&new_group.id);
                     let slug_key = keys::encode_group_slug(realm_id, slug);
@@ -2060,6 +2102,25 @@ impl RbacEngine for EmbeddedRbacEngine {
                         ],
                     )?;
                 }
+            }
+        }
+
+        // A group the YAML no longer declares goes back to runtime
+        // management, so an admin can edit or delete it.
+        let prefix = keys::group_slug_scan_prefix(realm_id);
+        let end = keys::prefix_end(&prefix);
+        for entry in self.storage.scan(realm_id, &prefix, &end)? {
+            let Ok(gid) = Self::de::<GroupId>(&entry.value) else {
+                continue;
+            };
+            let Some(mut existing) = self.load_group(realm_id, &gid)? else {
+                continue;
+            };
+            if existing.yaml_managed && !declared.contains(&existing.slug) {
+                existing.yaml_managed = false;
+                existing.updated_at = now;
+                let group_key = keys::encode_group(&existing.id);
+                self.write_put(realm_id, &group_key, &Self::ser(&existing)?)?;
             }
         }
         Ok(())
@@ -3270,7 +3331,7 @@ mod tests {
             ),
             (&c, "docs.read", Scope::Realm),
         ] {
-            e.grant_user_permission(
+            e.seed_user_permission_unchecked(
                 &realm,
                 &UserPermissionGrant {
                     realm_id: realm.clone(),

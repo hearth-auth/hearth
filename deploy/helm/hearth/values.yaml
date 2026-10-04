@@ -237,7 +237,7 @@ extraEnv: []
 
 # -- Liveness / readiness probes ------------------------------------------------
 # Deliberate split:
-#   liveness  → /health  (always-200 process heartbeat; a storage failure that
+#   liveness  → /healthz (always-200 process heartbeat; a storage failure that
 #                          triggers liveness causes an immediate pod kill, which
 #                          is worse than leaving the pod alive while storage
 #                          recovers.  Kill only when the process itself is hung.)
@@ -248,7 +248,7 @@ extraEnv: []
 # (see `tls`), HTTP otherwise. Set it here only to override that.
 livenessProbe:
   httpGet:
-    path: /health
+    path: /healthz
     port: http
   initialDelaySeconds: 10
   periodSeconds: 15

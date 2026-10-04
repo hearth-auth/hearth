@@ -1,35 +1,5 @@
 ## MODIFIED Requirements
 
-### Requirement: A-3 Distributed-attack detector
-The server SHALL count, in a rolling window, the distinct usernames tried from each source IP and the distinct source IPs that target each username, and SHALL challenge a login attempt when either count exceeds its threshold. Each counting bucket SHALL hold at most `2 × threshold` entries, so memory per key is bounded whatever the attack rate.
-
-| Key (`security.distributed_attack_detector.*`) | Default | Meaning |
-|-----|---------|---------|
-| `enabled` | `false` | Whether the detector runs |
-| `window` | `300s` | Rolling window length |
-| `username_per_ip_threshold` | `20` | Distinct usernames per IP |
-| `ip_per_username_threshold` | `20` | Distinct IPs per username |
-
-A caller that receives a challenge MUST emit an `AbuseDetected` audit event with the IP and the username in its metadata, MUST apply the A-16 challenge, and MUST return an error to the client (HTTP `429` or a challenge token). The caller MUST NOT surface the challenge reason to the client. Setting a threshold to `usize::MAX` SHALL disable that dimension. When its lock is poisoned, the detector SHALL recover the lock and keep counting.
-
-#### Scenario: Password spray from one address
-- **WHEN** one source IP tries more than `username_per_ip_threshold` distinct usernames inside the window
-- **THEN** the next attempt from that IP is challenged
-- **AND** an `AbuseDetected` audit event records the IP and the username
-
-#### Scenario: Distributed credential stuffing
-- **WHEN** more than `ip_per_username_threshold` distinct IPs try one username inside the window
-- **THEN** the next attempt against that username is challenged
-
-#### Scenario: The reason stays private
-- **WHEN** an attempt is challenged
-- **THEN** the response does not reveal which dimension fired
-
-#### Scenario: A challenged login is audited and challenged
-- **WHEN** the detector challenges a login attempt
-- **THEN** an `AbuseDetected` audit event with the IP and the username is written
-- **AND** the A-16 challenge is applied instead of a bare generic refusal
-
 ### Requirement: A-12 Adaptive lockout backoff
 The server SHALL track consecutive lockouts per key and SHALL lengthen the lockout on each repeat offence. The offence counter SHALL reset to zero only after `offense_cooldown` (default 7 days) has passed since the end of the most recent lockout, so waiting out one lockout does not restore a clean slate. The schedule SHALL be configurable under `security.adaptive_backoff` (`durations`, `offense_cooldown`). `durations: []` SHALL disable adaptive backoff, leaving the flat per-account lockout active. The `POST /ui/device` guard SHALL key the backoff by realm and user, and SHALL lock a key after 5 wrong user codes.
 
@@ -66,32 +36,6 @@ Each realm SHALL be able to restrict WebAuthn registration with `realms.<name>.a
 #### Scenario: PRF is required when `require_prf` is set
 - **WHEN** a realm sets `require_prf: true` and an authenticator reports the largeBlob extension but not PRF
 - **THEN** the registration is refused and no credential is stored
-
-### Requirement: A-16 CAPTCHA-of-last-resort challenge
-The server SHALL count failed authentications per IP and SHALL put an IP into a challenge state for `challenge_ttl_secs` once `challenge_threshold` failures occur inside `window_secs`. An API caller in the challenge state SHALL receive HTTP `403` with `error_code: "HEARTH_ABUSE_CHALLENGE_REQUIRED"`, and that SHALL be the only error code and the only detail returned. A UI caller in the challenge state SHALL receive a login or registration page that carries the configured CAPTCHA widget at the `<!-- captcha-widget-slot -->` marker. A solved CAPTCHA, or expiry of the window, SHALL return the IP to `Allow`.
-
-| Key (`security.captcha.*`) | Default | Meaning |
-|-----|---------|---------|
-| `provider` | none; required | CAPTCHA provider (`turnstile`); a `security.captcha` block without it does not parse |
-| `challenge_threshold` | absent | Failures per window before a challenge; required to enable the store |
-| `window_secs` | `60` | Window for counting failures |
-| `challenge_ttl_secs` | `1800` | How long the challenge state lasts |
-
-When `challenge_threshold` is absent the store SHALL be disabled and every check SHALL return `Allow` (fail-open).
-
-#### Scenario: A hot IP keeps guessing
-- **WHEN** an IP reaches `challenge_threshold` failed logins inside `window_secs`
-- **THEN** its next API attempt receives `403` with `HEARTH_ABUSE_CHALLENGE_REQUIRED`
-- **AND** its next UI attempt is shown the CAPTCHA widget
-
-#### Scenario: The challenge is solved
-- **WHEN** the IP solves the CAPTCHA
-- **THEN** its state returns to `Allow`
-
-#### Scenario: A challenged caller is told to solve a challenge
-- **WHEN** an IP in the challenge state makes an API sign-in attempt, and then loads the UI login page
-- **THEN** the API attempt receives `403` with `HEARTH_ABUSE_CHALLENGE_REQUIRED`
-- **AND** the login page carries the CAPTCHA widget at `<!-- captcha-widget-slot -->`
 
 ### Requirement: A-18 Session lifecycle policy
 A realm SHALL be able to set an idle timeout and an absolute timeout for sessions, and a session past either deadline SHALL be rejected on the read path. The keys SHALL be `auth.session_idle_timeout_secs` and `auth.session_absolute_timeout_secs` globally, with per-realm overrides `realms.<name>.session_idle_timeout_secs` and `realms.<name>.session_absolute_timeout_secs`; `null` (the default) SHALL disable each timeout. Concurrent sessions per user SHALL be capped by `auth.session_max_concurrent`, overridden per realm by `realms.<name>.session_max_concurrent`; absent at both levels means unlimited. `session_over_limit_policy` (global, per-realm override) SHALL decide what happens at the cap: `reject_new` (the default) refuses the new session, and `evict_oldest` evicts the user's oldest session. Any other value SHALL fail configuration parsing.
@@ -137,26 +81,8 @@ Deleting a user SHALL reserve the user's normalised email address in that realm 
 - **WHEN** one user create hits a reserved address and another hits an address in use
 - **THEN** both responses have the same status and a byte-identical body
 
-### Requirement: A-38 Delegation-chain depth cap
-Token validation SHALL reject a token whose RFC 8693 `act` delegation chain is deeper than `MAX_ACT_CHAIN_DEPTH` (3) with an invalid-token error (fail-closed). Depth SHALL count the outer actor as 1 and each nested `act` as one more, and the traversal SHALL be iterative and stop once the cap is passed.
-
-| `act` claim | Depth | Result |
-|-------------|-------|--------|
-| `{ "sub": "x" }` | 1 | accepted |
-| `{ "sub": "x", "act": { "sub": "y" } }` | 2 | accepted |
-| Three-level chain | 3 | accepted |
-| Four-level chain | 4 | rejected |
-
-#### Scenario: An over-deep chain
-- **WHEN** a token carries a four-level `act` chain
-- **THEN** validation fails with an invalid-token error
-
-#### Scenario: The delegation chain depth ceiling is 3
-- **WHEN** an inbound token carries a four-level `act` chain and no per-agent delegation limit applies
-- **THEN** validation fails with an invalid-token error, because the global ceiling is 3, not 10
-
 ### Requirement: A-40 Host allowlist and cross-origin isolation
-The server SHALL reject a request whose `Host` header is not in `security.allowed_hosts` with `400 Bad Request`; the default SHALL be the listener's bind hostnames. UI responses SHALL carry `Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Embedder-Policy: require-corp`, and a `Permissions-Policy` that denies sensors and payment by default.
+The server SHALL reject a request whose `Host` header is not in `security.allowed_hosts` with `400 Bad Request`. When `security.allowed_hosts` is not set, the list SHALL default to the host of `oidc.issuer`; under `--dev` a loopback `Host` SHALL also be admitted. The comparison SHALL ignore the port. The liveness and readiness probes (`/healthz`, `/readyz`) SHALL be exempt from the check; every other route, including `/health` and `/metrics`, SHALL NOT be exempt. UI responses SHALL carry `Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Embedder-Policy: require-corp`, and a `Permissions-Policy` that denies sensors and payment by default.
 
 #### Scenario: DNS rebinding
 - **WHEN** `security.allowed_hosts` is set and a request arrives with a `Host` outside it
@@ -166,9 +92,15 @@ The server SHALL reject a request whose `Host` header is not in `security.allowe
 - **WHEN** a browser loads a `/ui` page
 - **THEN** the response carries COOP `same-origin`, COEP `require-corp` and a `Permissions-Policy` header
 
-#### Scenario: An unset host allowlist accepts only the bind hostnames
-- **WHEN** `security.allowed_hosts` is not set, the server binds `hearth.example.com`, and a request arrives with `Host: evil.example`
+#### Scenario: An unset host allowlist accepts only the issuer host
+- **WHEN** `security.allowed_hosts` is not set, `oidc.issuer` is `https://hearth.example.com`, and a request arrives with `Host: evil.example`
 - **THEN** the response is `400`
+- **AND** a request with `Host: hearth.example.com:443` is admitted
+
+#### Scenario: Probes skip the host check
+- **WHEN** `security.allowed_hosts` is not set and a request for `/readyz` arrives with `Host: 10.0.0.7:8420`
+- **THEN** the request is admitted
+- **AND** the same request for `/metrics` is answered `400`
 
 ### Requirement: A-41 Session-id rotation on authentication
 On a successful primary authentication, MFA step-up, federation link, password change or admin impersonation, the server SHALL destroy the current session record, mint a session with a fresh ID, and invalidate the old cookie.
@@ -222,7 +154,7 @@ All operator- or tenant-supplied content that reaches an unescaped render path S
 - **AND** the served theme CSS contains no `@import`
 
 ### Requirement: A-47 Unknown fields refused on request bodies
-Every request-body shape of the admin and authentication APIs SHALL refuse unknown fields, unless a documented forward-compatibility exception is recorded for that shape.
+Every request-body shape of the admin and authentication APIs SHALL refuse unknown fields, unless a documented forward-compatibility exception is recorded for that shape. The OAuth 2.0 and OIDC protocol endpoints (token, pushed authorization, revocation, introspection, authorization and device authorization) are the recorded exceptions: RFC 6749 §3.1 and §3.2 require the server to ignore an unrecognized parameter.
 
 #### Scenario: An extension field slips into an admin body
 - **WHEN** an admin request body carries a field its shape does not declare
@@ -231,3 +163,7 @@ Every request-body shape of the admin and authentication APIs SHALL refuse unkno
 #### Scenario: A client update refuses unknown fields
 - **WHEN** a `PATCH /admin/applications/{id}` body carries a field its shape does not declare
 - **THEN** the request is refused
+
+#### Scenario: A protocol endpoint ignores an unknown parameter
+- **WHEN** a token request carries a parameter the token endpoint does not define
+- **THEN** the parameter is ignored and the request is processed

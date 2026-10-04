@@ -10,10 +10,12 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
+use crate::core::FormSecret;
 use crate::core::UserId;
 use crate::identity::{verify_step_up, StepUpError};
+use crate::identity::{ClientExtensionResults, RegistrationExtensionInputs};
 use crate::protocol::client_info::PeerAddr;
-use crate::protocol::step_up::StepUpProofBody;
+use crate::protocol::step_up::{StepUpAssertionBody, StepUpProofBody};
 
 use super::{
     extract_realm_id, identity_error_to_response, make_ip_rate_limit_response,
@@ -130,7 +132,12 @@ fn pinned_origin_and_rp_id(state: &AppState) -> (String, String) {
     (origin, rp_id)
 }
 
+/// Body of `POST /webauthn/register/begin`.
+///
+/// The step-up proof fields are declared inline rather than through
+/// `#[serde(flatten)]`, which cannot be combined with `deny_unknown_fields`.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WbrBeginReq {
     /// Accepted for backward compatibility but **ignored**: the RP ID is pinned
     /// server-side from the configured issuer (HEA-2025). A client cannot choose
@@ -138,11 +145,29 @@ struct WbrBeginReq {
     #[allow(dead_code)]
     rp_id: Option<String>,
     discoverable: Option<bool>,
-    /// Step-up proof — the account password, a current TOTP code, or an
-    /// assertion from an already-enrolled passkey (audit 2026-08-28 §4.18#2).
-    /// An access token alone is one factor and does not enrol a credential.
-    #[serde(flatten)]
-    step_up: StepUpProofBody,
+    // Step-up proof — the account password, a current TOTP code, or an
+    // assertion from an already-enrolled passkey (audit 2026-08-28 §4.18#2).
+    // An access token alone is one factor and does not enrol a credential.
+    /// The account's current password.
+    #[serde(default)]
+    password: Option<FormSecret>,
+    /// A current code from the account's enrolled TOTP factor.
+    #[serde(default)]
+    totp_code: Option<String>,
+    /// An assertion from an already-enrolled passkey.
+    #[serde(default)]
+    assertion: Option<StepUpAssertionBody>,
+}
+
+impl WbrBeginReq {
+    /// Splits off the step-up proof fields.
+    fn step_up(self) -> StepUpProofBody {
+        StepUpProofBody {
+            password: self.password,
+            totp_code: self.totp_code,
+            assertion: self.assertion,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -155,9 +180,14 @@ struct WbrBeginRes {
     user_display_name: String,
     attestation: String,
     timeout: u64,
+    /// The extensions the realm's attestation policy requires the
+    /// authenticator to report; omitted when it requires none.
+    #[serde(skip_serializing_if = "RegistrationExtensionInputs::is_empty")]
+    extensions: RegistrationExtensionInputs,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WbrCompleteReq {
     client_data_json: String,
     attestation_object: String,
@@ -167,6 +197,10 @@ struct WbrCompleteReq {
     #[allow(dead_code)]
     origin: String,
     discoverable: Option<bool>,
+    /// The credential's `getClientExtensionResults()`; the realm's
+    /// attestation policy reads `largeBlob.supported` from it.
+    #[serde(default)]
+    client_extension_results: ClientExtensionResults,
 }
 
 #[derive(Debug, Serialize)]
@@ -177,6 +211,7 @@ struct WbrCompleteRes {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WbaBeginReq {
     /// Accepted for backward compatibility but **ignored**: the RP ID is pinned
     /// server-side from the configured issuer (HEA-2025).
@@ -202,6 +237,7 @@ struct WbaAllowCred {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WbaCompleteReq {
     credential_id: String,
     client_data_json: String,
@@ -260,13 +296,14 @@ async fn webauthn_register_begin(
     };
     // Pin the RP ID server-side; ignore any client-supplied `rp_id` (HEA-2025).
     let (origin, rp_id) = pinned_origin_and_rp_id(&state);
+    let discoverable = body.discoverable.unwrap_or(true);
     // Enrolling a credential needs more than the access token that carried the
     // request (audit 2026-08-28 §4.18#2).
     if let Err(e) = verify_step_up(
         &state.identity,
         &realm_id,
         &user_id,
-        body.step_up.into_proof(&origin),
+        body.step_up().into_proof(&origin),
     )
     .await
     {
@@ -274,7 +311,7 @@ async fn webauthn_register_begin(
     }
     let options = crate::identity::webauthn::RegistrationOptions {
         rp_id,
-        discoverable: body.discoverable.unwrap_or(true),
+        discoverable,
     };
     match state
         .identity
@@ -291,6 +328,15 @@ async fn webauthn_register_begin(
                 user_display_name: user_id.to_string(),
                 attestation: "none".to_string(),
                 timeout: 60,
+                extensions: RegistrationExtensionInputs::for_policy(
+                    state
+                        .identity
+                        .get_realm(&realm_id)
+                        .ok()
+                        .flatten()
+                        .and_then(|r| r.config().webauthn_attestation.clone())
+                        .as_ref(),
+                ),
             }),
         )
             .into_response(),
@@ -341,6 +387,7 @@ async fn webauthn_register_complete(
         &attestation_object,
         &origin,
         body.discoverable.unwrap_or(false),
+        &body.client_extension_results,
     ) {
         Ok(info) => (
             StatusCode::OK,
@@ -606,6 +653,7 @@ async fn webauthn_delete_credential(
 
 /// Query parameters for the magic-link request.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MagicLinkRequestBody {
     email: String,
 }

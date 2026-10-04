@@ -25,7 +25,9 @@ use hearth::identity::{
 };
 use hearth::protocol::admin_auth::JwksRateLimiter;
 use hearth::protocol::http::{self, AppState};
-use hearth::protocol::tls::{build_server_config, ReloadableTlsConfig, TlsConfigParams};
+use hearth::protocol::tls::{
+    build_reloadable_server_config, ReloadableClientVerifier, ReloadableTlsConfig, TlsConfigParams,
+};
 use hearth::protocol::web::{self, WebState};
 use hearth::rbac::{EmbeddedRbacEngine, RbacEngine, SvBumper};
 use hearth::storage::{CompactionConfig, EmbeddedStorageEngine, StorageConfig, StorageEngine};
@@ -2582,10 +2584,14 @@ async fn run_serve(
         }
     }
 
-    let allowed_hosts = config.security.allowed_hosts.clone();
-    if !allowed_hosts.is_empty() {
-        info!(count = allowed_hosts.len(), "loaded allowed_hosts");
-    }
+    // A-40: an unset `security.allowed_hosts` defaults to the `oidc.issuer`
+    // host, so the Host check is always on.
+    let allowed_hosts = config.effective_allowed_hosts();
+    info!(
+        count = allowed_hosts.len(),
+        configured = !config.security.allowed_hosts.is_empty(),
+        "host allowlist active"
+    );
 
     // §4.13#5: the restore handler reads this off `AppState`, and nothing ever
     // put it there — the signature check could not fire on any deployment.
@@ -2719,6 +2725,10 @@ async fn run_serve(
     .with_default_realm(config.server.default_realm.clone())
     .with_config(Arc::new(config.clone()))
     .with_abuse_guards(Arc::clone(&abuse_guards))
+    // A-12: the `/ui/device` lockout follows `security.adaptive_backoff`.
+    .with_device_approval_guard(Arc::new(
+        hearth::abuse::runtime::build_device_approval_guard(&config.security),
+    ))
     .with_dev_mode(config.dev_mode);
 
     if !api_trusted_proxies.is_empty() {
@@ -3068,13 +3078,12 @@ async fn run_serve(
     });
 
     // Check for TLS configuration
-    if let Some((reloadable, acceptor)) = tls {
+    if let Some(tls) = tls {
         let tls_drain_incomplete = run_serve_tls(
             addr,
             &config,
             app_router,
-            reloadable,
-            acceptor,
+            tls,
             shutdown_signal_rx.clone(),
             Arc::clone(&identity_engine),
             Arc::clone(&rbac_engine),
@@ -3588,12 +3597,14 @@ fn shared_drain_deadline(
 /// Builds the HTTPS listener's TLS acceptor (M14).
 ///
 /// The returned [`ReloadableTlsConfig`] backs the acceptor's certificate
-/// resolver, so a SIGHUP certificate reload reaches the listener.
+/// resolver, and the [`ReloadableClientVerifier`] (present under mTLS) backs
+/// its client-certificate check, so a SIGHUP reload of either reaches the
+/// listener.
 fn build_tls_acceptor(
     config: &Config,
     cert_path: &std::path::Path,
     key_path: &std::path::Path,
-) -> Result<(ReloadableTlsConfig, tokio_rustls::TlsAcceptor), Box<dyn std::error::Error>> {
+) -> Result<TlsListenerParts, Box<dyn std::error::Error>> {
     let reloadable = ReloadableTlsConfig::load(cert_path.to_path_buf(), key_path.to_path_buf())
         .map_err(|e| format!("failed to load TLS certificates: {e}"))?;
     let params = TlsConfigParams {
@@ -3603,12 +3614,23 @@ fn build_tls_acceptor(
         crl_paths: config.security.tls.crl_paths.clone(),
         tls13_only: config.security.tls.min_version == TlsMinVersionYaml::Tls13,
     };
-    let server_config =
-        build_server_config(params).map_err(|e| format!("failed to build TLS config: {e}"))?;
-    Ok((
+    let (server_config, client_verifier) = build_reloadable_server_config(params)
+        .map_err(|e| format!("failed to build TLS config: {e}"))?;
+    Ok(TlsListenerParts {
         reloadable,
-        tokio_rustls::TlsAcceptor::from(Arc::new(server_config)),
-    ))
+        client_verifier,
+        acceptor: tokio_rustls::TlsAcceptor::from(Arc::new(server_config)),
+    })
+}
+
+/// What [`build_tls_acceptor`] hands to [`run_serve_tls`].
+struct TlsListenerParts {
+    /// Reloadable server certificate.
+    reloadable: ReloadableTlsConfig,
+    /// Reloadable mTLS client verifier (CRLs), when a client CA is configured.
+    client_verifier: Option<Arc<ReloadableClientVerifier>>,
+    /// The listener's TLS acceptor.
+    acceptor: tokio_rustls::TlsAcceptor,
 }
 
 /// Runs the HTTPS server with TLS, redirect listener, and SIGHUP cert + config reload.
@@ -3625,8 +3647,7 @@ async fn run_serve_tls(
     addr: SocketAddr,
     config: &Config,
     app_router: axum::Router,
-    reloadable: ReloadableTlsConfig,
-    acceptor: tokio_rustls::TlsAcceptor,
+    tls: TlsListenerParts,
     shutdown_signal: tokio::sync::watch::Receiver<Option<tokio::time::Instant>>,
     identity_engine: Arc<dyn IdentityEngine>,
     rbac_engine: Arc<dyn RbacEngine>,
@@ -3670,8 +3691,8 @@ async fn run_serve_tls(
     // Register SIGHUP handler for cert + config hot-reload
     #[cfg(unix)]
     {
-        let reloadable = Arc::new(reloadable);
-        let reloadable_clone = Arc::clone(&reloadable);
+        let reloadable_clone = Arc::new(tls.reloadable);
+        let client_verifier = tls.client_verifier;
         let engine = identity_engine;
         let rbac = rbac_engine;
         let registry = permission_registry;
@@ -3692,6 +3713,12 @@ async fn run_serve_tls(
                 // Reload TLS certificates
                 if let Err(e) = reloadable_clone.reload() {
                     error!(error = %e, "TLS certificate reload failed, keeping old cert");
+                }
+                // A-44: re-read the mTLS CRLs; a bad file keeps the old ones.
+                if let Some(verifier) = &client_verifier {
+                    if let Err(e) = verifier.reload() {
+                        error!(error = %e, "mTLS CRL reload failed, keeping previous CRLs");
+                    }
                 }
                 // Reload configuration and reconcile
                 run_config_reconciliation(
@@ -3714,7 +3741,7 @@ async fn run_serve_tls(
     let drain_outcome = http::serve_tls_router(
         listener,
         app_router,
-        acceptor,
+        tls.acceptor,
         shutdown_rx,
         Duration::from_secs(drain_secs),
     )

@@ -511,6 +511,7 @@ fn reconcile_rbac_for_realm(
                 description: g.description.clone(),
                 created_at: Timestamp::from_micros(0),
                 updated_at: Timestamp::from_micros(0),
+                yaml_managed: true,
             })
             .collect();
         if let Err(e) = rbac.reconcile_groups(realm_id, &domain_groups) {

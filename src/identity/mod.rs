@@ -148,8 +148,9 @@ pub use types::{
 };
 pub use validation::fuzz_validate_redirect_uri;
 pub use webauthn::{
-    fuzz_parse_webauthn, AuthenticationOptions, CompleteAuthenticationParams, RegistrationOptions,
-    WebAuthnAuthResult, WebAuthnCredentialInfo,
+    fuzz_parse_webauthn, AuthenticationOptions, ClientExtensionResults,
+    CompleteAuthenticationParams, LargeBlobInputs, LargeBlobOutputs, PrfInputs,
+    RegistrationExtensionInputs, RegistrationOptions, WebAuthnAuthResult, WebAuthnCredentialInfo,
 };
 
 use crate::audit::AuditContext;
@@ -1362,7 +1363,9 @@ pub trait IdentityEngine: Send + Sync {
     /// Completes a `WebAuthn` registration ceremony.
     ///
     /// Validates the attestation response, extracts the credential, and
-    /// stores it. Returns the credential info.
+    /// stores it. Returns the credential info. `client_extensions` is the
+    /// client's `getClientExtensionResults()` for the ceremony, read by the
+    /// realm's attestation policy.
     fn complete_webauthn_registration(
         &self,
         realm_id: &RealmId,
@@ -1371,6 +1374,7 @@ pub trait IdentityEngine: Send + Sync {
         attestation_object: &[u8],
         origin: &str,
         discoverable: bool,
+        client_extensions: &ClientExtensionResults,
     ) -> Result<WebAuthnCredentialInfo, IdentityError>;
 
     /// Completes a `WebAuthn` registration that MUST prove user verification,
@@ -1388,6 +1392,7 @@ pub trait IdentityEngine: Send + Sync {
         attestation_object: &[u8],
         origin: &str,
         discoverable: bool,
+        client_extensions: &ClientExtensionResults,
     ) -> Result<WebAuthnCredentialInfo, IdentityError>;
 
     /// Starts a `WebAuthn` authentication ceremony.
@@ -2633,6 +2638,10 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// Returns `true` if any active credential's hash matches. Uses
     /// constant-time comparison to prevent timing attacks.
+    ///
+    /// Only an `Active` agent's keys verify: returns `AgentRevoked` when the
+    /// agent is revoked or suspended, and `AgentNotFound` when it does not
+    /// exist.
     fn verify_agent_api_key(
         &self,
         realm_id: &RealmId,

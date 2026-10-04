@@ -366,7 +366,7 @@ async fn org_scoped_admin_permission_counts_for_the_ceiling() {
         .add_member(&f.realm, &org, &target, OrganizationRole::Member)
         .expect("add member");
     f.h.rbac()
-        .grant_user_permission(
+        .seed_user_permission_unchecked(
             &f.realm,
             &UserPermissionGrant {
                 realm_id: f.realm.clone(),

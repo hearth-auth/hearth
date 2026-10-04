@@ -90,7 +90,7 @@ When a user belongs to an organization, you can assign RBAC roles that are valid
 
 ### Assign a role scoped to an organization
 
-The following examples assign an RBAC role to a user scoped to a specific organization:
+The following examples assign an RBAC role to a user scoped to a specific organization. The body is `role_id` plus `org_id`. Any other field is refused with `422`, and nothing is assigned. The SDKs have no role-assignment method, so send the request over HTTP:
 
 <Tabs groupId="lang">
 <TabItem value="curl" label="curl" default>
@@ -104,14 +104,12 @@ curl -X POST http://127.0.0.1:8420/admin/users/<user-id>/roles \
   -H "Content-Type: application/json" \
   -d '{
     "role_id": "<role-id>",
-    "scope": {"type": "org", "org_id": "org_<uuid>"}
+    "org_id": "org_<uuid>"
   }'
 ```
 
 </TabItem>
 <TabItem value="ts" label="TypeScript">
-
-The TypeScript SDK's `AdminClient` has no role-assignment method. Send the request with `fetch`:
 
 ```typescript
 await fetch('https://hearth.example.com/admin/users/<user-id>/roles', {
@@ -123,72 +121,19 @@ await fetch('https://hearth.example.com/admin/users/<user-id>/roles', {
   },
   body: JSON.stringify({
     role_id: '<role-id>',
-    scope: { type: 'org', org_id: 'org_<uuid>' },
+    org_id: 'org_<uuid>',
   }),
 });
 ```
 
 </TabItem>
-<TabItem value="go" label="Go">
-
-```go
-import "github.com/hearth-auth/hearth/sdks/go/hearth"
-
-admin := client.Admin(adminToken)
-
-err := admin.AssignRole(ctx, hearth.AssignRoleRequest{
-    UserID: "<user-id>",
-    RoleID: "<role-id>",
-    Scope: &hearth.OrgScope{
-        Type:  "org",
-        OrgID: "org_<uuid>",
-    },
-})
-```
-
-</TabItem>
-<TabItem value="python" label="Python">
-
-```python
-from hearth import HearthClient
-
-client = HearthClient(base_url=HEARTH_URL, realm_id=REALM_ID)
-admin = client.admin(admin_token)
-
-admin.assign_role(
-    user_id="<user-id>",
-    role_id="<role-id>",
-    scope={"type": "org", "org_id": "org_<uuid>"},
-)
-```
-
-</TabItem>
-<TabItem value="php" label="PHP">
-
-```php
-use Hearth\AdminClient;
-
-$admin = new AdminClient(
-    baseUrl: 'https://hearth.example.com',
-    realmId: '<realm-id>',
-    accessToken: $adminToken,
-);
-
-$admin->assignRole(
-    userId:  '<user-id>',
-    roleId:  '<role-id>',
-    scope:   ['type' => 'org', 'org_id' => 'org_<uuid>'],
-);
-```
-
-</TabItem>
 </Tabs>
 
-The `org_id` value is the full `org_`-prefixed organization ID (e.g., `org_550e8400-e29b-41d4-a716-446655440000`).
+The same body assigns a role to a group through `POST /admin/groups/<group-id>/roles`. The `org_id` value is the organization ID, with or without the `org_` prefix (e.g., `org_550e8400-e29b-41d4-a716-446655440000`). The organization must exist.
 
 ### Inspect org-scoped permissions for a user
 
-The `GET /v1/me/permissions` endpoint resolves a user's effective roles, groups, and permissions and accepts an `org_id` query parameter to include org-scoped assignments:
+The `GET /v1/me/permissions` endpoint resolves the bearer token's effective roles, groups, and permissions. The organization context is the token's `oid` claim, so a token issued for an organization includes that organization's assignments. An `org_id` query parameter may name the organization explicitly. The caller must be a member of it, or the request is refused with `403`:
 
 <Tabs groupId="lang">
 <TabItem value="curl" label="curl" default>

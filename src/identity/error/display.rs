@@ -197,10 +197,8 @@ impl fmt::Display for IdentityError {
             Self::JwtBearerAssertionInvalid { reason } => {
                 write!(f, "invalid JWT bearer assertion: {reason}")
             }
-            Self::EmailReserved => write!(
-                f,
-                "a user with this email already exists or was recently deleted"
-            ),
+            // A-20: the same text as `DuplicateEmail`, wherever it is shown.
+            Self::EmailReserved => write!(f, "a user with this email already exists"),
             Self::EmailChangeTokenInvalid => {
                 write!(f, "email change token is invalid or has expired")
             }

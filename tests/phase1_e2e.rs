@@ -333,6 +333,7 @@ async fn mfa_enrollment_plus_login() {
 /// Proves the full `WebAuthn` ceremony composes with session issuance and
 /// token validation without a password credential ever being set.
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // one end-to-end ceremony: register, authenticate, validate
 async fn passkey_only_authentication() {
     let harness = common::TestHarness::in_process()
         .await
@@ -391,6 +392,7 @@ async fn passkey_only_authentication() {
             &att_obj,
             origin,
             false,
+            &Default::default(),
         )
         .expect("complete registration");
     assert_eq!(cred_info.credential_id(), authenticator.credential_id);

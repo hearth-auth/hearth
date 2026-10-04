@@ -289,11 +289,11 @@ Run these checks immediately after bringing the new binary up, regardless of dep
 
   | Endpoint | Purpose | Kubernetes probe type |
   |----------|----------|-----------------------|
-  | `/health` | Process liveness — always 200 if the binary is running | `livenessProbe` |
-  | `/healthz` | Same as `/health` (alias) | `livenessProbe` |
+  | `/health` | Process liveness — always 200 if the binary is running. Subject to the `security.allowed_hosts` check, so a probe addressed to a pod IP gets `400` | — |
+  | `/healthz` | Same as `/health`, but answers whatever the `Host` header | `livenessProbe` |
   | `/readyz` | Readiness — verifies storage is responsive; fails until WAL replay completes | `readinessProbe` |
 
-  The Helm chart already routes these correctly. If you are writing your own Kubernetes manifests, configure `/health` or `/healthz` as the liveness probe and `/readyz` as the readiness probe.
+  The Helm chart already routes these correctly. If you are writing your own Kubernetes manifests, configure `/healthz` as the liveness probe and `/readyz` as the readiness probe.
 
 - [ ] **OIDC discovery documents are served for all realms.** Replace `<realm>` with each realm name in your deployment:
 

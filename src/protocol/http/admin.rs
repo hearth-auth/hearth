@@ -1556,6 +1556,21 @@ fn admin_set_realm_suspended(
     }
 }
 
+/// Body of `PATCH /admin/realms/{realm_id}/users/{user_id}/required-actions`.
+///
+/// Each entry is an action-type string; an unrecognised one is refused with
+/// `400` by the handler, so the entries stay untyped here.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PatchUserRequiredActionsBody {
+    /// Actions to add.
+    #[serde(default)]
+    add: Vec<serde_json::Value>,
+    /// Actions to remove.
+    #[serde(default)]
+    remove: Vec<serde_json::Value>,
+}
+
 /// Admin: PATCH required-actions for a specific user in a realm (HEA-807).
 ///
 /// `PATCH /admin/realms/{realm_id}/users/{user_id}/required-actions`
@@ -1570,7 +1585,7 @@ async fn admin_patch_user_required_actions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path((realm_id_str, user_id_str)): Path<(String, String)>,
-    Json(body): Json<serde_json::Value>,
+    Json(body): Json<PatchUserRequiredActionsBody>,
 ) -> impl IntoResponse {
     use crate::audit::AuditAction;
     use crate::identity::{RequiredAction, UpdateUserRequest};
@@ -1618,30 +1633,30 @@ async fn admin_patch_user_required_actions(
     }
 
     // Parse and validate action string arrays from the request body.
-    let parse_actions = |key: &str| -> Result<Vec<RequiredAction>, axum::response::Response> {
-        let arr = body[key].as_array().cloned().unwrap_or_default();
-        let mut out = Vec::with_capacity(arr.len());
-        for v in arr {
-            match serde_json::from_value::<RequiredAction>(v.clone()) {
-                Ok(a) => out.push(a),
-                Err(_) => {
-                    let s = v.as_str().unwrap_or("(non-string)");
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error": format!("unknown action type: {s}")})),
-                    )
-                        .into_response());
+    let parse_actions =
+        |arr: &[serde_json::Value]| -> Result<Vec<RequiredAction>, axum::response::Response> {
+            let mut out = Vec::with_capacity(arr.len());
+            for v in arr {
+                match serde_json::from_value::<RequiredAction>(v.clone()) {
+                    Ok(a) => out.push(a),
+                    Err(_) => {
+                        let s = v.as_str().unwrap_or("(non-string)");
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            Json(serde_json::json!({"error": format!("unknown action type: {s}")})),
+                        )
+                            .into_response());
+                    }
                 }
             }
-        }
-        Ok(out)
-    };
+            Ok(out)
+        };
 
-    let add_actions = match parse_actions("add") {
+    let add_actions = match parse_actions(&body.add) {
         Ok(v) => v,
         Err(e) => return e,
     };
-    let remove_actions = match parse_actions("remove") {
+    let remove_actions = match parse_actions(&body.remove) {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -2600,6 +2615,7 @@ async fn admin_get_client(
 /// Extends the proto `UpdateClientRequest` with logout URI fields that are
 /// not (yet) in the proto schema.
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct AdminUpdateClientBody {
     client_name: Option<String>,
     #[serde(default)]
@@ -3232,6 +3248,7 @@ pub(super) async fn dev_seed_session(
 
 #[derive(Deserialize)]
 #[cfg(feature = "dev-endpoints")]
+#[serde(deny_unknown_fields)]
 pub(super) struct DevSeedSessionRequest {
     user_id: String,
 }
@@ -3291,6 +3308,7 @@ pub(super) async fn dev_seed_token(
 
 #[derive(Deserialize)]
 #[cfg(feature = "dev-endpoints")]
+#[serde(deny_unknown_fields)]
 pub(super) struct DevSeedTokenRequest {
     user_id: String,
 }
@@ -3342,6 +3360,7 @@ pub(super) async fn dev_seed_password(
 
 #[derive(Deserialize)]
 #[cfg(feature = "dev-endpoints")]
+#[serde(deny_unknown_fields)]
 pub(super) struct DevSeedPasswordRequest {
     user_id: String,
     password: FormSecret,
@@ -3934,6 +3953,7 @@ struct AddGroupMemberBody {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AssignRoleBody {
     role_id: String,
     /// Optional org ID for org-scoped assignments; omit for realm scope.
@@ -4785,6 +4805,7 @@ async fn admin_unassign_role(
 
 /// JSON body for `POST /admin/webhooks`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateWebhookBody {
     url: String,
     secret: FormSecret,
@@ -4800,6 +4821,7 @@ fn default_enabled() -> bool {
 
 /// JSON body for `PUT /admin/webhooks/{id}`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UpdateWebhookBody {
     url: Option<String>,
     secret: Option<FormSecret>,

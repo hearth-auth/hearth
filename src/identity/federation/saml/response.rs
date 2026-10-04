@@ -168,8 +168,9 @@ pub fn build_response_xml(b: &ResponseBuilder<'_>) -> String {
 /// # Errors
 ///
 /// Returns [`SamlError::Parse`] on malformed XML, a `DOCTYPE`, more than
-/// `MAX_SAML_XML_EVENTS` events, a duplicate field as above, or a Response
-/// missing its `ID`, `IssueInstant` or `StatusCode`.
+/// `MAX_SAML_XML_EVENTS` events, a duplicate field as above, encrypted
+/// content (`EncryptedAssertion`, `EncryptedID`, `EncryptedAttribute`), or a
+/// Response missing its `ID`, `IssueInstant` or `StatusCode`.
 pub fn parse_response(xml: &[u8]) -> Result<SamlResponse, IdentityError> {
     let mut parser = ResponseParser::default();
     walk_outside_signatures(xml, |step| match step {
@@ -222,6 +223,10 @@ enum Node {
     Attribute,
     /// `Assertion/AttributeStatement/Attribute/AttributeValue`.
     AttributeValue,
+    /// `Response/EncryptedAssertion`, `Subject/EncryptedID` or
+    /// `AttributeStatement/EncryptedAttribute`. There is no decryption path,
+    /// so the document is refused rather than read without that content.
+    Encrypted,
     /// Anything else. Nothing inside it is read.
     Other,
 }
@@ -235,12 +240,14 @@ impl Node {
             Some(Node::Response) if is(ns::SAMLP, "Status") => Node::Status,
             Some(Node::Response) if is(ns::SAML, "Issuer") => Node::ResponseIssuer,
             Some(Node::Response) if is(ns::SAML, "Assertion") => Node::Assertion,
+            Some(Node::Response) if is(ns::SAML, "EncryptedAssertion") => Node::Encrypted,
             Some(Node::Status) if is(ns::SAMLP, "StatusCode") => Node::StatusCode,
             Some(Node::Assertion) if is(ns::SAML, "Issuer") => Node::AssertionIssuer,
             Some(Node::Assertion) if is(ns::SAML, "Subject") => Node::Subject,
             Some(Node::Assertion) if is(ns::SAML, "Conditions") => Node::Conditions,
             Some(Node::Assertion) if is(ns::SAML, "AttributeStatement") => Node::AttributeStatement,
             Some(Node::Subject) if is(ns::SAML, "NameID") => Node::NameId,
+            Some(Node::Subject) if is(ns::SAML, "EncryptedID") => Node::Encrypted,
             Some(Node::Subject) if is(ns::SAML, "SubjectConfirmation") => {
                 Node::SubjectConfirmation {
                     bearer: e.attr("Method").is_some_and(|m| m.trim() == CM_BEARER),
@@ -251,6 +258,7 @@ impl Node {
             }
             Some(Node::AudienceRestriction) if is(ns::SAML, "Audience") => Node::Audience,
             Some(Node::AttributeStatement) if is(ns::SAML, "Attribute") => Node::Attribute,
+            Some(Node::AttributeStatement) if is(ns::SAML, "EncryptedAttribute") => Node::Encrypted,
             Some(Node::Attribute) if is(ns::SAML, "AttributeValue") => Node::AttributeValue,
             _ => Node::Other,
         }
@@ -331,6 +339,9 @@ impl ResponseParser {
             }
             Node::ResponseIssuer => {
                 once(&mut self.seen_response_issuer, "<saml:Issuer> in Response")?;
+            }
+            Node::Encrypted => {
+                return Err(parse_err("encrypted SAML content is not supported"));
             }
             Node::Assertion => {
                 self.current = Some(AssertionInProgress {
@@ -537,8 +548,11 @@ pub fn extract_and_validate_assertion(
         }
     }
 
-    // Issuer check.
-    if a.issuer != p.idp_entity_id && resp.issuer != p.idp_entity_id {
+    // Issuer check. The assertion's own `<Issuer>` must name the registered
+    // IdP: it is the issuer the assertion's signature vouches for. The
+    // Response-level `<Issuer>` is optional (SAML Core §3.2.2), but when
+    // present it must name the IdP too.
+    if a.issuer != p.idp_entity_id || (!resp.issuer.is_empty() && resp.issuer != p.idp_entity_id) {
         return Err(IdentityError::Saml(SamlError::IssuerMismatch));
     }
 
@@ -1360,5 +1374,157 @@ mod tests {
             "a SubjectConfirmationData outside every <Assertion> must not be \
              attributed to the assertion"
         );
+    }
+
+    // ==================================================================
+    // Issuer binding: the assertion's own `<Issuer>` must name the
+    // registered IdP; a Response-level `<Issuer>`, when present, too.
+    // ==================================================================
+
+    const WELL_BOUND_SCD: &str = r#"InResponseTo="_req1" Recipient="https://sp.example/acs" NotOnOrAfter="2099-01-01T00:00:00Z""#;
+    const IDP_ISSUER: &str = "<saml:Issuer>https://idp.example</saml:Issuer>";
+    const OTHER_ISSUER: &str = "<saml:Issuer>https://other-idp.example</saml:Issuer>";
+
+    /// The well-bound fixture with its Response-level and assertion-level
+    /// `<Issuer>` elements replaced (`""` removes one).
+    fn validate_with_issuers(
+        response_issuer: &str,
+        assertion_issuer: &str,
+    ) -> Result<Assertion, IdentityError> {
+        let xml = String::from_utf8(response_with_subject_confirmation(WELL_BOUND_SCD))
+            .expect("fixture is UTF-8");
+        let (head, tail) = xml
+            .split_once("<saml:Assertion ")
+            .expect("fixture has an assertion");
+        assert_eq!(head.matches(IDP_ISSUER).count(), 1, "one Response Issuer");
+        assert_eq!(tail.matches(IDP_ISSUER).count(), 1, "one Assertion Issuer");
+        let xml = format!(
+            "{}<saml:Assertion {}",
+            head.replacen(IDP_ISSUER, response_issuer, 1),
+            tail.replacen(IDP_ISSUER, assertion_issuer, 1),
+        );
+        let parsed = parse_response(xml.as_bytes()).expect("parse");
+        extract_and_validate_assertion(
+            &parsed,
+            &ValidateParams {
+                sp_entity_id: "https://sp.example",
+                acs_url: "https://sp.example/acs",
+                idp_entity_id: "https://idp.example",
+                expected_in_response_to: Some("_req1"),
+                now: Timestamp::from_micros(1_700_000_000 * 1_000_000),
+                clock_skew_secs: 60,
+            },
+        )
+    }
+
+    fn assert_issuer_mismatch(res: Result<Assertion, IdentityError>, case: &str) {
+        assert!(
+            matches!(res, Err(IdentityError::Saml(SamlError::IssuerMismatch))),
+            "{case}: expected IssuerMismatch, got {res:?}"
+        );
+    }
+
+    #[test]
+    fn issuer_both_registered_idp_accepted() {
+        let a = validate_with_issuers(IDP_ISSUER, IDP_ISSUER).expect("both issuers match");
+        assert_eq!(a.issuer, "https://idp.example");
+    }
+
+    #[test]
+    fn issuer_absent_response_issuer_accepted() {
+        let a = validate_with_issuers("", IDP_ISSUER).expect("Response Issuer is optional");
+        assert_eq!(a.issuer, "https://idp.example");
+    }
+
+    #[test]
+    fn issuer_both_other_entity_rejected() {
+        assert_issuer_mismatch(
+            validate_with_issuers(OTHER_ISSUER, OTHER_ISSUER),
+            "both issuers name another entity",
+        );
+    }
+
+    #[test]
+    fn issuer_assertion_must_match_even_when_response_matches() {
+        assert_issuer_mismatch(
+            validate_with_issuers(IDP_ISSUER, OTHER_ISSUER),
+            "assertion issuer names another entity",
+        );
+    }
+
+    #[test]
+    fn issuer_present_response_issuer_must_match() {
+        assert_issuer_mismatch(
+            validate_with_issuers(OTHER_ISSUER, IDP_ISSUER),
+            "Response issuer names another entity",
+        );
+    }
+
+    #[test]
+    fn issuer_assertion_issuer_required() {
+        assert_issuer_mismatch(
+            validate_with_issuers(IDP_ISSUER, ""),
+            "assertion has no issuer",
+        );
+    }
+
+    // ==================================================================
+    // Encrypted content is not supported and is refused, never skipped.
+    // ==================================================================
+
+    fn assert_encrypted_rejected(xml: &str, case: &str) {
+        let err = parse_response(xml.as_bytes())
+            .err()
+            .unwrap_or_else(|| panic!("{case}: must be rejected"));
+        assert!(
+            matches!(&err, IdentityError::Saml(SamlError::Parse { reason }) if reason.contains("encrypted")),
+            "{case}: wrong error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_encrypted_assertion() {
+        let base = build_response_xml(&sample_builder());
+        let (head, _) = base
+            .split_once("<saml:Assertion ")
+            .expect("fixture has an assertion");
+        let xml = format!(
+            "{head}<saml:EncryptedAssertion><xenc:EncryptedData \
+             xmlns:xenc=\"http://www.w3.org/2001/04/xmlenc#\"/></saml:EncryptedAssertion>\
+             </samlp:Response>"
+        );
+        assert_encrypted_rejected(&xml, "EncryptedAssertion only");
+
+        let alongside = base.replacen(
+            "</samlp:Response>",
+            "<saml:EncryptedAssertion/></samlp:Response>",
+            1,
+        );
+        assert_encrypted_rejected(&alongside, "EncryptedAssertion beside an Assertion");
+    }
+
+    #[test]
+    fn parse_rejects_encrypted_subject_id() {
+        let base = build_response_xml(&sample_builder());
+        let start = base.find("<saml:NameID").expect("fixture has a NameID");
+        let end =
+            base.find("</saml:NameID>").expect("fixture closes NameID") + "</saml:NameID>".len();
+        let xml = format!(
+            "{}<saml:EncryptedID><xenc:EncryptedData \
+             xmlns:xenc=\"http://www.w3.org/2001/04/xmlenc#\"/></saml:EncryptedID>{}",
+            &base[..start],
+            &base[end..]
+        );
+        assert_encrypted_rejected(&xml, "EncryptedID instead of NameID");
+    }
+
+    #[test]
+    fn parse_rejects_encrypted_attribute() {
+        let xml = response_with_assertion_tail(concat!(
+            "<saml:AttributeStatement><saml:EncryptedAttribute>",
+            r#"<xenc:EncryptedData xmlns:xenc="http://www.w3.org/2001/04/xmlenc#"/>"#,
+            "</saml:EncryptedAttribute></saml:AttributeStatement>",
+        ));
+        assert_encrypted_rejected(&xml, "EncryptedAttribute");
     }
 }

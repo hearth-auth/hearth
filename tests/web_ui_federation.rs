@@ -484,6 +484,98 @@ fn callback_auto_links_existing_user_on_verified_email() {
     );
 }
 
+/// A federated login rotates the browser's session: a session cookie the
+/// browser already holds is revoked, and the login issues a session with a
+/// new ID.
+#[test]
+fn callback_revokes_the_prior_session_and_issues_a_new_one() {
+    use hearth::protocol::web::auth::{issue_auth_cookies, SESSION_COOKIE};
+
+    let stub = Arc::new(StubFederationTransport::new());
+    let rig = build_rig(Arc::clone(&stub));
+    set_link_mode(&rig, LinkMode::Auto);
+    let existing = rig
+        .identity
+        .create_user(
+            &rig.realm_id,
+            &CreateUserRequest {
+                email: "rotate@example.com".to_string(),
+                display_name: "Rotate Local".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create local user");
+    let prior = rig
+        .identity
+        .create_session(&rig.realm_id, existing.id(), &Default::default())
+        .expect("prior session");
+    let prior_cookie = issue_auth_cookies(
+        &CookieSecret::from_bytes(COOKIE_SECRET),
+        &rig.realm_id,
+        prior.id(),
+        false,
+    )
+    .session_cookie;
+    let prior_pair = prior_cookie
+        .split(';')
+        .next()
+        .expect("cookie pair")
+        .to_string();
+
+    // Derived at runtime: the state and nonce are protocol values, not
+    // fixtures worth a compile-time literal.
+    let state = format!("state-rotate-{}", uuid::Uuid::new_v4());
+    let nonce = format!("nonce-rotate-{}", uuid::Uuid::new_v4());
+    seed_state(&rig, &state, &nonce);
+    stub_successful_oidc_callback(
+        &stub,
+        "code-rotate",
+        &nonce,
+        "ext-rotate-1",
+        "rotate@example.com",
+        true,
+    );
+
+    let resp = send(
+        &rig.app,
+        Request::builder()
+            .header(
+                "cookie",
+                format!("{}; {prior_pair}", fed_bind_cookie(&state)),
+            )
+            .uri(format!(
+                "/ui/realms/demo/federation/callback?state={state}&code=code-rotate"
+            ))
+            .body(Body::empty())
+            .unwrap(),
+    );
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        resp.headers().get("location").unwrap().to_str().unwrap(),
+        "/ui/account"
+    );
+
+    let new_pair = resp
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|c| c.starts_with(&format!("{SESSION_COOKIE}=")))
+        .and_then(|c| c.split(';').next())
+        .expect("the login sets a session cookie")
+        .to_string();
+    assert_ne!(new_pair, prior_pair, "the new session must have a new ID");
+    assert!(
+        rig.identity
+            .get_session(&rig.realm_id, prior.id())
+            .expect("look up prior session")
+            .is_none(),
+        "the session the browser held before the federated login must be revoked"
+    );
+}
+
 /// A realm that sets `mfa_required` demands a second factor on the federation
 /// path too (audit 2026-08-28 §4.18#3, task 9.6). The upstream IdP asserts a
 /// first factor only, so the callback must hand the browser to Hearth's own

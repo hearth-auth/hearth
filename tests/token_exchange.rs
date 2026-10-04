@@ -532,6 +532,53 @@ async fn token_exchange_produces_act_claim() {
     assert!(act.act.is_none(), "single-hop: no nested act");
 }
 
+/// An `actor_token` is accepted only with `actor_token_type` set to the JWT
+/// token type URI; any other value, or none, is `invalid_request`.
+#[tokio::test]
+async fn token_exchange_actor_token_requires_jwt_actor_token_type() {
+    let harness = common::TestHarness::in_process()
+        .await
+        .expect("test setup failed");
+    let identity = harness.identity();
+    let realm_id = make_realm(identity);
+
+    for actor_token_type in [
+        Some("urn:ietf:params:oauth:token-type:access_token".to_string()),
+        None,
+    ] {
+        let user_id = make_user(identity, &realm_id);
+        let subject_token = make_subject_token(identity, &realm_id, &user_id, "mcp:tools:invoke");
+        let (actor_client_id, actor_token) =
+            make_actor_token(identity, &realm_id, Some("mcp:tools:invoke"));
+        let request = Rfc8693Request {
+            client_id: actor_client_id,
+            subject_token,
+            subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
+            actor_token: Some(actor_token),
+            actor_token_type: actor_token_type.clone(),
+            requested_token_type: None,
+            scope: Some("mcp:tools:invoke".to_string()),
+            resource: None,
+            audience: None,
+            dpop_jkt: None,
+        };
+
+        let err = identity
+            .rfc8693_token_exchange(&realm_id, &request)
+            .expect_err("an actor token without the JWT token type must be refused");
+        assert!(
+            matches!(
+                err,
+                IdentityError::TokenExchangeRejected {
+                    oauth_error: "invalid_request",
+                    ..
+                }
+            ),
+            "expected invalid_request for actor_token_type {actor_token_type:?}, got: {err}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn token_exchange_actor_jti_replay_rejected() {
     let harness = common::TestHarness::in_process()

@@ -146,7 +146,15 @@ fn enrol_passkey(
         authenticator.build_registration_response(&challenge, ORIGIN)
     };
     h.identity()
-        .complete_webauthn_registration(realm, user.id(), &cdj, &att, ORIGIN, true)
+        .complete_webauthn_registration(
+            realm,
+            user.id(),
+            &cdj,
+            &att,
+            ORIGIN,
+            true,
+            &Default::default(),
+        )
         .expect("complete registration");
     authenticator
 }

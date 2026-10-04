@@ -140,6 +140,90 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   `<samlp:Status>`, for example, used to be ignored; it is now an error. Responses that sign the
   Response, the Assertion, or both are unaffected. The SP suite now also runs the eight published
   XML signature-wrapping variants (XSW1–XSW8).
+- **Host allowlist on by default.** With `security.allowed_hosts` unset, the server now admits
+  only the `oidc.issuer` host (any port) instead of every `Host`. The match ignores the port on
+  both sides. `/healthz` and `/readyz` skip the check; `/health` and `/metrics` do not. A reverse
+  proxy that rewrites `Host` must set `security.allowed_hosts`.
+- **`security.adaptive_backoff` now governs the `POST /ui/device` lockout.** The configured
+  schedule used to be ignored there in favour of the compiled default; `durations: []` keeps a
+  flat 1-minute lockout.
+- **`SIGHUP` now reloads the mTLS CRLs** in `security.tls.crl_paths`. They were read only at
+  startup, so a newly revoked client certificate kept working until a restart. A CRL that fails
+  to load at reload is logged and the previous CRLs stay in force.
+- **Session idle and absolute timeouts are configurable.** `auth.session_idle_timeout_secs` and
+  `auth.session_absolute_timeout_secs`, with per-realm overrides
+  `realms.<name>.session_idle_timeout_secs` / `session_absolute_timeout_secs`, now load and apply
+  to new sessions. Before, these documented keys were refused as unknown and the timeouts could
+  not be turned on from `hearth.yaml`.
+- **Operator logos and custom CSS are sanitized where they are rendered.** A local SVG logo is
+  passed through the SVG sanitizer before it is inlined into an email, and `branding.custom_css` /
+  `realms.<name>.web.custom_css` are passed through the CSS sanitizer (which drops `@import` and
+  script-bearing declarations) before they are served in the theme CSS.
+- **An SVG logo that fails to parse renders as no logo.** The SVG sanitizer used to keep the
+  part of the document written before the parse error.
+- **Sanitized custom CSS keeps its braces balanced.** A rule whose selector or at-rule prelude
+  matches a blocked pattern is now dropped whole, including its block, so the rules after it
+  (inside or outside `@media`) are no longer misnested.
+- **Agent API keys verify only while their agent is `Active`.** Revoking or suspending an agent
+  now disables every API key it holds; verification answers `AgentRevoked`.
+- **A derived AAT keeps every constraint of its parent tool.** When a parent AAT constrains a
+  tool, deriving a child that lists the tool with no constraints, or without one of the parent's
+  constraint keys, is refused with `AatScopeEscalation`.
+- **SAML SP: the assertion's own `<Issuer>` must name the registered IdP.** A Response-level
+  `<Issuer>`, when present, must name it too; either mismatch is refused with `IssuerMismatch`.
+- **SAML SP: encrypted content is refused.** A response carrying `<EncryptedAssertion>`,
+  `<EncryptedID>` or `<EncryptedAttribute>` is rejected (there is no decryption path), and an
+  assertion without a `<NameID>` subject maps to no account.
+- **Federated sign-in rotates the browser session.** Completing an OIDC or SAML login now
+  revokes any session the browser already holds before issuing a new one, as password sign-in
+  does.
+- **Token exchange: an `actor_token` requires `actor_token_type=urn:ietf:params:oauth:token-type:jwt`.**
+  An exchange that sends an actor token with any other type, or none, is refused with
+  `invalid_request` (RFC 8693 §2.1).
+- **Token exchange without an `actor_token` is attenuated to the client.** The exchanging client
+  is the actor, and a client holds no RBAC permissions, so the delegated token's `permissions`
+  are empty rather than the subject's.
+- **WebAuthn attestation policy: `require_prf` and `require_large_blob` are checked
+  independently.** Support for one no longer satisfies the other. PRF support is read from the
+  authenticator data (`prf`, or `hmac-secret`, its CTAP2 form); largeBlob support from the
+  client's `largeBlob.supported` output, which the registration-complete bodies
+  (`POST /webauthn/register/complete` and the browser passkey flows) now accept as
+  `client_extension_results`. The `/webauthn/register/*` and `/webauthn/auth/*` request bodies
+  refuse undeclared fields with `422`.
+- **WebAuthn registration options request the extensions the attestation policy requires.**
+  When a realm sets `require_prf` or `require_large_blob`, every registration-begin response
+  (`POST /webauthn/register/begin`, the account console and the required-action passkey
+  enrolment) now carries `extensions` (`prf: {}`, `largeBlob: {support: "required"}`), so a
+  browser can satisfy the policy.
+- **A login that passes through a required action rotates the browser session too.** When a
+  password, MFA or federated login is sent to a required-action page, the session the browser
+  already held is revoked before the flow starts; the flow ends in a session with a new ID.
+- **Admin and authentication request bodies refuse unknown fields.** Role assignment, direct
+  permission grants, application updates, webhooks, organizations, agents, approvals, tool
+  invocation, AATs, transaction tokens, SPIFFE mappings, cross-realm policies, email templates,
+  required actions and magic-link requests now answer `422` naming a field the body does not
+  declare, instead of ignoring it. An organization-scoped role assignment is `{"role_id": …,
+  "org_id": …}`; the guides showed a `scope` object, which is refused. OAuth/OIDC endpoint
+  parameters are still ignored when unknown, as RFC 6749 §3.1 requires.
+- **A recently deleted user's email address answers like one in use.** Creating a user or
+  changing an email to a reserved address now returns the same `409` body as an address in use,
+  and the console, SCIM and setup pages show the same message for both.
+- **Reserved `hearth.*` permissions cannot be granted directly.** `POST
+  /admin/users/{id}/permissions` and the console grant forms refuse a `hearth.*` permission with
+  `403 reserved_namespace`; reserved authority comes only from the roles seeded at realm
+  bootstrap. Existing direct grants are unchanged and still count for the admin ceiling.
+- **Roles and groups declared in `hearth.yaml` cannot be changed or deleted at runtime.**
+  `PATCH`/`DELETE /admin/roles/{id}` and `/admin/groups/{id}`, and the console forms, answer
+  `409 yaml_managed` for them, naming `hearth.yaml`. Startup reconciliation still applies YAML
+  changes; a group removed from the YAML returns to runtime management, and a role removed from
+  it is archived as before.
+- **`GET /v1/me/permissions` takes the organization from the token.** Without `org_id` it
+  resolves the token's `oid` (realm-scoped assignments only when the token has none). An
+  `org_id` query parameter must name an organization the user is a member of, or the request is
+  refused with `403`; a malformed `org_id` is `400`. Group responses now include `yaml_managed`.
+- **The step-up proof body refuses undeclared fields.** A JSON step-up proof (console passkey
+  enrolment, REST passkey removal) that carries a field it does not declare, at the top level or
+  inside `assertion`, is refused instead of being read with the field dropped.
 
 ### Fixed
 - The cluster-mode startup warning no longer says writes to a follower fail with HTTP 500

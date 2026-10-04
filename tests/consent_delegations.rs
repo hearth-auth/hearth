@@ -269,6 +269,10 @@ async fn revoked_delegation_rejects_previously_issued_obo_token() {
 /// into the blocklist and `validate_token` honours it, but `introspect` and
 /// `decide` did not, so a revoked delegation stayed `active: true` with live
 /// permissions on exactly the two endpoints a resource server calls.
+///
+/// An exchange without an actor token now carries no permissions (the
+/// exchanging client holds none), so `decide` denies the token before and
+/// after revocation; revocation itself is observed through `introspect`.
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // role setup + exchange + before/after on two endpoints
 async fn revoked_delegation_is_inactive_on_introspect_and_decide() {
@@ -282,7 +286,7 @@ async fn revoked_delegation_is_inactive_on_introspect_and_decide() {
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
 
-    // Give the user a real permission so `decide` is `true` before revocation.
+    // Give the user a real permission, which the delegation must not carry.
     let role = harness
         .rbac()
         .create_role(
@@ -313,12 +317,10 @@ async fn revoked_delegation_is_inactive_on_introspect_and_decide() {
     // user's realm-scoped `tools.invoke` resolves live.
     let scope = "mcp:tools:invoke openid";
     let subject_token = build_subject_jwt(identity, &user_id, &realm_id, scope);
-    // No actor token: the exchanging client acts on its own behalf, so the
-    // delegation carries the subject's `tools.invoke`. A client-credentials
-    // actor token carries no permissions, and a delegated token is capped at
-    // the actor ∩ subject intersection fixed at exchange (openspec/specs/rbac-model/spec.md
-    // §16) — `decide` ignoring that cap is what let this test's former
-    // fixture pass (GA audit 3 C-8).
+    // No actor token: the exchanging client is the actor. A client holds no
+    // RBAC permissions, and a delegated token is capped at the actor ∩
+    // subject intersection fixed at exchange (openspec/specs/rbac-model/spec.md
+    // §16), so the delegation carries none of the user's `tools.invoke`.
     let (actor_client_id, _actor_token) = make_actor_token(identity, &realm_id, scope);
     let request = Rfc8693Request {
         client_id: actor_client_id,
@@ -364,8 +366,8 @@ async fn revoked_delegation_is_inactive_on_introspect_and_decide() {
         )
         .expect("decide before");
     assert!(
-        decide_before.allowed,
-        "setup: decide must allow before revoke"
+        !decide_before.allowed,
+        "a delegated token without an actor token carries no permissions"
     );
 
     // Revoke the delegation.
