@@ -33,6 +33,8 @@ on:
       - 'Dockerfile'
       - '.dockerignore'
       - 'src/**'
+      # A change to this workflow (e.g. an action bump) must build on the PR too.
+      - '.github/workflows/docker.yml'
   push:
     # Release-tag-only publish. No push on branch commits — images are only
     # promoted from signed, tagged release commits. Strict semver pattern
