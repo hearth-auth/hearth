@@ -627,6 +627,7 @@ Global security hardening options.
 | `jwks_rps_limit` | integer | `60` | Maximum JWKS / discovery requests per source IP per second (A-10). Applies to all unauthenticated key-discovery endpoints. Requests beyond this limit receive `429 Too Many Requests`. |
 | `reserved_slugs` | list of strings | 26-item built-in list | Slug names that may never be used as a realm or organization slug (case-insensitive). Setting this key **replaces** the built-in list entirely — include all names you still want reserved. The built-in default includes: `admin`, `api`, `support`, `www`, `mail`, `help`, `status`, `blog`, `app`, `auth`, `login`, `logout`, `signup`, `register`, `account`, `profile`, `settings`, `dashboard`, `billing`, `security`, `webhook`, `callback`, `oauth`, `oidc`, `saml`, `scim`. |
 | `slug_cooldown_days` | integer | `30` | Days a slug is held in reserve after its realm or organization is deleted, before it may be reused. |
+| `max_act_chain_depth` | integer | `3` | The deepest RFC 8693 `act` delegation chain a token may carry (A-38). Token validation refuses a token with a deeper chain (`invalid_token`), and token exchange refuses to build one (`invalid_grant`). An agent's `max_delegation_depth` must be from `1` to this value; if you lower it below a stored agent depth, the lower value applies. Range `1`–`32`; a value outside it fails config load. RFC 8693 sets no number. The upper bound of `32` is a token-size limit, not a policy: each link adds an `act` object to the token, and past about 32 links a delegated token can exceed common 8 KB request-header limits. Raise it only when your agents really delegate that deep. |
 | `key_encryption_key` | string | — | **Required in production** (see [Mandatory in Production](#mandatory-in-production)). 64-character lowercase hex string (32 bytes, `openssl rand -hex 32`) used to encrypt realm signing keys at rest. Prefer the `HEARTH_KEK` environment variable — either one satisfies the gate; setting neither is a hard startup error outside `--dev`. Without it, Ed25519 realm signing keys are stored in plaintext. |
 | `load_test_unthrottled` | bool | `false` | Load-test escape hatch — disables **all** request-rate limiters when `true`. Requires `--dev` mode **and** every bind address must be loopback; refused otherwise. Never enable in production. See [`security.load_test_unthrottled`](#securityload_test_unthrottled). |
 
@@ -2160,6 +2161,7 @@ Every field's default value at a glance.
 | `security` | `allowed_return_to_origins` | `[]` |
 | `security` | `reserved_slugs` | 26-item built-in list |
 | `security` | `slug_cooldown_days` | `30` |
+| `security` | `max_act_chain_depth` | `3` |
 | `security.backup` | `export_rate_limit` | `10` |
 | `security.captcha.turnstile` | `verify_url` | Cloudflare default |
 | `security.http2` | `max_concurrent_streams` | `100` |

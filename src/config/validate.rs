@@ -583,6 +583,16 @@ impl Config {
         if let Err(e) = self.security.validate_kdf_admission() {
             issues.push(config_error_to_issue(&e));
         }
+        if !(1..=32).contains(&self.security.max_act_chain_depth) {
+            issues.push(ValidationIssue {
+                field: "security.max_act_chain_depth".to_string(),
+                reason: format!(
+                    "must be 1–32, got {} (32 keeps a delegated token under common \
+                     8 KB request-header limits)",
+                    self.security.max_act_chain_depth
+                ),
+            });
+        }
 
         validate_auth_password_costs(&self.auth, &mut issues);
         validate_argon2_ceilings(&self.auth, self.realms.as_ref(), &mut issues);

@@ -142,6 +142,7 @@ security:
      dashboard, billing, security, webhook, callback, oauth, oidc,
      saml, scim]
   slug_cooldown_days: 30                    # re-registration cooldown
+  max_act_chain_depth: 3                    # RFC 8693 act-chain ceiling, 1-32
 
   # --- Key material (all 64-char lowercase hex; openssl rand -hex 32) --------
   key_encryption_key: "${HEARTH_KEK}"       # envelope-encryption KEK

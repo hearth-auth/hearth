@@ -246,6 +246,10 @@ pub(crate) const SECURITY_KEYS: &[SecurityKey] = &[
         "src/main.rs (loopback-gated)",
     ),
     key(
+        "security.max_act_chain_depth",
+        "src/identity/engine/mod.rs (act-chain ceiling), src/main.rs",
+    ),
+    key(
         "security.outbound_volume_shield.email_hard_cap",
         "src/abuse/runtime.rs (OutboundVolumeShield, A-4)",
     ),

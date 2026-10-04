@@ -5149,24 +5149,33 @@ impl EmbeddedIdentityEngine {
         })
     }
 
+    /// Stores a delegation grant with its user index row and, when it has a
+    /// parent token, its parent index row, in one batch.
     pub(super) fn store_delegation_grant_inner(
         &self,
         realm_id: &RealmId,
         grant: &StoredDelegationGrant,
     ) -> Result<(), IdentityError> {
-        let primary_key = keys::encode_delegation_grant(&grant.delegation_id);
-        let index_key =
-            keys::encode_delegation_grant_user_index(&grant.user_sub, &grant.delegation_id);
         let bytes = serde_json::to_vec(grant).map_err(|e| IdentityError::Serialization {
             reason: e.to_string(),
         })?;
+        let mut entries = vec![
+            (keys::encode_delegation_grant(&grant.delegation_id), bytes),
+            (
+                keys::encode_delegation_grant_user_index(&grant.user_sub, &grant.delegation_id),
+                b"1".to_vec(),
+            ),
+        ];
+        if let Some(parent_jti) = &grant.parent_token_jti {
+            let exp_secs = grant.expires_at.as_micros() / 1_000_000;
+            entries.push((
+                keys::encode_delegation_grant_parent_index(parent_jti, &grant.delegation_id),
+                exp_secs.to_le_bytes().to_vec(),
+            ));
+        }
         self.storage
-            .put(realm_id, &primary_key, &bytes)
-            .map_err(Self::storage_err)?;
-        self.storage
-            .put(realm_id, &index_key, b"1")
-            .map_err(Self::storage_err)?;
-        Ok(())
+            .put_batch(realm_id, &entries)
+            .map_err(Self::storage_err)
     }
 
     pub(super) fn list_delegation_grants_inner(
@@ -5224,31 +5233,108 @@ impl EmbeddedIdentityEngine {
         delegation_id: &str,
         user_sub: &str,
     ) -> Result<(), IdentityError> {
-        let primary_key = keys::encode_delegation_grant(delegation_id);
-        let Some(bytes) = self
-            .storage
-            .get(realm_id, &primary_key)
-            .map_err(Self::storage_err)?
-        else {
+        let Some(grant) = self.load_delegation_grant(realm_id, delegation_id)? else {
             return Err(IdentityError::DelegationGrantNotFound);
         };
-        let mut grant: StoredDelegationGrant =
-            serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
-                reason: e.to_string(),
-            })?;
         if grant.user_sub != user_sub {
             return Err(IdentityError::DelegationGrantNotFound);
         }
         if grant.revoked {
             return Ok(());
         }
+        self.revoke_delegation_tree(realm_id, grant, "self")
+    }
+
+    /// Revokes `root` and every grant exchanged onward from its token, down
+    /// the whole tree (`delegation-chain-integrity` design §2).
+    ///
+    /// Each grant's token `jti` is written to the revoked-`jti` blocklist
+    /// before its children are scanned. An exchange stores its child grant
+    /// before it re-reads its parent's blocklist row, so a child the scan
+    /// misses is one whose exchange sees the parent revoked and revokes the
+    /// child itself. The walk is a work list, not recursion, and visits each
+    /// grant once: a child that is already revoked is skipped.
+    pub(super) fn revoke_delegation_tree(
+        &self,
+        realm_id: &RealmId,
+        root: StoredDelegationGrant,
+        via: &str,
+    ) -> Result<(), IdentityError> {
+        let root_id = root.delegation_id.clone();
+        let mut pending = vec![(root, None::<String>)];
+        while let Some((mut grant, parent_delegation)) = pending.pop() {
+            self.revoke_one_delegation_grant(
+                realm_id,
+                &mut grant,
+                if parent_delegation.is_some() {
+                    "cascade"
+                } else {
+                    via
+                },
+                parent_delegation.as_deref(),
+            )?;
+            let prefix = keys::delegation_grant_parent_prefix(&grant.token_jti);
+            let end = keys::prefix_end(&prefix);
+            let children = self
+                .storage
+                .scan(realm_id, &prefix, &end)
+                .map_err(Self::storage_err)?;
+            for entry in &children {
+                let Some(child_id) = entry.key.get(prefix.len()..) else {
+                    continue;
+                };
+                let child_id = String::from_utf8_lossy(child_id);
+                if let Some(child) = self.load_delegation_grant(realm_id, &child_id)? {
+                    if !child.revoked {
+                        pending.push((child, Some(grant.delegation_id.clone())));
+                    }
+                }
+            }
+        }
+        tracing::debug!(delegation_id = %root_id, "delegation tree revoked");
+        Ok(())
+    }
+
+    /// Reads one delegation grant record.
+    fn load_delegation_grant(
+        &self,
+        realm_id: &RealmId,
+        delegation_id: &str,
+    ) -> Result<Option<StoredDelegationGrant>, IdentityError> {
+        let Some(bytes) = self
+            .storage
+            .get(realm_id, &keys::encode_delegation_grant(delegation_id))
+            .map_err(Self::storage_err)?
+        else {
+            return Ok(None);
+        };
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })
+    }
+
+    /// Marks one grant revoked, blocklists its token `jti` and records
+    /// `AgentTokenRevoked`.
+    fn revoke_one_delegation_grant(
+        &self,
+        realm_id: &RealmId,
+        grant: &mut StoredDelegationGrant,
+        via: &str,
+        parent_delegation: Option<&str>,
+    ) -> Result<(), IdentityError> {
         grant.revoked = true;
         let updated_bytes =
-            serde_json::to_vec(&grant).map_err(|e| IdentityError::Serialization {
+            serde_json::to_vec(&*grant).map_err(|e| IdentityError::Serialization {
                 reason: e.to_string(),
             })?;
         self.storage
-            .put(realm_id, &primary_key, &updated_bytes)
+            .put(
+                realm_id,
+                &keys::encode_delegation_grant(&grant.delegation_id),
+                &updated_bytes,
+            )
             .map_err(Self::storage_err)?;
         let jti_key = keys::encode_revoked_jti(&grant.token_jti);
         let exp_secs = grant.expires_at.as_micros() / 1_000_000;
@@ -5261,16 +5347,33 @@ impl EmbeddedIdentityEngine {
             Some(&AuditContext {
                 actor: Actor::System,
                 metadata: Some(serde_json::json!({
-                    "delegation_id": delegation_id,
+                    "delegation_id": grant.delegation_id,
                     "actor_sub": grant.actor_sub,
-                    "via": "self",
+                    "via": via,
+                    "parent_delegation_id": parent_delegation,
                 })),
             }),
             AuditAction::AgentTokenRevoked,
             "delegation",
-            delegation_id,
+            &grant.delegation_id,
         );
         Ok(())
+    }
+
+    /// Whether `jti` has a row in the revoked-`jti` blocklist.
+    ///
+    /// Reads storage, not the in-process cache: a revoke on another node
+    /// reaches this node's storage before it reaches this node's cache.
+    pub(super) fn jti_revoked_in_storage(
+        &self,
+        realm_id: &RealmId,
+        jti: &str,
+    ) -> Result<bool, IdentityError> {
+        Ok(self
+            .storage
+            .get(realm_id, &keys::encode_revoked_jti(jti))
+            .map_err(Self::storage_err)?
+            .is_some())
     }
 }
 

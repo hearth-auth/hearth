@@ -7,10 +7,11 @@
 //! that the server did not read it, instead of getting a broader result than it
 //! asked for.
 //!
-//! The OAuth/OIDC wire bodies (token, PAR, revocation, introspection,
-//! authorize, device authorization) are the documented exceptions: RFC 6749
-//! §3.1 requires the server to ignore unknown request parameters. They are not
-//! listed here.
+//! The OAuth/OIDC wire bodies (token, PAR, revocation, introspection, the
+//! browser `GET /authorize`, device authorization) are the documented
+//! exceptions: RFC 6749 §3.1 requires the server to ignore unknown request
+//! parameters. They are not in the refusal table; the token and device
+//! authorization endpoints have their own tests below.
 
 #![allow(clippy::unwrap_used)]
 
@@ -491,4 +492,66 @@ async fn a47_token_endpoint_ignores_an_unknown_parameter() {
     let body = String::from_utf8_lossy(&body);
     assert_eq!(status, StatusCode::OK, "token request refused: {body}");
     assert!(body.contains("\"access_token\""), "no access token: {body}");
+}
+
+/// `abuse-prevention` A-47: the RFC 8628 device authorization endpoint is a
+/// protocol endpoint, so it ignores a parameter it does not define. The
+/// header-routed route and its realm-routed twin answer the same.
+#[tokio::test]
+async fn a47_device_authorization_ignores_an_unknown_parameter() {
+    const SECRET: &str = "a47-device-secret-0123456789!";
+    let h = common::TestHarness::in_process().await.unwrap();
+    let realm = h.create_realm();
+    let realm_name = h
+        .identity()
+        .get_realm(&realm)
+        .expect("get realm")
+        .expect("realm exists")
+        .name()
+        .to_string();
+    let client = h
+        .identity()
+        .register_client(
+            &realm,
+            &RegisterClientRequest {
+                client_name: "a47-device-client".to_string(),
+                redirect_uris: vec!["https://app.example.com/cb".to_string()],
+                client_secret: Some(SECRET.to_string()),
+                grant_types: vec!["urn:ietf:params:oauth:grant-type:device_code".to_string()],
+                trust_level: hearth::identity::ClientTrustLevel::FirstParty,
+                require_consent: false,
+                ..Default::default()
+            },
+        )
+        .expect("register client");
+    let form = format!(
+        "client_id={}&client_secret={SECRET}&scope=openid&{UNKNOWN}=1",
+        client.client_id().as_uuid()
+    );
+
+    for uri in [
+        "/device_authorization".to_string(),
+        format!("/realms/{realm_name}/device_authorization"),
+    ] {
+        let resp = app(&h)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(&uri)
+                    .header("x-realm-id", realm.as_uuid().to_string())
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(form.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert_eq!(status, StatusCode::OK, "{uri}: request refused: {body}");
+        assert!(
+            body.contains("\"device_code\""),
+            "{uri}: no device code: {body}"
+        );
+    }
 }

@@ -2600,7 +2600,7 @@ type CreateAgentRequest struct {
 	// UUID of the owning user or organization.
 	OwnerId      string   `protobuf:"bytes,4,opt,name=owner_id,json=ownerId,proto3" json:"owner_id,omitempty"`
 	Capabilities []string `protobuf:"bytes,5,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
-	// Maximum delegation depth (1–10, default 1).
+	// Maximum delegation depth (1 to `security.max_act_chain_depth`, default 1).
 	MaxDelegationDepth uint32 `protobuf:"varint,6,opt,name=max_delegation_depth,json=maxDelegationDepth,proto3" json:"max_delegation_depth,omitempty"`
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache

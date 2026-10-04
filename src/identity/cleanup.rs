@@ -112,6 +112,17 @@ pub struct CleanupStats {
     /// session is revoked. A family that merely *expires* is reclaimed by
     /// `sweep_grant_families` and used to leave its index row behind forever.
     pub session_family_rows_deleted: u64,
+    /// Delegation parent-index rows (`dgrant:parent:`) swept.
+    ///
+    /// A row links an exchange's subject token to the grant it created, so a
+    /// revoke can reach onward exchanges. Once the child token has expired
+    /// there is nothing left to revoke, and the row is dead weight.
+    pub delegation_parent_rows_deleted: u64,
+    /// Records of minted AATs (`aat:rec:`) swept once the AAT has expired.
+    ///
+    /// AAT validation reads the record of every chain link. An expired AAT
+    /// fails its own `exp` check first, so its record is dead weight.
+    pub aat_records_deleted: u64,
     /// A-18 idle/absolute-timeout sessions evicted by the background sweep.
     ///
     /// Policy-expired sessions are rejected fail-closed on the read path with
@@ -145,6 +156,8 @@ impl CleanupStats {
             + self.consumed_markers_deleted
             + self.revoked_jtis_deleted
             + self.session_family_rows_deleted
+            + self.delegation_parent_rows_deleted
+            + self.aat_records_deleted
             + self.rate_trackers_pruned
             + self.sessions_evicted
     }
@@ -286,6 +299,20 @@ pub(crate) fn sweep_expired(
         &mut errors,
         "single-use redemption marker",
         sweep_consumed_markers(realm_id, storage, now_secs),
+    );
+    record(
+        realm_id,
+        &mut stats.delegation_parent_rows_deleted,
+        &mut errors,
+        "delegation parent index",
+        sweep_delegation_parent_index(realm_id, storage, now_secs),
+    );
+    record(
+        realm_id,
+        &mut stats.aat_records_deleted,
+        &mut errors,
+        "AAT record",
+        sweep_aat_records(realm_id, storage, now_secs),
     );
     record(
         realm_id,
@@ -568,6 +595,64 @@ pub(crate) fn sweep_actor_jtis(
         };
         let expires_at = i64::from_le_bytes(bytes);
         if expires_at <= now_secs {
+            storage.delete(realm_id, &entry.key)?;
+            deleted += 1;
+        }
+    }
+    Ok(deleted)
+}
+
+/// Evicts delegation parent-index rows (`dgrant:parent:`) whose child token
+/// has expired.
+///
+/// Each row stores the child token's `exp` as an 8-byte little-endian `i64`
+/// (Unix seconds). A row of another size is left for realm-cascade deletion.
+pub(crate) fn sweep_delegation_parent_index(
+    realm_id: &RealmId,
+    storage: &dyn StorageEngine,
+    now_secs: i64,
+) -> Result<u64, crate::storage::StorageError> {
+    let prefix = keys::delegation_grant_parent_scan_prefix();
+    let end = keys::prefix_end(&prefix);
+    let entries = storage.scan(realm_id, &prefix, &end)?;
+
+    let mut deleted: u64 = 0;
+    for entry in &entries {
+        let Ok(bytes) = entry.value.as_slice().try_into() else {
+            continue;
+        };
+        let expires_at = i64::from_le_bytes(bytes);
+        if expires_at <= now_secs {
+            storage.delete(realm_id, &entry.key)?;
+            deleted += 1;
+        }
+    }
+    Ok(deleted)
+}
+
+/// Evicts the records of expired AATs (`aat:rec:`).
+///
+/// A record is the minted claims as JSON; only its `exp` (Unix seconds) is
+/// read. A record that does not parse is left for realm-cascade deletion.
+pub(crate) fn sweep_aat_records(
+    realm_id: &RealmId,
+    storage: &dyn StorageEngine,
+    now_secs: i64,
+) -> Result<u64, crate::storage::StorageError> {
+    #[derive(serde::Deserialize)]
+    struct Expiry {
+        exp: i64,
+    }
+    let prefix = keys::aat_record_scan_prefix();
+    let end = keys::prefix_end(&prefix);
+    let entries = storage.scan(realm_id, &prefix, &end)?;
+
+    let mut deleted: u64 = 0;
+    for entry in &entries {
+        let Ok(Expiry { exp }) = serde_json::from_slice(&entry.value) else {
+            continue;
+        };
+        if exp <= now_secs {
             storage.delete(realm_id, &entry.key)?;
             deleted += 1;
         }
@@ -1272,6 +1357,48 @@ mod tests {
                 .is_some(),
             "active-1 must survive"
         );
+    }
+
+    #[test]
+    fn sweep_delegation_parent_index_deletes_rows_of_expired_children() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+        let expired = keys::encode_delegation_grant_parent_index("parent", "expired-child");
+        let live = keys::encode_delegation_grant_parent_index("parent", "live-child");
+        s.put(&realm, &expired, &(NOW_SECS - 1).to_le_bytes())
+            .expect("put expired");
+        s.put(&realm, &live, &(NOW_SECS + 300).to_le_bytes())
+            .expect("put live");
+
+        let deleted = sweep_delegation_parent_index(&realm, &s, NOW_SECS).expect("sweep");
+        assert_eq!(deleted, 1, "only the expired child's row is removed");
+        assert!(s.get(&realm, &expired).expect("get").is_none());
+        assert!(s.get(&realm, &live).expect("get").is_some());
+    }
+
+    #[test]
+    fn sweep_aat_records_deletes_records_of_expired_aats() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+        let expired = keys::encode_aat_record("expired");
+        let live = keys::encode_aat_record("live");
+        s.put(
+            &realm,
+            &expired,
+            format!(r#"{{"exp":{}}}"#, NOW_SECS - 1).as_bytes(),
+        )
+        .expect("put expired");
+        s.put(
+            &realm,
+            &live,
+            format!(r#"{{"exp":{}}}"#, NOW_SECS + 300).as_bytes(),
+        )
+        .expect("put live");
+
+        let deleted = sweep_aat_records(&realm, &s, NOW_SECS).expect("sweep");
+        assert_eq!(deleted, 1, "only the expired AAT's record is removed");
+        assert!(s.get(&realm, &expired).expect("get").is_none());
+        assert!(s.get(&realm, &live).expect("get").is_some());
     }
 
     #[test]

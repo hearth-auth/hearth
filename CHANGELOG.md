@@ -17,6 +17,11 @@ libraries, admin clients generated from OpenAPI, one conformance harness for all
 testing, an external pentest). Hearth is not yet production-ready until the second one is done.
 
 ### Added
+- **`security.max_act_chain_depth`** — the deepest RFC 8693 `act` delegation chain a token may
+  carry. Default `3`, range `1`–`32`; a value outside the range fails config load. Token
+  validation and token exchange both read it, and an agent's `max_delegation_depth` must be from
+  `1` to this value. The bound of `32` keeps a delegated token under common 8 KB request-header
+  limits.
 - **Organization methods in every SDK's `AdminClient`** — list, create, get, update and delete
   organizations, and list, add and remove a member's extra organization roles
   (`/admin/organizations`, served since 3.0.0). TypeScript and Go: `listOrganizations` …
@@ -148,6 +153,25 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   token, ID token and PKCE state live in `sessionStorage` (the access token stays in memory),
   and the refresh and ID tokens earlier releases kept in `localStorage` are removed when the
   facade is created.
+- **The act-chain depth ceiling is now `3` by default, and one setting controls it.** Token
+  validation refuses a token whose `act` chain is deeper than `security.max_act_chain_depth`, and
+  stops reading the chain once it passes the ceiling. Token exchange applies the same ceiling. An
+  agent's `max_delegation_depth` above the ceiling is refused on create and update, and a stored
+  value above a later, lower ceiling is capped at the ceiling.
+- **Revoking a delegation now revokes every token exchanged onward from it.** Each delegation
+  records the token it was exchanged from, and a revoke walks the whole tree of onward exchanges:
+  every token in it fails validation and introspects `active: false`. Each cascaded delegation
+  records its own `AgentTokenRevoked` event (`"via": "cascade"`). An exchange that races a revoke
+  of its subject token fails with `invalid_grant` and leaves no live delegation behind, and a
+  token exchange whose delegation record cannot be stored now fails instead of issuing a token
+  that could not be revoked.
+- **AAT validation now checks every link of the attenuation chain.** Hearth stores the claims of
+  each AAT it issues or derives, and validation compares the presented token with that record.
+  `aat_chain` must end with the token's own `jti`, `aat_parent` must be the link before it, and
+  each link must narrow its parent's tools and scopes. AATs issued before this release have no
+  record and fail validation; they live at most one hour, so issue or derive a new one. A backup
+  restore does not carry the records, so AATs minted on the source fail on the target the same
+  way.
 - **`GET /admin/users/{id}/effective-permissions?org_id=` no longer reports a suspended
   organization's permissions.** The REST handler passed `org_id` straight to the resolver, so an
   administrator was shown org-scoped authority that tokens never carried; it now applies the
@@ -245,6 +269,9 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   inside `assertion`, is refused instead of being read with the field dropped.
 
 ### Fixed
+- **`POST /device_authorization` now ignores an unknown parameter.** The header-routed device
+  authorization endpoint refused a parameter RFC 8628 does not define with `400`, unlike its
+  realm-routed twin and the other OAuth endpoints. It now ignores it, as RFC 6749 §3.1 requires.
 - The cluster-mode startup warning no longer says writes to a follower fail with HTTP 500
   (they are forwarded to the leader) or that followers never update cached RBAC and sessions.
   It now names the open items and points to the new cluster consistency spec,

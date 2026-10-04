@@ -4936,7 +4936,7 @@
           "max_delegation_depth": {
             "type": "integer",
             "format": "int64",
-            "description": "Maximum delegation depth (1\u201310, default 1)."
+            "description": "Maximum delegation depth (1 to `security.max_act_chain_depth`, default 1)."
           }
         },
         "description": "Request to create a new agent."

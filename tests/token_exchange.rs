@@ -305,7 +305,7 @@ fn act_claim_depth_counts_chain() {
         sub: "agent:A".to_string(),
         act: None,
     };
-    assert_eq!(depth_1.depth(), 1);
+    assert_eq!(depth_1.depth_up_to(3), 1);
 
     let depth_2 = ActClaim {
         sub: "agent:B".to_string(),
@@ -314,7 +314,7 @@ fn act_claim_depth_counts_chain() {
             act: None,
         })),
     };
-    assert_eq!(depth_2.depth(), 2);
+    assert_eq!(depth_2.depth_up_to(3), 2);
 
     let depth_3 = ActClaim {
         sub: "agent:C".to_string(),
@@ -326,7 +326,7 @@ fn act_claim_depth_counts_chain() {
             })),
         })),
     };
-    assert_eq!(depth_3.depth(), 3);
+    assert_eq!(depth_3.depth_up_to(3), 3);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -637,7 +637,8 @@ async fn token_exchange_delegation_depth_enforced() {
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
 
-    let max_depth = hearth::abuse::MAX_ACT_CHAIN_DEPTH;
+    // The default act-chain ceiling (`security.max_act_chain_depth`).
+    let max_depth = 3;
 
     // Build a real subject token at depth `max_depth` by running `max_depth` sequential
     // token exchanges. Each exchange appends one act-chain hop. Because each hop requires a
@@ -693,11 +694,11 @@ async fn token_exchange_delegation_depth_enforced() {
         matches!(
             err,
             IdentityError::DelegationDepthExceeded {
-                max: 10,
-                attempted: 11
+                max: 3,
+                attempted: 4
             }
         ),
-        "expected DelegationDepthExceeded {{ max: 10, attempted: 11 }}, got: {err}"
+        "expected DelegationDepthExceeded {{ max: 3, attempted: 4 }}, got: {err}"
     );
 }
 

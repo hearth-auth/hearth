@@ -1169,7 +1169,7 @@ export type CreateAgentRequest = Message<"hearth.identity.v1.CreateAgentRequest"
   capabilities: string[];
 
   /**
-   * Maximum delegation depth (1–10, default 1).
+   * Maximum delegation depth (1 to `security.max_act_chain_depth`, default 1).
    *
    * @generated from field: uint32 max_delegation_depth = 6;
    */

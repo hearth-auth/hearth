@@ -340,7 +340,7 @@ message CreateAgentRequest {
   // UUID of the owning user or organization.
   string owner_id = 4;
   repeated string capabilities = 5;
-  // Maximum delegation depth (1–10, default 1).
+  // Maximum delegation depth (1 to `security.max_act_chain_depth`, default 1).
   uint32 max_delegation_depth = 6;
 }
 

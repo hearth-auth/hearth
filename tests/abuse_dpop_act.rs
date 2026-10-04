@@ -7,12 +7,12 @@
 //!   the token carries `cnf.jkt`.
 //! - A-38c: `client_credentials` without `dpop_jkt` for a client without the
 //!   flag succeeds.
-//! - A-38d: `MAX_ACT_CHAIN_DEPTH` is the documented sentinel value of 3.
+//! - A-38d: `security.max_act_chain_depth` defaults to 3 and must be in `1`–`32`.
 
 mod common;
 
 use base64::prelude::{Engine as _, BASE64_URL_SAFE_NO_PAD};
-use hearth::abuse::MAX_ACT_CHAIN_DEPTH;
+use hearth::config::Config;
 use hearth::identity::oidc::{ClientCredentialsRequest, RegisterClientRequest};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -192,16 +192,43 @@ async fn a38c_unbound_client_credentials_without_dpop_ok() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// A-38d — MAX_ACT_CHAIN_DEPTH sentinel
+// A-38d — `security.max_act_chain_depth`
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Verifies the constant equals the documented default so spec and code
-/// stay in sync. Raised from 3 → 10 in HEA-1406 (M2 Phase B: delegation chains
-/// need deeper `max_delegation_depth` per openspec/specs/delegated-authorization/spec.md).
+/// A production config with `security_extra` inside the `security:` block.
+fn prod_yaml(security_extra: &str) -> String {
+    format!(
+        "server:\n  trust_forwarded_proto: true\n  trusted_proxies: [\"127.0.0.1\"]\n\
+         storage:\n  data_dir: \"/tmp/hearth-a38d\"\n\
+         security:\n  key_encryption_key: \"\
+         1111111111111111111111111111111111111111111111111111111111111111\"\n{security_extra}\
+         oidc:\n  issuer: \"https://auth.example.test\"\n\
+         email:\n  allow_log_transport_in_production: true\n"
+    )
+}
+
+/// Scenario "The default delegation chain depth ceiling is 3".
 #[test]
-fn a38d_max_act_chain_depth_is_10() {
-    assert_eq!(
-        MAX_ACT_CHAIN_DEPTH, 10,
-        "constant changed — update openspec/specs/agent-identity/spec.md and CHANGELOG"
-    );
+fn a38d_the_default_ceiling_is_3() {
+    let config = Config::from_yaml_str(&prod_yaml("")).expect("config without the key loads");
+    assert_eq!(config.security.max_act_chain_depth, 3);
+}
+
+/// Scenario "A ceiling out of range": `0` and `33` fail and name the key;
+/// the bounds `1` and `32` load.
+#[test]
+fn a38d_a_ceiling_out_of_range_is_refused() {
+    for bad in [0, 33] {
+        let err = Config::from_yaml_str(&prod_yaml(&format!("  max_act_chain_depth: {bad}\n")))
+            .expect_err("a ceiling outside 1..=32 is refused");
+        assert!(
+            err.to_string().contains("security.max_act_chain_depth"),
+            "value {bad}: the error must name the key; got: {err}"
+        );
+    }
+    for good in [1_u8, 32] {
+        let config = Config::from_yaml_str(&prod_yaml(&format!("  max_act_chain_depth: {good}\n")))
+            .expect("a ceiling inside 1..=32 loads");
+        assert_eq!(config.security.max_act_chain_depth, good);
+    }
 }

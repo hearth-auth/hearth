@@ -486,7 +486,7 @@ pub struct Agent {
     description: String,
     capabilities: Vec<String>,
     status: AgentStatus,
-    /// Maximum number of delegation hops this agent may initiate (1–10).
+    /// Maximum number of delegation hops this agent may initiate (1 to `security.max_act_chain_depth`).
     max_delegation_depth: u8,
     created_at: Timestamp,
     updated_at: Timestamp,
@@ -613,7 +613,7 @@ pub struct CreateAgentRequest {
     pub owner: AgentOwner,
     /// Declared capability URIs (informational; enforcement via RBAC).
     pub capabilities: Vec<String>,
-    /// Maximum number of delegation hops (1–10, default 1).
+    /// Maximum number of delegation hops (1 to `security.max_act_chain_depth`, default 1).
     pub max_delegation_depth: u8,
 }
 
@@ -922,7 +922,9 @@ pub struct Rfc8693Response {
 /// Created when `rfc8693_token_exchange` issues a delegated access token.
 /// Stored so the user can list active delegations and revoke them via
 /// `GET /ui/consent/delegations`. Revoking adds `token_jti` to the
-/// JTI blocklist, immediately invalidating the issued access token.
+/// JTI blocklist, immediately invalidating the issued access token, and
+/// revokes every grant whose `parent_token_jti` is that `token_jti`, down the
+/// whole tree of onward exchanges.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StoredDelegationGrant {
     /// Unique ID for this delegation record (UUID string).
@@ -941,6 +943,11 @@ pub struct StoredDelegationGrant {
     pub revoked: bool,
     /// JTI of the issued delegated access token, for immediate revocation.
     pub token_jti: String,
+    /// JTI of the exchange's subject token. Revoking the grant that issued
+    /// that token revokes this grant too. `None` when the subject token
+    /// carried no `jti`.
+    #[serde(default)]
+    pub parent_token_jti: Option<String>,
 }
 
 /// Listing entry returned from [`IdentityEngine::list_delegation_grants`].
@@ -1034,7 +1041,10 @@ pub struct AatToolPermission {
 /// Issued by Hearth (typ: `"aat+jwt"`, signed with the realm key).
 /// Each derived child includes a reference back to its parent via
 /// `aat_parent` and the full ordered `aat_chain`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// Hearth stores the claims of every AAT it mints, and validation compares a
+/// presented token with that record, link by link.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct AatClaims {
     /// Token ID (UUID string). Used for revocation and chain references.
     pub jti: String,

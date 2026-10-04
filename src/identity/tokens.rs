@@ -89,10 +89,25 @@ pub struct ActClaim {
 }
 
 impl ActClaim {
-    /// Counts the depth of the `act` chain (1 for a single actor, 2 for A→B, etc.).
+    /// Counts the links of the `act` chain (1 for a single actor, 2 for A→B,
+    /// etc.), stopping one link past `limit`.
+    ///
+    /// Returns at most `limit + 1`, so a caller can tell "within the limit"
+    /// from "past it" without reading the rest of the chain. The walk is a
+    /// loop, not recursion, and does not allocate: it runs in
+    /// `validate_token` on the hot path (A-38).
     #[must_use]
-    pub fn depth(&self) -> usize {
-        1 + self.act.as_ref().map_or(0, |inner| inner.depth())
+    pub fn depth_up_to(&self, limit: usize) -> usize {
+        let mut depth = 1;
+        let mut cur = self.act.as_deref();
+        while let Some(inner) = cur {
+            if depth > limit {
+                break;
+            }
+            depth += 1;
+            cur = inner.act.as_deref();
+        }
+        depth
     }
 }
 
