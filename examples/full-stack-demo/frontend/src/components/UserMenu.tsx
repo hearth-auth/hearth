@@ -1,5 +1,4 @@
 import { hearthAuth } from "../main.js";
-import { getAccessToken } from "@hearth-auth/sdk";
 
 /** Decode only the JWT payload — signature is trusted because we issued it. */
 function decodePayload(token: string): Record<string, unknown> {
@@ -16,7 +15,7 @@ function decodePayload(token: string): Record<string, unknown> {
 
 /** Avatar + display name chip with a Logout button. */
 export default function UserMenu() {
-  const token = getAccessToken();
+  const token = hearthAuth.getAccessToken();
   const claims = token ? decodePayload(token) : {};
   const name =
     (claims.name as string | undefined) ??

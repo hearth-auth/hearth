@@ -1,14 +1,13 @@
 import { useState } from "react";
 import { Navigate } from "react-router-dom";
 import { hearthAuth } from "../main.js";
-import { isAuthenticated } from "@hearth-auth/sdk";
 
 export default function Login() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Already logged in — skip straight to dashboard.
-  if (isAuthenticated()) {
+  if (hearthAuth.isAuthenticated()) {
     return <Navigate to="/dashboard" replace />;
   }
 

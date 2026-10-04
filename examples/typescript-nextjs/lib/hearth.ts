@@ -35,12 +35,14 @@ export async function verifyAccessToken(token: string) {
   return payload;
 }
 
-// Client-side RBAC facade — reads claims from the JWT in memory (zero network).
+// Client-side RBAC facade — verifies the in-memory JWT against the realm JWKS
+// (fetched once, then cached), then reads its claims. The checks are async.
 // Only available after import on the client; do not import server-only modules here.
 export function makeHearthFacade(getToken: () => string | null | undefined) {
   return createHearth({
     baseUrl: process.env.HEARTH_BASE_URL!,
     realmId: process.env.HEARTH_REALM_ID!,
+    issuerUrl: process.env.HEARTH_BASE_URL!,
     getToken,
   });
 }

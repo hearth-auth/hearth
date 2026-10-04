@@ -295,7 +295,7 @@ func contains(haystack []string, needle string) bool {
 }
 
 // verifiedClaims verifies token end-to-end via VerifyToken — EdDSA signature
-// against the issuer's JWKS, plus exp, nbf, iat and iss — and only then returns
+// against the issuer's JWKS, plus exp, nbf, iat, iss and aud — and only then returns
 // the RBAC subset of the (now authenticated) payload.
 //
 // Returns nil when verification fails for any reason, so every caller is

@@ -1,7 +1,7 @@
 import { Link } from "react-router-dom";
 import { useHasRole, useHasPermission, useInGroup, useInOrg } from "@hearth-auth/sdk";
 import UserMenu from "../components/UserMenu.js";
-import { getAccessToken } from "@hearth-auth/sdk";
+import { hearthAuth } from "../main.js";
 
 function decodePayload(token: string): Record<string, unknown> {
   try {
@@ -14,7 +14,7 @@ function decodePayload(token: string): Record<string, unknown> {
 
 /** Shows decoded JWT claims + role/permission badges. */
 export default function Dashboard() {
-  const token = getAccessToken() ?? "";
+  const token = hearthAuth.getAccessToken() ?? "";
   const claims = decodePayload(token);
 
   // SDK hooks — read JWT claims synchronously, no network.

@@ -12,6 +12,8 @@ import Link from "next/link";
 const hearth = createHearth({
   baseUrl: process.env.NEXT_PUBLIC_HEARTH_BASE_URL ?? "",
   realmId: process.env.NEXT_PUBLIC_HEARTH_REALM_ID ?? "",
+  // The realm issuer the token is verified against.
+  issuerUrl: process.env.NEXT_PUBLIC_HEARTH_BASE_URL ?? "",
   // Read the token from the cookie. In production use an API route that
   // returns a non-HttpOnly copy of the access token (or read from memory).
   getToken: () => {
