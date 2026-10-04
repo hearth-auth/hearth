@@ -1001,10 +1001,11 @@ async fn rest_role_cascade_delete_honours_the_ceiling() {
 
 // ── round 2: org-scoped authority of non-members ─────────────────────────────
 
-/// Permission resolution honours an org-scoped grant or group assignment of a
-/// user who is NOT a member of that organization (`GET
-/// /v1/me/permissions?org_id=` reports it), so the ceiling counts it too; and
-/// an additional org role can no longer be given to a non-member.
+/// An org-scoped grant or group assignment of a user who is NOT a member of
+/// that organization still counts for the ceiling (the ceiling is
+/// conservative), although `GET /v1/me/permissions?org_id=` refuses a
+/// non-member's organization; and an additional org role can no longer be
+/// given to a non-member.
 #[tokio::test]
 async fn non_member_org_scoped_authority_counts_for_the_ceiling() {
     let f = Fixture::new().await;
@@ -1058,7 +1059,7 @@ async fn non_member_org_scoped_authority_counts_for_the_ceiling() {
         .expect("org-scoped group assignment");
     assert!(!f.is_member(&org, &granted) && !f.is_member(&org, &grouped));
 
-    // Evidence: resolution honours it without membership.
+    // A caller-chosen organization the user is not a member of is refused.
     let (status, body) = f
         .call(
             "GET",
@@ -1068,13 +1069,7 @@ async fn non_member_org_scoped_authority_counts_for_the_ceiling() {
             None,
         )
         .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(
-        body["permissions"]
-            .as_array()
-            .is_some_and(|p| p.iter().any(|v| v == "hearth.admin")),
-        "a non-member's org-scoped grant is honoured: {body}"
-    );
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
 
     let token = f.sub_admin("hearth.users.admin");
     for target in [&granted, &grouped] {

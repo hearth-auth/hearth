@@ -314,6 +314,8 @@ class Group(BaseModel):
     slug: str | None = None
     description: str | None = None
     realm_id: str | None = None
+    #: Declared in ``hearth.yaml`` (read-only through the API).
+    yaml_managed: bool = False
     #: Microseconds since the Unix epoch.
     created_at: int | None = None
     #: Microseconds since the Unix epoch.

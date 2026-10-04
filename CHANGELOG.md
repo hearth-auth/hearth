@@ -159,6 +159,10 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   `409 yaml_managed` for them, naming `hearth.yaml`. Startup reconciliation still applies YAML
   changes; a group removed from the YAML returns to runtime management, and a role removed from
   it is archived as before.
+- **`GET /v1/me/permissions` takes the organization from the token.** Without `org_id` it
+  resolves the token's `oid` (realm-scoped assignments only when the token has none). An
+  `org_id` query parameter must name an organization the user is a member of, or the request is
+  refused with `403`; a malformed `org_id` is `400`. Group responses now include `yaml_managed`.
 
 ### Fixed
 - The cluster-mode startup warning no longer says writes to a follower fail with HTTP 500

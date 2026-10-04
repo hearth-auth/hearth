@@ -368,6 +368,9 @@ type AdminGroup struct {
 
 	// UpdatedAt Microseconds since the Unix epoch.
 	UpdatedAt int64 `json:"updated_at"`
+
+	// YamlManaged Declared in hearth.yaml; the admin API cannot change or delete it.
+	YamlManaged bool `json:"yaml_managed"`
 }
 
 // AdminGroupMemberPage defines model for AdminGroupMemberPage.

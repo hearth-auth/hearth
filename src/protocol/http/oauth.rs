@@ -3381,7 +3381,9 @@ async fn userinfo(
 /// `GET /v1/me/permissions` — resolves and returns the authenticated user's
 /// effective roles, groups, and permissions FRESHLY (not from the JWT).
 ///
-/// Accepts optional `org_id` and `scope` query parameters.
+/// The organization context is the token's `oid`; an optional `org_id` query
+/// parameter may name another organization the user is a member of (else
+/// `403`). An optional `scope` query parameter narrows the result.
 async fn me_permissions(
     State(state): State<Arc<AppState>>,
     method: axum::http::Method,
@@ -3422,26 +3424,57 @@ async fn me_permissions(
     };
 
     // Only a user's token has a user to answer for.
-    if claims.sub.parse::<UserId>().is_err() {
+    let Ok(user_id) = claims.sub.parse::<UserId>() else {
         return (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": "invalid_token"})),
         )
             .into_response();
-    }
+    };
+
+    // The organization context is the token's `oid`. An explicit `org_id`
+    // may name an organization only if the user is a member of it; otherwise
+    // it is refused, never resolved.
+    let parse_org = |raw: &str| {
+        uuid::Uuid::parse_str(raw.strip_prefix("org_").unwrap_or(raw))
+            .ok()
+            .map(crate::core::OrganizationId::new)
+    };
+    let requested = match params.get("org_id") {
+        None => claims.oid.as_deref().and_then(parse_org),
+        Some(raw) => {
+            let Some(org) = parse_org(raw) else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "invalid_request",
+                        "error_description": "org_id is not an organization ID",
+                    })),
+                )
+                    .into_response();
+            };
+            match state.identity.get_membership(&realm_id, &org, &user_id) {
+                Ok(Some(_)) => Some(org),
+                Ok(None) | Err(crate::identity::IdentityError::OrganizationNotFound) => {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        Json(serde_json::json!({
+                            "error": "forbidden",
+                            "error_description": "not a member of this organization",
+                        })),
+                    )
+                        .into_response();
+                }
+                Err(e) => return identity_error_to_response(&e).into_response(),
+            }
+        }
+    };
 
     // A suspended or archived organisation grants nothing: drop the org
     // context so only realm-scoped authority is reported (subsystem audit
     // 2026-09-21, finding O-2). The rule lives in the engine, so every
     // surface applies the same one.
-    let org_id = state.identity.active_org_context(
-        &realm_id,
-        params.get("org_id").and_then(|s| {
-            uuid::Uuid::parse_str(s)
-                .ok()
-                .map(crate::core::OrganizationId::new)
-        }),
-    );
+    let org_id = state.identity.active_org_context(&realm_id, requested);
     let scope = params.get("scope").cloned();
 
     // The TOKEN's live authority, not the user's (GA audit 3 B-2/B-5): a
