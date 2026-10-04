@@ -275,14 +275,14 @@ async fn a_caller_chosen_organization_is_refused() {
     let f = OrgFixture::new(false).await;
     let token = f.token(None);
 
-    for org_id in [
-        f.org.as_uuid().to_string(),
-        format!("org_{}", f.org.as_uuid()),
+    for (form, org_id) in [
+        ("bare UUID", f.org.as_uuid().to_string()),
+        ("org_ prefix", format!("org_{}", f.org.as_uuid())),
     ] {
         let uri = format!("/v1/me/permissions?org_id={org_id}");
         let (status, body) = f.get(&uri, &token).await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{org_id}: {body}");
-        assert!(!has_permission(&body, "reports.view"), "{org_id}: {body}");
+        assert_eq!(status, StatusCode::FORBIDDEN, "{form}");
+        assert!(!has_permission(&body, "reports.view"), "{form}");
     }
 
     // An organization that does not exist is refused the same way.

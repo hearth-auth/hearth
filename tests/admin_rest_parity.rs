@@ -695,12 +695,12 @@ async fn user_permission_grants_honour_the_ceiling() {
         StatusCode::FORBIDDEN,
         "a permission the caller lacks: {body}"
     );
-    assert!(f
-        .h
-        .rbac()
-        .list_user_permissions(&f.realm, &target)
-        .expect("list")
-        .is_empty());
+    assert_eq!(
+        f.h.rbac()
+            .list_user_permissions(&f.realm, &target)
+            .expect("list"),
+        [] as [hearth::rbac::UserPermissionGrant; 0]
+    );
 
     let (held, body) = f
         .call(

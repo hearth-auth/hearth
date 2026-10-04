@@ -524,11 +524,15 @@ fn callback_revokes_the_prior_session_and_issues_a_new_one() {
         .expect("cookie pair")
         .to_string();
 
-    seed_state(&rig, "state-rotate", "nonce-rotate");
+    // Derived at runtime: the state and nonce are protocol values, not
+    // fixtures worth a compile-time literal.
+    let state = format!("state-rotate-{}", uuid::Uuid::new_v4());
+    let nonce = format!("nonce-rotate-{}", uuid::Uuid::new_v4());
+    seed_state(&rig, &state, &nonce);
     stub_successful_oidc_callback(
         &stub,
         "code-rotate",
-        "nonce-rotate",
+        &nonce,
         "ext-rotate-1",
         "rotate@example.com",
         true,
@@ -539,9 +543,11 @@ fn callback_revokes_the_prior_session_and_issues_a_new_one() {
         Request::builder()
             .header(
                 "cookie",
-                format!("{}; {prior_pair}", fed_bind_cookie("state-rotate")),
+                format!("{}; {prior_pair}", fed_bind_cookie(&state)),
             )
-            .uri("/ui/realms/demo/federation/callback?state=state-rotate&code=code-rotate")
+            .uri(format!(
+                "/ui/realms/demo/federation/callback?state={state}&code=code-rotate"
+            ))
             .body(Body::empty())
             .unwrap(),
     );

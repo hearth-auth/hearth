@@ -307,10 +307,9 @@ async fn no_actor_token_attenuates_to_client_permissions() {
         client_id.as_uuid().to_string(),
         "act.sub must name the exchanging client"
     );
-    assert!(
-        delegated.permissions.is_empty(),
-        "the exchanging client holds no permissions, so the delegated token carries none; \
-         got: {:?}",
-        delegated.permissions
+    assert_eq!(
+        delegated.permissions,
+        [] as [String; 0],
+        "the exchanging client holds no permissions, so the delegated token carries none"
     );
 }

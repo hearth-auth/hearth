@@ -769,7 +769,7 @@ async fn agent_api_key_of_revoked_agent_does_not_verify() {
     let result = identity.verify_agent_api_key(&realm_id, agent.id(), &key_hex);
     assert!(
         matches!(result, Err(IdentityError::AgentRevoked)),
-        "a revoked agent's key must not verify, got {result:?}"
+        "a revoked agent's key must not verify"
     );
 }
 
@@ -799,7 +799,7 @@ async fn agent_api_key_of_suspended_agent_does_not_verify() {
     let result = identity.verify_agent_api_key(&realm_id, agent.id(), &key_hex);
     assert!(
         matches!(result, Err(IdentityError::AgentRevoked)),
-        "a suspended agent's key must not verify, got {result:?}"
+        "a suspended agent's key must not verify"
     );
 }
 

@@ -72,11 +72,10 @@ async fn grant_user_permission_refuses_a_reserved_permission() {
         matches!(&err, hearth::rbac::RbacError::ReservedNamespace { permission } if permission == "hearth.admin"),
         "got: {err:?}"
     );
-    assert!(h
-        .rbac()
-        .list_user_permissions(&realm, &user)
-        .expect("list")
-        .is_empty());
+    assert_eq!(
+        h.rbac().list_user_permissions(&realm, &user).expect("list"),
+        [] as [hearth::rbac::UserPermissionGrant; 0]
+    );
 }
 
 #[tokio::test]
