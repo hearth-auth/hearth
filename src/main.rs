@@ -2582,10 +2582,14 @@ async fn run_serve(
         }
     }
 
-    let allowed_hosts = config.security.allowed_hosts.clone();
-    if !allowed_hosts.is_empty() {
-        info!(count = allowed_hosts.len(), "loaded allowed_hosts");
-    }
+    // A-40: an unset `security.allowed_hosts` defaults to the `oidc.issuer`
+    // host, so the Host check is always on.
+    let allowed_hosts = config.effective_allowed_hosts();
+    info!(
+        count = allowed_hosts.len(),
+        configured = !config.security.allowed_hosts.is_empty(),
+        "host allowlist active"
+    );
 
     // §4.13#5: the restore handler reads this off `AppState`, and nothing ever
     // put it there — the signature check could not fire on any deployment.

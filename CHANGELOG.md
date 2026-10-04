@@ -140,6 +140,10 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   `<samlp:Status>`, for example, used to be ignored; it is now an error. Responses that sign the
   Response, the Assertion, or both are unaffected. The SP suite now also runs the eight published
   XML signature-wrapping variants (XSW1–XSW8).
+- **Host allowlist on by default.** With `security.allowed_hosts` unset, the server now admits
+  only the `oidc.issuer` host (any port) instead of every `Host`. The match ignores the port on
+  both sides. `/healthz` and `/readyz` skip the check; `/health` and `/metrics` do not. A reverse
+  proxy that rewrites `Host` must set `security.allowed_hosts`.
 
 ### Fixed
 - The cluster-mode startup warning no longer says writes to a follower fail with HTTP 500

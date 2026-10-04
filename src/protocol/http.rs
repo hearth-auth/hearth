@@ -371,9 +371,13 @@ async fn strip_server_header(req: Request, next: Next) -> Response {
 /// A-40: Host header allowlist enforcement (DNS rebinding protection).
 ///
 /// When `allowed_hosts` is non-empty in [`AppState`], rejects requests whose
-/// `Host` header is absent or does not match any entry (case-insensitive).
-/// An empty list means accept any host (fail-open for backward compatibility
-/// with existing deployments that predate this control).
+/// `Host` header is absent or does not match any entry. The comparison ignores
+/// case and any `:port` on either side. An empty list disables the check; the
+/// server never builds one (`Config::effective_allowed_hosts` defaults to the
+/// `oidc.issuer` host), so only embedders and tests see that mode.
+///
+/// `/healthz` and `/readyz` skip the check so orchestrator probes that address
+/// the pod IP keep working; `/health` and `/metrics` do not.
 ///
 /// Applied as the outermost layer so the check runs before route dispatch and
 /// before any handler logic can execute.
@@ -395,7 +399,7 @@ async fn enforce_host_allowlist(
     req: Request,
     next: Next,
 ) -> Response {
-    if state.allowed_hosts.is_empty() {
+    if state.allowed_hosts.is_empty() || is_host_exempt_probe(req.uri().path()) {
         return next.run(req).await;
     }
     let host = req
@@ -403,10 +407,12 @@ async fn enforce_host_allowlist(
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let permitted = state
-        .allowed_hosts
-        .iter()
-        .any(|h| h.eq_ignore_ascii_case(host))
+    let bare = host_without_port(host);
+    let permitted = (!bare.is_empty()
+        && state
+            .allowed_hosts
+            .iter()
+            .any(|h| host_without_port(h).eq_ignore_ascii_case(bare)))
         || (state.dev_mode && is_loopback_host(host));
     if permitted {
         next.run(req).await
@@ -417,6 +423,12 @@ async fn enforce_host_allowlist(
         )
             .into_response()
     }
+}
+
+/// Routes answered whatever the `Host` header: the orchestrator probes, whose
+/// bodies are bare status words. `/health` and `/metrics` are not exempt.
+fn is_host_exempt_probe(path: &str) -> bool {
+    matches!(path, "/healthz" | "/readyz")
 }
 
 /// Strips an optional `:port` suffix from a `Host` header value, handling the

@@ -3753,6 +3753,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn url_host_takes_only_the_host_of_an_issuer() {
+        assert_eq!(
+            url_host("https://auth.example.com"),
+            Some("auth.example.com")
+        );
+        assert_eq!(
+            url_host("https://auth.example.com:8443/realms/x?a=b"),
+            Some("auth.example.com")
+        );
+        assert_eq!(url_host("http://user@10.0.0.1:80/"), Some("10.0.0.1"));
+        assert_eq!(url_host("https://[::1]:8420/"), Some("[::1]"));
+        assert_eq!(url_host("https:///path"), None);
+        assert_eq!(url_host("ftp://auth.example.com"), None);
+    }
+
+    #[test]
     fn server_config_defaults() {
         let cfg = ServerConfig::default();
         assert_eq!(cfg.bind_address, "127.0.0.1");
@@ -4237,4 +4253,42 @@ pub struct Config {
     /// fail closed on the same set.
     #[serde(skip)]
     pub key_liveness_issues: Vec<ValidationIssue>,
+}
+
+impl Config {
+    /// The `Host` allowlist the HTTP listener enforces (A-40).
+    ///
+    /// `security.allowed_hosts` when set; otherwise the host of `oidc.issuer`,
+    /// which production configuration requires. With neither (reachable only
+    /// under `--dev`, where validation does not demand an issuer) the list is
+    /// `["localhost"]`, so with the dev-mode loopback grace only loopback
+    /// hosts are admitted.
+    ///
+    /// The result is never empty: an empty list disables the check.
+    #[must_use]
+    pub fn effective_allowed_hosts(&self) -> Vec<String> {
+        if !self.security.allowed_hosts.is_empty() {
+            return self.security.allowed_hosts.clone();
+        }
+        if let Some(host) = self.oidc.issuer.as_deref().and_then(url_host) {
+            return vec![host.to_string()];
+        }
+        vec!["localhost".to_string()]
+    }
+}
+
+/// The host component of an absolute `http(s)://` URL, without userinfo or
+/// port. IPv6 literals keep their brackets. `None` when there is no host.
+fn url_host(url: &str) -> Option<&str> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, hp)| hp);
+    let host = if host_port.starts_with('[') {
+        host_port.split_inclusive(']').next().unwrap_or(host_port)
+    } else {
+        host_port.split(':').next().unwrap_or(host_port)
+    };
+    (!host.is_empty()).then_some(host)
 }
