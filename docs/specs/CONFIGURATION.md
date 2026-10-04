@@ -257,7 +257,7 @@ When present, Hearth starts a Raft engine and participates in peer-to-peer log r
 | `tls_cert_path` | path | — | **Required.** Path to this node's PEM certificate (presented to peers during mTLS). |
 | `tls_key_path` | path | — | **Required.** Path to this node's PEM private key. |
 | `tls_ca_cert_path` | path | — | **Required.** Path to the CA certificate used to verify peer certificates. All nodes must share the same CA. |
-| `read_lag_threshold_ms` | integer | `500` | Maximum follower replication lag in milliseconds. Currently informational — see write routing note below. |
+| `read_lag_threshold_ms` | integer | `500` | Read gate. Every 50 ms the node estimates its lag as 5 ms per received-but-unapplied Raft entry; above this value it refuses reads with `503` / `HEARTH_CLUSTER_UNAVAILABLE`. It does **not** yet detect a node that has lost contact with the leader — see [CONSISTENCY.md](./CONSISTENCY.md) G1. |
 | `write_timeout_ms` | integer | `10000` | Upper bound on how long a single replicated write waits for quorum commit before the caller is told the outcome is **unknown**. See the write-bound note below. |
 
 ```yaml
@@ -280,15 +280,15 @@ cluster:
 
 **Write routing (H-3, fixed):** A write that arrives on a follower is forwarded to the leader over the peer mTLS channel and answered once it is committed and applied on that follower, so any node accepts writes and logins. The forwarded call shares the `write_timeout_ms` bound (plus 2 s), and the follower's wait for its own apply is bounded by `write_timeout_ms` again. A forwarded write whose outcome is unknown (the leader died mid-call) fails instead of being retried. A write the cluster cannot serve answers `503` with `Retry-After` and `HEARTH_CLUSTER_UNAVAILABLE` or `HEARTH_CLUSTER_WRITE_OUTCOME_UNKNOWN`; one replicated write is limited to 4 MiB. See the [Clustering guide](../guides/clustering.md#h-3--writes-to-a-follower-forwarded-to-the-leader-fixed).
 
-**Follower RBAC cache (C-5):** Follower nodes do not invalidate their in-process RBAC or session caches when writes are applied from the Raft log. A permission revoked on the leader will continue to be accepted on followers until those followers restart.
+**Follower caches (C-5, partial):** Followers update their RBAC, revoked-token and control caches from the Raft log, and a session revocation makes every node drop its session cache. The bound and its open items are in [CONSISTENCY.md](./CONSISTENCY.md) §4.
 
-**Membership (C-6):** The `peers` list is set once at `POST /admin/cluster/bootstrap` and cannot be changed in a running cluster. Adding or removing a node requires stopping all nodes, updating each node's `peers` list in YAML, and restarting.
+**Membership (C-6):** The `peers` list is used once, when the cluster is first initialised (automatically by the lowest node ID, or by `POST /admin/cluster/bootstrap`). After that, membership lives in the Raft log: editing `peers` and restarting does **not** add or remove a node. Online membership changes are not yet implemented — see [CONSISTENCY.md](./CONSISTENCY.md) §6 and G5.
 
 **Exclusive `data_dir` lock:** Hearth holds an OS advisory flock on `data_dir/LOCK` for the lifetime of the process. Each cluster node must use a separate `data_dir` on separate storage. Sharing a directory or network mount between nodes will cause startup failure.
 
 **Bootstrap:** On first cluster startup, call the bootstrap API on the designated bootstrap node once all peers are reachable. See the [Clustering guide](../guides/clustering.md) for the step-by-step sequence.
 
-**NTP requirement:** Hearth embeds `leader_timestamp` (wall-clock microseconds) in every Raft log entry to produce stable, monotonic timestamps across nodes. **NTP-synchronized clocks are a hard operational requirement for cluster mode.** Clock skew above 1 second will cause a startup warning; skew above several seconds will produce incorrect ordering of concurrent writes.
+**NTP requirement:** **NTP-synchronized clocks are a hard operational requirement for cluster mode.** Each Raft log entry carries a `leader_timestamp`, but records are not yet stamped from it ([CONSISTENCY.md](./CONSISTENCY.md) G8): timestamps inside records come from the node that handled the request, and expiry checks use each node's clock with 60 s tolerance. Clock skew above 1 second causes a warning. Replication safety does not depend on clocks.
 
 > **See also:** [Clustering guide](../guides/clustering.md) for bootstrap, quorum, cert generation, graceful shutdown, and backup strategy.
 

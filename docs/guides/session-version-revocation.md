@@ -3,7 +3,7 @@
 **Audience:** operators configuring sub-TTL revocation freshness for resource servers using
 `embedded` token mode.
 
-Hearth's default `embedded` mode validates access tokens entirely in-process — zero network
+By default Hearth validates access tokens entirely in-process — zero network
 hops, sub-microsecond verification. The trade-off is eventual consistency: a revoked session
 stops issuing new tokens immediately, but access tokens already issued remain valid until
 they expire (typically 15–60 min, governed by `access_token_ttl`).

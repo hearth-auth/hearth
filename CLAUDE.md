@@ -196,6 +196,7 @@ Read these before writing code. They are the canonical source of truth:
 - `docs/specs/AUTHZ_EXPANSION.md` — custom permissions, scopes, configurable claim profiles. Hybrid spec + phase tracker.
 - `docs/specs/OIDC.md` — OIDC + OAuth 2.0 + FAPI 2.0 security profile. Normative for FAPI work.
 - `docs/specs/CONFIGURATION.md` — full `hearth.yaml` reference.
+- `docs/specs/CONSISTENCY.md` — cluster consistency model: write, read, revocation and clock promises with status, open items (G1–G9), Jepsen test mapping.
 - `docs/specs/UI_ROUTING.md` — realm-name and admin-route reservation rules.
 - `docs/specs/TESTING.md` — eight testing layers, TDD workflow, tooling, CI tiers.
 - `docs/specs/TEST_SCENARIOS.md` — granular checkbox-tracked scenario checklist.

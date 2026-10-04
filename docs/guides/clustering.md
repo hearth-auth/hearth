@@ -86,13 +86,15 @@ both followers and a token revocation on the leader binding promptly on both fol
 **What is still not established:** this is an allow-list of forwarded row types, not a general
 cache-coherence protocol, and no test proves coherence for every cached type (for example
 session-lookup caches). Treat any read served by a follower as potentially stale, and do not rely
-on a follower for an access decision that must reflect the latest revocation.
+on a follower for an access decision that must reflect the latest revocation. The target model
+(bounded staleness, and a node that loses contact with the leader refuses reads) is in
+[CONSISTENCY.md](../specs/CONSISTENCY.md); the contact check is not yet implemented (G1).
 
 ### C-6 — Cluster membership is immutable after bootstrap
 
 `add_learner` and `change_membership` are not implemented. The only path to set cluster membership is `raft.initialize()` from static YAML at first bootstrap.
 
-**Consequence:** Nodes cannot be added or removed from a running cluster. Replacing a failed node requires a full-cluster restart with updated YAML. Online membership changes are not possible in Hearth 1.x.
+**Consequence:** Nodes cannot be added or removed from a running cluster. Editing `peers` and restarting does not change membership, because membership lives in the Raft log. A failed node stays a voter, so a 3-node cluster with one dead node tolerates no further failure. See [CONSISTENCY.md](../specs/CONSISTENCY.md#6-membership) §6 (G5, G9).
 
 ### H-3 — Writes to a follower: forwarded to the leader (fixed)
 
@@ -232,7 +234,7 @@ If you are evaluating cluster behaviour for integration work or contributing to 
 
 Before enabling cluster mode in a test environment:
 
-1. **NTP on every node.** Hearth embeds a `leader_timestamp` (wall-clock microseconds) in every Raft log entry so all nodes apply the same timestamp to concurrent writes. Clocks must be NTP-synchronized.
+1. **NTP on every node.** Timestamps inside records come from the node that handled the request, and expiry checks use each node's clock (60 s tolerance). Each Raft log entry carries a `leader_timestamp`, but records are not yet stamped from it ([CONSISTENCY.md](../specs/CONSISTENCY.md) G8). Clocks must be NTP-synchronized.
 
 2. **Mutual TLS certificates.** All inter-node gRPC connections (the internal Raft peer transport, `cluster.peer_address`; Hearth has no public gRPC API) are mTLS — plaintext is unconditionally rejected. You need:
    - A CA certificate shared by all nodes
@@ -440,8 +442,9 @@ channel and answers once the write is committed and applied on the follower itse
 leader awareness and a client reads its own write on the node it wrote to. A forwarded write
 costs one extra peer round trip; routing writes to the leader avoids it.
 
-Reads from followers may be stale: follower cache invalidation covers only the row types listed
-under C-5. For consistent reads, route all traffic to the leader. A write whose forwarded outcome
+Reads may be stale on any node other than the one you wrote to. Routing all traffic to the leader
+narrows this but does not remove it: a leader that has lost its quorum does not step down and keeps
+serving reads. See [CONSISTENCY.md](../specs/CONSISTENCY.md) §3. A write whose forwarded outcome
 is unknown (the leader died mid-call) fails with `503` / `HEARTH_CLUSTER_WRITE_OUTCOME_UNKNOWN`
 rather than being retried — re-read before retrying it.
 
@@ -457,7 +460,7 @@ rather than being retried — re-read before retrying it.
 
 A majority (quorum) of nodes must be reachable for writes to succeed.
 
-**If a node fails permanently:** Replace it by restarting all remaining nodes with updated YAML (removing the failed node from the `peers` list). Online membership changes are not supported in Hearth 1.x.
+**If a node fails permanently:** removing it from `peers` does not remove it from the cluster. The [backup guide](./backup.md) replaces it with a node that reuses its ID and address and starts with an empty data directory; the leader then sends it a snapshot. That node has forgotten its Raft vote, which Raft's safety proof does not allow for ([CONSISTENCY.md](../specs/CONSISTENCY.md) G9). Online membership changes are not yet implemented (G5).
 
 ---
 
