@@ -916,7 +916,8 @@ fn friendly_identity_error(e: &crate::identity::IdentityError) -> String {
         crate::identity::IdentityError::DuplicateRealmName => {
             "A realm with that name already exists. Choose a different name.".to_string()
         }
-        crate::identity::IdentityError::DuplicateEmail => {
+        crate::identity::IdentityError::DuplicateEmail
+        | crate::identity::IdentityError::EmailReserved => {
             "A user with that email already exists.".to_string()
         }
         _ => {

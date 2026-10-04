@@ -630,7 +630,7 @@ pub async fn admin_user_create_submit(
             ))
             .into_response()
         }
-        Err(IdentityError::DuplicateEmail) => {
+        Err(IdentityError::DuplicateEmail | IdentityError::EmailReserved) => {
             render_error("A user with that email already exists.".to_string())
         }
         Err(IdentityError::InvalidInput { reason }) => render_error(reason),
@@ -1563,7 +1563,7 @@ pub async fn admin_user_edit_submit(
             ))
             .into_response()
         }
-        Err(IdentityError::DuplicateEmail) => render_edit_error(
+        Err(IdentityError::DuplicateEmail | IdentityError::EmailReserved) => render_edit_error(
             &state,
             &session,
             &target.0,

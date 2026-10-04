@@ -1210,7 +1210,9 @@ pub async fn setup_submit(
         Err(OnboardingError::AlreadyConfigured) => {
             link_token::mark_spent(not_found_response("Setup page is not available."))
         }
-        Err(OnboardingError::Identity(IdentityError::DuplicateEmail)) => setup_err(
+        Err(OnboardingError::Identity(
+            IdentityError::DuplicateEmail | IdentityError::EmailReserved,
+        )) => setup_err(
             "An account with that email already exists in this system.".to_string(),
             StatusCode::CONFLICT,
         ),

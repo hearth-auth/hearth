@@ -147,6 +147,9 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   declare, instead of ignoring it. An organization-scoped role assignment is `{"role_id": …,
   "org_id": …}`; the guides showed a `scope` object, which is refused. OAuth/OIDC endpoint
   parameters are still ignored when unknown, as RFC 6749 §3.1 requires.
+- **A recently deleted user's email address answers like one in use.** Creating a user or
+  changing an email to a reserved address now returns the same `409` body as an address in use,
+  and the console, SCIM and setup pages show the same message for both.
 
 ### Fixed
 - The cluster-mode startup warning no longer says writes to a follower fail with HTTP 500

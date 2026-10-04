@@ -715,7 +715,11 @@ pub(crate) fn identity_error_to_response(
              credentials and security profile cannot be changed, at runtime",
         ),
         IdentityError::DuplicateRealmName => (StatusCode::CONFLICT, "duplicate realm name"),
-        IdentityError::DuplicateEmail => (StatusCode::CONFLICT, "duplicate email"),
+        // A-20: a reserved address answers exactly as one in use, so the body
+        // does not tell a deleted account's address from a live one.
+        IdentityError::DuplicateEmail | IdentityError::EmailReserved => {
+            (StatusCode::CONFLICT, "duplicate email")
+        }
         IdentityError::InvalidInput { .. } => (StatusCode::BAD_REQUEST, "invalid input"),
         IdentityError::CredentialNotFound => (StatusCode::NOT_FOUND, "credential not found"),
         IdentityError::InvalidCredential { .. } => (StatusCode::UNAUTHORIZED, "invalid credential"),
@@ -901,7 +905,6 @@ pub(crate) fn identity_error_to_response(
         }
         // A-19: email-change flow errors.
         IdentityError::QuotaExceeded { .. } => (StatusCode::TOO_MANY_REQUESTS, "quota_exceeded"),
-        IdentityError::EmailReserved => (StatusCode::CONFLICT, "email_reserved"),
         IdentityError::EmailChangeTokenInvalid => (
             StatusCode::UNAUTHORIZED,
             "invalid or expired email-change link",
