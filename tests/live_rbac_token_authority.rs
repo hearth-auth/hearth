@@ -435,7 +435,9 @@ async fn decide_caps_a_delegated_token_at_its_delegated_permissions() {
             .expect("exchanging client")
             .client_id()
             .clone();
-    // The subject token carries only docs.view; so does the delegation.
+    // The subject token carries only docs.view. The exchange sends no actor
+    // token, so the exchanging client is the actor; a client holds no RBAC
+    // permissions, so the delegation carries none.
     let delegated =
         f.h.identity()
             .rfc8693_token_exchange(
@@ -462,15 +464,22 @@ async fn decide_caps_a_delegated_token_at_its_delegated_permissions() {
         "control: the user's own first-party token sees the new grant live"
     );
     assert!(
-        f.decide(&delegated, "docs.view", None),
-        "the delegated permission stays allowed"
+        f.decide(&f.session_token, "docs.view", None),
+        "control: the user's own token holds docs.view"
+    );
+    assert!(
+        !f.decide(&delegated, "docs.view", None),
+        "a delegated token is capped at its delegated (empty) permissions"
     );
     assert!(
         !f.decide(&delegated, "docs.delete", None),
         "a delegated token must not reach beyond the permissions it was delegated"
     );
     let (_, perms, roles, _) = f.introspect(&delegated);
-    assert_eq!(perms, vec!["docs.view".to_string()]);
+    assert!(
+        perms.is_empty(),
+        "a delegation without an actor token carries no permissions; got {perms:?}"
+    );
     assert!(
         roles.is_empty(),
         "a delegated token carries no roles; got {roles:?}"

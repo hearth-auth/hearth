@@ -17749,13 +17749,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     actor_claims.permissions.clone(),
                 )
             } else {
-                // No actor_token: the client is acting on its own behalf (no delegation chain).
-                // Preserve the original behavior — actor ceiling matches the subject's own scope
-                // so this path doesn't further restrict scope beyond subject ∩ requested.
-                // For permissions, use the subject's full set as the ceiling (no attenuation).
+                // No actor_token: the exchanging client itself is the actor.
+                // Its scope ceiling matches the subject's own scope, so scope
+                // narrows only to subject ∩ requested. Its permission ceiling
+                // is its own RBAC permission set, and a client holds none, so
+                // the delegated token carries no permissions
+                // (openspec/specs/rbac-token-claims/spec.md).
                 let actor_sub = crate::identity::tokens::issued_client_id(&request.client_id);
                 let actor_scope = subject_claims.scope.clone().unwrap_or_default();
-                (actor_sub, actor_scope, subject_claims.permissions.clone())
+                (actor_sub, actor_scope, Vec::new())
             };
 
         // G3 / A-8: an agent that is not Active must not participate in a

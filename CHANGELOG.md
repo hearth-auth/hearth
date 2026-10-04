@@ -156,6 +156,9 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
 - **Token exchange: an `actor_token` requires `actor_token_type=urn:ietf:params:oauth:token-type:jwt`.**
   An exchange that sends an actor token with any other type, or none, is refused with
   `invalid_request` (RFC 8693 §2.1).
+- **Token exchange without an `actor_token` is attenuated to the client.** The exchanging client
+  is the actor, and a client holds no RBAC permissions, so the delegated token's `permissions`
+  are empty rather than the subject's.
 
 ### Fixed
 - The cluster-mode startup warning no longer says writes to a follower fail with HTTP 500
