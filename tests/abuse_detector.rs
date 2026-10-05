@@ -19,7 +19,7 @@ mod abuse_rig;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, Instant};
 
-use abuse_rig::{Rig, A3_ONE_USERNAME, WIDGET};
+use abuse_rig::{wrong_password, Rig, A3_ONE_USERNAME, WIDGET};
 use axum::http::StatusCode;
 use hearth::abuse::detector::{
     DetectorConfig, DetectorOutcome, DistributedAttackDetector, OutboundVolumeShield,
@@ -531,7 +531,7 @@ async fn a3_challenged_login_is_audited_and_challenged() {
     let first = rig.create_user();
     let second = rig.create_user();
 
-    let (status, _) = rig.ui_login(&first, "wrong-password-1", None).await;
+    let (status, _) = rig.ui_login(&first, &wrong_password(1), None).await;
     assert_eq!(
         status,
         StatusCode::UNAUTHORIZED,
@@ -574,12 +574,12 @@ async fn a3_challenged_login_shows_the_widget_whatever_the_address() {
     let unknown = format!("nobody-{}@example.com", uuid::Uuid::new_v4().simple());
 
     let (status, _) = rig
-        .ui_login("first@example.com", "wrong-password-1", None)
+        .ui_login("first@example.com", &wrong_password(1), None)
         .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
-    let (known_status, known_page) = rig.ui_login(&known, "wrong-password-2", None).await;
-    let (unknown_status, unknown_page) = rig.ui_login(&unknown, "wrong-password-3", None).await;
+    let (known_status, known_page) = rig.ui_login(&known, &wrong_password(2), None).await;
+    let (unknown_status, unknown_page) = rig.ui_login(&unknown, &wrong_password(3), None).await;
 
     let slot = known_page
         .find("<!-- captcha-widget-slot -->")

@@ -23,7 +23,7 @@ mod abuse_rig;
 
 use std::net::{IpAddr, Ipv4Addr};
 
-use abuse_rig::{a16, Rig, SOLVED, WIDGET};
+use abuse_rig::{a16, wrong_password, Rig, SOLVED, WIDGET};
 use axum::http::StatusCode;
 use hearth::abuse::captcha::{TurnstileCaptchaProvider, TurnstileConfig};
 use hearth::abuse::challenge::{CaptchaProvider, NoopCaptchaProvider};
@@ -212,9 +212,7 @@ fn turnstile_empty_secret_key_accepted_at_construction() {
 /// passwords on the login form.
 async fn fail_logins(rig: &Rig, email: &str, n: usize) {
     for i in 0..n {
-        let (status, _) = rig
-            .ui_login(email, &format!("wrong-password-{i}"), None)
-            .await;
+        let (status, _) = rig.ui_login(email, &wrong_password(i), None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "failed login {i}");
     }
 }
@@ -343,7 +341,11 @@ async fn a16_wrong_captcha_token_counts_as_a_failure() {
     );
 
     let (status, page) = rig
-        .ui_login("third@example.com", "wrong-password", Some("not-the-token"))
+        .ui_login(
+            "third@example.com",
+            &wrong_password(9),
+            Some("not-the-token"),
+        )
         .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert!(

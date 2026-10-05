@@ -46,6 +46,11 @@ pub fn password() -> String {
     ["abuse", "rig", "correct", "staple"].join("-")
 }
 
+/// The `n`th wrong password: never any rig user's.
+pub fn wrong_password(n: usize) -> String {
+    format!("{}-{n}", ["abuse", "rig", "wrong"].join("-"))
+}
+
 /// A-3: one distinct username per client is the most allowed.
 pub const A3_ONE_USERNAME: &str = "distributed_attack_detector:\n  enabled: true\n  \
      window: 300s\n  username_per_ip_threshold: 1\n  ip_per_username_threshold: 1000\n";
