@@ -77,7 +77,7 @@ pub(crate) fn audit_challenge(
         "surface": attempt.surface.as_str(),
     });
     if let Some(username) = attempt.username {
-        metadata["username"] = serde_json::Value::from(username);
+        metadata["username"] = serde_json::Value::from(bounded_username(username));
     }
     crate::protocol::audit_log::record(
         audit,
@@ -168,4 +168,40 @@ pub(crate) async fn gate_api_sign_in(
         return Ok(());
     }
     Err(api_challenge_response(guards, &challenge))
+}
+
+/// The longest username written to the audit metadata, in bytes: the
+/// longest valid email address (RFC 5321).
+const MAX_AUDITED_USERNAME: usize = 254;
+
+/// `username` cut to [`MAX_AUDITED_USERNAME`] bytes on a character boundary.
+/// The value is caller-supplied, so its size in the audit log is bounded.
+fn bounded_username(username: &str) -> &str {
+    if username.len() <= MAX_AUDITED_USERNAME {
+        return username;
+    }
+    let mut end = MAX_AUDITED_USERNAME;
+    while !username.is_char_boundary(end) {
+        end -= 1;
+    }
+    &username[..end]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_normal_username_is_audited_whole() {
+        assert_eq!(bounded_username("a@example.com"), "a@example.com");
+    }
+
+    #[test]
+    fn an_oversized_username_is_cut_on_a_character_boundary() {
+        let long = "é".repeat(200);
+        let cut = bounded_username(&long);
+        assert!(cut.len() <= MAX_AUDITED_USERNAME, "{} bytes", cut.len());
+        assert!(long.starts_with(cut));
+        assert_eq!(cut.chars().count(), MAX_AUDITED_USERNAME / 2);
+    }
 }
