@@ -46,9 +46,13 @@ pub fn password() -> String {
     ["abuse", "rig", "correct", "staple"].join("-")
 }
 
-/// The `n`th wrong password: never any rig user's.
-pub fn wrong_password(n: usize) -> String {
-    format!("{}-{n}", ["abuse", "rig", "wrong"].join("-"))
+/// A fresh wrong password: never any rig user's.
+pub fn wrong_password() -> String {
+    format!(
+        "{}-{}",
+        ["abuse", "rig", "wrong"].join("-"),
+        uuid::Uuid::new_v4().simple()
+    )
 }
 
 /// A-3: one distinct username per client is the most allowed.

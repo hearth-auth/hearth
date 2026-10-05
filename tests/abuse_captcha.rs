@@ -212,7 +212,7 @@ fn turnstile_empty_secret_key_accepted_at_construction() {
 /// passwords on the login form.
 async fn fail_logins(rig: &Rig, email: &str, n: usize) {
     for i in 0..n {
-        let (status, _) = rig.ui_login(email, &wrong_password(i), None).await;
+        let (status, _) = rig.ui_login(email, &wrong_password(), None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "failed login {i}");
     }
 }
@@ -343,7 +343,7 @@ async fn a16_wrong_captcha_token_counts_as_a_failure() {
     let (status, page) = rig
         .ui_login(
             "third@example.com",
-            &wrong_password(9),
+            &wrong_password(),
             Some("not-the-token"),
         )
         .await;
