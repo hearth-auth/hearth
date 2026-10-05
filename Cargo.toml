@@ -112,7 +112,7 @@ redb = "2"
 tonic = { version = "0.14", features = ["transport", "tls-ring", "gzip"] }
 tonic-prost = "0.14"
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["trace"] }
+tower-http = { version = "0.7", features = ["trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-opentelemetry = "0.33"
