@@ -85,6 +85,7 @@ async fn developer_onramp_realm_app_oidc_login() {
         .authorize(
             &realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://app.startup.io/callback".to_string(),
                 scope: "openid".to_string(),

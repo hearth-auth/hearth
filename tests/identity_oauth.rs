@@ -86,6 +86,31 @@ fn pkce_challenge(verifier: &str) -> String {
 
 const TEST_PKCE_VERIFIER: &str = "S4gKJfVNgWiFl2PQ8RxXS7E6Mhr9BqyTvUIe3WoA5Zc";
 
+/// Stores the user's consent to `client` for `openid`. A third-party client
+/// refreshes only under a stored consent that covers the grant.
+fn grant_openid_consent(
+    engine: &EmbeddedIdentityEngine,
+    realm: &RealmId,
+    user: &UserId,
+    client: &ClientId,
+) {
+    engine
+        .grant_consent(
+            realm,
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: user.clone(),
+                    client_id: client.clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["openid".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
+        )
+        .expect("consent");
+}
+
 #[allow(dead_code)]
 fn register_test_client(engine: &EmbeddedIdentityEngine, realm: &RealmId) -> OAuthClient {
     engine
@@ -368,10 +393,12 @@ fn refresh_token_rotation_issues_new_pair() {
         .expect("register client");
 
     // Auth code flow → tokens with grant family
+    grant_openid_consent(&engine, &realm_id, user.id(), client.client_id());
     let auth = engine
         .authorize(
             &realm_id,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 scope: "openid".to_string(),
@@ -466,6 +493,7 @@ fn refresh_token_rejects_forged_legacy_payload_without_fid() {
         .authorize(
             &realm_id,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 scope: "openid".to_string(),
@@ -590,6 +618,7 @@ fn revoke_refresh_token_invalidates_family() {
         .authorize(
             &realm_id,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 scope: "openid".to_string(),
@@ -780,10 +809,12 @@ fn adversarial_refresh_token_theft_detection() {
         )
         .expect("register client");
 
+    grant_openid_consent(&engine, &realm_id, user.id(), client.client_id());
     let auth = engine
         .authorize(
             &realm_id,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://app.example.com/cb".to_string(),
                 scope: "openid".to_string(),
@@ -1046,8 +1077,10 @@ mod oauth_proptests {
                     display_name: format!("Prop User {i}"),
                     ..Default::default()
                 }).expect("create user");
+                grant_openid_consent(&engine, &realm_id, user.id(), client.client_id());
 
                 let auth = engine.authorize(&realm_id, &AuthorizationRequest {
+                    organization: None,
                     client_id: client.client_id().clone(),
                     redirect_uri: "https://app.example.com/cb".to_string(),
                     scope: "openid".to_string(),
@@ -1213,8 +1246,10 @@ mod oauth_proptests {
                                         ..Default::default()
                 },
             ).expect("register client");
+            grant_openid_consent(&engine, &realm_id, user.id(), client.client_id());
 
             let auth = engine.authorize(&realm_id, &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://app.example.com/cb".to_string(),
                 scope: "openid".to_string(),
@@ -1346,31 +1381,70 @@ fn grant_and_get_consent_round_trip() {
     let rec = engine
         .grant_consent(
             &realm,
-            &user,
-            &client,
-            &["profile".to_string(), "email".to_string()],
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: user.clone(),
+                    client_id: client.clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["profile".to_string(), "email".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
         )
         .expect("grant");
     assert_eq!(rec.granted_scopes, vec!["email", "profile"]);
 
     let loaded = engine
-        .get_consent(&realm, &user, &client)
+        .get_consent(
+            &realm,
+            &hearth::identity::ConsentKey {
+                user_id: user.clone(),
+                client_id: client.clone(),
+                org_id: None,
+                resource: None,
+            },
+        )
         .expect("get")
         .expect("present");
     assert_eq!(loaded.granted_scopes, vec!["email", "profile"]);
-    assert!(loaded.covers(&["profile".to_string()]));
-    assert!(!loaded.covers(&["admin".to_string()]));
+    assert!(loaded.granted_scopes.contains(&"profile".to_string()));
+    assert!(!loaded.granted_scopes.contains(&"admin".to_string()));
 }
 
 #[test]
 fn grant_consent_merges_into_existing_record() {
     let (_dir, engine, clock, realm, user, client) = setup_consent_env();
     engine
-        .grant_consent(&realm, &user, &client, &["profile".to_string()])
+        .grant_consent(
+            &realm,
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: user.clone(),
+                    client_id: client.clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["profile".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
+        )
         .expect("grant 1");
     clock.advance(1_000_000);
     let rec = engine
-        .grant_consent(&realm, &user, &client, &["email".to_string()])
+        .grant_consent(
+            &realm,
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: user.clone(),
+                    client_id: client.clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["email".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
+        )
         .expect("grant 2");
     assert_eq!(rec.granted_scopes, vec!["email", "profile"]);
     assert!(rec.updated_at.as_micros() > rec.granted_at.as_micros());
@@ -1381,7 +1455,19 @@ fn grant_consent_requires_existing_client() {
     let (_dir, engine, _clock, realm, user, _client) = setup_consent_env();
     let bogus = ClientId::generate();
     let err = engine
-        .grant_consent(&realm, &user, &bogus, &["profile".to_string()])
+        .grant_consent(
+            &realm,
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: user.clone(),
+                    client_id: bogus.clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["profile".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
+        )
         .expect_err("client not found");
     assert!(matches!(err, IdentityError::ClientNotFound), "got: {err:?}");
 }
@@ -1390,7 +1476,19 @@ fn grant_consent_requires_existing_client() {
 fn list_consents_by_user_returns_joined_entries() {
     let (_dir, engine, _clock, realm, user, client) = setup_consent_env();
     engine
-        .grant_consent(&realm, &user, &client, &["profile".to_string()])
+        .grant_consent(
+            &realm,
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: user.clone(),
+                    client_id: client.clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["profile".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
+        )
         .expect("grant");
     let list = engine.list_consents_by_user(&realm, &user).expect("list");
     assert_eq!(list.len(), 1);
@@ -1402,7 +1500,19 @@ fn list_consents_by_user_returns_joined_entries() {
 fn list_consents_filters_orphaned_client_records() {
     let (_dir, engine, _clock, realm, user, client) = setup_consent_env();
     engine
-        .grant_consent(&realm, &user, &client, &["profile".to_string()])
+        .grant_consent(
+            &realm,
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: user.clone(),
+                    client_id: client.clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["profile".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
+        )
         .expect("grant");
     engine
         .delete_client(&realm, &client)
@@ -1416,7 +1526,12 @@ fn list_consents_filters_orphaned_client_records() {
 fn revoke_consent_returns_not_found_when_absent() {
     let (_dir, engine, _clock, realm, user, client) = setup_consent_env();
     let err = engine
-        .revoke_consent(&realm, &user, &client)
+        .revoke_consent(
+            &realm,
+            &user,
+            &client,
+            &hearth::audit::Actor::User(user.clone()),
+        )
         .expect_err("no record yet");
     assert!(
         matches!(err, IdentityError::ConsentNotFound),
@@ -1428,13 +1543,38 @@ fn revoke_consent_returns_not_found_when_absent() {
 fn revoke_consent_removes_record_entirely() {
     let (_dir, engine, _clock, realm, user, client) = setup_consent_env();
     engine
-        .grant_consent(&realm, &user, &client, &["profile".to_string()])
+        .grant_consent(
+            &realm,
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: user.clone(),
+                    client_id: client.clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["profile".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
+        )
         .expect("grant");
     engine
-        .revoke_consent(&realm, &user, &client)
+        .revoke_consent(
+            &realm,
+            &user,
+            &client,
+            &hearth::audit::Actor::User(user.clone()),
+        )
         .expect("revoke");
     assert!(engine
-        .get_consent(&realm, &user, &client)
+        .get_consent(
+            &realm,
+            &hearth::identity::ConsentKey {
+                user_id: user.clone(),
+                client_id: client.clone(),
+                org_id: None,
+                resource: None
+            }
+        )
         .expect("get")
         .is_none());
 }
@@ -1460,10 +1600,34 @@ fn revoke_all_consents_drops_every_user_record() {
         )
         .expect("register 2");
     engine
-        .grant_consent(&realm, &user, &client1, &["profile".to_string()])
+        .grant_consent(
+            &realm,
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: user.clone(),
+                    client_id: client1.clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["profile".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
+        )
         .expect("grant 1");
     engine
-        .grant_consent(&realm, &user, client2.client_id(), &["email".to_string()])
+        .grant_consent(
+            &realm,
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: user.clone(),
+                    client_id: client2.client_id().clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["email".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
+        )
         .expect("grant 2");
     let count = engine
         .revoke_all_consents_for_user(&realm, &user)
@@ -1480,6 +1644,7 @@ fn pending_authorization_ticket_is_single_use() {
     let (_dir, engine, clock, realm, user, client) = setup_consent_env();
     let now = clock.now();
     let pending = PendingAuthorizationRequest {
+        organization: None,
         realm_id: realm.clone(),
         user_id: user.clone(),
         client_id: client.clone(),
@@ -1514,6 +1679,7 @@ fn pending_authorization_ticket_expires() {
     let (_dir, engine, clock, realm, user, client) = setup_consent_env();
     let now = clock.now();
     let pending = PendingAuthorizationRequest {
+        organization: None,
         realm_id: realm.clone(),
         user_id: user,
         client_id: client,
@@ -1548,11 +1714,31 @@ fn pending_authorization_ticket_expires() {
 fn delete_user_cascades_consent_records() {
     let (_dir, engine, _clock, realm, user, client) = setup_consent_env();
     engine
-        .grant_consent(&realm, &user, &client, &["profile".to_string()])
+        .grant_consent(
+            &realm,
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: user.clone(),
+                    client_id: client.clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["profile".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
+        )
         .expect("grant");
     engine.delete_user(&realm, &user).expect("delete user");
     assert!(engine
-        .get_consent(&realm, &user, &client)
+        .get_consent(
+            &realm,
+            &hearth::identity::ConsentKey {
+                user_id: user.clone(),
+                client_id: client.clone(),
+                org_id: None,
+                resource: None
+            }
+        )
         .expect("get")
         .is_none());
 }
@@ -1567,11 +1753,31 @@ fn consent_records_are_realm_isolated() {
         })
         .expect("create realm B");
     engine
-        .grant_consent(&realm_a, &user, &client, &["profile".to_string()])
+        .grant_consent(
+            &realm_a,
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: user.clone(),
+                    client_id: client.clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["profile".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
+        )
         .expect("grant");
     // Same (user, client) key in realm_b must not find realm_a's record.
     let other = engine
-        .get_consent(realm_b.id(), &user, &client)
+        .get_consent(
+            realm_b.id(),
+            &hearth::identity::ConsentKey {
+                user_id: user.clone(),
+                client_id: client.clone(),
+                org_id: None,
+                resource: None,
+            },
+        )
         .expect("get");
     assert!(other.is_none());
 }
@@ -1598,10 +1804,12 @@ fn concurrent_refresh_of_one_token_yields_exactly_one_success() {
 
     for round in 0..ROUNDS {
         let user = create_test_user(&engine, &realm_id);
+        grant_openid_consent(&engine, &realm_id, user.id(), client.client_id());
         let auth = engine
             .authorize(
                 &realm_id,
                 &AuthorizationRequest {
+                    organization: None,
                     client_id: client.client_id().clone(),
                     redirect_uri: "https://app.example.com/callback".to_string(),
                     scope: "openid".to_string(),
@@ -1704,10 +1912,12 @@ fn deleting_a_client_revokes_its_outstanding_refresh_tokens() {
         )
         .expect("register client");
 
+    grant_openid_consent(&engine, &realm_id, user.id(), client.client_id());
     let auth = engine
         .authorize(
             &realm_id,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://app.example.com/cb".to_string(),
                 scope: "openid".to_string(),

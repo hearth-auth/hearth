@@ -789,6 +789,15 @@ impl RbacEngine for EmbeddedRbacEngine {
         resolve::resolve_with_scopes(self, realm_id, request)
     }
 
+    fn scope_definitions(
+        &self,
+        realm_id: &RealmId,
+        scopes: &[String],
+        resource: Option<&crate::core::Uri>,
+    ) -> Result<Vec<String>, RbacError> {
+        resolve::scope_definitions(self, realm_id, scopes, resource)
+    }
+
     fn grant_user_permission(
         &self,
         realm_id: &RealmId,

@@ -218,6 +218,7 @@ async fn token_ttl_overrides_applied_at_issuance() {
         .authorize(
             realm.id(),
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://app.example.com/cb".to_string(),
                 scope: "openid".to_string(),

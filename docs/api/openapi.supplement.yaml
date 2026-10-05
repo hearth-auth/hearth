@@ -298,6 +298,12 @@ paths:
         public client identifies itself with `client_id` alone and may not
         present a secret. Body `client_id` is optional under
         `client_secret_basic`.
+
+        Besides the authorization parameters of RFC 6749 and RFC 9126, the
+        body may carry `organization` (an organization ID or slug): the code
+        is then issued in that organization context, and its tokens carry
+        `oid`. A user who is not an active member is refused at `/authorize`
+        with `access_denied`.
       operationId: pushedAuthorizationRequest
       tags: [OAuth]
       requestBody:

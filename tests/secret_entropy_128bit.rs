@@ -157,6 +157,7 @@ fn par_request_uri_carries_128_bits() {
             .push_authorization_request(
                 &realm,
                 &PushedAuthorizationRequest {
+                    organization: None,
                     client_id: client.client_id().clone(),
                     redirect_uri: "https://app.example.com/cb".to_string(),
                     scope: "openid".to_string(),
@@ -199,6 +200,7 @@ fn consent_ticket_carries_128_bits() {
             .put_pending_authorization(
                 &realm,
                 &PendingAuthorizationRequest {
+                    organization: None,
                     realm_id: realm.clone(),
                     user_id: user.id().clone(),
                     client_id: client.client_id().clone(),

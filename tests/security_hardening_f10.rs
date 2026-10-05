@@ -106,6 +106,7 @@ fn do_authcode_exchange(
         .authorize(
             realm_id,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 scope: "openid profile email".to_string(),

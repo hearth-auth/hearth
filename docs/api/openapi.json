@@ -2647,7 +2647,7 @@
     "/as/par": {
       "post": {
         "summary": "Pushed Authorization Request (RFC 9126)",
-        "description": "The client authenticates exactly as at the token endpoint (RFC 9126 \u00a72):\na confidential client with `client_secret_basic`, `client_secret_post`\nor `private_key_jwt` (`client_assertion_type` + `client_assertion`); a\npublic client identifies itself with `client_id` alone and may not\npresent a secret. Body `client_id` is optional under\n`client_secret_basic`.\n",
+        "description": "The client authenticates exactly as at the token endpoint (RFC 9126 \u00a72):\na confidential client with `client_secret_basic`, `client_secret_post`\nor `private_key_jwt` (`client_assertion_type` + `client_assertion`); a\npublic client identifies itself with `client_id` alone and may not\npresent a secret. Body `client_id` is optional under\n`client_secret_basic`.\n\nBesides the authorization parameters of RFC 6749 and RFC 9126, the\nbody may carry `organization` (an organization ID or slug): the code\nis then issued in that organization context, and its tokens carry\n`oid`. A user who is not an active member is refused at `/authorize`\nwith `access_denied`.\n",
         "operationId": "pushedAuthorizationRequest",
         "tags": [
           "OAuth"

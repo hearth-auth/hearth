@@ -690,6 +690,19 @@ pub(crate) fn identity_error_to_response(
         );
     }
 
+    // A refresh whose consent no longer covers the grant: RFC 6749 §5.2
+    // `invalid_grant`, with the reason the client acts on.
+    if let IdentityError::RefreshConsentRequired = err {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_grant",
+                "error_description": "consent_required",
+                "error_code": crate::protocol::error_codes::for_identity_error(err),
+            })),
+        );
+    }
+
     // A transient cluster failure is a 503 with a fixed message; the router
     // adds `Retry-After` to every 503 that lacks one.
     if let IdentityError::Storage(e) = err {
@@ -807,6 +820,9 @@ pub(crate) fn identity_error_to_response(
             (StatusCode::FORBIDDEN, "invitation required")
         }
         IdentityError::ConsentRequired => (StatusCode::FORBIDDEN, "consent required"),
+        // Answered above with its `error_description`.
+        IdentityError::RefreshConsentRequired => (StatusCode::BAD_REQUEST, "invalid_grant"),
+        IdentityError::OrganizationAccessDenied => (StatusCode::FORBIDDEN, "access_denied"),
         IdentityError::ClientMismatch => (StatusCode::FORBIDDEN, "client mismatch"),
         IdentityError::ConsentTicketNotFound | IdentityError::ConsentTicketExpired => {
             (StatusCode::BAD_REQUEST, "consent ticket invalid")
@@ -1549,6 +1565,26 @@ mod cluster_unavailable_tests {
             assert_eq!(body.0["error_code"], code, "{}", body.0);
             assert!(!body.0.to_string().contains("10.1.1.1"), "{}", body.0);
         }
+    }
+
+    #[test]
+    fn a_refresh_that_needs_consent_again_is_invalid_grant_with_consent_required() {
+        // custom-permissions "A broadened bundle requires consent again".
+        let (status, body) = identity_error_to_response(&IdentityError::RefreshConsentRequired);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body.0["error"], "invalid_grant", "{}", body.0);
+        assert_eq!(
+            body.0["error_description"], "consent_required",
+            "{}",
+            body.0
+        );
+    }
+
+    #[test]
+    fn an_organization_the_user_cannot_use_is_access_denied() {
+        let (status, body) = identity_error_to_response(&IdentityError::OrganizationAccessDenied);
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body.0["error"], "access_denied", "{}", body.0);
     }
 }
 

@@ -129,6 +129,7 @@ async fn realm_dcr_client_id_is_accepted_by_the_token_endpoint() {
         .authorize(
             &realm_id,
             &AuthorizationRequest {
+                organization: None,
                 client_id: domain_client_id,
                 redirect_uri: REDIRECT_URI.to_string(),
                 scope: "openid".to_string(),

@@ -232,6 +232,14 @@ pub enum IdentityError {
     RegistrationRequiresInvitation,
     /// The OAuth client requires user consent and no sufficient consent record exists.
     ConsentRequired,
+    /// A refresh for a third-party client whose stored consent no longer
+    /// covers what the grant would disclose (`scope-consent-integrity`
+    /// design §5). The client sends the user through `/authorize` again.
+    RefreshConsentRequired,
+    /// The `organization` of an authorization request is unknown, not
+    /// active, or the user is not a member. One variant for every case, so
+    /// the response does not tell them apart.
+    OrganizationAccessDenied,
     /// A non-interactive authorization request named a client the bearer
     /// token was not issued to (GA audit 3 B-1): a token issued to a client
     /// may authorize only that client, and a first-party session token only

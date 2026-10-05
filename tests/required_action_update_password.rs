@@ -635,6 +635,7 @@ async fn post_expired_ra_token_redirects_to_root() {
             user.id(),
             vec![RequiredAction::UpdatePassword],
             OidcParams {
+                organization: None,
                 client_id: rig.client.client_id().as_uuid().to_string(),
                 redirect_uri: "https://app.example.com/cb".to_string(),
                 scope: "openid".to_string(),

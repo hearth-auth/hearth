@@ -107,6 +107,18 @@ pub trait RbacEngine: Send + Sync {
         request: &ScopeRequest<'_>,
     ) -> Result<ResolvedPermissions, RbacError>;
 
+    /// The permissions `scopes` stand for in the registry the audience
+    /// selects (`resource`, else the realm's): a bundle's definition, a raw
+    /// permission itself. OIDC and unknown names contribute nothing. Sorted
+    /// and de-duplicated. Independent of any user: the consent disclosure is
+    /// built from it (`scope-consent-integrity` design §5).
+    fn scope_definitions(
+        &self,
+        realm_id: &RealmId,
+        scopes: &[String],
+        resource: Option<&crate::core::Uri>,
+    ) -> Result<Vec<String>, RbacError>;
+
     // ------- Replicated-write invalidation (cluster mode) -------
 
     /// Notifies the engine that `key` was written or deleted for `realm_id` by

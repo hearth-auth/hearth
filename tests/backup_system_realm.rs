@@ -1010,9 +1010,16 @@ async fn a_system_realm_restore_refuses_what_the_live_api_never_creates_there() 
         .expect("client");
     id.grant_consent(
         &tenant,
-        user.id(),
-        client.client_id(),
-        &["openid".to_string()],
+        &hearth::identity::ConsentGrant {
+            key: hearth::identity::ConsentKey {
+                user_id: user.id().clone(),
+                client_id: client.client_id().clone(),
+                org_id: None,
+                resource: None,
+            },
+            scopes: vec!["openid".to_string()],
+            via: hearth::identity::ConsentSurface::Web,
+        },
     )
     .expect("consent");
 
@@ -1099,9 +1106,17 @@ async fn a_system_realm_restore_refuses_what_the_live_api_never_creates_there() 
     assert!(id.get_organization(&sys, org.id()).expect("get").is_none());
     assert!(id.get_idp(&sys, &idp_id).expect("get").is_none());
     assert!(
-        id.get_consent(&sys, user.id(), client.client_id())
-            .expect("get consent")
-            .is_none(),
+        id.get_consent(
+            &sys,
+            &hearth::identity::ConsentKey {
+                user_id: user.id().clone(),
+                client_id: client.client_id().clone(),
+                org_id: None,
+                resource: None
+            }
+        )
+        .expect("get consent")
+        .is_none(),
         "no consent lands in the system realm"
     );
     assert!(

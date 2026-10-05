@@ -301,8 +301,8 @@ fn rfc7009_revocation_survives_a_concurrent_rotation() {
 
 /// Revoking an application's consent deleted the consent record and nothing
 /// else. The grant families issued under that consent stayed live, and
-/// `rotate_grant_family`'s consent check only compares scope digests *when a
-/// record exists* — so deleting the record removed the only thing that check
+/// `rotate_grant_family`'s consent check then compared scope digests only
+/// *when a record existed* — so deleting the record removed the only thing that check
 /// could fail on, and the application kept refreshing forever
 /// (audit 2026-08-28 §4.16#11).
 #[test]
@@ -332,9 +332,16 @@ fn revoking_consent_kills_the_applications_refresh_chain() {
     engine
         .grant_consent(
             &realm_id,
-            user.id(),
-            client.client_id(),
-            &["openid".to_string()],
+            &crate::identity::ConsentGrant {
+                key: crate::identity::ConsentKey {
+                    user_id: user.id().clone(),
+                    client_id: client.client_id().clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["openid".to_string()],
+                via: crate::identity::ConsentSurface::Web,
+            },
         )
         .expect("grant consent");
 
@@ -342,6 +349,7 @@ fn revoking_consent_kills_the_applications_refresh_chain() {
         .authorize(
             &realm_id,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://app.example.com/cb".to_string(),
                 state: "csrf-state".to_string(),
@@ -380,7 +388,12 @@ fn revoking_consent_kills_the_applications_refresh_chain() {
         .expect("refresh before consent revocation must work");
 
     engine
-        .revoke_consent(&realm_id, user.id(), client.client_id())
+        .revoke_consent(
+            &realm_id,
+            user.id(),
+            client.client_id(),
+            &crate::audit::Actor::User(user.id().clone()),
+        )
         .expect("revoke consent");
 
     let after = engine.refresh_tokens(&realm_id, rotated.refresh_token(), None, None);

@@ -38,6 +38,7 @@ fn a_par_request_uri_is_consumed_once_under_concurrency() {
             .push_authorization_request(
                 &realm,
                 &PushedAuthorizationRequest {
+                    organization: None,
                     client_id: client.clone(),
                     redirect_uri: "https://app.example.com/cb".to_string(),
                     scope: "openid".to_string(),
@@ -102,6 +103,7 @@ fn a_consumed_par_marker_outlives_the_request_uri_then_is_swept() {
         .push_authorization_request(
             &realm,
             &PushedAuthorizationRequest {
+                organization: None,
                 client_id: client,
                 redirect_uri: "https://app.example.com/cb".to_string(),
                 scope: "openid".to_string(),

@@ -121,8 +121,9 @@ pub use tokens::{
 pub use totp::{RecoveryCodes, TotpEnrollment};
 pub use types::{
     canonicalize_scopes, ApprovalWebhookConfig, AttributeDefinition, AttributeDefinitions,
-    AttributeType, BreachCheckConfig, BulkResult, CidrPolicy, ConsentDecision, ConsentExport,
-    ConsentListEntry, ConsentRecord, CreateInvitationRequest, CreateOrganizationRequest,
+    AttributeType, AuthorizationScopes, BreachCheckConfig, BulkResult, CidrPolicy, ConsentDecision,
+    ConsentDisclosure, ConsentExport, ConsentGrant, ConsentKey, ConsentListEntry, ConsentRecord,
+    ConsentState, ConsentSurface, CreateInvitationRequest, CreateOrganizationRequest,
     CreateRealmRequest, CreateUserRequest, CreateWebhookRequest, CredentialExport, DcrPolicy,
     DemoSeedOutcome, DemoSeedSpec, FederationLinkExport, ImportClientRequest, ImportUserRequest,
     InvitationStatus, MfaFactorExport, MfaProof, MigrationReport, Organization, OrganizationConfig,
@@ -854,10 +855,15 @@ pub trait IdentityEngine: Send + Sync {
     ) -> Result<AuthorizationResponse, IdentityError>;
 
     /// The scopes `/authorize` would grant `user_id` for this client, scope
-    /// string and RFC 8707 resource (`scope-consent-integrity` design §2).
-    /// The browser gate calls it before the consent screen, so the screen
-    /// lists only what can be granted. A refusal is `InvalidScope` (or
-    /// `InvalidTarget` for an unregistered resource).
+    /// string, RFC 8707 resource and `organization` parameter
+    /// (`scope-consent-integrity` design §1, §2, §5), and whether a stored
+    /// consent covers them. The browser gate calls it before the consent
+    /// screen, so the screen lists only what can be granted.
+    ///
+    /// A refusal is `InvalidScope`, `InvalidTarget` for an unregistered
+    /// resource, or `OrganizationAccessDenied` for an organization the user
+    /// cannot sign in to.
+    #[allow(clippy::too_many_arguments)]
     fn authorization_scopes(
         &self,
         realm_id: &RealmId,
@@ -865,7 +871,8 @@ pub trait IdentityEngine: Send + Sync {
         client_id: &crate::core::ClientId,
         scope: &str,
         resource: Option<&str>,
-    ) -> Result<Vec<String>, IdentityError>;
+        organization: Option<&str>,
+    ) -> Result<AuthorizationScopes, IdentityError>;
 
     /// [`Self::authorize`] for a code minted from a browser session whose
     /// login proved `mfa_proof`. The code records it, and the session its
@@ -889,9 +896,9 @@ pub trait IdentityEngine: Send + Sync {
     /// to a client (RFC 9068 `client_id`) may authorize that client only; a
     /// first-party session token (no `client_id`) a first-party client only.
     /// Anything else fails with [`IdentityError::ClientMismatch`] (GA audit 3
-    /// B-1). Issues only when the client does not require consent or a
-    /// recorded consent covers every requested scope — the browser consent
-    /// gate's rule — and otherwise fails with
+    /// B-1). Issues only when the client has no consent step or a stored
+    /// consent covers what the grant discloses — the browser consent gate's
+    /// rule — and otherwise fails with
     /// [`IdentityError::ConsentRequired`] (GA audit B2). For a client or role
     /// that demands a second factor, the token's session must have proved
     /// one, or the call fails with [`IdentityError::MfaRequired`] (the
@@ -2017,44 +2024,47 @@ pub trait IdentityEngine: Send + Sync {
 
     // ===== OAuth Consent =====
 
-    /// Returns the user's consent record for a specific OAuth client, if any.
+    /// Returns the consent row stored under `key`, if any. Exact match only:
+    /// no fallback to the realm-context row.
     fn get_consent(
         &self,
         realm_id: &RealmId,
-        user_id: &UserId,
-        client_id: &crate::core::ClientId,
+        key: &ConsentKey,
     ) -> Result<Option<ConsentRecord>, IdentityError>;
 
-    /// Lists every consent the given user has granted in this realm.
+    /// Lists the user's consents in this realm, one entry per client.
     ///
-    /// Each entry is joined with the current client name and logo URL for
-    /// UI rendering. Clients that no longer exist (orphaned consents) are
-    /// filtered out — callers see only live consents.
+    /// A client with rows in several organizations or for several resources
+    /// is one entry: its `record` carries the union of their scopes. Each
+    /// entry is joined with the current client name and logo URL. Clients
+    /// that no longer exist (orphaned consents) are filtered out.
     fn list_consents_by_user(
         &self,
         realm_id: &RealmId,
         user_id: &UserId,
     ) -> Result<Vec<ConsentListEntry>, IdentityError>;
 
-    /// Upserts a consent record, merging `approved_scopes` into any
-    /// pre-existing granted scopes. Returns the resulting canonical record.
+    /// Records the signed-in user's consent under `grant.key`, merging the
+    /// approved scopes and their disclosure into an existing row. The engine
+    /// computes the disclosure from the current registry and claim profile.
     fn grant_consent(
         &self,
         realm_id: &RealmId,
-        user_id: &UserId,
-        client_id: &crate::core::ClientId,
-        approved_scopes: &[String],
+        grant: &ConsentGrant,
     ) -> Result<ConsentRecord, IdentityError>;
 
-    /// Revokes the user's consent for a specific client. Returns
-    /// `ConsentNotFound` if no record existed. Idempotent from the
-    /// caller's perspective — the HTTP layer translates to 404.
+    /// Revokes the application: deletes every consent row of the user for
+    /// `client_id` (every organization, every resource) and revokes the
+    /// grant families issued to it. Writes one `ClientConsentRevoked` per
+    /// row, naming `actor`. Returns the number of rows deleted;
+    /// `ConsentNotFound` when there were none.
     fn revoke_consent(
         &self,
         realm_id: &RealmId,
         user_id: &UserId,
         client_id: &crate::core::ClientId,
-    ) -> Result<(), IdentityError>;
+        actor: &crate::audit::Actor,
+    ) -> Result<usize, IdentityError>;
 
     /// Revokes every consent granted by the user in this realm. Returns
     /// the number of records deleted.

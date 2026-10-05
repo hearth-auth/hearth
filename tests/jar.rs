@@ -185,6 +185,7 @@ fn register_client_with_jwks(env: &TestEnv, jwks: &str) -> hearth::identity::OAu
 
 fn par_with_jar(client_id: hearth::core::ClientId, jar_jwt: String) -> PushedAuthorizationRequest {
     PushedAuthorizationRequest {
+        organization: None,
         client_id,
         // These outer params are overridden by the JAR — redirect_uri/scope/state/etc.
         // come from the JWT. Supply them here anyway to ensure JAR takes precedence.
@@ -1266,6 +1267,7 @@ fn authorization_response_reports_the_jar_redirect_uri_not_the_outer_one() {
     // The outer parameter is an attacker-chosen URI that is NOT registered.
     const ATTACKER_URI: &str = "https://evil.example.com/steal";
     let req = AuthorizationRequest {
+        organization: None,
         client_id: client_id.clone(),
         redirect_uri: ATTACKER_URI.to_string(),
         scope: "openid".to_string(),
@@ -1324,6 +1326,7 @@ fn authorization_response_reports_the_outer_redirect_uri_without_a_jar() {
         .encode(ring::digest::digest(&ring::digest::SHA256, PKCE_VERIFIER.as_bytes()).as_ref());
 
     let req = AuthorizationRequest {
+        organization: None,
         client_id: client.client_id().clone(),
         redirect_uri: REDIRECT_URI.to_string(),
         scope: "openid".to_string(),

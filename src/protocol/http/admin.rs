@@ -3010,28 +3010,15 @@ async fn admin_revoke_user_consent(
     if let Err(e) = require_user_admin_ceiling(&state, &auth, &auth.realm_id, &user_id) {
         return e.into_response();
     }
-    match state
-        .identity
-        .revoke_consent(&auth.realm_id, &user_id, &client_id)
-    {
-        Ok(()) => {
-            crate::protocol::audit_log::record(
-                state.audit.as_ref(),
-                &crate::audit::CreateAuditEvent {
-                    realm_id: auth.realm_id.clone(),
-                    actor: auth.user_id.as_uuid().to_string(),
-                    action: crate::audit::AuditAction::ConsentRevoked,
-                    resource_type: "oauth_client".to_string(),
-                    resource_id: client_id.as_uuid().to_string(),
-                    metadata: Some(serde_json::json!({
-                        "via": "admin",
-                        "target_user": user_id.as_uuid().to_string(),
-                        "client_id": client_id.as_uuid().to_string(),
-                    })),
-                },
-            );
-            (StatusCode::NO_CONTENT, ()).into_response()
-        }
+    // The engine writes one `ClientConsentRevoked` per deleted row, naming
+    // the admin as the actor.
+    match state.identity.revoke_consent(
+        &auth.realm_id,
+        &user_id,
+        &client_id,
+        &crate::audit::Actor::User(auth.user_id.clone()),
+    ) {
+        Ok(_) => (StatusCode::NO_CONTENT, ()).into_response(),
         Err(e) => identity_error_to_response(&e).into_response(),
     }
 }

@@ -109,6 +109,12 @@ impl fmt::Display for IdentityError {
                 write!(f, "self-service registration requires a valid invitation")
             }
             Self::ConsentRequired => write!(f, "user consent is required"),
+            Self::RefreshConsentRequired => {
+                write!(f, "the stored consent no longer covers this grant")
+            }
+            Self::OrganizationAccessDenied => {
+                write!(f, "the organization is not available to this user")
+            }
             Self::ClientMismatch => {
                 write!(f, "the bearer token was not issued to the requested client")
             }

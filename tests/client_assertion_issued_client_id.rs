@@ -171,6 +171,7 @@ impl Env {
             .push_authorization_request(
                 &self.realm,
                 &PushedAuthorizationRequest {
+                    organization: None,
                     client_id: self.client.clone(),
                     redirect_uri: REDIRECT_URI.into(),
                     scope: "openid".into(),

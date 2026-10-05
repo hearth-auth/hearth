@@ -2240,11 +2240,13 @@ pub async fn admin_user_consent_revoke(
     let user_id = crate::core::UserId::new(uuid_u);
     let client_id = ClientId::new(uuid_c);
 
-    match state
-        .identity
-        .revoke_consent(target_realm.id(), &user_id, &client_id)
-    {
-        Ok(()) => Redirect::to(&format!(
+    match state.identity.revoke_consent(
+        target_realm.id(),
+        &user_id,
+        &client_id,
+        &crate::audit::Actor::User(session.user_id.clone()),
+    ) {
+        Ok(_) => Redirect::to(&format!(
             "/ui/admin/realms/{}/users/{}/applications",
             target_realm.0.name(),
             user_id.as_uuid()

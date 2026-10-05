@@ -346,17 +346,17 @@ use crate::identity::tokens::{
 use crate::identity::totp::{self, RecoveryCodes, StoredMfaState, TotpEnrollment, TotpSecret};
 use crate::identity::types::{
     Agent, AgentCredential, AgentCredentialKind, AgentExport, AgentOwner, AgentStatus, BulkResult,
-    ConsentExport, ConsentListEntry, ConsentRecord, CreateAgentApiKeyRequest,
-    CreateAgentApiKeyResponse, CreateAgentRequest, CreateInvitationRequest,
-    CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest, DemoSeedOutcome,
-    DemoSeedSpec, FederationLinkExport, ImportClientRequest, ImportUserRequest, InvitationStatus,
-    ListAgentsQuery, Organization, OrganizationInvitation, OrganizationMembership,
-    OrganizationRole, OrganizationStatus, Page, PendingAuthorizationRequest, PlaintextApiKey,
-    ProtectedResource, ProtectedResourceReconcileReport, Realm, RealmStatus,
-    RegisterProtectedResourceRequest, RegisterUserRequest, RegisterUserResponse,
-    RegistrationPolicy, RetiringSigningKeyExport, RevocationExport, Rfc8693Request,
-    Rfc8693Response, ScimMappingExport, ScimMappingKind, Session, SessionContext,
-    SessionLimitPolicy, UpdateAgentRequest, UpdateOrganizationRequest,
+    ConsentExport, ConsentGrant, ConsentKey, ConsentListEntry, ConsentRecord,
+    CreateAgentApiKeyRequest, CreateAgentApiKeyResponse, CreateAgentRequest,
+    CreateInvitationRequest, CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest,
+    DemoSeedOutcome, DemoSeedSpec, FederationLinkExport, ImportClientRequest, ImportUserRequest,
+    InvitationStatus, ListAgentsQuery, Organization, OrganizationInvitation,
+    OrganizationMembership, OrganizationRole, OrganizationStatus, Page,
+    PendingAuthorizationRequest, PlaintextApiKey, ProtectedResource,
+    ProtectedResourceReconcileReport, Realm, RealmStatus, RegisterProtectedResourceRequest,
+    RegisterUserRequest, RegisterUserResponse, RegistrationPolicy, RetiringSigningKeyExport,
+    RevocationExport, Rfc8693Request, Rfc8693Response, ScimMappingExport, ScimMappingKind, Session,
+    SessionContext, SessionLimitPolicy, UpdateAgentRequest, UpdateOrganizationRequest,
     UpdateProtectedResourceRequest, UpdateRealmRequest, UpdateUserRequest, User, UserStatus,
     Webhook,
 };
@@ -373,6 +373,7 @@ use crate::storage::StorageEngine;
 mod advisory_lock;
 pub(super) mod approval;
 pub(crate) mod client_jwks;
+mod consent;
 mod control;
 mod grant_family_revocation;
 mod id_token_keys;
@@ -3983,24 +3984,6 @@ impl EmbeddedIdentityEngine {
         hex_encode(digest.as_ref())
     }
 
-    /// Computes a stable scope digest from a list of scope strings.
-    ///
-    /// The digest is SHA-256 of the sorted, deduplicated, newline-separated
-    /// scope names encoded as UTF-8. The result is a raw 32-byte vector.
-    ///
-    /// This digest is stored on [`ConsentRecord`] at grant time and
-    /// re-computed on every `/authorize` and `refresh_token` call. A mismatch
-    /// indicates that the declared scope surface has changed (e.g. because
-    /// YAML bundles were reloaded) and the user must re-consent.
-    pub(crate) fn compute_scope_digest(scopes: &[String]) -> Vec<u8> {
-        let mut sorted: Vec<&str> = scopes.iter().map(String::as_str).collect();
-        sorted.sort_unstable();
-        sorted.dedup();
-        let canonical = sorted.join("\n");
-        let digest = ring::digest::digest(&ring::digest::SHA256, canonical.as_bytes());
-        digest.as_ref().to_vec()
-    }
-
     /// Performs grant family rotation during refresh token exchange.
     ///
     /// Validates the incoming refresh token against the family's current hash,
@@ -4105,46 +4088,6 @@ impl EmbeddedIdentityEngine {
             ));
         }
 
-        // Consent scope-digest re-check on refresh.
-        //
-        // When the grant family carries a `client_id` and the token carries
-        // a non-empty scope claim, verify that the stored consent record's
-        // digest still matches the token's scope surface. A mismatch means
-        // the scope surface changed since the user last consented; we return
-        // `invalid_grant` (mapped to `ConsentRequired`) so the client can
-        // direct the user back through the authorization flow.
-        if let Some(ref client_id) = family.client_id {
-            if let Some(ref scope_str) = claims.scope {
-                let token_scopes: Vec<String> =
-                    scope_str.split_whitespace().map(str::to_string).collect();
-                if let Some(consent) = self.get_consent_extended(
-                    realm_id,
-                    user_id,
-                    client_id,
-                    keys::CONSENT_ORG_KEY_REALM,
-                    keys::CONSENT_RESOURCE_KEY_DEFAULT,
-                    // We don't have the client record in scope here; if the
-                    // family carries a client_id we can load it on demand,
-                    // but to avoid a storage round-trip we conservatively
-                    // disable the spans_orgs fallback (it is checked during
-                    // the initial authorize call).
-                    false,
-                )? {
-                    if !consent.scope_digest.is_empty() {
-                        let current_digest = Self::compute_scope_digest(&token_scopes);
-                        if current_digest != consent.scope_digest {
-                            tracing::info!(
-                                client_id = %client_id,
-                                user_id = %user_id,
-                                "consent digest mismatch on refresh — requiring re-consent"
-                            );
-                            return Err(IdentityError::ConsentRequired);
-                        }
-                    }
-                }
-            }
-        }
-
         // M1 (RFC 9449 §5): enforce DPoP key binding on the refresh path.
         // If the grant family was bound to a DPoP key at issuance, the
         // presented thumbprint must match — a stolen refresh token is unusable
@@ -4179,11 +4122,39 @@ impl EmbeddedIdentityEngine {
         } else {
             None
         };
+        // The organization of the grant must still hold: active, and the
+        // user still a member (`scope-consent-integrity` design §1).
+        let org_id = claims
+            .oid
+            .as_deref()
+            .map(str::parse::<crate::core::OrganizationId>)
+            .transpose()
+            .map_err(|_| IdentityError::InvalidGrant {
+                reason: "the grant names an invalid organization".to_string(),
+            })?;
+        if let Some(ref org) = org_id {
+            if !self.org_context_holds(realm_id, org, user_id)? {
+                return Err(IdentityError::InvalidGrant {
+                    reason: "the organization of the grant is no longer available".to_string(),
+                });
+            }
+        }
+        let grant_scopes = scope_grant::scope_list(claims.scope.as_deref());
+        // The consent row the grant was issued under (design §5). A scope the
+        // registry no longer defines ends it before re-resolution.
+        let consent_key = resolved_client.as_ref().map(|c| ConsentKey {
+            user_id: user_id.clone(),
+            client_id: c.client_id().clone(),
+            org_id: org_id.clone(),
+            resource: family.resources.first().cloned(),
+        });
+        if let (Some(client), Some(key)) = (resolved_client.as_ref(), consent_key.as_ref()) {
+            self.require_refresh_scopes_defined(realm_id, client, key, &grant_scopes)?;
+        }
         // Re-resolve the grant's scopes against the current registry
         // (scope-consent-integrity design §2): a scope the user no longer
         // fully holds drops out; one the registry no longer knows ends the
         // grant with `invalid_grant`.
-        let grant_scopes = scope_grant::scope_list(claims.scope.as_deref());
         let resolved = self.grant_scopes(
             realm_id,
             &scope_grant::ScopeGrant {
@@ -4191,12 +4162,16 @@ impl EmbeddedIdentityEngine {
                 client: resolved_client.as_ref(),
                 requested: &grant_scopes,
                 resource: family.resources.first(),
-                org_id: None,
+                org_id: org_id.as_ref(),
                 mode: crate::rbac::ScopeMode::Reissue,
                 narrowed: family.scope_narrowed,
                 issuing: true,
             },
         )?;
+        // The stored consent must still cover what the grant now discloses.
+        if let (Some(client), Some(key)) = (resolved_client.as_ref(), consent_key.as_ref()) {
+            self.require_refresh_disclosure(realm_id, client, key, &resolved.granted_scopes)?;
+        }
         let refreshed_scope = claims
             .scope
             .as_ref()
@@ -5690,74 +5665,6 @@ impl EmbeddedIdentityEngine {
         }
 
         Ok(signing_key)
-    }
-
-    /// Looks up a consent record for the given `(user, client, org_key,
-    /// resource_key)` tuple.
-    ///
-    /// When `consent_spans_orgs` is `true` and no org-specific record is found,
-    /// falls back to a realm-level record keyed with
-    /// [`CONSENT_ORG_KEY_REALM`][keys::CONSENT_ORG_KEY_REALM].
-    fn get_consent_extended(
-        &self,
-        realm_id: &RealmId,
-        user_id: &UserId,
-        client_id: &ClientId,
-        org_key: &str,
-        resource_key: &str,
-        consent_spans_orgs: bool,
-    ) -> Result<Option<ConsentRecord>, IdentityError> {
-        // Try the specific (org, resource) tuple first.
-        let key = keys::encode_consent_key_extended(user_id, client_id, org_key, resource_key);
-        if let Some(bytes) = self
-            .storage
-            .get(realm_id, &key)
-            .map_err(Self::storage_err)?
-        {
-            let rec: ConsentRecord =
-                serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
-                    reason: e.to_string(),
-                })?;
-            return Ok(Some(rec));
-        }
-
-        // `consent_spans_orgs` fallback: if the client allows a realm-level
-        // consent to cover any org, check for a `_realm`-keyed record.
-        if consent_spans_orgs && org_key != keys::CONSENT_ORG_KEY_REALM {
-            let fallback_key = keys::encode_consent_key_extended(
-                user_id,
-                client_id,
-                keys::CONSENT_ORG_KEY_REALM,
-                resource_key,
-            );
-            if let Some(bytes) = self
-                .storage
-                .get(realm_id, &fallback_key)
-                .map_err(Self::storage_err)?
-            {
-                let rec: ConsentRecord =
-                    serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
-                        reason: e.to_string(),
-                    })?;
-                return Ok(Some(rec));
-            }
-        }
-
-        // Legacy key fallback for records written before the extended schema.
-        let legacy_key = keys::encode_consent_key(user_id, client_id);
-        if let Some(bytes) = self
-            .storage
-            .get(realm_id, &legacy_key)
-            .map_err(Self::storage_err)?
-        {
-            let rec: ConsentRecord =
-                serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
-                    reason: e.to_string(),
-                })?;
-            return Ok(Some(rec));
-        }
-
-        Ok(None)
     }
 }
 
@@ -9988,8 +9895,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         client_id: &ClientId,
         scope: &str,
         resource: Option<&str>,
-    ) -> Result<Vec<String>, IdentityError> {
-        self.authorization_scopes_inner(realm_id, user_id, client_id, scope, resource)
+        organization: Option<&str>,
+    ) -> Result<crate::identity::types::AuthorizationScopes, IdentityError> {
+        self.authorization_scopes_inner(realm_id, user_id, client_id, scope, resource, organization)
     }
 
     fn authorize_from_session(
@@ -12436,10 +12344,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     fn get_consent(
         &self,
         realm_id: &RealmId,
-        user_id: &UserId,
-        client_id: &ClientId,
+        key: &ConsentKey,
     ) -> Result<Option<ConsentRecord>, IdentityError> {
-        self.get_consent_inner(realm_id, user_id, client_id)
+        self.get_consent_inner(realm_id, key)
     }
 
     fn list_consents_by_user(
@@ -12453,23 +12360,19 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     fn grant_consent(
         &self,
         realm_id: &RealmId,
-        user_id: &UserId,
-        client_id: &ClientId,
-        approved_scopes: &[String],
+        grant: &ConsentGrant,
     ) -> Result<ConsentRecord, IdentityError> {
-        self.grant_consent_inner(realm_id, user_id, client_id, approved_scopes)
+        self.grant_consent_inner(realm_id, grant)
     }
 
     fn revoke_consent(
         &self,
         realm_id: &RealmId,
         user_id: &UserId,
-        client_id: &ClientId,
-    ) -> Result<(), IdentityError> {
-        // Archival is a freeze: refuse mutations on a non-active realm
-        // (audit 2026-08-28 §4.20#5).
-        self.require_active_realm(realm_id)?;
-        self.revoke_consent_inner(realm_id, user_id, client_id)
+        client_id: &crate::core::ClientId,
+        actor: &crate::audit::Actor,
+    ) -> Result<usize, IdentityError> {
+        self.revoke_consent_inner(realm_id, user_id, client_id, actor)
     }
 
     fn revoke_all_consents_for_user(
@@ -22115,14 +22018,29 @@ mod tests {
         engine
             .grant_consent(
                 &realm,
-                user.id(),
-                client.client_id(),
-                &["openid".to_string()],
+                &crate::identity::ConsentGrant {
+                    key: crate::identity::ConsentKey {
+                        user_id: user.id().clone(),
+                        client_id: client.client_id().clone(),
+                        org_id: None,
+                        resource: None,
+                    },
+                    scopes: vec!["openid".to_string()],
+                    via: crate::identity::ConsentSurface::Web,
+                },
             )
             .expect("grant consent");
         assert!(
             engine
-                .get_consent(&realm, user.id(), client.client_id())
+                .get_consent(
+                    &realm,
+                    &crate::identity::ConsentKey {
+                        user_id: user.id().clone(),
+                        client_id: client.client_id().clone(),
+                        org_id: None,
+                        resource: None
+                    }
+                )
                 .expect("get consent")
                 .is_some(),
             "consent must exist before deletion"
@@ -22134,7 +22052,15 @@ mod tests {
 
         assert!(
             engine
-                .get_consent(&realm, user.id(), client.client_id())
+                .get_consent(
+                    &realm,
+                    &crate::identity::ConsentKey {
+                        user_id: user.id().clone(),
+                        client_id: client.client_id().clone(),
+                        org_id: None,
+                        resource: None
+                    }
+                )
                 .expect("get consent after delete")
                 .is_none(),
             "consent must be scrubbed when the client is deleted"
@@ -22172,6 +22098,7 @@ mod tests {
             .authorize(
                 &realm,
                 &AuthorizationRequest {
+                    organization: None,
                     client_id: client.client_id().clone(),
                     redirect_uri: "https://app.example.com/callback".to_string(),
                     scope: "openid".to_string(),
@@ -22208,6 +22135,7 @@ mod tests {
             .authorize(
                 &realm,
                 &AuthorizationRequest {
+                    organization: None,
                     client_id: client.client_id().clone(),
                     redirect_uri: "https://app.example.com/callback".to_string(),
                     scope: "openid".to_string(),
@@ -22273,6 +22201,7 @@ mod tests {
             .authorize(
                 &realm,
                 &AuthorizationRequest {
+                    organization: None,
                     client_id: client.client_id().clone(),
                     redirect_uri: "https://app.example.com/callback".to_string(),
                     scope: "openid".to_string(),
@@ -22339,6 +22268,7 @@ mod tests {
             .authorize(
                 &realm,
                 &AuthorizationRequest {
+                    organization: None,
                     client_id: client.client_id().clone(),
                     redirect_uri: "https://app.example.com/callback".to_string(),
                     scope: "openid".to_string(),
@@ -22419,6 +22349,7 @@ mod tests {
             .authorize(
                 &realm,
                 &AuthorizationRequest {
+                    organization: None,
                     client_id: client.client_id().clone(),
                     redirect_uri: "https://app.example.com/callback".to_string(),
                     scope: "openid".to_string(),
@@ -22486,6 +22417,7 @@ mod tests {
         let result = engine.authorize(
             &realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://evil.example.com/steal-tokens".to_string(),
                 scope: "openid".to_string(),
@@ -22520,6 +22452,7 @@ mod tests {
         let result = engine.authorize(
             &realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 scope: "openid".to_string(),
@@ -23140,6 +23073,7 @@ mod tests {
         let result = engine.authorize(
             &realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 scope: "openid".to_string(),
@@ -23161,6 +23095,7 @@ mod tests {
         let result = engine.authorize(
             &realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 scope: "openid".to_string(),
@@ -23185,6 +23120,7 @@ mod tests {
         let result = engine.authorize(
             &realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 scope: "openid".to_string(),
@@ -23213,6 +23149,7 @@ mod tests {
         let user = create_test_user(&engine, &realm);
 
         let make_request = |nonce: &str, state: &str| AuthorizationRequest {
+            organization: None,
             client_id: client.client_id().clone(),
             redirect_uri: "https://app.example.com/callback".to_string(),
             scope: "openid".to_string(),
@@ -23273,6 +23210,7 @@ mod tests {
         let user = create_test_user(&engine, &realm);
 
         let make_request = |client: &crate::core::ClientId, state: &str| AuthorizationRequest {
+            organization: None,
             client_id: client.clone(),
             redirect_uri: "https://app.example.com/callback".to_string(),
             scope: "openid".to_string(),
@@ -23330,6 +23268,7 @@ mod tests {
         // Batch A: insert 5 nonces.
         for i in 0..5u32 {
             let req = AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 scope: "openid".to_string(),
@@ -23358,6 +23297,7 @@ mod tests {
         // Batch B: insert 3 new nonces (triggers sweep of batch A).
         for i in 0..3u32 {
             let req = AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 scope: "openid".to_string(),
@@ -26141,11 +26081,28 @@ mod tests {
                 },
             )
             .expect("register client");
+        // A third-party client refreshes only under a stored consent.
+        engine
+            .grant_consent(
+                &realm_id,
+                &crate::identity::ConsentGrant {
+                    key: crate::identity::ConsentKey {
+                        user_id: user.id().clone(),
+                        client_id: client.client_id().clone(),
+                        org_id: None,
+                        resource: None,
+                    },
+                    scopes: vec!["openid".to_string()],
+                    via: crate::identity::ConsentSurface::Web,
+                },
+            )
+            .expect("consent");
 
         let auth = engine
             .authorize(
                 &realm_id,
                 &AuthorizationRequest {
+                    organization: None,
                     client_id: client.client_id().clone(),
                     redirect_uri: "https://app.example.com/cb".to_string(),
                     state: "csrf-state".to_string(),
@@ -26715,6 +26672,7 @@ mod tests {
             .authorize(
                 &realm,
                 &AuthorizationRequest {
+                    organization: None,
                     client_id: client.client_id().clone(),
                     redirect_uri: "https://app.example.com/callback".to_string(),
                     scope: "openid".to_string(),
@@ -26750,6 +26708,7 @@ mod tests {
             .authorize(
                 &realm,
                 &AuthorizationRequest {
+                    organization: None,
                     client_id: client.client_id().clone(),
                     redirect_uri: "https://app.example.com/callback".to_string(),
                     scope: "openid".to_string(),
@@ -26797,6 +26756,7 @@ mod tests {
         let result = engine.authorize(
             &realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 scope: "openid".to_string(),
@@ -26930,6 +26890,7 @@ mod tests {
             .authorize(
                 &realm,
                 &AuthorizationRequest {
+                    organization: None,
                     client_id: client.client_id().clone(),
                     redirect_uri: "https://app.example.com/callback".to_string(),
                     scope: "openid \"bad-scope\"".to_string(),
@@ -26964,6 +26925,7 @@ mod tests {
             .authorize(
                 &realm,
                 &AuthorizationRequest {
+                    organization: None,
                     client_id: client.client_id().clone(),
                     redirect_uri: "https://app.example.com/callback".to_string(),
                     scope: "openid".to_string(),
@@ -27181,6 +27143,7 @@ mod tests {
         challenge: &str,
     ) -> crate::identity::oidc::PushedAuthorizationRequest {
         crate::identity::oidc::PushedAuthorizationRequest {
+            organization: None,
             client_id,
             redirect_uri: "https://example.com/callback".to_string(),
             scope: "openid".to_string(),

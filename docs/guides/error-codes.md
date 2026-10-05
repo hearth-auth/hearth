@@ -159,7 +159,8 @@ header. See the
 
 | Code | Meaning |
 |------|---------|
-| `HEARTH_CONSENT_REQUIRED` | User consent is required before issuing tokens. |
+| `HEARTH_CONSENT_REQUIRED` | User consent is required before issuing tokens. On a `refresh_token` grant it comes with `error=invalid_grant` and `error_description=consent_required`: send the user through `/authorize` again. |
+| `HEARTH_ORG_ACCESS_DENIED` | The `organization` of an authorization request cannot be used: it is unknown, not active, or the user is not a member. One code for every case. |
 | `HEARTH_CONSENT_TICKET_INVALID` | Consent ticket is invalid or expired. |
 | `HEARTH_CONSENT_SCOPE_NOT_REQUESTED` | Approved scope was not in the original authorization request. |
 | `HEARTH_CONSENT_NOT_FOUND` | No consent record exists for this client. |

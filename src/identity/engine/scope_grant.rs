@@ -9,6 +9,7 @@
 
 use crate::core::{OrganizationId, RealmId, Uri, UserId};
 use crate::identity::oidc::OAuthClient;
+use crate::identity::types::{AuthorizationScopes, ConsentKey};
 use crate::identity::{ClientTrustLevel, IdentityEngine as _, IdentityError};
 use crate::rbac::{RbacError, ResolvedPermissions, ScopeMode, ScopeRequest};
 
@@ -119,6 +120,46 @@ impl EmbeddedIdentityEngine {
 }
 
 impl EmbeddedIdentityEngine {
+    /// Resolves the `organization` parameter of an authorization request
+    /// (`scope-consent-integrity` design §1): an organization ID or slug of
+    /// the realm, accepted only when the organization is `Active` and `user_id`
+    /// is a member. Every other case is the one
+    /// [`IdentityError::OrganizationAccessDenied`].
+    pub(super) fn resolve_org_parameter(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        organization: &str,
+    ) -> Result<OrganizationId, IdentityError> {
+        let org = match organization.parse::<OrganizationId>() {
+            Ok(id) => self.get_organization(realm_id, &id)?,
+            Err(_) => self.get_organization_by_slug(realm_id, organization)?,
+        };
+        let org_id = org
+            .map(|o| o.id().clone())
+            .ok_or(IdentityError::OrganizationAccessDenied)?;
+        if self.org_context_holds(realm_id, &org_id, user_id)? {
+            Ok(org_id)
+        } else {
+            Err(IdentityError::OrganizationAccessDenied)
+        }
+    }
+
+    /// Whether `user_id` may still act in `org_id`: the organization is
+    /// `Active` and the membership exists. The code exchange and refresh
+    /// re-check it.
+    pub(super) fn org_context_holds(
+        &self,
+        realm_id: &RealmId,
+        org_id: &OrganizationId,
+        user_id: &UserId,
+    ) -> Result<bool, IdentityError> {
+        let active = self
+            .get_organization(realm_id, org_id)?
+            .is_some_and(|o| o.status() == crate::identity::OrganizationStatus::Active);
+        Ok(active && self.get_membership(realm_id, org_id, user_id)?.is_some())
+    }
+
     /// The recorded narrowing of the grant family `fid` names. A token that
     /// names a family this node cannot read is treated as narrowed, so live
     /// resolution fails toward fewer permissions.
@@ -146,10 +187,14 @@ impl EmbeddedIdentityEngine {
         client_id: &crate::core::ClientId,
         scope: &str,
         resource: Option<&str>,
-    ) -> Result<Vec<String>, IdentityError> {
+        organization: Option<&str>,
+    ) -> Result<AuthorizationScopes, IdentityError> {
         let client = self
             .get_client(realm_id, client_id)?
             .ok_or(IdentityError::InvalidClient)?;
+        let org_id = organization
+            .map(|o| self.resolve_org_parameter(realm_id, user_id, o))
+            .transpose()?;
         self.validate_client_scope_request(&client, scope)?;
         let resource = resource
             .map(|r| self.resolve_authorization_resource(realm_id, r))
@@ -162,12 +207,27 @@ impl EmbeddedIdentityEngine {
                 client: Some(&client),
                 requested: &requested,
                 resource: resource.as_ref(),
-                org_id: None,
+                org_id: org_id.as_ref(),
                 mode: ScopeMode::Request,
                 narrowed: false,
                 issuing: false,
             },
         )?;
-        Ok(granted.granted_scopes)
+        let consent = self.consent_state(
+            realm_id,
+            &client,
+            &ConsentKey {
+                user_id: user_id.clone(),
+                client_id: client_id.clone(),
+                org_id: org_id.clone(),
+                resource,
+            },
+            &granted.granted_scopes,
+        )?;
+        Ok(AuthorizationScopes {
+            scopes: granted.granted_scopes,
+            consent,
+            org_id,
+        })
     }
 }

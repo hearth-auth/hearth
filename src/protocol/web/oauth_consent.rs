@@ -19,9 +19,10 @@
 //! 1. `GET /ui/oauth/authorize` — validate the request (plain query, JAR or
 //!    PAR) against the registered `OAuthClient`, require a valid
 //!    `UiSession`, then run the shared gates in `authorize_gate`: required
-//!    actions and consent — check the existing
-//!    [`ConsentRecord`]. If the record covers every requested scope
-//!    (or `require_consent=false`), skip straight to code issuance and
+//!    actions and consent — the engine resolves the scopes and checks the
+//!    consent row for the request's organization and resource. If the row
+//!    covers what the grant discloses (or the client has no consent step),
+//!    skip straight to code issuance and
 //!    302 back to `redirect_uri`. Otherwise stash a
 //!    [`PendingAuthorizationRequest`] under an opaque ticket and
 //!    redirect to the consent page.
@@ -131,6 +132,10 @@ pub struct AuthorizeQuery {
     /// `consume_par` to expand the pre-validated stored parameters.
     #[serde(default)]
     pub request_uri: Option<String>,
+    /// The `organization` parameter: an organization ID or slug of the realm
+    /// (`scope-consent-integrity` design §1). A JAR's claim takes precedence.
+    #[serde(default)]
+    pub organization: Option<String>,
     /// RFC 8707 resource indicator (plain requests; a JAR or PAR request
     /// takes it from the request object or the stored entry instead).
     ///
@@ -390,6 +395,7 @@ fn plain_params(
         prompt: q.prompt.clone(),
         response_mode,
         resource,
+        organization: q.organization.clone().filter(|o| !o.is_empty()),
         // Set from the session by `authorize_get_impl`.
         mfa_proof: MfaProof::None,
     })
@@ -457,8 +463,33 @@ fn par_params(
         prompt: stored.prompt.unwrap_or_default(),
         response_mode,
         resource,
+        organization: stored.organization,
         // Set from the session by `authorize_get_impl`.
         mfa_proof: MfaProof::None,
+    })
+}
+
+/// The consent row a pending request is decided under: its user, client,
+/// organization (stored by the gate as an ID) and canonical resource.
+///
+/// `None` when a stored value does not parse. The gate wrote it, so that is
+/// an internal fault and the caller refuses the ticket.
+fn pending_consent_key(
+    pending: &PendingAuthorizationRequest,
+) -> Option<crate::identity::ConsentKey> {
+    let org_id = match pending.organization.as_deref() {
+        None => None,
+        Some(o) => Some(o.parse::<crate::core::OrganizationId>().ok()?),
+    };
+    let resource = match pending.resource.as_deref() {
+        None => None,
+        Some(r) => Some(crate::core::Uri::try_from(r.to_string()).ok()?),
+    };
+    Some(crate::identity::ConsentKey {
+        user_id: pending.user_id.clone(),
+        client_id: pending.client_id.clone(),
+        org_id,
+        resource,
     })
 }
 
@@ -520,9 +551,12 @@ pub async fn consent_page(
         Ok(None) => return handlers_common::bad_request("unknown client"),
         Err(_) => return handlers_common::server_error(),
     };
+    let Some(key) = pending_consent_key(&pending) else {
+        return handlers_common::bad_request("consent ticket invalid");
+    };
     let existing = state
         .identity
-        .get_consent(&session.realm_id, &session.user_id, &pending.client_id)
+        .get_consent(&session.realm_id, &key)
         .ok()
         .flatten();
 
@@ -680,12 +714,17 @@ pub async fn consent_submit(
             // Persist consent (even if approved is empty — the user
             // chose "approve no scopes", which still satisfies the
             // request for an authorization code).
-            if let Err(e) = state.identity.grant_consent(
-                &session.realm_id,
-                &session.user_id,
-                &pending.client_id,
-                &approved,
-            ) {
+            // The row is bound to the organization and the resource of the
+            // request (`scope-consent-integrity` design §5).
+            let Some(key) = pending_consent_key(&pending) else {
+                return handlers_common::bad_request("consent ticket invalid");
+            };
+            let grant = crate::identity::ConsentGrant {
+                key,
+                scopes: approved.clone(),
+                via: crate::identity::ConsentSurface::Web,
+            };
+            if let Err(e) = state.identity.grant_consent(&session.realm_id, &grant) {
                 tracing::warn!(error = %e, "grant_consent failed");
                 return handlers_common::server_error();
             }
@@ -726,6 +765,7 @@ pub async fn consent_submit(
                 prompt: String::new(),
                 response_mode,
                 resource: pending.resource.clone(),
+                organization: pending.organization.clone(),
                 // The approving session's proof (GA audit round 3, D-7).
                 mfa_proof: session.mfa_proof,
             };
@@ -978,6 +1018,10 @@ fn jar_params(
         prompt: jar.prompt.unwrap_or_else(|| q.prompt.clone()),
         response_mode,
         resource,
+        organization: jar
+            .organization
+            .or_else(|| q.organization.clone())
+            .filter(|o| !o.is_empty()),
         // Set from the session by `authorize_get_impl`.
         mfa_proof: MfaProof::None,
     })

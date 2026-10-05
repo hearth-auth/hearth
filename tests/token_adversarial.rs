@@ -1336,6 +1336,7 @@ async fn id_token_on_introspect_returns_inactive() {
         .authorize(
             &realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://adv.test/callback".to_string(),
                 scope: "openid".to_string(),
@@ -1432,6 +1433,7 @@ async fn concurrent_auth_code_exchange_only_one_succeeds() {
         .authorize(
             &realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://adv.test/callback".to_string(),
                 scope: "openid".to_string(),

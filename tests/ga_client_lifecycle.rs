@@ -128,6 +128,7 @@ fn par_request(client: &ClientId) -> PushedAuthorizationRequest {
     use base64::Engine as _;
     let digest = ring::digest::digest(&ring::digest::SHA256, b"ga-lifecycle-verifier-0123456789");
     PushedAuthorizationRequest {
+        organization: None,
         client_id: client.clone(),
         redirect_uri: REDIRECT_URI.to_string(),
         scope: "openid".to_string(),

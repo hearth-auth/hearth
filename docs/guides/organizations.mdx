@@ -200,6 +200,22 @@ $perms = $hearth->mePermissions($accessToken, orgId: 'org_<uuid>');
 
 See [openspec/specs/rbac-model/spec.md](https://github.com/hearth-auth/hearth/blob/main/openspec/specs/rbac-model/spec.md) for the full org-scoped permission resolution algorithm and the `oid` JWT claim specification.
 
+### Sign in to an organization
+
+An OAuth client asks for an organization context with the `organization` parameter of `/authorize`. The value is the organization's ID or its slug. The parameter works in the browser query, in a signed request object (JAR), and in a pushed authorization request (PAR). The JSON `POST /authorize` takes it through a pushed `request_uri`.
+
+```text
+GET /ui/oauth/authorize?client_id=<client-id>&response_type=code&scope=openid
+    &organization=acme&redirect_uri=...&state=...&code_challenge=...&code_challenge_method=S256
+```
+
+- Hearth accepts the parameter only when the organization is active and the signed-in user is a member. Every other case gets the same answer: an error redirect with `error=access_denied`. The answer does not say whether the organization exists.
+- The access token, the ID token and the refresh token carry the organization's ID as `oid`, and the organization's role assignments apply.
+- A refresh keeps the organization. It fails with `invalid_grant` when the organization is no longer active or the user is no longer a member.
+- Without the parameter, the flow stays in realm context and the tokens carry no `oid`.
+
+Consent is stored per organization. A user who consented to a third-party application in one organization sees the consent screen again in another, unless the client sets `consent_spans_orgs: true`. In that case a consent given in realm context covers every organization.
+
 ## Listing an organization's members
 
 Use the Admin UI: open the organization's detail page and select the **Members** tab. The member list shows each user's organization role and any additional RBAC roles scoped to the org.

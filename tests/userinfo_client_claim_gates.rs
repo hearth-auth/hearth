@@ -94,6 +94,7 @@ fn access_token_for(
         .authorize(
             realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.clone(),
                 redirect_uri: REDIRECT_URI.into(),
                 scope: "openid".into(),

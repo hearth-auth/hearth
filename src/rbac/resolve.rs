@@ -414,6 +414,43 @@ fn classify_requested_scope<R: Resolver + ?Sized>(
     }
 }
 
+/// What `scopes` stand for in the registry the audience selects: a bundle's
+/// permissions, a raw permission itself. OIDC scopes and names the registry
+/// does not define contribute nothing. Sorted and de-duplicated.
+///
+/// The consent disclosure (`scope-consent-integrity` design §5) is built from
+/// this. It reads definitions only, so it does not depend on what the user
+/// holds: a broadened bundle grows it, a lost role does not.
+pub(crate) fn scope_definitions<R: Resolver + ?Sized>(
+    resolver: &R,
+    realm_id: &RealmId,
+    scopes: &[String],
+    resource: Option<&Uri>,
+) -> Result<Vec<String>, RbacError> {
+    let mut out = BTreeSet::new();
+    for scope in scopes {
+        match classify_scope_string(scope) {
+            Some(ScopeKind::OidcStandard) => {}
+            Some(ScopeKind::Permission) => {
+                out.insert(scope.clone());
+            }
+            kind => {
+                let lookup = match resource {
+                    Some(uri) if kind == Some(ScopeKind::Bundle) => {
+                        resolver.resource_scope_permissions(realm_id, uri, scope)?
+                    }
+                    Some(_) => continue,
+                    None => resolver.scope_permissions(realm_id, scope)?,
+                };
+                if let ScopeLookup::Bundle(list) = lookup {
+                    out.extend(list.iter().map(|p| p.as_str().to_string()));
+                }
+            }
+        }
+    }
+    Ok(out.into_iter().collect())
+}
+
 /// The scope-resolution entry point (`scope-consent-integrity` design §2).
 ///
 /// - Every scope must be legal for the audience: an OIDC standard scope, a
@@ -1675,6 +1712,36 @@ mod tests {
             HashMap::from([("mcp:tools:invoke".to_string(), perms(&["docs.read"]))]),
         );
         (fake, realm, alice)
+    }
+
+    #[test]
+    fn scope_definitions_read_the_registry_not_the_user() {
+        let (fake, realm, _alice) = scope_fixture();
+        let realm_defs = scope_definitions(
+            &fake,
+            &realm,
+            &strings(&["openid", "read:docs", "view:docs", "docs.delete", "nope"]),
+            None,
+        )
+        .expect("definitions");
+        // `read:docs` is listed whole although the user holds only part of it.
+        assert_eq!(
+            realm_defs,
+            strings(&["docs.delete", "docs.list", "docs.read", "docs.share"])
+        );
+        let uri = Uri::try_from(MCP.to_string()).expect("uri");
+        let resource_defs = scope_definitions(
+            &fake,
+            &realm,
+            &strings(&["openid", "mcp:tools:invoke", "read:docs"]),
+            Some(&uri),
+        )
+        .expect("definitions");
+        assert_eq!(
+            resource_defs,
+            strings(&["docs.read"]),
+            "under a resource only its own bundles count"
+        );
     }
 
     fn resolve_scopes(

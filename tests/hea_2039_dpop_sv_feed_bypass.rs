@@ -236,6 +236,7 @@ fn mint_bound_user_token(
         .authorize(
             realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client_id.clone(),
                 redirect_uri: REDIRECT_URI.to_string(),
                 response_type: "code".to_string(),

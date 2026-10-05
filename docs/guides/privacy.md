@@ -55,7 +55,7 @@ with the owning `RealmId`, except signing keys which live in the **system realm*
 | OAuth client registration | `oauth:client:{client_uuid}` | JSON | `client_name`, `redirect_uris`, `client_secret_hash` (SHA-256 for Hearth-generated secrets, Argon2id for caller-chosen ones; plaintext never stored), grant types, allowed scopes |
 | Authorization code | `oauth:code:{sha256_hex_of_code}` | JSON | Plaintext code never stored; key is SHA-256 of the code issued to the client |
 | Refresh token (grant family) | `oauth:family:{family_id}` | JSON | `current_refresh_hash` (SHA-256 of current token) + `session_id`; plaintext refresh token never stored |
-| OAuth consent | `oauth:consent:{user_uuid}:{client_uuid}` | JSON | Granted scopes; no raw credentials |
+| OAuth consent | `oauth:consent:{user_uuid}:{client_uuid}:{org_uuid or _realm}:{resource_uri or _default}` | JSON | Granted scopes, what they disclose (permission names, `claim@target` pairs), the granting user's ID and the surface (`web` or `device`); no claim values, no raw credentials |
 | Device code | `oauth:device:{device_code_hash}` | JSON | Hash of device code |
 | Single-use redemption marker | `consumed:{kind}:{id_or_sha256}` | TTL marker | Records that a redeem-once artifact was spent — kinds `par`, `code`, `device`, `magic`, `reset`, `verify`, `refresh`, `saml-state`, `fed-state`, `fed-confirm`, `pending-auth`, `approval`, `txn`, `otp`. The key carries a public id (`request_uri` id, approval-request id, `jti`, OTP nonce) or the SHA-256 of a secret token, never a plaintext token. Swept after the artifact's own expiry plus 60 s |
 | Revoked JTI blocklist | `oauth:revjti:{jti}` | TTL marker | For sessionless client-credentials revocation; no PII in value |

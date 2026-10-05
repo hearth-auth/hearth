@@ -173,14 +173,13 @@ pub async fn revoke_consent(
         return handlers_common::not_found("Consent not found");
     };
     let client_id = ClientId::new(uuid);
-    match state
-        .identity
-        .revoke_consent(&session.realm_id, &session.user_id, &client_id)
-    {
-        Ok(()) => {
-            // Engine now emits ConsentRevoked internally.
-            Redirect::to("/ui/account/applications").into_response()
-        }
+    match state.identity.revoke_consent(
+        &session.realm_id,
+        &session.user_id,
+        &client_id,
+        &crate::audit::Actor::User(session.user_id.clone()),
+    ) {
+        Ok(_) => Redirect::to("/ui/account/applications").into_response(),
         Err(IdentityError::ConsentNotFound) => handlers_common::not_found("Consent not found"),
         Err(e) => {
             tracing::warn!(error = %e, "revoke_consent failed");
@@ -216,7 +215,12 @@ pub async fn revoke_all_consents(
     for entry in &entries {
         let _ = state
             .identity
-            .revoke_consent(&session.realm_id, &session.user_id, &entry.record.client_id)
+            .revoke_consent(
+                &session.realm_id,
+                &session.user_id,
+                &entry.record.client_id,
+                &crate::audit::Actor::User(session.user_id.clone()),
+            )
             .is_ok();
     }
     Redirect::to("/ui/account/applications").into_response()

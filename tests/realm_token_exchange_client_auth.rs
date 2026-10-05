@@ -149,6 +149,7 @@ fn make_dpop_bound_subject_token(
         .authorize(
             realm_id,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client_id.clone(),
                 redirect_uri: REDIRECT_URI.to_string(),
                 response_type: "code".to_string(),

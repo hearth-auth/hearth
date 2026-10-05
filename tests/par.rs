@@ -90,6 +90,7 @@ fn register_public_client(env: &TestEnv) -> hearth::identity::OAuthClient {
 
 fn par_request_with_pkce(client_id: hearth::core::ClientId) -> PushedAuthorizationRequest {
     PushedAuthorizationRequest {
+        organization: None,
         client_id,
         redirect_uri: REDIRECT_URI.to_string(),
         scope: "openid".to_string(),
@@ -140,6 +141,7 @@ fn public_client_without_pkce_rejected() {
     let client = register_public_client(&env);
 
     let req = PushedAuthorizationRequest {
+        organization: None,
         client_id: client.client_id().clone(),
         redirect_uri: REDIRECT_URI.to_string(),
         scope: "openid".to_string(),
@@ -171,6 +173,7 @@ fn non_code_response_type_rejected() {
     let client = register_public_client(&env);
 
     let req = PushedAuthorizationRequest {
+        organization: None,
         client_id: client.client_id().clone(),
         redirect_uri: REDIRECT_URI.to_string(),
         scope: "openid".to_string(),

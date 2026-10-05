@@ -2173,6 +2173,7 @@ fn non_interactive_authorization_request(
         }
 
         AuthorizationRequest {
+            organization: stored.organization,
             client_id: stored.client_id,
             redirect_uri: stored.redirect_uri,
             scope: stored.scope,
@@ -2302,6 +2303,10 @@ struct HttpParRequest {
     /// OIDC `prompt` (`none`, `consent`). The authorize endpoint ignores a
     /// `prompt` beside `request_uri`, so it must be pushed here.
     prompt: Option<String>,
+    /// The `organization` parameter: an organization ID or slug of the realm
+    /// (`scope-consent-integrity` design §1).
+    #[serde(default)]
+    organization: Option<String>,
 }
 
 fn default_response_type() -> String {
@@ -2469,6 +2474,7 @@ async fn par_handler(
     };
 
     let request = PushedAuthorizationRequest {
+        organization: body.organization.filter(|o| !o.is_empty()),
         client_id,
         redirect_uri: body.redirect_uri,
         scope: body.scope,
@@ -3619,14 +3625,13 @@ async fn self_revoke_consent(
     {
         return super::auth::third_party_token_forbidden().into_response();
     }
-    match state
-        .identity
-        .revoke_consent(&realm_id, &user_id, &client_id)
-    {
-        Ok(()) => {
-            // Engine now emits ConsentRevoked internally.
-            (StatusCode::NO_CONTENT, ()).into_response()
-        }
+    match state.identity.revoke_consent(
+        &realm_id,
+        &user_id,
+        &client_id,
+        &crate::audit::Actor::User(user_id.clone()),
+    ) {
+        Ok(_) => (StatusCode::NO_CONTENT, ()).into_response(),
         Err(e) => identity_error_to_response(&e).into_response(),
     }
 }

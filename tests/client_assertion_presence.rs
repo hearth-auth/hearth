@@ -226,6 +226,7 @@ impl Env {
             .authorize(
                 &self.realm_id,
                 &AuthorizationRequest {
+                    organization: None,
                     client_id: self.secret_client.clone(),
                     redirect_uri: REDIRECT_URI.to_string(),
                     response_type: "code".to_string(),

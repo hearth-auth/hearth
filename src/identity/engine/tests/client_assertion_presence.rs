@@ -37,6 +37,7 @@ fn code_for(engine: &EmbeddedIdentityEngine, realm: &RealmId, client: &ClientId)
         .authorize(
             realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.clone(),
                 redirect_uri: REDIRECT.to_string(),
                 response_type: "code".to_string(),

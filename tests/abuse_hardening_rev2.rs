@@ -369,6 +369,7 @@ fn make_pending(realm_id: RealmId, engine: &dyn IdentityEngine) -> (String, Real
     use hearth::core::{ClientId, UserId};
     let now = Timestamp::from_micros(1_700_000_000_000_000);
     let pending = PendingAuthorizationRequest {
+        organization: None,
         realm_id: realm_id.clone(),
         user_id: UserId::generate(),
         client_id: ClientId::generate(),
@@ -397,6 +398,7 @@ fn a34_pending_auth_carries_realm_id_serde_roundtrip() {
     use hearth::core::{ClientId, UserId};
     let now = Timestamp::from_micros(1_700_000_000_000_000);
     let pending = PendingAuthorizationRequest {
+        organization: None,
         realm_id: realm.clone(),
         user_id: UserId::generate(),
         client_id: ClientId::generate(),

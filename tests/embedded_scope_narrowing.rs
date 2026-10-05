@@ -137,6 +137,7 @@ impl Fixture {
             .authorize(
                 &self.realm,
                 &AuthorizationRequest {
+                    organization: None,
                     client_id: self.client.clone(),
                     redirect_uri: REDIRECT_URI.into(),
                     response_type: "code".into(),

@@ -113,6 +113,7 @@ fn confidential_client_without_pkce_always_rejected() {
     let result = engine.authorize(
         &realm_id,
         &AuthorizationRequest {
+            organization: None,
             client_id: client.client_id().clone(),
             redirect_uri: "https://app.example.com/cb".to_string(),
             scope: "openid".to_string(),
@@ -162,6 +163,7 @@ fn public_client_without_pkce_always_rejected() {
     let result = engine.authorize(
         &realm_id,
         &AuthorizationRequest {
+            organization: None,
             client_id: client.client_id().clone(),
             redirect_uri: "https://app.example.com/cb".to_string(),
             scope: "openid".to_string(),

@@ -211,6 +211,7 @@ impl Fixture {
             .authorize(
                 &self.realm,
                 &AuthorizationRequest {
+                    organization: None,
                     client_id: client.clone(),
                     redirect_uri: REDIRECT_URI.into(),
                     response_type: "code".into(),
@@ -344,7 +345,19 @@ async fn json_authorize_issues_a_code_when_a_recorded_consent_covers_the_scopes(
     let own = f.client_token(&client, None);
     f.harness
         .identity()
-        .grant_consent(&f.realm, &f.user, &client, &["openid".to_string()])
+        .grant_consent(
+            &f.realm,
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: f.user.clone(),
+                    client_id: client.clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["openid".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
+        )
         .expect("grant consent");
 
     let (status, body) = post_authorize(
@@ -427,7 +440,19 @@ async fn json_authorize_refuses_a_third_party_clients_token_for_a_first_party_cl
     // Control: the same token re-authorizes its own client once consented.
     f.harness
         .identity()
-        .grant_consent(&f.realm, &f.user, &third_party, &["openid".to_string()])
+        .grant_consent(
+            &f.realm,
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: f.user.clone(),
+                    client_id: third_party.clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["openid".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
+        )
         .expect("grant consent");
     let (status, body) = post_authorize(
         &f,
@@ -481,7 +506,19 @@ async fn json_authorize_refuses_a_session_token_for_a_third_party_client() {
     let third_party = f.register(ClientTrustLevel::ThirdParty, true);
     f.harness
         .identity()
-        .grant_consent(&f.realm, &f.user, &third_party, &["openid".to_string()])
+        .grant_consent(
+            &f.realm,
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: f.user.clone(),
+                    client_id: third_party.clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["openid".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
+        )
         .expect("grant consent");
 
     let (status, body) = post_authorize(
@@ -686,6 +723,7 @@ async fn realm_authorize_consumes_a_pushed_authorization_request() {
             .push_authorization_request(
                 &f.realm,
                 &PushedAuthorizationRequest {
+                    organization: None,
                     client_id: client.clone(),
                     redirect_uri: REDIRECT_URI.into(),
                     scope: "openid".into(),

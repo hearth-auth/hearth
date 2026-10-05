@@ -1174,17 +1174,35 @@ pub(crate) fn oidc_nonce_scan_prefix() -> Vec<u8> {
 
 // ===== OAuth consent key encoding =====
 
-/// Encodes the primary key for an OAuth consent record.
+/// Encodes the key of one consent row (`scope-consent-integrity` design §5).
 ///
-/// Format: `oauth:consent:{user_uuid}:{client_uuid}`
+/// Format: `oauth:consent:{user_uuid}:{client_uuid}:{org}:{resource}`, where
+/// `{org}` is the organization UUID or `_realm`, and `{resource}` the
+/// canonical resource URI or `_default` for Hearth as audience. The resource
+/// is the last field, so the colons of a URI do not shift the others.
 ///
-/// The compound key enables:
-/// - O(1) lookup of a specific `(user, client)` consent.
-/// - Prefix scan by user for "list my consents".
-/// - Cascade delete of all consent records on user deletion.
-pub(crate) fn encode_consent_key(user_id: &UserId, client_id: &ClientId) -> Vec<u8> {
+/// The `(user, client)` prefix lists every row a revocation deletes; the
+/// user prefix lists a user's consents and serves the account delete cascade.
+pub(crate) fn encode_consent_key(key: &crate::identity::types::ConsentKey) -> Vec<u8> {
+    let org = key.org_id.as_ref().map_or_else(
+        || CONSENT_ORG_KEY_REALM.to_string(),
+        |o| o.as_uuid().to_string(),
+    );
+    let resource = key
+        .resource
+        .as_ref()
+        .map_or(CONSENT_RESOURCE_KEY_DEFAULT, crate::core::Uri::as_str);
+    let mut out = encode_consent_prefix_for_client(&key.user_id, &key.client_id);
+    out.extend_from_slice(format!("{org}:{resource}").as_bytes());
+    out
+}
+
+/// Returns the scan prefix for every consent row of one user and client.
+///
+/// Format: `oauth:consent:{user_uuid}:{client_uuid}:`
+pub(crate) fn encode_consent_prefix_for_client(user_id: &UserId, client_id: &ClientId) -> Vec<u8> {
     format!(
-        "{OAUTH_CONSENT_PREFIX}{}:{}",
+        "{OAUTH_CONSENT_PREFIX}{}:{}:",
         user_id.as_uuid(),
         client_id.as_uuid()
     )
@@ -1216,32 +1234,6 @@ pub(crate) fn oauth_consent_scan_prefix() -> Vec<u8> {
 /// a hand-edited archive using that member to write anywhere else in the realm.
 pub(crate) fn is_oauth_consent_key(key: &str) -> bool {
     key.starts_with(OAUTH_CONSENT_PREFIX) && key.len() > OAUTH_CONSENT_PREFIX.len()
-}
-
-/// Encodes the extended consent key for a `(user, client, org_key, resource_key)` tuple.
-///
-/// Format: `oauth:consent:{user_uuid}:{client_uuid}:{org_key}:{resource_key}`
-///
-/// - `org_key` is the org UUID string, or `"_realm"` for realm-scoped consent.
-/// - `resource_key` is the resource URI, or `"_default"` when no resource indicator.
-///
-/// This is the preferred key for consent records created under the expanded
-/// authorization model. Legacy records keyed by `encode_consent_key` remain
-/// readable during migration.
-pub(crate) fn encode_consent_key_extended(
-    user_id: &UserId,
-    client_id: &ClientId,
-    org_key: &str,
-    resource_key: &str,
-) -> Vec<u8> {
-    format!(
-        "{OAUTH_CONSENT_PREFIX}{}:{}:{}:{}",
-        user_id.as_uuid(),
-        client_id.as_uuid(),
-        org_key,
-        resource_key,
-    )
-    .into_bytes()
 }
 
 /// The sentinel `org_key` value meaning the consent applies at realm scope
@@ -3147,36 +3139,41 @@ mod tests {
 
     #[test]
     fn encode_consent_key_format() {
-        let user_uuid =
-            Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").expect("valid uuid");
-        let client_uuid =
-            Uuid::parse_str("660e8400-e29b-41d4-a716-446655440000").expect("valid uuid");
-        let user_id = UserId::new(user_uuid);
-        let client_id = ClientId::new(client_uuid);
-        let key = encode_consent_key(&user_id, &client_id);
-        let key_str = std::str::from_utf8(&key).expect("utf8");
-        assert_eq!(
-            key_str,
-            "oauth:consent:550e8400-e29b-41d4-a716-446655440000:660e8400-e29b-41d4-a716-446655440000"
+        let user_id = UserId::new(
+            uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").expect("valid"),
         );
-    }
-
-    #[test]
-    fn consent_key_starts_with_user_prefix() {
-        let user_id = UserId::generate();
-        let client_id = ClientId::generate();
-        let key = encode_consent_key(&user_id, &client_id);
-        let prefix = encode_consent_prefix_for_user(&user_id);
-        assert!(key.starts_with(&prefix));
-    }
-
-    #[test]
-    fn consent_key_starts_with_scan_prefix() {
-        let user_id = UserId::generate();
-        let client_id = ClientId::generate();
-        let key = encode_consent_key(&user_id, &client_id);
-        let prefix = oauth_consent_scan_prefix();
-        assert!(key.starts_with(&prefix));
+        let client_id = ClientId::new(
+            uuid::Uuid::parse_str("660e8400-e29b-41d4-a716-446655440000").expect("valid"),
+        );
+        let org = crate::core::OrganizationId::new(
+            uuid::Uuid::parse_str("770e8400-e29b-41d4-a716-446655440000").expect("valid"),
+        );
+        let realm_row = crate::identity::types::ConsentKey {
+            user_id: user_id.clone(),
+            client_id: client_id.clone(),
+            org_id: None,
+            resource: None,
+        };
+        assert_eq!(
+            String::from_utf8(encode_consent_key(&realm_row)).expect("valid"),
+            "oauth:consent:550e8400-e29b-41d4-a716-446655440000:660e8400-e29b-41d4-a716-446655440000:_realm:_default"
+        );
+        let org_row = crate::identity::types::ConsentKey {
+            org_id: Some(org),
+            resource: Some(
+                crate::core::Uri::try_from("https://mcp.acme.com".to_string()).expect("valid"),
+            ),
+            ..realm_row
+        };
+        let key = String::from_utf8(encode_consent_key(&org_row)).expect("valid");
+        assert!(key.ends_with(":770e8400-e29b-41d4-a716-446655440000:https://mcp.acme.com"));
+        assert!(key
+            .as_bytes()
+            .starts_with(&encode_consent_prefix_for_client(&user_id, &client_id)));
+        assert!(key
+            .as_bytes()
+            .starts_with(&encode_consent_prefix_for_user(&user_id)));
+        assert!(key.as_bytes().starts_with(&oauth_consent_scan_prefix()));
     }
 
     #[test]

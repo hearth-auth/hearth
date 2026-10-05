@@ -196,6 +196,7 @@ fn code_flow(engine: &dyn IdentityEngine, realm: &RealmId, client: &ClientId) ->
         .authorize(
             realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.clone(),
                 redirect_uri: REDIRECT_URI.to_string(),
                 scope: "openid".to_string(),
