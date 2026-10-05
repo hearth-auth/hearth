@@ -23,7 +23,7 @@ name = "hearth"
 path = "src/main.rs"
 
 [dependencies]
-askama = "0.12"
+askama = "0.16"
 hashbrown = "0.17"
 pbjson = "0.9"
 pbjson-types = "0.9"
