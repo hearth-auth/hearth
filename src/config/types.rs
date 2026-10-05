@@ -2409,10 +2409,28 @@ pub struct ClaimMappingYaml {
 
 impl ClaimMappingYaml {
     /// Resolves the YAML mapping into the domain mapping, applying every
-    /// documented default.
-    #[must_use]
-    pub fn to_domain(&self) -> ClaimMapping {
-        ClaimMapping {
+    /// documented default. `managed_clients` maps each managed client's slug
+    /// to its client ID; an `allowed_clients` entry that names no managed
+    /// client is returned as the error.
+    pub fn to_domain(
+        &self,
+        managed_clients: &std::collections::HashMap<String, crate::core::ClientId>,
+    ) -> Result<ClaimMapping, String> {
+        let allowed_clients = match &self.allowed_clients {
+            None => None,
+            Some(slugs) => Some(
+                slugs
+                    .iter()
+                    .map(|slug| {
+                        managed_clients
+                            .get(slug)
+                            .cloned()
+                            .ok_or_else(|| slug.clone())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+        };
+        Ok(ClaimMapping {
             claim: self.claim.clone(),
             source: self.source.clone(),
             include_in_access_token: self.include_in_access_token.unwrap_or(true),
@@ -2422,8 +2440,8 @@ impl ClaimMappingYaml {
                 crate::identity::claims_config::default_first_party_only_for(&self.claim)
             }),
             required_scopes: self.required_scopes.clone(),
-            allowed_clients: self.allowed_clients.clone(),
-        }
+            allowed_clients,
+        })
     }
 }
 
@@ -3075,6 +3093,37 @@ fn sha256_hex(input: &str) -> String {
 }
 
 impl RealmYamlConfig {
+    /// The slug → client ID map of the realm's managed clients. A repeated
+    /// slug is pushed to `errors`.
+    pub(crate) fn managed_client_ids(
+        &self,
+        realm_name: &str,
+        errors: &mut Vec<crate::rbac::RegistryError>,
+    ) -> std::collections::HashMap<String, crate::core::ClientId> {
+        let mut by_slug: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        if let Some(apps) = self.applications.as_ref().or(self.oauth_clients.as_ref()) {
+            for (key, app) in apps {
+                let slug = app.slug.clone().unwrap_or_else(|| key.clone());
+                by_slug.entry(slug).or_default().push(key.clone());
+            }
+        }
+        let mut ids = std::collections::HashMap::new();
+        for (slug, mut keys) in by_slug {
+            if let [key] = keys.as_slice() {
+                let id = crate::identity::reconcile::deterministic_client_id(realm_name, key);
+                ids.insert(slug, id);
+            } else {
+                keys.sort();
+                errors.push(crate::rbac::RegistryError::DuplicateClientSlug {
+                    slug,
+                    clients: keys,
+                });
+            }
+        }
+        ids
+    }
+
     /// Merges this per-realm config with global auth defaults to produce a
     /// `RealmConfig` suitable for storage.
     ///
@@ -3089,6 +3138,7 @@ impl RealmYamlConfig {
     #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
     pub fn to_realm_config(
         &self,
+        realm_name: &str,
         global: &AuthConfig,
         global_branding: Option<&EmailBranding>,
     ) -> Result<crate::identity::RealmConfig, Vec<crate::rbac::RegistryError>> {
@@ -3495,14 +3545,26 @@ impl RealmYamlConfig {
 
         // --- Claim profile -------------------------------------------------
 
+        // Each managed client's slug (its `slug`, or its YAML key) resolves
+        // to its deterministic client ID; a release gate compares IDs.
+        let managed_clients = self.managed_client_ids(realm_name, &mut errors);
         let claim_profile =
             self.claims
-                .clone()
+                .as_ref()
                 .map(|claims| crate::identity::claims_config::ClaimProfile {
                     mappings: claims
                         .mappings
                         .iter()
-                        .map(ClaimMappingYaml::to_domain)
+                        .filter_map(|m| match m.to_domain(&managed_clients) {
+                            Ok(mapping) => Some(mapping),
+                            Err(slug) => {
+                                errors.push(RegistryError::UnknownAllowedClient {
+                                    claim: m.claim.clone(),
+                                    slug,
+                                });
+                                None
+                            }
+                        })
                         .collect(),
                     updated_at: None,
                 });
@@ -3845,7 +3907,7 @@ mod tests {
             protected_resources: Some(resources),
             ..RealmYamlConfig::default()
         };
-        match yaml.to_realm_config(&AuthConfig::default(), None) {
+        match yaml.to_realm_config("test", &AuthConfig::default(), None) {
             Ok(_) => Vec::new(),
             Err(errors) => errors
                 .into_iter()
@@ -3908,7 +3970,7 @@ mod tests {
             protected_resources: Some(vec![resource("HTTPS://RS.example.com:443/api/", &[])]),
             ..RealmYamlConfig::default()
         }
-        .to_realm_config(&AuthConfig::default(), None)
+        .to_realm_config("test", &AuthConfig::default(), None)
         .expect("valid");
         assert_eq!(
             cfg.protected_resources[0].resource_uri,
@@ -3946,7 +4008,7 @@ mod tests {
             ..RealmYamlConfig::default()
         };
         let cfg = yaml
-            .to_realm_config(&AuthConfig::default(), None)
+            .to_realm_config("test", &AuthConfig::default(), None)
             .expect("to_realm_config");
         assert_eq!(cfg.webauthn_required, Some(true));
         assert_eq!(cfg.webauthn_resident_key.as_deref(), Some("required"));
@@ -3965,7 +4027,7 @@ mod tests {
             ..AuthConfig::default()
         };
         let cfg = RealmYamlConfig::default()
-            .to_realm_config(&global, None)
+            .to_realm_config("test", &global, None)
             .expect("to_realm_config");
         assert_eq!(cfg.webauthn_required, Some(true));
         assert_eq!(cfg.webauthn_resident_key.as_deref(), Some("discouraged"));
@@ -3987,7 +4049,7 @@ mod tests {
             ..RealmYamlConfig::default()
         };
         let cfg = yaml
-            .to_realm_config(&global, None)
+            .to_realm_config("test", &global, None)
             .expect("to_realm_config");
         assert_eq!(cfg.webauthn_user_verification.as_deref(), Some("required"));
     }
@@ -4006,7 +4068,7 @@ mod tests {
             ..RealmYamlConfig::default()
         };
         let cfg = yaml
-            .to_realm_config(&AuthConfig::default(), None)
+            .to_realm_config("test", &AuthConfig::default(), None)
             .expect("to_realm_config");
         assert_eq!(cfg.web_theme_name.as_deref(), Some("ocean"));
         // The CSS body is populated separately by main.rs from disk.
@@ -4027,7 +4089,7 @@ mod tests {
             ..RealmYamlConfig::default()
         };
         let cfg = yaml
-            .to_realm_config(&AuthConfig::default(), None)
+            .to_realm_config("test", &AuthConfig::default(), None)
             .expect("to_realm_config");
         assert!(cfg.web_theme_name.is_none());
     }
@@ -4037,7 +4099,7 @@ mod tests {
     fn to_realm_config_no_web_block_yields_none_theme_name() {
         let yaml = RealmYamlConfig::default();
         let cfg = yaml
-            .to_realm_config(&AuthConfig::default(), None)
+            .to_realm_config("test", &AuthConfig::default(), None)
             .expect("to_realm_config");
         assert!(cfg.web_theme_name.is_none());
     }
@@ -4051,7 +4113,7 @@ mod tests {
             ..RealmYamlConfig::default()
         };
         let cfg = yaml
-            .to_realm_config(&AuthConfig::default(), None)
+            .to_realm_config("test", &AuthConfig::default(), None)
             .expect("to_realm_config");
         // deepcode ignore HardcodedNonCryptoSecret: SHA-256 hash of "scim-secret-token" — SCIM bearer roundtrip fixture
         assert_eq!(
@@ -4163,7 +4225,7 @@ mod tests {
             ..RealmYamlConfig::default()
         };
         let merged = realm_cfg
-            .to_realm_config(&global, None)
+            .to_realm_config("test", &global, None)
             .expect("default realm config must be valid");
         // Per-realm TTL overrides global
         assert_eq!(merged.session_ttl_micros, Some(43_200_000_000));

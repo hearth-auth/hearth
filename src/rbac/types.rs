@@ -434,6 +434,32 @@ pub struct ResolvedPermissions {
     /// Requested scopes that were actually granted for this token.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub granted_scopes: Vec<String>,
+    /// Registry references that resolution skipped because the registry no
+    /// longer defines them. The identity layer audits them
+    /// (`OrphanedReferenceSkipped`); they never reach a token.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub orphans: Vec<OrphanRef>,
+}
+
+/// The kind of registry entry an [`OrphanRef`] names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrphanKind {
+    /// A permission whose registry record is archived.
+    Permission,
+    /// A role that is archived, or a role ID that no longer exists.
+    Role,
+    /// An additional organization role name that names no role.
+    RoleName,
+}
+
+/// A registry reference that permission resolution skipped.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct OrphanRef {
+    /// What kind of entry the reference names.
+    pub kind: OrphanKind,
+    /// The permission name, role name or role ID.
+    pub reference: String,
 }
 
 /// Declarative role definition consumed by `RbacEngine::reconcile_roles`.

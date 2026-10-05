@@ -380,6 +380,7 @@ mod id_token_keys;
 mod mfa_single_use;
 pub(super) mod oauth;
 mod operator_token;
+mod orphan_audit;
 mod retired_keys;
 mod sharded_cache;
 mod single_use;
@@ -686,6 +687,8 @@ pub struct EmbeddedIdentityEngine {
     /// one per attempt would make the absent-account arm cost *twice* a real
     /// verification, replacing the oracle with its mirror image.
     dummy_hashes: Mutex<std::collections::HashMap<RealmId, String>>,
+    /// Per-node rate limiter for `OrphanedReferenceSkipped` audit events.
+    orphan_audit: orphan_audit::OrphanAuditLimiter,
     /// Default Ed25519 signing key for JWT token issuance (Phase 0 compat).
     signing_key: Arc<SigningKey>,
     /// Per-realm Ed25519 signing keys, lazily loaded from storage.
@@ -1179,6 +1182,10 @@ impl Drop for EmbeddedIdentityEngine {
 }
 
 impl EmbeddedIdentityEngine {
+    /// The realm's claim-profile mappings, without any mapping that targets a
+    /// Tier 1 claim. Config load refuses such a mapping, but a profile can
+    /// reach the engine without that check; core issuance alone writes Tier 1
+    /// claims (custom-permissions "Tier 1 claim names are reserved").
     fn claim_profile_overrides(
         &self,
         realm_id: &RealmId,
@@ -1187,7 +1194,13 @@ impl EmbeddedIdentityEngine {
             .ok()
             .flatten()
             .and_then(|realm| realm.config().claim_profile.clone())
-            .map(|profile| profile.mappings)
+            .map(|profile| {
+                profile
+                    .mappings
+                    .into_iter()
+                    .filter(|m| !crate::rbac::registry::TIER1_CLAIMS.contains(&m.claim.as_str()))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -1237,7 +1250,9 @@ impl EmbeddedIdentityEngine {
         let permissions = Self::claim_vector(claims.get("permissions"));
         claims.remove("roles");
         claims.remove("groups");
-        claims.remove("permissions");
+        // `permissions` is Tier 1 too: the built-in mapping above is its only
+        // source. No other Tier 1 name may leave the profile.
+        claims.retain(|name, _| !crate::rbac::registry::TIER1_CLAIMS.contains(&name.as_str()));
         (roles, groups, permissions, claims)
     }
 
@@ -1509,6 +1524,7 @@ impl EmbeddedIdentityEngine {
             audit,
             dummy_hash,
             dummy_hashes: Mutex::new(std::collections::HashMap::new()),
+            orphan_audit: orphan_audit::OrphanAuditLimiter::new(),
             signing_key,
             realm_signing_keys: Arc::new(ShardedEpochMap::new()),
             realm_retiring_keys: Arc::new(ShardedEpochMap::new()),
@@ -1939,6 +1955,7 @@ impl EmbeddedIdentityEngine {
             audit,
             dummy_hash,
             dummy_hashes: Mutex::new(std::collections::HashMap::new()),
+            orphan_audit: orphan_audit::OrphanAuditLimiter::new(),
             signing_key,
             realm_signing_keys: Arc::new(ShardedEpochMap::new()),
             realm_retiring_keys: Arc::new(ShardedEpochMap::new()),
@@ -4176,6 +4193,7 @@ impl EmbeddedIdentityEngine {
                     reason: format!("rbac resolve failed: {e}"),
                 },
             })?;
+        self.audit_orphans(realm_id, &resolved.orphans);
 
         let resolved_client = if let Some(ref cid) = family.client_id {
             self.get_client(realm_id, cid)?
@@ -9298,9 +9316,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // by every permission-bearing granted scope — the rule the code
         // exchange, refresh and live resolution share (GA audit 3 B-4).
         let grant_scopes: Vec<String> = ctx.granted_scopes.iter().cloned().collect();
+        // Organization-scoped assignments apply when the token is issued in
+        // an organization context (`rbac-model`).
+        let rbac_org = self.active_org_context(
+            realm_id,
+            ctx.oid
+                .as_deref()
+                .and_then(|oid| oid.parse::<crate::core::OrganizationId>().ok()),
+        );
         let resolved = self
             .rbac
-            .resolve_for_granted_scopes(user_id, realm_id, None, &grant_scopes)
+            .resolve_for_granted_scopes(user_id, realm_id, rbac_org.as_ref(), &grant_scopes)
             .map_err(|e| match e {
                 RbacError::TokenSizeExceeded {
                     limit,
@@ -9315,6 +9341,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     reason: format!("rbac resolve failed: {e}"),
                 },
             })?;
+        self.audit_orphans(realm_id, &resolved.orphans);
 
         // Resolve the OAuth client: use the caller-supplied client_id when
         // present, otherwise fall back to the first-party sentinel used by

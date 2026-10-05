@@ -2001,6 +2001,8 @@ async fn run_serve(
         }
     }
 
+    log_orphaned_references(identity_engine.as_ref(), rbac_engine.as_ref(), &config);
+
     // Phase D: detect archived realms with live users but no declared
     // migration destination.  Non-blocking — startup continues regardless.
     let orphaned_realms = hearth::identity::reconcile::detect_orphaned_realms(
@@ -3937,7 +3939,11 @@ fn build_permission_registry(config: &Config) -> hearth::rbac::registry::Permiss
     let mut registry = PermissionRegistry::default();
     if let Some(realms) = &config.realms {
         for (realm_name, realm_yaml) in realms {
-            match realm_yaml.to_realm_config(&config.auth, config.email.branding.as_ref()) {
+            match realm_yaml.to_realm_config(
+                realm_name,
+                &config.auth,
+                config.email.branding.as_ref(),
+            ) {
                 Ok(realm_config) => {
                     let realm_registry = hearth::rbac::registry::RealmPermissionRegistry {
                         permissions: realm_config.permissions,
@@ -5538,7 +5544,7 @@ fn config_validation_report(file: &std::path::Path, force_dev: bool) -> Result<C
     if let Some(realms) = &config.realms {
         for (realm_name, realm_yaml) in realms {
             if let Err(errs) =
-                realm_yaml.to_realm_config(&config.auth, config.email.branding.as_ref())
+                realm_yaml.to_realm_config(realm_name, &config.auth, config.email.branding.as_ref())
             {
                 for e in errs {
                     issues.push(ValidationIssue {
@@ -5846,6 +5852,42 @@ fn run_config_example(output: Option<&PathBuf>) -> Result<(), Box<dyn std::error
         print!("{EXAMPLE_YAML}");
     }
     Ok(())
+}
+
+/// Logs, once at startup, a `warn` summary of stored references to registry
+/// entries that `hearth.yaml` no longer declares. Resolution skips them, and
+/// each one is audited as `OrphanedReferenceSkipped` when a token skips it
+/// (custom-permissions "Registry reload is lazy and non-destructive").
+fn log_orphaned_references(
+    identity: &dyn hearth::identity::IdentityEngine,
+    rbac: &dyn hearth::rbac::RbacEngine,
+    config: &Config,
+) {
+    let Some(realms) = config.realms.as_ref() else {
+        return;
+    };
+    for realm_name in realms.keys() {
+        let Ok(Some(realm)) = identity.get_realm_by_name(realm_name) else {
+            continue;
+        };
+        match rbac.orphaned_references(realm.id()) {
+            Ok(orphans) if orphans.is_empty() => {}
+            Ok(orphans) => {
+                let references: Vec<String> = orphans
+                    .iter()
+                    .map(|o| format!("{:?}:{}", o.kind, o.reference))
+                    .collect();
+                warn!(
+                    realm = %realm_name,
+                    count = orphans.len(),
+                    references = ?references,
+                    "stored data references registry entries hearth.yaml no longer declares; \
+                     they are not granted"
+                );
+            }
+            Err(e) => warn!(realm = %realm_name, error = %e, "orphan summary failed"),
+        }
+    }
 }
 
 /// Runs the `hearth rbac orphans list` command.

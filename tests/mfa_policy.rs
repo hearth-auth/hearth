@@ -31,12 +31,12 @@ fn global(mfa_required: Option<bool>) -> AuthConfig {
 #[test]
 fn a_realm_with_no_mfa_setting_requires_mfa() {
     let cfg = realm_yaml(None)
-        .to_realm_config(&global(None), None)
+        .to_realm_config("test", &global(None), None)
         .expect("realm config");
     assert_eq!(cfg.mfa_required, Some(true));
 
     let bare = RealmYamlConfig::default()
-        .to_realm_config(&global(None), None)
+        .to_realm_config("test", &global(None), None)
         .expect("realm config");
     assert_eq!(bare.mfa_required, Some(true), "no auth block at all");
 }
@@ -44,17 +44,17 @@ fn a_realm_with_no_mfa_setting_requires_mfa() {
 #[test]
 fn an_explicit_opt_out_is_honoured() {
     let realm_off = realm_yaml(Some(false))
-        .to_realm_config(&global(None), None)
+        .to_realm_config("test", &global(None), None)
         .expect("realm config");
     assert_eq!(realm_off.mfa_required, Some(false));
 
     let global_off = realm_yaml(None)
-        .to_realm_config(&global(Some(false)), None)
+        .to_realm_config("test", &global(Some(false)), None)
         .expect("realm config");
     assert_eq!(global_off.mfa_required, Some(false), "global opt-out");
 
     let realm_wins = realm_yaml(Some(true))
-        .to_realm_config(&global(Some(false)), None)
+        .to_realm_config("test", &global(Some(false)), None)
         .expect("realm config");
     assert_eq!(realm_wins.mfa_required, Some(true), "realm beats global");
 }

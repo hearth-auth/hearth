@@ -878,6 +878,7 @@ impl EmbeddedIdentityEngine {
                     reason: format!("rbac resolve failed: {e}"),
                 },
             })?;
+        self.audit_orphans(realm_id, &resolved.orphans);
         let granted_scopes: BTreeSet<String> = grant_scopes.into_iter().collect();
 
         // For non-Embedded modes, strip RBAC claims from the access token.

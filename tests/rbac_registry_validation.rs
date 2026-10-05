@@ -471,3 +471,26 @@ fn tier1_claim_exp_rejected() {
         "expected ForbiddenClaimTarget for 'exp'; got {errs:?}"
     );
 }
+
+#[test]
+fn a_bundle_with_no_permissions_fails() {
+    let reg = RealmPermissionRegistry {
+        permissions: vec![perm_def("mcp.invoke")],
+        scopes: vec![make_bundle("read:nothing", &[])],
+        protected_resources: vec![ProtectedResource {
+            resource_uri: "https://mcp.example.com".to_string(),
+            display_name: "MCP Server".to_string(),
+            scopes: vec![make_bundle("mcp:nothing", &[])],
+        }],
+        ..Default::default()
+    };
+    let errs = reg.validate().expect_err("an empty bundle must fail");
+    for name in ["read:nothing", "mcp:nothing"] {
+        assert!(
+            errs.iter().any(|e| matches!(e,
+                RegistryError::EmptyScopeBundle { bundle_name } if bundle_name == name
+            )),
+            "{name}: got {errs:?}"
+        );
+    }
+}

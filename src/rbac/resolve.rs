@@ -9,9 +9,7 @@
 //! the traversal decoupled from the concrete engine makes property
 //! testing (e.g. "cycles are rejected") self-contained.
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 
 use crate::core::{OrganizationId, RealmId, Uri, UserId};
 use crate::identity::ClientTrustLevel;
@@ -21,8 +19,8 @@ use super::error::RbacError;
 #[cfg(test)]
 use super::types::Subject;
 use super::types::{
-    CycleKind, GroupId, GroupMember, Permission, ResolvedPermissions, Role, RoleAssignment, RoleId,
-    Scope, TraversalKind, UserPermissionGrant,
+    CycleKind, GroupId, GroupMember, OrphanKind, OrphanRef, Permission, ResolvedPermissions, Role,
+    RoleAssignment, RoleId, RoleStatus, Scope, TraversalKind, UserPermissionGrant,
 };
 
 /// Maximum depth for transitive group membership BFS.
@@ -38,40 +36,15 @@ pub(crate) const MAX_ROLES_PER_TOKEN: usize = 50;
 /// Maximum group names in a single resolved token (openspec/specs/rbac-model/spec.md).
 pub(crate) const MAX_GROUPS_PER_TOKEN: usize = 50;
 
-/// Rate window for `OrphanedReferenceSkipped` events: at most one emit per
-/// `(realm, reference)` per hour.
-const ORPHAN_EMIT_WINDOW: Duration = Duration::from_secs(3600);
-
-/// Per-process rate-limiter for orphaned-reference tracing events.
-///
-/// Key: `(realm_id_bytes, ref_id_string)`.  Value: the `Instant` at which
-/// the last event was emitted for that key.  Entries are never evicted
-/// (a live process has a bounded number of unique realm × role-id pairs),
-/// but the map stays small in practice — only stale references accumulate.
-static ORPHAN_RATE_LIMITER: OnceLock<Mutex<HashMap<(RealmId, String), Instant>>> = OnceLock::new();
-
-fn orphan_limiter() -> &'static Mutex<HashMap<(RealmId, String), Instant>> {
-    ORPHAN_RATE_LIMITER.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Returns `true` if an `OrphanedReferenceSkipped` event for `(realm_id,
-/// ref_id)` should be emitted right now; `false` if the rate window has not
-/// elapsed since the last emit.
-///
-/// Side-effect: records the current instant if returning `true`.
-pub(crate) fn should_emit_orphan(realm_id: &RealmId, ref_id: &str) -> bool {
-    let key = (realm_id.clone(), ref_id.to_string());
-    let now = Instant::now();
-    let mut limiter = orphan_limiter()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    match limiter.get(&key) {
-        Some(&last) if now.duration_since(last) < ORPHAN_EMIT_WINDOW => false,
-        _ => {
-            limiter.insert(key, now);
-            true
-        }
-    }
+/// What a scope name maps to in a scope registry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ScopeLookup {
+    /// The registry has no row for this name.
+    Missing,
+    /// A row that does not narrow: the seeded OIDC identifier scopes.
+    NoNarrowing,
+    /// A bundle and the permissions it grants.
+    Bundle(Vec<Permission>),
 }
 
 /// Data-access surface the resolver needs.
@@ -127,27 +100,20 @@ pub(crate) trait Resolver {
         group_id: &GroupId,
     ) -> Result<Option<String>, RbacError>;
 
-    /// Permissions granted by an OAuth scope value, or `None` if no narrowing
-    /// should be applied (e.g. `openid`/`profile`/`email` are identifier
-    /// scopes — full set passes through).
-    ///
-    /// Resolver returns `Some(vec![])` to mean "scope exists but maps to no
-    /// permissions" (the narrowing yields an empty intersection).
+    /// What a scope value maps to in the realm-level scope registry.
     fn scope_permissions(
         &self,
         realm_id: &RealmId,
         scope_name: &str,
-    ) -> Result<Option<Vec<Permission>>, RbacError>;
+    ) -> Result<ScopeLookup, RbacError>;
 
-    /// Look up scope permissions for a bundle declared under a specific
-    /// protected resource. Returns `None` if the scope name is not declared
-    /// for the given resource.
+    /// What a scope value maps to in a protected resource's scope registry.
     fn resource_scope_permissions(
         &self,
         realm_id: &RealmId,
         resource_uri: &Uri,
         scope_name: &str,
-    ) -> Result<Option<Vec<Permission>>, RbacError>;
+    ) -> Result<ScopeLookup, RbacError>;
 
     /// Returns the union of all permissions declared across a resource's
     /// scope bundles. Used to check whether a raw permission scope belongs
@@ -171,6 +137,16 @@ pub(crate) trait Resolver {
         realm_id: &RealmId,
         name: &str,
     ) -> Result<Option<RoleId>, RbacError>;
+
+    /// Whether the realm's registry holds `permission` as an archived entry:
+    /// one that `hearth.yaml` declared and later removed. A permission with no
+    /// registry record at all (a realm with no YAML vocabulary) is not
+    /// archived.
+    fn permission_archived(
+        &self,
+        realm_id: &RealmId,
+        permission: &Permission,
+    ) -> Result<bool, RbacError>;
 
     /// Extra org-scoped role names for a user within the given organization.
     ///
@@ -222,15 +198,19 @@ pub(crate) fn resolve_full<R: Resolver + ?Sized>(
     let mut perms: BTreeSet<Permission> = BTreeSet::new();
     let mut visited: HashSet<RoleId> = HashSet::new();
     let mut path: HashSet<RoleId> = HashSet::new();
+    let mut orphans: BTreeSet<OrphanRef> = BTreeSet::new();
     for ra in &assignments {
         expand_role(
             resolver,
             realm_id,
             &ra.role_id,
-            &mut role_names,
-            &mut perms,
-            &mut visited,
-            &mut path,
+            &mut RoleWalk {
+                role_names: &mut role_names,
+                perms: &mut perms,
+                visited: &mut visited,
+                path: &mut path,
+                orphans: &mut orphans,
+            },
             0,
         )?;
     }
@@ -252,26 +232,42 @@ pub(crate) fn resolve_full<R: Resolver + ?Sized>(
                         resolver,
                         realm_id,
                         &rid,
-                        &mut role_names,
-                        &mut perms,
-                        &mut visited,
-                        &mut path,
+                        &mut RoleWalk {
+                            role_names: &mut role_names,
+                            perms: &mut perms,
+                            visited: &mut visited,
+                            path: &mut path,
+                            orphans: &mut orphans,
+                        },
                         0,
                     )?;
                 }
                 None => {
-                    let ref_id = name.clone();
-                    if should_emit_orphan(realm_id, &ref_id) {
-                        tracing::warn!(
-                            realm_id = %realm_id,
-                            role_name = %ref_id,
-                            action = "orphaned_reference_skipped",
-                            "additional org role not found during permission resolution"
-                        );
-                    }
+                    orphans.insert(OrphanRef {
+                        kind: OrphanKind::RoleName,
+                        reference: name,
+                    });
                 }
             }
         }
+    }
+
+    // ----- Step 4b: drop permissions the registry has archived -----
+    // Resolution is the single enforcement point for a registry entry that
+    // `hearth.yaml` removed (custom-permissions "Registry reload is lazy and
+    // non-destructive"): the grant stays in storage, but it is not granted.
+    let mut archived: Vec<Permission> = Vec::new();
+    for p in &perms {
+        if resolver.permission_archived(realm_id, p)? {
+            archived.push(p.clone());
+        }
+    }
+    for p in archived {
+        perms.remove(&p);
+        orphans.insert(OrphanRef {
+            kind: OrphanKind::Permission,
+            reference: p.as_str().to_string(),
+        });
     }
 
     // ----- Step 5: group slugs for JWT claim -----
@@ -289,6 +285,7 @@ pub(crate) fn resolve_full<R: Resolver + ?Sized>(
         groups: group_slugs.into_iter().collect(),
         permissions: perms.into_iter().collect(),
         granted_scopes: Vec::new(),
+        orphans: orphans.into_iter().collect(),
     })
 }
 
@@ -341,6 +338,7 @@ pub(crate) fn resolve_permissions<R: Resolver + ?Sized>(
         roles,
         groups,
         permissions: full_perms,
+        orphans,
         ..
     } = resolver.resolve_full_cached(user_id, realm_id, org_id)?;
 
@@ -361,6 +359,7 @@ pub(crate) fn resolve_permissions<R: Resolver + ?Sized>(
         groups,
         permissions,
         granted_scopes: Vec::new(),
+        orphans,
     })
 }
 
@@ -379,6 +378,7 @@ pub(crate) fn resolve_for_granted_scopes<R: Resolver + ?Sized>(
         roles,
         groups,
         permissions: full_perms,
+        orphans,
         ..
     } = resolver.resolve_full_cached(user_id, realm_id, org_id)?;
 
@@ -395,7 +395,7 @@ pub(crate) fn resolve_for_granted_scopes<R: Resolver + ?Sized>(
             continue;
         }
         match resolver.scope_permissions(realm_id, scope)? {
-            Some(list) if !list.is_empty() => {
+            ScopeLookup::Bundle(list) if !list.is_empty() => {
                 narrowing = true;
                 admitted.extend(list);
             }
@@ -427,6 +427,7 @@ pub(crate) fn resolve_for_granted_scopes<R: Resolver + ?Sized>(
         groups,
         permissions,
         granted_scopes: Vec::new(),
+        orphans,
     })
 }
 
@@ -563,7 +564,7 @@ pub(crate) fn resolve_with_scopes<R: Resolver + ?Sized>(
                 };
 
                 match bundle_result {
-                    None => {
+                    ScopeLookup::Missing | ScopeLookup::NoNarrowing => {
                         // Scope name not found in the relevant registry.
                         if client_trust_level == ClientTrustLevel::ThirdParty {
                             return Err(RbacError::InvalidScope {
@@ -572,7 +573,7 @@ pub(crate) fn resolve_with_scopes<R: Resolver + ?Sized>(
                         }
                         // FirstParty: silently skip.
                     }
-                    Some(bundle_perms) => {
+                    ScopeLookup::Bundle(bundle_perms) => {
                         // Full-satisfiability: user must have ALL bundle permissions.
                         let fully_satisfied = bundle_perms.iter().all(|p| effective.contains(p));
                         if fully_satisfied {
@@ -625,6 +626,7 @@ pub(crate) fn resolve_with_scopes<R: Resolver + ?Sized>(
         groups: full.groups,
         permissions,
         granted_scopes,
+        orphans: full.orphans,
     })
 }
 
@@ -740,19 +742,26 @@ fn bfs_groups<R: Resolver + ?Sized>(
     Ok(visited.into_iter().collect())
 }
 
+/// The mutable state of one role-composition walk.
+struct RoleWalk<'a> {
+    role_names: &'a mut BTreeSet<String>,
+    perms: &'a mut BTreeSet<Permission>,
+    visited: &'a mut HashSet<RoleId>,
+    path: &'a mut HashSet<RoleId>,
+    orphans: &'a mut BTreeSet<OrphanRef>,
+}
+
 /// DFS role composition expansion.
 ///
-/// - Skips roles whose ID isn't found (defensive — dangling parent edge).
+/// - Skips a role whose ID isn't found (a dangling parent edge) or that the
+///   registry has archived, and records it as an orphan.
 /// - Rejects cycles with `CycleDetected`.
-/// - Rejects depth beyond `MAX_ROLE_DEPTH`.
+/// - Enforces `MAX_ROLE_DEPTH`.
 fn expand_role<R: Resolver + ?Sized>(
     resolver: &R,
     realm_id: &RealmId,
     role_id: &RoleId,
-    role_names: &mut BTreeSet<String>,
-    perms: &mut BTreeSet<Permission>,
-    visited: &mut HashSet<RoleId>,
-    path: &mut HashSet<RoleId>,
+    walk: &mut RoleWalk<'_>,
     depth: usize,
 ) -> Result<(), RbacError> {
     if depth > MAX_ROLE_DEPTH {
@@ -766,7 +775,7 @@ fn expand_role<R: Resolver + ?Sized>(
     // if the role is already on the current DFS path, it's a true
     // cycle (e.g. A→B→C→A or self-edge A→A). The visited set
     // handles diamonds (shared ancestors) correctly below.
-    if !path.insert(role_id.clone()) {
+    if !walk.path.insert(role_id.clone()) {
         return Err(RbacError::CycleDetected {
             kind: CycleKind::RoleComposition,
             entity: role_id.to_string(),
@@ -775,48 +784,37 @@ fn expand_role<R: Resolver + ?Sized>(
 
     // Diamond check: already fully expanded by another branch.
     // Safe to stop — permissions are already collected.
-    if visited.contains(role_id) {
-        path.remove(role_id);
+    if walk.visited.contains(role_id) {
+        walk.path.remove(role_id);
         return Ok(());
     }
 
-    let Some(role) = resolver.get_role(realm_id, role_id)? else {
-        // Dangling parent: role was deleted after being set as a parent.
-        // Tolerate at resolve time; emit rate-limited warning.
-        let ref_id = role_id.to_string();
-        if should_emit_orphan(realm_id, &ref_id) {
-            tracing::warn!(
-                realm_id = %realm_id,
-                role_id = %ref_id,
-                action = "orphaned_reference_skipped",
-                "dangling role reference skipped during permission resolution"
-            );
+    let role = match resolver.get_role(realm_id, role_id)? {
+        Some(role) if role.status != RoleStatus::Archived => role,
+        found => {
+            // A dangling edge (the role was deleted) or a role that
+            // `hearth.yaml` removed: tolerate it at resolve time and report it.
+            walk.orphans.insert(OrphanRef {
+                kind: OrphanKind::Role,
+                reference: found.map_or_else(|| role_id.to_string(), |r| r.name),
+            });
+            walk.path.remove(role_id);
+            return Ok(());
         }
-        path.remove(role_id);
-        return Ok(());
     };
 
-    visited.insert(role_id.clone());
+    walk.visited.insert(role_id.clone());
 
-    role_names.insert(role.name.clone());
+    walk.role_names.insert(role.name.clone());
     for p in &role.permissions {
-        perms.insert(p.clone());
+        walk.perms.insert(p.clone());
     }
 
     for parent in &role.parent_roles {
-        expand_role(
-            resolver,
-            realm_id,
-            parent,
-            role_names,
-            perms,
-            visited,
-            path,
-            depth + 1,
-        )?;
+        expand_role(resolver, realm_id, parent, walk, depth + 1)?;
     }
 
-    path.remove(role_id);
+    walk.path.remove(role_id);
     Ok(())
 }
 
@@ -833,17 +831,28 @@ pub(crate) fn expand_role_permissions<R: Resolver + ?Sized>(
     let mut perms = BTreeSet::new();
     let mut visited = HashSet::new();
     let mut path = HashSet::new();
+    let mut orphans = BTreeSet::new();
     expand_role(
         resolver,
         realm_id,
         role_id,
-        &mut role_names,
-        &mut perms,
-        &mut visited,
-        &mut path,
+        &mut RoleWalk {
+            role_names: &mut role_names,
+            perms: &mut perms,
+            visited: &mut visited,
+            path: &mut path,
+            orphans: &mut orphans,
+        },
         0,
     )?;
-    Ok(perms)
+    // What the role grants, as resolution would grant it.
+    let mut granted = BTreeSet::new();
+    for p in perms {
+        if !resolver.permission_archived(realm_id, &p)? {
+            granted.insert(p);
+        }
+    }
+    Ok(granted)
 }
 
 /// Narrow a permission set by an OAuth scope's declared permissions.
@@ -866,15 +875,17 @@ fn narrow_by_scope<R: Resolver + ?Sized>(
 
     for scope_name in scope_str.split_whitespace() {
         match resolver.scope_permissions(realm_id, scope_name)? {
-            None => {
+            ScopeLookup::NoNarrowing => {
                 // No-filter scope — the entire original set is admitted.
                 any_nonfilter = true;
             }
-            Some(list) => {
+            ScopeLookup::Bundle(list) => {
                 for p in list {
                     allowed.insert(p);
                 }
             }
+            // A scope the registry does not know admits nothing.
+            ScopeLookup::Missing => {}
         }
     }
 
@@ -908,6 +919,7 @@ mod tests {
         scopes: HashMap<String, Option<Vec<Permission>>>,
         user_perms: HashMap<UserId, Vec<UserPermissionGrant>>,
         resource_scopes: HashMap<String, HashMap<String, Option<Vec<Permission>>>>,
+        archived: HashSet<Permission>,
     }
 
     impl Fake {
@@ -921,6 +933,7 @@ mod tests {
                 scopes: HashMap::new(),
                 user_perms: HashMap::new(),
                 resource_scopes: HashMap::new(),
+                archived: HashSet::new(),
             }
         }
 
@@ -948,6 +961,15 @@ mod tests {
 
         fn set_scope(&mut self, name: &str, perms: Option<Vec<Permission>>) {
             self.scopes.insert(name.to_string(), perms);
+        }
+    }
+
+    /// Maps a fake registry row the way the engine maps a stored one.
+    fn lookup(row: Option<&Option<Vec<Permission>>>) -> ScopeLookup {
+        match row {
+            None => ScopeLookup::Missing,
+            Some(None) => ScopeLookup::NoNarrowing,
+            Some(Some(list)) => ScopeLookup::Bundle(list.clone()),
         }
     }
 
@@ -996,13 +1018,8 @@ mod tests {
             &self,
             _r: &RealmId,
             scope_name: &str,
-        ) -> Result<Option<Vec<Permission>>, RbacError> {
-            // Non-registered scope → no match (treated as empty Vec so we see narrowing).
-            Ok(self
-                .scopes
-                .get(scope_name)
-                .cloned()
-                .unwrap_or(Some(Vec::new())))
+        ) -> Result<ScopeLookup, RbacError> {
+            Ok(lookup(self.scopes.get(scope_name)))
         }
 
         fn user_permissions(
@@ -1034,18 +1051,25 @@ mod tests {
             Ok(Vec::new())
         }
 
+        fn permission_archived(
+            &self,
+            _r: &RealmId,
+            permission: &Permission,
+        ) -> Result<bool, RbacError> {
+            Ok(self.archived.contains(permission))
+        }
+
         fn resource_scope_permissions(
             &self,
             _r: &RealmId,
             resource_uri: &Uri,
             scope_name: &str,
-        ) -> Result<Option<Vec<Permission>>, RbacError> {
-            Ok(self
-                .resource_scopes
-                .get(resource_uri.as_str())
-                .and_then(|scopes| scopes.get(scope_name))
-                .cloned()
-                .unwrap_or(None))
+        ) -> Result<ScopeLookup, RbacError> {
+            Ok(lookup(
+                self.resource_scopes
+                    .get(resource_uri.as_str())
+                    .and_then(|scopes| scopes.get(scope_name)),
+            ))
         }
 
         fn resource_scope_permission_names(
@@ -1819,60 +1843,6 @@ mod tests {
                 prop_assert_eq!(&resolved.groups, &groups_sorted);
             }
         }
-    }
-
-    // ===== OrphanedReferenceSkipped rate limiter =====
-
-    /// Unique realm IDs for rate-limiter tests so parallel test runs never
-    /// share a key with other tests (the limiter is process-global).
-    fn fresh_realm() -> RealmId {
-        RealmId::generate()
-    }
-
-    #[test]
-    fn orphan_first_call_emits() {
-        let realm = fresh_realm();
-        assert!(
-            should_emit_orphan(&realm, "role_aabbccdd-0000-0000-0000-000000000001"),
-            "first call for a new key must emit"
-        );
-    }
-
-    #[test]
-    fn orphan_second_immediate_call_is_rate_limited() {
-        let realm = fresh_realm();
-        let ref_id = "role_aabbccdd-0000-0000-0000-000000000002";
-        assert!(should_emit_orphan(&realm, ref_id), "first call must emit");
-        assert!(
-            !should_emit_orphan(&realm, ref_id),
-            "second immediate call must be rate-limited"
-        );
-    }
-
-    #[test]
-    fn orphan_different_realm_is_independent() {
-        let realm_a = fresh_realm();
-        let realm_b = fresh_realm();
-        let ref_id = "role_aabbccdd-0000-0000-0000-000000000003";
-        // Emit on realm_a; realm_b must still be independent.
-        let _ = should_emit_orphan(&realm_a, ref_id);
-        assert!(
-            should_emit_orphan(&realm_b, ref_id),
-            "different realm must not be rate-limited by realm_a's emit"
-        );
-    }
-
-    #[test]
-    fn orphan_different_ref_is_independent() {
-        let realm = fresh_realm();
-        let ref_a = "role_aabbccdd-0000-0000-0000-000000000004";
-        let ref_b = "role_aabbccdd-0000-0000-0000-000000000005";
-        // Emit ref_a; ref_b in the same realm must still be independent.
-        let _ = should_emit_orphan(&realm, ref_a);
-        assert!(
-            should_emit_orphan(&realm, ref_b),
-            "different ref_id in same realm must not be rate-limited"
-        );
     }
 
     #[test]

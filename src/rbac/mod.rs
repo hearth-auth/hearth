@@ -33,8 +33,8 @@ pub use seed::seed_permission_description;
 pub(crate) use seed::SEED_PERMISSIONS;
 pub use types::{
     AssignRoleRequest, AssignmentId, CreateGroupRequest, CreateRoleRequest, CycleKind, Group,
-    GroupId, GroupMember, GroupMembership, GroupMembershipEdge, Page, Permission,
-    PermissionDefinition, PermissionRecord, PermissionStatus, ProtectedResource,
+    GroupId, GroupMember, GroupMembership, GroupMembershipEdge, OrphanKind, OrphanRef, Page,
+    Permission, PermissionDefinition, PermissionRecord, PermissionStatus, ProtectedResource,
     ResolvedPermissions, Role, RoleAssignment, RoleId, RoleScopeKind, RoleSpec, RoleStatus,
     RoleSubject, Scope, ScopeBundle, ScopeExport, ScopeSpec, Subject, TraversalKind,
     UpdateGroupRequest, UpdateRoleRequest, UserPermissionGrant,
@@ -551,6 +551,12 @@ pub trait RbacEngine: Send + Sync {
 
     /// Returns all role-assignment records in a realm for backup export.
     fn export_all_assignments(&self, realm_id: &RealmId) -> Result<Vec<RoleAssignment>, RbacError>;
+
+    /// Every stored reference in the realm to a registry entry that resolution
+    /// skips: a role or permission `hearth.yaml` removed (archived), a deleted
+    /// role, or an additional organization role name that names no role. Read
+    /// at startup for the orphan summary; not on any request path.
+    fn orphaned_references(&self, realm_id: &RealmId) -> Result<Vec<OrphanRef>, RbacError>;
 
     /// Returns every group-membership edge in a realm for backup export.
     ///

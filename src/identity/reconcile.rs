@@ -445,21 +445,24 @@ fn reconcile_rbac_for_realm(
         }
     }
 
-    if let Some(scopes) = yaml_cfg.scopes.as_ref() {
-        let specs: Vec<crate::rbac::ScopeSpec> = scopes
-            .iter()
-            .map(|s| crate::rbac::ScopeSpec {
-                name: s.name.clone(),
-                permissions: Some(s.permissions.clone()),
-            })
-            .collect();
-        if let Err(e) = rbac.reconcile_scopes(realm_id, &specs) {
-            tracing::warn!(
-                realm = realm_name,
-                error = %e,
-                "failed to reconcile YAML scope bundles"
-            );
-        }
+    // Scope bundles mirror YAML exactly: an absent or empty `scopes:` block
+    // removes every bundle, so a bundle the operator deleted never applies.
+    let specs: Vec<crate::rbac::ScopeSpec> = yaml_cfg
+        .scopes
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|s| crate::rbac::ScopeSpec {
+            name: s.name.clone(),
+            permissions: Some(s.permissions.clone()),
+        })
+        .collect();
+    if let Err(e) = rbac.reconcile_scopes(realm_id, &specs) {
+        tracing::warn!(
+            realm = realm_name,
+            error = %e,
+            "failed to reconcile YAML scope bundles"
+        );
     }
 
     // Protected-resource scope bundles mirror YAML exactly, like the identity
@@ -933,7 +936,7 @@ fn reconcile_declared_realms(
         }
 
         let realm_config = yaml_cfg
-            .to_realm_config(&config.auth, config.email.branding.as_ref())
+            .to_realm_config(name, &config.auth, config.email.branding.as_ref())
             .map_err(|errors| IdentityError::ConfigInvalid {
                 realm_name: name.clone(),
                 errors,
@@ -1042,7 +1045,7 @@ fn reconcile_declared_realms(
 /// Uses a default (empty) `RealmYamlConfig`, so validation always succeeds.
 fn default_realm_config(auth: &AuthConfig, config: &Config) -> RealmConfig {
     let yaml = RealmYamlConfig::default();
-    yaml.to_realm_config(auth, config.email.branding.as_ref())
+    yaml.to_realm_config("default", auth, config.email.branding.as_ref())
         .expect("default RealmYamlConfig must always pass validation")
 }
 
@@ -1059,7 +1062,11 @@ const APP_NAMESPACE: Uuid = Uuid::from_bytes([
 ///
 /// Uses UUID v5 (SHA-1 + namespace) so the same `(realm, app)` pair always
 /// produces the same ID across server restarts.
-fn deterministic_client_id(realm_name: &str, app_key: &str) -> ClientId {
+/// The client ID of the managed client declared under `app_key` in realm
+/// `realm_name`: a UUID v5, so it is stable across restarts and never equal
+/// to a dynamically registered (v4) client's ID.
+#[must_use]
+pub fn deterministic_client_id(realm_name: &str, app_key: &str) -> ClientId {
     let input = format!("{realm_name}/{app_key}");
     let id = Uuid::new_v5(&APP_NAMESPACE, input.as_bytes());
     ClientId::new(id)
@@ -1212,7 +1219,7 @@ pub(crate) fn reconcile_applications(
                             },
                             id_token_signed_response_alg: id_token_alg_changed
                                 .then(|| cfg_id_token_alg.clone()),
-                            slug: app_cfg.slug.clone(),
+                            slug: Some(app_cfg.slug.clone().unwrap_or_else(|| app_key.clone())),
                             trust_level: app_cfg.trust_level,
                             declared_scopes: app_cfg.declared_scopes.clone(),
                             consent_spans_orgs: app_cfg.consent_spans_orgs,
@@ -1275,7 +1282,7 @@ pub(crate) fn reconcile_applications(
                         redirect_uris,
                         client_secret: secret,
                         grant_types,
-                        slug: app_cfg.slug.clone(),
+                        slug: Some(app_cfg.slug.clone().unwrap_or_else(|| app_key.clone())),
                         trust_level: app_cfg
                             .trust_level
                             .unwrap_or(crate::identity::ClientTrustLevel::FirstParty),

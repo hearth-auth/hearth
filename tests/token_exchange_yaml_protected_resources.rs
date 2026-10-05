@@ -287,9 +287,11 @@ async fn a_changed_yaml_entry_updates_the_record() {
     let realm = reconcile(&h, &[RS]);
     let yaml = format!(
         "auth:\n  mfa_required: false\nrealms:\n  {REALM}:\n    session_ttl: \"12h\"\n    \
+         permissions:\n      - name: {PERM}\n        display_name: Invoke\n    \
          protected_resources:\n      \
          - resource_uri: \"{RS}\"\n        display_name: \"Renamed\"\n        scopes:\n          \
-         - name: \"mcp:tools:invoke\"\n            display_name: \"Invoke tools\"\n"
+         - name: \"mcp:tools:invoke\"\n            display_name: \"Invoke tools\"\n            \
+         permissions: [{PERM}]\n"
     );
     let mut cfg = Config::from_yaml_str_unchecked(&yaml).expect("parse yaml");
     cfg.dev_mode = true;
