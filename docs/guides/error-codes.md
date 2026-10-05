@@ -78,7 +78,8 @@ header. See the
 
 | Code | Meaning |
 |------|---------|
-| `HEARTH_RATE_LIMITED` | Request rate limit exceeded, or account temporarily locked after repeated failed attempts. |
+| `HEARTH_RATE_LIMITED` | Request rate limit exceeded, or account temporarily locked after repeated failed attempts. Retry after the `Retry-After` seconds. |
+| `HEARTH_ABUSE_CHALLENGE_REQUIRED` | `403` from a sign-in endpoint (`POST /v1/{realm}/auth/magic-link`, `POST /webauthn/auth/complete`) when the server wants a CAPTCHA before it continues. Resend the request with a solved `captcha_token`. Returned only when a CAPTCHA provider is configured; without one the same situation is a `429` `HEARTH_RATE_LIMITED`. |
 
 ### Account State
 

@@ -184,6 +184,11 @@ impl CaptchaProvider for TurnstileCaptchaProvider {
         &self.widget_html
     }
 
+    /// The widget script and its challenge frame load from Cloudflare.
+    fn csp_origins(&self) -> &[&'static str] {
+        &["https://challenges.cloudflare.com"]
+    }
+
     /// Verifies a Turnstile response token against the Cloudflare siteverify API.
     ///
     /// # Blocking

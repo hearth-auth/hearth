@@ -172,24 +172,36 @@ impl IpChallengeStore {
 
     /// [`check`](Self::check) at an explicit time (tests drive the clock).
     fn check_at(&self, ip: IpAddr, now: Instant) -> ChallengeOutcome {
-        if self.config.threshold.is_none() {
-            return ChallengeOutcome::Allow;
+        if self.remaining_at(ip, now).is_some() {
+            ChallengeOutcome::ChallengeRequired
+        } else {
+            ChallengeOutcome::Allow
         }
+    }
+
+    /// How long `ip` stays in the challenge state, or `None` when it is not
+    /// in it. Does not mutate counters.
+    pub fn challenge_remaining(&self, ip: IpAddr) -> Option<Duration> {
+        self.remaining_at(ip, Instant::now())
+    }
+
+    /// [`challenge_remaining`](Self::challenge_remaining) at an explicit time.
+    fn remaining_at(&self, ip: IpAddr, now: Instant) -> Option<Duration> {
+        self.config.threshold?;
 
         let map = self
             .entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        if let Some(entry) = map.get(&rate_limit_key(ip)) {
-            if let Some(until) = entry.challenge_until {
-                if now < until {
-                    return ChallengeOutcome::ChallengeRequired;
-                }
-            }
-        }
+        let until = map.get(&rate_limit_key(ip))?.challenge_until?;
+        (now < until).then(|| until.duration_since(now))
+    }
 
-        ChallengeOutcome::Allow
+    /// The window failures are counted in.
+    #[must_use]
+    pub fn window(&self) -> Duration {
+        Duration::from_secs(self.config.window_secs)
     }
 
     /// Records a failed authentication attempt for `ip`.
@@ -291,6 +303,13 @@ pub trait CaptchaProvider: Send + Sync {
     ///
     /// Returns `true` when the challenge passes (or when failing open on error).
     fn verify(&self, token: &str, ip: IpAddr) -> bool;
+
+    /// Origins the widget loads scripts and frames from, added to the
+    /// `Content-Security-Policy` of a page that carries the widget. Empty by
+    /// default.
+    fn csp_origins(&self) -> &[&'static str] {
+        &[]
+    }
 }
 
 /// No-op CAPTCHA provider (built-in, shipped with A-16).

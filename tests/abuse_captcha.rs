@@ -12,9 +12,19 @@
 //! - **Adversarial**: empty secret key is accepted at construction (start-time validation is caller's job).
 //!
 //! Closes: [HEA-1202](/HEA/issues/HEA-1202) (P-1 Turnstile adapter).
+//!
+//! The `a16_*` tests drive the A-16 challenge end to end through the login
+//! form, the magic-link request and both passkey completions.
+
+mod common;
+
+#[path = "common/abuse_rig.rs"]
+mod abuse_rig;
 
 use std::net::{IpAddr, Ipv4Addr};
 
+use abuse_rig::{a16, wrong_password, Rig, SOLVED, WIDGET};
+use axum::http::StatusCode;
 use hearth::abuse::captcha::{TurnstileCaptchaProvider, TurnstileConfig};
 use hearth::abuse::challenge::{CaptchaProvider, NoopCaptchaProvider};
 
@@ -193,5 +203,178 @@ fn turnstile_empty_secret_key_accepted_at_construction() {
     assert!(
         provider.widget_html().contains("sk"),
         "site key must appear in widget HTML"
+    );
+}
+
+// ── A-16 challenge, end to end (login-abuse-challenge) ───────────────────────
+
+/// Puts the rig's client into the A-16 challenge state with `n` wrong
+/// passwords on the login form.
+async fn fail_logins(rig: &Rig, email: &str, n: usize) {
+    for i in 0..n {
+        let (status, _) = rig.ui_login(email, &wrong_password(), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "failed login {i}");
+    }
+}
+
+/// A-16: a challenged caller is told to solve a challenge, on the API and on
+/// the login page it loads next.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a16_challenged_caller_is_told_to_solve_a_challenge() {
+    let rig = Rig::new(&a16(2, false), true).await;
+    let user = rig.create_user();
+
+    let (_, _, page) = rig.ui_login_page().await;
+    assert!(!page.contains(WIDGET), "no widget before any failure");
+
+    fail_logins(&rig, &user, 2).await;
+
+    let (status, _, body) = rig.magic_link(&user, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(body["error_code"], "HEARTH_ABUSE_CHALLENGE_REQUIRED");
+
+    let (status, _, page) = rig.ui_login_page().await;
+    assert_eq!(status, StatusCode::OK);
+    let slot = page
+        .find("<!-- captcha-widget-slot -->")
+        .expect("the login form carries the widget slot");
+    let widget = page
+        .find(WIDGET)
+        .expect("the login page shows the widget to a challenged caller");
+    assert!(slot < widget, "the widget sits at the slot");
+
+    let events = rig.abuse_events();
+    assert!(
+        events
+            .iter()
+            .any(|m| m["guard"] == "a16" && m["surface"] == "api"),
+        "the API challenge is audited: {events:?}"
+    );
+}
+
+/// A-16: a hot IP's next login-form attempt is shown the widget, even with
+/// the right password.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a16_hot_ip_login_attempt_is_shown_the_widget() {
+    let rig = Rig::new(&a16(2, false), true).await;
+    let user = rig.create_user();
+    fail_logins(&rig, &user, 2).await;
+
+    let (status, page) = rig.ui_login(&user, &abuse_rig::password(), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(
+        page.contains(WIDGET),
+        "the challenged attempt shows the widget"
+    );
+    let events = rig.abuse_events();
+    assert!(
+        events
+            .iter()
+            .any(|m| m["guard"] == "a16" && m["surface"] == "ui" && m["username"] == user.as_str()),
+        "the UI challenge is audited with the username: {events:?}"
+    );
+}
+
+/// A-16: a solved CAPTCHA on the login form lets the attempt reach the
+/// credential check, and clears the challenge state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a16_solved_captcha_lets_the_login_continue() {
+    let rig = Rig::new(&a16(1, false), true).await;
+    let user = rig.create_user();
+    fail_logins(&rig, &user, 1).await;
+
+    let (status, page) = rig
+        .ui_login(&user, &abuse_rig::password(), Some(SOLVED))
+        .await;
+    assert_ne!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "a solved CAPTCHA and the right password must sign in: {page}"
+    );
+    assert!(!page.contains(WIDGET));
+
+    let (_, _, page) = rig.ui_login_page().await;
+    assert!(!page.contains(WIDGET), "the challenge state is cleared");
+}
+
+/// A-16: a solved CAPTCHA in a JSON sign-in body lets the request continue.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a16_solved_captcha_lets_the_json_sign_in_continue() {
+    let rig = Rig::new(&a16(1, false), true).await;
+    let user = rig.create_user();
+    fail_logins(&rig, &user, 1).await;
+
+    let (status, _, body) = rig.magic_link(&user, Some(SOLVED)).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "body: {body}");
+    let (status, _, _) = rig.magic_link(&user, None).await;
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "the solved CAPTCHA cleared the challenge state"
+    );
+}
+
+/// A-16: a token the provider rejects is challenged again and counts as a
+/// failed attempt — here it is the failure that puts the IP in the A-16
+/// state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a16_wrong_captcha_token_counts_as_a_failure() {
+    let rig = Rig::new(&a16(1, true), true).await;
+    let (status, _, _) = rig.magic_link("first@example.com", None).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let (_, _, page) = rig.ui_login_page().await;
+    assert!(
+        !page.contains(WIDGET),
+        "a magic-link request is not a failure"
+    );
+
+    let (status, _, body) = rig
+        .magic_link("second@example.com", Some("not-the-token"))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(body["error_code"], "HEARTH_ABUSE_CHALLENGE_REQUIRED");
+
+    let (_, _, page) = rig.ui_login_page().await;
+    assert!(
+        page.contains(WIDGET),
+        "the rejected token must count as the failure that crosses the threshold"
+    );
+
+    let (status, page) = rig
+        .ui_login(
+            "third@example.com",
+            &wrong_password(),
+            Some("not-the-token"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(
+        page.contains(WIDGET),
+        "a rejected token is challenged again"
+    );
+}
+
+/// A-16: failed passkey assertions count, and the next passkey completion is
+/// challenged on both the API and the login page's endpoint.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a16_failed_passkey_sign_ins_count() {
+    let rig = Rig::new(&a16(2, false), true).await;
+    for i in 0..2 {
+        let (status, _, body) = rig.api_passkey_complete(None).await;
+        assert!(
+            status.is_client_error() && status != StatusCode::FORBIDDEN,
+            "failed assertion {i} is a plain failure: {status} {body}"
+        );
+    }
+
+    let (status, _, body) = rig.api_passkey_complete(None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(body["error_code"], "HEARTH_ABUSE_CHALLENGE_REQUIRED");
+
+    let (status, _, body) = rig.ui_passkey_complete().await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert!(
+        body.contains("HEARTH_ABUSE_CHALLENGE_REQUIRED"),
+        "body: {body}"
     );
 }

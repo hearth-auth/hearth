@@ -32,6 +32,7 @@ fn web_forms_do_not_print_passwords() {
                 return_to: None,
                 locale: None,
                 csrf: SECRET.to_string(),
+                captcha_token: SECRET.to_string(),
             }
         ),
     );

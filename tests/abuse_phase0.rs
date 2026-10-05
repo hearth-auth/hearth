@@ -526,15 +526,9 @@ fn a1_abuse_guard_deny_decision_rejects_request() {
     unimplemented!("A-1 AbuseGuard facade pending (HEA-1114)");
 }
 
-/// A `Challenge` decision must surface `HEARTH_ABUSE_CHALLENGE_REQUIRED`
-/// without leaking the underlying signal that tripped the policy.
-///
-/// A-1 — see openspec/specs/abuse-prevention/spec.md row A-1.
-#[test]
-#[ignore = "A-1 unified AbuseGuard facade blocked on HEA-1114 (facade not yet built)"]
-fn a1_abuse_guard_challenge_decision_returns_challenge_required() {
-    unimplemented!("A-1 AbuseGuard facade pending (HEA-1114)");
-}
+// A challenge answered with `HEARTH_ABUSE_CHALLENGE_REQUIRED`, without the
+// signal that tripped it, is covered end to end by the `a3_challenged_*` tests
+// in `tests/abuse_detector.rs` and the `a16_*` tests in `tests/abuse_captcha.rs`.
 
 // A-51: external audit-log attestation ────────────────────────────────────────
 

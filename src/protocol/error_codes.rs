@@ -91,6 +91,9 @@ pub const CLUSTER_WRITE_OUTCOME_UNKNOWN: &str = "HEARTH_CLUSTER_WRITE_OUTCOME_UN
 pub const RATE_LIMITED: &str = "HEARTH_RATE_LIMITED";
 /// User has exceeded the maximum number of concurrent active sessions.
 pub const SESSION_LIMIT_EXCEEDED: &str = "HEARTH_SESSION_LIMIT_EXCEEDED";
+/// The sign-in attempt must be accompanied by a solved CAPTCHA
+/// (`captcha_token`). Returned with `403` and no other detail.
+pub const ABUSE_CHALLENGE_REQUIRED: &str = "HEARTH_ABUSE_CHALLENGE_REQUIRED";
 
 // ── Account state ─────────────────────────────────────────────────────────────
 

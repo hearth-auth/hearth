@@ -7,10 +7,20 @@
 //! - **Adversarial**: repeated same-item, exact-threshold boundary, hard vs soft cap.
 //!
 //! Closes: HEA-1189 §A-3 (distributed-attack detector) + §A-4 (outbound volume shield).
+//!
+//! The `a3_challenged_*` tests drive the login form and the magic-link request
+//! end to end: a challenge is audited and answered as the A-16 table says.
+
+mod common;
+
+#[path = "common/abuse_rig.rs"]
+mod abuse_rig;
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, Instant};
 
+use abuse_rig::{wrong_password, Rig, A3_ONE_USERNAME, WIDGET};
+use axum::http::StatusCode;
 use hearth::abuse::detector::{
     DetectorConfig, DetectorOutcome, DistributedAttackDetector, OutboundVolumeShield,
     VolumeShieldConfig, VolumeShieldOutcome,
@@ -497,5 +507,165 @@ fn a4_adversarial_email_pumping_hard_cap() {
     assert!(
         saw_hard_cap,
         "hard cap must trigger during email pumping attack"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A-3 — a challenge is audited and answered (login-abuse-challenge)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The metadata of the rig's `AbuseDetected` events for `username`.
+fn events_for(rig: &Rig, username: &str) -> Vec<serde_json::Value> {
+    rig.abuse_events()
+        .into_iter()
+        .filter(|m| m["username"] == username)
+        .collect()
+}
+
+/// A-3: without a CAPTCHA provider a challenged login gets the generic
+/// failure page, and an `AbuseDetected` event records the IP, the username,
+/// the guard and the surface.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a3_challenged_login_is_audited_and_challenged() {
+    let rig = Rig::new(A3_ONE_USERNAME, false).await;
+    let first = rig.create_user();
+    let second = rig.create_user();
+
+    let (status, _) = rig.ui_login(&first, &wrong_password(), None).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "first username: a wrong password"
+    );
+    assert!(
+        rig.abuse_events().is_empty(),
+        "nothing is challenged below the threshold"
+    );
+
+    let (status, page) = rig.ui_login(&second, &abuse_rig::password(), None).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "a challenged login without a provider is refused even with the right password"
+    );
+    assert!(
+        page.contains("Sign-in failed. Check your credentials and try again."),
+        "without a provider the challenge is the generic failure page"
+    );
+    assert!(!page.contains(WIDGET), "no provider, no widget");
+
+    let events = events_for(&rig, &second);
+    assert_eq!(events.len(), 1, "one AbuseDetected event: {events:?}");
+    assert_eq!(events[0]["guard"], "a3");
+    assert_eq!(events[0]["surface"], "ui");
+    assert!(
+        events[0]["ip"].as_str().is_some_and(|ip| !ip.is_empty()),
+        "the event records the client IP: {events:?}"
+    );
+}
+
+/// A-3: with a provider the challenged caller sees the login page with the
+/// widget, and the page is the same for an address with and without an
+/// account.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a3_challenged_login_shows_the_widget_whatever_the_address() {
+    let rig = Rig::new(A3_ONE_USERNAME, true).await;
+    let known = rig.create_user();
+    let unknown = format!("nobody-{}@example.com", uuid::Uuid::new_v4().simple());
+
+    let (status, _) = rig
+        .ui_login("first@example.com", &wrong_password(), None)
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (known_status, known_page) = rig.ui_login(&known, &wrong_password(), None).await;
+    let (unknown_status, unknown_page) = rig.ui_login(&unknown, &wrong_password(), None).await;
+
+    let slot = known_page
+        .find("<!-- captcha-widget-slot -->")
+        .expect("the login form carries the widget slot");
+    let widget = known_page
+        .find(WIDGET)
+        .expect("a challenged caller sees the provider's widget");
+    assert!(slot < widget, "the widget sits at the slot");
+    assert!(
+        !known_page.contains("Sign-in failed. Check your credentials"),
+        "the widget page is not the wrong-password page"
+    );
+    assert_eq!(known_status, unknown_status);
+    assert_eq!(
+        known_page.replace(&known, "ADDRESS"),
+        unknown_page.replace(&unknown, "ADDRESS"),
+        "the challenge page must not reveal whether the address has an account"
+    );
+}
+
+/// A-3: a sustained attack writes one `AbuseDetected` event per guard, IP and
+/// username per window.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a3_challenged_sustained_attack_does_not_flood_the_audit_log() {
+    let rig = Rig::new(A3_ONE_USERNAME, true).await;
+    let (status, _, _) = rig.magic_link("first@example.com", None).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    for _ in 0..4 {
+        let (status, _, _) = rig.magic_link("target@example.com", None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+    let events = events_for(&rig, "target@example.com");
+    assert_eq!(
+        events.len(),
+        1,
+        "four challenges inside one window must write one event: {events:?}"
+    );
+}
+
+/// A-3: a challenged magic-link request gets the API challenge response, with
+/// no detail about which guard fired, and is audited with `surface: "api"`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a3_challenged_magic_link_request() {
+    let rig = Rig::new(A3_ONE_USERNAME, true).await;
+    let (status, _, _) = rig.magic_link("first@example.com", None).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "below the threshold");
+
+    let (status, _, body) = rig.magic_link("second@example.com", None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(body["error_code"], "HEARTH_ABUSE_CHALLENGE_REQUIRED");
+    let keys: Vec<&String> = body.as_object().expect("JSON object").keys().collect();
+    assert_eq!(
+        keys,
+        ["error", "error_code"],
+        "the challenge carries no other detail: {body}"
+    );
+    let text = body.to_string();
+    for leak in ["a3", "a16", "username", "threshold", "dimension"] {
+        assert!(!text.contains(leak), "the reason must stay private: {text}");
+    }
+
+    let events = events_for(&rig, "second@example.com");
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["guard"], "a3");
+    assert_eq!(events[0]["surface"], "api");
+}
+
+/// A-3 without a provider: the API answers with a timed lockout, `429` with
+/// `HEARTH_RATE_LIMITED` and the seconds left in the detector's window.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a3_challenged_api_without_a_provider_is_a_timed_lockout() {
+    let rig = Rig::new(A3_ONE_USERNAME, false).await;
+    let (status, _, _) = rig.magic_link("first@example.com", None).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let (status, headers, body) = rig.magic_link("second@example.com", None).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "body: {body}");
+    assert_eq!(body["error_code"], "HEARTH_RATE_LIMITED");
+    let retry_after: u64 = headers
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+        .expect("a numeric Retry-After");
+    assert!(
+        (1..=300).contains(&retry_after) && retry_after > 250,
+        "Retry-After must be the seconds left in the 300 s window, got {retry_after}"
     );
 }

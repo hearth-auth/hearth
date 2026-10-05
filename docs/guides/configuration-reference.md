@@ -923,6 +923,21 @@ server refuse to boot.
 | `window_secs` | integer | `60` | Rolling window for counting failures. |
 | `challenge_ttl_secs` | integer | `1800` | How long challenge state persists once the threshold is crossed. |
 
+What a challenge from A-16 or A-3 does depends on whether a CAPTCHA provider
+(`security.captcha.provider` with its settings) is configured:
+
+| CAPTCHA provider | Login page | API sign-in (`POST /v1/{realm}/auth/magic-link`, `POST /webauthn/auth/complete`) |
+|---|---|---|
+| Configured | The login page again, with the provider's widget | `403` `HEARTH_ABUSE_CHALLENGE_REQUIRED`; resend with a solved `captcha_token` |
+| Not configured | The generic sign-in failure page | `429` `HEARTH_RATE_LIMITED` with `Retry-After` (the seconds left in the guard's window) |
+
+A solved CAPTCHA lets that attempt continue and clears the IP's A-16 state;
+a token the provider rejects counts as another failure. Failed passwords and
+failed passkey assertions count toward `challenge_threshold`; a magic-link
+request does not. Every challenge writes an `AbuseDetected` audit event
+(metadata `ip`, `username` where the endpoint has one, `guard`, `surface`), at
+most one per guard, IP and username per window.
+
 ##### `security.distributed_attack_detector` (A-3)
 
 Cardinality detector for credential spraying and stuffing.

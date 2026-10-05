@@ -2631,14 +2631,20 @@ async fn run_serve(
     // the `security:` block. Nine guards documented "Shipped" in
     // `openspec/specs/abuse-prevention/spec.md` had no constructor outside their own test modules;
     // this is the production path. Every guard is fail-open until an operator
-    // enables it, so an existing config sees no behaviour change.
-    let abuse_guards = Arc::new(hearth::abuse::runtime::AbuseGuards::from_security(
-        &config.security,
-    ));
+    // enables it, so an existing config sees no behaviour change. A login
+    // challenge is answered with the CAPTCHA provider when one is configured,
+    // and with a timed lockout when not.
+    let captcha_provider = build_captcha_provider(&config.security);
+    let mut guards = hearth::abuse::runtime::AbuseGuards::from_security(&config.security);
+    if let Some(provider) = captcha_provider.as_ref() {
+        guards = guards.with_captcha_provider(Arc::clone(provider));
+    }
+    let abuse_guards = Arc::new(guards);
     info!(
         distributed_attack_detector = config.security.distributed_attack_detector.enabled,
         outbound_volume_shield = config.security.outbound_volume_shield.enabled,
         cross_realm_aggregation_cap = config.security.cross_realm_aggregation_cap.enabled,
+        captcha_provider = captcha_provider.is_some(),
         "abuse-prevention guards installed"
     );
 
@@ -2903,43 +2909,10 @@ async fn run_serve(
         web_state = web_state.with_config_path(cfg_path.clone());
     }
 
-    // Wire up the CAPTCHA provider (P-1 — HEA-1202).
-    if let Some(captcha_cfg) = config.security.captcha.as_ref() {
-        use hearth::abuse::captcha::{TurnstileCaptchaProvider, TurnstileConfig};
-        use hearth::config::CaptchaProviderKind;
-        match captcha_cfg.provider {
-            CaptchaProviderKind::Turnstile => {
-                if let Some(ts) = captcha_cfg.turnstile.as_ref() {
-                    let secret_key = std::env::var("HEARTH_TURNSTILE_SECRET_KEY")
-                        .ok()
-                        .or_else(|| ts.secret_key.clone())
-                        .unwrap_or_default();
-                    if secret_key.is_empty() {
-                        warn!(
-                            "security.captcha.turnstile: no secret_key configured and \
-                             HEARTH_TURNSTILE_SECRET_KEY is unset — Turnstile will reject all tokens"
-                        );
-                    }
-                    let cfg = if let Some(ref url) = ts.verify_url {
-                        TurnstileConfig {
-                            site_key: ts.site_key.clone(),
-                            secret_key,
-                            verify_url: url.clone(),
-                        }
-                    } else {
-                        TurnstileConfig::new(ts.site_key.clone(), secret_key)
-                    };
-                    info!(site_key = %ts.site_key, "CAPTCHA: Cloudflare Turnstile enabled");
-                    web_state = web_state
-                        .with_captcha_provider(Arc::new(TurnstileCaptchaProvider::new(cfg)));
-                } else {
-                    warn!(
-                        "security.captcha.provider = turnstile but no \
-                         security.captcha.turnstile section found — captcha disabled"
-                    );
-                }
-            }
-        }
+    // Wire up the CAPTCHA provider (P-1 — HEA-1202). The same provider
+    // answers login challenges through the abuse guards.
+    if let Some(provider) = captcha_provider {
+        web_state = web_state.with_captcha_provider(provider);
     }
 
     // 22.5 / 22.12 — install the operational and HTTP/2 limits before either
@@ -3382,6 +3355,50 @@ fn fmt_bytes(bytes: u64) -> String {
         format!("{:.1} MB", bytes as f64 / 1_048_576.0)
     } else {
         format!("{} KB", bytes / 1024)
+    }
+}
+
+/// Builds the CAPTCHA provider named in `security.captcha` (P-1 — HEA-1202),
+/// or `None` when none is configured or its settings are missing.
+fn build_captcha_provider(
+    security: &hearth::config::SecurityYaml,
+) -> Option<Arc<dyn hearth::abuse::challenge::CaptchaProvider>> {
+    use hearth::abuse::captcha::{TurnstileCaptchaProvider, TurnstileConfig};
+    use hearth::config::CaptchaProviderKind;
+
+    let captcha_cfg = security.captcha.as_ref()?;
+    match captcha_cfg.provider {
+        CaptchaProviderKind::Turnstile => {
+            let Some(ts) = captcha_cfg.turnstile.as_ref() else {
+                warn!(
+                    "security.captcha.provider = turnstile but no \
+                     security.captcha.turnstile section found — captcha disabled; \
+                     a challenged sign-in is answered with a timed lockout"
+                );
+                return None;
+            };
+            let secret_key = std::env::var("HEARTH_TURNSTILE_SECRET_KEY")
+                .ok()
+                .or_else(|| ts.secret_key.clone())
+                .unwrap_or_default();
+            if secret_key.is_empty() {
+                warn!(
+                    "security.captcha.turnstile: no secret_key configured and \
+                     HEARTH_TURNSTILE_SECRET_KEY is unset — Turnstile will reject all tokens"
+                );
+            }
+            let cfg = if let Some(ref url) = ts.verify_url {
+                TurnstileConfig {
+                    site_key: ts.site_key.clone(),
+                    secret_key,
+                    verify_url: url.clone(),
+                }
+            } else {
+                TurnstileConfig::new(ts.site_key.clone(), secret_key)
+            };
+            info!(site_key = %ts.site_key, "CAPTCHA: Cloudflare Turnstile enabled");
+            Some(Arc::new(TurnstileCaptchaProvider::new(cfg)))
+        }
     }
 }
 

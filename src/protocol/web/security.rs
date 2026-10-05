@@ -271,6 +271,43 @@ fn build_csp(extra_form_action_origins: &[String]) -> HeaderValue {
     HeaderValue::from_str(&csp).unwrap_or_else(|_| HeaderValue::from_static(STRICT_CSP))
 }
 
+/// Sets a per-response `Content-Security-Policy` on a page that carries a
+/// CAPTCHA widget: the strict policy, plus `origins` as script and frame
+/// sources so the provider's widget can load. The middleware keeps a policy
+/// the handler set. No-op when `origins` is empty or any origin is not a
+/// plain `https://` origin.
+pub(crate) fn allow_captcha_origins(resp: &mut axum::response::Response, origins: &[&'static str]) {
+    let plain = |o: &&str| {
+        o.strip_prefix("https://").is_some_and(|host| {
+            !host.is_empty()
+                && host
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        })
+    };
+    if origins.is_empty() || !origins.iter().all(plain) {
+        return;
+    }
+    let sources = origins.join(" ");
+    let csp = format!(
+        "default-src 'self'; \
+         script-src 'self' {sources}; \
+         frame-src {sources}; \
+         style-src 'self'; \
+         font-src 'self'; \
+         img-src 'self' data:; \
+         connect-src 'self'; \
+         object-src 'none'; \
+         form-action 'self'; \
+         frame-ancestors 'none'; \
+         base-uri 'self'"
+    );
+    if let Ok(value) = HeaderValue::from_str(&csp) {
+        resp.headers_mut()
+            .insert(HeaderName::from_static("content-security-policy"), value);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;
@@ -641,5 +678,39 @@ mod tests {
             "strict-origin-when-cross-origin",
             "every other page keeps the default"
         );
+    }
+
+    /// A page carrying a CAPTCHA widget lets the provider's origin load the
+    /// widget script and frame, and nothing else changes.
+    #[test]
+    fn captcha_origins_are_added_as_script_and_frame_sources() {
+        let mut resp = StatusCode::OK.into_response();
+        allow_captcha_origins(&mut resp, &["https://challenges.cloudflare.com"]);
+        let csp = resp.headers()["content-security-policy"]
+            .to_str()
+            .expect("ascii CSP");
+        assert!(csp.contains("script-src 'self' https://challenges.cloudflare.com;"));
+        assert!(csp.contains("frame-src https://challenges.cloudflare.com;"));
+        assert!(csp.contains("form-action 'self';"));
+        assert!(csp.contains("frame-ancestors 'none'"));
+    }
+
+    /// No origin, or one that is not a plain `https://` origin, leaves the
+    /// middleware's strict policy in place.
+    #[test]
+    fn captcha_origins_that_are_not_plain_https_origins_change_nothing() {
+        for origins in [
+            &[][..],
+            &["http://challenges.cloudflare.com"][..],
+            &["https://evil.example; script-src *"][..],
+            &["https://"][..],
+        ] {
+            let mut resp = StatusCode::OK.into_response();
+            allow_captcha_origins(&mut resp, origins);
+            assert!(
+                !resp.headers().contains_key("content-security-policy"),
+                "{origins:?} must not set a policy"
+            );
+        }
     }
 }

@@ -3,6 +3,7 @@
 //! Thin, stateless adapters that translate wire requests into Identity Engine
 //! calls and serialize responses.
 
+pub(crate) mod abuse_challenge;
 pub mod admin_auth;
 pub(crate) mod audit_log;
 pub(crate) mod client_admin;

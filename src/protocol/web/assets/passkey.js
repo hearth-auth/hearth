@@ -120,6 +120,12 @@
       if (assertion.response.userHandle && assertion.response.userHandle.byteLength > 0) {
         body.user_handle = b64urlEncode(assertion.response.userHandle);
       }
+      // A challenged caller's login page carries the CAPTCHA widget, which
+      // writes its token into a `captcha_token` field.
+      var captchaInput = document.querySelector('input[name="captcha_token"]');
+      if (captchaInput && captchaInput.value) {
+        body.captcha_token = captchaInput.value;
+      }
       return fetch(completeUrl, {
         method: 'POST',
         credentials: 'same-origin',
@@ -129,6 +135,18 @@
         },
         body: JSON.stringify(body),
       }).then(function (resp) {
+        if (resp.status === 403) {
+          return resp.clone().json().then(function (result) {
+            // Challenged: reload so the page shows the CAPTCHA widget.
+            if (result && result.error_code === 'HEARTH_ABUSE_CHALLENGE_REQUIRED') {
+              window.location.reload();
+              return;
+            }
+            throw new Error(failedMsg);
+          }, function () {
+            return resp.text().then(function (t) { throw new Error(t || failedMsg); });
+          });
+        }
         if (!resp.ok) {
           return resp.text().then(function (t) { throw new Error(t || 'Authentication failed'); });
         }
