@@ -23,6 +23,11 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
 - **`HEARTH_ABUSE_CHALLENGE_REQUIRED` error code** — `403` from a sign-in endpoint when a
   CAPTCHA provider is configured and the caller must solve a CAPTCHA before it continues. The
   per-IP login `429` body now also carries `error_code: "HEARTH_RATE_LIMITED"`.
+- **`resource` on the token endpoint** (`scope-consent-integrity`). The `authorization_code`,
+  `refresh_token` and `client_credentials` grants now read the RFC 8707 `resource` parameter. On
+  the first two it may only restate the grant's own resource; any other value answers
+  `invalid_target`. On `client_credentials` a registered protected resource joins the token's
+  `aud` and selects the scope registry; an unregistered one answers `invalid_target`.
 - **`security.max_act_chain_depth`** — the deepest RFC 8693 `act` delegation chain a token may
   carry. Default `3`, range `1`–`32`; a value outside the range fails config load. Token
   validation and token exchange both read it, and an agent's `max_delegation_depth` must be from
@@ -153,6 +158,15 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   login page's `.../login/passkey-complete`) run A-16; a failed passkey assertion counts toward
   `security.captcha.challenge_threshold`. A page that carries the Turnstile widget allows
   `https://challenges.cloudflare.com` as a script and frame source.
+- **One scope-resolution rule on every token path** (`scope-consent-integrity`). `/authorize`
+  (browser, JSON and PAR), the code exchange, refresh, the device grant, `client_credentials`,
+  the JWT-bearer grant and live resolution (introspection, decision mode, `/v1/me/permissions`)
+  now resolve scopes the same way. A bundle is granted only when the user holds every permission
+  in it. A scope no registry defines answers `invalid_scope`, for first-party clients too. Under a
+  `resource`, only that resource's bundles are legal. A request with only OIDC scopes gives a
+  third-party client no permissions, in the token or through introspection. A grant narrowed to
+  named scopes never widens to the user's full set, and a refresh of a bundle deleted from
+  `hearth.yaml` answers `invalid_grant`. Claim release gates read the granted scopes only.
 - **A registry entry removed from `hearth.yaml` is no longer granted** (`scope-consent-integrity`).
   A permission or role that the YAML no longer declares is skipped at every token issuance, also
   when a stored role, an extra permission or an additional organization role still names it. Each
@@ -340,6 +354,11 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   short form was refused as "invalid status".
 
 ### Changed
+- **Scope refusals answer `invalid_scope`** (`scope-consent-integrity`). A refused scope used to
+  answer `400 {"error_code":"HEARTH_INVALID_INPUT"}`; it now answers the OAuth error
+  `invalid_scope` (RFC 6749 §5.2), and the browser `/authorize` redirects with
+  `error=invalid_scope` instead of showing an error page. The token's `scope` lists the granted
+  scopes, which can be fewer than the requested ones for a first-party client.
 - **PHP SDK: a future `iat` throws `TokenNotYetValidException`** (was `TokenInvalidException`),
   so a token issued beyond the 5 s clock skew in the future gets the same error in all four
   SDKs, as a future `nbf` does.

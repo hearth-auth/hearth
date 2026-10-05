@@ -18,14 +18,14 @@
 
 ## 3. Scope resolution (PR 2)
 
-- [ ] 3.1 One engine entry point (`design.md` §2), called by the browser gate, `/authorize`, PAR, the code exchange, the device grant, `client_credentials`, refresh and introspection. The code stores the granted scopes
-- [ ] 3.2 Enforce: A bundle is granted only when fully held. Test: scenario "A bundle is granted only when fully held"
-- [ ] 3.3 Enforce: A third-party client never gets an unsatisfiable bundle. Test: scenario "A third-party client never gets an unsatisfiable bundle"
-- [ ] 3.4 Enforce: Gates run on granted scopes only. Test: scenario "Gates run on granted scopes only"
-- [ ] 3.5 Enforce: Only resource bundles apply under a resource, and an unknown scope is refused. Test: scenarios "Only resource bundles apply under a resource" and "An unknown scope from a first-party client"
-- [ ] 3.6 Enforce: OIDC-only and fully dropped requests. Test: scenarios "Only OIDC scopes for a third-party client" and "Every requested bundle is dropped"
-- [ ] 3.7 Enforce: A deleted bundle never widens a refreshed token. Test: scenario "A deleted bundle never widens a refreshed token"
-- [ ] 3.8 Enforce: A token request's resource is applied. Test: scenarios "A token request's resource is applied", "A code exchange names another resource" and "A refresh names another resource"
+- [x] 3.1 One engine entry point (`design.md` §2), called by the browser gate, `/authorize`, PAR, the code exchange, the device grant, `client_credentials`, refresh and introspection. The code stores the granted scopes
+- [x] 3.2 Enforce: A bundle is granted only when fully held. Test: scenario "A bundle is granted only when fully held"
+- [x] 3.3 Enforce: A third-party client never gets an unsatisfiable bundle. Test: scenario "A third-party client never gets an unsatisfiable bundle"
+- [x] 3.4 Enforce: Gates run on granted scopes only. Test: scenario "Gates run on granted scopes only"
+- [x] 3.5 Enforce: Only resource bundles apply under a resource, and an unknown scope is refused. Test: scenarios "Only resource bundles apply under a resource" and "An unknown scope from a first-party client"
+- [x] 3.6 Enforce: OIDC-only and fully dropped requests. Test: scenarios "Only OIDC scopes for a third-party client" and "Every requested bundle is dropped"
+- [x] 3.7 Enforce: A deleted bundle never widens a refreshed token. Test: scenario "A deleted bundle never widens a refreshed token"
+- [x] 3.8 Enforce: A token request's resource is applied. Test: scenarios "A token request's resource is applied", "A code exchange names another resource" and "A refresh names another resource"
 
 ## 4. Organization context and consent (PR 3)
 

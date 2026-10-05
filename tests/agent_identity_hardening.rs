@@ -521,6 +521,7 @@ async fn token_exchange_refuses_a_suspended_agent_actor() {
     let harness = common::TestHarness::in_process().await.expect("harness");
     let identity = harness.identity();
     let realm = make_realm(identity, "exchange-suspended");
+    harness.declare_scopes(&realm, &["mcp:tools:invoke"]);
     let owner = make_user(identity, &realm);
     let agent = make_agent(identity, &realm, &owner);
     let subject = make_user(identity, &realm);

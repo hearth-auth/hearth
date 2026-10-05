@@ -14,6 +14,7 @@ use hearth::identity::{
     ClientCredentialsRequest, CreateRealmRequest, EmbeddedIdentityEngine, IdentityConfig,
     IdentityEngine, RegisterClientRequest, TokenIntrospectionRequest,
 };
+use hearth::rbac::{EmbeddedRbacEngine, RbacEngine, ScopeSpec};
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
 
 /// Sets up an engine with a realm, a confidential client, and a pre-issued
@@ -50,6 +51,16 @@ fn setup_oauth() -> (
         })
         .expect("create realm");
     let realm_id = realm.id().clone();
+    // The scope registry refuses a scope the realm does not define.
+    EmbeddedRbacEngine::new(Arc::clone(&storage), Arc::clone(&clock))
+        .reconcile_scopes(
+            &realm_id,
+            &["read", "write"].map(|name| ScopeSpec {
+                name: name.to_string(),
+                permissions: Some(Vec::new()),
+            }),
+        )
+        .expect("declare scopes");
 
     let secret = "bench-client-secret-that-is-long-enough";
     let client = engine
@@ -78,6 +89,7 @@ fn setup_oauth() -> (
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("client_credentials_token");
@@ -125,6 +137,7 @@ fn bench_client_credentials(c: &mut Criterion) {
                     dpop_jkt: None,
                     client_assertion_type: None,
                     client_assertion: None,
+                    resource: None,
                 },
             );
             assert!(result.is_ok());

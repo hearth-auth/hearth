@@ -1208,6 +1208,10 @@ pub struct TokenExchangeRequest {
     pub client_assertion_type: Option<String>,
     /// The signed JWT assertion for `private_key_jwt` client authentication.
     pub client_assertion: Option<String>,
+    /// The RFC 8707 `resource` of the token request, as sent. For the
+    /// authorization-code grant it must name the code's resource; for
+    /// `client_credentials` it must be a registered protected resource.
+    pub resource: Option<String>,
 }
 
 /// Response from a successful token exchange.
@@ -1310,6 +1314,10 @@ pub(crate) struct StoredAuthorizationCode {
     /// with no session behind it) carries [`crate::identity::MfaProof::None`].
     #[serde(default)]
     pub(crate) mfa_proof: crate::identity::MfaProof,
+    /// Whether scope resolution narrowed this grant to named scopes;
+    /// the exchange re-resolves with it (`ScopeRequest::narrowed`).
+    #[serde(default)]
+    pub(crate) scope_narrowed: bool,
 }
 
 /// Context from the refresh request that binds it to its grant family.
@@ -1599,6 +1607,10 @@ pub struct ClientCredentialsRequest {
     pub client_assertion_type: Option<String>,
     /// The signed JWT assertion for `private_key_jwt` client authentication.
     pub client_assertion: Option<String>,
+    /// The RFC 8707 `resource` of the token request, as sent. For the
+    /// authorization-code grant it must name the code's resource; for
+    /// `client_credentials` it must be a registered protected resource.
+    pub resource: Option<String>,
 }
 
 /// Request for the JWT Bearer Grant (RFC 7523).
@@ -1811,6 +1823,10 @@ pub(crate) struct StoredGrantFamily {
     /// from being used without possession of the original private key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) bound_jkt: Option<String>,
+    /// Whether scope resolution narrowed this grant to named scopes;
+    /// every refresh re-resolves with it (`ScopeRequest::narrowed`).
+    #[serde(default)]
+    pub(crate) scope_narrowed: bool,
 }
 
 // ===== Token Revocation (RFC 7009) =====
@@ -2259,6 +2275,7 @@ mod tests {
             resource: None,
             amr_values: Vec::new(),
             mfa_proof: crate::identity::MfaProof::None,
+            scope_narrowed: false,
         };
 
         let json = serde_json::to_string(&code).expect("serialize");

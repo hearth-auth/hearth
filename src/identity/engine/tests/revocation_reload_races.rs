@@ -77,6 +77,7 @@ fn concurrent_revocations_are_never_lost_from_the_revoked_jti_projection() {
                                 dpop_jkt: None,
                                 client_assertion_type: None,
                                 client_assertion: None,
+                                resource: None,
                             },
                         )
                         .expect("mint")

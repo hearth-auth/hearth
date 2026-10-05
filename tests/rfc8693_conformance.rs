@@ -58,15 +58,20 @@ fn make_exchange_client(
         .clone()
 }
 
-fn make_realm(identity: &dyn IdentityEngine) -> RealmId {
-    identity
+/// Creates a realm that declares the MCP scope the token fixtures mint; the
+/// scope registry refuses a name it does not define.
+fn make_realm(harness: &common::TestHarness) -> RealmId {
+    let realm_id = harness
+        .identity()
         .create_realm(&CreateRealmRequest {
             name: format!("rfc8693-{}", uuid::Uuid::new_v4()),
             config: None,
         })
         .expect("create realm")
         .id()
-        .clone()
+        .clone();
+    harness.declare_scopes(&realm_id, &["mcp:tools:invoke"]);
+    realm_id
 }
 
 /// Issue a real Ed25519-signed access token for `user_id` with explicit `scope`.
@@ -206,7 +211,7 @@ async fn rfc8693_response_required_fields() {
 
     let harness = common::TestHarness::in_process().await.expect("test setup");
     let identity = harness.identity();
-    let realm_id = make_realm(identity);
+    let realm_id = make_realm(&harness);
 
     let user_id = identity
         .create_user(
@@ -273,7 +278,7 @@ async fn rfc8693_response_required_fields() {
 async fn rfc8693_err01_wrong_subject_token_type() {
     let harness = common::TestHarness::in_process().await.expect("test setup");
     let identity = harness.identity();
-    let realm_id = make_realm(identity);
+    let realm_id = make_realm(&harness);
     let user_id = identity
         .create_user(
             &realm_id,
@@ -344,7 +349,7 @@ async fn rfc8693_err01_wrong_subject_token_type() {
 async fn rfc8693_err02_invalid_signature_subject_token_rejected() {
     let harness = common::TestHarness::in_process().await.expect("test setup");
     let identity = harness.identity();
-    let realm_id = make_realm(identity);
+    let realm_id = make_realm(&harness);
     let user_id = identity
         .create_user(
             &realm_id,
@@ -404,7 +409,7 @@ async fn rfc8693_err02_invalid_signature_subject_token_rejected() {
 async fn rfc8693_err03_scope_wider_than_subject() {
     let harness = common::TestHarness::in_process().await.expect("test setup");
     let identity = harness.identity();
-    let realm_id = make_realm(identity);
+    let realm_id = make_realm(&harness);
     let user_id = identity
         .create_user(
             &realm_id,

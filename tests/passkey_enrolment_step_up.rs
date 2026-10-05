@@ -1133,6 +1133,8 @@ async fn web_enrolment_refuses_a_third_party_clients_bearer_token() {
             session.id(),
             &TokenIssuanceContext {
                 client_id: Some(client),
+                // A third-party client must request at least one scope.
+                granted_scopes: std::iter::once("openid".to_string()).collect(),
                 ..TokenIssuanceContext::default()
             },
         )

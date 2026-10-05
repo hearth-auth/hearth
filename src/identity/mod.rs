@@ -810,6 +810,19 @@ pub trait IdentityEngine: Send + Sync {
         bind_ctx: Option<&RefreshBindContext>,
     ) -> Result<TokenPair, IdentityError>;
 
+    /// [`Self::refresh_tokens`] for a token request that carries an RFC 8707
+    /// `resource`. An absent `resource`, or one equal in canonical form to
+    /// the grant's resource, is accepted; any other value fails with
+    /// `invalid_target`. A refresh never switches resource.
+    fn refresh_tokens_for_resource(
+        &self,
+        realm_id: &RealmId,
+        refresh_token: &str,
+        dpop_jkt: Option<&str>,
+        bind_ctx: Option<&RefreshBindContext>,
+        resource: Option<&str>,
+    ) -> Result<TokenPair, IdentityError>;
+
     /// Returns the JWKS document containing public keys for external verification.
     fn jwks(&self) -> JwksDocument;
 
@@ -839,6 +852,20 @@ pub trait IdentityEngine: Send + Sync {
         realm_id: &RealmId,
         request: &AuthorizationRequest,
     ) -> Result<AuthorizationResponse, IdentityError>;
+
+    /// The scopes `/authorize` would grant `user_id` for this client, scope
+    /// string and RFC 8707 resource (`scope-consent-integrity` design §2).
+    /// The browser gate calls it before the consent screen, so the screen
+    /// lists only what can be granted. A refusal is `InvalidScope` (or
+    /// `InvalidTarget` for an unregistered resource).
+    fn authorization_scopes(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        client_id: &crate::core::ClientId,
+        scope: &str,
+        resource: Option<&str>,
+    ) -> Result<Vec<String>, IdentityError>;
 
     /// [`Self::authorize`] for a code minted from a browser session whose
     /// login proved `mfa_proof`. The code records it, and the session its

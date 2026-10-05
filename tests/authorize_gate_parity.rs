@@ -442,6 +442,7 @@ fn exchanged_audience(
                 client_assertion_type: pair
                     .map(|_| "urn:ietf:params:oauth:client-assertion-type:jwt-bearer".to_string()),
                 client_assertion: pair.map(|pair| client_assertion(rig, client, pair)),
+                resource: None,
             },
         )
         .expect("exchange the code");

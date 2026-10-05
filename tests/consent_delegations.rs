@@ -20,15 +20,20 @@ use hearth::identity::{
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn make_realm(identity: &dyn IdentityEngine) -> RealmId {
-    identity
+/// Creates a realm that declares the MCP scope the token fixtures mint; the
+/// scope registry refuses a name it does not define.
+fn make_realm(harness: &common::TestHarness) -> RealmId {
+    let realm_id = harness
+        .identity()
         .create_realm(&CreateRealmRequest {
             name: format!("cd-test-{}", uuid::Uuid::new_v4()),
             config: None,
         })
         .expect("create realm")
         .id()
-        .clone()
+        .clone();
+    harness.declare_scopes(&realm_id, &["mcp:tools:invoke"]);
+    realm_id
 }
 
 fn make_user(identity: &dyn IdentityEngine, realm_id: &RealmId) -> UserId {
@@ -92,6 +97,7 @@ fn make_actor_token(
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("issue actor access token");
@@ -143,7 +149,7 @@ async fn delegation_grant_persisted_after_exchange() {
         .await
         .expect("test setup failed");
     let identity = harness.identity();
-    let realm_id = make_realm(identity);
+    let realm_id = make_realm(&harness);
     let user_id = make_user(identity, &realm_id);
 
     let subject_token = build_subject_jwt(identity, &user_id, &realm_id, "mcp:tools:invoke");
@@ -201,7 +207,7 @@ async fn revoked_delegation_rejects_previously_issued_obo_token() {
         .await
         .expect("test setup failed");
     let identity = harness.identity();
-    let realm_id = make_realm(identity);
+    let realm_id = make_realm(&harness);
     let user_id = make_user(identity, &realm_id);
 
     let subject_token = build_subject_jwt(identity, &user_id, &realm_id, "mcp:tools:invoke");
@@ -277,13 +283,15 @@ async fn revoked_delegation_rejects_previously_issued_obo_token() {
 #[allow(clippy::too_many_lines)] // role setup + exchange + before/after on two endpoints
 async fn revoked_delegation_is_inactive_on_introspect_and_decide() {
     use hearth::identity::{DecidePermissionRequest, TokenIntrospectionRequest};
-    use hearth::rbac::{AssignRoleRequest, CreateRoleRequest, Permission, Scope, Subject};
+    use hearth::rbac::{
+        AssignRoleRequest, CreateRoleRequest, Permission, Scope, ScopeSpec, Subject,
+    };
 
     let harness = common::TestHarness::in_process()
         .await
         .expect("test setup failed");
     let identity = harness.identity();
-    let realm_id = make_realm(identity);
+    let realm_id = make_realm(&harness);
     let user_id = make_user(identity, &realm_id);
 
     // Give the user a real permission, which the delegation must not carry.
@@ -313,8 +321,18 @@ async fn revoked_delegation_is_inactive_on_introspect_and_decide() {
         )
         .expect("assign role");
 
-    // The MCP scope is not a realm RBAC scope, so it narrows nothing and the
-    // user's realm-scoped `tools.invoke` resolves live.
+    // The MCP scope bundles `tools.invoke`, so the subject token carries the
+    // user's realm-scoped `tools.invoke`.
+    harness
+        .rbac()
+        .reconcile_scopes(
+            &realm_id,
+            &[ScopeSpec {
+                name: "mcp:tools:invoke".to_string(),
+                permissions: Some(vec!["tools.invoke".to_string()]),
+            }],
+        )
+        .expect("bundle tools.invoke under the MCP scope");
     let scope = "mcp:tools:invoke openid";
     let subject_token = build_subject_jwt(identity, &user_id, &realm_id, scope);
     // No actor token: the exchanging client is the actor. A client holds no
@@ -465,7 +483,7 @@ async fn revoking_a_delegation_revokes_onward_exchanges() {
         .await
         .expect("test setup failed");
     let identity = harness.identity();
-    let realm_id = make_realm(identity);
+    let realm_id = make_realm(&harness);
     let user_id = make_user(identity, &realm_id);
     let user_sub = user_id.to_string();
 
@@ -521,7 +539,7 @@ async fn revoke_other_users_delegation_is_not_found() {
         .await
         .expect("test setup failed");
     let identity = harness.identity();
-    let realm_id = make_realm(identity);
+    let realm_id = make_realm(&harness);
     let user_a = make_user(identity, &realm_id);
     let user_b = make_user(identity, &realm_id);
 
@@ -572,7 +590,7 @@ async fn revoke_delegation_is_idempotent() {
         .await
         .expect("test setup failed");
     let identity = harness.identity();
-    let realm_id = make_realm(identity);
+    let realm_id = make_realm(&harness);
     let user_id = make_user(identity, &realm_id);
 
     let subject_token = build_subject_jwt(identity, &user_id, &realm_id, "mcp:tools:invoke");
@@ -645,7 +663,7 @@ async fn list_delegation_grants_empty_for_new_user() {
         .await
         .expect("test setup failed");
     let identity = harness.identity();
-    let realm_id = make_realm(identity);
+    let realm_id = make_realm(&harness);
     let user_id = make_user(identity, &realm_id);
 
     let user_sub = user_id.to_string();

@@ -125,6 +125,7 @@ impl std::error::Error for IdentityError {
             | Self::InvalidTarget { .. }
             | Self::DelegationDepthExceeded { .. }
             | Self::EmptyScopeIntersection
+            | Self::InvalidScope { .. }
             | Self::ActorTokenReplayed
             // Phase C
             | Self::ToolAccessDenied { .. }

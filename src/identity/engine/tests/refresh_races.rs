@@ -370,6 +370,7 @@ fn revoking_consent_kills_the_applications_refresh_chain() {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("exchange");

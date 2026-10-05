@@ -199,6 +199,7 @@ async fn code_flow_token(rig: &Rig, browser: &mut Browser) -> String {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("exchange")

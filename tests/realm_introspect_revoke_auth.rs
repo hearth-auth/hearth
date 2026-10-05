@@ -51,6 +51,8 @@ fn register_client(h: &common::TestHarness, realm: &RealmId, name: &str) -> Stri
 
 /// Mints a client-credentials access token for `client_id`.
 fn mint_token(h: &common::TestHarness, realm: &RealmId, client_id: &str) -> String {
+    // The scope registry refuses a scope the realm does not define.
+    h.declare_scopes(realm, &["read"]);
     h.identity()
         .client_credentials_token(
             realm,
@@ -61,6 +63,7 @@ fn mint_token(h: &common::TestHarness, realm: &RealmId, client_id: &str) -> Stri
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("mint token")

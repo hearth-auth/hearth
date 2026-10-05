@@ -522,6 +522,7 @@ async fn decide_denies_a_delegation_beyond_the_actors_permissions() {
                     dpop_jkt: None,
                     client_assertion_type: None,
                     client_assertion: None,
+                    resource: None,
                 },
             )
             .expect("actor token")

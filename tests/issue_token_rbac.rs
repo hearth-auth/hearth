@@ -638,6 +638,7 @@ async fn oauth_path_permissions_cap_refuses_issuance() {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect_err("should fail");
@@ -762,6 +763,7 @@ async fn refresh_re_resolves_claims_instead_of_copying() {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("exchange");

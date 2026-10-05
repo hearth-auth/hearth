@@ -20,10 +20,23 @@ use hearth::identity::{
     OAuthClient, PendingAuthorizationRequest, RefreshBindContext, RegisterClientRequest,
     SessionContext, TokenExchangeRequest, User,
 };
+use hearth::rbac::{EmbeddedRbacEngine, RbacEngine, ScopeSpec};
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
 
 /// Creates a minimal engine with a `FakeClock` for deterministic tests.
 fn setup_engine() -> (tempfile::TempDir, EmbeddedIdentityEngine, Arc<FakeClock>) {
+    let (dir, engine, clock, _rbac) = setup_engine_with_rbac();
+    (dir, engine, clock)
+}
+
+/// [`setup_engine`], also returning the RBAC engine the identity engine
+/// resolves scopes against, for a test that declares realm scopes.
+fn setup_engine_with_rbac() -> (
+    tempfile::TempDir,
+    EmbeddedIdentityEngine,
+    Arc<FakeClock>,
+    Arc<dyn RbacEngine>,
+) {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage = Arc::new(
         EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().to_path_buf()))
@@ -38,14 +51,19 @@ fn setup_engine() -> (tempfile::TempDir, EmbeddedIdentityEngine, Arc<FakeClock>)
         Arc::clone(&storage),
         Arc::clone(&clock) as Arc<dyn Clock>,
     ));
-    let engine = EmbeddedIdentityEngine::new(
+    let rbac: Arc<dyn RbacEngine> = Arc::new(EmbeddedRbacEngine::new(
+        Arc::clone(&storage),
+        Arc::clone(&clock) as Arc<dyn Clock>,
+    ));
+    let engine = EmbeddedIdentityEngine::with_rbac(
         Arc::clone(&storage),
         Arc::clone(&clock) as Arc<dyn Clock>,
         identity_config,
+        Arc::clone(&rbac),
         audit as Arc<dyn AuditEngine>,
     )
     .expect("engine creation");
-    (dir, engine, clock)
+    (dir, engine, clock, rbac)
 }
 
 fn create_test_user(engine: &EmbeddedIdentityEngine, realm: &RealmId) -> User {
@@ -130,8 +148,17 @@ fn register_confidential_client(
 fn client_credentials_register_and_issue_token() {
     use hearth::identity::ClientCredentialsRequest;
 
-    let (_dir, engine, _clock) = setup_engine();
+    let (_dir, engine, _clock, rbac) = setup_engine_with_rbac();
     let realm_id = create_test_realm(&engine);
+    // The scope registry refuses a scope the realm does not define.
+    rbac.reconcile_scopes(
+        &realm_id,
+        &["read", "write"].map(|name| ScopeSpec {
+            name: name.to_string(),
+            permissions: Some(Vec::new()),
+        }),
+    )
+    .expect("declare scopes");
     let secret = uuid::Uuid::new_v4().to_string();
 
     // Register confidential client
@@ -152,6 +179,7 @@ fn client_credentials_register_and_issue_token() {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("client_credentials_token should succeed");
@@ -185,6 +213,7 @@ fn client_credentials_wrong_secret_rejected() {
             dpop_jkt: None,
             client_assertion_type: None,
             client_assertion: None,
+            resource: None,
         },
     );
 
@@ -207,6 +236,7 @@ fn client_credentials_unsupported_grant_type() {
         dpop_jkt: None,
         client_assertion_type: None,
         client_assertion: None,
+        resource: None,
     };
 
     // A confidential client without the client_credentials grant that proves
@@ -370,6 +400,7 @@ fn refresh_token_rotation_issues_new_pair() {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("exchange code");
@@ -462,6 +493,7 @@ fn refresh_token_rejects_forged_legacy_payload_without_fid() {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("exchange code");
@@ -586,6 +618,7 @@ fn revoke_refresh_token_invalidates_family() {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("exchange code");
@@ -779,6 +812,7 @@ fn adversarial_refresh_token_theft_detection() {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("exchange");
@@ -854,6 +888,7 @@ fn adversarial_invalid_client_secret_generic_error() {
             dpop_jkt: None,
             client_assertion_type: None,
             client_assertion: None,
+            resource: None,
         },
     );
     assert!(
@@ -871,6 +906,7 @@ fn adversarial_invalid_client_secret_generic_error() {
             dpop_jkt: None,
             client_assertion_type: None,
             client_assertion: None,
+            resource: None,
         },
     );
     assert!(
@@ -889,6 +925,7 @@ fn adversarial_invalid_client_secret_generic_error() {
             dpop_jkt: None,
             client_assertion_type: None,
             client_assertion: None,
+            resource: None,
         },
     );
     // The same answer as a wrong secret: a caller that has not proved a secret
@@ -1034,6 +1071,7 @@ mod oauth_proptests {
                     dpop_jkt: None,
                     client_assertion_type: None,
                     client_assertion: None,
+                    resource: None,
                 }).expect("exchange");
 
                 access_tokens.push(tokens.access_token().to_string());
@@ -1200,6 +1238,7 @@ mod oauth_proptests {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             }).expect("exchange");
 
             let mut current_refresh = tokens.refresh_token().to_string();
@@ -1590,6 +1629,7 @@ fn concurrent_refresh_of_one_token_yields_exactly_one_success() {
                     dpop_jkt: None,
                     client_assertion_type: None,
                     client_assertion: None,
+                    resource: None,
                 },
             )
             .expect("exchange");
@@ -1695,6 +1735,7 @@ fn deleting_a_client_revokes_its_outstanding_refresh_tokens() {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("exchange");

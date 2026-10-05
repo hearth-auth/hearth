@@ -959,6 +959,7 @@ mod tests {
             resource: None,
             amr_values: Vec::new(),
             mfa_proof: crate::identity::MfaProof::None,
+            scope_narrowed: false,
         };
         let key = keys::encode_oauth_code("hash1");
         s.put(&realm, &key, &serde_json::to_vec(&code).expect("serialize"))
@@ -990,6 +991,7 @@ mod tests {
             resource: None,
             amr_values: Vec::new(),
             mfa_proof: crate::identity::MfaProof::None,
+            scope_narrowed: false,
         };
         let key = keys::encode_oauth_code("hash2");
         s.put(&realm, &key, &serde_json::to_vec(&code).expect("serialize"))
@@ -1174,6 +1176,7 @@ mod tests {
             resources: Vec::new(),
             amr_values: Vec::new(),
             bound_jkt: None,
+            scope_narrowed: false,
         };
 
         let key = keys::encode_grant_family("fid1");
@@ -1208,6 +1211,7 @@ mod tests {
             resources: Vec::new(),
             amr_values: Vec::new(),
             bound_jkt: None,
+            scope_narrowed: false,
         };
 
         let key = keys::encode_grant_family("fid2");
@@ -1248,6 +1252,7 @@ mod tests {
             resources: Vec::new(),
             amr_values: Vec::new(),
             bound_jkt: None,
+            scope_narrowed: false,
         };
 
         let key = keys::encode_grant_family("fid3");
@@ -1293,6 +1298,7 @@ mod tests {
                 resource: None,
                 amr_values: Vec::new(),
                 mfa_proof: crate::identity::MfaProof::None,
+                scope_narrowed: false,
             };
             let key = keys::encode_oauth_code(&format!("expired_hash_{i}"));
             s.put(&realm, &key, &serde_json::to_vec(&code).expect("serialize"))
@@ -1965,6 +1971,7 @@ mod tests {
             resources: Vec::new(),
             amr_values: Vec::new(),
             bound_jkt: None,
+            scope_narrowed: false,
         };
         s.put(
             &realm,

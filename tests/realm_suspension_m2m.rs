@@ -18,6 +18,8 @@ use hearth::identity::{
 
 const CLIENT_SECRET: &str = "m2m-suspend-secret-123!";
 
+/// Creates a realm that declares the `read` scope [`cc_request`] asks for;
+/// the scope registry refuses a name it does not define.
 fn create_realm(harness: &common::TestHarness) -> RealmId {
     let realm = harness
         .identity()
@@ -25,8 +27,11 @@ fn create_realm(harness: &common::TestHarness) -> RealmId {
             name: format!("m2m-suspend-{}", uuid::Uuid::new_v4()),
             config: None,
         })
-        .expect("create realm");
-    realm.id().clone()
+        .expect("create realm")
+        .id()
+        .clone();
+    harness.declare_scopes(&realm, &["read"]);
+    realm
 }
 
 /// Registers a confidential `client_credentials` client and returns its ID.
@@ -58,6 +63,7 @@ fn cc_request(client_id: &hearth::core::ClientId) -> ClientCredentialsRequest {
         dpop_jkt: None,
         client_assertion_type: None,
         client_assertion: None,
+        resource: None,
     }
 }
 

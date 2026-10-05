@@ -74,6 +74,7 @@ fn the_code_exchange_refuses_a_malformed_assertion() {
                 dpop_jkt: None,
                 client_assertion_type: assertion_type.map(str::to_string),
                 client_assertion: assertion.map(str::to_string),
+                resource: None,
             },
         );
         assert!(
@@ -110,6 +111,7 @@ fn client_credentials_refuses_a_malformed_assertion_beside_a_valid_secret() {
             dpop_jkt: None,
             client_assertion_type: assertion_type.map(str::to_string),
             client_assertion: assertion.map(str::to_string),
+            resource: None,
         };
     // Control: the secret alone works.
     let issued = engine

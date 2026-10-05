@@ -52,6 +52,8 @@ fn client(h: &common::TestHarness, realm: &RealmId, secret: bool, grants: &[&str
 }
 
 fn subject_token(h: &common::TestHarness, realm: &RealmId) -> String {
+    // The scope registry refuses a scope the realm does not define.
+    h.declare_scopes(realm, &["read"]);
     let user = h
         .identity()
         .create_user(

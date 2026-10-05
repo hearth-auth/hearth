@@ -607,6 +607,7 @@ fn email_scope_token(h: &common::TestHarness, realm: &RealmId, user: &UserId) ->
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("exchange")

@@ -351,13 +351,41 @@ fn consent_gate(
         response_mode: params.response_mode.as_ref(),
     };
 
-    let requested_scopes = canonicalize_scopes(
-        params
-            .scope
-            .split_whitespace()
-            .map(str::to_string)
-            .collect::<Vec<_>>(),
-    );
+    // Resolve the scopes first (scope-consent-integrity design §2): the
+    // consent check, the consent screen and the code see only what can be
+    // granted.
+    let granted = match state.identity.authorization_scopes(
+        realm,
+        user_id,
+        &params.client_id,
+        &params.scope,
+        params.resource.as_deref(),
+    ) {
+        Ok(granted) => granted,
+        Err(crate::identity::IdentityError::InvalidScope { .. }) => {
+            return authorization_error_redirect(
+                state,
+                realm,
+                &error_return,
+                "invalid_scope",
+                "a requested scope is not available",
+            );
+        }
+        Err(crate::identity::IdentityError::InvalidTarget { .. }) => {
+            return handlers_common::bad_request(
+                "invalid_target: resource is not a registered protected resource",
+            );
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "authorize: scope resolution failed");
+            return handlers_common::server_error();
+        }
+    };
+    let mut granted_params = params.clone();
+    granted_params.scope = granted.join(" ");
+    let params = &granted_params;
+
+    let requested_scopes = canonicalize_scopes(granted);
 
     let existing = match state
         .identity

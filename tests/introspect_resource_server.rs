@@ -86,6 +86,8 @@ fn app(h: &common::TestHarness, realm: &RealmId, name: &str) -> ClientId {
 
 /// A token exchanged for `audience=RS` only: its `aud` is `[RS]`.
 fn audience_only_token(h: &common::TestHarness, realm: &RealmId) -> String {
+    // The scope registry refuses a scope the realm does not define.
+    h.declare_scopes(realm, &["read"]);
     let exchanger = h
         .identity()
         .register_client(

@@ -101,6 +101,8 @@ async fn a_concurrently_replayed_actor_token_is_accepted_once() {
     let h = common::TestHarness::in_process().await.unwrap();
     let identity: Arc<dyn IdentityEngine> = h.identity_arc();
     let realm = h.create_realm();
+    // The scope registry refuses a scope the realm does not define.
+    h.declare_scopes(&realm, &["read"]);
     let client = exchange_client(identity.as_ref(), &realm);
 
     for round in 0..ROUNDS {
@@ -114,6 +116,7 @@ async fn a_concurrently_replayed_actor_token_is_accepted_once() {
                     dpop_jkt: None,
                     client_assertion_type: None,
                     client_assertion: None,
+                    resource: None,
                 },
             )
             .unwrap()

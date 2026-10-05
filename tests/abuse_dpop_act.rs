@@ -58,6 +58,7 @@ async fn a38a_dpop_bound_client_credentials_without_dpop_rejected() {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect_err("must fail without dpop_jkt for a dpop_bound_access_tokens client");
@@ -112,6 +113,7 @@ async fn a38a_dpop_bound_client_credentials_with_dpop_jkt_accepted() {
                 dpop_jkt: Some(DUMMY_JKT.to_string()),
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect(
@@ -181,6 +183,7 @@ async fn a38c_unbound_client_credentials_without_dpop_ok() {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("client_credentials without dpop_jkt must succeed for an unbound client");

@@ -439,6 +439,47 @@ pub struct ResolvedPermissions {
     /// (`OrphanedReferenceSkipped`); they never reach a token.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub orphans: Vec<OrphanRef>,
+    /// Whether scope resolution narrowed `permissions` to named scopes (see
+    /// [`ScopeRequest::narrowed`]). The grant records it for re-issue.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub scope_narrowed: bool,
+}
+
+/// How scope resolution treats a scope it cannot grant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScopeMode {
+    /// An authorization request. A `first_party` client gets the grantable
+    /// scopes and the rest are dropped; a `third_party` client is refused
+    /// when any non-OIDC scope is not grantable. `declared_scopes` applies.
+    Request,
+    /// Re-issuing scopes granted earlier (code exchange, refresh, live
+    /// resolution). A scope the user no longer fully holds drops out, for
+    /// every trust level; a scope the registry no longer knows is refused.
+    Reissue,
+}
+
+/// One scope-resolution request (`scope-consent-integrity` design §2).
+#[derive(Clone, Copy, Debug)]
+pub struct ScopeRequest<'a> {
+    /// The user, or `None` for a grant with no user (`client_credentials`):
+    /// legal scopes are then granted and carry no permissions.
+    pub user_id: Option<&'a crate::core::UserId>,
+    /// The organization context of the token.
+    pub org_id: Option<&'a crate::core::OrganizationId>,
+    /// The scopes asked for, or granted earlier when `mode` is `Reissue`.
+    pub requested: &'a [String],
+    /// The client's trust level.
+    pub trust_level: crate::identity::ClientTrustLevel,
+    /// The client's `declared_scopes`; empty means any scope.
+    pub declared: &'a [String],
+    /// The canonical RFC 8707 resource, which selects the scope registry.
+    pub resource: Option<&'a crate::core::Uri>,
+    /// Request or re-issue rules.
+    pub mode: ScopeMode,
+    /// Whether the grant named a permission-bearing scope when it was first
+    /// requested. A re-issued grant keeps its narrowing even when every such
+    /// scope has dropped out, so it never widens to the user's full set.
+    pub narrowed: bool,
 }
 
 /// The kind of registry entry an [`OrphanRef`] names.

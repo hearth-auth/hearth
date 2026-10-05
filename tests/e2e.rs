@@ -114,6 +114,7 @@ async fn developer_onramp_realm_app_oidc_login() {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("exchange code");

@@ -456,6 +456,13 @@ pub enum IdentityError {
     },
     /// The scope intersection of subject, actor, and requested is empty.
     EmptyScopeIntersection,
+    /// A requested scope is not legal for the client and audience, or not
+    /// grantable to the user (`custom-permissions`). Answered as
+    /// `invalid_scope` (RFC 6749 §4.1.2.1, §5.2).
+    InvalidScope {
+        /// Internal reason (logged, not sent to the client).
+        reason: String,
+    },
     /// An actor token `jti` was replayed (B.5 replay prevention).
     ActorTokenReplayed,
 

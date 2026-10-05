@@ -21,6 +21,7 @@ fn cc_request(client_id: &ClientId, secret: &str) -> ClientCredentialsRequest {
         dpop_jkt: None,
         client_assertion_type: None,
         client_assertion: None,
+        resource: None,
     }
 }
 

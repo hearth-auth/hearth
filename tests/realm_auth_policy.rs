@@ -247,6 +247,7 @@ async fn token_ttl_overrides_applied_at_issuance() {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("exchange code");

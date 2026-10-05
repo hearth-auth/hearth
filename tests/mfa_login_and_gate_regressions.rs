@@ -1268,6 +1268,7 @@ fn exchanged_audience(rig: &LoginRig, client_id: &str, location: &str) -> Vec<St
                 client_assertion_type: holds_jwks
                     .then(|| "urn:ietf:params:oauth:client-assertion-type:jwt-bearer".to_string()),
                 client_assertion: holds_jwks.then(|| jar_client_assertion(rig, client_id)),
+                resource: None,
             },
         )
         .expect("exchange the code");

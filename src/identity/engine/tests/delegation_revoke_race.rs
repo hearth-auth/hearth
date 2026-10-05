@@ -152,6 +152,7 @@ fn an_exchange_racing_a_revoke_of_its_parent_fails_and_leaves_no_live_grant() {
     .with_hibp_transport(Arc::new(NeverPwnedStub));
 
     let realm = create_test_realm(&engine);
+    declare_test_scopes(&engine, &realm, &["mcp:tools:invoke"]);
     let user = create_test_user(&engine, &realm);
     let session = engine
         .create_session(&realm, user.id(), &SessionContext::default())

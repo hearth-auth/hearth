@@ -141,6 +141,7 @@ fn machine_token(h: &common::TestHarness, realm: &RealmId, client: &ClientId) ->
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("mint machine token")
@@ -443,8 +444,11 @@ async fn another_client_cannot_revoke_a_device_grant_token() {
 // ===== RFC 8693 token exchange: the exchanged token belongs to the actor =====
 
 /// Registers a confidential client declaring `scope`, able to mint
-/// `client_credentials` tokens and to perform token exchange.
+/// `client_credentials` tokens and to perform token exchange. The realm
+/// declares `scope` too, as the scope registry refuses a name it does not
+/// define.
 fn register_scoped(h: &common::TestHarness, realm: &RealmId, scope: &str) -> ClientId {
+    h.declare_scopes(realm, &scope.split_whitespace().collect::<Vec<_>>());
     h.identity()
         .register_client(
             realm,
@@ -579,6 +583,7 @@ async fn an_exchanged_machine_token_belongs_to_the_exchanging_client() {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("mint subject machine token")
@@ -687,6 +692,7 @@ async fn an_exchanged_machine_token_keeps_its_introspection_audience() {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("mint subject machine token")
@@ -725,6 +731,7 @@ async fn an_exchanged_token_with_an_actor_token_belongs_to_the_actor() {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("mint actor token")

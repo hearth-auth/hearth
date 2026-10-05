@@ -177,6 +177,7 @@ fn make_dpop_bound_subject_token(
                 dpop_jkt: Some(SUBJECT_JKT.to_string()),
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("exchange auth code")
