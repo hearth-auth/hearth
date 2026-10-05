@@ -105,11 +105,7 @@ done
 # cosign v3 signs to one `<file>.sigstore.json` bundle (signature, certificate
 # and transparency-log proof). The release no longer ships detached `.sig` /
 # `.pem` pairs, so a `verify-blob` that names them cannot run.
-#
-# The guide documents the current format. The README pins the latest published
-# binary release (check-readme-version.sh), so it moves to bundles together
-# with its version pin, once a release that ships bundles is published.
-for f in "$GUIDE"; do
+for f in "$README" "$GUIDE"; do
     if grep -qE '^\s*--(signature|certificate)\s' "$f" \
         || grep -qE 'verify-blob.*--(signature|certificate)\s' "$f"; then
         fail "${f} verifies with --signature/--certificate. Releases ship a Sigstore bundle: use 'cosign verify-blob --bundle <file>.sigstore.json'."

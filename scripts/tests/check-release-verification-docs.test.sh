@@ -196,6 +196,24 @@ cosign verify-blob \
 EOF
 run_case "the guide verifies a .sig/.pem pair the release no longer ships" \
     1 "${TMP}/readme-good.md" "${TMP}/guide-detached.md" "Sigstore bundle"
+cat > "${TMP}/readme-detached.md" <<'EOF'
+# Hearth
+
+```bash
+curl -LO "https://github.com/hearth-auth/hearth/releases/download/v1.6.10/hearth-linux-amd64"
+
+cosign verify-blob \
+  --certificate SHA256SUMS.pem \
+  --signature   SHA256SUMS.sig \
+  --certificate-identity-regexp '^https://github\.com/hearth-auth/hearth/.*$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  SHA256SUMS
+
+sha256sum -c SHA256SUMS --ignore-missing
+```
+EOF
+run_case "the README verifies a .sig/.pem pair the release no longer ships" \
+    1 "${TMP}/readme-detached.md" "${TMP}/guide-good.md" "Sigstore bundle"
 
 echo "== a documented asset the release never uploads is refused =="
 cat > "${TMP}/release-missing.yml" <<'EOF'

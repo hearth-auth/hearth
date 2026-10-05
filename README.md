@@ -1,4 +1,4 @@
-[![CI](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml/badge.svg)](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/hearth-auth/hearth/badge)](https://scorecard.dev/viewer/?uri=github.com/hearth-auth/hearth) [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0) [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange)](https://www.rust-lang.org/) ![v2.0.4](https://img.shields.io/badge/status-v2.0.4-brightgreen)
+[![CI](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml/badge.svg)](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/hearth-auth/hearth/badge)](https://scorecard.dev/viewer/?uri=github.com/hearth-auth/hearth) [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0) [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange)](https://www.rust-lang.org/) ![v3.1.6](https://img.shields.io/badge/status-v3.1.6-brightgreen)
 
 # Hearth — a purpose-built identity database
 
@@ -12,7 +12,7 @@ Every other identity provider is an application sitting on top of a generic data
 
 Token validation, session lookup, and permission checks run in-process against lock-free in-memory structures (epoch-reclaimed `HashMap` snapshots) — no network hop, no cache round-trip, no database query on the hot path. Deploy as a single binary with one config file and a data directory. No Postgres to provision, no Redis to invalidate, no policy service to operate.
 
-> **Stable 2.0.4:** APIs and on-disk formats are stable. See [CHANGELOG](CHANGELOG.md) for the full release history.
+> **Stable 3.1.6:** APIs and on-disk formats are stable. See [CHANGELOG](CHANGELOG.md) for the full release history.
 >
 > **Upgrade from 1.x:** 2.0.x carries the GA audit fixes merged in PRs #358 through #380. It
 > changes several defaults and token claim values; read the [upgrading guide](docs/guides/upgrading.md)
@@ -22,7 +22,7 @@ Token validation, session lookup, and permission checks run in-process against l
 
 ## Install
 
-Download pre-built v2.0.4 artifacts from the [Releases page](https://github.com/hearth-auth/hearth/releases/tag/v2.0.4), or use Docker or Helm.
+Download pre-built v3.1.6 artifacts from the [Releases page](https://github.com/hearth-auth/hearth/releases/tag/v3.1.6), or use Docker or Helm.
 
 ### Released binary — Linux / macOS
 
@@ -32,21 +32,19 @@ Download pre-built v2.0.4 artifacts from the [Releases page](https://github.com/
 #   hearth-darwin-amd64 | hearth-darwin-arm64
 ARTIFACT=hearth-linux-amd64
 
-BASE=https://github.com/hearth-auth/hearth/releases/download/v2.0.4
+BASE=https://github.com/hearth-auth/hearth/releases/download/v3.1.6
 
 curl -LO "${BASE}/${ARTIFACT}"
 curl -LO "${BASE}/SHA256SUMS"
-curl -LO "${BASE}/SHA256SUMS.sig"
-curl -LO "${BASE}/SHA256SUMS.pem"
+curl -LO "${BASE}/SHA256SUMS.sigstore.json"
 
-# 1. Verify the checksum manifest itself. Requires cosign v2+
+# 1. Verify the checksum manifest itself. Requires cosign v2.4+
 #    (brew install cosign). Without this step the checksum below proves
 #    nothing: anyone who can replace the binary can replace SHA256SUMS
 #    beside it. The signature is bound to Hearth's release workflow and
 #    logged to Sigstore's public transparency log, so it cannot be forged.
 cosign verify-blob \
-  --certificate SHA256SUMS.pem \
-  --signature   SHA256SUMS.sig \
+  --bundle SHA256SUMS.sigstore.json \
   --certificate-identity-regexp \
     '^https://github\.com/hearth-auth/hearth/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
@@ -69,19 +67,18 @@ chmod +x "${ARTIFACT}"
 
 ```powershell
 Invoke-WebRequest `
-  -Uri "https://github.com/hearth-auth/hearth/releases/download/v2.0.4/hearth-windows-amd64.exe" `
+  -Uri "https://github.com/hearth-auth/hearth/releases/download/v3.1.6/hearth-windows-amd64.exe" `
   -OutFile hearth-windows-amd64.exe
-foreach ($f in 'SHA256SUMS','SHA256SUMS.sig','SHA256SUMS.pem') {
+foreach ($f in 'SHA256SUMS','SHA256SUMS.sigstore.json') {
   Invoke-WebRequest `
-    -Uri "https://github.com/hearth-auth/hearth/releases/download/v2.0.4/$f" `
+    -Uri "https://github.com/hearth-auth/hearth/releases/download/v3.1.6/$f" `
     -OutFile $f
 }
 
-# 1. Verify the checksum manifest itself (cosign v2+). Without this the
+# 1. Verify the checksum manifest itself (cosign v2.4+). Without this the
 #    checksum below proves nothing — see the note under the Linux/macOS block.
 cosign verify-blob `
-  --certificate SHA256SUMS.pem `
-  --signature   SHA256SUMS.sig `
+  --bundle SHA256SUMS.sigstore.json `
   --certificate-identity-regexp `
     '^https://github\.com/hearth-auth/hearth/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$' `
   --certificate-oidc-issuer https://token.actions.githubusercontent.com `
@@ -98,10 +95,10 @@ if ($expected -eq $actual) { "OK" } else { throw "CHECKSUM MISMATCH" }
 ### Docker — multi-arch (linux/amd64 + linux/arm64)
 
 ```bash
-docker pull ghcr.io/hearth-auth/hearth:v2.0.4
+docker pull ghcr.io/hearth-auth/hearth:v3.1.6
 
 # Dev mode — in-memory store, no data persistence (Linux only; --dev requires loopback bind)
-docker run --rm --network=host ghcr.io/hearth-auth/hearth:v2.0.4 serve --dev
+docker run --rm --network=host ghcr.io/hearth-auth/hearth:v3.1.6 serve --dev
 curl -fsS http://127.0.0.1:8420/health   # → {"status":"ok"}
 ```
 
@@ -111,7 +108,7 @@ curl -fsS http://127.0.0.1:8420/health   # → {"status":"ok"}
 
 ```bash
 helm install hearth oci://ghcr.io/hearth-auth/charts/hearth \
-  --version 2.0.4 \
+  --version 3.1.6 \
   --namespace auth \
   --create-namespace
 ```
@@ -123,7 +120,7 @@ cosign verify \
   --certificate-identity-regexp \
     '^https://github\.com/hearth-auth/hearth/\.github/workflows/helm\.yml@refs/tags/v' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/hearth-auth/charts/hearth:2.0.4
+  ghcr.io/hearth-auth/charts/hearth:3.1.6
 ```
 
 For signature and SLSA provenance verification of binaries, see [docs/guides/verify-release.md](docs/guides/verify-release.md). For production deployment (systemd, Docker Compose, Kubernetes), see [`deploy/README.md`](deploy/README.md).
