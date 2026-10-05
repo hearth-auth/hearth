@@ -115,7 +115,7 @@ tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-tracing-opentelemetry = "0.33"
+tracing-opentelemetry = "0.34"
 opentelemetry = { version = "0.32", features = ["trace"] }
 # 0.32.1 is the floor: it fixes GHSA-w9wp-h8wv-79jx (unbounded allocation in
 # W3C Baggage propagation). Hearth installs no text-map propagator, so the path
