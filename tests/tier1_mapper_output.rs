@@ -149,20 +149,20 @@ async fn tier1_names_never_come_from_mapper_output() {
     assert_eq!(
         text.matches("\"sub\":").count(),
         1,
-        "the payload carries `sub` once: {text}"
+        "the payload carries `sub` once"
     );
     let payload: serde_json::Value = serde_json::from_str(&text).expect("json payload");
     assert_eq!(
         payload["sub"].as_str(),
         Some(user.to_string().as_str()),
-        "`sub` is the user's ID: {text}"
+        "`sub` is the user's ID"
     );
     assert!(
         !text.contains("hearth.admin"),
-        "a mapper never adds permissions: {text}"
+        "a mapper never adds permissions"
     );
     assert!(
         payload.get("oid").is_none(),
-        "a mapper never sets the organization: {text}"
+        "a mapper never sets the organization"
     );
 }

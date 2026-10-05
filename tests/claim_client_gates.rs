@@ -139,7 +139,6 @@ async fn slug_gates_match_managed_clients_only() {
     let info = h.identity().userinfo(&realm, &token).expect("userinfo");
     assert!(
         !info.custom.contains_key("portal_tier"),
-        "a self-registered client must not pass a managed client's gate; got {:?}",
-        info.custom
+        "a self-registered client must not pass a managed client's gate"
     );
 }
