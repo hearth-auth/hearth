@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::core::Timestamp;
+use crate::core::{ClientId, Timestamp};
 use crate::identity::oidc::{ClientTrustLevel, OAuthClient};
 use crate::identity::User;
 
@@ -60,8 +60,12 @@ pub struct ClaimMapping {
     pub first_party_only: bool,
     #[serde(default)]
     pub required_scopes: Option<Vec<String>>,
+    /// Release gate: the managed clients that may receive the claim, by
+    /// client ID. Config load resolves each `allowed_clients` slug of
+    /// `hearth.yaml` to its managed client's ID, so a client is matched by
+    /// identity, never by a name another registration could copy.
     #[serde(default)]
-    pub allowed_clients: Option<Vec<String>>,
+    pub allowed_clients: Option<Vec<ClientId>>,
 }
 
 const fn default_true() -> bool {
@@ -121,7 +125,7 @@ impl ClaimMapping {
             }
         }
         if let Some(allowed_clients) = &self.allowed_clients {
-            if !allowed_clients.iter().any(|slug| slug == client.slug()) {
+            if !allowed_clients.contains(client.client_id()) {
                 return false;
             }
         }

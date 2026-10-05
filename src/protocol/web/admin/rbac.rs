@@ -1577,8 +1577,11 @@ pub async fn admin_realm_claims(
         .as_ref()
         .and_then(|cfg| cfg.realms.as_ref())
         .and_then(|realms| realms.get(realm.name()))
-        .and_then(|r| r.claims.as_ref())
-        .map(|profile| {
+        .and_then(|r| r.claims.as_ref().map(|profile| (r, profile)))
+        .map(|(r, profile)| {
+            // Config load refused any gate that names no managed client, so
+            // every mapping resolves here.
+            let managed = r.managed_client_ids(realm.name(), &mut Vec::new());
             profile
                 .mappings
                 .iter()
@@ -1586,17 +1589,15 @@ pub async fn admin_realm_claims(
                 // operator omitted still has a value at issuance time — the
                 // viewer must show the one the token issuer will use
                 // (audit 2026-08-28 §4.13#3).
-                .map(|m| {
-                    let m = m.to_domain();
-                    ClaimMappingRow {
-                        claim: m.claim.clone(),
-                        source: claim_source_label(&m.source),
-                        include_in_access_token: m.include_in_access_token,
-                        include_in_id_token: m.include_in_id_token,
-                        include_in_userinfo: m.include_in_userinfo,
-                        first_party_only: m.first_party_only,
-                        required_scopes: m.required_scopes.clone().unwrap_or_default(),
-                    }
+                .filter_map(|m| m.to_domain(&managed).ok())
+                .map(|m| ClaimMappingRow {
+                    claim: m.claim.clone(),
+                    source: claim_source_label(&m.source),
+                    include_in_access_token: m.include_in_access_token,
+                    include_in_id_token: m.include_in_id_token,
+                    include_in_userinfo: m.include_in_userinfo,
+                    first_party_only: m.first_party_only,
+                    required_scopes: m.required_scopes.clone().unwrap_or_default(),
                 })
                 .collect::<Vec<_>>()
         })

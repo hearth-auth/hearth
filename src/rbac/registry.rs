@@ -119,6 +119,26 @@ pub enum RegistryError {
         /// The undeclared permission string.
         permission: String,
     },
+    /// Two managed clients of one realm have the same slug.
+    DuplicateClientSlug {
+        /// The repeated slug.
+        slug: String,
+        /// The YAML keys of the clients that share it.
+        clients: Vec<String>,
+    },
+    /// An `allowed_clients` entry names no managed client of the realm.
+    UnknownAllowedClient {
+        /// The claim whose gate holds the entry.
+        claim: String,
+        /// The entry.
+        slug: String,
+    },
+    /// A scope bundle grants no permissions. Every user would hold all of
+    /// it, so it is refused at load.
+    EmptyScopeBundle {
+        /// Name of the offending bundle.
+        bundle_name: String,
+    },
     /// A role's `parent_roles` contains a `RoleId` not present in the
     /// registry's `roles` list.
     UndeclaredParentRole {
@@ -204,6 +224,22 @@ impl fmt::Display for RegistryError {
                     f,
                     "bundle {bundle_name:?} references undeclared permission {permission:?}"
                 )
+            }
+            Self::DuplicateClientSlug { slug, clients } => {
+                write!(
+                    f,
+                    "managed clients {clients:?} share the slug {slug:?}; slugs must be unique"
+                )
+            }
+            Self::UnknownAllowedClient { claim, slug } => {
+                write!(
+                    f,
+                    "claim {claim:?}: allowed_clients entry {slug:?} is not the slug of a \
+                     managed client (applications / oauth_clients) of this realm"
+                )
+            }
+            Self::EmptyScopeBundle { bundle_name } => {
+                write!(f, "bundle {bundle_name:?} grants no permissions")
             }
             Self::UndeclaredParentRole {
                 role_name,
@@ -328,6 +364,11 @@ impl RealmPermissionRegistry {
                     reason,
                 });
             }
+            if bundle.permissions.is_empty() {
+                errors.push(RegistryError::EmptyScopeBundle {
+                    bundle_name: bundle.name.clone(),
+                });
+            }
             for perm in &bundle.permissions {
                 if !declared_perms.contains(perm.as_str()) {
                     errors.push(RegistryError::UndeclaredPermissionInBundle {
@@ -346,6 +387,11 @@ impl RealmPermissionRegistry {
                     errors.push(RegistryError::InvalidScopeBundleName {
                         name: bundle.name.clone(),
                         reason,
+                    });
+                }
+                if bundle.permissions.is_empty() {
+                    errors.push(RegistryError::EmptyScopeBundle {
+                        bundle_name: bundle.name.clone(),
                     });
                 }
                 for perm in &bundle.permissions {

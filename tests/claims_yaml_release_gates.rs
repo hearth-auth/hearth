@@ -43,7 +43,7 @@ fn effective_mappings(config: &Config) -> Vec<ClaimMapping> {
     let realms = config.realms.as_ref().expect("realms block");
     let realm = realms.get("acme").expect("acme realm");
     realm
-        .to_realm_config(&config.auth, None)
+        .to_realm_config("test", &config.auth, None)
         .expect("realm config")
         .claim_profile
         .expect("claim profile")
@@ -200,5 +200,96 @@ fn overriding_roles_inherits_its_first_party_gate() {
         mapping(&mappings, "roles").first_party_only,
         "overriding `roles` must inherit the default mapping's \
          first_party_only: true"
+    );
+}
+
+// ── `allowed_clients` names managed clients only ─────────────────────────────
+
+fn config_with_apps(apps_yaml: &str, mappings_yaml: &str) -> Result<Config, String> {
+    let yaml = format!(
+        "{PREAMBLE}realms:\n  acme:\n    applications:\n{apps_yaml}    claims:\n      mappings:\n{mappings_yaml}"
+    );
+    Config::from_yaml_str(&yaml).map_err(|e| e.to_string())
+}
+
+/// Runs the realm through the startup path; returns the refusal text.
+fn realm_refusal(config: &Config) -> String {
+    let realm = config
+        .realms
+        .as_ref()
+        .and_then(|r| r.get("acme"))
+        .expect("acme realm");
+    match realm.to_realm_config("acme", &config.auth, None) {
+        Ok(_) => String::new(),
+        Err(errs) => errs
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; "),
+    }
+}
+
+const PORTAL_GATE: &str = "        - claim: portal_tier\n\
+     \x20         source:\n\
+     \x20           source: constant\n\
+     \x20           value: gold\n\
+     \x20         allowed_clients:\n\
+     \x20           - customer-portal\n";
+
+/// One managed client under `key`, with an optional explicit `slug`.
+fn app(key: &str, slug: Option<&str>) -> String {
+    let slug = slug.map_or(String::new(), |s| format!("        slug: {s}\n"));
+    format!(
+        "      {key}:\n        name: {key}\n{slug}        redirect_uris: [\"https://rp.example.com/cb\"]\n"
+    )
+}
+
+#[test]
+fn managed_client_slugs_are_unique() {
+    let apps = app("portal-a", Some("customer-portal")) + &app("portal-b", Some("customer-portal"));
+    let config = config_with_apps(&apps, PORTAL_GATE).expect("parses");
+    let err = realm_refusal(&config);
+    assert!(
+        err.contains("customer-portal"),
+        "two managed clients with one slug must be refused, naming it; got: {err:?}"
+    );
+}
+
+#[test]
+fn an_allowed_clients_entry_must_name_a_managed_client() {
+    let config = config_with_apps(&app("billing", None), PORTAL_GATE).expect("parses");
+    let err = realm_refusal(&config);
+    assert!(
+        err.contains("customer-portal"),
+        "a gate naming no managed client must be refused, naming the entry; got: {err:?}"
+    );
+}
+
+#[test]
+fn a_client_slug_defaults_to_its_yaml_key() {
+    let config = config_with_apps(&app("customer-portal", None), PORTAL_GATE).expect("parses");
+    let realm = config
+        .realms
+        .as_ref()
+        .and_then(|r| r.get("acme"))
+        .expect("acme");
+    let mappings = realm
+        .to_realm_config("acme", &config.auth, None)
+        .expect("the key is the slug, so the gate resolves")
+        .claim_profile
+        .expect("claim profile")
+        .mappings;
+    let gate = mappings
+        .iter()
+        .find(|m| m.claim == "portal_tier")
+        .and_then(|m| m.allowed_clients.clone())
+        .expect("gate");
+    assert_eq!(
+        gate,
+        vec![hearth::identity::reconcile::deterministic_client_id(
+            "acme",
+            "customer-portal"
+        )],
+        "the gate holds the managed client's ID"
     );
 }

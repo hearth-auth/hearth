@@ -62,9 +62,10 @@ Where it runs:
 
 ### 3. Gates and config
 
-- Every `oauth_clients` entry needs a `slug`, unique in its realm. Config load refuses a missing or repeated slug and names the clients.
+- Every managed client has a slug: its `slug` field, or its YAML key when the field is absent. Before, a missing slug fell back to the client name, the same rule a dynamically registered client gets. Config load refuses a repeated slug and names the clients.
 - Each `allowed_clients` entry must be the slug of a managed client in the same realm. Any other value fails config load and names the entry. A typo and a dynamically registered client's slug look the same at load, and both are refused. At registry load each slug resolves to a client ID. The gate compares client IDs.
-- After the mappers run, issuance drops every mapper output whose name is a Tier 1 claim. Core then writes the Tier 1 claims. This holds even for a claim profile that config load did not check.
+- Issuance drops every realm mapping that targets a Tier 1 claim before it evaluates the profile, and drops any Tier 1 name from the result. The built-in `permissions` mapping, sourced from the resolved permissions, is the only profile source of a Tier 1 claim. Core writes the others. This holds even for a claim profile that config load did not check.
+- Resolution skips a role or permission that `hearth.yaml` removed (archived). A permission with no registry record at all stays granted: a realm created at runtime has no YAML vocabulary, so its roles name unregistered permissions.
 
 ### 4. Registry hygiene
 

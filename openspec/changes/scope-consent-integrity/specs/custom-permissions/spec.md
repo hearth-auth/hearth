@@ -96,7 +96,7 @@ A realm bundle and a protected-resource bundle MAY share a name. They are distin
 - **THEN** the request fails with `invalid_scope`
 
 ### Requirement: `allowed_clients` names managed clients only
-Every entry of `oauth_clients` in `hearth.yaml` SHALL carry a `slug`, unique within the realm. Each `allowed_clients` entry SHALL be the slug of a managed client: one authored under `realms.<id>.oauth_clients`. Config load SHALL reject an `allowed_clients` entry that names a client registered through Dynamic Client Registration, with an error that names the slug's track. The server SHALL resolve each slug to its client ID at registry load, and the gate SHALL compare client IDs, not slugs.
+Every managed client (an entry of `applications` or `oauth_clients` in `hearth.yaml`) SHALL have a slug: its `slug` field, or its YAML key when the field is absent. Slugs SHALL be unique within the realm. Each `allowed_clients` entry SHALL be the slug of a managed client: one authored under `realms.<id>.oauth_clients`. Config load SHALL reject an `allowed_clients` entry that names a client registered through Dynamic Client Registration, with an error that names the slug's track. The server SHALL resolve each slug to its client ID at registry load, and the gate SHALL compare client IDs, not slugs.
 
 #### Scenario: A DCR slug in a gate
 - **WHEN** a mapping lists in `allowed_clients` the slug of a client created by `POST /register`
@@ -110,9 +110,13 @@ Every entry of `oauth_clients` in `hearth.yaml` SHALL carry a `slug`, unique wit
 - **WHEN** a mapping sets `allowed_clients: [customer-portal]`, and a client registered through `POST /register` with `client_name` `Customer Portal` gets a token
 - **THEN** the gated claim is not emitted to that client
 
-#### Scenario: Managed client slugs are required and unique
-- **WHEN** `hearth.yaml` declares two clients in one realm with the same `slug`, or a client with no `slug`
+#### Scenario: Managed client slugs are unique
+- **WHEN** `hearth.yaml` declares two clients in one realm with the same `slug`
 - **THEN** config load fails and names the clients
+
+#### Scenario: A client without a slug
+- **WHEN** a client is declared under the key `customer-portal` with no `slug`, and a gate lists `customer-portal`
+- **THEN** config load succeeds, and the gate matches that client
 
 ### Requirement: Tier 1 claim names are reserved
 Config load SHALL reject a mapping whose target is a Tier 1 claim name:

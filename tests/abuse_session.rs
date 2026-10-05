@@ -550,7 +550,7 @@ fn a18_session_timeout_keys_load_from_yaml() {
     let realms = config.realms.as_ref().expect("realms block");
 
     let acme = realms["acme"]
-        .to_realm_config(&config.auth, None)
+        .to_realm_config("test", &config.auth, None)
         .expect("acme realm config");
     assert_eq!(
         acme.idle_timeout_secs,
@@ -564,7 +564,7 @@ fn a18_session_timeout_keys_load_from_yaml() {
     );
 
     let plain = realms["plain"]
-        .to_realm_config(&config.auth, None)
+        .to_realm_config("test", &config.auth, None)
         .expect("plain realm config");
     assert_eq!(
         plain.idle_timeout_secs,
@@ -608,7 +608,7 @@ fn a18_session_timeout_keys_default_to_none() {
     let config =
         hearth::config::Config::from_yaml_str_unchecked("realms:\n  plain: {}\n").expect("parse");
     let plain = config.realms.as_ref().expect("realms")["plain"]
-        .to_realm_config(&config.auth, None)
+        .to_realm_config("test", &config.auth, None)
         .expect("realm config");
     assert_eq!(plain.idle_timeout_secs, None);
     assert_eq!(plain.absolute_timeout_secs, None);

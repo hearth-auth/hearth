@@ -35,7 +35,7 @@ fn unrecognized_policy_string_returns_error() {
         session_over_limit_policy: Some("banish_oldest".to_string()),
         ..Default::default()
     };
-    let result = yaml_config.to_realm_config(&AuthConfig::default(), None);
+    let result = yaml_config.to_realm_config("test", &AuthConfig::default(), None);
     assert!(
         result.is_err(),
         "unrecognized session_over_limit_policy must be a hard error, not a silent fallback"

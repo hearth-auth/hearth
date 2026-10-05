@@ -23,11 +23,9 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use base64::Engine as _;
 use hearth::core::{ClientId, RealmId, UserId};
-use hearth::identity::claims_config::{ClaimMapping, ClaimProfile, ClaimSource};
 use hearth::identity::{
-    AuthorizationRequest, ClientTrustLevel, CodeChallengeMethod, CreateRealmRequest,
-    CreateUserRequest, DeviceAuthorizationRequest, RealmConfig, RegisterClientRequest,
-    TokenExchangeRequest,
+    AuthorizationRequest, ClientTrustLevel, CodeChallengeMethod, CreateUserRequest,
+    DeviceAuthorizationRequest, RegisterClientRequest, TokenExchangeRequest, UpdateClientRequest,
 };
 use hearth::protocol::http::{router, AppState};
 use hearth::rbac::{AssignRoleRequest, CreateRoleRequest, Permission, Scope, Subject};
@@ -350,35 +348,6 @@ async fn access_tokens_name_the_client_they_were_issued_to() {
     }
 }
 
-/// A realm whose claim profile deliberately releases `permissions` to every
-/// client — the defence-in-depth case: even when a third-party token does
-/// carry admin permissions, the admin API must refuse it.
-fn realm_releasing_permissions_to_everyone(h: &common::TestHarness) -> RealmId {
-    let realm = h
-        .identity()
-        .create_realm(&CreateRealmRequest {
-            name: format!("tp-admin-{}", uuid::Uuid::new_v4()),
-            config: Some(RealmConfig {
-                claim_profile: Some(ClaimProfile {
-                    mappings: vec![ClaimMapping {
-                        claim: "permissions".into(),
-                        source: ClaimSource::EffectivePermissions,
-                        include_in_access_token: true,
-                        include_in_id_token: false,
-                        include_in_userinfo: false,
-                        first_party_only: false,
-                        required_scopes: None,
-                        allowed_clients: None,
-                    }],
-                    updated_at: None,
-                }),
-                ..RealmConfig::default()
-            }),
-        })
-        .expect("create realm");
-    realm.id().clone()
-}
-
 async fn get_admin_users(h: &common::TestHarness, realm: &RealmId, token: &str) -> StatusCode {
     let app = router(Arc::new(AppState::new(
         h.identity_arc(),
@@ -401,42 +370,49 @@ async fn get_admin_users(h: &common::TestHarness, realm: &RealmId, token: &str) 
 
 #[tokio::test]
 async fn admin_api_refuses_a_token_held_by_a_third_party_client() {
+    // Defence in depth: a third-party token can no longer carry permissions
+    // (the `permissions` claim is first-party only, and a claim profile cannot
+    // re-target a Tier 1 claim). To hold a permission-bearing token whose
+    // client is third-party, the token is issued while the client is
+    // first-party, and the client is then demoted. Only the client gate is
+    // left to refuse it.
     let h = common::TestHarness::in_process().await.expect("harness");
-    let realm = realm_releasing_permissions_to_everyone(&h);
+    let realm = h.create_realm();
     let user = create_user(&h, &realm);
     grant_realm_admin(&h, &realm, user.id());
 
-    let third = register(
-        &h,
-        &realm,
-        ClientTrustLevel::ThirdParty,
-        &["authorization_code", "refresh_token"],
-    );
-    let (tp_access, _) = code_grant(&h, &realm, &third, user.id());
-    let tp_claims = h.identity().validate_token(&realm, &tp_access).expect("v");
-    assert!(
-        !tp_claims.permissions.is_empty(),
-        "precondition: this realm's profile releases permissions to third \
-         parties, so the admin gate is the only thing left to refuse the token"
-    );
-    assert_eq!(
-        get_admin_users(&h, &realm, &tp_access).await,
-        StatusCode::FORBIDDEN,
-        "the admin API must refuse a token issued to a third-party client, \
-         whatever permissions it carries"
-    );
-
-    // Control: the same user through a first-party client is admitted.
-    let first = register(
+    let client = register(
         &h,
         &realm,
         ClientTrustLevel::FirstParty,
         &["authorization_code", "refresh_token"],
     );
-    let (fp_access, _) = code_grant(&h, &realm, &first, user.id());
+    let (access, _) = code_grant(&h, &realm, &client, user.id());
     assert_eq!(
-        get_admin_users(&h, &realm, &fp_access).await,
+        get_admin_users(&h, &realm, &access).await,
         StatusCode::OK,
-        "a first-party client's token for an admin must still reach the admin API"
+        "control: a first-party client's token for an admin reaches the admin API"
+    );
+    let claims = h.identity().validate_token(&realm, &access).expect("v");
+    assert!(
+        !claims.permissions.is_empty(),
+        "precondition: the token carries the admin's permissions"
+    );
+
+    h.identity()
+        .update_client(
+            &realm,
+            &client,
+            &UpdateClientRequest {
+                trust_level: Some(ClientTrustLevel::ThirdParty),
+                ..Default::default()
+            },
+        )
+        .expect("demote the client");
+    assert_eq!(
+        get_admin_users(&h, &realm, &access).await,
+        StatusCode::FORBIDDEN,
+        "the admin API must refuse a token issued to a third-party client, \
+         whatever permissions it carries"
     );
 }

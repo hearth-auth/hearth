@@ -392,7 +392,7 @@ fn realm_yaml_with_ttl(
 #[test]
 fn a14_password_reset_ttl_over_1h_rejected() {
     let yaml = realm_yaml_with_ttl(Some("2h"), None, false);
-    let result = yaml.to_realm_config(&AuthConfig::default(), None);
+    let result = yaml.to_realm_config("test", &AuthConfig::default(), None);
     assert!(
         result.is_err(),
         "password_reset_token_ttl = 2h without allow_unsafe_ttl must be rejected"
@@ -409,7 +409,7 @@ fn a14_password_reset_ttl_over_1h_rejected() {
 #[test]
 fn a14_magic_link_ttl_over_30m_rejected() {
     let yaml = realm_yaml_with_ttl(None, Some("1h"), false);
-    let result = yaml.to_realm_config(&AuthConfig::default(), None);
+    let result = yaml.to_realm_config("test", &AuthConfig::default(), None);
     assert!(
         result.is_err(),
         "magic_link_ttl = 1h without allow_unsafe_ttl must be rejected"
@@ -426,7 +426,7 @@ fn a14_magic_link_ttl_over_30m_rejected() {
 #[test]
 fn a14_allow_unsafe_ttl_lifts_both_caps() {
     let yaml = realm_yaml_with_ttl(Some("12h"), Some("2h"), true);
-    yaml.to_realm_config(&AuthConfig::default(), None)
+    yaml.to_realm_config("test", &AuthConfig::default(), None)
         .expect("allow_unsafe_ttl = true must permit TTLs over the caps");
 }
 
@@ -434,7 +434,7 @@ fn a14_allow_unsafe_ttl_lifts_both_caps() {
 #[test]
 fn a14_ttl_at_exact_cap_boundary_succeeds() {
     let yaml = realm_yaml_with_ttl(Some("60m"), Some("30m"), false);
-    yaml.to_realm_config(&AuthConfig::default(), None)
+    yaml.to_realm_config("test", &AuthConfig::default(), None)
         .expect("TTL at exact cap boundary must succeed");
 }
 
@@ -443,7 +443,7 @@ fn a14_ttl_at_exact_cap_boundary_succeeds() {
 fn a14_valid_ttls_are_parsed_correctly() {
     let yaml = realm_yaml_with_ttl(Some("30m"), Some("15m"), false);
     let cfg = yaml
-        .to_realm_config(&AuthConfig::default(), None)
+        .to_realm_config("test", &AuthConfig::default(), None)
         .expect("valid TTLs must parse");
 
     assert_eq!(

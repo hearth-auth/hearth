@@ -18,15 +18,16 @@ use crate::storage::{StorageEngine, StorageError};
 
 use super::error::RbacError;
 use super::keys;
+use super::registry::{classify_scope_string, ScopeKind};
 use super::resolution_cache::ShardedResolutionCache;
-use super::resolve::{self, Resolver};
+use super::resolve::{self, Resolver, ScopeLookup};
 use super::seed::{self, StoredScope};
 use super::types::{
     AssignRoleRequest, AssignmentId, CreateGroupRequest, CreateRoleRequest, CycleKind, Group,
-    GroupId, GroupMember, GroupMembership, GroupMembershipEdge, Page, Permission, PermissionRecord,
-    PermissionStatus, ProtectedResource, ResolvedPermissions, Role, RoleAssignment, RoleId,
-    RoleSpec, RoleStatus, RoleSubject, Scope, ScopeExport, ScopeSpec, Subject, TraversalKind,
-    UpdateGroupRequest, UpdateRoleRequest, UserPermissionGrant,
+    GroupId, GroupMember, GroupMembership, GroupMembershipEdge, OrphanKind, OrphanRef, Page,
+    Permission, PermissionRecord, PermissionStatus, ProtectedResource, ResolvedPermissions, Role,
+    RoleAssignment, RoleId, RoleSpec, RoleStatus, RoleSubject, Scope, ScopeExport, ScopeSpec,
+    Subject, TraversalKind, UpdateGroupRequest, UpdateRoleRequest, UserPermissionGrant,
 };
 use super::{RbacEngine, SvBumper};
 
@@ -352,6 +353,14 @@ impl EmbeddedRbacEngine {
         Ok(())
     }
 
+    /// Maps a stored scope row to its lookup result.
+    fn scope_lookup(stored: &StoredScope) -> ScopeLookup {
+        match &stored.permissions {
+            None => ScopeLookup::NoNarrowing,
+            Some(list) => ScopeLookup::Bundle(list.clone()),
+        }
+    }
+
     fn validate_permissions_for_operator(perms: &[Permission]) -> Result<(), RbacError> {
         for p in perms {
             if p.is_reserved() {
@@ -666,14 +675,11 @@ impl Resolver for EmbeddedRbacEngine {
         &self,
         realm_id: &RealmId,
         scope_name: &str,
-    ) -> Result<Option<Vec<Permission>>, RbacError> {
+    ) -> Result<ScopeLookup, RbacError> {
         let key = keys::encode_scope(realm_id, scope_name);
         match self.storage.get(realm_id, &key)? {
-            None => Ok(Some(Vec::new())),
-            Some(bytes) => {
-                let s: StoredScope = Self::de(&bytes)?;
-                Ok(s.permissions)
-            }
+            None => Ok(ScopeLookup::Missing),
+            Some(bytes) => Ok(Self::scope_lookup(&Self::de(&bytes)?)),
         }
     }
 
@@ -691,6 +697,21 @@ impl Resolver for EmbeddedRbacEngine {
         name: &str,
     ) -> Result<Option<RoleId>, RbacError> {
         self.load_role_id_by_name(realm_id, name)
+    }
+
+    fn permission_archived(
+        &self,
+        realm_id: &RealmId,
+        permission: &Permission,
+    ) -> Result<bool, RbacError> {
+        let key = keys::encode_permission(realm_id, permission.as_str());
+        match self.storage.get(realm_id, &key)? {
+            None => Ok(false),
+            Some(raw) => {
+                let record: PermissionRecord = Self::de(&raw)?;
+                Ok(record.status == PermissionStatus::Archived)
+            }
+        }
     }
 
     fn additional_roles(
@@ -714,15 +735,12 @@ impl Resolver for EmbeddedRbacEngine {
         realm_id: &RealmId,
         resource_uri: &Uri,
         scope_name: &str,
-    ) -> Result<Option<Vec<Permission>>, RbacError> {
+    ) -> Result<ScopeLookup, RbacError> {
         let hash = resource_uri.storage_hash();
         let key = keys::encode_resource_scope(realm_id, &hash, scope_name);
         match self.storage.get(realm_id, &key)? {
-            None => Ok(None),
-            Some(bytes) => {
-                let s: StoredScope = Self::de(&bytes)?;
-                Ok(s.permissions)
-            }
+            None => Ok(ScopeLookup::Missing),
+            Some(bytes) => Ok(Self::scope_lookup(&Self::de(&bytes)?)),
         }
     }
 
@@ -1999,6 +2017,23 @@ impl RbacEngine for EmbeddedRbacEngine {
             let key = keys::encode_scope(realm_id, &spec.name);
             self.write_put(realm_id, &key, &Self::ser(&stored)?)?;
         }
+
+        // A bundle that the YAML no longer defines is deleted, so it can never
+        // narrow or widen a token again. Only bundle names (`a:b`) come from
+        // YAML; the seeded bare-word scopes (`openid`, `admin`, `org`, ...)
+        // are not YAML bundles and stay.
+        let declared: HashSet<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+        let prefix = keys::scope_scan_prefix(realm_id);
+        let end = keys::prefix_end(&prefix);
+        for entry in self.storage.scan(realm_id, &prefix, &end)? {
+            let Ok(stored) = Self::de::<seed::StoredScope>(&entry.value) else {
+                continue;
+            };
+            let is_bundle = classify_scope_string(&stored.name) == Some(ScopeKind::Bundle);
+            if is_bundle && !declared.contains(stored.name.as_str()) {
+                self.write_delete(realm_id, &entry.key)?;
+            }
+        }
         Ok(())
     }
 
@@ -2181,6 +2216,86 @@ impl RbacEngine for EmbeddedRbacEngine {
             out.push(GroupMembershipEdge { group_id, member });
         }
         Ok(out)
+    }
+
+    fn orphaned_references(&self, realm_id: &RealmId) -> Result<Vec<OrphanRef>, RbacError> {
+        let scan = |prefix: Vec<u8>| {
+            let end = keys::prefix_end(&prefix);
+            self.storage.scan(realm_id, &prefix, &end)
+        };
+        let mut archived_perms: HashSet<String> = HashSet::new();
+        for entry in scan(keys::permission_scan_prefix(realm_id))? {
+            if let Ok(record) = Self::de::<PermissionRecord>(&entry.value) {
+                if record.status == PermissionStatus::Archived {
+                    archived_perms.insert(record.name.as_str().to_string());
+                }
+            }
+        }
+        let mut roles: std::collections::HashMap<RoleId, Role> = std::collections::HashMap::new();
+        for entry in scan(keys::role_name_scan_prefix(realm_id))? {
+            if let Ok(id) = Self::de::<RoleId>(&entry.value) {
+                if let Some(role) = self.load_role(realm_id, &id)? {
+                    roles.insert(id, role);
+                }
+            }
+        }
+
+        let mut out: BTreeSet<OrphanRef> = BTreeSet::new();
+        let role_ref = |out: &mut BTreeSet<OrphanRef>, id: &RoleId| match roles.get(id) {
+            None => {
+                out.insert(OrphanRef {
+                    kind: OrphanKind::Role,
+                    reference: id.to_string(),
+                });
+            }
+            Some(role) if role.status == RoleStatus::Archived => {
+                out.insert(OrphanRef {
+                    kind: OrphanKind::Role,
+                    reference: role.name.clone(),
+                });
+            }
+            Some(_) => {}
+        };
+        let archived_perm = |out: &mut BTreeSet<OrphanRef>, p: &Permission| {
+            if archived_perms.contains(p.as_str()) {
+                out.insert(OrphanRef {
+                    kind: OrphanKind::Permission,
+                    reference: p.as_str().to_string(),
+                });
+            }
+        };
+
+        for role in roles.values().filter(|r| r.status != RoleStatus::Archived) {
+            for p in &role.permissions {
+                archived_perm(&mut out, p);
+            }
+            for parent in &role.parent_roles {
+                role_ref(&mut out, parent);
+            }
+        }
+        for assignment in self.export_all_assignments(realm_id)? {
+            role_ref(&mut out, &assignment.role_id);
+        }
+        for entry in scan(keys::user_permission_realm_scan_prefix(realm_id))? {
+            if let Ok(grant) = Self::de::<UserPermissionGrant>(&entry.value) {
+                archived_perm(&mut out, &grant.permission);
+            }
+        }
+        for entry in scan(keys::org_extra_role_realm_scan_prefix(realm_id))? {
+            let Ok(name) = Self::de::<String>(&entry.value) else {
+                continue;
+            };
+            match self.load_role_id_by_name(realm_id, &name)? {
+                Some(id) => role_ref(&mut out, &id),
+                None => {
+                    out.insert(OrphanRef {
+                        kind: OrphanKind::RoleName,
+                        reference: name,
+                    });
+                }
+            }
+        }
+        Ok(out.into_iter().collect())
     }
 
     fn export_all_assignments(&self, realm_id: &RealmId) -> Result<Vec<RoleAssignment>, RbacError> {
@@ -2382,6 +2497,18 @@ mod tests {
 
     fn perm(s: &str) -> Permission {
         Permission::new(s).expect("valid perm")
+    }
+
+    #[test]
+    fn a_missing_scope_row_reads_as_missing() {
+        let (engine, realm) = mk_engine();
+        assert_eq!(
+            engine
+                .scope_permissions(&realm, "nosuch:bundle")
+                .expect("lookup"),
+            ScopeLookup::Missing,
+            "a missing row is not an empty bundle, which every user would satisfy"
+        );
     }
 
     /// A [`StorageEngine`] decorator that counts read operations (`get`,

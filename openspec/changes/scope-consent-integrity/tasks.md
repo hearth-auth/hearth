@@ -6,15 +6,15 @@
 
 ## 1. Registry hygiene (PR 1)
 
-- [ ] 1.1 Enforce: An extra permission ends with its registry entry. Test: scenario "An extra permission ends with its registry entry"
-- [ ] 1.2 Enforce: A skipped orphan reference is audited. Test: scenario "A skipped orphan reference is audited"
-- [ ] 1.3 A missing scope row reads as absent, reload deletes a bundle removed from YAML, and config load refuses a bundle with no permissions. Test: unit tests in `src/rbac/`
+- [x] 1.1 Enforce: An extra permission ends with its registry entry. Test: scenario "An extra permission ends with its registry entry"
+- [x] 1.2 Enforce: A skipped orphan reference is audited. Test: scenario "A skipped orphan reference is audited"
+- [x] 1.3 A missing scope row reads as absent, reload deletes a bundle removed from YAML, and config load refuses a bundle with no permissions. Test: unit tests in `src/rbac/`
 
 ## 2. Gates and config (PR 1)
 
-- [ ] 2.1 Enforce: Managed client slugs are required and unique. Test: scenario "Managed client slugs are required and unique"
-- [ ] 2.2 Enforce: Slug gates match managed clients only. Test: scenarios "A DCR slug in a gate" and "Slug gates match managed clients only"
-- [ ] 2.3 Enforce: Tier 1 names never come from mapper output. Test: scenario "Tier 1 names never come from mapper output"
+- [x] 2.1 Enforce: Managed client slugs are unique, and default to the YAML key. Test: scenarios "Managed client slugs are unique" and "A client without a slug"
+- [x] 2.2 Enforce: Slug gates match managed clients only. Test: scenarios "A DCR slug in a gate" and "Slug gates match managed clients only"
+- [x] 2.3 Enforce: Tier 1 names never come from mapper output. Test: scenario "Tier 1 names never come from mapper output"
 
 ## 3. Scope resolution (PR 2)
 

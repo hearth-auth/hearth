@@ -507,7 +507,7 @@ fn realm_yaml_with_token_ttls(
 #[test]
 fn a14_password_reset_ttl_exceeding_1h_cap_is_rejected() {
     let yaml = realm_yaml_with_token_ttls(Some("2h"), None, false);
-    let result = yaml.to_realm_config(&AuthConfig::default(), None);
+    let result = yaml.to_realm_config("test", &AuthConfig::default(), None);
 
     let errors = result.expect_err(
         "password_reset_token_ttl = 2h without allow_unsafe_ttl must be a config error",
@@ -526,7 +526,7 @@ fn a14_password_reset_ttl_exceeding_1h_cap_is_rejected() {
 #[test]
 fn a14_magic_link_ttl_exceeding_30m_cap_is_rejected() {
     let yaml = realm_yaml_with_token_ttls(None, Some("1h"), false);
-    let result = yaml.to_realm_config(&AuthConfig::default(), None);
+    let result = yaml.to_realm_config("test", &AuthConfig::default(), None);
 
     let errors =
         result.expect_err("magic_link_ttl = 1h without allow_unsafe_ttl must be a config error");
@@ -544,7 +544,7 @@ fn a14_magic_link_ttl_exceeding_30m_cap_is_rejected() {
 #[test]
 fn a14_allow_unsafe_ttl_bypasses_both_caps() {
     let yaml = realm_yaml_with_token_ttls(Some("12h"), Some("2h"), true);
-    yaml.to_realm_config(&AuthConfig::default(), None)
+    yaml.to_realm_config("test", &AuthConfig::default(), None)
         .expect("allow_unsafe_ttl = true must accept any TTL value");
 }
 

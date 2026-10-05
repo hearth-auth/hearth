@@ -153,6 +153,21 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   login page's `.../login/passkey-complete`) run A-16; a failed passkey assertion counts toward
   `security.captcha.challenge_threshold`. A page that carries the Turnstile widget allows
   `https://challenges.cloudflare.com` as a script and frame source.
+- **A registry entry removed from `hearth.yaml` is no longer granted** (`scope-consent-integrity`).
+  A permission or role that the YAML no longer declares is skipped at every token issuance, also
+  when a stored role, an extra permission or an additional organization role still names it. Each
+  skipped reference writes an `OrphanedReferenceSkipped` audit event, at most once per realm and
+  reference per hour on each node. A scope bundle removed from the YAML (or a removed `scopes:`
+  block) is deleted at reload, and config load refuses a bundle with no permissions. A permission
+  with no registry record at all, as in a realm created at runtime, is still granted.
+- **Claim release gates match managed clients by ID** (`scope-consent-integrity`). Each
+  `claims.mappings[].allowed_clients` entry must be the slug of a client declared in the realm's
+  `applications` / `oauth_clients`, or config load fails; the gate compares client IDs, so a
+  dynamically registered client never passes it. A managed client's slug now defaults to its YAML
+  key (before: its lower-cased name), and config load refuses two clients with one slug.
+- **Mapper output never sets a Tier 1 claim** (`scope-consent-integrity`). Issuance drops every
+  claim mapping that targets a Tier 1 name (`sub`, `permissions`, `oid`, `client_id`, ...), also
+  for a claim profile that config load did not check.
 - **SDKs: the access-token audience is checked by default** (`sdk-security-defaults`). All four
   SDKs gain an `audience` option, default `hearth`, the audience Hearth mints when a client names
   no resource; an API registered as a protected resource sets its resource URI (RFC 9068 §4).
