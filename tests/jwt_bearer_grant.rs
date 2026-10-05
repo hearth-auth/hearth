@@ -32,15 +32,20 @@ fn realm_issuer(harness: &common::TestHarness, realm_id: &hearth::core::RealmId)
     format!("{}/realms/{}", base, realm.name())
 }
 
+/// Creates a realm that declares the `read` scope the grants request; the
+/// scope registry refuses a name it does not define.
 fn create_realm(h: &common::TestHarness) -> hearth::core::RealmId {
-    h.identity()
+    let realm = h
+        .identity()
         .create_realm(&CreateRealmRequest {
             name: format!("jb-test-{}", uuid::Uuid::new_v4()),
             config: None,
         })
         .expect("create realm")
         .id()
-        .clone()
+        .clone();
+    h.declare_scopes(&realm, &["read"]);
+    realm
 }
 
 /// Makes a signed JWT assertion using the given signing key.

@@ -115,6 +115,7 @@ fn authorize_and_exchange(
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("exchange code")

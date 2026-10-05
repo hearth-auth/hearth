@@ -577,6 +577,15 @@ impl TestHarness {
         self.audit_engine.clone() as Arc<dyn AuditEngine>
     }
 
+    /// Declares `scopes` in `realm`'s scope registry, as `hearth.yaml` would,
+    /// as bundles that grant no permission. For tests whose tokens need scope
+    /// strings that scope resolution accepts, with no permission meaning.
+    /// Bundles already declared keep their permissions.
+    #[allow(dead_code)]
+    pub fn declare_scopes(&self, realm: &hearth::core::RealmId, scopes: &[&str]) {
+        declare_scopes(self.rbac(), realm, scopes);
+    }
+
     /// Creates a new realm and returns its `RealmId`.
     pub fn create_realm(&self) -> hearth::core::RealmId {
         self.identity()
@@ -643,4 +652,30 @@ pub fn user_token_pair(
     identity
         .issue_tokens(realm_id, user_id, session.id())
         .expect("issue tokens")
+}
+
+/// [`TestHarness::declare_scopes`] for a test that holds only an RBAC engine.
+#[allow(dead_code)]
+pub fn declare_scopes(rbac: &dyn RbacEngine, realm: &hearth::core::RealmId, scopes: &[&str]) {
+    let mut specs: Vec<hearth::rbac::ScopeSpec> = rbac
+        .export_all_scopes(realm)
+        .expect("export scopes")
+        .into_iter()
+        .map(|s| hearth::rbac::ScopeSpec {
+            name: s.name,
+            permissions: s
+                .permissions
+                .map(|list| list.iter().map(|p| p.as_str().to_string()).collect()),
+        })
+        .collect();
+    for scope in scopes {
+        if !specs.iter().any(|s| s.name == *scope) {
+            specs.push(hearth::rbac::ScopeSpec {
+                name: (*scope).to_string(),
+                permissions: Some(Vec::new()),
+            });
+        }
+    }
+    rbac.reconcile_scopes(realm, &specs)
+        .expect("declare scopes");
 }

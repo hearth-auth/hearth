@@ -574,6 +574,7 @@ async fn introspect_applies_the_audience_gate_to_a_machine_token() {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("mint A's token")

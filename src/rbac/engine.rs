@@ -13,7 +13,6 @@ use std::collections::{BTreeSet, HashSet};
 use std::sync::{Arc, OnceLock};
 
 use crate::core::{Clock, ImportOutcome, OrganizationId, RealmId, Uri, UserId};
-use crate::identity::ClientTrustLevel;
 use crate::storage::{StorageEngine, StorageError};
 
 use super::error::RbacError;
@@ -26,8 +25,8 @@ use super::types::{
     AssignRoleRequest, AssignmentId, CreateGroupRequest, CreateRoleRequest, CycleKind, Group,
     GroupId, GroupMember, GroupMembership, GroupMembershipEdge, OrphanKind, OrphanRef, Page,
     Permission, PermissionRecord, PermissionStatus, ProtectedResource, ResolvedPermissions, Role,
-    RoleAssignment, RoleId, RoleSpec, RoleStatus, RoleSubject, Scope, ScopeExport, ScopeSpec,
-    Subject, TraversalKind, UpdateGroupRequest, UpdateRoleRequest, UserPermissionGrant,
+    RoleAssignment, RoleId, RoleSpec, RoleStatus, RoleSubject, Scope, ScopeExport, ScopeRequest,
+    ScopeSpec, Subject, TraversalKind, UpdateGroupRequest, UpdateRoleRequest, UserPermissionGrant,
 };
 use super::{RbacEngine, SvBumper};
 
@@ -743,26 +742,6 @@ impl Resolver for EmbeddedRbacEngine {
             Some(bytes) => Ok(Self::scope_lookup(&Self::de(&bytes)?)),
         }
     }
-
-    fn resource_scope_permission_names(
-        &self,
-        realm_id: &RealmId,
-        resource_uri: &Uri,
-    ) -> Result<Vec<Permission>, RbacError> {
-        let hash = resource_uri.storage_hash();
-        let prefix = keys::resource_scope_scan_prefix(realm_id, &hash);
-        let end = keys::prefix_end(&prefix);
-        let mut out = BTreeSet::new();
-        for entry in self.storage.scan(realm_id, &prefix, &end)? {
-            let s: StoredScope = Self::de(&entry.value)?;
-            if let Some(perms) = s.permissions {
-                for p in perms {
-                    out.insert(p);
-                }
-            }
-        }
-        Ok(out.into_iter().collect())
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -802,36 +781,12 @@ impl RbacEngine for EmbeddedRbacEngine {
         resolve::resolve_permissions(self, user_id, realm_id, org_id, requested_scope)
     }
 
-    fn resolve_for_granted_scopes(
-        &self,
-        user_id: &UserId,
-        realm_id: &RealmId,
-        org_id: Option<&OrganizationId>,
-        granted_scopes: &[String],
-    ) -> Result<ResolvedPermissions, RbacError> {
-        resolve::resolve_for_granted_scopes(self, user_id, realm_id, org_id, granted_scopes)
-    }
-
     fn resolve_with_scopes(
         &self,
-        user_id: &UserId,
         realm_id: &RealmId,
-        org_id: Option<&OrganizationId>,
-        requested_scopes: &[String],
-        client_trust_level: ClientTrustLevel,
-        declared_scopes: &[String],
-        resource: Option<&Uri>,
+        request: &ScopeRequest<'_>,
     ) -> Result<ResolvedPermissions, RbacError> {
-        resolve::resolve_with_scopes(
-            self,
-            user_id,
-            realm_id,
-            org_id,
-            requested_scopes,
-            client_trust_level,
-            declared_scopes,
-            resource,
-        )
+        resolve::resolve_with_scopes(self, realm_id, request)
     }
 
     fn grant_user_permission(

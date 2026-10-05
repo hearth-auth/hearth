@@ -251,6 +251,10 @@ impl fmt::Display for IdentityError {
                 f,
                 "invalid_target: the resource is not a registered protected resource"
             ),
+            Self::InvalidScope { .. } => write!(
+                f,
+                "invalid_scope: a requested scope is not available to this client"
+            ),
             Self::DelegationDepthExceeded { max, attempted } => write!(
                 f,
                 "delegation depth {attempted} exceeds agent maximum {max}"

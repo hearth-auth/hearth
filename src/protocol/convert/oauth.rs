@@ -176,6 +176,7 @@ pub(crate) fn proto_token_exchange_to_domain(
         dpop_jkt: None,
         client_assertion_type: None,
         client_assertion: None,
+        resource: None,
     })
 }
 
@@ -213,6 +214,7 @@ pub(crate) fn proto_client_creds_to_domain(
         dpop_jkt: None,
         client_assertion_type: None,
         client_assertion: None,
+        resource: None,
     })
 }
 

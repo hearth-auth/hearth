@@ -59,6 +59,7 @@ async fn issue_dpop_bound_token(
                 dpop_jkt: Some(DUMMY_JKT.to_string()),
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("client_credentials with dpop_jkt");
@@ -178,6 +179,7 @@ async fn non_dpop_token_unaffected_by_blocklist() {
                 dpop_jkt: None, // no DPoP binding
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .unwrap();
@@ -275,6 +277,7 @@ fn blocked_jkt_survives_engine_restart() {
                 dpop_jkt: Some(DUMMY_JKT.to_string()),
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("client_credentials with dpop_jkt")

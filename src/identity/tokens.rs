@@ -147,6 +147,15 @@ impl Audience {
         }
     }
 
+    /// The RFC 8707 resource a token was issued for: the entry after the
+    /// base audience, as [`Self::with_resource`] builds it.
+    pub(crate) fn resource(&self) -> Option<&str> {
+        match self {
+            Self::Single(_) => None,
+            Self::Multi(list) => list.get(1).map(String::as_str),
+        }
+    }
+
     /// Returns the configured base audience string (first entry for Multi).
     pub(crate) fn base(&self) -> &str {
         match self {

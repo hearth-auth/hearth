@@ -41,7 +41,7 @@ A new engine function takes the realm, the user (none for `client_credentials`),
 
 1. **Classify** each scope with `classify_scope_string`: OIDC standard, bundle, raw permission, or neither.
 2. **Select the registry** from the audience (`custom-permissions` "The token audience selects the scope registry"). Under a `resource`, the legal scopes are the OIDC scopes plus that resource's bundles. Without one, they are the OIDC scopes, the realm's bundles and, for a first-party client, raw permissions.
-3. **Refuse unknown names.** A scope that is neither OIDC, nor in the selected registry, nor a registered permission, fails the request with `invalid_scope`, for every trust level. The client's non-empty `declared_scopes` still applies, as today.
+3. **Refuse unknown names.** A scope that is neither OIDC, nor in the selected registry, nor (first-party, no resource) a raw permission, fails the request with `invalid_scope`, for every trust level. A raw permission does not need a registry record, because a realm created at runtime has none. A non-empty `declared_scopes` must hold every non-OIDC scope, for every trust level (baseline "Requested scopes must be declared by the client").
 4. **Decide what is grantable.** An OIDC scope is always grantable. A bundle is grantable only when the user holds every permission in it. A raw permission is grantable only when the user holds it. A bundle with no permissions is refused at config load, so a vacuous bundle cannot exist.
 5. **Apply the trust level.** A first-party client gets the grantable scopes, and the rest are dropped. A third-party client fails with `invalid_scope` when any non-OIDC scope is not grantable. When the request names at least one scope and none is grantable, it fails for every trust level.
 6. **Compute permissions.**
@@ -49,11 +49,20 @@ A new engine function takes the realm, the user (none for `client_credentials`),
    - When the request named only OIDC scopes, a first-party client gets the user's full effective set (the first-party app acts as the user). A third-party client gets no permissions: none in the token, and none through introspection or decision mode.
 7. **Return orphans.** `rbac` returns the references that it skipped (see §4). It writes no audit itself.
 
+Two modes:
+- **Request** (`/authorize`, the browser gate, the device grant, `client_credentials`, the JWT-bearer grant): the trust-level rules of steps 5 and 6.
+- **Reissue** (the code exchange, refresh, live resolution): scopes granted earlier are resolved again. A scope the user no longer fully holds drops out, for every trust level. A scope the registry no longer knows fails with `invalid_grant`. Live resolution treats that as no authority.
+
+**Narrowing is recorded.** When a grant named a permission-bearing scope, the code and the refresh family record `scope_narrowed`. Re-issue keeps the narrowing even when every such scope has dropped out. Without it, a first-party grant for `openid read:docs`, stored as `openid`, would re-resolve to the user's full set.
+
+**Size caps.** The per-token caps (100 permissions, 50 roles, 50 groups) apply to what a token carries, after narrowing, on the paths that mint a token. `/authorize` only decides what is grantable.
+
 Where it runs:
-- The browser consent gate and `/authorize` resolve before the consent screen, so the screen lists only what can be granted. The code stores the **granted** scopes.
-- The code exchange re-resolves the code's granted scopes. A third-party scope that is no longer grantable fails with `invalid_grant`.
-- `client_credentials` resolves with no user: scopes must be legal for the audience, and the token carries no permissions (as today).
-- Refresh and introspection resolve the family's granted scopes (§5).
+- The browser consent gate resolves first, through `IdentityEngine::authorization_scopes`, so the consent check, the consent screen and the code see only grantable scopes. A refusal redirects with `error=invalid_scope`.
+- `/authorize` resolves after the resource is known. The code stores the **granted** scopes.
+- The device authorization request checks legality only (no user yet). The token request resolves with the approving user.
+- `client_credentials` and the JWT-bearer grant resolve with no user: scopes must be legal for the audience, and the token carries no permissions (as today).
+- The code exchange, refresh and live resolution (introspection, decision, `/v1/me/permissions`) re-issue.
 - Claim release gates (`required_scopes`) read the granted scopes only.
 
 **`resource` on the token endpoint:**

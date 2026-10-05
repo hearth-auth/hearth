@@ -243,6 +243,7 @@ fn mint_bound_token(
                 dpop_jkt: Some(jkt.to_string()),
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("exchange auth code")

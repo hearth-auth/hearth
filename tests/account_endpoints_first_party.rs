@@ -181,6 +181,8 @@ impl Fixture {
                 session.id(),
                 &TokenIssuanceContext {
                     client_id: client.cloned(),
+                    // A third-party client must request at least one scope.
+                    granted_scopes: std::iter::once("openid".to_string()).collect(),
                     ..TokenIssuanceContext::default()
                 },
             )

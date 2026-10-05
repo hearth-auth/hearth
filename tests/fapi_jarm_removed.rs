@@ -114,6 +114,7 @@ fn cc_request(client_id: &str, dpop_jkt: Option<&str>) -> ClientCredentialsReque
         dpop_jkt: dpop_jkt.map(str::to_string),
         client_assertion_type: None,
         client_assertion: None,
+        resource: None,
     }
 }
 

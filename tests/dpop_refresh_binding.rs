@@ -127,6 +127,7 @@ fn exchange_code(
                 dpop_jkt,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("exchange auth code")

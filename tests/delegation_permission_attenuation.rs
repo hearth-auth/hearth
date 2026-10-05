@@ -152,6 +152,7 @@ fn make_actor_token_no_rbac(
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("issue actor access token");

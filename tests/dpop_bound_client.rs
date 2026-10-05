@@ -54,6 +54,8 @@ async fn env() -> Env {
         .expect("create realm")
         .id()
         .clone();
+    // The scope registry refuses a scope the realm does not define.
+    h.declare_scopes(&realm, &["read"]);
     let user = h
         .identity()
         .create_user(
@@ -156,6 +158,7 @@ impl Env {
                 dpop_jkt: dpop_jkt.map(str::to_string),
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
     }

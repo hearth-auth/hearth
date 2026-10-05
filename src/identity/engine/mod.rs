@@ -367,7 +367,6 @@ use crate::identity::webauthn::{
     WebAuthnChallengeStore, WebAuthnCredentialInfo,
 };
 use crate::identity::IdentityEngine;
-use crate::rbac::error::RbacError;
 use crate::rbac::registry::{classify_scope_string, ScopeKind};
 use crate::storage::StorageEngine;
 
@@ -382,6 +381,7 @@ pub(super) mod oauth;
 mod operator_token;
 mod orphan_audit;
 mod retired_keys;
+mod scope_grant;
 mod sharded_cache;
 mod single_use;
 // Phase D engine modules
@@ -1343,9 +1343,8 @@ impl EmbeddedIdentityEngine {
         if client.trust_level() == crate::identity::ClientTrustLevel::ThirdParty
             && requested.is_empty()
         {
-            return Err(IdentityError::InvalidInput {
-                reason: "invalid_scope: third-party clients must request at least one scope"
-                    .to_string(),
+            return Err(IdentityError::InvalidScope {
+                reason: "third-party clients must request at least one scope".to_string(),
             });
         }
         for scope in requested {
@@ -1365,17 +1364,17 @@ impl EmbeddedIdentityEngine {
                     .iter()
                     .any(|declared| declared == scope)
             {
-                return Err(IdentityError::InvalidInput {
-                    reason: format!("invalid_scope: client did not declare scope '{scope}'"),
+                return Err(IdentityError::InvalidScope {
+                    reason: format!("client did not declare scope '{scope}'"),
                 });
             }
 
             if client.trust_level() == crate::identity::ClientTrustLevel::ThirdParty
                 && classify_scope_string(scope) == Some(ScopeKind::Permission)
             {
-                return Err(IdentityError::InvalidInput {
+                return Err(IdentityError::InvalidScope {
                     reason: format!(
-                        "invalid_scope: third-party clients cannot request raw permission scope '{scope}'"
+                        "third-party clients cannot request raw permission scope '{scope}'"
                     ),
                 });
             }
@@ -4019,6 +4018,7 @@ impl EmbeddedIdentityEngine {
         claims: &TokenClaims,
         dpop_jkt: Option<&str>,
         bind_ctx: Option<&RefreshBindContext>,
+        resource: Option<&str>,
     ) -> Result<TokenPair, IdentityError> {
         // Serialize the whole load → hash-check → issue → rotate-write
         // sequence per family. Without this, two concurrent presentations of
@@ -4171,35 +4171,36 @@ impl EmbeddedIdentityEngine {
         let user = self
             .get_user(realm_id, user_id)?
             .ok_or(IdentityError::UserNotFound)?;
-        let grant_scopes: Vec<String> = claims
-            .scope
-            .as_deref()
-            .map(|s| s.split_whitespace().map(str::to_string).collect())
-            .unwrap_or_default();
-        let resolved = self
-            .rbac
-            .resolve_for_granted_scopes(user_id, realm_id, None, &grant_scopes)
-            .map_err(|e| match e {
-                RbacError::TokenSizeExceeded {
-                    limit,
-                    limit_value,
-                    actual,
-                } => IdentityError::TokenTooLarge {
-                    limit: format!("access_token_{limit}"),
-                    limit_value,
-                    actual,
-                },
-                e => IdentityError::Internal {
-                    reason: format!("rbac resolve failed: {e}"),
-                },
-            })?;
-        self.audit_orphans(realm_id, &resolved.orphans);
+        // A refresh never switches resource (RFC 8707 §2.2).
+        self.require_grant_resource(realm_id, resource, family.resources.first())?;
 
         let resolved_client = if let Some(ref cid) = family.client_id {
             self.get_client(realm_id, cid)?
         } else {
             None
         };
+        // Re-resolve the grant's scopes against the current registry
+        // (scope-consent-integrity design §2): a scope the user no longer
+        // fully holds drops out; one the registry no longer knows ends the
+        // grant with `invalid_grant`.
+        let grant_scopes = scope_grant::scope_list(claims.scope.as_deref());
+        let resolved = self.grant_scopes(
+            realm_id,
+            &scope_grant::ScopeGrant {
+                user_id: Some(user_id),
+                client: resolved_client.as_ref(),
+                requested: &grant_scopes,
+                resource: family.resources.first(),
+                org_id: None,
+                mode: crate::rbac::ScopeMode::Reissue,
+                narrowed: family.scope_narrowed,
+                issuing: true,
+            },
+        )?;
+        let refreshed_scope = claims
+            .scope
+            .as_ref()
+            .map(|_| resolved.granted_scopes.join(" "));
         let sentinel_client = OAuthClient::new(
             ClientId::generate(),
             "session".to_string(),
@@ -4214,7 +4215,7 @@ impl EmbeddedIdentityEngine {
             &crate::rbac::ResolvedPermissions::default()
         };
 
-        let granted_scopes: BTreeSet<String> = grant_scopes.into_iter().collect();
+        let granted_scopes: BTreeSet<String> = resolved.granted_scopes.iter().cloned().collect();
         let (roles, groups, permissions, custom) = self.apply_claim_profile(
             realm_id,
             &user,
@@ -4236,7 +4237,7 @@ impl EmbeddedIdentityEngine {
             &user_id.to_string(),
             &client_id_str,
             "refresh_token",
-            claims.scope.as_deref(),
+            refreshed_scope.as_deref(),
             Some(&session_id.as_uuid().to_string()),
             &roles,
             &groups,
@@ -4312,7 +4313,7 @@ impl EmbeddedIdentityEngine {
             nbf: None,
             jti: Some(uuid::Uuid::new_v4().to_string()),
             fid: Some(fid.to_string()),
-            scope: claims.scope.clone(),
+            scope: refreshed_scope.clone(),
             nonce: None,
             azp: None,
             roles: effective_roles.clone(),
@@ -4340,7 +4341,7 @@ impl EmbeddedIdentityEngine {
             nbf: None,
             jti: Some(uuid::Uuid::new_v4().to_string()),
             fid: Some(fid.to_string()),
-            scope: claims.scope.clone(),
+            scope: refreshed_scope.clone(),
             nonce: None,
             azp: None,
             roles: effective_roles,
@@ -9315,34 +9316,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Resolve effective permissions via RBAC at token-issue time, narrowed
         // by every permission-bearing granted scope — the rule the code
         // exchange, refresh and live resolution share (GA audit 3 B-4).
-        let grant_scopes: Vec<String> = ctx.granted_scopes.iter().cloned().collect();
-        // Organization-scoped assignments apply when the token is issued in
-        // an organization context (`rbac-model`).
-        let rbac_org = self.active_org_context(
-            realm_id,
-            ctx.oid
-                .as_deref()
-                .and_then(|oid| oid.parse::<crate::core::OrganizationId>().ok()),
-        );
-        let resolved = self
-            .rbac
-            .resolve_for_granted_scopes(user_id, realm_id, rbac_org.as_ref(), &grant_scopes)
-            .map_err(|e| match e {
-                RbacError::TokenSizeExceeded {
-                    limit,
-                    limit_value,
-                    actual,
-                } => IdentityError::TokenTooLarge {
-                    limit: format!("access_token_{limit}"),
-                    limit_value,
-                    actual,
-                },
-                e => IdentityError::Internal {
-                    reason: format!("rbac resolve failed: {e}"),
-                },
-            })?;
-        self.audit_orphans(realm_id, &resolved.orphans);
-
         // Resolve the OAuth client: use the caller-supplied client_id when
         // present, otherwise fall back to the first-party sentinel used by
         // the legacy session-token path.
@@ -9357,6 +9330,33 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         } else {
             None
         };
+        // Organization-scoped assignments apply when the token is issued in
+        // an organization context (`rbac-model`).
+        let rbac_org = self.active_org_context(
+            realm_id,
+            ctx.oid
+                .as_deref()
+                .and_then(|oid| oid.parse::<crate::core::OrganizationId>().ok()),
+        );
+        // The scopes go through the one resolution entry point
+        // (scope-consent-integrity design §2), with the request rules: this
+        // is the first time the user's authority meets them (the device grant).
+        let grant_scopes: Vec<String> = ctx.granted_scopes.iter().cloned().collect();
+        let resolved = self.grant_scopes(
+            realm_id,
+            &scope_grant::ScopeGrant {
+                user_id: Some(user_id),
+                client: resolved_client.as_ref(),
+                requested: &grant_scopes,
+                resource: ctx.resource.as_ref(),
+                org_id: rbac_org.as_ref(),
+                mode: crate::rbac::ScopeMode::Request,
+                narrowed: false,
+                issuing: true,
+            },
+        )?;
+        let granted_set: BTreeSet<String> = resolved.granted_scopes.iter().cloned().collect();
+
         let sentinel_client =
             OAuthClient::new(ClientId::generate(), "session".to_string(), Vec::new(), now);
         let effective_client = resolved_client.as_ref().unwrap_or(&sentinel_client);
@@ -9423,19 +9423,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             &user,
             effective_client,
             access_resolved,
-            &ctx.granted_scopes,
+            &granted_set,
             oid_ref,
             ClaimTarget::AccessToken,
         );
         validate_claim_payload(ClaimTarget::AccessToken, &roles, &groups, &permissions)?;
 
         // Pre-token enrichment webhook: fire before signing and merge extra claims.
-        let scope_str: String = ctx
-            .granted_scopes
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let scope_str: String = resolved.granted_scopes.join(" ");
         let client_id_str = ctx
             .client_id
             .as_ref()
@@ -9563,6 +9558,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             amr_values: Vec::new(),
             // RFC 9449 §5: the refresh path refuses a proof by any other key.
             bound_jkt: ctx.dpop_jkt.clone(),
+            scope_narrowed: resolved.scope_narrowed,
         };
         let family_bytes =
             serde_json::to_vec(&family).map_err(|e| IdentityError::Serialization {
@@ -9804,6 +9800,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         dpop_jkt: Option<&str>,
         bind_ctx: Option<&RefreshBindContext>,
     ) -> Result<TokenPair, IdentityError> {
+        self.refresh_tokens_for_resource(realm_id, refresh_token, dpop_jkt, bind_ctx, None)
+    }
+
+    fn refresh_tokens_for_resource(
+        &self,
+        realm_id: &RealmId,
+        refresh_token: &str,
+        dpop_jkt: Option<&str>,
+        bind_ctx: Option<&RefreshBindContext>,
+        resource: Option<&str>,
+    ) -> Result<TokenPair, IdentityError> {
         // Verify the Ed25519 signature against the realm's own key (and any
         // in-grace retiring key). There is no global-key fallback — a realm
         // with no key of its own fails closed. Rejects forged/tampered tokens
@@ -9889,6 +9896,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 &claims,
                 dpop_jkt,
                 bind_ctx,
+                resource,
             )
         } else {
             // No grant family — refuse.
@@ -9971,6 +9979,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         request: &AuthorizationRequest,
     ) -> Result<AuthorizationResponse, IdentityError> {
         self.authorize_inner(realm_id, request, None, crate::identity::MfaProof::None)
+    }
+
+    fn authorization_scopes(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        client_id: &ClientId,
+        scope: &str,
+        resource: Option<&str>,
+    ) -> Result<Vec<String>, IdentityError> {
+        self.authorization_scopes_inner(realm_id, user_id, client_id, scope, resource)
     }
 
     fn authorize_from_session(
@@ -20265,6 +20284,37 @@ mod tests {
             .clone()
     }
 
+    /// Declares `scopes` in `realm`'s scope registry as bundles that grant no
+    /// permission, keeping the bundles already there. The registry refuses a
+    /// scope it does not define, so a fixture that mints a token with a
+    /// made-up scope declares it first.
+    fn declare_test_scopes(engine: &EmbeddedIdentityEngine, realm: &RealmId, scopes: &[&str]) {
+        let mut specs: Vec<crate::rbac::ScopeSpec> = engine
+            .rbac
+            .export_all_scopes(realm)
+            .expect("export scopes")
+            .into_iter()
+            .map(|s| crate::rbac::ScopeSpec {
+                name: s.name,
+                permissions: s
+                    .permissions
+                    .map(|list| list.iter().map(|p| p.as_str().to_string()).collect()),
+            })
+            .collect();
+        for scope in scopes {
+            if !specs.iter().any(|s| s.name == *scope) {
+                specs.push(crate::rbac::ScopeSpec {
+                    name: (*scope).to_string(),
+                    permissions: Some(Vec::new()),
+                });
+            }
+        }
+        engine
+            .rbac
+            .reconcile_scopes(realm, &specs)
+            .expect("declare scopes");
+    }
+
     /// Retires `realm` so `delete_realm` will accept it.
     ///
     /// The archival gate lives in `delete_realm` rather than in each protocol
@@ -22186,6 +22236,7 @@ mod tests {
                     dpop_jkt: None,
                     client_assertion_type: None,
                     client_assertion: None,
+                    resource: None,
                 },
             )
             .expect("exchange code");
@@ -22250,6 +22301,7 @@ mod tests {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         );
         assert!(result1.is_ok(), "first exchange should succeed");
@@ -22265,6 +22317,7 @@ mod tests {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         );
         assert!(
@@ -22317,6 +22370,7 @@ mod tests {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         );
         assert!(
@@ -22394,6 +22448,7 @@ mod tests {
                     dpop_jkt: None,
                     client_assertion_type: None,
                     client_assertion: None,
+                    resource: None,
                 },
             )
             .expect("first exchange");
@@ -22409,6 +22464,7 @@ mod tests {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         );
         assert!(
@@ -26118,6 +26174,7 @@ mod tests {
                     dpop_jkt: None,
                     client_assertion_type: None,
                     client_assertion: None,
+                    resource: None,
                 },
             )
             .expect("exchange");
@@ -27632,6 +27689,7 @@ mod tests {
 
         // Build a valid, session-bound subject token, then re-sign it with an
         // `act` chain naming agent A (issuance API does not expose act directly).
+        declare_test_scopes(&engine, &realm, &["mcp:tools:invoke"]);
         let subject = create_test_user(&engine, &realm);
         let session = engine
             .create_session(&realm, subject.id(), &SessionContext::default())
@@ -27764,6 +27822,18 @@ mod tests {
                 },
             )
             .expect("assign role");
+        // The token's scope is a bundle of `tools.invoke`, so `decide` (which
+        // narrows by the token's scopes) can allow the control below.
+        engine
+            .rbac
+            .reconcile_scopes(
+                &realm,
+                &[crate::rbac::ScopeSpec {
+                    name: "mcp:tools:invoke".to_string(),
+                    permissions: Some(vec!["tools.invoke".to_string()]),
+                }],
+            )
+            .expect("bundle tools.invoke under the MCP scope");
 
         let session = engine
             .create_session(&realm, user.id(), &SessionContext::default())

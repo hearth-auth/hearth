@@ -615,6 +615,25 @@ impl EmbeddedIdentityEngine {
             }
         }
 
+        // 4c. Scope resolution (scope-consent-integrity design §2): only
+        //     scopes legal for the audience and grantable to the user reach
+        //     the code, which stores the granted set.
+        let requested_scopes = super::scope_grant::scope_list(Some(&request.scope));
+        let granted = self.grant_scopes(
+            realm_id,
+            &super::scope_grant::ScopeGrant {
+                user_id: Some(&request.user_id),
+                client: Some(&client),
+                requested: &requested_scopes,
+                resource: resource.as_ref(),
+                org_id: None,
+                mode: crate::rbac::ScopeMode::Request,
+                narrowed: false,
+                issuing: false,
+            },
+        )?;
+        let granted_scope = granted.granted_scopes.join(" ");
+
         // 5. PKCE enforcement (RFC 9700 §2.1.1 — unconditional for all clients)
         if request.code_challenge.is_none() {
             return Err(IdentityError::InvalidInput {
@@ -661,7 +680,7 @@ impl EmbeddedIdentityEngine {
             client_id: request.client_id.clone(),
             user_id: request.user_id.clone(),
             redirect_uri: request.redirect_uri.clone(),
-            scope: request.scope.clone(),
+            scope: granted_scope,
             code_challenge: request.code_challenge.clone(),
             code_challenge_method: request.code_challenge_method.clone(),
             created_at: now,
@@ -670,6 +689,7 @@ impl EmbeddedIdentityEngine {
             resource: resource.as_ref().map(|r| r.as_str().to_string()),
             amr_values: request.amr_values.clone(),
             mfa_proof: code_proof,
+            scope_narrowed: granted.scope_narrowed,
         };
 
         // 9. Persist the code
@@ -854,32 +874,39 @@ impl EmbeddedIdentityEngine {
         //     only against a DPoP proof (RFC 9449 §5.2).
         Self::require_dpop_for_bound_client(Some(&client), request.dpop_jkt.as_deref())?;
 
-        let scope_value = stored_code.scope.trim().to_string();
-        // Every permission-bearing scope of the grant narrows — the rule the
-        // refresh and device grants and live resolution apply too (GA audit 3
-        // B-4). Only a single-scope grant used to be narrowed, so
-        // `openid docs:read` resolved the user's full set.
-        let grant_scopes: Vec<String> =
-            scope_value.split_whitespace().map(str::to_string).collect();
-        let resolved = self
-            .rbac
-            .resolve_for_granted_scopes(&stored_code.user_id, realm_id, None, &grant_scopes)
-            .map_err(|e| match e {
-                RbacError::TokenSizeExceeded {
-                    limit,
-                    limit_value,
-                    actual,
-                } => IdentityError::TokenTooLarge {
-                    limit: format!("access_token_{limit}"),
-                    limit_value,
-                    actual,
-                },
-                e => IdentityError::Internal {
-                    reason: format!("rbac resolve failed: {e}"),
-                },
-            })?;
-        self.audit_orphans(realm_id, &resolved.orphans);
-        let granted_scopes: BTreeSet<String> = grant_scopes.into_iter().collect();
+        // 8c. The token request's `resource` (RFC 8707 §2.2) may only restate
+        //     the code's resource; it never switches or adds one.
+        let resource_uri = stored_code
+            .resource
+            .as_ref()
+            .map(|s| {
+                Uri::try_from(s.clone()).map_err(|e| IdentityError::InvalidGrant {
+                    reason: format!("authorization code has invalid resource URI: {e}"),
+                })
+            })
+            .transpose()?;
+        self.require_grant_resource(realm_id, request.resource.as_deref(), resource_uri.as_ref())?;
+
+        // 8d. Re-resolve the code's granted scopes against the current
+        //     registry (scope-consent-integrity design §2): a scope the user
+        //     no longer fully holds drops out; one the registry no longer knows
+        //     fails the exchange.
+        let grant_scopes = super::scope_grant::scope_list(Some(&stored_code.scope));
+        let resolved = self.grant_scopes(
+            realm_id,
+            &super::scope_grant::ScopeGrant {
+                user_id: Some(&stored_code.user_id),
+                client: Some(&client),
+                requested: &grant_scopes,
+                resource: resource_uri.as_ref(),
+                org_id: None,
+                mode: crate::rbac::ScopeMode::Reissue,
+                narrowed: stored_code.scope_narrowed,
+                issuing: true,
+            },
+        )?;
+        let scope_value = resolved.granted_scopes.join(" ");
+        let granted_scopes: BTreeSet<String> = resolved.granted_scopes.iter().cloned().collect();
 
         // For non-Embedded modes, strip RBAC claims from the access token.
         use crate::identity::oidc::AccessTokenAuthorization;
@@ -974,15 +1001,6 @@ impl EmbeddedIdentityEngine {
         // Apply per-realm token TTL overrides.
         let (access_ttl_secs, refresh_ttl_secs) = self.effective_token_ttl_secs(realm_id);
 
-        let resource_uri = stored_code
-            .resource
-            .as_ref()
-            .map(|s| {
-                Uri::try_from(s.clone()).map_err(|e| IdentityError::InvalidGrant {
-                    reason: format!("authorization code has invalid resource URI: {e}"),
-                })
-            })
-            .transpose()?;
         let aud = match &resource_uri {
             Some(r) => Audience::with_resource(self.config.token.audience.clone(), r),
             None => Audience::single(self.config.token.audience.clone()),
@@ -1096,6 +1114,7 @@ impl EmbeddedIdentityEngine {
             // UA/ASN binding context (A-49) recorded on first refresh exchange.
             // M1 (RFC 9449 §5): persist the DPoP key thumbprint for sender-constraint enforcement.
             bound_jkt: request.dpop_jkt.clone(),
+            scope_narrowed: resolved.scope_narrowed,
         };
         let family_bytes =
             serde_json::to_vec(&family).map_err(|e| IdentityError::Serialization {
@@ -1265,6 +1284,27 @@ impl EmbeddedIdentityEngine {
         }
 
         self.validate_client_scope_request(&client, request.scope.as_deref().unwrap_or(""))?;
+        // 3a. RFC 8707: a named resource must be a registered protected
+        //     resource; it selects the scope registry and joins the audience.
+        let cc_resource = request
+            .resource
+            .as_deref()
+            .map(|r| self.resolve_authorization_resource(realm_id, r))
+            .transpose()?;
+        let requested_scopes = super::scope_grant::scope_list(request.scope.as_deref());
+        let granted = self.grant_scopes(
+            realm_id,
+            &super::scope_grant::ScopeGrant {
+                user_id: None,
+                client: Some(&client),
+                requested: &requested_scopes,
+                resource: cc_resource.as_ref(),
+                org_id: None,
+                mode: crate::rbac::ScopeMode::Request,
+                narrowed: false,
+                issuing: true,
+            },
+        )?;
 
         // 3b. A `dpop_bound_access_tokens` client needs a DPoP proof (A-38).
         Self::require_dpop_for_bound_client(Some(&client), request.dpop_jkt.as_deref())?;
@@ -1274,11 +1314,19 @@ impl EmbeddedIdentityEngine {
         let iat = now.as_micros() / 1_000_000;
         let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
 
-        let scope = request.scope.clone();
+        // A request that named a scope, even an empty one, keeps a `scope`
+        // claim: token exchange reads a missing actor scope as "no limit".
+        let scope = request
+            .scope
+            .as_ref()
+            .map(|_| granted.granted_scopes.join(" "));
         let access_claims = TokenClaims {
             sub: request.client_id.to_string(),
             iss: self.realm_issuer_url(realm_id),
-            aud: Audience::single(self.config.token.audience.clone()),
+            aud: cc_resource.as_ref().map_or_else(
+                || Audience::single(self.config.token.audience.clone()),
+                |r| Audience::with_resource(self.config.token.audience.clone(), r),
+            ),
             exp: iat + self.config.token.access_token_ttl_secs,
             iat,
             nbf: None,
@@ -1436,11 +1484,30 @@ impl EmbeddedIdentityEngine {
 
         // 7. Validate requested scope against the client's declared scopes
         self.validate_client_scope_request(&client, request.scope.as_deref().unwrap_or(""))?;
+        let requested_scopes = super::scope_grant::scope_list(request.scope.as_deref());
+        let granted = self.grant_scopes(
+            realm_id,
+            &super::scope_grant::ScopeGrant {
+                user_id: None,
+                client: Some(&client),
+                requested: &requested_scopes,
+                resource: None,
+                org_id: None,
+                mode: crate::rbac::ScopeMode::Request,
+                narrowed: false,
+                issuing: true,
+            },
+        )?;
 
         // 8. Issue sessionless access token (same pattern as client_credentials)
         let iat = now_secs;
         let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
-        let scope = request.scope.clone();
+        // A request that named a scope, even an empty one, keeps a `scope`
+        // claim: token exchange reads a missing actor scope as "no limit".
+        let scope = request
+            .scope
+            .as_ref()
+            .map(|_| granted.granted_scopes.join(" "));
         let access_claims = TokenClaims {
             // Hearth's own subject form for a client, as client_credentials
             // mints it — not the assertion's `sub`, which is the issued
@@ -1867,6 +1934,23 @@ impl EmbeddedIdentityEngine {
         }
 
         self.validate_client_scope_request(&client, request.scope.as_deref().unwrap_or(""))?;
+        // 1c. Every scope must be legal for the client before a user code is
+        //     shown. Grantability is decided at the token request, once the
+        //     approving user is known.
+        let requested_scopes = super::scope_grant::scope_list(request.scope.as_deref());
+        self.grant_scopes(
+            realm_id,
+            &super::scope_grant::ScopeGrant {
+                user_id: None,
+                client: Some(&client),
+                requested: &requested_scopes,
+                resource: None,
+                org_id: None,
+                mode: crate::rbac::ScopeMode::Request,
+                narrowed: false,
+                issuing: false,
+            },
+        )?;
 
         // 2. Generate device code (32 random bytes → base64url)
         let rng = ring::rand::SystemRandom::new();
@@ -3302,19 +3386,32 @@ impl EmbeddedIdentityEngine {
         );
         let client = issued_to.as_ref().unwrap_or(&sentinel);
 
-        // Every permission-bearing scope of the token narrows (OIDC scopes and
-        // scopes the realm registry does not know neither narrow nor widen);
-        // the caller's own filter (`/v1/me/permissions?scope=`) can only
-        // narrow further.
-        let token_scopes: Vec<String> = claims
-            .scope
-            .as_deref()
-            .map(|s| s.split_whitespace().map(str::to_string).collect())
-            .unwrap_or_default();
-        let mut resolved = self
-            .rbac
-            .resolve_for_granted_scopes(&user_id, realm_id, org_id, &token_scopes)
-            .map_err(rbac_err)?;
+        // The token's granted scopes, re-resolved now with the re-issue rules
+        // (scope-consent-integrity design §2); the caller's own filter
+        // (`/v1/me/permissions?scope=`) can only narrow further. A grant the
+        // registry can no longer honour carries no authority.
+        let token_scopes = super::scope_grant::scope_list(claims.scope.as_deref());
+        let token_resource = claims
+            .aud
+            .resource()
+            .and_then(|r| Uri::try_from(r.to_string()).ok());
+        let mut resolved = match self.grant_scopes(
+            realm_id,
+            &super::scope_grant::ScopeGrant {
+                user_id: Some(&user_id),
+                client: issued_to.as_ref(),
+                requested: &token_scopes,
+                resource: token_resource.as_ref(),
+                org_id,
+                mode: crate::rbac::ScopeMode::Reissue,
+                narrowed: self.grant_family_narrowed(realm_id, claims.fid.as_deref()),
+                issuing: true,
+            },
+        ) {
+            Ok(resolved) => resolved,
+            Err(IdentityError::InvalidGrant { .. }) => return Ok(LiveTokenAuthority::default()),
+            Err(e) => return Err(e),
+        };
         if let Some(narrow) = narrow_scope {
             let admitted: BTreeSet<crate::rbac::Permission> = self
                 .rbac
@@ -3326,7 +3423,7 @@ impl EmbeddedIdentityEngine {
             resolved.permissions.retain(|p| admitted.contains(p));
         }
 
-        let granted_scopes: BTreeSet<String> = token_scopes.into_iter().collect();
+        let granted_scopes: BTreeSet<String> = resolved.granted_scopes.iter().cloned().collect();
         let (mut roles, mut groups, mut permissions, _custom) = self.apply_claim_profile(
             realm_id,
             &user,
@@ -3866,6 +3963,29 @@ impl EmbeddedIdentityEngine {
     /// undeclared value would let a client mint a Hearth-signed token for a
     /// resource server the realm never declared. Every spelling of a
     /// registered URI resolves to its one canonical form (G6).
+    /// Checks a token request's RFC 8707 `resource` against the grant's
+    /// resource: absent, or equal in canonical form, is accepted; anything
+    /// else is `invalid_target` (RFC 8707 §2.2). A grant's resource never
+    /// changes after `/authorize`.
+    pub(super) fn require_grant_resource(
+        &self,
+        realm_id: &RealmId,
+        requested: Option<&str>,
+        granted: Option<&Uri>,
+    ) -> Result<(), IdentityError> {
+        let Some(requested) = requested else {
+            return Ok(());
+        };
+        let canonical = self.resolve_authorization_resource(realm_id, requested)?;
+        if granted.is_some_and(|g| g.as_str() == canonical.as_str()) {
+            Ok(())
+        } else {
+            Err(IdentityError::InvalidTarget {
+                reason: "the token request names a resource the grant does not hold".to_string(),
+            })
+        }
+    }
+
     pub(super) fn resolve_authorization_resource(
         &self,
         realm_id: &RealmId,

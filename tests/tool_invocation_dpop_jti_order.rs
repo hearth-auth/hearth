@@ -139,6 +139,7 @@ async fn failed_dpop_binding_does_not_consume_the_proof_jti() {
                 dpop_jkt: Some("not-a-real-thumbprint-AAAAAAAAAAAA".to_string()),
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("client_credentials_token");

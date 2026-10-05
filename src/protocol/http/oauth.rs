@@ -2716,6 +2716,8 @@ async fn token_exchange_impl(
                         .into_response();
                 }
             };
+            // RFC 8707: the token request's resource is checked by the grant.
+            request.resource.clone_from(&body.resource);
             request.dpop_jkt = dpop_jkt.clone();
             request.client_assertion_type = body.client_assertion_type;
             request.client_assertion = body.client_assertion.as_deref().map(str::to_string);
@@ -2783,11 +2785,12 @@ async fn token_exchange_impl(
                 authenticated_client_id,
             };
 
-            match state.identity.refresh_tokens(
+            match state.identity.refresh_tokens_for_resource(
                 &realm_id,
                 &refresh_token,
                 dpop_jkt.as_deref(),
                 Some(&refresh_bind),
+                body.resource.as_deref(),
             ) {
                 Ok(tokens) => {
                     crate::metrics::metrics()
@@ -2840,6 +2843,8 @@ async fn token_exchange_impl(
                         .into_response();
                 }
             };
+            // RFC 8707: the token request's resource is checked by the grant.
+            request.resource.clone_from(&body.resource);
             request.dpop_jkt = dpop_jkt.clone();
             request.client_assertion_type = body.client_assertion_type;
             request.client_assertion = body.client_assertion.as_deref().map(str::to_string);
@@ -3927,6 +3932,8 @@ async fn realm_token_exchange(
                         .into_response()
                 }
             };
+            // RFC 8707: the token request's resource is checked by the grant.
+            request.resource.clone_from(&body.resource);
             request.dpop_jkt = dpop_jkt.clone();
             request.client_assertion_type = body.client_assertion_type;
             request.client_assertion = body.client_assertion.as_deref().map(str::to_string);
@@ -3979,11 +3986,12 @@ async fn realm_token_exchange(
             let refresh_bind = crate::identity::RefreshBindContext {
                 authenticated_client_id,
             };
-            match state.identity.refresh_tokens(
+            match state.identity.refresh_tokens_for_resource(
                 &realm_id,
                 &refresh_token,
                 dpop_jkt.as_deref(),
                 Some(&refresh_bind),
+                body.resource.as_deref(),
             ) {
                 Ok(tokens) => {
                     let resp = pb::OidcTokenResponse {
@@ -4024,6 +4032,8 @@ async fn realm_token_exchange(
                         .into_response()
                 }
             };
+            // RFC 8707: the token request's resource is checked by the grant.
+            request.resource.clone_from(&body.resource);
             request.dpop_jkt = dpop_jkt.clone();
             request.client_assertion_type = body.client_assertion_type;
             request.client_assertion = body.client_assertion.as_deref().map(str::to_string);

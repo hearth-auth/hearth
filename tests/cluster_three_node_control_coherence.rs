@@ -554,6 +554,7 @@ async fn revoking_a_sessionless_token_on_the_leader_is_prompt_and_binds_on_both_
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .unwrap()
@@ -2084,6 +2085,7 @@ async fn an_authorization_code_is_redeemed_once_across_a_leader_change() {
                     dpop_jkt: None,
                     client_assertion_type: None,
                     client_assertion: None,
+                    resource: None,
                 },
             )
             .is_ok()
@@ -2281,6 +2283,7 @@ fn issue_refresh_token(
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .unwrap()

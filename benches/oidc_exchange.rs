@@ -117,6 +117,7 @@ fn bench_auth_code_exchange(c: &mut Criterion) {
                     dpop_jkt: None,
                     client_assertion_type: None,
                     client_assertion: None,
+                    resource: None,
                 },
             );
             assert!(result.is_ok());

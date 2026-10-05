@@ -24,15 +24,27 @@ use hearth::identity::{
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
-fn make_realm(identity: &dyn IdentityEngine) -> RealmId {
-    identity
+/// Scopes the token fixtures in this file mint. The scope registry refuses a
+/// name it does not define, so each realm declares them up front.
+const FIXTURE_SCOPES: &[&str] = &[
+    "mcp:tools:invoke",
+    "mcp:tools:list",
+    "mcp:resources:read",
+    "tool:delete-db:invoke",
+];
+
+fn make_realm(harness: &common::TestHarness) -> RealmId {
+    let realm_id = harness
+        .identity()
         .create_realm(&CreateRealmRequest {
             name: format!("te-test-{}", uuid::Uuid::new_v4()),
             config: None,
         })
         .expect("create realm")
         .id()
-        .clone()
+        .clone();
+    harness.declare_scopes(&realm_id, FIXTURE_SCOPES);
+    realm_id
 }
 
 fn make_user(identity: &dyn IdentityEngine, realm_id: &RealmId) -> UserId {
@@ -123,6 +135,7 @@ fn make_actor_token(
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("issue actor access token");
@@ -339,7 +352,7 @@ async fn token_exchange_requires_access_token_type() {
         .await
         .expect("test setup failed");
     let identity = harness.identity();
-    let realm_id = make_realm(identity);
+    let realm_id = make_realm(&harness);
     let user_id = make_user(identity, &realm_id);
     let client_id = make_exchange_client(identity, &realm_id);
 
@@ -390,7 +403,7 @@ async fn token_exchange_rejects_expired_subject_token() {
         .await
         .expect("test setup failed");
     let identity = harness.identity();
-    let realm_id = make_realm(identity);
+    let realm_id = make_realm(&harness);
     let user_id = make_user(identity, &realm_id);
     let client_id = make_exchange_client(identity, &realm_id);
 
@@ -444,7 +457,7 @@ async fn token_exchange_empty_scope_intersection_rejected() {
         .await
         .expect("test setup failed");
     let identity = harness.identity();
-    let realm_id = make_realm(identity);
+    let realm_id = make_realm(&harness);
     let user_id = make_user(identity, &realm_id);
     let client_id = make_exchange_client(identity, &realm_id);
 
@@ -479,7 +492,7 @@ async fn token_exchange_produces_act_claim() {
         .await
         .expect("test setup failed");
     let identity = harness.identity();
-    let realm_id = make_realm(identity);
+    let realm_id = make_realm(&harness);
     let user_id = make_user(identity, &realm_id);
 
     let subject_token = make_subject_token(
@@ -540,7 +553,7 @@ async fn token_exchange_actor_token_requires_jwt_actor_token_type() {
         .await
         .expect("test setup failed");
     let identity = harness.identity();
-    let realm_id = make_realm(identity);
+    let realm_id = make_realm(&harness);
 
     for actor_token_type in [
         Some("urn:ietf:params:oauth:token-type:access_token".to_string()),
@@ -585,7 +598,7 @@ async fn token_exchange_actor_jti_replay_rejected() {
         .await
         .expect("test setup failed");
     let identity = harness.identity();
-    let realm_id = make_realm(identity);
+    let realm_id = make_realm(&harness);
     let user_id = make_user(identity, &realm_id);
 
     // Issue a single real actor token — the same JWT (same JTI) will be used twice.
@@ -634,7 +647,7 @@ async fn token_exchange_delegation_depth_enforced() {
         .await
         .expect("test setup failed");
     let identity = harness.identity();
-    let realm_id = make_realm(identity);
+    let realm_id = make_realm(&harness);
     let user_id = make_user(identity, &realm_id);
 
     // The default act-chain ceiling (`security.max_act_chain_depth`).
@@ -708,7 +721,7 @@ async fn token_exchange_lifetime_bounded_by_subject() {
         .await
         .expect("test setup failed");
     let identity = harness.identity();
-    let realm_id = make_realm(identity);
+    let realm_id = make_realm(&harness);
     let user_id = make_user(identity, &realm_id);
     let client_id = make_exchange_client(identity, &realm_id);
 
@@ -757,7 +770,7 @@ async fn token_exchange_nested_act_chain_two_hops() {
         .await
         .expect("test setup failed");
     let identity = harness.identity();
-    let realm_id = make_realm(identity);
+    let realm_id = make_realm(&harness);
     let user_id = make_user(identity, &realm_id);
 
     // Build a real depth-1 subject (user → first_actor) via a first exchange.
@@ -858,7 +871,7 @@ async fn token_exchange_actor_scope_limits_result() {
         .await
         .expect("test setup failed");
     let identity = harness.identity();
-    let realm_id = make_realm(identity);
+    let realm_id = make_realm(&harness);
     let user_id = make_user(identity, &realm_id);
 
     // Subject holds two scopes; actor only holds the narrower one.
@@ -914,7 +927,7 @@ async fn token_exchange_zero_scope_actor_rejected() {
         .await
         .expect("test setup failed");
     let identity = harness.identity();
-    let realm_id = make_realm(identity);
+    let realm_id = make_realm(&harness);
     let user_id = make_user(identity, &realm_id);
 
     // Subject holds a highly privileged scope.
@@ -960,8 +973,8 @@ async fn token_exchange_rejects_cross_realm_subject_tid() {
         .expect("test setup failed");
     let identity = harness.identity();
     // Two separate realms — the subject token belongs to realm_a but is presented to realm_b.
-    let realm_a = make_realm(identity);
-    let realm_b = make_realm(identity);
+    let realm_a = make_realm(&harness);
+    let realm_b = make_realm(&harness);
     let user_id = make_user(identity, &realm_a);
     let client_id = make_exchange_client(identity, &realm_b);
 
@@ -1010,7 +1023,7 @@ async fn token_exchange_actor_sub_mismatch_rejected() {
         .await
         .expect("test setup failed");
     let identity = harness.identity();
-    let realm_id = make_realm(identity);
+    let realm_id = make_realm(&harness);
     let user_id = make_user(identity, &realm_id);
 
     let subject_token = make_subject_token(identity, &realm_id, &user_id, "mcp:tools:invoke");
@@ -1060,7 +1073,7 @@ async fn token_exchange_overrides_iss_and_tid_to_serving_realm() {
         .await
         .expect("test setup failed");
     let identity = harness.identity();
-    let realm_id = make_realm(identity);
+    let realm_id = make_realm(&harness);
     let user_id = make_user(identity, &realm_id);
     let client_id = make_exchange_client(identity, &realm_id);
 
@@ -1116,7 +1129,7 @@ async fn token_exchange_rejects_forged_subject_token_bogus_signature() {
         .await
         .expect("test setup failed");
     let identity = harness.identity();
-    let realm_id = make_realm(identity);
+    let realm_id = make_realm(&harness);
     let user_id = make_user(identity, &realm_id);
     let client_id = make_exchange_client(identity, &realm_id);
 

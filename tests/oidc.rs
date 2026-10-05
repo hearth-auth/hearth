@@ -110,6 +110,7 @@ async fn oidc_authorization_code_flow_roundtrip() {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("exchange code");
@@ -477,6 +478,7 @@ async fn oidc_pkce_s256_flow() {
             dpop_jkt: None,
             client_assertion_type: None,
             client_assertion: None,
+            resource: None,
         },
     );
     assert!(
@@ -518,6 +520,7 @@ async fn oidc_pkce_s256_flow() {
             dpop_jkt: None,
             client_assertion_type: None,
             client_assertion: None,
+            resource: None,
         },
     );
     assert!(
@@ -564,6 +567,7 @@ async fn oidc_pkce_s256_flow() {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("exchange with correct verifier");
@@ -818,6 +822,7 @@ async fn conformance_token_endpoint_rfc6749() {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("exchange code");
@@ -865,6 +870,7 @@ async fn conformance_token_endpoint_rfc6749() {
             dpop_jkt: None,
             client_assertion_type: None,
             client_assertion: None,
+            resource: None,
         },
     );
     assert!(
@@ -884,6 +890,7 @@ async fn conformance_token_endpoint_rfc6749() {
             dpop_jkt: None,
             client_assertion_type: None,
             client_assertion: None,
+            resource: None,
         },
     );
     assert!(
@@ -927,6 +934,7 @@ async fn conformance_token_endpoint_rfc6749() {
             dpop_jkt: None,
             client_assertion_type: None,
             client_assertion: None,
+            resource: None,
         },
     );
     assert!(

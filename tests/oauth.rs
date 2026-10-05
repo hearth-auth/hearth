@@ -64,6 +64,8 @@ async fn client_credentials_full_flow() {
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
+    // The scope registry refuses a scope the realm does not define.
+    harness.declare_scopes(&realm, &["read", "write"]);
 
     // 1. Register a confidential client with a secret
     let client = harness
@@ -102,6 +104,7 @@ async fn client_credentials_full_flow() {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("client credentials token");
@@ -315,6 +318,7 @@ async fn refresh_token_rotation_e2e() {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("exchange code");
@@ -478,6 +482,7 @@ async fn auth_code_flow_iss_matches_discovery_issuer() {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("exchange code");
@@ -592,6 +597,7 @@ async fn conformance_rfc7662_introspection_response() {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("exchange");
@@ -1056,6 +1062,8 @@ async fn introspection_scoped_to_intended_audience() {
         .await
         .expect("harness setup");
     let realm = create_realm(&harness);
+    // The scope registry refuses a scope the realm does not define.
+    harness.declare_scopes(&realm, &["read"]);
 
     let register_confidential = |name: &str| {
         harness
@@ -1090,6 +1098,7 @@ async fn introspection_scoped_to_intended_audience() {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("token for client_a");

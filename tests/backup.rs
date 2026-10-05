@@ -2670,6 +2670,7 @@ fn rs256_id_token(
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("exchange")
@@ -3212,6 +3213,7 @@ async fn restore_keeps_revoked_jtis_and_blocked_dpop_keys() {
                     dpop_jkt: dpop_jkt.map(str::to_string),
                     client_assertion_type: None,
                     client_assertion: None,
+                    resource: None,
                 },
             )
             .expect("mint machine token")

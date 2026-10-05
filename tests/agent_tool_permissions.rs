@@ -415,6 +415,7 @@ async fn m4_bound_token_without_dpop_proof_rejected() {
                 dpop_jkt: Some(fake_jkt),
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("client_credentials_token");

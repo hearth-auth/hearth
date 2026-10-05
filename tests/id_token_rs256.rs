@@ -225,6 +225,7 @@ fn code_flow(engine: &dyn IdentityEngine, realm: &RealmId, client: &ClientId) ->
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("exchange authorization code")

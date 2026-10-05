@@ -1365,6 +1365,7 @@ async fn id_token_on_introspect_returns_inactive() {
                 dpop_jkt: None,
                 client_assertion_type: None,
                 client_assertion: None,
+                resource: None,
             },
         )
         .expect("exchange code");
@@ -1472,6 +1473,7 @@ async fn concurrent_auth_code_exchange_only_one_succeeds() {
                         dpop_jkt: None,
                         client_assertion_type: None,
                         client_assertion: None,
+                        resource: None,
                     },
                 )
             })

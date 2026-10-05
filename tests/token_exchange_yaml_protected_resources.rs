@@ -95,6 +95,8 @@ fn client(h: &common::TestHarness, realm: &RealmId) -> ClientId {
 }
 
 fn subject_token(h: &common::TestHarness, realm: &RealmId) -> String {
+    // The scope registry refuses a scope the realm does not define.
+    h.declare_scopes(realm, &["read"]);
     let user = h
         .identity()
         .create_user(
@@ -452,14 +454,19 @@ fn rbac_grants_bundle(
     resource: &str,
 ) -> bool {
     let uri = hearth::core::Uri::try_from(resource.to_string()).unwrap();
+    let scopes = [BUNDLE.to_string()];
     match h.rbac().resolve_with_scopes(
-        user,
         realm,
-        None,
-        &[BUNDLE.to_string()],
-        ClientTrustLevel::ThirdParty,
-        &[BUNDLE.to_string()],
-        Some(&uri),
+        &hearth::rbac::ScopeRequest {
+            user_id: Some(user),
+            org_id: None,
+            requested: &scopes,
+            trust_level: ClientTrustLevel::ThirdParty,
+            declared: &scopes,
+            resource: Some(&uri),
+            mode: hearth::rbac::ScopeMode::Request,
+            narrowed: false,
+        },
     ) {
         Ok(resolved) => {
             assert_eq!(resolved.granted_scopes, vec![BUNDLE.to_string()]);
@@ -569,7 +576,9 @@ fn resource_bound_pair(
             user.id(),
             session.id(),
             &TokenIssuanceContext {
-                granted_scopes: std::iter::once("read".to_string()).collect(),
+                // Under a resource only that resource's bundles and the OIDC
+                // scopes are legal; these resources define no bundle.
+                granted_scopes: std::iter::once("openid".to_string()).collect(),
                 resource: resource.map(|r| hearth::core::Uri::try_from(r.to_string()).unwrap()),
                 ..TokenIssuanceContext::default()
             },

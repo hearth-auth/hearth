@@ -946,7 +946,9 @@ pub(crate) fn identity_error_to_response(
         }
         IdentityError::InvalidTarget { .. } => (StatusCode::BAD_REQUEST, "invalid_target"),
         IdentityError::DelegationDepthExceeded { .. } => (StatusCode::BAD_REQUEST, "invalid_grant"),
-        IdentityError::EmptyScopeIntersection => (StatusCode::BAD_REQUEST, "invalid_scope"),
+        IdentityError::EmptyScopeIntersection | IdentityError::InvalidScope { .. } => {
+            (StatusCode::BAD_REQUEST, "invalid_scope")
+        }
         IdentityError::ActorTokenReplayed => (StatusCode::BAD_REQUEST, "invalid_grant"),
         IdentityError::DelegationGrantNotFound => (StatusCode::NOT_FOUND, "not_found"),
         // Phase C

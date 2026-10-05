@@ -225,11 +225,6 @@ pub(crate) fn resource_scope_realm_scan_prefix(realm_id: &RealmId) -> Vec<u8> {
     format!("{RESOURCE_SCOPE_PREFIX}{}:", realm_id.as_uuid()).into_bytes()
 }
 
-/// Scan prefix for all resource-scope entries under a given URI hash.
-pub(crate) fn resource_scope_scan_prefix(realm_id: &RealmId, uri_hash: &str) -> Vec<u8> {
-    format!("{RESOURCE_SCOPE_PREFIX}{}:{uri_hash}:", realm_id.as_uuid()).into_bytes()
-}
-
 fn scope_key(scope: &Scope) -> String {
     match scope {
         Scope::Realm => "_realm".to_string(),

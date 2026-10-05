@@ -20,7 +20,8 @@ use super::error::RbacError;
 use super::types::Subject;
 use super::types::{
     CycleKind, GroupId, GroupMember, OrphanKind, OrphanRef, Permission, ResolvedPermissions, Role,
-    RoleAssignment, RoleId, RoleStatus, Scope, TraversalKind, UserPermissionGrant,
+    RoleAssignment, RoleId, RoleStatus, Scope, ScopeMode, ScopeRequest, TraversalKind,
+    UserPermissionGrant,
 };
 
 /// Maximum depth for transitive group membership BFS.
@@ -114,15 +115,6 @@ pub(crate) trait Resolver {
         resource_uri: &Uri,
         scope_name: &str,
     ) -> Result<ScopeLookup, RbacError>;
-
-    /// Returns the union of all permissions declared across a resource's
-    /// scope bundles. Used to check whether a raw permission scope belongs
-    /// to the resource's scope namespace.
-    fn resource_scope_permission_names(
-        &self,
-        realm_id: &RealmId,
-        resource_uri: &Uri,
-    ) -> Result<Vec<Permission>, RbacError>;
 
     /// Direct extra permissions granted to a user.
     fn user_permissions(
@@ -286,12 +278,13 @@ pub(crate) fn resolve_full<R: Resolver + ?Sized>(
         permissions: perms.into_iter().collect(),
         granted_scopes: Vec::new(),
         orphans: orphans.into_iter().collect(),
+        scope_narrowed: false,
     })
 }
 
 /// Enforces the per-token size caps (openspec/specs/rbac-model/spec.md). Hard caps prevent
 /// oversized JWTs from escaping the issuance path.
-fn enforce_token_caps(
+pub(crate) fn enforce_token_caps(
     permissions: &[Permission],
     roles: &[String],
     groups: &[String],
@@ -360,286 +353,166 @@ pub(crate) fn resolve_permissions<R: Resolver + ?Sized>(
         permissions,
         granted_scopes: Vec::new(),
         orphans,
+        scope_narrowed: false,
     })
 }
 
-/// Resolves the permissions an access token granted `granted_scopes` carries,
-/// re-evaluated now — the live (`introspection` / `decision`) twin of
-/// issuance-time scope narrowing (GA audit 3 C-8). See
-/// [`crate::rbac::RbacEngine::resolve_for_granted_scopes`].
-pub(crate) fn resolve_for_granted_scopes<R: Resolver + ?Sized>(
-    resolver: &R,
-    user_id: &UserId,
-    realm_id: &RealmId,
-    org_id: Option<&OrganizationId>,
-    granted_scopes: &[String],
-) -> Result<ResolvedPermissions, RbacError> {
-    let ResolvedPermissions {
-        roles,
-        groups,
-        permissions: full_perms,
-        orphans,
-        ..
-    } = resolver.resolve_full_cached(user_id, realm_id, org_id)?;
+/// What one requested scope is, once classified against the selected
+/// registry.
+enum ScopeEntry {
+    /// An OIDC standard scope: always grantable, no permissions.
+    Oidc,
+    /// A bundle (or a bare-word realm scope) and its permissions, or a raw
+    /// permission scope as a one-permission bundle.
+    Bearing(Vec<Permission>),
+}
 
-    // Union of what every permission-bearing scope admits. A scope that
-    // admits nothing identifiable — an OIDC scope, a non-narrowing registry
-    // entry, a scope this realm's registry does not know — is skipped rather
-    // than voiding the others (the `narrow_by_scope` rule that let
-    // `openid docs:read` resolve wider than `docs:read`).
-    let mut narrowing = false;
-    let mut admitted: BTreeSet<Permission> = BTreeSet::new();
-    for scope in granted_scopes {
-        let kind = classify_scope_string(scope);
-        if kind == Some(ScopeKind::OidcStandard) {
-            continue;
+fn invalid_scope(reason: String) -> RbacError {
+    RbacError::InvalidScope { reason }
+}
+
+/// Classifies `scope` against the registry the audience selects
+/// (custom-permissions "The token audience selects the scope registry").
+/// A name the selected registry does not define is refused.
+fn classify_requested_scope<R: Resolver + ?Sized>(
+    resolver: &R,
+    realm_id: &RealmId,
+    scope: &str,
+    request: &ScopeRequest<'_>,
+) -> Result<ScopeEntry, RbacError> {
+    let unknown = || invalid_scope(format!("unknown scope '{scope}'"));
+    match classify_scope_string(scope) {
+        Some(ScopeKind::OidcStandard) => Ok(ScopeEntry::Oidc),
+        Some(ScopeKind::Permission) => {
+            if request.resource.is_some() {
+                return Err(invalid_scope(format!(
+                    "raw permission scope '{scope}' is not legal under a resource"
+                )));
+            }
+            if request.trust_level == ClientTrustLevel::ThirdParty {
+                return Err(invalid_scope(format!(
+                    "third-party clients cannot request raw permission scope '{scope}'"
+                )));
+            }
+            let permission = Permission::new(scope).map_err(|_| unknown())?;
+            Ok(ScopeEntry::Bearing(vec![permission]))
         }
-        match resolver.scope_permissions(realm_id, scope)? {
-            ScopeLookup::Bundle(list) if !list.is_empty() => {
-                narrowing = true;
-                admitted.extend(list);
-            }
-            // A raw permission scope is a synthetic single-permission scope
-            // (openspec/specs/custom-permissions/spec.md §"Resolution rule", rule 2).
-            _ if kind == Some(ScopeKind::Permission) => {
-                narrowing = true;
-                if let Ok(permission) = Permission::new(scope.as_str()) {
-                    admitted.insert(permission);
+        kind => {
+            // A bundle, or a bare word that only the realm registry may define.
+            let lookup = match request.resource {
+                Some(uri) if kind == Some(ScopeKind::Bundle) => {
+                    resolver.resource_scope_permissions(realm_id, uri, scope)?
                 }
+                Some(_) => return Err(unknown()),
+                None => resolver.scope_permissions(realm_id, scope)?,
+            };
+            match lookup {
+                ScopeLookup::Bundle(list) => Ok(ScopeEntry::Bearing(list)),
+                ScopeLookup::Missing | ScopeLookup::NoNarrowing => Err(unknown()),
             }
-            _ => {}
         }
     }
-
-    let permissions: Vec<Permission> = if narrowing {
-        full_perms
-            .into_iter()
-            .filter(|p| admitted.contains(p))
-            .collect()
-    } else {
-        full_perms
-    };
-
-    enforce_token_caps(&permissions, &roles, &groups)?;
-
-    Ok(ResolvedPermissions {
-        roles,
-        groups,
-        permissions,
-        granted_scopes: Vec::new(),
-        orphans,
-    })
 }
 
-/// Scope-resolution pipeline per `openspec/specs/custom-permissions/spec.md` §"Resolution rule".
+/// The scope-resolution entry point (`scope-consent-integrity` design §2).
 ///
-/// Classifies each requested scope string, performs full-satisfiability
-/// checking against the user's effective permission set, and applies
-/// trust-level-aware grant policy:
-///
-/// - `ThirdParty` fail-closed: any non-OIDC scope that is undeclared or
-///   unsatisfiable causes `RbacError::InvalidScope`.
-/// - `FirstParty` partial grant: unsatisfiable scopes are silently dropped.
-/// - Empty `requested_scopes` + `ThirdParty`: `RbacError::InvalidScope`.
-/// - Empty `requested_scopes` + `FirstParty`: full effective permissions,
-///   `granted_scopes` is empty.
-#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
+/// - Every scope must be legal for the audience: an OIDC standard scope, a
+///   bundle of the selected registry, or (first-party, no resource) a raw
+///   permission. Anything else is refused with `InvalidScope`, in both modes.
+/// - In [`ScopeMode::Request`], a non-empty `declared_scopes` must hold every
+///   non-OIDC scope.
+/// - A bundle is grantable only when the user holds every permission of it.
+///   With no user (`client_credentials`), every legal scope is granted and
+///   carries no permissions.
+/// - An ungrantable scope refuses a third-party request; otherwise it drops.
+///   When scopes were asked for and none is granted, the call is refused.
+/// - `permissions` is the union of the granted permission-bearing scopes.
+///   When only OIDC scopes (or none) were asked for, a first-party client gets
+///   the user's full effective set and a third-party client gets nothing.
 pub(crate) fn resolve_with_scopes<R: Resolver + ?Sized>(
     resolver: &R,
-    user_id: &UserId,
     realm_id: &RealmId,
-    org_id: Option<&OrganizationId>,
-    requested_scopes: &[String],
-    client_trust_level: ClientTrustLevel,
-    declared_scopes: &[String],
-    resource: Option<&Uri>,
+    request: &ScopeRequest<'_>,
 ) -> Result<ResolvedPermissions, RbacError> {
-    // Step 1–4: resolve the user's full effective permission set (no scope
-    // narrowing yet).
-    let full = resolve_permissions(resolver, user_id, realm_id, org_id, None)?;
-    let effective: BTreeSet<Permission> = full.permissions.iter().cloned().collect();
-
-    // ThirdParty with no requested scopes → fail-closed immediately.
-    if requested_scopes.is_empty() {
-        if client_trust_level == ClientTrustLevel::ThirdParty {
-            return Err(RbacError::InvalidScope {
-                reason: "ThirdParty clients must request at least one scope".to_string(),
-            });
-        }
-        // FirstParty with no requested scopes → full effective permissions.
-        return Ok(full);
+    let first_party = request.trust_level == ClientTrustLevel::FirstParty;
+    if request.requested.is_empty() && !first_party && request.mode == ScopeMode::Request {
+        return Err(invalid_scope(
+            "third-party clients must request at least one scope".to_string(),
+        ));
     }
 
-    let declared_set: HashSet<&str> = declared_scopes.iter().map(String::as_str).collect();
+    // The full set, uncapped: the per-token caps apply to what a token
+    // carries, after narrowing (see `enforce_token_caps`).
+    let full = match request.user_id {
+        Some(user_id) => Some(resolver.resolve_full_cached(user_id, realm_id, request.org_id)?),
+        None => None,
+    };
+    let effective: BTreeSet<&Permission> = full
+        .as_ref()
+        .map(|f| f.permissions.iter().collect())
+        .unwrap_or_default();
 
     let mut granted_scopes: Vec<String> = Vec::new();
-    // Union of permissions admitted by all granted scopes.
     let mut admitted: BTreeSet<Permission> = BTreeSet::new();
-    // Whether any granted scope is OIDC standard (contributes no narrowing).
-    let mut any_oidc_standard_granted = false;
-
-    for scope in requested_scopes {
-        let scope_str = scope.as_str();
-
-        match classify_scope_string(scope_str) {
-            Some(ScopeKind::OidcStandard) => {
-                // OIDC standard scopes are always grantable regardless of
-                // trust level or resource indicator. They apply no
-                // permission narrowing.
-                granted_scopes.push(scope.clone());
-                any_oidc_standard_granted = true;
+    let mut named_bearing = request.narrowed;
+    for scope in request.requested {
+        let entry = classify_requested_scope(resolver, realm_id, scope, request)?;
+        let ScopeEntry::Bearing(perms) = entry else {
+            granted_scopes.push(scope.clone());
+            continue;
+        };
+        named_bearing = true;
+        if request.mode == ScopeMode::Request
+            && !request.declared.is_empty()
+            && !request.declared.contains(scope)
+        {
+            return Err(invalid_scope(format!(
+                "scope '{scope}' is not in the client's declared_scopes"
+            )));
+        }
+        let grantable = full.is_none() || perms.iter().all(|p| effective.contains(p));
+        if grantable {
+            granted_scopes.push(scope.clone());
+            if full.is_some() {
+                admitted.extend(perms);
             }
-            Some(ScopeKind::Permission) => {
-                // ThirdParty clients MUST NOT use raw permission scopes.
-                if client_trust_level == ClientTrustLevel::ThirdParty {
-                    return Err(RbacError::InvalidScope {
-                        reason: format!(
-                            "ThirdParty clients cannot request raw permission scope '{scope_str}'"
-                        ),
-                    });
-                }
-                // When resource indicator is present, permission scopes must
-                // belong to the resource's scope bundles' permission lists.
-                if let Some(uri) = resource {
-                    let in_resource_bundles =
-                        permission_in_resource_bundles(resolver, realm_id, uri, scope_str)?;
-                    if !in_resource_bundles {
-                        if client_trust_level == ClientTrustLevel::ThirdParty {
-                            return Err(RbacError::InvalidScope {
-                                reason: format!(
-                                    "permission scope '{scope_str}' is not in any scope bundle \
-                                     declared for resource '{}'",
-                                    uri.as_str()
-                                ),
-                            });
-                        }
-                        // FirstParty: silently skip.
-                        continue;
-                    }
-                } else {
-                    // No resource indicator: check declaration constraint.
-                    if !declared_set.is_empty() && !declared_set.contains(scope_str) {
-                        if client_trust_level == ClientTrustLevel::ThirdParty {
-                            return Err(RbacError::InvalidScope {
-                                reason: format!(
-                                    "scope '{scope_str}' not in client declared_scopes"
-                                ),
-                            });
-                        }
-                        // FirstParty: silently skip undeclared scope.
-                        continue;
-                    }
-                }
-                // Full-satisfiability check: user must hold the permission.
-                if let Ok(p) = Permission::new(scope_str) {
-                    if effective.contains(&p) {
-                        granted_scopes.push(scope.clone());
-                        admitted.insert(p);
-                    }
-                }
-            }
-            Some(ScopeKind::Bundle) => {
-                // Check declaration constraint (only when no resource indicator).
-                if resource.is_none() {
-                    if !declared_set.is_empty() && !declared_set.contains(scope_str) {
-                        if client_trust_level == ClientTrustLevel::ThirdParty {
-                            return Err(RbacError::InvalidScope {
-                                reason: format!(
-                                    "scope '{scope_str}' not in client declared_scopes"
-                                ),
-                            });
-                        }
-                        // FirstParty: silently skip undeclared scope.
-                        continue;
-                    }
-                }
-
-                // Load bundle permissions — from the resource scope registry
-                // when a resource indicator is present, otherwise from the
-                // realm-level scope registry.
-                let bundle_result = if let Some(uri) = resource {
-                    resolver.resource_scope_permissions(realm_id, uri, scope_str)?
-                } else {
-                    resolver.scope_permissions(realm_id, scope_str)?
-                };
-
-                match bundle_result {
-                    ScopeLookup::Missing | ScopeLookup::NoNarrowing => {
-                        // Scope name not found in the relevant registry.
-                        if client_trust_level == ClientTrustLevel::ThirdParty {
-                            return Err(RbacError::InvalidScope {
-                                reason: format!("undeclared scope '{scope_str}'"),
-                            });
-                        }
-                        // FirstParty: silently skip.
-                    }
-                    ScopeLookup::Bundle(bundle_perms) => {
-                        // Full-satisfiability: user must have ALL bundle permissions.
-                        let fully_satisfied = bundle_perms.iter().all(|p| effective.contains(p));
-                        if fully_satisfied {
-                            granted_scopes.push(scope.clone());
-                            for p in bundle_perms {
-                                admitted.insert(p);
-                            }
-                        } else if client_trust_level == ClientTrustLevel::ThirdParty {
-                            return Err(RbacError::InvalidScope {
-                                reason: format!(
-                                    "user does not satisfy all permissions required by scope '{scope_str}'"
-                                ),
-                            });
-                        }
-                        // FirstParty: silently skip unsatisfiable bundle.
-                    }
-                }
-            }
-            None => {
-                // Unclassifiable scope string.
-                if client_trust_level == ClientTrustLevel::ThirdParty {
-                    return Err(RbacError::InvalidScope {
-                        reason: format!("unrecognized scope syntax '{scope_str}'"),
-                    });
-                }
-                // FirstParty: silently skip unrecognized scope.
-            }
+        } else if !first_party && request.mode == ScopeMode::Request {
+            return Err(invalid_scope(format!(
+                "the user does not hold every permission of scope '{scope}'"
+            )));
         }
     }
-
-    // If nothing was granted, that's an error for both trust levels.
-    if granted_scopes.is_empty() {
-        return Err(RbacError::InvalidScope {
-            reason: "no requested scope could be granted".to_string(),
-        });
+    if !request.requested.is_empty() && granted_scopes.is_empty() {
+        return Err(invalid_scope(
+            "no requested scope could be granted".to_string(),
+        ));
     }
 
-    // Compute effective_for_token = effective ∩ ∪admitted.
-    let permissions: Vec<Permission> = if any_oidc_standard_granted {
+    let Some(full) = full else {
+        return Ok(ResolvedPermissions {
+            granted_scopes,
+            scope_narrowed: named_bearing,
+            ..ResolvedPermissions::default()
+        });
+    };
+    let permissions: Vec<Permission> = if named_bearing {
         full.permissions
-    } else {
-        effective
             .into_iter()
             .filter(|p| admitted.contains(p))
             .collect()
+    } else if first_party {
+        full.permissions
+    } else {
+        Vec::new()
     };
-
     Ok(ResolvedPermissions {
         roles: full.roles,
         groups: full.groups,
         permissions,
         granted_scopes,
         orphans: full.orphans,
+        scope_narrowed: named_bearing,
     })
-}
-
-/// Checks whether a permission-scope string appears in any of a resource's
-/// scope bundles' permission lists.
-fn permission_in_resource_bundles<R: Resolver + ?Sized>(
-    resolver: &R,
-    realm_id: &RealmId,
-    resource_uri: &Uri,
-    permission: &str,
-) -> Result<bool, RbacError> {
-    let perms = resolver.resource_scope_permission_names(realm_id, resource_uri)?;
-    Ok(perms.iter().any(|p| p.as_str() == permission))
 }
 
 fn extra_applies(extra: &UserPermissionGrant, org_id: Option<&OrganizationId>) -> bool {
@@ -1070,24 +943,6 @@ mod tests {
                     .get(resource_uri.as_str())
                     .and_then(|scopes| scopes.get(scope_name)),
             ))
-        }
-
-        fn resource_scope_permission_names(
-            &self,
-            _r: &RealmId,
-            resource_uri: &Uri,
-        ) -> Result<Vec<Permission>, RbacError> {
-            Ok(self
-                .resource_scopes
-                .get(resource_uri.as_str())
-                .map(|scopes| {
-                    scopes
-                        .values()
-                        .filter_map(|v| v.as_ref())
-                        .flat_map(|perms| perms.iter().cloned())
-                        .collect()
-                })
-                .unwrap_or_default())
         }
     }
 
@@ -1591,106 +1446,6 @@ mod tests {
         );
     }
 
-    /// A user holding `docs.view`, `docs.edit` and `hearth.admin`, with the
-    /// `docs` bundle (`docs.view`, `docs.edit`) and a non-narrowing `openid`
-    /// registered — the fixture for the live scope-narrowing tests.
-    fn granted_scopes_fixture() -> (Fake, RealmId, UserId) {
-        let realm = RealmId::generate();
-        let alice = UserId::generate();
-        let role = mk_role(
-            &realm,
-            "r",
-            &["docs.view", "docs.edit", "hearth.admin"],
-            vec![],
-        );
-        let rid = role.id.clone();
-        let mut fake = Fake::new();
-        fake.upsert_role(role);
-        fake.user_asgn.insert(
-            alice.clone(),
-            vec![mk_asgn(
-                &realm,
-                Subject::User(alice.clone()),
-                rid,
-                Scope::Realm,
-            )],
-        );
-        fake.set_scope(
-            "docs",
-            Some(vec![
-                Permission::new("docs.view").expect("valid"),
-                Permission::new("docs.edit").expect("valid"),
-            ]),
-        );
-        fake.set_scope("openid", None);
-        (fake, realm, alice)
-    }
-
-    fn granted(fake: &Fake, realm: &RealmId, user: &UserId, scopes: &[&str]) -> Vec<String> {
-        let scopes: Vec<String> = scopes.iter().map(|s| (*s).to_string()).collect();
-        resolve_for_granted_scopes(fake, user, realm, None, &scopes)
-            .expect("resolve")
-            .permissions
-            .iter()
-            .map(|p| p.as_str().to_string())
-            .collect()
-    }
-
-    /// GA audit 3 C-8: `openid docs` resolved the user's FULL set, because a
-    /// non-narrowing scope voids every other scope's narrowing in
-    /// `resolve_permissions` — one more scope bought more authority.
-    #[test]
-    fn granted_scopes_an_oidc_scope_does_not_void_the_narrowing() {
-        let (fake, realm, alice) = granted_scopes_fixture();
-        assert_eq!(
-            granted(&fake, &realm, &alice, &["openid", "docs"]),
-            vec!["docs.edit".to_string(), "docs.view".to_string()]
-        );
-        assert_eq!(
-            granted(&fake, &realm, &alice, &["docs"]),
-            vec!["docs.edit".to_string(), "docs.view".to_string()]
-        );
-    }
-
-    /// A raw permission scope admits exactly that permission
-    /// (openspec/specs/custom-permissions/spec.md §"Resolution rule", rule 2).
-    #[test]
-    fn granted_scopes_a_raw_permission_scope_admits_that_permission() {
-        let (fake, realm, alice) = granted_scopes_fixture();
-        assert_eq!(
-            granted(&fake, &realm, &alice, &["openid", "docs.view"]),
-            vec!["docs.view".to_string()]
-        );
-    }
-
-    /// A scope the realm registry does not know — a protected resource's MCP
-    /// scope — carries no RBAC meaning: it neither narrows nor widens.
-    #[test]
-    fn granted_scopes_an_unregistered_scope_neither_narrows_nor_widens() {
-        let (fake, realm, alice) = granted_scopes_fixture();
-        assert_eq!(
-            granted(&fake, &realm, &alice, &["mcp:tools:invoke"]).len(),
-            3,
-            "alone it leaves the full set"
-        );
-        assert_eq!(
-            granted(&fake, &realm, &alice, &["mcp:tools:invoke", "docs"]),
-            vec!["docs.edit".to_string(), "docs.view".to_string()],
-            "beside a bundle it does not widen the bundle"
-        );
-    }
-
-    /// No scope, or only OIDC scopes: the full effective set.
-    #[test]
-    fn granted_scopes_without_a_permission_scope_is_the_full_set() {
-        let (fake, realm, alice) = granted_scopes_fixture();
-        assert_eq!(granted(&fake, &realm, &alice, &[]).len(), 3);
-        assert_eq!(
-            granted(&fake, &realm, &alice, &["openid", "profile"]).len(),
-            3
-        );
-    }
-
     #[test]
     fn permissions_are_deduplicated_and_sorted() {
         let realm = RealmId::generate();
@@ -1872,5 +1627,423 @@ mod tests {
             [] as [crate::rbac::types::Permission; 0]
         );
         assert_eq!(resolved.roles, [] as [std::string::String; 0]);
+    }
+
+    // ===== Scope resolution (scope-consent-integrity design §2) =====
+
+    const MCP: &str = "https://mcp.acme.com";
+
+    fn strings(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// Alice holds `docs.read` and `org.read`. Realm bundles: `read:docs`
+    /// (three permissions), `view:docs` (`docs.read`), the bare-word `org`.
+    /// Resource bundle: `mcp:tools:invoke` (`docs.read`) under [`MCP`].
+    fn scope_fixture() -> (Fake, RealmId, UserId) {
+        let realm = RealmId::generate();
+        let alice = UserId::generate();
+        let mut fake = Fake::new();
+        let role = mk_role(&realm, "reader", &["docs.read", "org.read"], vec![]);
+        fake.user_asgn.insert(
+            alice.clone(),
+            vec![mk_asgn(
+                &realm,
+                Subject::User(alice.clone()),
+                role.id.clone(),
+                Scope::Realm,
+            )],
+        );
+        fake.roles.insert(role.id.clone(), role);
+        let perms = |list: &[&str]| -> Option<Vec<Permission>> {
+            Some(
+                list.iter()
+                    .map(|p| Permission::new(*p).expect("perm"))
+                    .collect(),
+            )
+        };
+        fake.scopes.insert("openid".into(), None);
+        fake.scopes.insert(
+            "read:docs".into(),
+            perms(&["docs.read", "docs.list", "docs.share"]),
+        );
+        fake.scopes
+            .insert("view:docs".into(), perms(&["docs.read"]));
+        fake.scopes.insert("org".into(), perms(&["org.read"]));
+        fake.resource_scopes.insert(
+            MCP.to_string(),
+            HashMap::from([("mcp:tools:invoke".to_string(), perms(&["docs.read"]))]),
+        );
+        (fake, realm, alice)
+    }
+
+    fn resolve_scopes(
+        fake: &Fake,
+        realm: &RealmId,
+        user: Option<&UserId>,
+        requested: &[&str],
+        trust_level: ClientTrustLevel,
+        mode: ScopeMode,
+        declared: &[&str],
+        resource: Option<&str>,
+    ) -> Result<ResolvedPermissions, RbacError> {
+        let requested = strings(requested);
+        let declared = strings(declared);
+        let uri = resource.map(|r| Uri::try_from(r.to_string()).expect("uri"));
+        resolve_with_scopes(
+            fake,
+            realm,
+            &ScopeRequest {
+                user_id: user,
+                org_id: None,
+                requested: &requested,
+                trust_level,
+                declared: &declared,
+                resource: uri.as_ref(),
+                mode,
+                narrowed: false,
+            },
+        )
+    }
+
+    fn perm_names(r: &ResolvedPermissions) -> Vec<&str> {
+        r.permissions.iter().map(Permission::as_str).collect()
+    }
+
+    use ClientTrustLevel::{FirstParty, ThirdParty};
+    use ScopeMode::{Reissue, Request};
+
+    #[test]
+    fn a_bundle_is_granted_only_when_fully_held() {
+        let (f, realm, alice) = scope_fixture();
+        let r = resolve_scopes(
+            &f,
+            &realm,
+            Some(&alice),
+            &["read:docs", "docs.read"],
+            FirstParty,
+            Request,
+            &[],
+            None,
+        )
+        .expect("first-party partial grant");
+        assert_eq!(r.granted_scopes, strings(&["docs.read"]));
+        assert_eq!(perm_names(&r), vec!["docs.read"]);
+    }
+
+    #[test]
+    fn a_third_party_client_never_gets_an_unsatisfiable_bundle() {
+        let (f, realm, alice) = scope_fixture();
+        let r = resolve_scopes(
+            &f,
+            &realm,
+            Some(&alice),
+            &["openid", "read:docs"],
+            ThirdParty,
+            Request,
+            &[],
+            None,
+        );
+        assert!(matches!(r, Err(RbacError::InvalidScope { .. })), "{r:?}");
+    }
+
+    #[test]
+    fn an_unknown_scope_is_refused_for_every_trust_level() {
+        let (f, realm, alice) = scope_fixture();
+        for requested in [["openid", "nosuch:bundle"], ["openid", "nosuchword"]] {
+            for trust in [FirstParty, ThirdParty] {
+                let r = resolve_scopes(
+                    &f,
+                    &realm,
+                    Some(&alice),
+                    &requested,
+                    trust,
+                    Request,
+                    &[],
+                    None,
+                );
+                assert!(
+                    matches!(r, Err(RbacError::InvalidScope { .. })),
+                    "{requested:?} {trust:?}: {r:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_undeclared_scope_is_refused_for_every_trust_level() {
+        let (f, realm, alice) = scope_fixture();
+        for trust in [FirstParty, ThirdParty] {
+            let r = resolve_scopes(
+                &f,
+                &realm,
+                Some(&alice),
+                &["view:docs", "org"],
+                trust,
+                Request,
+                &["view:docs"],
+                None,
+            );
+            assert!(
+                matches!(r, Err(RbacError::InvalidScope { .. })),
+                "{trust:?}: {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bare_word_realm_scope_narrows_like_a_bundle() {
+        let (f, realm, alice) = scope_fixture();
+        let r = resolve_scopes(
+            &f,
+            &realm,
+            Some(&alice),
+            &["org"],
+            FirstParty,
+            Request,
+            &[],
+            None,
+        )
+        .expect("org");
+        assert_eq!(r.granted_scopes, strings(&["org"]));
+        assert_eq!(perm_names(&r), vec!["org.read"]);
+    }
+
+    #[test]
+    fn only_resource_bundles_apply_under_a_resource() {
+        let (f, realm, alice) = scope_fixture();
+        for requested in [
+            ["openid", "view:docs"],
+            ["openid", "docs.read"],
+            ["openid", "org"],
+        ] {
+            let r = resolve_scopes(
+                &f,
+                &realm,
+                Some(&alice),
+                &requested,
+                FirstParty,
+                Request,
+                &[],
+                Some(MCP),
+            );
+            assert!(
+                matches!(r, Err(RbacError::InvalidScope { .. })),
+                "{requested:?}: {r:?}"
+            );
+        }
+        let r = resolve_scopes(
+            &f,
+            &realm,
+            Some(&alice),
+            &["openid", "mcp:tools:invoke"],
+            ThirdParty,
+            Request,
+            &["mcp:tools:invoke"],
+            Some(MCP),
+        )
+        .expect("resource bundle");
+        assert_eq!(r.granted_scopes, strings(&["openid", "mcp:tools:invoke"]));
+        assert_eq!(perm_names(&r), vec!["docs.read"]);
+    }
+
+    #[test]
+    fn a_resource_bundle_must_be_declared_too() {
+        let (f, realm, alice) = scope_fixture();
+        let r = resolve_scopes(
+            &f,
+            &realm,
+            Some(&alice),
+            &["mcp:tools:invoke"],
+            ThirdParty,
+            Request,
+            &["view:docs"],
+            Some(MCP),
+        );
+        assert!(matches!(r, Err(RbacError::InvalidScope { .. })), "{r:?}");
+    }
+
+    #[test]
+    fn only_oidc_scopes_give_first_party_the_full_set_and_third_party_nothing() {
+        let (f, realm, alice) = scope_fixture();
+        let first = resolve_scopes(
+            &f,
+            &realm,
+            Some(&alice),
+            &["openid", "profile"],
+            FirstParty,
+            Request,
+            &[],
+            None,
+        )
+        .expect("first");
+        assert_eq!(perm_names(&first), vec!["docs.read", "org.read"]);
+        let third = resolve_scopes(
+            &f,
+            &realm,
+            Some(&alice),
+            &["openid", "profile"],
+            ThirdParty,
+            Request,
+            &[],
+            None,
+        )
+        .expect("third");
+        assert_eq!(third.granted_scopes, strings(&["openid", "profile"]));
+        assert!(
+            third.permissions.is_empty(),
+            "a third-party OIDC-only grant carries no permission"
+        );
+    }
+
+    #[test]
+    fn every_requested_bundle_dropped_means_no_permissions() {
+        let (f, realm, alice) = scope_fixture();
+        let r = resolve_scopes(
+            &f,
+            &realm,
+            Some(&alice),
+            &["openid", "read:docs"],
+            FirstParty,
+            Request,
+            &[],
+            None,
+        )
+        .expect("first-party drop");
+        assert_eq!(r.granted_scopes, strings(&["openid"]));
+        assert!(r.permissions.is_empty(), "no permission is granted");
+    }
+
+    #[test]
+    fn nothing_grantable_is_refused() {
+        let (f, realm, alice) = scope_fixture();
+        let r = resolve_scopes(
+            &f,
+            &realm,
+            Some(&alice),
+            &["read:docs"],
+            FirstParty,
+            Request,
+            &[],
+            None,
+        );
+        assert!(matches!(r, Err(RbacError::InvalidScope { .. })), "{r:?}");
+    }
+
+    #[test]
+    fn reissue_drops_an_ungrantable_scope_for_every_trust_level() {
+        let (f, realm, alice) = scope_fixture();
+        let r = resolve_scopes(
+            &f,
+            &realm,
+            Some(&alice),
+            &["openid", "read:docs", "view:docs"],
+            ThirdParty,
+            Reissue,
+            &[],
+            None,
+        )
+        .expect("reissue drops");
+        assert_eq!(r.granted_scopes, strings(&["openid", "view:docs"]));
+        assert_eq!(perm_names(&r), vec!["docs.read"]);
+    }
+
+    #[test]
+    fn a_narrowed_grant_never_widens_to_the_full_set() {
+        let (f, realm, alice) = scope_fixture();
+        let requested = strings(&["openid"]);
+        let r = resolve_with_scopes(
+            &f,
+            &realm,
+            &ScopeRequest {
+                user_id: Some(&alice),
+                org_id: None,
+                requested: &requested,
+                trust_level: FirstParty,
+                declared: &[],
+                resource: None,
+                mode: Reissue,
+                narrowed: true,
+            },
+        )
+        .expect("reissue");
+        assert!(r.permissions.is_empty(), "no permission is granted");
+        assert!(r.scope_narrowed);
+    }
+
+    #[test]
+    fn reissue_refuses_a_scope_the_registry_no_longer_knows() {
+        let (f, realm, alice) = scope_fixture();
+        let r = resolve_scopes(
+            &f,
+            &realm,
+            Some(&alice),
+            &["openid", "gone:bundle"],
+            FirstParty,
+            Reissue,
+            &[],
+            None,
+        );
+        assert!(matches!(r, Err(RbacError::InvalidScope { .. })), "{r:?}");
+    }
+
+    #[test]
+    fn without_a_user_legal_scopes_are_granted_with_no_permissions() {
+        let (f, realm, _) = scope_fixture();
+        let r = resolve_scopes(
+            &f,
+            &realm,
+            None,
+            &["read:docs"],
+            FirstParty,
+            Request,
+            &[],
+            None,
+        )
+        .expect("client credentials");
+        assert_eq!(r.granted_scopes, strings(&["read:docs"]));
+        assert!(r.permissions.is_empty() && r.roles.is_empty());
+        let r = resolve_scopes(
+            &f,
+            &realm,
+            None,
+            &["nosuch:bundle"],
+            FirstParty,
+            Request,
+            &[],
+            None,
+        );
+        assert!(matches!(r, Err(RbacError::InvalidScope { .. })), "{r:?}");
+    }
+
+    #[test]
+    fn an_empty_request_depends_on_the_trust_level() {
+        let (f, realm, alice) = scope_fixture();
+        let first = resolve_scopes(
+            &f,
+            &realm,
+            Some(&alice),
+            &[],
+            FirstParty,
+            Request,
+            &[],
+            None,
+        )
+        .expect("first");
+        assert_eq!(perm_names(&first), vec!["docs.read", "org.read"]);
+        let third = resolve_scopes(
+            &f,
+            &realm,
+            Some(&alice),
+            &[],
+            ThirdParty,
+            Request,
+            &[],
+            None,
+        );
+        assert!(
+            matches!(third, Err(RbacError::InvalidScope { .. })),
+            "{third:?}"
+        );
     }
 }

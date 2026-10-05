@@ -1802,6 +1802,7 @@ mod tests {
     /// follower restarted.
     #[tokio::test]
     #[allow(clippy::unwrap_used)]
+    #[allow(clippy::too_many_lines)] // engines + scope + client + token + follower checks
     async fn applied_revjti_put_reaches_follower_projection() {
         use crate::audit::{AuditEngine, EmbeddedAuditEngine};
         use crate::core::{Clock, FakeClock, Timestamp};
@@ -1810,6 +1811,7 @@ mod tests {
             CredentialConfig, EmbeddedIdentityEngine, IdentityConfig, IdentityEngine,
             RegisterClientRequest,
         };
+        use crate::rbac::RbacEngine as _;
 
         let dir = tempdir().unwrap();
         let storage: Arc<dyn StorageEngine> = Arc::new(
@@ -1844,6 +1846,21 @@ mod tests {
             })
             .expect("create realm");
         let realm_id = realm.id().clone();
+        // The scope registry refuses a scope the realm does not define. The
+        // registry lives in the shared replicated storage, so any RBAC engine
+        // over it can declare `read`.
+        crate::rbac::EmbeddedRbacEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        )
+        .reconcile_scopes(
+            &realm_id,
+            &[crate::rbac::ScopeSpec {
+                name: "read".to_string(),
+                permissions: Some(Vec::new()),
+            }],
+        )
+        .expect("declare scope");
         let secret = "revjti-secret-abcdefgh!";
         let client = leader
             .register_client(
@@ -1869,6 +1886,7 @@ mod tests {
                     dpop_jkt: None,
                     client_assertion_type: None,
                     client_assertion: None,
+                    resource: None,
                 },
             )
             .expect("client credentials token");
