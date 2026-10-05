@@ -94,11 +94,27 @@ fn exchange_code(
     client_id: &ClientId,
     dpop_jkt: Option<String>,
 ) -> hearth::identity::OidcTokenResponse {
+    h.identity()
+        .grant_consent(
+            realm,
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: user_id.clone(),
+                    client_id: client_id.clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["openid".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
+        )
+        .expect("consent");
     let auth = h
         .identity()
         .authorize(
             realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client_id.clone(),
                 redirect_uri: REDIRECT_URI.to_string(),
                 response_type: "code".to_string(),

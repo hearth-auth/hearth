@@ -89,6 +89,17 @@ pub enum ClaimTarget {
     UserInfo,
 }
 
+impl ClaimTarget {
+    /// The target's name in a consent disclosure (`claim@target`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AccessToken => "access_token",
+            Self::IdToken => "id_token",
+            Self::UserInfo => "userinfo",
+        }
+    }
+}
+
 /// Inputs required to evaluate a claim mapping.
 #[derive(Clone, Debug)]
 pub struct ClaimEvaluationContext<'a> {
@@ -390,19 +401,29 @@ pub fn resolve_claims_for_target(
     out
 }
 
-/// Computes the set of emitted `(claim, target)` tuples for consent digests.
-pub fn emitted_claim_targets(
+/// The `(claim, target)` pairs the profile releases to `client` for
+/// `granted_scopes`: a claim is released to a target when a mapping for it
+/// includes the target and its release gates pass. Values are not evaluated,
+/// so the set does not depend on the user's data. The consent disclosure is
+/// built from it (`scope-consent-integrity` design §5).
+pub fn released_claim_targets(
     overrides: &[ClaimMapping],
-    ctx: &ClaimEvaluationContext<'_>,
+    client: &OAuthClient,
+    granted_scopes: &BTreeSet<String>,
 ) -> BTreeSet<(String, ClaimTarget)> {
     let mut out = BTreeSet::new();
-    for target in [
-        ClaimTarget::AccessToken,
-        ClaimTarget::IdToken,
-        ClaimTarget::UserInfo,
-    ] {
-        for (claim, _) in resolve_claims_for_target(target, overrides, ctx) {
-            out.insert((claim, target));
+    for mapping in default_claim_profile().iter().chain(overrides) {
+        if !mapping.gates_pass(client, granted_scopes) {
+            continue;
+        }
+        for target in [
+            ClaimTarget::AccessToken,
+            ClaimTarget::IdToken,
+            ClaimTarget::UserInfo,
+        ] {
+            if mapping.includes_target(target) {
+                out.insert((mapping.claim.clone(), target));
+            }
         }
     }
     out

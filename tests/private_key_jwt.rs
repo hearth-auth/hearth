@@ -280,6 +280,7 @@ async fn valid_assertion_exchanges_auth_code() {
         .authorize(
             &env.realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: env.client_id.clone(),
                 redirect_uri: REDIRECT_URI.to_string(),
                 scope: "openid".to_string(),
@@ -825,6 +826,7 @@ async fn auth_code_exchange_without_assertion_rejected_for_pkjwt_client() {
         .authorize(
             &realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: REDIRECT_URI.to_string(),
                 response_type: "code".to_string(),
@@ -1130,6 +1132,7 @@ mod jwks_only_client {
                 .authorize(
                     &self.realm_id,
                     &AuthorizationRequest {
+                        organization: None,
                         client_id: client.clone(),
                         redirect_uri: REDIRECT_URI.to_string(),
                         response_type: "code".to_string(),

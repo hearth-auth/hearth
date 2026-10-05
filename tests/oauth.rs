@@ -253,6 +253,32 @@ async fn device_authorization_full_flow() {
 // Auth code flow → issue tokens → refresh → validate new →
 // old refresh rejected.
 
+/// Stores the user's consent to `client` for `openid`. A third-party client
+/// refreshes only under a stored consent that covers the grant.
+fn grant_openid_consent(
+    harness: &common::TestHarness,
+    realm: &RealmId,
+    user: &User,
+    client: &hearth::core::ClientId,
+) {
+    harness
+        .identity()
+        .grant_consent(
+            realm,
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: user.id().clone(),
+                    client_id: client.clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["openid".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
+        )
+        .expect("consent");
+}
+
 #[tokio::test]
 async fn refresh_token_rotation_e2e() {
     use hearth::identity::{AuthorizationRequest, CodeChallengeMethod, TokenExchangeRequest};
@@ -283,12 +309,15 @@ async fn refresh_token_rotation_e2e() {
         )
         .expect("register client");
 
-    // 2. Authorize and exchange for tokens
+    // 2. Authorize and exchange for tokens. The client is third-party, so a
+    //    refresh needs a stored consent covering the grant.
+    grant_openid_consent(&harness, &realm, &user, client.client_id());
     let auth_resp = harness
         .identity()
         .authorize(
             &realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 scope: "openid".to_string(),
@@ -453,6 +482,7 @@ async fn auth_code_flow_iss_matches_discovery_issuer() {
         .authorize(
             &realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 scope: "openid".to_string(),
@@ -568,6 +598,7 @@ async fn conformance_rfc7662_introspection_response() {
         .authorize(
             &realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://app.example.com/cb".to_string(),
                 scope: "openid".to_string(),
@@ -905,6 +936,7 @@ async fn archived_client_blocks_and_restore_allows_authorize() {
         .authorize(
             &realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://app.example.com/cb".to_string(),
                 scope: "openid".to_string(),
@@ -945,6 +977,7 @@ async fn archived_client_blocks_and_restore_allows_authorize() {
         .authorize(
             &realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://app.example.com/cb".to_string(),
                 scope: "openid".to_string(),

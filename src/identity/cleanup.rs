@@ -946,6 +946,7 @@ mod tests {
         let clock = fake_clock(T0 + 2 * ONE_HOUR);
 
         let code = StoredAuthorizationCode {
+            org_id: None,
             code_hash: "hash1".into(),
             client_id: crate::core::ClientId::generate(),
             user_id: crate::core::UserId::generate(),
@@ -978,6 +979,7 @@ mod tests {
         let clock = fake_clock(T0 + TEN_MINUTES / 2);
 
         let code = StoredAuthorizationCode {
+            org_id: None,
             code_hash: "hash2".into(),
             client_id: crate::core::ClientId::generate(),
             user_id: crate::core::UserId::generate(),
@@ -1085,6 +1087,7 @@ mod tests {
         let clock = fake_clock(T0 + 2 * ONE_HOUR);
 
         let ticket = PendingAuthorizationRequest {
+            organization: None,
             realm_id: realm.clone(),
             user_id: crate::core::UserId::generate(),
             client_id: crate::core::ClientId::generate(),
@@ -1124,6 +1127,7 @@ mod tests {
         let clock = fake_clock(T0 + TEN_MINUTES / 2);
 
         let ticket = PendingAuthorizationRequest {
+            organization: None,
             realm_id: realm.clone(),
             user_id: crate::core::UserId::generate(),
             client_id: crate::core::ClientId::generate(),
@@ -1285,6 +1289,7 @@ mod tests {
 
         for i in 0..5 {
             let code = StoredAuthorizationCode {
+                org_id: None,
                 code_hash: format!("expired_hash_{i}"),
                 client_id: crate::core::ClientId::generate(),
                 user_id: crate::core::UserId::generate(),

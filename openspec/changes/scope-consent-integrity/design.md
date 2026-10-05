@@ -110,7 +110,7 @@ This replaces the scope-name digest. The row stores the set itself, so the subse
 | Change since consent | Outcome |
 |---|---|
 | The disclosure set grew | `invalid_grant`, `error_description=consent_required`, audit `ConsentRequiredOnRefresh` |
-| A granted scope is no longer in the registry | `invalid_grant`; the whole consent row is deleted |
+| A granted scope is no longer in the registry | `invalid_grant`, `error_description=consent_required`; the whole consent row is deleted |
 | The user no longer fully holds a granted bundle | succeeds; the bundle drops out of `scope` |
 | Nothing grantable remains | `invalid_grant` |
 | The request names a different `resource` | `invalid_target` |

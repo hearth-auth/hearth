@@ -26,8 +26,8 @@ use crate::identity::tokens::{
     self, issued_client_id, parse_issued_client_id, Audience, LogoutTokenClaims, TokenClaims,
 };
 use crate::identity::types::{
-    BulkResult, ConsentListEntry, ConsentRecord, CreateUserRequest, DelegationGrantEntry,
-    PendingAuthorizationRequest, StoredDelegationGrant, UpdateUserRequest, User, UserStatus,
+    BulkResult, CreateUserRequest, DelegationGrantEntry, PendingAuthorizationRequest,
+    StoredDelegationGrant, UpdateUserRequest, User, UserStatus,
 };
 use crate::identity::validation;
 use crate::identity::IdentityEngine;
@@ -327,8 +327,8 @@ impl EmbeddedIdentityEngine {
     /// They cannot show a consent screen or a factor challenge, so they may
     /// issue only for the client the token was issued to — or, for a
     /// first-party session token, a first-party client (GA audit 3 B-1) —
-    /// only when the client does not require consent or a recorded consent
-    /// covers the requested scopes (GA audit B2), and — for a client or role
+    /// only when the client has no consent step or a stored consent covers
+    /// what the grant discloses (GA audit B2), and — for a client or role
     /// that demands a second factor — only when the token's session proved
     /// one (GA audit B5). The browser flow passes `None`: its gates
     /// (`authorize_gate::mfa_use_gate`, `consent_gate`) have already run.
@@ -372,6 +372,7 @@ impl EmbeddedIdentityEngine {
             });
 
             jar_override = AuthorizationRequest {
+                organization: jar.organization.or_else(|| request.organization.clone()),
                 client_id: request.client_id.clone(),
                 redirect_uri: jar
                     .redirect_uri
@@ -520,27 +521,16 @@ impl EmbeddedIdentityEngine {
             }
         }
 
-        self.validate_client_scope_request(&client, &request.scope)?;
+        // 4b'. The `organization` parameter (`scope-consent-integrity` design
+        //      §1): resolved before the scopes, so they are granted in that
+        //      organization; one refusal for every reason it is unusable.
+        let org_id = request
+            .organization
+            .as_deref()
+            .map(|o| self.resolve_org_parameter(realm_id, &request.user_id, o))
+            .transpose()?;
 
-        // 4a. Consent on the non-interactive surfaces (GA audit B2): the same
-        //     rule as the browser `consent_gate` — issue only when the client
-        //     does not require consent or a recorded consent covers every
-        //     requested scope. Checked after JAR has settled the scopes.
-        if bearer_session.is_some() && client.require_consent() {
-            let requested = crate::identity::types::canonicalize_scopes(
-                request
-                    .scope
-                    .split_whitespace()
-                    .map(str::to_string)
-                    .collect(),
-            );
-            let covered = self
-                .get_consent_inner(realm_id, &request.user_id, &request.client_id)?
-                .is_some_and(|record| record.covers(&requested));
-            if !covered {
-                return Err(IdentityError::ConsentRequired);
-            }
-        }
+        self.validate_client_scope_request(&client, &request.scope)?;
 
         // 4a'. Factor USE on the non-interactive surfaces (GA audit B5, the
         //      browser `mfa_use_gate`'s rule): a client or role that demands a
@@ -569,51 +559,15 @@ impl EmbeddedIdentityEngine {
             browser_proof
         };
 
-        // 4b. Consent scope-digest re-check.
-        //
-        // When a consent record exists for this (user, client) and it carries
-        // a non-empty `scope_digest`, re-compute the digest from the requested
-        // scopes. A mismatch means the scope surface has changed since the
-        // user last consented (e.g. YAML bundles reloaded) — require fresh
-        // consent rather than silently issuing a stale grant.
-        //
-        // Records with an empty digest (written before this feature) are
-        // treated as valid to preserve backward compatibility.
-        //
         // The RFC 8707 resource is resolved first: it must be a registered
         // protected resource (else `invalid_target`), and its canonical form
-        // keys the consent record and becomes the code's audience, so every
+        // keys the consent row and becomes the code's audience, so every
         // spelling of one resource is the same resource here (G6).
         let resource = request
             .resource
             .as_deref()
             .map(|r| self.resolve_authorization_resource(realm_id, r))
             .transpose()?;
-        let resource_key = resource
-            .as_ref()
-            .map_or(keys::CONSENT_RESOURCE_KEY_DEFAULT, Uri::as_str);
-        if let Some(existing_consent) = self.get_consent_extended(
-            realm_id,
-            &request.user_id,
-            &request.client_id,
-            keys::CONSENT_ORG_KEY_REALM,
-            resource_key,
-            client.consent_spans_orgs(),
-        )? {
-            // Digest re-check: verify the granted scopes are still self-consistent.
-            // Compares the re-computed digest of the stored granted_scopes against
-            // what was stored at consent time. A mismatch indicates external tampering
-            // or structural corruption; a fresh consent is required.
-            // Note: true YAML-bundle-change detection requires resolving scope names
-            // to their current permission set and comparing; that is deferred to a
-            // future improvement. For now we validate internal record consistency only.
-            if !existing_consent.scope_digest.is_empty() {
-                let current_digest = Self::compute_scope_digest(&existing_consent.granted_scopes);
-                if current_digest != existing_consent.scope_digest {
-                    return Err(IdentityError::ConsentRequired);
-                }
-            }
-        }
 
         // 4c. Scope resolution (scope-consent-integrity design §2): only
         //     scopes legal for the audience and grantable to the user reach
@@ -626,13 +580,32 @@ impl EmbeddedIdentityEngine {
                 client: Some(&client),
                 requested: &requested_scopes,
                 resource: resource.as_ref(),
-                org_id: None,
+                org_id: org_id.as_ref(),
                 mode: crate::rbac::ScopeMode::Request,
                 narrowed: false,
                 issuing: false,
             },
         )?;
         let granted_scope = granted.granted_scopes.join(" ");
+
+        // 4d. Consent on the non-interactive surfaces (GA audit B2): the same
+        //     rule as the browser `consent_gate` — issue only when the client
+        //     has no consent ceremony or a stored consent covers the grant.
+        if bearer_session.is_some()
+            && self.consent_state(
+                realm_id,
+                &client,
+                &crate::identity::types::ConsentKey {
+                    user_id: request.user_id.clone(),
+                    client_id: request.client_id.clone(),
+                    org_id: org_id.clone(),
+                    resource: resource.clone(),
+                },
+                &granted.granted_scopes,
+            )? == crate::identity::types::ConsentState::Missing
+        {
+            return Err(IdentityError::ConsentRequired);
+        }
 
         // 5. PKCE enforcement (RFC 9700 §2.1.1 — unconditional for all clients)
         if request.code_challenge.is_none() {
@@ -690,6 +663,7 @@ impl EmbeddedIdentityEngine {
             amr_values: request.amr_values.clone(),
             mfa_proof: code_proof,
             scope_narrowed: granted.scope_narrowed,
+            org_id,
         };
 
         // 9. Persist the code
@@ -887,6 +861,17 @@ impl EmbeddedIdentityEngine {
             .transpose()?;
         self.require_grant_resource(realm_id, request.resource.as_deref(), resource_uri.as_ref())?;
 
+        // 8c'. The organization the user signed in to must still hold
+        //      (`scope-consent-integrity` design §1).
+        if let Some(ref org_id) = stored_code.org_id {
+            if !self.org_context_holds(realm_id, org_id, &stored_code.user_id)? {
+                return Err(IdentityError::InvalidGrant {
+                    reason: "the organization of the grant is no longer available".to_string(),
+                });
+            }
+        }
+        let oid = stored_code.org_id.as_ref().map(|o| o.as_uuid().to_string());
+
         // 8d. Re-resolve the code's granted scopes against the current
         //     registry (scope-consent-integrity design §2): a scope the user
         //     no longer fully holds drops out; one the registry no longer knows
@@ -899,7 +884,7 @@ impl EmbeddedIdentityEngine {
                 client: Some(&client),
                 requested: &grant_scopes,
                 resource: resource_uri.as_ref(),
-                org_id: None,
+                org_id: stored_code.org_id.as_ref(),
                 mode: crate::rbac::ScopeMode::Reissue,
                 narrowed: stored_code.scope_narrowed,
                 issuing: true,
@@ -925,7 +910,7 @@ impl EmbeddedIdentityEngine {
                 &client,
                 access_resolved,
                 &granted_scopes,
-                None,
+                oid.as_deref(),
                 ClaimTarget::AccessToken,
             );
         validate_claim_payload(
@@ -940,7 +925,7 @@ impl EmbeddedIdentityEngine {
             &client,
             &resolved,
             &granted_scopes,
-            None,
+            oid.as_deref(),
             ClaimTarget::IdToken,
         );
         validate_claim_payload(ClaimTarget::IdToken, &id_roles, &id_groups, &id_permissions)?;
@@ -1006,6 +991,20 @@ impl EmbeddedIdentityEngine {
             None => Audience::single(self.config.token.audience.clone()),
         };
 
+        // Organization-scoped group paths, as on the other issuance paths.
+        let org_groups: Vec<String> = match stored_code.org_id.as_ref() {
+            Some(org_id) if !access_groups.is_empty() => self
+                .get_organization(realm_id, org_id)?
+                .map(|org| {
+                    access_groups
+                        .iter()
+                        .map(|g| format!("/{}/{g}", org.slug()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+
         let sv_claim = {
             let enabled = self
                 .get_realm(realm_id)
@@ -1028,7 +1027,7 @@ impl EmbeddedIdentityEngine {
             nbf: None,
             sid: session.id().to_string(),
             tid: realm_id.to_string(),
-            oid: None,
+            oid: oid.clone(),
             token_type: "access".to_string(),
             jti: Some(uuid::Uuid::new_v4().to_string()),
             fid: Some(family_id.clone()),
@@ -1037,7 +1036,7 @@ impl EmbeddedIdentityEngine {
             azp: None,
             roles: access_roles,
             groups: access_groups,
-            org_groups: Vec::new(),
+            org_groups: org_groups.clone(),
             permissions: access_permissions,
             act: None,
             amr: stored_code.amr_values.clone(),
@@ -1059,7 +1058,7 @@ impl EmbeddedIdentityEngine {
             nbf: None,
             sid: session.id().to_string(),
             tid: realm_id.to_string(),
-            oid: None,
+            oid: oid.clone(),
             token_type: "refresh".to_string(),
             jti: Some(uuid::Uuid::new_v4().to_string()),
             fid: Some(family_id.clone()),
@@ -1142,7 +1141,7 @@ impl EmbeddedIdentityEngine {
             nbf: None,
             sid: session.id().to_string(),
             tid: realm_id.to_string(),
-            oid: None,
+            oid: oid.clone(),
             token_type: "id_token".to_string(),
             jti: Some(uuid::Uuid::new_v4().to_string()),
             fid: None,
@@ -2523,6 +2522,7 @@ impl EmbeddedIdentityEngine {
             effective_nonce,
             effective_response_mode,
             effective_prompt,
+            effective_organization,
         ) = if let Some(ref jar_jwt) = request.request {
             let jar = self.verify_jar(realm_id, &request.client_id, jar_jwt)?;
             // JAR client_id claim must match the outer client_id.
@@ -2551,6 +2551,7 @@ impl EmbeddedIdentityEngine {
                 // So does its `prompt`. Dropping the claim here left a pushed
                 // request object's `prompt=none` showing the consent page.
                 jar.prompt.or_else(|| request.prompt.clone()),
+                jar.organization.or_else(|| request.organization.clone()),
             )
         } else {
             (
@@ -2564,6 +2565,7 @@ impl EmbeddedIdentityEngine {
                 request.nonce.clone(),
                 request.response_mode.clone(),
                 request.prompt.clone(),
+                request.organization.clone(),
             )
         };
 
@@ -2632,6 +2634,7 @@ impl EmbeddedIdentityEngine {
             nonce: effective_nonce,
             response_mode: effective_response_mode,
             prompt: effective_prompt.filter(|p| !p.is_empty()),
+            organization: effective_organization.filter(|o| !o.is_empty()),
             created_at: now,
             expires_at,
         };
@@ -4586,357 +4589,6 @@ impl EmbeddedIdentityEngine {
         })
     }
 
-    // ===== OAuth consent =====
-
-    pub(super) fn get_consent_inner(
-        &self,
-        realm_id: &RealmId,
-        user_id: &UserId,
-        client_id: &ClientId,
-    ) -> Result<Option<ConsentRecord>, IdentityError> {
-        // Legacy key (`oauth:consent:{user}:{client}`) — checked first for
-        // backward compatibility with records written before the extended key
-        // schema was introduced.
-        let legacy_key = keys::encode_consent_key(user_id, client_id);
-        if let Some(bytes) = self
-            .storage
-            .get(realm_id, &legacy_key)
-            .map_err(Self::storage_err)?
-        {
-            let rec: ConsentRecord =
-                serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
-                    reason: e.to_string(),
-                })?;
-            return Ok(Some(rec));
-        }
-
-        // Extended key (`oauth:consent:{user}:{client}:_realm:_default`) —
-        // the canonical form for new records.
-        let extended_key = keys::encode_consent_key_extended(
-            user_id,
-            client_id,
-            keys::CONSENT_ORG_KEY_REALM,
-            keys::CONSENT_RESOURCE_KEY_DEFAULT,
-        );
-        if let Some(bytes) = self
-            .storage
-            .get(realm_id, &extended_key)
-            .map_err(Self::storage_err)?
-        {
-            let rec: ConsentRecord =
-                serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
-                    reason: e.to_string(),
-                })?;
-            return Ok(Some(rec));
-        }
-
-        Ok(None)
-    }
-
-    pub(super) fn list_consents_by_user_inner(
-        &self,
-        realm_id: &RealmId,
-        user_id: &UserId,
-    ) -> Result<Vec<ConsentListEntry>, IdentityError> {
-        let prefix = keys::encode_consent_prefix_for_user(user_id);
-        let end = keys::prefix_end(&prefix);
-        let entries = self
-            .storage
-            .scan(realm_id, &prefix, &end)
-            .map_err(Self::storage_err)?;
-        let mut out = Vec::with_capacity(entries.len());
-        for entry in &entries {
-            let rec: ConsentRecord =
-                serde_json::from_slice(&entry.value).map_err(|e| IdentityError::Serialization {
-                    reason: e.to_string(),
-                })?;
-            // Join with current client. Orphaned consents (client deleted)
-            // are filtered out — callers see only actionable entries.
-            let client_key = keys::encode_oauth_client(&rec.client_id);
-            let Some(client_bytes) = self
-                .storage
-                .get(realm_id, &client_key)
-                .map_err(Self::storage_err)?
-            else {
-                continue;
-            };
-            let client: OAuthClient = serde_json::from_slice(&client_bytes).map_err(|e| {
-                IdentityError::Serialization {
-                    reason: e.to_string(),
-                }
-            })?;
-            out.push(ConsentListEntry {
-                record: rec,
-                client_name: client.client_name().to_string(),
-                client_logo_url: client.client_logo_url().map(str::to_string),
-            });
-        }
-        Ok(out)
-    }
-
-    pub(super) fn grant_consent_inner(
-        &self,
-        realm_id: &RealmId,
-        user_id: &UserId,
-        client_id: &ClientId,
-        approved_scopes: &[String],
-    ) -> Result<ConsentRecord, IdentityError> {
-        // Verify the client exists — avoids orphan consents.
-        let client_key = keys::encode_oauth_client(client_id);
-        self.storage
-            .get(realm_id, &client_key)
-            .map_err(Self::storage_err)?
-            .ok_or(IdentityError::ClientNotFound)?;
-
-        let now = self.clock.now();
-
-        // Use the extended key as the canonical storage location for new
-        // records. The realm-level sentinel values (`_realm`, `_default`)
-        // are used when no org/resource context is supplied by the caller.
-        let key = keys::encode_consent_key_extended(
-            user_id,
-            client_id,
-            keys::CONSENT_ORG_KEY_REALM,
-            keys::CONSENT_RESOURCE_KEY_DEFAULT,
-        );
-
-        // Also check the legacy key so that pre-migration records are merged
-        // rather than duplicated.
-        let legacy_key = keys::encode_consent_key(user_id, client_id);
-        let existing_bytes = self
-            .storage
-            .get(realm_id, &key)
-            .map_err(Self::storage_err)?
-            .or_else(|| self.storage.get(realm_id, &legacy_key).unwrap_or_default());
-
-        let mut record = if let Some(bytes) = existing_bytes {
-            let mut rec: ConsentRecord =
-                serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
-                    reason: e.to_string(),
-                })?;
-            rec.merge_scopes(approved_scopes, now);
-            rec
-        } else {
-            ConsentRecord::new(
-                user_id.clone(),
-                client_id.clone(),
-                approved_scopes.to_vec(),
-                now,
-            )
-        };
-
-        // Compute and store the scope digest so future authorize /
-        // refresh_token calls can detect stale consent.
-        record.scope_digest = Self::compute_scope_digest(&record.granted_scopes);
-
-        let bytes = serde_json::to_vec(&record).map_err(|e| IdentityError::Serialization {
-            reason: e.to_string(),
-        })?;
-        self.storage
-            .put(realm_id, &key, &bytes)
-            .map_err(Self::storage_err)?;
-
-        // Remove the legacy key if it existed to avoid stale duplicates.
-        let _ = self.storage.delete(realm_id, &legacy_key);
-
-        self.record_audit(
-            realm_id,
-            Some(&AuditContext {
-                actor: Actor::User(user_id.clone()),
-                metadata: None,
-            }),
-            AuditAction::ConsentGranted,
-            "consent",
-            &client_id.as_uuid().to_string(),
-        )?;
-
-        Ok(record)
-    }
-
-    /// Revokes every outstanding refresh-token grant family this user holds for
-    /// `client_id`.
-    ///
-    /// Consent is the authority the grant was issued under. Deleting the
-    /// consent record alone left the families live, and
-    /// `rotate_grant_family`'s consent check only compares scope digests *when
-    /// a record exists* — so deleting the record removed the only thing that
-    /// check could fail on and the application refreshed forever
-    /// (audit 2026-08-28 §4.16#11).
-    ///
-    /// Returns the number of families revoked. Errors reading an individual row
-    /// are fatal: a consent revocation that silently skipped a family would
-    /// reintroduce the defect.
-    fn revoke_grant_families_for_consent(
-        &self,
-        realm_id: &RealmId,
-        user_id: &UserId,
-        client_id: Option<&ClientId>,
-    ) -> Result<usize, IdentityError> {
-        let prefix = keys::grant_family_scan_prefix();
-        let end = keys::prefix_end(&prefix);
-        let entries = self
-            .storage
-            .scan(realm_id, &prefix, &end)
-            .map_err(Self::storage_err)?;
-        let mut revoked = 0usize;
-        for entry in &entries {
-            let listed: StoredGrantFamily =
-                serde_json::from_slice(&entry.value).map_err(|e| IdentityError::Serialization {
-                    reason: e.to_string(),
-                })?;
-            let Some(ref family_client) = listed.client_id else {
-                // A clientless (session) grant carries no consent to revoke.
-                continue;
-            };
-            if client_id.is_some_and(|wanted| family_client != wanted) {
-                continue;
-            }
-            // The family records the session, not the subject; resolve the
-            // owner so one user's revocation cannot revoke another's grant.
-            // `load_session_raw` so an already-revoked session still resolves.
-            let owner = self.load_session_raw(realm_id, &listed.session_id)?;
-            if owner.as_ref().map(crate::identity::types::Session::user_id) != Some(user_id) {
-                continue;
-            }
-            // Serialize with any in-flight rotation, then re-read under the
-            // lock so this revocation is not a lost update (§4.16#2).
-            let lock = self.grant_family_lock(realm_id, &listed.family_id);
-            // INVARIANT: guard held only across the sync re-read + revoke-write; no .await in scope.
-            let _guard = lock.lock().map_err(|_| IdentityError::Internal {
-                reason: "grant family lock poisoned".to_string(),
-            })?;
-            let Some(bytes) = self
-                .storage
-                .get(realm_id, &entry.key)
-                .map_err(Self::storage_err)?
-            else {
-                continue;
-            };
-            let mut family: StoredGrantFamily =
-                serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
-                    reason: e.to_string(),
-                })?;
-            if self.grant_family_is_revoked(realm_id, &family)? {
-                continue;
-            }
-            self.mark_grant_family_revoked(realm_id, &family)?;
-            family.revoked = true;
-            let updated =
-                serde_json::to_vec(&family).map_err(|e| IdentityError::Serialization {
-                    reason: e.to_string(),
-                })?;
-            self.storage
-                .put(realm_id, &entry.key, &updated)
-                .map_err(Self::storage_err)?;
-            revoked += 1;
-        }
-        Ok(revoked)
-    }
-
-    pub(super) fn revoke_consent_inner(
-        &self,
-        realm_id: &RealmId,
-        user_id: &UserId,
-        client_id: &ClientId,
-    ) -> Result<(), IdentityError> {
-        // Try the extended key (canonical location for new records) first.
-        let extended_key = keys::encode_consent_key_extended(
-            user_id,
-            client_id,
-            keys::CONSENT_ORG_KEY_REALM,
-            keys::CONSENT_RESOURCE_KEY_DEFAULT,
-        );
-        let extended_exists = self
-            .storage
-            .get(realm_id, &extended_key)
-            .map_err(Self::storage_err)?
-            .is_some();
-        if extended_exists {
-            self.storage
-                .delete(realm_id, &extended_key)
-                .map_err(Self::storage_err)?;
-            // Also clean up any lingering legacy key.
-            let legacy_key = keys::encode_consent_key(user_id, client_id);
-            let _ = self.storage.delete(realm_id, &legacy_key);
-            // The grant families issued under this consent are dead with it
-            // (audit 2026-08-28 §4.16#11).
-            self.revoke_grant_families_for_consent(realm_id, user_id, Some(client_id))?;
-            self.record_audit(
-                realm_id,
-                Some(&AuditContext {
-                    actor: Actor::User(user_id.clone()),
-                    metadata: None,
-                }),
-                AuditAction::ConsentRevoked,
-                "consent",
-                &client_id.as_uuid().to_string(),
-            )?;
-            return Ok(());
-        }
-
-        // Fall back to the legacy key for pre-migration records.
-        let legacy_key = keys::encode_consent_key(user_id, client_id);
-        let legacy_exists = self
-            .storage
-            .get(realm_id, &legacy_key)
-            .map_err(Self::storage_err)?
-            .is_some();
-        if legacy_exists {
-            self.storage
-                .delete(realm_id, &legacy_key)
-                .map_err(Self::storage_err)?;
-            // The grant families issued under this consent are dead with it
-            // (audit 2026-08-28 §4.16#11).
-            self.revoke_grant_families_for_consent(realm_id, user_id, Some(client_id))?;
-            self.record_audit(
-                realm_id,
-                Some(&AuditContext {
-                    actor: Actor::User(user_id.clone()),
-                    metadata: None,
-                }),
-                AuditAction::ConsentRevoked,
-                "consent",
-                &client_id.as_uuid().to_string(),
-            )?;
-            return Ok(());
-        }
-
-        Err(IdentityError::ConsentNotFound)
-    }
-
-    pub(super) fn revoke_all_consents_for_user_inner(
-        &self,
-        realm_id: &RealmId,
-        user_id: &UserId,
-    ) -> Result<usize, IdentityError> {
-        let prefix = keys::encode_consent_prefix_for_user(user_id);
-        let end = keys::prefix_end(&prefix);
-        let entries = self
-            .storage
-            .scan(realm_id, &prefix, &end)
-            .map_err(Self::storage_err)?;
-        let count = entries.len();
-        for entry in &entries {
-            self.storage
-                .delete(realm_id, &entry.key)
-                .map_err(Self::storage_err)?;
-        }
-        // Every grant family this user holds against any client was issued
-        // under one of the consents just deleted (audit 2026-08-28 §4.16#11).
-        self.revoke_grant_families_for_consent(realm_id, user_id, None)?;
-        self.record_audit(
-            realm_id,
-            Some(&AuditContext {
-                actor: Actor::User(user_id.clone()),
-                metadata: None,
-            }),
-            AuditAction::ConsentRevoked,
-            "consent",
-            "all",
-        )?;
-        Ok(count)
-    }
-
     pub(super) fn put_pending_authorization_inner(
         &self,
         realm_id: &RealmId,
@@ -5015,6 +4667,7 @@ impl EmbeddedIdentityEngine {
         jar_request: Option<String>,
     ) -> Result<AuthorizationResponse, IdentityError> {
         let request = AuthorizationRequest {
+            organization: None,
             client_id: client_id.clone(),
             redirect_uri: redirect_uri.to_string(),
             scope: scope.to_string(),

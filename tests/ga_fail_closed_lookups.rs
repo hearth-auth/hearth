@@ -74,6 +74,7 @@ async fn code_exchange_fails_closed_when_the_client_lookup_errors() {
         .authorize(
             &realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: REDIRECT_URI.to_string(),
                 scope: "openid".to_string(),

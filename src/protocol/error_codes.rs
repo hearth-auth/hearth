@@ -182,6 +182,8 @@ pub const PASSWORD_RESET_TOKEN_INVALID: &str = "HEARTH_PASSWORD_RESET_TOKEN_INVA
 
 /// User consent is required before issuing tokens.
 pub const CONSENT_REQUIRED: &str = "HEARTH_CONSENT_REQUIRED";
+/// The `organization` of an authorization request cannot be used by the user.
+pub const ORG_ACCESS_DENIED: &str = "HEARTH_ORG_ACCESS_DENIED";
 /// Consent ticket is invalid or expired.
 pub const CONSENT_TICKET_INVALID: &str = "HEARTH_CONSENT_TICKET_INVALID";
 /// Approved scope was not in the original authorization request.
@@ -484,6 +486,7 @@ mod tests {
             VERIFICATION_TOKEN_INVALID,
             PASSWORD_RESET_TOKEN_INVALID,
             CONSENT_REQUIRED,
+            ORG_ACCESS_DENIED,
             CONSENT_TICKET_INVALID,
             CONSENT_SCOPE_NOT_REQUESTED,
             CONSENT_NOT_FOUND,

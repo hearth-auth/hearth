@@ -6365,7 +6365,7 @@ fn record_device_consent(
             return Err(super::handlers_common::server_error());
         }
     };
-    if !client.require_consent() {
+    if !client.has_consent_step() {
         return Ok(());
     }
     let scopes: Vec<String> = pending
@@ -6375,10 +6375,17 @@ fn record_device_consent(
         .split_whitespace()
         .map(str::to_string)
         .collect();
-    if let Err(e) = state
-        .identity
-        .grant_consent(realm, user_id, &pending.client_id, &scopes)
-    {
+    let grant = crate::identity::ConsentGrant {
+        key: crate::identity::ConsentKey {
+            user_id: user_id.clone(),
+            client_id: pending.client_id.clone(),
+            org_id: None,
+            resource: None,
+        },
+        scopes,
+        via: crate::identity::ConsentSurface::Device,
+    };
+    if let Err(e) = state.identity.grant_consent(realm, &grant) {
         tracing::warn!(error = %e, "device_approve: grant_consent failed");
         return Err(super::handlers_common::server_error());
     }

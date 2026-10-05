@@ -89,6 +89,7 @@ fn bench_auth_code_exchange(c: &mut Criterion) {
                 .authorize(
                     &realm,
                     &AuthorizationRequest {
+                        organization: None,
                         client_id: client_id.clone(),
                         redirect_uri: "https://bench.example.com/callback".to_string(),
                         scope: "openid".to_string(),

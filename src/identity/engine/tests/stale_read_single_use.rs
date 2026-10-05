@@ -371,6 +371,7 @@ fn a_pending_authorization_ticket_is_taken_once_despite_a_stale_read() {
         .put_pending_authorization(
             &f.realm,
             &crate::identity::types::PendingAuthorizationRequest {
+                organization: None,
                 realm_id: f.realm.clone(),
                 user_id: UserId::generate(),
                 client_id: ClientId::generate(),

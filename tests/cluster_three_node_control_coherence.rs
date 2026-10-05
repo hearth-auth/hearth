@@ -2002,6 +2002,7 @@ async fn a_par_request_uri_is_consumed_once_across_a_leader_change() {
         .push_authorization_request(
             &seeded.realm_id,
             &hearth::identity::PushedAuthorizationRequest {
+                organization: None,
                 client_id: client,
                 redirect_uri: SINGLE_USE_REDIRECT.to_string(),
                 scope: "openid".to_string(),
@@ -2052,6 +2053,7 @@ async fn an_authorization_code_is_redeemed_once_across_a_leader_change() {
         .authorize(
             &seeded.realm_id,
             &hearth::identity::AuthorizationRequest {
+                organization: None,
                 client_id: client.clone(),
                 redirect_uri: SINGLE_USE_REDIRECT.to_string(),
                 scope: "openid".to_string(),
@@ -2254,6 +2256,7 @@ fn issue_refresh_token(
         .authorize(
             &seeded.realm_id,
             &hearth::identity::AuthorizationRequest {
+                organization: None,
                 client_id: client.clone(),
                 redirect_uri: SINGLE_USE_REDIRECT.to_string(),
                 scope: "openid offline_access".to_string(),
@@ -2309,6 +2312,23 @@ async fn a_refresh_token_rotates_once_across_a_leader_change() {
         "refresh-racer",
         &["authorization_code", "refresh_token"],
     );
+    // A third-party client refreshes only under a stored consent.
+    leader
+        .identity
+        .grant_consent(
+            &seeded.realm_id,
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: seeded.user_id.clone(),
+                    client_id: client.clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["openid".to_string(), "offline_access".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
+        )
+        .unwrap();
     let refresh_token = issue_refresh_token(leader, &seeded, &client);
     assert!(!refresh_token.is_empty(), "precondition: a refresh token");
     clock.advance(1_000_000);
@@ -2413,9 +2433,16 @@ async fn a_consent_revocation_is_not_undone_by_a_rotation_across_a_leader_change
         .identity
         .grant_consent(
             &seeded.realm_id,
-            &seeded.user_id,
-            &client,
-            &["openid".to_string(), "offline_access".to_string()],
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: seeded.user_id.clone(),
+                    client_id: client.clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["openid".to_string(), "offline_access".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
         )
         .unwrap();
     let refresh_token = issue_refresh_token(leader, &seeded, &client);
@@ -2444,7 +2471,12 @@ async fn a_consent_revocation_is_not_undone_by_a_rotation_across_a_leader_change
         &rotate,
         |identity| {
             identity
-                .revoke_consent(&seeded.realm_id, &seeded.user_id, &client)
+                .revoke_consent(
+                    &seeded.realm_id,
+                    &seeded.user_id,
+                    &client,
+                    &hearth::audit::Actor::User(seeded.user_id.clone()),
+                )
                 .unwrap();
         },
     )

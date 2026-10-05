@@ -94,6 +94,7 @@ async fn setup() -> Env {
 
 fn auth_request(env: &Env) -> AuthorizationRequest {
     AuthorizationRequest {
+        organization: None,
         client_id: env.client.client_id().clone(),
         redirect_uri: REDIRECT_URI.to_string(),
         scope: "openid".to_string(),
@@ -230,6 +231,7 @@ async fn iss_present_with_minimal_state() {
     let env = setup().await;
 
     let req = AuthorizationRequest {
+        organization: None,
         state: "x".to_string(),
         ..auth_request(&env)
     };

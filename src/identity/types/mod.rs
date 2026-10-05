@@ -417,55 +417,46 @@ mod tests {
     // ===== Consent record tests =====
 
     #[test]
-    fn consent_record_scope_union_is_deduped_and_sorted() {
-        let now = Timestamp::from_micros(1_000_000);
-        let mut rec = ConsentRecord::new(
-            UserId::generate(),
-            ClientId::generate(),
-            vec!["profile".to_string(), "email".to_string()],
-            now,
-        );
-        assert_eq!(rec.granted_scopes, vec!["email", "profile"]);
-
-        let later = Timestamp::from_micros(2_000_000);
-        rec.merge_scopes(
-            &[
-                "openid".to_string(),
-                "profile".to_string(),
-                "  ".to_string(),
-            ],
-            later,
-        );
-        assert_eq!(rec.granted_scopes, vec!["email", "openid", "profile"]);
-        assert_eq!(rec.updated_at, later);
-        assert_ne!(rec.updated_at, rec.granted_at);
+    fn a_disclosure_is_covered_only_by_a_superset() {
+        let stored = ConsentDisclosure {
+            permissions: vec!["docs.list".into(), "docs.read".into()],
+            oidc_scopes: vec!["openid".into()],
+            claims: vec!["email@id_token".into()],
+        };
+        let narrower = ConsentDisclosure {
+            permissions: vec!["docs.read".into()],
+            oidc_scopes: vec!["openid".into()],
+            claims: vec![],
+        };
+        assert!(narrower.is_subset_of(&stored));
+        assert!(stored.is_subset_of(&stored));
+        let more_claims = ConsentDisclosure {
+            claims: vec!["email@id_token".into(), "salary@id_token".into()],
+            ..narrower.clone()
+        };
+        assert!(!more_claims.is_subset_of(&stored));
+        let more_permissions = ConsentDisclosure {
+            permissions: vec!["docs.delete".into()],
+            ..narrower
+        };
+        assert!(!more_permissions.is_subset_of(&stored));
     }
 
     #[test]
-    fn consent_covers_requested_scopes_returns_true_when_superset() {
-        let now = Timestamp::from_micros(1_000_000);
-        let rec = ConsentRecord::new(
-            UserId::generate(),
-            ClientId::generate(),
-            vec!["profile".to_string(), "email".to_string()],
-            now,
-        );
-        assert!(rec.covers(&["profile".to_string()]));
-        assert!(rec.covers(&["email".to_string(), "profile".to_string()]));
-        assert!(rec.covers(&[]));
-    }
-
-    #[test]
-    fn consent_covers_returns_false_when_scope_missing() {
-        let now = Timestamp::from_micros(1_000_000);
-        let rec = ConsentRecord::new(
-            UserId::generate(),
-            ClientId::generate(),
-            vec!["profile".to_string()],
-            now,
-        );
-        assert!(!rec.covers(&["profile".to_string(), "email".to_string()]));
-        assert!(!rec.covers(&["admin".to_string()]));
+    fn merging_disclosures_keeps_each_list_sorted_and_unique() {
+        let mut a = ConsentDisclosure {
+            permissions: vec!["docs.read".into()],
+            oidc_scopes: vec!["profile".into()],
+            claims: vec![],
+        };
+        a.merge(&ConsentDisclosure {
+            permissions: vec!["docs.list".into(), "docs.read".into()],
+            oidc_scopes: vec!["email".into()],
+            claims: vec!["email@userinfo".into()],
+        });
+        assert_eq!(a.permissions, vec!["docs.list", "docs.read"]);
+        assert_eq!(a.oidc_scopes, vec!["email", "profile"]);
+        assert_eq!(a.claims, vec!["email@userinfo"]);
     }
 
     #[test]
@@ -483,13 +474,25 @@ mod tests {
     #[test]
     fn consent_record_serde_round_trip() {
         let now = Timestamp::from_micros(1_000_000);
-        let rec = ConsentRecord::new(
-            UserId::generate(),
-            ClientId::generate(),
-            vec!["profile".to_string(), "email".to_string()],
-            now,
-        );
+        let user = UserId::generate();
+        let rec = ConsentRecord {
+            user_id: user.clone(),
+            client_id: ClientId::generate(),
+            context_oid: Some(OrganizationId::generate()),
+            resource: Some("https://mcp.acme.com".into()),
+            granted_scopes: vec!["email".into(), "profile".into()],
+            disclosure: ConsentDisclosure {
+                permissions: vec![],
+                oidc_scopes: vec!["email".into(), "profile".into()],
+                claims: vec!["email@id_token".into()],
+            },
+            granted_at: now,
+            updated_at: now,
+            granted_by: user,
+            granted_via: ConsentSurface::Device,
+        };
         let json = serde_json::to_string(&rec).expect("serialize");
+        assert!(json.contains("\"granted_via\":\"device\""));
         let back: ConsentRecord = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(rec, back);
     }
@@ -588,6 +591,7 @@ mod tests {
     #[test]
     fn pending_authorization_request_serde_round_trip() {
         let pending = PendingAuthorizationRequest {
+            organization: None,
             realm_id: RealmId::generate(),
             user_id: UserId::generate(),
             client_id: ClientId::generate(),

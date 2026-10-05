@@ -214,9 +214,16 @@ fn grant_consent(rig: &Rig, client: &OAuthClient) {
     rig.identity
         .grant_consent(
             &rig.realm_id,
-            &rig.user_id,
-            client.client_id(),
-            &["openid".to_string()],
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: rig.user_id.clone(),
+                    client_id: client.client_id().clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["openid".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
         )
         .expect("grant consent");
 }
@@ -564,6 +571,7 @@ fn jar_jwt(
 /// response mode, resource or request object.
 fn par_request(client: &OAuthClient) -> hearth::identity::PushedAuthorizationRequest {
     hearth::identity::PushedAuthorizationRequest {
+        organization: None,
         client_id: client.client_id().clone(),
         redirect_uri: REDIRECT.to_string(),
         scope: "openid".to_string(),
@@ -979,6 +987,7 @@ async fn engine_authorize_honours_the_fragment_response_mode() {
         .authorize(
             &rig.realm_id,
             &hearth::identity::AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: REDIRECT.to_string(),
                 scope: "openid".to_string(),

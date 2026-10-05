@@ -94,6 +94,7 @@ fn access_token_for(h: &common::TestHarness, realm: &RealmId, user: &UserId) -> 
         .authorize(
             realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.clone(),
                 redirect_uri: REDIRECT_URI.into(),
                 scope: "openid".into(),

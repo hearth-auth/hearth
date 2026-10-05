@@ -119,9 +119,26 @@ impl Env {
     fn code(&self, client: &ClientId) -> String {
         self.h
             .identity()
+            .grant_consent(
+                &self.realm,
+                &hearth::identity::ConsentGrant {
+                    key: hearth::identity::ConsentKey {
+                        user_id: self.user.clone(),
+                        client_id: client.clone(),
+                        org_id: None,
+                        resource: None,
+                    },
+                    scopes: vec!["openid".to_string()],
+                    via: hearth::identity::ConsentSurface::Web,
+                },
+            )
+            .expect("consent");
+        self.h
+            .identity()
             .authorize(
                 &self.realm,
                 &AuthorizationRequest {
+                    organization: None,
                     client_id: client.clone(),
                     redirect_uri: REDIRECT_URI.to_string(),
                     response_type: "code".to_string(),

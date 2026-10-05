@@ -608,6 +608,7 @@ async fn oauth_path_permissions_cap_refuses_issuance() {
         .authorize(
             &realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "http://localhost/callback".into(),
                 scope: "openid profile".into(),
@@ -735,6 +736,7 @@ async fn refresh_re_resolves_claims_instead_of_copying() {
         .authorize(
             &realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "http://localhost/callback".into(),
                 scope: "openid profile".into(),

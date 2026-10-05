@@ -146,11 +146,27 @@ fn code_grant(
     client: &ClientId,
     user: &UserId,
 ) -> (String, String) {
+    h.identity()
+        .grant_consent(
+            realm,
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: user.clone(),
+                    client_id: client.clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["openid".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
+        )
+        .expect("consent");
     let auth = h
         .identity()
         .authorize(
             realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.clone(),
                 redirect_uri: REDIRECT_URI.into(),
                 scope: "openid".into(),

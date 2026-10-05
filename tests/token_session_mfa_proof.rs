@@ -268,6 +268,7 @@ async fn an_unproved_code_flow_token_cannot_authorize_an_mfa_client() {
     let result = rig.identity.authorize_non_interactive(
         &rig.realm_id,
         &AuthorizationRequest {
+            organization: None,
             client_id: rig.client.client_id().clone(),
             redirect_uri: CALLBACK.to_string(),
             scope: "openid".to_string(),

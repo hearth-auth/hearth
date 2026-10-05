@@ -29,9 +29,9 @@
 
 ## 4. Organization context and consent (PR 3)
 
-- [ ] 4.1 Enforce: the `organization` parameter. Test: scenarios "A member signs in to an organization", "A non-member names an organization" and "Membership ends before a refresh"
-- [ ] 4.2 One `ConsentKey` and one lookup; delete the legacy key code. Enforce: Consent is scoped to the organization. Test: scenario "Consent is scoped to the organization"
-- [ ] 4.3 Enforce: Consent is scoped to the resource. Test: scenario "Consent is scoped to the resource"
-- [ ] 4.4 Enforce: Revoking an application removes every consent row. Test: scenario "Revoking an application removes every consent row"
-- [ ] 4.5 The disclosure set replaces the scope digest. Enforce: A new mapper invalidates consent, and a removed mapper does not. Test: scenarios "A new mapper invalidates consent" and "A removed mapper does not ask again"
-- [ ] 4.6 Enforce: A broadened bundle requires consent again. Test: scenario "A broadened bundle requires consent again"
+- [x] 4.1 Enforce: the `organization` parameter. Test: scenarios "A member signs in to an organization", "A non-member names an organization" and "Membership ends before a refresh"
+- [x] 4.2 One `ConsentKey` and one lookup; delete the legacy key code. Enforce: Consent is scoped to the organization. Test: scenario "Consent is scoped to the organization"
+- [x] 4.3 Enforce: Consent is scoped to the resource. Test: scenario "Consent is scoped to the resource"
+- [x] 4.4 Enforce: Revoking an application removes every consent row. Test: scenario "Revoking an application removes every consent row"
+- [x] 4.5 The disclosure set replaces the scope digest. Enforce: A new mapper invalidates consent, and a removed mapper does not. Test: scenarios "A new mapper invalidates consent" and "A removed mapper does not ask again"
+- [x] 4.6 Enforce: A broadened bundle requires consent again. Test: scenario "A broadened bundle requires consent again"

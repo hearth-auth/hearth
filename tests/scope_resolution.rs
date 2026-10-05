@@ -145,7 +145,20 @@ impl Fixture {
             let scopes: Vec<String> = scope.split_whitespace().map(str::to_string).collect();
             self.h
                 .identity()
-                .grant_consent(&self.realm, &self.user, &client, &scopes)
+                .grant_consent(
+                    &self.realm,
+                    &hearth::identity::ConsentGrant {
+                        key: hearth::identity::ConsentKey {
+                            user_id: self.user.clone(),
+                            client_id: client.clone(),
+                            org_id: None,
+                            resource: resource
+                                .map(|r| hearth::core::Uri::try_from(r.to_string()).unwrap()),
+                        },
+                        scopes,
+                        via: hearth::identity::ConsentSurface::Web,
+                    },
+                )
                 .expect("consent");
         }
         self.h
@@ -153,6 +166,7 @@ impl Fixture {
             .authorize(
                 &self.realm,
                 &AuthorizationRequest {
+                    organization: None,
                     client_id: client,
                     redirect_uri: REDIRECT_URI.into(),
                     response_type: "code".into(),

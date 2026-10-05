@@ -1413,6 +1413,7 @@ async fn par_resource_reaches_the_access_token_audience() {
         .push_authorization_request(
             &rig.realm_id,
             &hearth::identity::PushedAuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: REDIRECT.to_string(),
                 scope: "openid".to_string(),

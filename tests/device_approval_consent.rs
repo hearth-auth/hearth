@@ -264,11 +264,21 @@ async fn approving_a_device_records_consent_for_a_client_that_requires_it() {
     let consent = rig
         .state
         .identity
-        .get_consent(&rig.realm, &rig.user, &client)
+        .get_consent(
+            &rig.realm,
+            &hearth::identity::ConsentKey {
+                user_id: rig.user.clone(),
+                client_id: client.clone(),
+                org_id: None,
+                resource: None,
+            },
+        )
         .expect("consent lookup")
         .expect("approving a consent-requiring client must record the user's consent");
     assert!(
-        consent.covers(&["openid".to_string(), "profile".to_string()]),
+        ["openid", "profile"]
+            .iter()
+            .all(|s| consent.granted_scopes.iter().any(|g| g == s)),
         "the consent must cover the scopes the device requested; got {:?}",
         consent.granted_scopes
     );
@@ -290,7 +300,15 @@ async fn denying_a_device_approves_nothing() {
     assert!(
         rig.state
             .identity
-            .get_consent(&rig.realm, &rig.user, &client)
+            .get_consent(
+                &rig.realm,
+                &hearth::identity::ConsentKey {
+                    user_id: rig.user.clone(),
+                    client_id: client.clone(),
+                    org_id: None,
+                    resource: None
+                }
+            )
             .expect("consent lookup")
             .is_none(),
         "deny records no consent"

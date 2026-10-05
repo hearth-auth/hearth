@@ -437,7 +437,19 @@ async fn users_admin_allowed_on_revoke_consent() {
     let kept = f.client();
     for client in [&revoked, &kept] {
         f.h.identity()
-            .grant_consent(&f.realm, &target, client, &["openid".to_string()])
+            .grant_consent(
+                &f.realm,
+                &hearth::identity::ConsentGrant {
+                    key: hearth::identity::ConsentKey {
+                        user_id: target.clone(),
+                        client_id: client.clone(),
+                        org_id: None,
+                        resource: None,
+                    },
+                    scopes: vec!["openid".to_string()],
+                    via: hearth::identity::ConsentSurface::Web,
+                },
+            )
             .expect("grant consent");
     }
     let before = f.consent_clients(&target);

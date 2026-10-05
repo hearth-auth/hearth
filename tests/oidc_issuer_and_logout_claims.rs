@@ -126,6 +126,7 @@ impl Env {
             .authorize(
                 &self.realm,
                 &AuthorizationRequest {
+                    organization: None,
                     client_id: self.client.client_id().clone(),
                     redirect_uri: REDIRECT_URI.into(),
                     scope: "openid".into(),

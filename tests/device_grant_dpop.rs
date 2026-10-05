@@ -112,6 +112,22 @@ impl Fx {
             .expect("device authorize");
         self.h
             .identity()
+            .grant_consent(
+                &self.realm,
+                &hearth::identity::ConsentGrant {
+                    key: hearth::identity::ConsentKey {
+                        user_id: self.user.clone(),
+                        client_id: client.clone(),
+                        org_id: None,
+                        resource: None,
+                    },
+                    scopes: SCOPE.split(' ').map(str::to_string).collect(),
+                    via: hearth::identity::ConsentSurface::Device,
+                },
+            )
+            .expect("consent");
+        self.h
+            .identity()
             .approve_device(&self.realm, &started.user_code, &self.user)
             .expect("approve device");
         started.device_code

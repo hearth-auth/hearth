@@ -83,10 +83,28 @@ fn authorize_and_exchange(
             )
             .expect("register the protected resource");
     }
+    identity
+        .grant_consent(
+            realm_id,
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: user_id.clone(),
+                    client_id: client.client_id().clone(),
+                    org_id: None,
+                    resource: resource.map(|uri| {
+                        hearth::core::Uri::try_from(uri.to_string()).expect("resource uri")
+                    }),
+                },
+                scopes: vec!["openid".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
+        )
+        .expect("consent");
     let auth = identity
         .authorize(
             realm_id,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 scope: "openid".to_string(),

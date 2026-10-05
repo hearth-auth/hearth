@@ -120,6 +120,7 @@ pub(crate) fn proto_authorize_to_domain(
     };
 
     Ok(domain::AuthorizationRequest {
+        organization: None,
         client_id: ClientId::new(
             uuid::Uuid::parse_str(&r.client_id)
                 .map_err(|_| "invalid client_id UUID".to_string())?,

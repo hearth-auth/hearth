@@ -81,6 +81,9 @@ pub struct OidcParams {
     /// audience the client asked for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource: Option<String>,
+    /// The `organization` parameter, as the request named it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization: Option<String>,
 }
 
 /// Claims embedded in a Required-Action session JWT.
@@ -410,6 +413,7 @@ mod tests {
 
     fn test_oidc_params() -> OidcParams {
         OidcParams {
+            organization: None,
             client_id: "test-client".to_string(),
             redirect_uri: "https://app.example.com/callback".to_string(),
             scope: "openid profile".to_string(),

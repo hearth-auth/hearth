@@ -226,7 +226,7 @@ A refresh for a third-party client SHALL re-run scope resolution and the digest 
 
 | Change since consent | Refresh outcome |
 |---|---|
-| A bundle's permission list changed | `invalid_grant` with `consent_required` |
+| A bundle was broadened, or a claim now reaches the client or a new target | `invalid_grant` with `consent_required` |
 | A bundle was deleted | `invalid_grant` with `consent_required` |
 | The user lost a permission | succeeds, with the narrower set; a bundle no longer fully held drops out of `scope` |
 | Nothing grantable remains | `invalid_grant` |

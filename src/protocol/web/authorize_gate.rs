@@ -37,7 +37,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use crate::core::{ClientId, RealmId, Timestamp, UserId};
 use crate::identity::ra_token::OidcParams;
 use crate::identity::{
-    canonicalize_scopes, AuthorizationRequest, CodeChallengeMethod, MfaProof,
+    canonicalize_scopes, AuthorizationRequest, CodeChallengeMethod, ConsentState, MfaProof,
     PendingAuthorizationRequest, ResponseMode,
 };
 
@@ -48,6 +48,10 @@ use super::oauth_consent::{
     CONSENT_TICKET_TTL_SECS,
 };
 use super::WebState;
+
+/// The one `error_description` for an `organization` the user cannot sign
+/// in to: unknown, not active, or no membership. It does not say which.
+pub(super) const ORGANIZATION_DENIED: &str = "the organization is not available";
 
 /// A validated authorization request, every value authoritative.
 ///
@@ -76,6 +80,9 @@ pub(super) struct AuthorizeParams {
     pub response_mode: Option<ResponseMode>,
     /// RFC 8707 resource indicator, from a verified JAR or PAR entry only.
     pub resource: Option<String>,
+    /// The `organization` parameter (an organization ID or slug), from the
+    /// query, a verified JAR or a PAR entry.
+    pub organization: Option<String>,
     /// What the browser session authorizing the request proved about a
     /// second factor. The code records it, and the token session its exchange
     /// opens proves exactly that (GA audit round 3, D-7). Set from the
@@ -100,6 +107,7 @@ impl AuthorizeParams {
             prompt: self.prompt.clone(),
             mfa_proof: self.mfa_proof,
             resource: self.resource.clone(),
+            organization: self.organization.clone(),
         }
     }
 
@@ -120,6 +128,7 @@ impl AuthorizeParams {
             prompt: p.prompt.clone(),
             response_mode: parse_response_mode(p.response_mode.as_deref())?,
             resource: p.resource.clone(),
+            organization: p.organization.clone(),
             mfa_proof: p.mfa_proof,
         })
     }
@@ -334,14 +343,14 @@ fn consent_gate(
     secure: bool,
     now: Timestamp,
 ) -> Response {
-    let client = match state.identity.get_client(realm, &params.client_id) {
-        Ok(Some(c)) => c,
+    match state.identity.get_client(realm, &params.client_id) {
+        Ok(Some(_)) => {}
         Ok(None) => return handlers_common::bad_request("unknown client"),
         Err(e) => {
             tracing::warn!(error = %e, "authorize: get_client failed at the consent gate");
             return handlers_common::server_error();
         }
-    };
+    }
     let client_id_str = params.client_id.to_string();
     // Errors go back the way the code would have: in the request's
     // response mode.
@@ -360,8 +369,20 @@ fn consent_gate(
         &params.client_id,
         &params.scope,
         params.resource.as_deref(),
+        params.organization.as_deref(),
     ) {
         Ok(granted) => granted,
+        // One answer for an unknown organization, an inactive one and a
+        // missing membership (`scope-consent-integrity` design §1).
+        Err(crate::identity::IdentityError::OrganizationAccessDenied) => {
+            return authorization_error_redirect(
+                state,
+                realm,
+                &error_return,
+                "access_denied",
+                ORGANIZATION_DENIED,
+            );
+        }
         Err(crate::identity::IdentityError::InvalidScope { .. }) => {
             return authorization_error_redirect(
                 state,
@@ -382,24 +403,15 @@ fn consent_gate(
         }
     };
     let mut granted_params = params.clone();
-    granted_params.scope = granted.join(" ");
+    granted_params.scope = granted.scopes.join(" ");
+    // The resolved ID, so the consent row and the code name the
+    // organization the same way whatever the request used.
+    granted_params.organization = granted.org_id.map(|o| o.as_uuid().to_string());
     let params = &granted_params;
 
-    let requested_scopes = canonicalize_scopes(granted);
-
-    let existing = match state
-        .identity
-        .get_consent(realm, user_id, &params.client_id)
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "authorize: get_consent failed");
-            return handlers_common::server_error();
-        }
-    };
-    let covered = existing
-        .as_ref()
-        .is_some_and(|r| r.covers(&requested_scopes));
+    let requested_scopes = canonicalize_scopes(granted.scopes);
+    let consent_required = granted.consent != ConsentState::NotRequired;
+    let covered = granted.consent == ConsentState::Held;
 
     let force_prompt = params.prompt == "consent";
     let silent_only = params.prompt == "none";
@@ -407,7 +419,7 @@ fn consent_gate(
     // A-37: every `prompt=none` request is counted per (realm, sub) and rate
     // limited; a limited probe answers `login_required` (OIDC Core §3.1.2.6).
     if silent_only {
-        let outcome = if !client.require_consent() || covered {
+        let outcome = if !consent_required || covered {
             "code_issued"
         } else {
             "consent_required"
@@ -426,7 +438,7 @@ fn consent_gate(
         }
     }
 
-    let bypass = !client.require_consent() || (covered && !force_prompt);
+    let bypass = !consent_required || (covered && !force_prompt);
     if bypass {
         return issue_code(
             state,
@@ -465,6 +477,7 @@ fn consent_gate(
             .as_ref()
             .map(|m| m.as_str().to_string()),
         resource: params.resource.clone(),
+        organization: params.organization.clone(),
         amr_values,
         created_at: now,
         expires_at: now.add_micros(CONSENT_TICKET_TTL_SECS * 1_000_000),
@@ -497,6 +510,7 @@ pub(super) fn issue_code(
     amr_values: Vec<String>,
 ) -> Response {
     let request = AuthorizationRequest {
+        organization: params.organization.clone(),
         client_id: params.client_id.clone(),
         redirect_uri: params.redirect_uri.clone(),
         scope: scope.to_string(),
@@ -539,6 +553,7 @@ mod tests {
 
     fn sample() -> AuthorizeParams {
         AuthorizeParams {
+            organization: None,
             client_id: ClientId::new(uuid::Uuid::new_v4()),
             redirect_uri: "https://app.example.com/cb".to_string(),
             scope: "openid profile".to_string(),

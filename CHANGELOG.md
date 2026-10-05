@@ -17,6 +17,14 @@ libraries, admin clients generated from OpenAPI, one conformance harness for all
 testing, an external pentest). Hearth is not yet production-ready until the second one is done.
 
 ### Added
+- **`organization` parameter on `/authorize`** (`scope-consent-integrity`). An organization ID
+  or slug, in the browser query, a signed request object (JAR) or a pushed request (PAR); the
+  JSON `POST /authorize` takes it through a pushed `request_uri`. Hearth accepts it only for an
+  active organization the user is a member of; every other case answers `access_denied` with
+  one fixed description (error code `HEARTH_ORG_ACCESS_DENIED`). The access, ID and refresh
+  tokens carry the organization as `oid`, and its role assignments apply. A refresh keeps the
+  organization and answers `invalid_grant` once the organization is no longer active or the
+  user no longer a member.
 - **`captcha_token` on the JSON sign-in endpoints** — an optional body field on
   `POST /v1/{realm}/auth/magic-link` and `POST /webauthn/auth/complete` that carries a solved
   CAPTCHA after a `403` `HEARTH_ABUSE_CHALLENGE_REQUIRED` answer (`login-abuse-challenge`).
@@ -145,6 +153,22 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   workflows and guides are gone.
 
 ### Security
+- **Consent is bound to the organization and the resource, and covers what it discloses**
+  (`scope-consent-integrity`). A third-party consent row is now keyed by user, client,
+  organization and RFC 8707 resource, and the browser gate, the JSON `/authorize` and refresh
+  read it the same way. A consent in one organization does not cover another unless the client
+  sets `consent_spans_orgs: true`, and a consent never covers another resource. The row records
+  what the granted scopes disclose: the permissions the bundles stand for and the
+  `claim@target` pairs the claim profile releases to the client. When that grows (a new mapper,
+  a broadened bundle, a claim on a new target), `/authorize` shows the consent screen again and a
+  refresh answers `invalid_grant` with `error_description=consent_required` and writes a
+  `ConsentRequiredOnRefresh` audit event; a refresh of a bundle deleted from `hearth.yaml` does
+  the same and deletes the row. Disclosing less never asks again. The row also records who
+  granted it and on which surface (`web` or `device`). A first-party client has no consent step.
+- **Revoking an application removes every consent row** (`scope-consent-integrity`). Revoking
+  from the account page, the admin console or the API deletes the client's rows in every
+  organization and for every resource, revokes their refresh tokens, and writes one
+  `ClientConsentRevoked` audit event per row, naming the real actor (the user or the admin).
 - **A challenged sign-in is audited and can be answered** (`login-abuse-challenge`). When the
   distributed-attack detector (A-3) or the per-IP challenge state (A-16) challenges a sign-in,
   an `AbuseDetected` audit event records the IP, the username, the guard and the surface, at most
@@ -354,6 +378,12 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   short form was refused as "invalid status".
 
 ### Changed
+- **`ClientConsentRevoked` replaces `ConsentRevoked` for revocations** (`scope-consent-integrity`).
+  A revocation now writes one `ClientConsentRevoked` event per deleted consent row, with
+  `context_oid` and `resource_uri` in its metadata. An admin revocation names the admin as the
+  actor, not the user. The admin API no longer writes a separate `ConsentRevoked` event.
+- **`require_consent` applies to third-party clients only** (`scope-consent-integrity`). A
+  first-party client never shows the consent screen, whatever its `require_consent` value.
 - **Scope refusals answer `invalid_scope`** (`scope-consent-integrity`). A refused scope used to
   answer `400 {"error_code":"HEARTH_INVALID_INPUT"}`; it now answers the OAuth error
   `invalid_scope` (RFC 6749 §5.2), and the browser `/authorize` redirects with

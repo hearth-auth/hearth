@@ -398,8 +398,12 @@ async fn first_time_flow_shows_consent_then_issues_code() {
         .identity
         .get_consent(
             &rig.realm_id,
-            &rig.alice_id,
-            rig.untrusted_client.client_id(),
+            &hearth::identity::ConsentKey {
+                user_id: rig.alice_id.clone(),
+                client_id: rig.untrusted_client.client_id().clone(),
+                org_id: None,
+                resource: None,
+            },
         )
         .expect("get")
         .expect("persisted");
@@ -452,8 +456,12 @@ async fn partial_approval_stores_only_approved_scopes() {
         .identity
         .get_consent(
             &rig.realm_id,
-            &rig.alice_id,
-            rig.untrusted_client.client_id(),
+            &hearth::identity::ConsentKey {
+                user_id: rig.alice_id.clone(),
+                client_id: rig.untrusted_client.client_id().clone(),
+                org_id: None,
+                resource: None,
+            },
         )
         .expect("get")
         .expect("persisted");
@@ -467,9 +475,16 @@ async fn returning_user_with_sufficient_consent_bypasses_prompt() {
     rig.identity
         .grant_consent(
             &rig.realm_id,
-            &rig.alice_id,
-            rig.untrusted_client.client_id(),
-            &["profile".to_string(), "email".to_string()],
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: rig.alice_id.clone(),
+                    client_id: rig.untrusted_client.client_id().clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["profile".to_string(), "email".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
         )
         .expect("grant");
 
@@ -502,9 +517,16 @@ async fn returning_user_with_new_scope_reprompts() {
     rig.identity
         .grant_consent(
             &rig.realm_id,
-            &rig.alice_id,
-            rig.untrusted_client.client_id(),
-            &["profile".to_string()],
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: rig.alice_id.clone(),
+                    client_id: rig.untrusted_client.client_id().clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["profile".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
         )
         .expect("grant");
 
@@ -575,8 +597,12 @@ async fn deny_redirects_with_access_denied_error() {
         .identity
         .get_consent(
             &rig.realm_id,
-            &rig.alice_id,
-            rig.untrusted_client.client_id(),
+            &hearth::identity::ConsentKey {
+                user_id: rig.alice_id.clone(),
+                client_id: rig.untrusted_client.client_id().clone(),
+                org_id: None,
+                resource: None,
+            },
         )
         .expect("get");
     assert!(rec.is_none());
@@ -719,9 +745,16 @@ async fn prompt_consent_forces_reprompt_even_with_existing_record() {
     rig.identity
         .grant_consent(
             &rig.realm_id,
-            &rig.alice_id,
-            rig.untrusted_client.client_id(),
-            &["profile".to_string()],
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: rig.alice_id.clone(),
+                    client_id: rig.untrusted_client.client_id().clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["profile".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
         )
         .expect("grant");
 
@@ -795,8 +828,12 @@ async fn csrf_protection_on_consent_post() {
         .identity
         .get_consent(
             &rig.realm_id,
-            &rig.alice_id,
-            rig.untrusted_client.client_id(),
+            &hearth::identity::ConsentKey {
+                user_id: rig.alice_id.clone(),
+                client_id: rig.untrusted_client.client_id().clone(),
+                org_id: None,
+                resource: None,
+            },
         )
         .expect("get");
     assert!(rec.is_none());
@@ -892,8 +929,12 @@ async fn cross_user_ticket_replay_is_rejected() {
         .identity
         .get_consent(
             &rig.realm_id,
-            &rig.alice_id,
-            rig.untrusted_client.client_id(),
+            &hearth::identity::ConsentKey {
+                user_id: rig.alice_id.clone(),
+                client_id: rig.untrusted_client.client_id().clone(),
+                org_id: None,
+                resource: None,
+            },
         )
         .expect("get");
     assert!(rec.is_none());
@@ -1097,17 +1138,31 @@ async fn list_consents_returns_only_current_user_consents() {
     rig.identity
         .grant_consent(
             &rig.realm_id,
-            &rig.alice_id,
-            rig.untrusted_client.client_id(),
-            &["profile".to_string()],
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: rig.alice_id.clone(),
+                    client_id: rig.untrusted_client.client_id().clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["profile".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
         )
         .expect("grant alice");
     rig.identity
         .grant_consent(
             &rig.realm_id,
-            &rig.bob_id,
-            rig.untrusted_client.client_id(),
-            &["email".to_string()],
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: rig.bob_id.clone(),
+                    client_id: rig.untrusted_client.client_id().clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["email".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
         )
         .expect("grant bob");
 
@@ -1146,9 +1201,16 @@ async fn self_revoke_consent_removes_record_and_reprompts_next_authorize() {
     rig.identity
         .grant_consent(
             &rig.realm_id,
-            &rig.alice_id,
-            rig.untrusted_client.client_id(),
-            &["profile".to_string()],
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: rig.alice_id.clone(),
+                    client_id: rig.untrusted_client.client_id().clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["profile".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
         )
         .expect("grant");
 
@@ -1206,9 +1268,16 @@ async fn self_revoke_consent_emits_audit_event() {
     rig.identity
         .grant_consent(
             &rig.realm_id,
-            &rig.alice_id,
-            rig.untrusted_client.client_id(),
-            &["profile".to_string()],
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: rig.alice_id.clone(),
+                    client_id: rig.untrusted_client.client_id().clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["profile".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
         )
         .expect("grant");
     let csrf = "x";
@@ -1236,20 +1305,24 @@ async fn self_revoke_consent_emits_audit_event() {
             start_time: None,
             end_time: None,
             actor: None,
-            action: Some(AuditAction::ConsentRevoked),
+            action: Some(AuditAction::ClientConsentRevoked),
             limit: Some(10),
             agent_id: None,
             tool: None,
         })
         .expect("query");
-    assert_eq!(events.len(), 1, "expected exactly 1 ConsentRevoked event");
+    assert_eq!(
+        events.len(),
+        1,
+        "expected exactly 1 ClientConsentRevoked event (one row)"
+    );
     let ev = &events[0];
     assert_eq!(
         ev.actor,
         rig.alice_id.as_uuid().to_string(),
         "actor must be the user who revoked their own consent"
     );
-    assert_eq!(ev.action, AuditAction::ConsentRevoked);
+    assert_eq!(ev.action, AuditAction::ClientConsentRevoked);
     assert_eq!(ev.resource_type, "consent", "resource_type must be consent");
 }
 
@@ -1282,17 +1355,31 @@ async fn self_revoke_all_consents() {
     rig.identity
         .grant_consent(
             &rig.realm_id,
-            &rig.alice_id,
-            rig.untrusted_client.client_id(),
-            &["profile".to_string()],
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: rig.alice_id.clone(),
+                    client_id: rig.untrusted_client.client_id().clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["profile".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
         )
         .expect("grant");
     rig.identity
         .grant_consent(
             &rig.realm_id,
-            &rig.alice_id,
-            rig.trusted_client.client_id(),
-            &["email".to_string()],
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: rig.alice_id.clone(),
+                    client_id: rig.trusted_client.client_id().clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["email".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
         )
         .expect("grant 2");
     let csrf = "x";
@@ -1331,6 +1418,8 @@ struct AdminRig {
     target_realm_id: RealmId,
     target_realm_name: String,
     admin_session: SessionId,
+    /// The admin's user ID: the actor of an admin revocation.
+    admin_user: UserId,
     non_admin_session: SessionId,
     /// User whose consents the admin is viewing (in the target realm).
     target_user: UserId,
@@ -1393,9 +1482,16 @@ fn build_admin_rig() -> AdminRig {
     identity
         .grant_consent(
             target_realm.id(),
-            &target_user,
-            client.client_id(),
-            &["profile".to_string()],
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: target_user.clone(),
+                    client_id: client.client_id().clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["profile".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
         )
         .expect("grant consent");
 
@@ -1485,6 +1581,7 @@ fn build_admin_rig() -> AdminRig {
         target_realm_id: target_realm.id().clone(),
         target_realm_name: target_realm.name().to_string(),
         admin_session,
+        admin_user: admin_user.id().clone(),
         non_admin_session,
         target_user,
         client,
@@ -1578,8 +1675,12 @@ async fn admin_revoke_on_behalf_emits_audit_event() {
         .identity
         .get_consent(
             &rig.target_realm_id,
-            &rig.target_user,
-            rig.client.client_id(),
+            &hearth::identity::ConsentKey {
+                user_id: rig.target_user.clone(),
+                client_id: rig.client.client_id().clone(),
+                org_id: None,
+                resource: None,
+            },
         )
         .expect("get");
     assert!(rec.is_none(), "consent must be deleted after admin revoke");
@@ -1591,22 +1692,24 @@ async fn admin_revoke_on_behalf_emits_audit_event() {
             start_time: None,
             end_time: None,
             actor: None,
-            action: Some(AuditAction::ConsentRevoked),
+            action: Some(AuditAction::ClientConsentRevoked),
             limit: Some(10),
             agent_id: None,
             tool: None,
         })
         .expect("query");
-    assert_eq!(events.len(), 1, "expected exactly 1 ConsentRevoked event");
+    assert_eq!(
+        events.len(),
+        1,
+        "expected exactly 1 ClientConsentRevoked event (one row)"
+    );
     let ev = &events[0];
-    // The engine records the target user as actor (the identity whose consent
-    // was revoked). Admin identity threading is a product-level follow-up.
     assert_eq!(
         ev.actor,
-        rig.target_user.as_uuid().to_string(),
-        "actor must be the target user"
+        rig.admin_user.as_uuid().to_string(),
+        "actor must be the admin who revoked it"
     );
-    assert_eq!(ev.action, AuditAction::ConsentRevoked);
+    assert_eq!(ev.action, AuditAction::ClientConsentRevoked);
     assert_eq!(ev.resource_type, "consent", "resource_type must be consent");
 }
 
@@ -1636,25 +1739,63 @@ async fn non_admin_cannot_access_admin_consent_page() {
 }
 
 #[tokio::test]
-async fn toggling_require_consent_via_update_client_reinstates_prompt() {
+async fn toggling_require_consent_on_a_third_party_client_controls_the_prompt() {
     let rig = build_rig();
-    // trusted_client has require_consent=false; flip it on.
+    // A first-party client never has a consent step (scope-consent-integrity
+    // design §5); `require_consent` controls it for a third-party client.
+    let set_require_consent = |require: bool| {
+        rig.identity
+            .update_client(
+                &rig.realm_id,
+                rig.untrusted_client.client_id(),
+                &UpdateClientRequest {
+                    require_consent: Some(require),
+                    ..Default::default()
+                },
+            )
+            .expect("update");
+    };
+    let cookie = auth_cookie(&rig.realm_id, &rig.alice_session, "x");
+    let authorize = || async {
+        let resp = rig
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(authorize_url(&rig.untrusted_client, "profile", &[]))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("oneshot");
+        location_header(&resp).expect("location")
+    };
+
+    set_require_consent(false);
+    assert!(
+        authorize().await.contains("code="),
+        "with require_consent=false the code is issued without a prompt"
+    );
+    set_require_consent(true);
+    assert_eq!(
+        authorize().await,
+        "/ui/oauth/consent",
+        "now that require_consent=true, prompt should appear"
+    );
+
+    // The flag does not give a first-party client a consent step.
     rig.identity
         .update_client(
             &rig.realm_id,
             rig.trusted_client.client_id(),
             &UpdateClientRequest {
-                client_name: None,
-                redirect_uris: None,
-                grant_types: None,
                 require_consent: Some(true),
-                client_logo_url: None,
                 ..Default::default()
             },
         )
         .expect("update");
-
-    let cookie = auth_cookie(&rig.realm_id, &rig.alice_session, "x");
     let resp = rig
         .app
         .clone()
@@ -1668,11 +1809,9 @@ async fn toggling_require_consent_via_update_client_reinstates_prompt() {
         )
         .await
         .expect("oneshot");
-    assert!(resp.status().is_redirection());
-    assert_eq!(
-        location_header(&resp).as_deref(),
-        Some("/ui/oauth/consent"),
-        "now that require_consent=true, prompt should appear"
+    assert!(
+        location_header(&resp).expect("location").contains("code="),
+        "a first-party client never shows the consent screen"
     );
 }
 
@@ -1813,4 +1952,157 @@ async fn prompt_none_error_redirect_carries_iss_in_query_and_fragment() {
             "{loc}"
         );
     }
+}
+
+// ==========================================================================
+// Organization context (`scope-consent-integrity` design §1, §5)
+// ==========================================================================
+
+fn create_org(rig: &Rig, slug: &str) -> hearth::core::OrganizationId {
+    rig.identity
+        .create_organization(
+            &rig.realm_id,
+            &hearth::identity::CreateOrganizationRequest {
+                name: slug.to_string(),
+                slug: slug.to_string(),
+                description: None,
+                config: None,
+                attributes: Default::default(),
+            },
+        )
+        .expect("organization")
+        .id()
+        .clone()
+}
+
+/// The value of query parameter `name` in a redirect `Location`.
+fn query_param(location: &str, name: &str) -> Option<String> {
+    let query = location.split_once('?')?.1;
+    query.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        (k == name).then(|| v.to_string())
+    })
+}
+
+async fn authorize_get(
+    rig: &Rig,
+    cookie: &str,
+    extra: &[(&str, &str)],
+) -> axum::response::Response {
+    rig.app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(authorize_url(&rig.untrusted_client, "profile", extra))
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("oneshot")
+}
+
+#[tokio::test]
+async fn an_organization_the_user_cannot_use_is_refused_as_access_denied() {
+    let rig = build_rig();
+    create_org(&rig, "globex");
+    let cookie = auth_cookie(&rig.realm_id, &rig.alice_session, "csrf-org");
+
+    let not_a_member = authorize_get(&rig, &cookie, &[("organization", "globex")]).await;
+    let unknown = authorize_get(&rig, &cookie, &[("organization", "no-such-org")]).await;
+    let mut answers = Vec::new();
+    for resp in [not_a_member, unknown] {
+        assert!(resp.status().is_redirection());
+        let loc = location_header(&resp).expect("location");
+        assert!(
+            loc.starts_with("https://app.example.com/cb?"),
+            "the refusal goes back to the client: {loc}"
+        );
+        answers.push((
+            query_param(&loc, "error"),
+            query_param(&loc, "error_description"),
+        ));
+    }
+    assert_eq!(answers[0].0.as_deref(), Some("access_denied"));
+    assert_eq!(
+        answers[0], answers[1],
+        "a non-member and an unknown organization get the same answer"
+    );
+}
+
+#[tokio::test]
+async fn consent_given_in_an_organization_is_bound_to_it() {
+    let rig = build_rig();
+    let acme = create_org(&rig, "acme");
+    rig.identity
+        .add_member(
+            &rig.realm_id,
+            &acme,
+            &rig.alice_id,
+            hearth::identity::OrganizationRole::Member,
+        )
+        .expect("membership");
+    let csrf = "csrf-acme";
+    let cookie = auth_cookie(&rig.realm_id, &rig.alice_session, csrf);
+
+    let resp = authorize_get(&rig, &cookie, &[("organization", "acme")]).await;
+    assert_eq!(location_header(&resp).as_deref(), Some("/ui/oauth/consent"));
+    let ticket = ticket_from_response(&resp).expect("ticket cookie");
+    let cookie2 = with_ticket_cookie(&cookie, &rig.alice_id, &ticket);
+    let resp = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ui/oauth/consent")
+                .header(header::COOKIE, &cookie2)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "_csrf={csrf}&ticket={ticket}&decision=approve&scope=profile"
+                )))
+                .expect("req"),
+        )
+        .await
+        .expect("oneshot");
+    let loc = location_header(&resp).expect("location");
+    assert!(loc.contains("code="), "approval issues a code: {loc}");
+
+    let key = |org_id| hearth::identity::ConsentKey {
+        user_id: rig.alice_id.clone(),
+        client_id: rig.untrusted_client.client_id().clone(),
+        org_id,
+        resource: None,
+    };
+    let row = rig
+        .identity
+        .get_consent(&rig.realm_id, &key(Some(acme.clone())))
+        .expect("get")
+        .expect("the row is stored for the organization");
+    assert_eq!(row.granted_by, rig.alice_id);
+    assert_eq!(row.granted_via, hearth::identity::ConsentSurface::Web);
+    assert!(rig
+        .identity
+        .get_consent(&rig.realm_id, &key(None))
+        .expect("get")
+        .is_none());
+
+    // The same organization needs no new consent; realm context does.
+    let again = authorize_get(
+        &rig,
+        &cookie,
+        &[("organization", acme.as_uuid().to_string().as_str())],
+    )
+    .await;
+    assert!(
+        location_header(&again).expect("location").contains("code="),
+        "consent in acme covers acme"
+    );
+    let realm = authorize_get(&rig, &cookie, &[]).await;
+    assert_eq!(
+        location_header(&realm).as_deref(),
+        Some("/ui/oauth/consent"),
+        "consent in acme does not cover realm context"
+    );
 }

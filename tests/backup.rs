@@ -2029,11 +2029,31 @@ async fn restore_carries_user_consents() {
 
     let granted = vec!["openid".to_string(), "profile".to_string()];
     src.identity()
-        .grant_consent(&realm, user.id(), client.client_id(), &granted)
+        .grant_consent(
+            &realm,
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: user.id().clone(),
+                    client_id: client.client_id().clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: granted.clone(),
+                via: hearth::identity::ConsentSurface::Web,
+            },
+        )
         .expect("grant consent");
     let src_consent = src
         .identity()
-        .get_consent(&realm, user.id(), client.client_id())
+        .get_consent(
+            &realm,
+            &hearth::identity::ConsentKey {
+                user_id: user.id().clone(),
+                client_id: client.client_id().clone(),
+                org_id: None,
+                resource: None,
+            },
+        )
         .expect("get source consent")
         .expect("source consent must exist");
 
@@ -2051,15 +2071,25 @@ async fn restore_carries_user_consents() {
 
     let dst_consent = dst
         .identity()
-        .get_consent(&restored_realm, user.id(), client.client_id())
+        .get_consent(
+            &restored_realm,
+            &hearth::identity::ConsentKey {
+                user_id: user.id().clone(),
+                client_id: client.client_id().clone(),
+                org_id: None,
+                resource: None,
+            },
+        )
         .expect("get restored consent")
         .expect("consent must survive the restore or every user is re-prompted");
     assert_eq!(
         dst_consent, src_consent,
-        "the consent record must round-trip field-for-field, digest included"
+        "the consent record must round-trip field-for-field, disclosure included"
     );
     assert!(
-        dst_consent.covers(&granted),
+        granted
+            .iter()
+            .all(|s| dst_consent.granted_scopes.contains(s)),
         "the restored consent must still cover the scopes the user approved"
     );
     assert_eq!(
@@ -2641,6 +2671,7 @@ fn rs256_id_token(
         .authorize(
             realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.clone(),
                 redirect_uri: "https://rp.example.com/cb".to_string(),
                 scope: "openid".to_string(),

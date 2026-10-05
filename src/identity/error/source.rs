@@ -63,6 +63,8 @@ impl std::error::Error for IdentityError {
             | Self::RegistrationDomainNotAllowed { .. }
             | Self::RegistrationRequiresInvitation
             | Self::ConsentRequired
+            | Self::RefreshConsentRequired
+            | Self::OrganizationAccessDenied
             | Self::ClientMismatch
             | Self::ConsentTicketNotFound
             | Self::ConsentTicketExpired

@@ -124,6 +124,7 @@ fn mint_code(
         .authorize(
             realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: REDIRECT_URI.to_string(),
                 scope: "openid".to_string(),

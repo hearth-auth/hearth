@@ -266,7 +266,15 @@ impl Fixture {
     fn has_consent(&self, client: &ClientId) -> bool {
         self.h
             .identity()
-            .get_consent(&self.realm, &self.user, client)
+            .get_consent(
+                &self.realm,
+                &hearth::identity::ConsentKey {
+                    user_id: self.user.clone(),
+                    client_id: client.clone(),
+                    org_id: None,
+                    resource: None,
+                },
+            )
             .expect("get consent")
             .is_some()
     }
@@ -301,7 +309,19 @@ async fn a_third_party_client_cannot_revoke_the_users_consent_to_another_app() {
     let f = setup().await;
     let other = register(&f.h, &f.realm, ClientTrustLevel::ThirdParty);
     f.h.identity()
-        .grant_consent(&f.realm, &f.user, &other, &["openid".to_string()])
+        .grant_consent(
+            &f.realm,
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: f.user.clone(),
+                    client_id: other.clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["openid".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
+        )
         .expect("consent");
 
     let uri = format!("/oauth/consents/{}", other.as_uuid());
@@ -329,9 +349,16 @@ async fn a_third_party_client_may_revoke_its_own_consent() {
     f.h.identity()
         .grant_consent(
             &f.realm,
-            &f.user,
-            &f.third_party_client,
-            &["openid".to_string()],
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: f.user.clone(),
+                    client_id: f.third_party_client.clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["openid".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
         )
         .expect("consent");
     let uri = format!("/oauth/consents/{}", f.third_party_client.as_uuid());

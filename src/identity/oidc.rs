@@ -685,6 +685,14 @@ impl OAuthClient {
         self.require_consent
     }
 
+    /// Whether authorizations for this client go through consent: a
+    /// third-party client that requires it (`scope-consent-integrity` design
+    /// §5). A first-party client never has a consent step, whatever
+    /// `require_consent` says.
+    pub fn has_consent_step(&self) -> bool {
+        self.require_consent && self.trust_level == ClientTrustLevel::ThirdParty
+    }
+
     /// Sets whether user consent is required. Used during admin updates.
     pub(crate) fn set_require_consent(&mut self, require: bool) {
         self.require_consent = require;
@@ -1084,6 +1092,10 @@ pub struct AuthorizationRequest {
     pub state: String,
     /// Optional RFC 8707 resource indicator.
     pub resource: Option<String>,
+    /// The `organization` parameter: an organization ID or slug of the
+    /// realm (`scope-consent-integrity` design §1). `None` keeps the flow in
+    /// realm context.
+    pub organization: Option<String>,
     /// Response type (must be "code" for authorization code flow).
     pub response_type: String,
     /// The authenticated user granting authorization.
@@ -1318,6 +1330,10 @@ pub(crate) struct StoredAuthorizationCode {
     /// the exchange re-resolves with it (`ScopeRequest::narrowed`).
     #[serde(default)]
     pub(crate) scope_narrowed: bool,
+    /// The organization the user signed in to (`organization` parameter);
+    /// the tokens carry it as `oid`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) org_id: Option<crate::core::OrganizationId>,
 }
 
 /// Context from the refresh request that binds it to its grant family.
@@ -1471,6 +1487,9 @@ pub struct JarClaims {
     /// RFC 8707 resource indicator.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource: Option<String>,
+    /// The `organization` parameter: an organization ID or slug.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization: Option<String>,
     /// Response mode (RFC 9101 §4 — overrides outer `response_mode` query param).
     ///
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1500,6 +1519,8 @@ pub struct PushedAuthorizationRequest {
     pub state: String,
     /// RFC 8707 resource indicator.
     pub resource: Option<String>,
+    /// The `organization` parameter: an organization ID or slug.
+    pub organization: Option<String>,
     /// Must be "code".
     pub response_type: String,
     /// PKCE S256 code challenge (required for public clients).
@@ -1581,6 +1602,9 @@ pub struct StoredPushedAuthorizationRequest {
     /// (RFC 9126 §4: parameters beside `request_uri` are ignored).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) prompt: Option<String>,
+    /// The `organization` parameter — the JAR's claim, else the pushed value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) organization: Option<String>,
     /// When this entry was created.
     pub(crate) created_at: Timestamp,
     /// When this entry expires (created_at + 90 s).
@@ -1802,8 +1826,8 @@ pub(crate) struct StoredGrantFamily {
     /// The OAuth client that owns this grant family.
     ///
     /// Optional for backward compatibility — families created before this
-    /// field was added will have `None`. When present, used for consent
-    /// digest re-checking on refresh.
+    /// field was added will have `None`. When present, refresh re-checks the
+    /// client's consent row (`scope-consent-integrity` design §5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) client_id: Option<ClientId>,
     /// RFC 8707 resource indicators from the authorization grant. Used
@@ -2262,6 +2286,7 @@ mod tests {
     #[test]
     fn stored_authorization_code_serde_round_trip() {
         let code = StoredAuthorizationCode {
+            org_id: None,
             code_hash: "abc123".to_string(),
             client_id: ClientId::generate(),
             user_id: crate::core::UserId::generate(),

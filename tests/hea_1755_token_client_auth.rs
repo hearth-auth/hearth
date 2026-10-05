@@ -88,9 +88,25 @@ fn mint_code(
     challenge: &str,
 ) -> String {
     h.identity()
+        .grant_consent(
+            realm,
+            &hearth::identity::ConsentGrant {
+                key: hearth::identity::ConsentKey {
+                    user_id: user_id.clone(),
+                    client_id: client.client_id().clone(),
+                    org_id: None,
+                    resource: None,
+                },
+                scopes: vec!["openid".to_string()],
+                via: hearth::identity::ConsentSurface::Web,
+            },
+        )
+        .expect("consent");
+    h.identity()
         .authorize(
             realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: REDIRECT_URI.to_string(),
                 scope: "openid".to_string(),

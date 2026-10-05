@@ -9,67 +9,138 @@ use crate::core::{
     UserId, WebhookId,
 };
 
-/// A user's persisted consent to share a set of scopes with an OAuth client.
+/// A user's persisted consent to a third-party OAuth client
+/// (`scope-consent-integrity` design §5).
 ///
-/// Stored per `(realm, user, client)`. `granted_scopes` is the canonical,
-/// sorted, deduplicated set of scopes the user has approved. Subsequent
-/// authorization requests that ask only for a subset of these scopes skip
-/// the consent prompt; requests that add a new scope re-prompt.
+/// One row per [`ConsentKey`]: user, client, organization context and RFC
+/// 8707 resource. The consent holds while what the client would now receive
+/// (its [`ConsentDisclosure`]) is a subset of [`Self::disclosure`].
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConsentRecord {
     /// The subject user.
     pub user_id: UserId,
     /// The OAuth client the consent applies to.
     pub client_id: ClientId,
-    /// Organization context captured at grant time.
+    /// The organization context the consent was granted in; `None` for
+    /// realm context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_oid: Option<OrganizationId>,
-    /// Resource indicator captured at grant time.
+    /// The canonical RFC 8707 resource; `None` for Hearth as audience.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource: Option<String>,
     /// Canonicalized (sorted + deduplicated) scopes the user has approved.
     pub granted_scopes: Vec<String>,
-    /// Digest of the authorization + disclosure surface.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub scope_digest: Vec<u8>,
+    /// What the approved scopes disclose to the client.
+    pub disclosure: ConsentDisclosure,
     /// When consent was first recorded.
     pub granted_at: Timestamp,
-    /// When the scope set was last updated.
+    /// When the row was last updated.
     pub updated_at: Timestamp,
+    /// The signed-in user who granted it.
+    pub granted_by: UserId,
+    /// The surface it was granted on.
+    pub granted_via: ConsentSurface,
 }
 
-impl ConsentRecord {
-    /// Creates a new consent record. `scopes` will be canonicalized.
-    pub fn new(user_id: UserId, client_id: ClientId, scopes: Vec<String>, now: Timestamp) -> Self {
-        Self {
-            user_id,
-            client_id,
-            context_oid: None,
-            resource: None,
-            granted_scopes: canonicalize_scopes(scopes),
-            scope_digest: Vec::new(),
-            granted_at: now,
-            updated_at: now,
+/// The surface a consent was granted on.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsentSurface {
+    /// The browser consent screen.
+    Web,
+    /// The device-grant approval page.
+    Device,
+}
+
+/// What a set of granted scopes discloses to a client: the permissions the
+/// scopes resolve to, the OIDC scopes, and the `claim@target` pairs the claim
+/// profile releases to the client. Claim values are not part of it.
+///
+/// Each list is sorted and de-duplicated.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConsentDisclosure {
+    /// Permissions the granted scopes resolve to.
+    pub permissions: Vec<String>,
+    /// The granted OIDC standard scopes.
+    pub oidc_scopes: Vec<String>,
+    /// Released claims as `claim@target` (`access_token`, `id_token`,
+    /// `userinfo`).
+    pub claims: Vec<String>,
+}
+
+impl ConsentDisclosure {
+    /// Whether every entry of `self` is in `stored`: a consent that covers
+    /// `stored` covers `self`.
+    pub fn is_subset_of(&self, stored: &Self) -> bool {
+        fn subset(current: &[String], stored: &[String]) -> bool {
+            current.iter().all(|c| stored.binary_search(c).is_ok())
         }
+        subset(&self.permissions, &stored.permissions)
+            && subset(&self.oidc_scopes, &stored.oidc_scopes)
+            && subset(&self.claims, &stored.claims)
     }
 
-    /// Returns `true` iff every requested scope is already in `granted_scopes`.
-    ///
-    /// Empty `requested` yields `true` — a client can always ask for nothing.
-    pub fn covers(&self, requested: &[String]) -> bool {
-        requested
-            .iter()
-            .all(|s| self.granted_scopes.iter().any(|g| g == s))
+    /// Adds every entry of `other`.
+    pub fn merge(&mut self, other: &Self) {
+        fn union(into: &mut Vec<String>, other: &[String]) {
+            into.extend(other.iter().cloned());
+            into.sort();
+            into.dedup();
+        }
+        union(&mut self.permissions, &other.permissions);
+        union(&mut self.oidc_scopes, &other.oidc_scopes);
+        union(&mut self.claims, &other.claims);
     }
+}
 
-    /// Merges `additional` into `granted_scopes`, canonicalizing and
-    /// updating `updated_at`.
-    pub fn merge_scopes(&mut self, additional: &[String], now: Timestamp) {
-        let mut all = self.granted_scopes.clone();
-        all.extend(additional.iter().cloned());
-        self.granted_scopes = canonicalize_scopes(all);
-        self.updated_at = now;
-    }
+/// The key of one consent row: user, client, organization context (`None`
+/// for realm context) and canonical resource (`None` for Hearth as
+/// audience).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConsentKey {
+    /// The subject user.
+    pub user_id: UserId,
+    /// The client.
+    pub client_id: ClientId,
+    /// The organization context.
+    pub org_id: Option<OrganizationId>,
+    /// The canonical RFC 8707 resource.
+    pub resource: Option<crate::core::Uri>,
+}
+
+/// A consent the signed-in user grants.
+#[derive(Clone, Debug)]
+pub struct ConsentGrant {
+    /// The row it is written to. Its `user_id` is the granting user.
+    pub key: ConsentKey,
+    /// The approved scopes.
+    pub scopes: Vec<String>,
+    /// Where it was granted.
+    pub via: ConsentSurface,
+}
+
+/// Whether an authorization needs the consent screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConsentState {
+    /// The client has no consent ceremony (first-party, or a third-party
+    /// client registered without `require_consent`).
+    NotRequired,
+    /// A stored consent covers what the client would receive.
+    Held,
+    /// No stored consent covers it: the consent screen is shown.
+    Missing,
+}
+
+/// The outcome of resolving an authorization request's scopes, before the
+/// consent screen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthorizationScopes {
+    /// The grantable scopes.
+    pub scopes: Vec<String>,
+    /// The consent decision for those scopes.
+    pub consent: ConsentState,
+    /// The organization the `organization` parameter named, by ID.
+    pub org_id: Option<OrganizationId>,
 }
 
 /// Sorts and deduplicates a list of scopes. Empty strings are dropped.
@@ -314,6 +385,10 @@ pub struct PendingAuthorizationRequest {
     /// audience the client asked for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource: Option<String>,
+    /// The `organization` parameter, as the request named it. The consent
+    /// row and the code are bound to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization: Option<String>,
     /// Authentication methods already proved on the way here, carried into
     /// the issued code.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -77,6 +77,7 @@ async fn oidc_authorization_code_flow_roundtrip() {
         .authorize(
             &realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 scope: "openid".to_string(),
@@ -445,6 +446,7 @@ async fn oidc_pkce_s256_flow() {
         .authorize(
             &realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 scope: "openid".to_string(),
@@ -492,6 +494,7 @@ async fn oidc_pkce_s256_flow() {
         .authorize(
             &realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 scope: "openid".to_string(),
@@ -537,6 +540,7 @@ async fn oidc_pkce_s256_flow() {
         .authorize(
             &realm,
             &AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 scope: "openid".to_string(),
@@ -780,6 +784,7 @@ async fn conformance_token_endpoint_rfc6749() {
         .authorize(
             &realm,
             &hearth::identity::AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 scope: "openid".to_string(),
@@ -907,6 +912,7 @@ async fn conformance_token_endpoint_rfc6749() {
         .authorize(
             &realm,
             &hearth::identity::AuthorizationRequest {
+                organization: None,
                 client_id: client.client_id().clone(),
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 scope: "openid".to_string(),

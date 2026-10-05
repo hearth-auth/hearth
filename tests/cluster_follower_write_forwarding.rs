@@ -231,6 +231,7 @@ fn push_par_on(identity: &EmbeddedIdentityEngine, realm_id: &RealmId, node_id: u
         .push_authorization_request(
             realm_id,
             &hearth::identity::PushedAuthorizationRequest {
+                organization: None,
                 client_id: client,
                 redirect_uri: REDIRECT.to_string(),
                 scope: "openid".to_string(),
