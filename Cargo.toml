@@ -127,7 +127,7 @@ opentelemetry_sdk = { version = "0.32.1", features = ["trace", "rt-tokio"] }
 # `hyper-client` — hyper is already a production dependency.
 # Direct dependency so the OTLP/HTTP exporter can be handed an explicit
 # hyper+rustls client instead of otlp's reqwest default (audit §4.8#9).
-opentelemetry-http = { version = "0.32", default-features = false, features = ["hyper"] }
+opentelemetry-http = { version = "0.33", default-features = false, features = ["hyper"] }
 opentelemetry-otlp = { version = "0.32", default-features = false, features = [
     "grpc-tonic",
     "http-proto",
