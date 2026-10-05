@@ -88,18 +88,30 @@ asset_is_published() {
 # Assets the guide's table names, with <os>-<arch> resolved to one real target.
 for asset in \
     hearth-linux-amd64 \
-    hearth-linux-amd64.sig \
-    hearth-linux-amd64.pem \
+    hearth-linux-amd64.sigstore.json \
     hearth-sbom.cdx.json \
-    hearth-sbom.cdx.json.sig \
-    hearth-sbom.cdx.json.pem \
+    hearth-sbom.cdx.json.sigstore.json \
     SHA256SUMS \
-    SHA256SUMS.sig \
-    SHA256SUMS.pem \
+    SHA256SUMS.sigstore.json \
     multiple.intoto.jsonl
 do
     if ! asset_is_published "$asset"; then
         fail "${GUIDE} documents '${asset}', which ${RELEASE_WORKFLOW} never uploads."
+    fi
+done
+
+# ── 2b. Signatures are Sigstore bundles ─────────────────────────────────────
+#
+# cosign v3 signs to one `<file>.sigstore.json` bundle (signature, certificate
+# and transparency-log proof). The release no longer ships detached `.sig` /
+# `.pem` pairs, so a `verify-blob` that names them cannot run.
+for f in "$README" "$GUIDE"; do
+    if grep -qE '^\s*--(signature|certificate)\s' "$f" \
+        || grep -qE 'verify-blob.*--(signature|certificate)\s' "$f"; then
+        fail "${f} verifies with --signature/--certificate. Releases ship a Sigstore bundle: use 'cosign verify-blob --bundle <file>.sigstore.json'."
+    fi
+    if grep -q 'cosign verify-blob' "$f" && ! grep -q -- '--bundle' "$f"; then
+        fail "${f} runs 'cosign verify-blob' without --bundle."
     fi
 done
 

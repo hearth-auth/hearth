@@ -5,10 +5,10 @@ name: Release
 # to a GitHub Release.
 #
 # Supply-chain trust chain (HEA-747):
-#   binary  ──cosign──▶  <binary>.sig + <binary>.pem   (Sigstore Fulcio / Rekor)
+#   binary  ──cosign──▶  <binary>.sigstore.json        (Sigstore bundle: Fulcio cert + Rekor proof)
 #   binary  ──SLSA──▶    <binary>.intoto.jsonl          (slsa-github-generator)
 #   codebase ─cyclonedx▶ hearth-sbom.cdx.json           (CycloneDX SBOM)
-#   all ────SHA256SUMS──▶ SHA256SUMS + SHA256SUMS.sig    (cosign-signed manifest)
+#   all ────SHA256SUMS──▶ SHA256SUMS + SHA256SUMS.sigstore.json (cosign-signed manifest)
 #
 # Cosign OIDC identity for verification:
 #   Issuer:  https://token.actions.githubusercontent.com
@@ -483,19 +483,20 @@ jobs:
       - name: Sign artifacts
         working-directory: artifacts
         run: |
+          # cosign v3 writes one Sigstore bundle per file (signature,
+          # certificate and transparency-log proof); the detached
+          # --output-signature/--output-certificate pair is ignored and
+          # signing fails without --bundle.
           for f in hearth-linux-amd64 hearth-linux-arm64 hearth-darwin-amd64 hearth-darwin-arm64 hearth-windows-amd64.exe hearth-sbom.cdx.json SHA256SUMS; do
             cosign sign-blob --yes \
-              --output-signature "${f}.sig" \
-              --output-certificate "${f}.pem" \
+              --bundle "${f}.sigstore.json" \
               "${f}"
           done
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: signatures
-          path: |
-            artifacts/*.sig
-            artifacts/*.pem
+          path: artifacts/*.sigstore.json
           if-no-files-found: error
 
   # ── 6. SLSA L1 provenance ─────────────────────────────────────────────────
@@ -580,8 +581,7 @@ jobs:
             'dist/hearth-windows-amd64.exe' \
             dist/hearth-sbom.cdx.json \
             dist/SHA256SUMS \
-            dist/*.sig \
-            dist/*.pem \
+            dist/*.sigstore.json \
             dist/multiple.intoto.jsonl \
             dist/validation-summary.txt
 

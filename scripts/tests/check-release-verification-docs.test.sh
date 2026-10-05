@@ -39,8 +39,7 @@ cat > "${TMP}/release.yml" <<'EOF'
             'dist/hearth-windows-amd64.exe' \
             dist/hearth-sbom.cdx.json \
             dist/SHA256SUMS \
-            dist/*.sig \
-            dist/*.pem \
+            dist/*.sigstore.json \
             dist/multiple.intoto.jsonl \
             dist/validation-summary.txt
 
@@ -72,8 +71,7 @@ cat > "${TMP}/readme-good.md" <<'EOF'
 curl -LO "https://github.com/hearth-auth/hearth/releases/download/v1.6.10/hearth-linux-amd64"
 
 cosign verify-blob \
-  --certificate SHA256SUMS.pem \
-  --signature   SHA256SUMS.sig \
+  --bundle SHA256SUMS.sigstore.json \
   --certificate-identity-regexp '^https://github\.com/hearth-auth/hearth/.*$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   SHA256SUMS
@@ -176,8 +174,7 @@ curl -LO "https://github.com/hearth-auth/hearth/releases/download/v1.6.10/hearth
 sha256sum -c SHA256SUMS --ignore-missing
 
 cosign verify-blob \
-  --certificate SHA256SUMS.pem \
-  --signature   SHA256SUMS.sig \
+  --bundle SHA256SUMS.sigstore.json \
   --certificate-identity-regexp '^https://github\.com/hearth-auth/hearth/.*$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   SHA256SUMS
@@ -185,6 +182,26 @@ cosign verify-blob \
 EOF
 run_case "the README compares before it verifies" \
     1 "${TMP}/readme-wrong-order.md" "${TMP}/guide-good.md" "before verifying it"
+
+echo "== detached signatures are no longer published =="
+cat > "${TMP}/readme-detached.md" <<'EOF'
+# Hearth
+
+```bash
+curl -LO "https://github.com/hearth-auth/hearth/releases/download/v1.6.10/hearth-linux-amd64"
+
+cosign verify-blob \
+  --certificate SHA256SUMS.pem \
+  --signature   SHA256SUMS.sig \
+  --certificate-identity-regexp '^https://github\.com/hearth-auth/hearth/.*$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  SHA256SUMS
+
+sha256sum -c SHA256SUMS --ignore-missing
+```
+EOF
+run_case "the README verifies a .sig/.pem pair the release no longer ships" \
+    1 "${TMP}/readme-detached.md" "${TMP}/guide-good.md" "Sigstore bundle"
 
 echo "== a documented asset the release never uploads is refused =="
 cat > "${TMP}/release-missing.yml" <<'EOF'
@@ -198,7 +215,7 @@ EOF
 out="$(README="${TMP}/readme-good.md" GUIDE="${TMP}/guide-good.md" \
     RELEASE_WORKFLOW="${TMP}/release-missing.yml" bash "$CHECK" 2>&1)"; rc=$?
 if [[ "$rc" == "1" ]] && printf '%s\n' "$out" | grep -q "never uploads"; then
-    pass "a missing SHA256SUMS.sig is caught"
+    pass "a missing SHA256SUMS.sigstore.json is caught"
 else
     fail "a missing release asset was not caught: exit ${rc}"
     printf '%s\n' "$out" | sed 's/^/         /'
