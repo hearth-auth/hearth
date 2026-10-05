@@ -1890,7 +1890,10 @@ mod tests {
         )
         .expect("third");
         assert_eq!(third.granted_scopes, strings(&["openid", "profile"]));
-        assert!(third.permissions.is_empty(), "{:?}", third.permissions);
+        assert!(
+            third.permissions.is_empty(),
+            "a third-party OIDC-only grant carries no permission"
+        );
     }
 
     #[test]
@@ -1908,7 +1911,7 @@ mod tests {
         )
         .expect("first-party drop");
         assert_eq!(r.granted_scopes, strings(&["openid"]));
-        assert!(r.permissions.is_empty(), "{:?}", r.permissions);
+        assert!(r.permissions.is_empty(), "no permission is granted");
     }
 
     #[test]
@@ -1964,7 +1967,7 @@ mod tests {
             },
         )
         .expect("reissue");
-        assert!(r.permissions.is_empty(), "{:?}", r.permissions);
+        assert!(r.permissions.is_empty(), "no permission is granted");
         assert!(r.scope_narrowed);
     }
 
