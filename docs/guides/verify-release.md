@@ -1,25 +1,24 @@
 # Verifying a Hearth Release
 
-Every Hearth release ships three artefacts per platform — the binary, its signature and its certificate — plus a CycloneDX SBOM, a signed checksum manifest, and one SLSA provenance document:
+Every Hearth release ships two artefacts per platform — the binary and its Sigstore bundle — plus a CycloneDX SBOM, a signed checksum manifest, and one SLSA provenance document:
 
 | File | Description |
 |------|-------------|
 | `hearth-<os>-<arch>` | Release binary |
-| `hearth-<os>-<arch>.sig` | cosign detached signature |
-| `hearth-<os>-<arch>.pem` | Sigstore Fulcio short-lived certificate |
+| `hearth-<os>-<arch>.sigstore.json` | Sigstore bundle: the cosign signature, the Fulcio certificate and the Rekor transparency-log proof |
 | `hearth-sbom.cdx.json` | CycloneDX SBOM (JSON) |
-| `hearth-sbom.cdx.json.sig` | cosign signature for the SBOM |
-| `hearth-sbom.cdx.json.pem` | Certificate for the SBOM signature |
-| `SHA256SUMS` | SHA-256 checksums for all five binaries and the SBOM. It does not, and cannot, contain its own checksum — its integrity comes from `SHA256SUMS.sig` |
-| `SHA256SUMS.sig` | cosign detached signature for SHA256SUMS |
-| `SHA256SUMS.pem` | Certificate for the SHA256SUMS signature |
+| `hearth-sbom.cdx.json.sigstore.json` | Sigstore bundle for the SBOM |
+| `SHA256SUMS` | SHA-256 checksums for all five binaries and the SBOM. It does not, and cannot, contain its own checksum — its integrity comes from `SHA256SUMS.sigstore.json` |
+| `SHA256SUMS.sigstore.json` | Sigstore bundle for SHA256SUMS |
 | `multiple.intoto.jsonl` | SLSA L1 provenance document (covers all binaries and the SBOM) |
+
+Releases up to v2.0.4 ship a detached `<file>.sig` and `<file>.pem` instead of the bundle. Verify those with `--signature <file>.sig --certificate <file>.pem` in place of `--bundle`; every other flag below is the same.
 
 All signing is **keyless** — there is no long-lived private key. Each binary receives a short-lived X.509 certificate issued by [Sigstore Fulcio](https://docs.sigstore.dev/certificate_authority/overview/) bound to the GitHub Actions workflow that produced it. The certificate is logged to [Sigstore Rekor](https://docs.sigstore.dev/logging/overview/) (public, append-only transparency log).
 
 ## Prerequisites
 
-Install `cosign` (v2+):
+Install `cosign` (v2.4 or later, which reads Sigstore bundles):
 
 ```bash
 # Linux / macOS via Homebrew
@@ -46,15 +45,14 @@ brew install rekor-cli
 
 ## Verify a binary with cosign
 
-Download the binary, its `.sig`, and its `.pem` from the [GitHub Releases page](https://github.com/hearth-auth/hearth/releases), then run:
+Download the binary and its `.sigstore.json` from the [GitHub Releases page](https://github.com/hearth-auth/hearth/releases), then run:
 
 ```bash
-VERSION=v1.0.0   # replace with the release tag
+VERSION=v3.1.6   # replace with the release tag
 ARTIFACT=hearth-linux-amd64   # replace with your target
 
 cosign verify-blob \
-  --certificate         "${ARTIFACT}.pem" \
-  --signature           "${ARTIFACT}.sig" \
+  --bundle              "${ARTIFACT}.sigstore.json" \
   --certificate-identity-regexp \
     '^https://github\.com/hearth-auth/hearth/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$' \
   --certificate-oidc-issuer \
@@ -76,8 +74,7 @@ If verification fails, do not run the binary.
 
 ```bash
 cosign verify-blob \
-  --certificate         SHA256SUMS.pem \
-  --signature           SHA256SUMS.sig \
+  --bundle              SHA256SUMS.sigstore.json \
   --certificate-identity-regexp \
     '^https://github\.com/hearth-auth/hearth/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$' \
   --certificate-oidc-issuer \
@@ -102,8 +99,7 @@ place agree with each other.
 
 ```bash
 cosign verify-blob \
-  --certificate         hearth-sbom.cdx.json.pem \
-  --signature           hearth-sbom.cdx.json.sig \
+  --bundle              hearth-sbom.cdx.json.sigstore.json \
   --certificate-identity-regexp \
     '^https://github\.com/hearth-auth/hearth/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$' \
   --certificate-oidc-issuer \
@@ -127,17 +123,21 @@ SLSA L1 provenance asserts that the binary was built by the declared workflow an
 
 ## Inspect the certificate
 
-You can decode the PEM certificate to see the embedded workflow identity:
+The bundle carries the certificate (base64 DER). Decode it to see the embedded workflow identity:
 
 ```bash
-openssl x509 -in "${ARTIFACT}.pem" -noout -text \
+jq -r '.verificationMaterial.certificate.rawBytes
+       // .verificationMaterial.x509CertificateChain.certificates[0].rawBytes' \
+  "${ARTIFACT}.sigstore.json" \
+  | base64 -d \
+  | openssl x509 -inform DER -noout -text \
   | grep -A2 "Subject Alternative Name"
 ```
 
 You should see a URI extension containing the full workflow path, for example:
 
 ```
-URI:https://github.com/hearth-auth/hearth/.github/workflows/release.yml@refs/tags/v1.0.0
+URI:https://github.com/hearth-auth/hearth/.github/workflows/release.yml@refs/tags/v3.1.6
 ```
 
 ## Inspect the transparency log entry

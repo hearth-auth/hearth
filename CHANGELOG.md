@@ -378,6 +378,11 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   short form was refused as "invalid status".
 
 ### Changed
+- **Release signatures are Sigstore bundles.** Each binary, the SBOM and `SHA256SUMS` now
+  ship one `<file>.sigstore.json` (signature, certificate and transparency-log proof) in place
+  of the detached `<file>.sig` and `<file>.pem`. Verify with `cosign verify-blob --bundle`
+  (cosign v2.4 or later); the identity and issuer pins are unchanged. This also restores the
+  binary release, whose signing step failed on every 3.x tag after the move to cosign v3.
 - **`ClientConsentRevoked` replaces `ConsentRevoked` for revocations** (`scope-consent-integrity`).
   A revocation now writes one `ClientConsentRevoked` event per deleted consent row, with
   `context_oid` and `resource_uri` in its metadata. An admin revocation names the admin as the
