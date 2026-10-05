@@ -24,4 +24,4 @@
 - [x] 2.2 Optional `captcha_token` on `POST /v1/{realm}/auth/magic-link` and `POST /webauthn/auth/complete`; `make openapi`
 - [x] 2.3 Login page widget at `<!-- captcha-widget-slot -->`, and a per-page CSP that admits the provider's origin
 - [x] 2.4 `CHANGELOG.md`: `### Security` and `### Added` entries
-- [ ] 2.5 Run `make ui-test-smoke` and `make ui-test-accessibility` against `make dev`
+- [x] 2.5 Run `make ui-test-smoke` and `make ui-test-accessibility` against `make dev`
