@@ -137,7 +137,7 @@ opentelemetry-otlp = { version = "0.32", default-features = false, features = [
     "logs",
     "internal-logs",
 ] }
-opentelemetry-semantic-conventions = "0.32"
+opentelemetry-semantic-conventions = "0.33"
 ureq = { version = "3", features = ["json"] }
 unicode-normalization = "0.1"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
