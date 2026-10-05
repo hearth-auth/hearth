@@ -49,6 +49,10 @@ Hearth MUST implement the RFC 8693 token exchange grant, `grant_type=urn:ietf:pa
 - **WHEN** an exchange presents a subject token with 60 seconds left
 - **THEN** the issued token expires within 60 seconds
 
+#### Scenario: Only the JWT actor token type is accepted
+- **WHEN** an exchange sends an `actor_token` with `actor_token_type=urn:ietf:params:oauth:token-type:access_token`, or with no `actor_token_type`
+- **THEN** the exchange is refused with `invalid_request`
+
 ### Requirement: Token exchange authenticates the client
 Both token endpoints, `POST /token` (realm from the `X-Realm-ID` header) and `POST /realms/{realm}/token` (realm from the path), MUST require the caller to authenticate as a registered client before the exchange is processed. The caller MAY authenticate with HTTP Basic (`Authorization: Basic base64(client_id:client_secret)`), with `client_id` and `client_secret` in the form body, or with a `client_assertion`. A request with no client credentials, or with credentials that match no registered client, MUST be refused with `401 invalid_client`.
 
@@ -111,10 +115,10 @@ Hearth MUST support multi-hop delegation, where a delegated token is exchanged a
 - **THEN** the result has `sub` user U, `act.sub` actor B, and `act.act.sub` actor A
 
 ### Requirement: Every delegation hop attenuates
-Delegation depth MUST be bounded. A token exchange that would make the `act` chain deeper than `MAX_ACT_CHAIN_DEPTH`, the ceiling that token validation also applies, MUST be refused with `invalid_grant`. Each hop MUST attenuate scope: the resulting token's scope MUST be a subset of the parent token's scope. Scope can only narrow, never widen. Each hop MUST attenuate lifetime: the resulting token's expiry MUST NOT exceed the parent token's expiry.
+Delegation depth MUST be bounded. A token exchange that would make the `act` chain deeper than the configured act-chain ceiling (`security.max_act_chain_depth`, default `3`), the ceiling that token validation also applies, MUST be refused with `invalid_grant`. When the actor is a registered agent, the bound is the lower of the ceiling and the agent's `max_delegation_depth`. Each hop MUST attenuate scope: the resulting token's scope MUST be a subset of the parent token's scope. Scope can only narrow, never widen. Each hop MUST attenuate lifetime: the resulting token's expiry MUST NOT exceed the parent token's expiry.
 
 #### Scenario: The depth ceiling is reached
-- **WHEN** a client exchanges a subject token whose `act` chain is already `MAX_ACT_CHAIN_DEPTH` levels deep
+- **WHEN** a client exchanges a subject token whose `act` chain is already as deep as the act-chain ceiling
 - **THEN** the exchange is refused with `invalid_grant`
 
 #### Scenario: A hop asks for more scope
@@ -150,6 +154,10 @@ A signed-in user MUST be able to view and revoke their active delegations. Heart
 - **WHEN** a user revokes a delegation
 - **THEN** the access token issued under it fails validation and introspects `active: false` on its next use
 - **AND** an `AgentTokenRevoked` event is recorded
+
+#### Scenario: Revoking a delegation revokes onward exchanges
+- **WHEN** a delegated token was exchanged onward before the user revokes its delegation
+- **THEN** the onward token also fails validation and introspects `active: false`
 
 ### Requirement: Attenuating Authorization Tokens
 An Attenuating Authorization Token (AAT) SHALL be a JWT that Hearth signs with the realm's key, with JOSE `typ` `aat+jwt`, and that can be narrowed but never widened. Hearth SHOULD support AATs per draft-niyikiza-oauth-attenuating-agent-tokens. A root AAT SHALL be issued through `POST /v1/aats` for an `Active` agent only, with a lifetime of at most 1 hour. An AAT SHALL carry these claims.
@@ -200,12 +208,20 @@ A child AAT MUST NOT add tools, widen constraints, extend its lifetime or add sc
 - **WHEN** a derivation is requested from an AAT whose `aat_chain` holds 5 entries
 - **THEN** the derivation is refused
 
+#### Scenario: A child AAT keeps every parent constraint
+- **WHEN** the parent constrains `search_files` with `{"max_results": 100, "folder": "inbox"}`, and a child lists `search_files` with no constraints, or with only `{"max_results": 50}`
+- **THEN** the child is refused
+
 ### Requirement: An AAT is validated along its whole chain
 Hearth MUST validate the full attenuation chain when an AAT is presented. Validation MUST verify that each `aat_parent` exists in the chain, that each child's permissions are a subset of its parent's, and that no link of the chain has been revoked. Revoking any token in the chain MUST invalidate all its descendants. Chain validation SHOULD be optimized for the common depth of 1–2.
 
 #### Scenario: The root is revoked
 - **WHEN** a root AAT is revoked and a child derived from it is presented
 - **THEN** the child fails validation
+
+#### Scenario: Validation checks every chain link
+- **WHEN** an AAT signed with the realm key is presented whose `aat_chain` does not contain its `aat_parent`, or whose tools exceed its parent's
+- **THEN** validation fails
 
 ### Requirement: Agent discovery
 Hearth MUST expose an agent registry API: `GET /v1/agents?capability={uri}&status=active`. Agent Cards SHALL serve as the discovery document for individual agents.

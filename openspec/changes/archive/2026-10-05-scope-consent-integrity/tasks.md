@@ -2,7 +2,7 @@
 
 - [x] 0.1 Read the draft advisory `GHSA-hxcr-696v-vqw3` (maintainers only)
 - [x] 0.2 Grill and record in `design.md`: the organization context at `/authorize`; OIDC-only requests; unknown scopes; refresh after a lost permission; first-party refresh; mapper removal; `allowed_clients` for dynamically registered clients; who granted a consent; a removed scope; the orphan-audit rate; `resource` on `authorization_code` and `refresh_token`
-- [ ] 0.3 For every task: write the scenario as a failing test first (red), then fix (green). Each fix needs a `### Security` entry in `CHANGELOG.md`
+- [x] 0.3 For every task: write the scenario as a failing test first (red), then fix (green). Each fix needs a `### Security` entry in `CHANGELOG.md`
 
 ## 1. Registry hygiene (PR 1)
 

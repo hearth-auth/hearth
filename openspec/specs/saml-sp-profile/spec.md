@@ -293,6 +293,10 @@ After signature verification, the SP SHALL enforce these checks in this order, a
 - **WHEN** a signed Response and its assertion both name an issuer other than the registered IdP entity ID
 - **THEN** the SP rejects it with `IssuerMismatch`
 
+#### Scenario: The assertion's own issuer must match
+- **WHEN** a signed Response names the registered IdP as its `Issuer`, but its assertion's own `Issuer` names another entity
+- **THEN** the SP rejects it with `IssuerMismatch`, and creates no session
+
 ### Requirement: The assertion's audience restriction names this SP
 Within one `<AudienceRestriction>`, the assertion SHALL count as addressed to this SP when any `<Audience>` equals this SP's entity ID (SAML Core §2.5.1.4). When the `<Conditions>` carry several `<AudienceRestriction>` elements, each MUST name this SP. The SP SHALL refuse an assertion with no `<AudienceRestriction>`, or with an empty one, because the Web Browser SSO profile (§4.1.4.2) requires one that names the SP. Every other case SHALL be rejected with `AudienceMismatch`.
 
@@ -412,6 +416,11 @@ The SP SHALL NOT decrypt `EncryptedAssertion` or `EncryptedID` content; there is
 #### Scenario: Encrypted subject
 - **WHEN** a signed assertion carries its subject as an `EncryptedID` instead of a `NameID`
 - **THEN** the SP rejects it rather than ignore the encrypted content
+
+#### Scenario: Encrypted content is rejected
+- **WHEN** a signed, otherwise valid assertion carries `<saml:EncryptedID>` in its `Subject` and no `<saml:NameID>`
+- **THEN** the SP rejects the response
+- **AND** no account is linked, provisioned or signed in for an empty subject
 
 ### Requirement: SAML failures map to stable wire codes
 Every SAML failure SHALL map to a `SamlError` variant, converted to `IdentityError::Saml` at the layer boundary. Each variant SHALL map to this wire error code:
