@@ -30,3 +30,7 @@ A pushed request whose resource is removed before the code is asked for SHALL be
 #### Scenario: A token request's resource is applied
 - **WHEN** a `client_credentials` token request carries `resource` naming a registered protected resource, and a second request carries an unregistered `resource`
 - **THEN** the first token's `aud` includes the resource, and the second request is refused with `invalid_target`
+
+#### Scenario: A code exchange names another resource
+- **WHEN** an authorization code was issued for `resource=https://mcp.acme.com`, and the token request carries `resource=https://other.example.com`
+- **THEN** the request is refused with `invalid_target`, and the code issues no token

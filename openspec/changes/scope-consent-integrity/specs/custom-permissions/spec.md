@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: A scope is granted only when the user satisfies all of it
-A scope bundle SHALL be granted only when the user's effective set contains every permission of the bundle. A raw permission scope SHALL be granted only when the user holds that permission. An OIDC standard scope SHALL always be granted. The token's `scope` SHALL list the granted scopes, space-delimited (RFC 6749 §3.3), and permission narrowing SHALL use the granted scopes only. When the request names at least one scope and no scope is grantable, the request SHALL fail with `invalid_scope`, for every trust level. A bundle named in `scope` is therefore always held in full, so `scope` and `permissions` never disagree.
+A scope bundle SHALL be granted only when the user's effective set contains every permission of the bundle. A raw permission scope SHALL be granted only when the user holds that permission. An OIDC standard scope SHALL always be granted. The token's `scope` SHALL list the granted scopes, space-delimited (RFC 6749 §3.3), and permission narrowing SHALL use the granted scopes only. When the request names at least one scope and no scope is grantable, the request SHALL fail with `invalid_scope`, for every trust level. A bundle named in `scope` is therefore always held in full, so `scope` and `permissions` never disagree. When the request names only OIDC standard scopes, a `first_party` client SHALL receive the user's full effective set, and a `third_party` client SHALL receive no permissions, in the token, in introspection and in decision mode. When the request names a bundle or a raw permission and none is granted, `permissions` SHALL be empty.
 
 #### Scenario: A bundle the user holds in part
 - **WHEN** the bundle `read:docs` is `[docs.read, docs.list, docs.share]`, the user holds `docs.read` only, and a first-party client requests `read:docs docs.read`
@@ -10,6 +10,14 @@ A scope bundle SHALL be granted only when the user's effective set contains ever
 #### Scenario: Nothing is grantable
 - **WHEN** a client requests only bundles and permissions the user cannot satisfy
 - **THEN** the request fails with `invalid_scope`
+
+#### Scenario: Only OIDC scopes for a third-party client
+- **WHEN** a third-party client asks for `openid profile` only
+- **THEN** the token carries no permissions, and introspecting it returns no permissions
+
+#### Scenario: Every requested bundle is dropped
+- **WHEN** a first-party client asks for `openid read:docs`, and the user does not fully hold `read:docs`
+- **THEN** the token's `scope` is `openid`, and its `permissions` is empty
 
 #### Scenario: A bundle is granted only when fully held
 - **WHEN** the bundle `read:docs` is `[docs.read, docs.list, docs.share]`, the user holds `docs.read` only, and a first-party client that declares `read:docs` and `docs.read` completes an authorization-code grant for `read:docs docs.read`
@@ -57,7 +65,7 @@ The server SHALL decide which requested scopes are legal from the token's audien
 - An OIDC standard scope SHALL be legal under any audience.
 - Without a `resource` parameter (the token is bound to Hearth itself), a `:`-bundle SHALL be legal only when the realm's top-level `scopes:` registry defines it. A protected resource's scopes SHALL NOT be legal.
 - With `resource=<uri>` (RFC 8707), the legal scopes SHALL be exactly the OIDC standard scopes plus `protected_resources[<uri>].scopes`. The realm's `scopes:` registry SHALL NOT be consulted, as a primary source or as a fallback. A raw permission scope SHALL fail with `invalid_scope`.
-- A scope missing from the selected registry SHALL fail with `invalid_scope`.
+- A scope missing from the selected registry SHALL fail with `invalid_scope`, for every trust level. The first-party drop rule applies to known scopes that the user cannot satisfy, not to unknown names.
 
 A realm bundle and a protected-resource bundle MAY share a name. They are distinct, because they are looked up under different audiences. Under a resource, a bundle SHALL be in both the client's `declared_scopes` and the resource's `scopes`.
 
@@ -77,6 +85,10 @@ A realm bundle and a protected-resource bundle MAY share a name. They are distin
 
 #### Scenario: A raw permission under a resource
 - **WHEN** a first-party client requests `scope=mcp.tools.invoke` with `resource=https://mcp.acme.com`
+- **THEN** the request fails with `invalid_scope`
+
+#### Scenario: An unknown scope from a first-party client
+- **WHEN** a first-party client asks for `openid nosuch:bundle`, and no registry defines `nosuch:bundle`
 - **THEN** the request fails with `invalid_scope`
 
 #### Scenario: Only resource bundles apply under a resource
@@ -152,7 +164,7 @@ The server SHALL load the permission registry (permissions, roles, scope bundles
 - **THEN** new tokens for the user do not carry `docs.archive`
 
 ### Requirement: Consent is bound to the organization context and the resource
-A third-party consent SHALL be stored per realm, user, client, organization context and RFC 8707 resource. A consent row SHALL record the scopes as the client requested them, the digest, the organization the user was in, the resource (or none for Hearth itself as audience), when it was granted and who granted it. At `/authorize` and at a `refresh_token` grant, the server SHALL:
+A third-party consent SHALL be stored per realm, user, client, organization context and RFC 8707 resource. A consent row SHALL record the scopes as granted, the disclosure set, the organization the user was in, the resource (or none for Hearth itself as audience), when it was granted, the ID of the user who granted it, and the surface it was granted on (`web` or `device`). A first-party client SHALL have no consent ceremony and no consent row. At `/authorize` and at a `refresh_token` grant, the server SHALL:
 
 1. look up the row for the current organization context (`oid`) and the current resource;
 2. when the user is in an organization and no row exists for it, fall back to the realm-level row only when the client sets `consent_spans_orgs: true`;
@@ -182,13 +194,16 @@ A third-party consent SHALL be stored per realm, user, client, organization cont
 - **THEN** the consent screen is shown
 
 ### Requirement: The consent digest covers what the user agreed to disclose
-At grant time the server SHALL compute a SHA-256 digest over:
+At grant time the server SHALL store, on the consent row, the disclosure set:
 
-1. the canonical resource: `_default` when there is none, otherwise the resource URI with a lower-cased scheme and host and a normalized path;
-2. the sorted, de-duplicated permissions that the consented scopes resolve to;
-3. the sorted set of `(claim, target)` pairs that the realm's claim profile would emit to this client, given its trust level, the granted scopes and the resource, serialized as `claim@target` strings.
+1. the sorted, de-duplicated permissions that the consented scopes resolve to;
+2. the sorted set of `(claim, target)` pairs that the realm's claim profile would emit to this client, given its trust level, the granted scopes and the resource, serialized as `claim@target` strings.
 
-The digest SHALL cover claim names and targets, not claim values. OIDC standard scopes SHALL contribute fixed sentinels. On every `/authorize` and every `refresh_token` grant the server SHALL recompute the digest against the current registry. On a mismatch, the stored consent SHALL be treated as absent: `/authorize` runs the consent ceremony again, and a refresh fails with `invalid_grant` and `error_description=consent_required`. No sweep SHALL run at YAML reload.
+The set SHALL cover claim names and targets, not claim values. OIDC standard scopes SHALL contribute fixed sentinels. The row's resource is part of its key, so the set does not repeat it. On every `/authorize` and every `refresh_token` grant the server SHALL recompute the set against the current registry. The stored consent SHALL hold while the current set is a subset of the stored set. When the current set is not a subset, the stored consent SHALL be treated as absent: `/authorize` runs the consent ceremony again, and a refresh fails with `invalid_grant` and `error_description=consent_required`. A smaller set, for example after a mapper is removed, SHALL NOT ask for consent again. No sweep SHALL run at YAML reload.
+
+#### Scenario: A removed mapper does not ask again
+- **WHEN** a third-party client holds consent, and the operator removes a mapper that released a claim to it and reloads
+- **THEN** the next `/authorize` for the same scopes shows no consent screen
 
 #### Scenario: A new mapper emits to the client
 - **WHEN** the operator adds a mapper that releases `salary` to a third-party client that holds consent
@@ -209,10 +224,11 @@ A refresh for a third-party client SHALL re-run scope resolution and the digest 
 |---|---|
 | A bundle's permission list changed | `invalid_grant` with `consent_required` |
 | A bundle was deleted | `invalid_grant` with `consent_required` |
-| The user lost a permission | succeeds, with the narrower set |
-| The request names a different `resource` than the grant | succeeds; the new token keeps the grant's original resource |
+| The user lost a permission | succeeds, with the narrower set; a bundle no longer fully held drops out of `scope` |
+| Nothing grantable remains | `invalid_grant` |
+| The request names a different `resource` than the grant | `invalid_target` |
 
-A refresh request SHALL NOT switch `resource`. To use a new resource, the client runs `/authorize` again, which produces a separate consent row and a new grant family. A refresh token that references a removed scope or bundle SHALL fail on its next refresh with `invalid_grant`, and the consent for the removed scope SHALL be dropped at that point.
+A refresh request SHALL NOT switch `resource`. An absent `resource`, or one equal in canonical form to the grant's resource, SHALL be accepted. To use a new resource, the client runs `/authorize` again, which produces a separate consent row and a new grant family. A refresh token that references a removed scope or bundle SHALL fail on its next refresh with `invalid_grant`, and the whole consent row SHALL be deleted at that point. A refresh for a first-party client SHALL re-run scope resolution with the same rules, with no consent step.
 
 #### Scenario: A bundle is broadened
 - **WHEN** an agent holds consent for `mcp:tools:invoke = [mcp.tools.invoke]`, and the operator redefines it as `[mcp.tools.invoke, mcp.tools.list]`
@@ -224,7 +240,7 @@ A refresh request SHALL NOT switch `resource`. To use a new resource, the client
 
 #### Scenario: A refresh names another resource
 - **WHEN** a grant was made for `resource=https://mcp.acme.com`, and the client refreshes with `resource=https://other.example.com`
-- **THEN** the new access token's audience is still `https://mcp.acme.com`
+- **THEN** the refresh fails with `invalid_target`, and no token issues
 
 #### Scenario: A broadened bundle requires consent again
 - **WHEN** a third-party client holds consent and a refresh token for `read:docs = [docs.read]`, and the operator redefines `read:docs` as `[docs.read, docs.list]` and reloads
