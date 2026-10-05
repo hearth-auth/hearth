@@ -304,7 +304,7 @@ jobs:
       # upload below still runs (`if: always()`), so alerts reach Code
       # Scanning either way.
       - name: Run OSV-Scanner
-        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+        uses: google/osv-scanner-action/osv-scanner-action@a345acffa64b0eaede81a3d9aae6141214d9c8fc # v2.6.0
         with:
           # HEA-1523: Explicit lockfile list instead of --recursive so examples/**
           # and tests/ui/** are never scanned. The [[PackageOverrides]] `group`
