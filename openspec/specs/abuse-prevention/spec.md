@@ -4,13 +4,13 @@
 Every live abuse guard, by its A-N or P-N identifier: limits, defaults, configuration and failure behaviour. `scripts/check-abuse-coverage.sh` requires a `tests/abuse_*.rs` test for every A-N id in this spec.
 ## Requirements
 ### Requirement: Abuse guards are opt-in and run before password hashing
-The guards listed below, except A-12, SHALL be off by default. A-12 SHALL always be on for `POST /ui/device`. A disabled guard SHALL be constructed in its no-op form and SHALL allow every request, so upgrading changes no behaviour until an operator enables a guard. The login-form guards SHALL run before a permit is taken from the Argon2 admission gate, so rejected traffic consumes no hashing capacity. Every refusal by a login-form guard SHALL render the one generic sign-in failure page, so no guard is an account-enumeration oracle.
+The guards listed below, except A-12, SHALL be off by default. A-12 SHALL always be on for `POST /ui/device`. A disabled guard SHALL be constructed in its no-op form and SHALL allow every request, so upgrading changes no behaviour until an operator enables a guard. The login-form guards SHALL run before a permit is taken from the Argon2 admission gate, so rejected traffic consumes no hashing capacity. Every refusal by a login-form guard SHALL render the one generic sign-in failure page, so no guard is an account-enumeration oracle. One exception applies: when a CAPTCHA provider is configured, a caller that A-3 or A-16 challenges SHALL see the login page again with the provider's widget (see A-16). That page SHALL be the same whether or not the submitted address has an account.
 
 | Guard | Where it is consulted |
 |-------|-----------------------|
-| A-3 distributed-attack detector | login form, before the admission gate |
+| A-3 distributed-attack detector | login form, before the admission gate; `POST /v1/{realm}/auth/magic-link` |
 | A-9 tenant CIDR policy | login form, before the admission gate |
-| A-16 CAPTCHA challenge state | login form, before the admission gate |
+| A-16 CAPTCHA challenge state | login form, before the admission gate; `POST /v1/{realm}/auth/magic-link`; passkey sign-in completion (`POST /webauthn/auth/complete` and the login page's `POST .../login/passkey-complete`) |
 | A-4 outbound volume shield | self-service verification and password-reset sends |
 | A-50 cross-realm aggregation cap | self-service verification and password-reset sends |
 | A-12 adaptive backoff | `POST /ui/device` approval guard |
@@ -20,8 +20,14 @@ The guards listed below, except A-12, SHALL be off by default. A-12 SHALL always
 - **THEN** login, registration and outbound mail behave exactly as they do without the guards
 
 #### Scenario: A guard refuses a login
-- **WHEN** a login-form guard refuses a sign-in attempt
+- **WHEN** a login-form guard refuses a sign-in attempt, and no CAPTCHA provider is configured
 - **THEN** the response is the same generic sign-in failure page that a wrong password gets
+- **AND** no Argon2 work is done for the attempt
+
+#### Scenario: A challenged login sees the widget when a provider is configured
+- **WHEN** a CAPTCHA provider is configured and A-3 or A-16 challenges a login-form attempt
+- **THEN** the response is the login page with the provider's widget at `<!-- captcha-widget-slot -->`
+- **AND** the page is the same for an address with an account and for one without
 - **AND** no Argon2 work is done for the attempt
 
 ### Requirement: A-2 Global request shaper
@@ -45,7 +51,7 @@ The server SHALL count, in a rolling window, the distinct usernames tried from e
 | `username_per_ip_threshold` | `20` | Distinct usernames per IP |
 | `ip_per_username_threshold` | `20` | Distinct IPs per username |
 
-A caller that receives a challenge MUST emit an `AbuseDetected` audit event with the IP and the username in its metadata, MUST apply the A-16 challenge, and MUST return an error to the client (HTTP `429` or a challenge token). The caller MUST NOT surface the challenge reason to the client. Setting a threshold to `usize::MAX` SHALL disable that dimension. When its lock is poisoned, the detector SHALL recover the lock and keep counting.
+A caller that receives a challenge MUST emit an `AbuseDetected` audit event with the IP and the username in its metadata, and MUST answer the client as the challenge-response table in A-16 says. The caller MUST NOT surface the challenge reason to the client. A solved CAPTCHA SHALL let one attempt continue; the detector SHALL keep counting, so its next challenge needs a new token. Setting a threshold to `usize::MAX` SHALL disable that dimension. When its lock is poisoned, the detector SHALL recover the lock and keep counting.
 
 #### Scenario: Password spray from one address
 - **WHEN** one source IP tries more than `username_per_ip_threshold` distinct usernames inside the window
@@ -59,6 +65,20 @@ A caller that receives a challenge MUST emit an `AbuseDetected` audit event with
 #### Scenario: The reason stays private
 - **WHEN** an attempt is challenged
 - **THEN** the response does not reveal which dimension fired
+
+#### Scenario: A challenged login is audited and challenged
+- **WHEN** the detector challenges a login attempt
+- **THEN** an `AbuseDetected` audit event with the IP, the username, `guard: "a3"` and the surface is written
+- **AND** the caller gets the challenge response from the A-16 table instead of a bare generic refusal
+
+#### Scenario: A sustained attack does not flood the audit log
+- **WHEN** the detector challenges many attempts from one IP against one username inside one window
+- **THEN** at most one `AbuseDetected` event is written for that IP, username and guard in that window
+
+#### Scenario: A challenged magic-link request
+- **WHEN** the detector challenges a `POST /v1/{realm}/auth/magic-link` request
+- **THEN** the request gets the API challenge response, and no link is minted or sent
+- **AND** an `AbuseDetected` audit event with `surface: "api"` is written
 
 ### Requirement: A-4 Outbound email volume shield
 The server SHALL track the distinct outbound email recipients of each realm in a rolling window, and SHALL abandon a send that exceeds the realm's hard cap. Recipient addresses SHALL be held only as `SipHash-1-3` hashes; plaintext recipient addresses SHALL NOT be retained in memory. The check SHALL run before the send, and before the A-50 cross-realm check. The check SHALL run in the off-request-path send job, so a refused send costs the caller exactly what an allowed one does and the caller's response does not reveal it.
@@ -195,6 +215,10 @@ The server SHALL track consecutive lockouts per key and SHALL lengthen the locko
 - **WHEN** a key waits exactly until its lockout ends and offends again
 - **THEN** the next lockout is longer than the previous one
 
+#### Scenario: The configured backoff schedule is used
+- **WHEN** `security.adaptive_backoff.durations` is `["2m"]` and a key is locked out on `POST /ui/device`
+- **THEN** the lockout lasts 2 minutes, not the compiled 1-minute default
+
 ### Requirement: A-13 WebAuthn attestation policy
 Each realm SHALL be able to restrict WebAuthn registration with `realms.<name>.auth.webauthn_attestation.{allow_none,aaguid_allowlist,require_prf,require_large_blob}`, and the policy SHALL be enforced at registration time. `allow_none` SHALL default to `true`. A non-empty `aaguid_allowlist` SHALL accept only authenticators whose AAGUID it lists. `require_prf` and `require_large_blob` SHALL require the matching extension. An authenticator that fails an active control SHALL receive `403 Forbidden` with `attestation_policy_violation`, and no credential SHALL be stored. An absent policy SHALL accept every authenticator.
 
@@ -205,6 +229,10 @@ Each realm SHALL be able to restrict WebAuthn registration with `realms.<name>.a
 #### Scenario: `none` attestation refused
 - **WHEN** a realm sets `allow_none: false` and an authenticator presents the `"none"` attestation format
 - **THEN** the registration is refused
+
+#### Scenario: PRF is required when `require_prf` is set
+- **WHEN** a realm sets `require_prf: true` and an authenticator reports the largeBlob extension but not PRF
+- **THEN** the registration is refused and no credential is stored
 
 ### Requirement: A-14 Per-realm TTL hard caps
 Configuration load SHALL refuse a realm whose `auth.token.password_reset_token_ttl` exceeds 1 hour or whose `auth.token.magic_link_ttl` exceeds 30 minutes, unless `auth.token.allow_unsafe_ttl: true` is also set. The keys SHALL apply per realm under `realms.<name>` and globally under `auth.token`.
@@ -218,7 +246,21 @@ Configuration load SHALL refuse a realm whose `auth.token.password_reset_token_t
 - **THEN** the configuration loads
 
 ### Requirement: A-16 CAPTCHA-of-last-resort challenge
-The server SHALL count failed authentications per IP and SHALL put an IP into a challenge state for `challenge_ttl_secs` once `challenge_threshold` failures occur inside `window_secs`. An API caller in the challenge state SHALL receive HTTP `403` with `error_code: "HEARTH_ABUSE_CHALLENGE_REQUIRED"`, and that SHALL be the only error code and the only detail returned. A UI caller in the challenge state SHALL receive a login or registration page that carries the configured CAPTCHA widget at the `<!-- captcha-widget-slot -->` marker. A solved CAPTCHA, or expiry of the window, SHALL return the IP to `Allow`.
+The server SHALL count failed authentications per IP and SHALL put an IP into a challenge state for `challenge_ttl_secs` once `challenge_threshold` failures occur inside `window_secs`. A solved CAPTCHA, or expiry of the window, SHALL return the IP to `Allow`.
+
+A challenge by A-3 or A-16 SHALL be answered as follows:
+
+| CAPTCHA provider | Login page (UI) | API sign-in endpoint |
+|---|---|---|
+| Configured | The login page again, with the provider's widget at `<!-- captcha-widget-slot -->` | `403` with `error_code: "HEARTH_ABUSE_CHALLENGE_REQUIRED"` and no other detail |
+| Not configured | The generic sign-in failure page, as for a wrong password | `429` with `error_code: "HEARTH_RATE_LIMITED"` and `Retry-After` |
+
+- Without a provider, `Retry-After` SHALL be the seconds left until the guard's window ends, rounded up, and at least `1`.
+- Neither response SHALL say which guard or which dimension fired.
+- A UI caller whose IP is in the challenge state SHALL see the widget on the login page it loads.
+- A challenged request MAY carry a CAPTCHA token: the provider's form field on the login form, or the optional `captcha_token` body field on a JSON endpoint. A token the provider verifies SHALL let that attempt continue and SHALL clear the IP's challenge state. A token that fails verification SHALL count as a failed attempt and SHALL get the challenge response again.
+- Every challenge SHALL write an `AbuseDetected` audit event with metadata `ip`, `username` (when the endpoint has one), `guard` (`a3` or `a16`) and `surface` (`ui` or `api`). At most one event SHALL be written per guard, IP and username per window.
+- The guards SHALL run before any credential work: before Argon2, before a passkey assertion is checked, and before a magic-link email is built. A failed passkey assertion SHALL count as a failed attempt. A magic-link request SHALL NOT count as one.
 
 | Key (`security.captcha.*`) | Default | Meaning |
 |-----|---------|---------|
@@ -237,6 +279,30 @@ When `challenge_threshold` is absent the store SHALL be disabled and every check
 #### Scenario: The challenge is solved
 - **WHEN** the IP solves the CAPTCHA
 - **THEN** its state returns to `Allow`
+
+#### Scenario: A challenged caller is told to solve a challenge
+- **WHEN** an IP in the challenge state makes an API sign-in attempt, and then loads the UI login page
+- **THEN** the API attempt receives `403` with `HEARTH_ABUSE_CHALLENGE_REQUIRED`
+- **AND** the login page carries the CAPTCHA widget at `<!-- captcha-widget-slot -->`
+
+#### Scenario: A solved CAPTCHA lets the sign-in continue
+- **WHEN** a challenged caller submits the login form, or a JSON sign-in request, with a token the provider verifies
+- **THEN** the attempt continues to the credential check
+- **AND** the IP's challenge state is cleared
+
+#### Scenario: A wrong CAPTCHA token counts as a failure
+- **WHEN** a challenged caller submits a token the provider rejects
+- **THEN** the caller gets the challenge response again
+- **AND** the attempt counts as a failed attempt for the IP
+
+#### Scenario: Without a provider, the API answers with a timed lockout
+- **WHEN** no CAPTCHA provider is configured and the detector challenges an API sign-in request
+- **THEN** the response is `429` with `error_code: "HEARTH_RATE_LIMITED"`
+- **AND** `Retry-After` is the whole seconds left in the detector's window, at least `1`
+
+#### Scenario: Failed passkey sign-ins count
+- **WHEN** an IP reaches `challenge_threshold` failed passkey assertions inside `window_secs`
+- **THEN** its next passkey sign-in completion is challenged before the assertion is checked
 
 ### Requirement: A-18 Session lifecycle policy
 A realm SHALL be able to set an idle timeout and an absolute timeout for sessions, and a session past either deadline SHALL be rejected on the read path. The keys SHALL be `auth.session_idle_timeout_secs` and `auth.session_absolute_timeout_secs` globally, with per-realm overrides `realms.<name>.session_idle_timeout_secs` and `realms.<name>.session_absolute_timeout_secs`; `null` (the default) SHALL disable each timeout. Concurrent sessions per user SHALL be capped by `auth.session_max_concurrent`, overridden per realm by `realms.<name>.session_max_concurrent`; absent at both levels means unlimited. `session_over_limit_policy` (global, per-realm override) SHALL decide what happens at the cap: `reject_new` (the default) refuses the new session, and `evict_oldest` evicts the user's oldest session. Any other value SHALL fail configuration parsing.
@@ -261,6 +327,11 @@ The `session_evicted` audit event SHALL be emitted only by the background sweep,
 #### Scenario: An active session reaches the absolute cap
 - **WHEN** a session is refreshed regularly but is older than `absolute_timeout_secs`
 - **THEN** it is rejected
+
+#### Scenario: The session timeout keys load
+- **WHEN** `hearth.yaml` sets `auth.session_idle_timeout_secs: 3600`
+- **THEN** the server starts
+- **AND** a session left idle for more than an hour is rejected
 
 ### Requirement: A-19 Email-change re-verification
 The user email-change flow SHALL take effect only after the new address is verified with a separate token. An email change made by an operator or over SCIM SHALL take effect at once and SHALL set `email_verified = false`. Initiating a change SHALL validate and normalise the new address, check uniqueness and the A-20 reservation, generate a 32-byte cryptographically random token, store only `SHA-256(token)`, and emit an `EmailChangeInitiated` audit event; the caller delivers the token to the new address. Confirming SHALL enforce a 24-hour expiry and single use, swap the email indexes atomically, set `email_verified = true`, revoke all of the user's sessions, and emit an `EmailChangeConfirmed` audit event. `EmailChangeConfirmed` SHALL use failure policy `FailOperation`; the other audit writes SHALL use `LogOnly`.
@@ -289,6 +360,10 @@ Deleting a user SHALL reserve the user's normalised email address in that realm 
 #### Scenario: Re-registration after the cooldown
 - **WHEN** the same address registers 91 days later
 - **THEN** a new user with a new `UserId` and no inherited memberships is created
+
+#### Scenario: Reserved and in-use emails answer the same body
+- **WHEN** one user create hits a reserved address and another hits an address in use
+- **THEN** both responses have the same status and a byte-identical body
 
 ### Requirement: A-21 JSON parse-bomb guard
 Every `POST`, `PUT` and `PATCH` request with a `Content-Type` starting with `application/json` SHALL have its body scanned before any handler logic runs, and SHALL be rejected with HTTP `400 Bad Request` when its nesting depth exceeds `MAX_JSON_DEPTH` (128) or any array holds `MAX_JSON_ARRAY_LEN` (65 536) or more items. JSON bodies SHALL already be capped at 1 MiB (`DefaultBodyLimit`) before the scan. The scan SHALL be linear in the body size and SHALL NOT deserialize the body. Other content types and the `GET`, `HEAD`, `DELETE` and `OPTIONS` methods SHALL bypass the guard. The guard SHALL fail closed.
@@ -538,7 +613,9 @@ Every `prompt=none` authorization request for an authenticated subject SHALL inc
 - **THEN** the next probe starts a new window and proceeds normally
 
 ### Requirement: A-38 Delegation-chain depth cap
-Token validation SHALL reject a token whose RFC 8693 `act` delegation chain is deeper than `MAX_ACT_CHAIN_DEPTH` (3) with an invalid-token error (fail-closed). Depth SHALL count the outer actor as 1 and each nested `act` as one more, and the traversal SHALL be iterative and stop once the cap is passed.
+Token validation SHALL reject a token whose RFC 8693 `act` delegation chain is deeper than the configured ceiling `security.max_act_chain_depth` with an invalid-token error (fail-closed). The ceiling SHALL default to `3`. Config load SHALL refuse a value outside `1`–`32`. The upper bound of `32` is a token-size bound, not a security policy: it keeps a delegated token below common 8 KB request-header limits. Depth SHALL count the outer actor as 1 and each nested `act` as one more, and the traversal SHALL be iterative and stop once the ceiling is passed.
+
+With the default ceiling:
 
 | `act` claim | Depth | Result |
 |-------------|-------|--------|
@@ -548,8 +625,24 @@ Token validation SHALL reject a token whose RFC 8693 `act` delegation chain is d
 | Four-level chain | 4 | rejected |
 
 #### Scenario: An over-deep chain
-- **WHEN** a token carries a four-level `act` chain
+- **WHEN** the ceiling is the default and a token carries a four-level `act` chain
 - **THEN** validation fails with an invalid-token error
+
+#### Scenario: The default delegation chain depth ceiling is 3
+- **WHEN** `security.max_act_chain_depth` is not set and an inbound token carries a four-level `act` chain
+- **THEN** validation fails with an invalid-token error
+
+#### Scenario: An operator raises the ceiling
+- **WHEN** `security.max_act_chain_depth` is `6` and a token carries a five-level `act` chain
+- **THEN** the chain depth does not fail validation
+
+#### Scenario: A ceiling out of range
+- **WHEN** `security.max_act_chain_depth` is `0` or `33`
+- **THEN** config load fails and names the key
+
+#### Scenario: A very deep chain stops early
+- **WHEN** a token carries an `act` chain far deeper than the ceiling
+- **THEN** validation stops reading the chain once the ceiling is passed and fails with an invalid-token error
 
 ### Requirement: A-39 HTTP/2 rapid-reset defense
 The HTTP/2 server SHALL cap concurrent streams per connection and SHALL bound the pending `RST_STREAM` budget per connection, dropping the connection on overrun (CVE-2023-44487). The caps SHALL be configured under `security.http2.*`: `max_concurrent_streams` (default 100) and `max_pending_reset_streams` (default 10).
@@ -559,7 +652,7 @@ The HTTP/2 server SHALL cap concurrent streams per connection and SHALL bound th
 - **THEN** the server closes the connection
 
 ### Requirement: A-40 Host allowlist and cross-origin isolation
-The server SHALL reject a request whose `Host` header is not in `security.allowed_hosts` with `400 Bad Request`; the default SHALL be the listener's bind hostnames. UI responses SHALL carry `Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Embedder-Policy: require-corp`, and a `Permissions-Policy` that denies sensors and payment by default.
+The server SHALL reject a request whose `Host` header is not in `security.allowed_hosts` with `400 Bad Request`. When `security.allowed_hosts` is not set, the list SHALL default to the host of `oidc.issuer`; under `--dev` a loopback `Host` SHALL also be admitted. The comparison SHALL ignore the port. The liveness and readiness probes (`/healthz`, `/readyz`) SHALL be exempt from the check; every other route, including `/health` and `/metrics`, SHALL NOT be exempt. UI responses SHALL carry `Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Embedder-Policy: require-corp`, and a `Permissions-Policy` that denies sensors and payment by default.
 
 #### Scenario: DNS rebinding
 - **WHEN** `security.allowed_hosts` is set and a request arrives with a `Host` outside it
@@ -569,12 +662,27 @@ The server SHALL reject a request whose `Host` header is not in `security.allowe
 - **WHEN** a browser loads a `/ui` page
 - **THEN** the response carries COOP `same-origin`, COEP `require-corp` and a `Permissions-Policy` header
 
+#### Scenario: An unset host allowlist accepts only the issuer host
+- **WHEN** `security.allowed_hosts` is not set, `oidc.issuer` is `https://hearth.example.com`, and a request arrives with `Host: evil.example`
+- **THEN** the response is `400`
+- **AND** a request with `Host: hearth.example.com:443` is admitted
+
+#### Scenario: Probes skip the host check
+- **WHEN** `security.allowed_hosts` is not set and a request for `/readyz` arrives with `Host: 10.0.0.7:8420`
+- **THEN** the request is admitted
+- **AND** the same request for `/metrics` is answered `400`
+
 ### Requirement: A-41 Session-id rotation on authentication
 On a successful primary authentication, MFA step-up, federation link, password change or admin impersonation, the server SHALL destroy the current session record, mint a session with a fresh ID, and invalidate the old cookie.
 
 #### Scenario: A pre-planted cookie
 - **WHEN** an attacker plants a session cookie in a victim's browser and the victim then signs in
 - **THEN** the planted session is revoked and does not survive the login
+
+#### Scenario: Federation login rotates the session
+- **WHEN** a browser holding a session cookie completes a federated login
+- **THEN** the earlier session is revoked
+- **AND** the browser receives a session with a new ID
 
 ### Requirement: A-42 Mass revocation on sensitive mutations
 `change_password`, `set_password`, an email change and MFA disablement SHALL revoke all of the user's sessions and refresh-token families. The caller MAY keep the active session with a `keep_current = true` opt-in. The revocation SHALL emit a `security.sessions_revoked` audit event and webhook.
@@ -598,6 +706,10 @@ TLS 1.3 0-RTT early data SHALL be disabled. The server SHALL assert `max_early_d
 - **WHEN** a path in `crl_paths` does not exist
 - **THEN** the server refuses to start
 
+#### Scenario: SIGHUP reloads the CRLs
+- **WHEN** an operator adds a client certificate to a CRL file listed in `crl_paths` and sends `SIGHUP`
+- **THEN** the next TLS handshake with that certificate fails
+
 ### Requirement: A-45 Tenant-controlled HTML, CSS and SVG sanitization
 All operator- or tenant-supplied content that reaches an unescaped render path SHALL pass through a sanitizer before reaching a template.
 
@@ -617,6 +729,11 @@ All operator- or tenant-supplied content that reaches an unescaped render path S
 - **WHEN** `custom_css` contains `@import url(https://evil.example/x.css);` and a harmless `:root { --ht-accent: red; }`
 - **THEN** the served theme CSS keeps the `:root` block and drops the `@import`
 
+#### Scenario: Render paths sanitize SVG and CSS
+- **WHEN** a configured logo SVG contains `<script>`, and a configured `custom_css` contains an `@import` rule
+- **THEN** the outgoing email contains no `<script>`
+- **AND** the served theme CSS contains no `@import`
+
 ### Requirement: A-46 Argon2 pepper rotation
 Each peppered credential SHALL record the `pepper_version` it was hashed with. The active pepper SHALL be configured as `security.password.pepper.version` and `security.password.pepper.key_hex`, and a superseded pepper MAY be kept valid during a grace window with `previous_version` and `previous_key_hex`. A credential hashed with the previous pepper SHALL verify during the grace window and SHALL be re-hashed with the active pepper on the next successful login. A credential whose pepper version is neither active nor previous SHALL fail verification. `hearth migrate rotate-pepper` SHALL report the credentials still pending rotation, which are rewritten lazily on the next successful login.
 
@@ -629,11 +746,23 @@ Each peppered credential SHALL record the `pepper_version` it was hashed with. T
 - **THEN** verification fails
 
 ### Requirement: A-47 Unknown fields refused on request bodies
-Every request-body shape of the admin and authentication APIs SHALL refuse unknown fields, unless a documented forward-compatibility exception is recorded for that shape.
+Every request-body shape of the admin and authentication APIs SHALL refuse unknown fields, unless a documented forward-compatibility exception is recorded for that shape. The OAuth 2.0 and OIDC protocol endpoints (token, pushed authorization, revocation, introspection, the browser authorization endpoint `GET /authorize` and device authorization) are the recorded exceptions: RFC 6749 §3.1 and §3.2 require the server to ignore an unrecognized parameter. The bearer-authenticated JSON `POST /authorize` is a Hearth API, not the RFC 6749 authorization endpoint, so it refuses unknown fields like the other authentication APIs.
 
 #### Scenario: An extension field slips into an admin body
 - **WHEN** an admin request body carries a field its shape does not declare
 - **THEN** the request is refused rather than the field being silently dropped
+
+#### Scenario: A client update refuses unknown fields
+- **WHEN** a `PATCH /admin/applications/{id}` body carries a field its shape does not declare
+- **THEN** the request is refused
+
+#### Scenario: A protocol endpoint ignores an unknown parameter
+- **WHEN** a token request carries a parameter the token endpoint does not define
+- **THEN** the parameter is ignored and the request is processed
+
+#### Scenario: Device authorization ignores an unknown parameter
+- **WHEN** a device authorization request carries a parameter RFC 8628 does not define
+- **THEN** the parameter is ignored and a device code is issued
 
 ### Requirement: A-48 Federation state bound to the browser
 Starting a federated login SHALL bind the opaque `state` to the starting browser, and the callback SHALL refuse a `state` presented without that binding (fail-closed, no fallback). At start the server SHALL draw a random 256-bit `state` token, compute `HMAC-SHA256(cookie_secret, "fed-state-bind|" || state_token)`, and set it in a `hearth_fed_bind` cookie with `HttpOnly; Path=/; Max-Age=600` and a `SameSite` value chosen by how the IdP returns. A connector whose callback arrives as a cross-site `form_post` SHALL get `SameSite=None; Secure`, because a `Lax` cookie is not sent on a cross-site POST. Any other connector SHALL get `SameSite=Lax; Secure` on a secure request and `SameSite=Lax` otherwise, because its callback is a top-level cross-origin navigation. The cookie SHALL carry only the MAC tag, never the `state` value. The HMAC key SHALL be the server-wide 32-byte `cookie_secret`, and the `"fed-state-bind|"` prefix SHALL separate this MAC from every other cookie MAC. The callback SHALL compare the MAC in constant time, and a missing or wrong cookie SHALL redirect with `303` to `/ui/login?error=federation_failed`. The upstream redirect SHALL complete within the 10-minute cookie lifetime.

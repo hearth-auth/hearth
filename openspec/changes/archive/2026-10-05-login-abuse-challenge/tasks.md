@@ -1,6 +1,6 @@
 ## 0. Before you start
 
-- [ ] 0.1 Read the draft advisory `GHSA-hxcr-696v-vqw3` (maintainers only)
+- [x] 0.1 Read the draft advisory `GHSA-hxcr-696v-vqw3` (maintainers only)
 - [x] 0.2 Write `design.md`: the no-op provider rule, the API sign-in endpoints in scope, and one status code for a challenged API caller (reconcile A-3 and A-16 in the spec)
 - [x] 0.3 For every task: write the scenario as a failing test first (red), then fix (green). Each fix needs a `### Security` entry in `CHANGELOG.md`
 

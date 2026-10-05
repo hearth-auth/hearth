@@ -45,6 +45,14 @@ A pushed request whose resource is removed before the code is asked for SHALL be
 - **WHEN** a client asks for `HTTPS://RS.example.com:443/api/` and the realm registers `https://rs.example.com/api`
 - **THEN** the request is accepted, and the token's `aud` carries `https://rs.example.com/api`
 
+#### Scenario: A token request's resource is applied
+- **WHEN** a `client_credentials` token request carries `resource` naming a registered protected resource, and a second request carries an unregistered `resource`
+- **THEN** the first token's `aud` includes the resource, and the second request is refused with `invalid_target`
+
+#### Scenario: A code exchange names another resource
+- **WHEN** an authorization code was issued for `resource=https://mcp.acme.com`, and the token request carries `resource=https://other.example.com`
+- **THEN** the request is refused with `invalid_target`, and the code issues no token
+
 ### Requirement: A resource-scoped token names the resource in `aud`
 An access token issued for a `resource` MUST carry an `aud` claim that matches the requested resource URI. If no `resource` parameter is given, the token MUST be scoped to Hearth itself, the default audience. Hearth MAY accept several `resource` parameters in one request; each SHALL then produce a separate token.
 

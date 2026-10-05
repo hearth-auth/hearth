@@ -123,8 +123,8 @@ Every SDK SHALL cache the realm's JWKS keys. On a token whose `kid` is not cache
 | 1 | The signature verifies against the cached JWKS. | `TokenInvalidError` |
 | 2 | `exp` is not in the past. | `TokenExpiredError` |
 | 3 | `iss` equals the configured issuer (TypeScript and PHP `issuerUrl`, Go `baseURL`, Python `base_url` or the `issuer_url` argument). The issuer in the discovery document does not replace it. | `TokenIssuerError` |
-| 4 | `aud` contains the configured `client_id`. Server SDKs only; configurable. | `TokenAudienceError` |
-| 5 | `iat` is not in the future. | — |
+| 4 | `aud` contains the configured `audience`: the name of the API that verifies the token (RFC 9068 §4). It defaults to `hearth`, the audience Hearth mints when a client names no resource; an API registered as a protected resource sets its resource URI. The check is always on. Server SDKs only. An ID token is checked against the client ID instead (OIDC Core §3.1.3.7). | `TokenAudienceError` |
+| 5 | `iat` is not in the future. | `TokenNotYetValidError` |
 | 6 | When `nbf` is present, `now` is not before `nbf`. | `TokenNotYetValidError` |
 
 The SDK need not run the checks in this order. A token with two faults (for example expired and with the wrong issuer) MAY get either error, and different SDKs MAY answer differently. A token with one fault SHALL get the same error in every SDK.
@@ -148,6 +148,18 @@ The SDK need not run the checks in this order. A token with two faults (for exam
 #### Scenario: One fault, same error everywhere
 - **WHEN** the four SDKs verify the same token, which has exactly one fault
 - **THEN** all four throw the same error type
+
+#### Scenario: TypeScript rejects a future `iat`
+- **WHEN** the TypeScript SDK verifies a token whose `iat` is 60 s in the future
+- **THEN** the SDK throws `TokenNotYetValidError`
+
+#### Scenario: Every SDK checks the audience by default
+- **WHEN** an SDK is configured with no `audience` and no per-call audience, and verifies a token whose `aud` is `other-api`
+- **THEN** the SDK throws `TokenAudienceError`, because the default audience is `hearth`
+
+#### Scenario: A protected resource sets its audience
+- **WHEN** an SDK is configured with `audience` `https://api.example.com`, and verifies a token minted with `resource=https://api.example.com`
+- **THEN** the audience check passes
 
 ### Requirement: One clock-skew allowance for time claims
 Every SDK SHALL apply one clock-skew allowance of 5 s to `exp`, `nbf` and `iat` alike, through its JOSE library. Where the SDK exposes the allowance (TypeScript `clockSkewSeconds`), a caller MAY widen it.
@@ -467,6 +479,14 @@ An SDK MUST verify the JWT signature against the realm's JWKS when it takes in a
 - **WHEN** the application calls `hasPermission` 100 times
 - **THEN** the SDK sends no request to `/v1/me/permissions`
 
+#### Scenario: The TypeScript facade verifies the signature
+- **WHEN** the `createHearth` facade's `getToken` returns a token whose `permissions` claim was edited after signing, and the application calls `hasPermission` for the added permission
+- **THEN** the facade returns `false`
+
+#### Scenario: Python permission checks verify the signature
+- **WHEN** `HearthClient.has_permission(token, permission)` gets a token whose `permissions` claim was edited after signing
+- **THEN** it returns `False`
+
 ### Requirement: Live permission query
 Every SDK SHALL expose a permissions query that calls `GET /v1/me/permissions` with the bearer token, and returns the live-resolved `MePermissionsResponse` (`permissions`, `roles`, `groups`). The answer has the same shape that `hasPermission`, `hasRole` and the other checks read, but the server resolves it at call time; it does not come from the claims baked into the JWT. Documentation SHALL describe it as the call to use when the cached JWT cannot be trusted, for example a long-running background job that checks again before a sensitive action.
 
@@ -755,6 +775,10 @@ The TypeScript browser SDK SHALL implement, through `createHearthAuth(config)`:
 #### Scenario: Logout
 - **WHEN** the app calls `logout()`
 - **THEN** the SDK clears the local session, and redirects to the realm's end-session endpoint
+
+#### Scenario: The refresh token is not kept in `localStorage`
+- **WHEN** a single-page app uses `createHearthAuth` with no storage option, and signs in
+- **THEN** the SDK writes no token to `localStorage`; its state lives in `sessionStorage`
 
 ### Requirement: Session-version cache
 An SDK MAY ship a session-version cache. One that does SHALL poll `GET /oauth/session-versions/snapshot?realm={realm}` once, then `GET /oauth/session-versions?since={seq}&realm={realm}`, to detect revoked sessions without introspection. It SHALL accept a configurable `pollIntervalMs` and `staleThresholdMs`, and SHALL release its background goroutine or thread on `stop()` or `close()`. The TypeScript `SessionVersionCache` and the Go `WithSessionVersions` option ship one.

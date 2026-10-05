@@ -133,6 +133,11 @@ The assignment body SHALL be `{ "role_id": "role_..." }` for a realm-scoped assi
 - **WHEN** an admin calls `GET /admin/roles/{role_id}/members` for a role assigned to one user and one group
 - **THEN** both subjects are listed
 
+#### Scenario: An unknown body field is refused
+- **WHEN** an admin posts `{ "role_id": "role_...", "scope": { "type": "org", "org_id": "org_..." } }` to `POST /admin/users/{user_id}/roles` or `POST /admin/groups/{group_id}/roles`
+- **THEN** the response is `422`
+- **AND** no assignment is created, realm-scoped or otherwise
+
 ### Requirement: Effective-permissions debug endpoint
 `GET /admin/users/{user_id}/effective-permissions?org_id=...&scope=...` SHALL resolve and return what the user would receive in a token issued with those parameters. It is a support and debug aid.
 
@@ -159,6 +164,11 @@ The assignment body SHALL be `{ "role_id": "role_..." }` for a realm-scoped assi
 - **WHEN** a user holds a role scoped to organization O and calls the endpoint with a token whose `oid` is O
 - **THEN** the response includes that role's permissions
 - **AND** the same call with a token that has no `oid` does not include them
+
+#### Scenario: A caller-chosen organization is refused
+- **WHEN** a user who is not a member of organization O, but holds a role assignment scoped to O, calls `GET /v1/me/permissions?org_id=<O>`
+- **THEN** the response is `403`
+- **AND** no permission of that role is returned
 
 ### Requirement: Sub-admin grants never exceed the caller
 A sub-admin, a caller that holds realm-scoped admin permissions but not `hearth.admin`, SHALL grant only permissions held in its own token's `permissions` claim. A sub-admin SHALL create or update only roles whose permission sets are subsets of its own permissions. A grant or a role definition that carries a permission the caller does not hold SHALL be refused with `403 Forbidden`. A caller that holds `hearth.admin` SHALL bypass this check. The ceiling SHALL apply to:
@@ -296,4 +306,14 @@ Operators MAY declare roles, permissions, groups and scope mappings in realm YAM
 #### Scenario: An admin edits a YAML-managed role
 - **WHEN** an admin sends `PATCH /admin/roles/{id}` for a role declared in `hearth.yaml`
 - **THEN** the request is refused with an error that points to `hearth.yaml`
+
+#### Scenario: A YAML-managed role cannot be deleted at runtime
+- **WHEN** an admin sends `DELETE /admin/roles/{id}?cascade=true` for a role declared in `hearth.yaml`
+- **THEN** the request is refused with an error that points to `hearth.yaml`
+- **AND** the role and its assignments remain
+
+#### Scenario: A YAML-managed group cannot be changed at runtime
+- **WHEN** an admin updates or deletes, through the admin API or the console, a group declared in `hearth.yaml`
+- **THEN** the request is refused with an error that points to `hearth.yaml`
+- **AND** the group and its members remain
 

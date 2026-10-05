@@ -106,6 +106,11 @@ Permissions under `hearth.*` SHALL be grantable only by Hearth itself or by the 
 - **WHEN** an admin creates a role that lists `hearth.admin`
 - **THEN** the API rejects the request with a reserved-namespace error
 
+#### Scenario: Reserved permissions are not granted directly
+- **WHEN** a caller holding `hearth.admin` sends `POST /admin/users/{id}/permissions` with `{"permission": "hearth.admin"}`
+- **THEN** the request is refused with a reserved-namespace error
+- **AND** the user holds no direct grant of `hearth.admin`
+
 ### Requirement: Assignments are realm-scoped or organization-scoped
 Every role assignment SHALL carry a scope. A realm-scoped assignment SHALL apply whenever the user acts in the realm: its permissions appear in every access token for that user in that realm. An organization-scoped assignment SHALL apply only in that organization's context: its permissions appear only when the token is issued with an `oid` equal to the assignment's organization.
 

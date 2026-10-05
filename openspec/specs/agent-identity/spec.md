@@ -23,7 +23,7 @@ An agent record MUST contain the fields below, with these limits.
 | `description` | String, optional | At most 2048 characters. |
 | `capabilities` | List of capability strings | Declared capabilities. |
 | `status` | `Active`, `Suspended` or `Revoked` | Lifecycle state. |
-| `max_delegation_depth` | Integer | 1–10. Default `1`. The maximum number of hops this agent may delegate further. |
+| `max_delegation_depth` | Integer | From `1` to the act-chain ceiling (`security.max_act_chain_depth`, default `3`). Default `1`. The maximum number of hops this agent may delegate further. If the ceiling is later lowered below a stored value, the lower of the two applies. |
 | `created_at` | Timestamp (UTC microseconds) | Creation time. |
 | `updated_at` | Timestamp (UTC microseconds) | Last modification. |
 
@@ -38,12 +38,16 @@ A create or update that breaks a limit SHALL be refused.
 - **THEN** the request is refused
 
 #### Scenario: A delegation depth out of range
-- **WHEN** an agent is created with `max_delegation_depth` of `0` or `11`
+- **WHEN** the act-chain ceiling is the default `3` and an agent is created with `max_delegation_depth` of `0` or `4`
 - **THEN** the request is refused
 
 #### Scenario: The delegation depth is omitted
 - **WHEN** an agent is created without `max_delegation_depth`
 - **THEN** the agent's `max_delegation_depth` is `1`
+
+#### Scenario: A lowered ceiling caps a stored depth
+- **WHEN** an agent has `max_delegation_depth` `5` and the operator lowers `security.max_act_chain_depth` to `3`
+- **THEN** a token exchange by that agent is limited to a chain of depth `3`
 
 ### Requirement: An agent's owner exists in the same realm
 An agent's `owner_id` MUST reference an existing user or organization in the same realm. Deleting the owning user or organization SHALL delete the agents it owns, so no agent is left without an owner.
@@ -70,6 +74,10 @@ Agent status transitions MUST be `Active → Suspended → Active` (reversible) 
 #### Scenario: A transition in an archived realm
 - **WHEN** an operator suspends, reactivates, revokes or deletes an agent in a realm that is not `Active`
 - **THEN** the operation is refused
+
+#### Scenario: A revoked agent's key does not verify
+- **WHEN** an API key that was never revoked itself is verified after its agent is revoked
+- **THEN** verification fails
 
 ### Requirement: A non-active agent takes no part in issuing tokens
 Any agent status other than `Active` MUST block the agent from every token-issuing path. The paths are: AAT issuance, derivation and validation; approval-request creation and approval; transaction tokens; and capability-token validation. `Suspended` MUST block exactly as `Revoked` does, because the abuse monitor applies `Suspended` automatically.
