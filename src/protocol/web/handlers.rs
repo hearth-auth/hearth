@@ -230,6 +230,9 @@ struct LoginTemplate {
     logo_url: String,
     realm_theme_url: Option<String>,
     inline_theme_css: Option<String>,
+    /// The CAPTCHA provider's widget, rendered at `<!-- captcha-widget-slot -->`
+    /// for a caller the abuse guards challenged (A-3, A-16). Empty otherwise.
+    captcha_widget_html: String,
 }
 
 impl LoginTemplate {
@@ -294,6 +297,7 @@ impl LoginTemplate {
             logo_url,
             realm_theme_url: None,
             inline_theme_css: None,
+            captcha_widget_html: String::new(),
         }
     }
 }
@@ -1541,30 +1545,39 @@ pub struct LoginQuery {
 /// Renders the login form at the bare `/ui/login` URL.
 pub async fn login_form(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     Query(query): Query<LoginQuery>,
 ) -> Response {
-    login_form_impl(state, headers, query, RealmSource::Path(None))
+    login_form_impl(state, headers, query, RealmSource::Path(None), peer_addr)
 }
 
 /// Renders the login form under `/ui/realms/<name>/login`.
 pub async fn login_form_scoped(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     axum::extract::Path(realm_name): axum::extract::Path<String>,
     headers: HeaderMap,
     Query(query): Query<LoginQuery>,
 ) -> Response {
-    login_form_impl(state, headers, query, RealmSource::Path(Some(realm_name)))
+    login_form_impl(
+        state,
+        headers,
+        query,
+        RealmSource::Path(Some(realm_name)),
+        peer_addr,
+    )
 }
 
 /// Renders the admin login form at `/ui/admin/login`. The session
 /// created by a successful submit is always bound to the system realm.
 pub async fn admin_login_form(
     State(state): State<Arc<WebState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     Query(query): Query<LoginQuery>,
 ) -> Response {
-    login_form_impl(state, headers, query, RealmSource::Admin)
+    login_form_impl(state, headers, query, RealmSource::Admin, peer_addr)
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -1573,6 +1586,7 @@ fn login_form_impl(
     headers: HeaderMap,
     query: LoginQuery,
     source: RealmSource,
+    peer_addr: SocketAddr,
 ) -> Response {
     let return_to = query.return_to.as_deref().and_then(sanitize_return_to);
     let locale = resolve_login_locale(
@@ -1617,7 +1631,22 @@ fn login_form_impl(
     };
     tmpl.csrf = Some(csrf_value);
 
+    // A-16: a caller an earlier attempt put in the challenge state sees the
+    // CAPTCHA widget now, so a passkey or password sign-in can carry a token.
+    let provider = state.abuse_guards.captcha_provider().filter(|_| {
+        let session_ctx = build_session_context(&headers, peer_addr, &state.trusted_proxies);
+        state
+            .abuse_guards
+            .challenge_pending(guard_ip_of(&session_ctx))
+    });
+    if let Some(provider) = provider {
+        tmpl.captcha_widget_html = provider.widget_html().to_string();
+    }
+
     let mut resp = render(&tmpl);
+    if let Some(provider) = provider {
+        super::security::allow_captcha_origins(&mut resp, provider.csp_origins());
+    }
     if let Some(cookie) = fresh_cookie {
         append_cookie(&mut resp, &cookie);
     }
@@ -1667,10 +1696,15 @@ pub struct LoginForm {
     /// CSRF token echoed from the hidden `_csrf` field.
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
+    /// CAPTCHA response token from the provider's widget, present when the
+    /// abuse guards challenged an earlier attempt (A-3, A-16).
+    #[serde(default)]
+    pub captcha_token: String,
 }
 
-/// Prints the address and routing fields only: the password and the CSRF
-/// token never reach a log line through `{:?}` (GA audit L20).
+/// Prints the address and routing fields only: the password, the CSRF
+/// token and the CAPTCHA token never reach a log line through `{:?}` (GA
+/// audit L20).
 impl std::fmt::Debug for LoginForm {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LoginForm")
@@ -1679,6 +1713,7 @@ impl std::fmt::Debug for LoginForm {
             .field("return_to", &self.return_to)
             .field("locale", &self.locale)
             .field("csrf", &"<redacted>")
+            .field("captcha_token", &"<redacted>")
             .finish()
     }
 }
@@ -1834,6 +1869,41 @@ impl LoginRenderCtx {
         )
     }
 
+    /// The answer to a login attempt the abuse guards challenged (A-3, A-16).
+    ///
+    /// With a CAPTCHA provider: the login page again (401), with the
+    /// provider's widget at the slot and the request's CSRF token echoed so
+    /// the form can be resubmitted. Without one: [`Self::generic_error`]. The
+    /// page is decided before any account lookup, so it is the same for
+    /// every address.
+    fn challenge_page(
+        &self,
+        submitted_email: &str,
+        guards: &crate::abuse::runtime::AbuseGuards,
+        headers: &HeaderMap,
+    ) -> Response {
+        let Some(provider) = guards.captcha_provider() else {
+            return self.generic_error(submitted_email);
+        };
+        let mut tmpl = LoginTemplate::new(
+            Some("Complete the check below, then sign in again.".to_string()),
+            self.return_to.clone(),
+            &self.action_prefix,
+            self.show_register,
+            self.locale,
+            self.product_name.clone(),
+            self.logo_url.clone(),
+        );
+        tmpl.email = submitted_email.to_string();
+        tmpl.csrf = super::auth::csrf_cookie_value_from_headers(headers).map(str::to_string);
+        tmpl.captcha_widget_html = provider.widget_html().to_string();
+        tmpl.realm_theme_url.clone_from(&self.realm_theme);
+        tmpl.inline_theme_css.clone_from(&self.inline_theme_css);
+        let mut resp = render_status(&tmpl, StatusCode::UNAUTHORIZED);
+        super::security::allow_captcha_origins(&mut resp, provider.csp_origins());
+        resp
+    }
+
     /// The CSRF failure page (422).
     ///
     /// Mints a **fresh** CSRF token so the user can resubmit immediately without
@@ -1890,6 +1960,9 @@ struct PreparedLogin {
     /// Parsed client IP for the abuse guards (task 20.13). `None` when no IP
     /// could be determined — every guard skips in that case.
     guard_ip: Option<std::net::IpAddr>,
+    /// The guards challenged this attempt and it carries a CAPTCHA token:
+    /// the token must verify before the attempt is admitted to the gate.
+    captcha_pending: bool,
 }
 
 /// Orchestrates a login submission across the bounded KDF admission gate
@@ -1920,6 +1993,20 @@ async fn login_submit_gated(
         // Rejected pre-gate: no KDF permit was ever acquired.
         Err(response) => return response,
     };
+    // A challenged attempt continues only with a CAPTCHA token the provider
+    // verifies; a rejected token counts as a failure and is challenged again.
+    if prepared.captcha_pending
+        && !crate::protocol::abuse_challenge::verify_captcha(
+            &state.abuse_guards,
+            prepared.guard_ip,
+            &form.captcha_token,
+        )
+        .await
+    {
+        return prepared
+            .render_ctx
+            .challenge_page(&prepared.email, &state.abuse_guards, &headers);
+    }
 
     let is_admin = prepared.is_admin;
     // Extract shed context before all values are moved into the closure.
@@ -2057,15 +2144,15 @@ fn login_prepare(
     }
 
     // Abuse guards (task 20.13, audit §4.17#9). A-9 tenant CIDR, A-16
-    // challenge and A-3 cardinality all run here, before a KDF permit is acquired, for the same
-    // reason the rate limit does: rejected traffic must not consume admission
-    // capacity. Every arm collapses into the one generic page, so login
+    // challenge and A-3 cardinality all run here, before a KDF permit is
+    // acquired, for the same reason the rate limit does: rejected traffic must
+    // not consume admission capacity. A refusal is the one generic page; a
+    // challenge is audited and answered with the CAPTCHA widget when a
+    // provider is configured. Neither depends on the account, so login
     // enumeration properties are unchanged. All are fail-open until the
     // operator enables them in `security:`.
-    let guard_ip = session_ctx
-        .ip_address
-        .as_deref()
-        .and_then(|s| s.parse::<std::net::IpAddr>().ok());
+    let guard_ip = guard_ip_of(&session_ctx);
+    let mut captcha_pending = false;
     match state
         .abuse_guards
         .pre_auth_login(guard_ip, &email, realm.config().cidr_policy.as_ref())
@@ -2075,14 +2162,25 @@ fn login_prepare(
             tracing::warn!(ip = %client_ip, guard = reason, "login: refused by abuse guard");
             return Err(render_ctx.generic_error(&email));
         }
-        PreAuthVerdict::Challenge { reason } => {
-            // No inline challenge surface exists on this form yet, so the
-            // signal is recorded and the attempt is refused rather than
-            // silently allowed — a challenge the caller cannot answer is a
-            // denial, and saying otherwise would be the same class of claim
-            // defect this task closes.
-            tracing::warn!(ip = %client_ip, guard = reason, "login: challenged by abuse guard");
-            return Err(render_ctx.generic_error(&email));
+        PreAuthVerdict::Challenge(challenge) => {
+            crate::protocol::abuse_challenge::audit_challenge(
+                &state.abuse_guards,
+                state.audit.as_ref(),
+                &crate::protocol::abuse_challenge::ChallengedAttempt {
+                    realm_id: realm.id(),
+                    ip: guard_ip,
+                    username: Some(&email),
+                    surface: crate::protocol::abuse_challenge::Surface::Ui,
+                },
+                &challenge,
+            );
+            // Without a provider, or without a token to verify, the challenge
+            // page is the answer. A token is verified in the async handler,
+            // still before the gate.
+            if state.abuse_guards.captcha_provider().is_none() || form.captcha_token.is_empty() {
+                return Err(render_ctx.challenge_page(&email, &state.abuse_guards, headers));
+            }
+            captcha_pending = true;
         }
     }
 
@@ -2094,6 +2192,7 @@ fn login_prepare(
         email,
         is_admin,
         guard_ip,
+        captcha_pending,
     })
 }
 
@@ -2120,6 +2219,7 @@ fn login_finish(
         email,
         is_admin: _,
         guard_ip,
+        captcha_pending: _,
     } = prepared;
     let return_to = render_ctx.return_to.clone();
 
@@ -2476,6 +2576,10 @@ pub struct PasskeyLoginCompleteBody {
     /// Base64url-encoded user handle (optional, for discoverable credentials).
     #[serde(default)]
     pub user_handle: Option<String>,
+    /// CAPTCHA response token from the login page's widget, for a caller the
+    /// abuse guards challenged (A-16).
+    #[serde(default)]
+    pub captcha_token: Option<String>,
 }
 
 /// `POST /ui/login/passkey-complete` — bare variant.
@@ -2485,7 +2589,7 @@ pub async fn passkey_login_complete(
     headers: HeaderMap,
     axum::Json(body): axum::Json<PasskeyLoginCompleteBody>,
 ) -> Response {
-    passkey_login_complete_impl(state, headers, body, None, peer_addr)
+    passkey_login_complete_impl(state, headers, body, None, peer_addr).await
 }
 
 /// `POST /ui/realms/<name>/login/passkey-complete` — realm-scoped variant.
@@ -2496,7 +2600,7 @@ pub async fn passkey_login_complete_scoped(
     headers: HeaderMap,
     axum::Json(body): axum::Json<PasskeyLoginCompleteBody>,
 ) -> Response {
-    passkey_login_complete_impl(state, headers, body, Some(realm_name), peer_addr)
+    passkey_login_complete_impl(state, headers, body, Some(realm_name), peer_addr).await
 }
 
 /// `POST /ui/admin/login/passkey-complete` — admin variant. Routes the
@@ -2514,7 +2618,15 @@ pub async fn passkey_login_complete_admin(
             return (StatusCode::BAD_REQUEST, "System realm unavailable").into_response();
         }
     };
-    passkey_login_complete_impl(state, headers, body, Some(system_realm_name), peer_addr)
+    passkey_login_complete_impl(state, headers, body, Some(system_realm_name), peer_addr).await
+}
+
+/// The client address the abuse guards count, from a built session context.
+fn guard_ip_of(session_ctx: &SessionContext) -> Option<std::net::IpAddr> {
+    session_ctx
+        .ip_address
+        .as_deref()
+        .and_then(|s| s.parse::<std::net::IpAddr>().ok())
 }
 
 /// Completes the discoverable credential authentication ceremony.
@@ -2522,7 +2634,7 @@ pub async fn passkey_login_complete_admin(
 /// cross-realm walk. The `user_handle` from the assertion identifies
 /// the user within the resolved realm.
 #[allow(clippy::needless_pass_by_value)]
-fn passkey_login_complete_impl(
+async fn passkey_login_complete_impl(
     state: Arc<WebState>,
     headers: HeaderMap,
     body: PasskeyLoginCompleteBody,
@@ -2536,6 +2648,40 @@ fn passkey_login_complete_impl(
     // B10). Setting it up front asserted a second factor before anything had
     // been verified.
     let session_ctx = build_session_context(&headers, peer_addr, &state.trusted_proxies);
+
+    // Resolve realm. JSON endpoint — picker/400 HTML isn't useful; return 400.
+    let realm = match resolve_pre_auth_realm(&state, path_realm, true) {
+        PreAuthRealm::Ok { realm, .. } => realm,
+        PreAuthRealm::Handled(_) => {
+            return (StatusCode::BAD_REQUEST, "Realm not resolvable").into_response();
+        }
+    };
+
+    // A-16, before the assertion is checked. A passkey sign-in has no
+    // username, so the per-username A-3 detector does not apply. A challenge
+    // is answered in this endpoint's JSON shape; the login page reloads and
+    // shows the widget.
+    let guard_ip = guard_ip_of(&session_ctx);
+    if let Err(response) = crate::protocol::abuse_challenge::gate_api_sign_in(
+        &state.abuse_guards,
+        state.audit.as_ref(),
+        &crate::protocol::abuse_challenge::ChallengedAttempt {
+            realm_id: realm.id(),
+            ip: guard_ip,
+            username: None,
+            surface: crate::protocol::abuse_challenge::Surface::Ui,
+        },
+        state.abuse_guards.pre_auth_passkey(guard_ip),
+        body.captcha_token.as_deref(),
+    )
+    .await
+    {
+        return response;
+    }
+    let failed = || {
+        state.abuse_guards.record_login_failure(guard_ip);
+        (StatusCode::UNAUTHORIZED, "Authentication failed").into_response()
+    };
 
     let b64 = &base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
@@ -2560,7 +2706,7 @@ fn passkey_login_complete_impl(
     // Parse the user handle into a UserId.
     let Some(ref uh_bytes) = user_handle_bytes else {
         tracing::warn!("passkey-login-complete: no user_handle in assertion");
-        return (StatusCode::UNAUTHORIZED, "Authentication failed").into_response();
+        return failed();
     };
     let user_id_result = std::str::from_utf8(uh_bytes)
         .ok()
@@ -2568,17 +2714,9 @@ fn passkey_login_complete_impl(
         .or_else(|| uuid::Uuid::from_slice(uh_bytes).ok());
     let Some(uuid) = user_id_result else {
         tracing::warn!("passkey-login-complete: cannot parse user_handle as UUID");
-        return (StatusCode::UNAUTHORIZED, "Authentication failed").into_response();
+        return failed();
     };
     let user_id = crate::core::UserId::new(uuid);
-
-    // Resolve realm. JSON endpoint — picker/400 HTML isn't useful; return 400.
-    let realm = match resolve_pre_auth_realm(&state, path_realm, true) {
-        PreAuthRealm::Ok { realm, .. } => realm,
-        PreAuthRealm::Handled(_) => {
-            return (StatusCode::BAD_REQUEST, "Realm not resolvable").into_response();
-        }
-    };
 
     // Confirm the user actually exists in the resolved realm.
     let exists = state
@@ -2589,7 +2727,7 @@ fn passkey_login_complete_impl(
         .is_some();
     if !exists {
         tracing::warn!(user_id = %user_id, "passkey-login-complete: user not in resolved realm");
-        return (StatusCode::UNAUTHORIZED, "Authentication failed").into_response();
+        return failed();
     }
 
     passkey_complete_for_user(
@@ -2755,13 +2893,20 @@ fn passkey_complete_for_user(
         origin,
     };
 
+    // A failed assertion counts against the client's A-16 failure count; a
+    // verified one clears it, as a correct password does.
+    let guard_ip = guard_ip_of(session_ctx);
     let auth_result = match state
         .identity
         .complete_webauthn_authentication(realm.id(), &params)
     {
-        Ok(r) => r,
+        Ok(r) => {
+            state.abuse_guards.record_login_success(guard_ip);
+            r
+        }
         Err(e) => {
             tracing::warn!(error = %e, "passkey-login-complete: authentication failed");
+            state.abuse_guards.record_login_failure(guard_ip);
             return (StatusCode::UNAUTHORIZED, "Authentication failed").into_response();
         }
     };

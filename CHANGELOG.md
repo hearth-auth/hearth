@@ -17,6 +17,12 @@ libraries, admin clients generated from OpenAPI, one conformance harness for all
 testing, an external pentest). Hearth is not yet production-ready until the second one is done.
 
 ### Added
+- **`captcha_token` on the JSON sign-in endpoints** — an optional body field on
+  `POST /v1/{realm}/auth/magic-link` and `POST /webauthn/auth/complete` that carries a solved
+  CAPTCHA after a `403` `HEARTH_ABUSE_CHALLENGE_REQUIRED` answer (`login-abuse-challenge`).
+- **`HEARTH_ABUSE_CHALLENGE_REQUIRED` error code** — `403` from a sign-in endpoint when a
+  CAPTCHA provider is configured and the caller must solve a CAPTCHA before it continues. The
+  per-IP login `429` body now also carries `error_code: "HEARTH_RATE_LIMITED"`.
 - **`security.max_act_chain_depth`** — the deepest RFC 8693 `act` delegation chain a token may
   carry. Default `3`, range `1`–`32`; a value outside the range fails config load. Token
   validation and token exchange both read it, and an agent's `max_delegation_depth` must be from
@@ -134,6 +140,19 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   workflows and guides are gone.
 
 ### Security
+- **A challenged sign-in is audited and can be answered** (`login-abuse-challenge`). When the
+  distributed-attack detector (A-3) or the per-IP challenge state (A-16) challenges a sign-in,
+  an `AbuseDetected` audit event records the IP, the username, the guard and the surface, at most
+  once per guard, IP and username per window. With a CAPTCHA provider configured, the login page
+  shows the provider's widget (also when a challenged caller loads it), and the JSON sign-in
+  endpoints answer `403` `HEARTH_ABUSE_CHALLENGE_REQUIRED`; a solved CAPTCHA lets the attempt
+  continue and clears the A-16 state, a rejected token counts as a failure. Without a provider,
+  the login page shows the generic failure page and the API answers `429` `HEARTH_RATE_LIMITED`
+  with `Retry-After` until the guard's window ends. `POST /v1/{realm}/auth/magic-link` runs
+  A-3 and A-16, and both passkey sign-in completions (`POST /webauthn/auth/complete` and the
+  login page's `.../login/passkey-complete`) run A-16; a failed passkey assertion counts toward
+  `security.captcha.challenge_threshold`. A page that carries the Turnstile widget allows
+  `https://challenges.cloudflare.com` as a script and frame source.
 - **SDKs: the access-token audience is checked by default** (`sdk-security-defaults`). All four
   SDKs gain an `audience` option, default `hearth`, the audience Hearth mints when a client names
   no resource; an API registered as a protected resource sets its resource URI (RFC 9068 §4).

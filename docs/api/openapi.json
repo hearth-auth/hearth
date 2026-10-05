@@ -4050,14 +4050,32 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object"
+                "type": "object",
+                "required": [
+                  "email"
+                ],
+                "properties": {
+                  "email": {
+                    "type": "string"
+                  },
+                  "captcha_token": {
+                    "type": "string",
+                    "description": "A solved CAPTCHA, sent after a `403` `HEARTH_ABUSE_CHALLENGE_REQUIRED` answer.\n"
+                  }
+                }
               }
             }
           }
         },
         "responses": {
-          "204": {
-            "description": "Magic link email queued (or rate-limited silently)"
+          "202": {
+            "description": "Accepted. The same answer whether or not the address has an account; a link is mailed only to an address that can sign in.\n"
+          },
+          "403": {
+            "description": "The caller is challenged: resend with a solved `captcha_token`. `error_code` is `HEARTH_ABUSE_CHALLENGE_REQUIRED`.\n"
+          },
+          "429": {
+            "description": "Rate limited (`HEARTH_RATE_LIMITED`); retry after `Retry-After` seconds.\n"
           }
         }
       }
@@ -4088,7 +4106,39 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object"
+                "type": "object",
+                "required": [
+                  "credential_id",
+                  "client_data_json",
+                  "authenticator_data",
+                  "signature",
+                  "origin"
+                ],
+                "properties": {
+                  "credential_id": {
+                    "type": "string"
+                  },
+                  "client_data_json": {
+                    "type": "string"
+                  },
+                  "authenticator_data": {
+                    "type": "string"
+                  },
+                  "signature": {
+                    "type": "string"
+                  },
+                  "user_handle": {
+                    "type": "string"
+                  },
+                  "origin": {
+                    "type": "string",
+                    "description": "Accepted but ignored; the origin is pinned server-side."
+                  },
+                  "captcha_token": {
+                    "type": "string",
+                    "description": "A solved CAPTCHA, sent after a `403` `HEARTH_ABUSE_CHALLENGE_REQUIRED` answer.\n"
+                  }
+                }
               }
             }
           }
@@ -4096,6 +4146,12 @@
         "responses": {
           "200": {
             "description": "Tokens issued"
+          },
+          "403": {
+            "description": "The caller is challenged: resend with a solved `captcha_token`. `error_code` is `HEARTH_ABUSE_CHALLENGE_REQUIRED`.\n"
+          },
+          "429": {
+            "description": "Rate limited (`HEARTH_RATE_LIMITED`); retry after `Retry-After` seconds.\n"
           }
         }
       }

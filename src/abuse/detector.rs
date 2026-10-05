@@ -279,12 +279,15 @@ pub enum DetectorOutcome {
     /// Callers MUST:
     /// 1. Emit an [`crate::audit::types::AuditAction::AbuseDetected`] event
     ///    with the IP and username in metadata.
-    /// 2. Apply the challenge response (A-16 CAPTCHA).
-    /// 3. Return an appropriate 429 / challenge response to the caller.
+    /// 2. Answer as the A-16 challenge-response table says: the CAPTCHA
+    ///    when a provider is configured, a timed lockout when not.
     Challenge {
         /// Human-readable reason for internal logging.
         /// MUST NOT be returned to the client verbatim.
         reason: &'static str,
+        /// Time until the window that fired is cleared, if no further attempt
+        /// lands in it: the `Retry-After` of a lockout.
+        retry_after: Duration,
     },
 }
 
@@ -332,6 +335,12 @@ impl DistributedAttackDetector {
         }
     }
 
+    /// The configured rolling window.
+    #[must_use]
+    pub fn window(&self) -> Duration {
+        self.config.window
+    }
+
     /// Evaluates a credential-check attempt from `peer_ip` against `username`.
     ///
     /// Records the (IP, username) pair in both cardinality dimensions and
@@ -362,18 +371,23 @@ impl DistributedAttackDetector {
         let ip_threshold = self.config.ip_per_username_threshold;
 
         // ── Dimension 1: distinct usernames per IP ──────────────────────────
+        let judge = |w: &DistinctWindow, threshold: usize| {
+            w.exceeds_threshold(threshold)
+                .then(|| w.expires_at(now).saturating_duration_since(now))
+        };
         let username_over = record_in(
             &self.username_per_ip,
             ip_hash,
             username_hash,
             now,
             (self.config.window, username_threshold),
-            |w| w.exceeds_threshold(username_threshold),
+            |w| judge(w, username_threshold),
         );
 
-        if username_over {
+        if let Some(retry_after) = username_over {
             return DetectorOutcome::Challenge {
                 reason: "distinct usernames per IP exceeded threshold",
+                retry_after,
             };
         }
 
@@ -384,12 +398,13 @@ impl DistributedAttackDetector {
             ip_hash,
             now,
             (self.config.window, ip_threshold),
-            |w| w.exceeds_threshold(ip_threshold),
+            |w| judge(w, ip_threshold),
         );
 
-        if ip_over {
+        if let Some(retry_after) = ip_over {
             return DetectorOutcome::Challenge {
                 reason: "distinct IPs per username exceeded threshold",
+                retry_after,
             };
         }
 

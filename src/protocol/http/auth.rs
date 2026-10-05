@@ -613,15 +613,19 @@ fn token_rate_limit_outcome(outcome: TokenRateLimitOutcome) -> Result<(), Respon
 
 /// Builds a 429 Too Many Requests response with a `Retry-After` header.
 ///
-/// Used for per-IP login rate limits on the token and magic-link endpoints.
+/// Used for per-IP login rate limits on the token and magic-link endpoints,
+/// and for the lockout that answers a login challenge when no CAPTCHA
+/// provider is configured: the two are deliberately indistinguishable.
 pub(crate) fn make_ip_rate_limit_response(retry_after_secs: u32) -> Response {
+    let mut body = rate_limit_body(LIMITER_LOGIN_IP, "rate limit exceeded");
+    body["error_code"] = serde_json::Value::from(crate::protocol::error_codes::RATE_LIMITED);
     (
         StatusCode::TOO_MANY_REQUESTS,
         [(
             axum::http::header::RETRY_AFTER,
             retry_after_secs.to_string(),
         )],
-        Json(rate_limit_body(LIMITER_LOGIN_IP, "rate limit exceeded")),
+        Json(body),
     )
         .into_response()
 }

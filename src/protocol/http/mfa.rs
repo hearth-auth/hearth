@@ -14,6 +14,7 @@ use crate::core::FormSecret;
 use crate::core::UserId;
 use crate::identity::{verify_step_up, StepUpError};
 use crate::identity::{ClientExtensionResults, RegistrationExtensionInputs};
+use crate::protocol::abuse_challenge::{gate_api_sign_in, ChallengedAttempt, Surface};
 use crate::protocol::client_info::PeerAddr;
 use crate::protocol::step_up::{StepUpAssertionBody, StepUpProofBody};
 
@@ -249,6 +250,9 @@ struct WbaCompleteReq {
     /// against `clientDataJSON.origin`.
     #[allow(dead_code)]
     origin: String,
+    /// A solved CAPTCHA, for a caller the abuse guards challenged (A-16).
+    #[serde(default)]
+    captcha_token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -473,6 +477,7 @@ async fn webauthn_auth_begin(
 
 async fn webauthn_auth_complete(
     State(state): State<Arc<AppState>>,
+    PeerAddr(peer_addr): PeerAddr,
     headers: HeaderMap,
     Json(body): Json<WbaCompleteReq>,
 ) -> impl IntoResponse {
@@ -480,6 +485,31 @@ async fn webauthn_auth_complete(
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
+    // A-16, before the assertion is checked. A passkey sign-in has no
+    // username, so the per-username A-3 detector does not apply.
+    let guard_ip = crate::protocol::client_info::extract_client_ip(
+        &headers,
+        peer_addr,
+        &state.trusted_proxies,
+    )
+    .parse::<std::net::IpAddr>()
+    .ok();
+    if let Err(response) = gate_api_sign_in(
+        &state.abuse_guards,
+        state.audit.as_ref(),
+        &ChallengedAttempt {
+            realm_id: &realm_id,
+            ip: guard_ip,
+            username: None,
+            surface: Surface::Api,
+        },
+        state.abuse_guards.pre_auth_passkey(guard_ip),
+        body.captcha_token.as_deref(),
+    )
+    .await
+    {
+        return response;
+    }
     let credential_id = match b64_decode(&body.credential_id) {
         Ok(v) => v,
         Err(e) => return e.into_response(),
@@ -521,16 +551,22 @@ async fn webauthn_auth_complete(
         .identity
         .complete_webauthn_authentication(&realm_id, &params)
     {
-        Ok(result) => (
-            StatusCode::OK,
-            Json(WbaCompleteRes {
-                credential_id: b64_encode(result.credential_id()),
-                user_id: result.user_id().to_string(),
-                sign_count: result.sign_count(),
-            }),
-        )
-            .into_response(),
-        Err(e) => identity_error_to_response(&e).into_response(),
+        Ok(result) => {
+            state.abuse_guards.record_login_success(guard_ip);
+            (
+                StatusCode::OK,
+                Json(WbaCompleteRes {
+                    credential_id: b64_encode(result.credential_id()),
+                    user_id: result.user_id().to_string(),
+                    sign_count: result.sign_count(),
+                }),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            state.abuse_guards.record_login_failure(guard_ip);
+            identity_error_to_response(&e).into_response()
+        }
     }
 }
 
@@ -656,6 +692,9 @@ async fn webauthn_delete_credential(
 #[serde(deny_unknown_fields)]
 struct MagicLinkRequestBody {
     email: String,
+    /// A solved CAPTCHA, for a caller the abuse guards challenged (A-3, A-16).
+    #[serde(default)]
+    captcha_token: Option<String>,
 }
 
 /// Builds the browser redemption URL and mails it, off the request path.
@@ -806,6 +845,30 @@ async fn magic_link_request(
     state
         .identity
         .record_ip_login_attempt(&realm_id, &client_ip);
+
+    // A-3 and A-16, before the account lookup and before any link is built.
+    // The verdict does not depend on whether the address has an account, so
+    // a challenge adds no enumeration signal to the uniform 202. A request is
+    // not a failed sign-in, so nothing is recorded against the IP here.
+    let guard_ip = client_ip.parse::<std::net::IpAddr>().ok();
+    if let Err(response) = gate_api_sign_in(
+        &state.abuse_guards,
+        state.audit.as_ref(),
+        &ChallengedAttempt {
+            realm_id: &realm_id,
+            ip: guard_ip,
+            username: Some(&body.email),
+            surface: Surface::Api,
+        },
+        state
+            .abuse_guards
+            .pre_auth_login(guard_ip, &body.email, None),
+        body.captcha_token.as_deref(),
+    )
+    .await
+    {
+        return response;
+    }
 
     // Only an address that can sign in with the link gets one: an existing
     // account, or — where the realm lets a magic link create the account —
