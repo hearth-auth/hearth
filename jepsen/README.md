@@ -1,0 +1,102 @@
+# Hearth Jepsen tests
+
+These tests run [Jepsen](https://jepsen.io) against a 5-node, production-mode Hearth
+cluster in Docker. They check the cluster-mode promises (W1–W5, R1, V1, …) in
+[`docs/dev/CONSISTENCY.md`](../docs/dev/CONSISTENCY.md) under network partitions,
+`kill -9`, restarts and peer-link delay.
+
+The plan, the decisions and the open items are in the OpenSpec change
+[`cluster-jepsen-harness`](../openspec/changes/cluster-jepsen-harness/).
+
+> **Status:** in progress. The containers, the binary, the per-node material
+> and node setup work: the `noop` test sets up and tears down all five nodes.
+> `make jepsen` arrives with task 3.2. Until then, run a test by hand inside the
+> control container: `lein run test --workload noop`.
+
+## Warning: privileged containers
+
+The five node containers run with `privileged: true`. The partition and delay faults
+change `iptables` and `tc` inside them, and that needs the privilege. A privileged
+container can reach the host kernel. Run these tests only on your own machine or on
+an ephemeral CI runner. **Never run them on a shared host.**
+
+## What you need
+
+- Docker with Compose v2 and BuildKit.
+- About 8 GB of free memory: six containers and one JVM.
+- Network access on the first run: the images, the cargo registry and the Jepsen
+  libraries download once and are then cached.
+
+## Run
+
+From the repository root:
+
+```bash
+make jepsen-binary   # build the shipped image; copy its hearth binary to jepsen/docker/.build/
+make jepsen-up       # start control + n1–n5; ends with `ssh <node> true` on all five
+make jepsen-down     # remove the containers and their volumes
+```
+
+`make jepsen-binary` builds the root `Dockerfile`, so the tests run the binary the
+published image ships: Debian bookworm, built without `dev-endpoints`. A run refuses
+a binary that serves `/admin/bootstrap`.
+
+To work by hand inside the control container:
+
+```bash
+docker compose -f jepsen/docker/compose.yaml exec control bash
+ssh n1                                  # root on node n1
+```
+
+## Layout
+
+| Path | What it is |
+|------|------------|
+| `docker/` | Compose file, node image (bookworm, sshd, iptables, iproute2), control image (JDK 21, Leiningen) |
+| `scripts/gen-material.sh` | Per-run secrets and certificates: KEK, master key, CA, peer and HTTPS leaves with `DNS:nX` |
+| `scripts/gen-configs.sh` | One bundle per node for `/opt/hearth`: `hearth.yaml`, seed config, master key, TLS files |
+| `scripts/seed-store.sh` | Seeds one store with an operator and mints a system-realm token into it |
+| `scripts/spike-cold-cluster.sh` | The task 0.2 spike: the same seeding path on 3 host processes |
+| `project.clj`, `src/`, `test/` | The Jepsen project |
+
+## How a node is set up
+
+Each node runs production mode: no `--dev`, no `dev-endpoints`, TLS on HTTPS and on
+the peer link, fsync on. The control node:
+
+1. generates fresh material for the run (`gen-material.sh`, `gen-configs.sh`);
+2. seeds one store on `n1`: first-boot setup, email verification, then
+   `hearth admin token` (`seed-store.sh`);
+3. copies that store to every node and starts all five. The lowest-ID node forms the
+   cluster.
+
+## Reading results
+
+Each run writes to `jepsen/store/<test-name>/<timestamp>/`. `store/latest` points at
+the newest run.
+
+| File | What it holds |
+|------|---------------|
+| `results.edn` | The checker verdict. `:valid? true` means the history is consistent. |
+| `history.txt` | Every operation: `:invoke`, then `:ok`, `:fail` or `:info`. |
+| `jepsen.log` | The control node's log, including every fault and when it happened. |
+| `n1/` … `n5/` | Each node's `hearth.log`, downloaded at teardown. |
+| `latency-raw.png`, `rate.png` | Latency and throughput, with fault periods shaded. |
+
+Each Hearth answer maps to one outcome (design decision 6):
+
+| Hearth answer | Write | Read |
+|---|---|---|
+| `2xx` | `:ok` | `:ok` |
+| `503` `HEARTH_CLUSTER_WRITE_OUTCOME_UNKNOWN` | `:info` | — |
+| `503` `HEARTH_CLUSTER_UNAVAILABLE` | `:fail` | `:fail` |
+| Timeout or connection error | `:info` | `:fail` |
+| Any other error | `:fail`, with the code in the history | `:fail` |
+
+`:ok` means Hearth acknowledged the write. `:fail` means it did not happen. `:info`
+means the outcome is unknown: the checkers allow the write to have happened or not.
+A `:fail` write that later shows up breaks W3.
+
+Some tests check a promise that Hearth does not keep yet. They are marked `xfail` with
+a gap ID (`G1`, `G2`, …) from `docs/dev/CONSISTENCY.md`. Such a test reports `xfail`
+when it finds the expected violation, and `xpass` when it does not.

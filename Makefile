@@ -628,12 +628,17 @@ JEPSEN_COMPOSE := docker compose -f jepsen/docker/compose.yaml
 ## no `dev-endpoints`, cached registry and target) and copies its hearth binary
 ## to jepsen/docker/.build/hearth, which the control container sees at
 ## /jepsen/docker/.build/hearth. The Jepsen `db` setup uploads it to each node.
+## hearth.sha256 records where the binary came from: a run refuses any binary
+## that does not match it, because a dev build run without --dev looks like a
+## production build from outside (spec: "The harness is pointed at a dev binary").
 jepsen-binary:
 	docker build -t hearth-jepsen-binary .
 	mkdir -p jepsen/docker/.build
+	rm -f jepsen/docker/.build/hearth jepsen/docker/.build/hearth.sha256
 	id=$$(docker create hearth-jepsen-binary) \
 		&& docker cp "$$id:/usr/local/bin/hearth" jepsen/docker/.build/hearth; \
 		status=$$?; docker rm "$$id" > /dev/null; exit $$status
+	cd jepsen/docker/.build && sha256sum hearth > hearth.sha256
 
 jepsen-up:
 	$(JEPSEN_COMPOSE) up -d --build --wait

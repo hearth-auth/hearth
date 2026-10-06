@@ -77,6 +77,13 @@ registry and target directory are cached in Docker volumes on a workstation and 
 Alternative: a static `musl` build. That changes the allocator and the TLS stack under test,
 so the harness would not test the shipped binary.
 
+Found in task 2.2: a binary built with `dev-endpoints` but run without `--dev` serves no dev
+route (`src/protocol/http.rs` merges them only when both hold), and every string a dev build
+holds also appears in a production build. So no probe can tell the builds apart. The harness
+checks the binary's origin instead: the build target (`make jepsen-binary`, the root
+`Dockerfile`, `--no-default-features`) writes `hearth.sha256` beside the binary, and a run
+refuses a binary without a matching file before it touches any node.
+
 ### 4. Every node runs production mode
 
 Jepsen's `db` setup writes one `hearth.yaml` per node from a template. Per run, the control

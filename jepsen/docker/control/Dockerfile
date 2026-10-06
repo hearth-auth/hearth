@@ -7,12 +7,14 @@
 FROM eclipse-temurin:21-jdk-noble@sha256:b468c3fc688b14450571494f588bd939378e7fd542ed5a73f8efc13f17872a87
 
 # openssh-client: the link to the nodes. gnuplot-nox: Jepsen's latency and
-# rate graphs. openssl: the per-run CA and leaves (gen-material.sh). curl:
-# fetches lein below.
+# rate graphs. openssl: the per-run CA and leaves (gen-material.sh). git:
+# Jepsen records the test code's commit in store/. curl: fetches lein below.
+# The mounted /jepsen belongs to the host user, not root, so git must trust it.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        openssh-client gnuplot-nox openssl curl ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+        openssh-client gnuplot-nox openssl git curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && git config --system --add safe.directory '*'
 
 # The base image sets en_US.UTF-8, and ssh forwards LANG and LC_* to the
 # nodes, which lack that locale. C.UTF-8 is built into every glibc.
