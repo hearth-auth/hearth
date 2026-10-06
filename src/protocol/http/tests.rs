@@ -917,6 +917,63 @@ async fn host_allowlist_allows_listed_host() {
     );
 }
 
+/// Sends `GET /health` the way hyper hands over an HTTP/2 request: the host is
+/// the URI's authority (`:authority`), and `host`, when given, is an extra
+/// `Host` header next to it.
+async fn host_allowlist_status(authority: &str, host: Option<&str>) -> StatusCode {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let state =
+        test_state_with_allowed_hosts(temp_dir.path(), vec!["allowed.example.com".to_string()]);
+    let mut req = axum::http::Request::builder()
+        .method("GET")
+        .uri(format!("https://{authority}/health"));
+    if let Some(host) = host {
+        req = req.header("host", host);
+    }
+    router(state)
+        .oneshot(req.body(axum::body::Body::empty()).expect("request"))
+        .await
+        .expect("response")
+        .status()
+}
+
+/// A-40: an HTTP/2 request carries its host in `:authority`, not in a `Host`
+/// header. An allowlisted authority must pass, or every HTTP/2 client (every
+/// browser over TLS) is refused.
+#[tokio::test]
+async fn host_allowlist_allows_a_listed_http2_authority() {
+    assert_eq!(
+        host_allowlist_status("allowed.example.com:8443", None).await,
+        StatusCode::OK
+    );
+}
+
+/// A-40: an unlisted `:authority` is refused like an unlisted `Host`.
+#[tokio::test]
+async fn host_allowlist_blocks_an_unlisted_http2_authority() {
+    assert_eq!(
+        host_allowlist_status("evil.attacker.com", None).await,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+/// A-40: every host name a request carries must be allowlisted. A listed
+/// `Host` must not carry an unlisted authority past the check, nor the other
+/// way round.
+#[tokio::test]
+async fn host_allowlist_blocks_a_request_whose_host_and_authority_disagree() {
+    assert_eq!(
+        host_allowlist_status("evil.attacker.com", Some("allowed.example.com")).await,
+        StatusCode::BAD_REQUEST,
+        "unlisted authority behind a listed Host"
+    );
+    assert_eq!(
+        host_allowlist_status("allowed.example.com", Some("evil.attacker.com")).await,
+        StatusCode::BAD_REQUEST,
+        "unlisted Host next to a listed authority"
+    );
+}
+
 /// A-40: When allowed_hosts is empty the middleware is fail-open (any Host passes).
 #[tokio::test]
 async fn host_allowlist_empty_allows_any_host() {

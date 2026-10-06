@@ -57,14 +57,18 @@ bootstrap node. Verified on three nodes on 2026-09-21; the transcript is in
 
 **Operational consequences.**
 
-* A cold cluster forms on its own. `POST /admin/cluster/bootstrap` still works
-  and now answers `409` on an already-initialised cluster; it remains the
-  escape hatch when the lowest-ID node is the one that is down.
-* Provision the lowest-ID node first, or at least start it alongside the
-  others. If it never starts, the remaining nodes wait out the 120 s window and
-  exit — bootstrap one of them explicitly instead.
-* A `cluster:` section with an empty `peers` list does **not** self-initialise;
-  there is nothing to replicate to. Use the endpoint.
+* A cold cluster forms on its own. `POST /admin/cluster/bootstrap` answers
+  `409` on an already-initialised cluster.
+* **The lowest-ID node must start.** A node opens its HTTP port only after the
+  start-up write window, and the window needs a leader. So while no leader
+  exists, no node serves `POST /admin/cluster/bootstrap`: the endpoint cannot
+  form a cold cluster. If the lowest-ID node never starts, the remaining nodes
+  wait out the 120 s window and exit. Start that node.
+* A `cluster:` section with an empty `peers` list does **not** self-initialise,
+  and so it does not start: its start-up writes find no leader and the process
+  exits before it serves HTTP (seen 2026-10-06 while writing
+  `tests/cluster_serve_admin_status.rs`). Omit the `cluster:` section for a
+  single node.
 
 ### C-5 — Follower cache invalidation is partial (was: "followers never invalidate")
 
@@ -386,17 +390,22 @@ data directory, and on a cluster node it is limited:
   into it **before** copying it to every node and the token validates on all of them (the
   [purged-log upgrade](./upgrading.md#upgrading-a-cluster-whose-raft-logs-were-purged), step 4).
 
-Neither source helps a **cold cluster with empty data directories**: it has no operator account
-yet, so there is nobody to mint for (see the bootstrap note below).
+A **cold cluster with empty data directories** has no operator account yet. To hold a token
+before the first start, seed one store as a single node (no `cluster:` section): finish the
+first-boot setup at `/ui/setup`, verify the operator's email, stop the node, mint with
+`hearth admin token` into that store, then copy it to every node before any node starts.
+`jepsen/scripts/seed-store.sh` scripts these steps.
 
 ### Bootstrap Sequence
 
-> **Usually unnecessary.** As of task 26.46 the lowest-ID node in the
+> **This endpoint cannot form a cold cluster.** The lowest-ID node in the
 > configured membership initialises the cluster itself at start-up — see
-> [G-1](#g-1--a-cold-cluster-could-not-be-bootstrapped-fixed). Follow this
-> sequence when that node is unavailable, or when you want to form the cluster
-> from a different node's membership. On an already-initialised cluster the
-> endpoint answers `409`.
+> [G-1](#g-1--a-cold-cluster-could-not-be-bootstrapped-fixed). A node opens its
+> HTTP port only after its start-up write window, and that window needs a
+> leader, so while no leader exists no node serves this endpoint (seen
+> 2026-10-06). If the lowest-ID node is down, start it. On a formed cluster the
+> endpoint answers `409` (`tests/cluster_serve_admin_status.rs`). The steps
+> below describe the endpoint only.
 
 Bootstrapping initializes the cluster's initial membership. Do this **once** — running bootstrap on an already-initialized cluster is a no-op (Raft rejects double-initialization).
 

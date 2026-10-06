@@ -348,6 +348,26 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   inside `assertion`, is refused instead of being read with the field dropped.
 
 ### Fixed
+- **`/admin/cluster/*` works on a running cluster.** `GET /admin/cluster/status`,
+  `POST /admin/cluster/bootstrap` and `POST /admin/cluster/transfer-leadership` answered
+  `503 not in cluster mode` on every node of a cluster, because `serve` never gave the HTTP layer
+  its Raft engine. They now reach Raft.
+- **`POST /admin/cluster/bootstrap` answers `409` on an initialised cluster**, as documented. It
+  answered `500`.
+- **`hearth admin token` signs with the configured issuer and audience.** It signed every token
+  for `https://hearth.local` with audience `hearth`, whatever `oidc.issuer`, `token.issuer` and
+  `token.audience` said. Production config refuses a `.local` issuer, so no production server
+  accepted its tokens.
+- **HTTP/2 requests pass the host allowlist.** An HTTP/2 request carries its host in
+  `:authority`, not in a `Host` header, so a node with native TLS answered every HTTP/2 request
+  (every browser) with `400 host not allowed`. The check now reads both. When a request carries
+  both, both must be on `security.allowed_hosts`.
+- **The cluster clock-offset warning (C4) no longer fires on replication delay.** A follower
+  warned `clock skew with leader exceeds 1 s` for every batch of entries that arrived late, for
+  example after a restart or the first election, on clocks that agreed. It now ignores entries
+  the leader had already committed, takes the freshest entry over a 30 s window, and warns at
+  most once per window: `clock offset from the leader exceeds 1 s` (leader ahead) or
+  `clock offset from the leader may exceed 1 s` (this node ahead).
 - **`POST /device_authorization` now ignores an unknown parameter.** The header-routed device
   authorization endpoint refused a parameter RFC 8628 does not define with `400`, unlike its
   realm-routed twin and the other OAuth endpoints. It now ignores it, as RFC 6749 §3.1 requires.
