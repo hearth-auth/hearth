@@ -1,0 +1,11 @@
+# The nodes generate a fresh host key each time they start, and they live on a
+# private Compose network. So a recorded host key is no protection here.
+Host n1 n2 n3 n4 n5
+    User root
+    IdentityFile /keys/id_ed25519
+    IdentitiesOnly yes
+    BatchMode yes
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+    LogLevel ERROR
+    ConnectTimeout 5

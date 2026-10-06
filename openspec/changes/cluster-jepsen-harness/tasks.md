@@ -7,9 +7,9 @@
 
 ## 1. Containers and binary
 
-- [ ] 1.1 `jepsen/docker/`: Compose file, node image (Debian bookworm, `sshd`, `iptables`, `iproute2`), control image (JDK 21, Leiningen). Proof: `make jepsen-up` starts 6 containers, and `ssh n1 true` from control exits 0 on all 5 nodes
-- [ ] 1.2 Builder stage: `cargo build --release` without `dev-endpoints`, cached registry and target. Proof: the binary runs `hearth --version` inside a node container
-- [ ] 1.3 Per-run material: KEK, `HEARTH_MASTER_KEY`, CA, peer and HTTPS leaves with `DNS:nX` SANs, one `hearth.yaml` per node. Proof: `hearth config validate` exits 0 on all 5 files, and `openssl x509 -noout -text` shows the SAN on each leaf
+- [x] 1.1 `jepsen/docker/`: Compose file, node image (Debian bookworm, `sshd`, `iptables`, `iproute2`), control image (JDK 21, Leiningen). Proof: `make jepsen-up` starts 6 containers, and `ssh n1 true` from control exits 0 on all 5 nodes
+- [x] 1.2 Builder stage: `cargo build --release` without `dev-endpoints`, cached registry and target. Proof: the binary runs `hearth --version` inside a node container
+- [x] 1.3 Per-run material: KEK, `HEARTH_MASTER_KEY`, CA, peer and HTTPS leaves with `DNS:nX` SANs, one `hearth.yaml` per node. Proof: `hearth config validate` exits 0 on all 5 files, and `openssl x509 -noout -text` shows the SAN on each leaf
 
 ## 2. Jepsen project skeleton
 

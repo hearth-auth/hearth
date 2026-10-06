@@ -1,0 +1,5 @@
+# The hearth binary `make jepsen-binary` extracts from the shipped image.
+/docker/.build/
+# Leiningen and Jepsen output.
+/target/
+/store/

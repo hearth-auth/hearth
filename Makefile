@@ -13,7 +13,7 @@ BUF := buf
 ## with `--workspace`.
 DEV_FEATURES ?= --features hearth/dev-endpoints
 
-.PHONY: setup build test test-detached test-no-dev-endpoints clippy fmt miri asan heap-check unsafe-check loadtest loadtest-check loadtest-smoke seed check coverage css css-check css-watch tailwind-install openapi openapi-check sdk-admin-gen sdk-admin-check sdk-conformance proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test sdk-lint test-quality abuse-check auth-discard-check mfa-resolver-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template scratch-prune scratch-prune-dry-run scratch-timer-install
+.PHONY: setup build test test-detached test-no-dev-endpoints clippy fmt miri asan heap-check unsafe-check loadtest loadtest-check loadtest-smoke seed check coverage css css-check css-watch tailwind-install openapi openapi-check sdk-admin-gen sdk-admin-check sdk-conformance proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test sdk-lint test-quality abuse-check auth-discard-check mfa-resolver-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke jepsen-binary jepsen-up jepsen-down ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template scratch-prune scratch-prune-dry-run scratch-timer-install
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -616,6 +616,31 @@ cluster-route-check:
 ## Estimated runtime: ~60 s on a laptop (election timeouts dominate).
 cluster-smoke:
 	PROTOC=$(PROTOC) cargo nextest run --package hearth-simulation --test-threads=1 $(CARGO_FLAGS) -E 'test(~simulation)'
+
+## Jepsen test cluster (openspec change `cluster-jepsen-harness`): one control
+## container and five privileged hearth nodes, from jepsen/docker/compose.yaml.
+## `jepsen-up` builds and starts them, then proves `ssh <node> true` from the
+## control container on all five nodes. `jepsen-down` removes the containers
+## and their volumes (the SSH key pair and the Maven cache).
+JEPSEN_COMPOSE := docker compose -f jepsen/docker/compose.yaml
+
+## `jepsen-binary` builds the shipped image from the root Dockerfile (bookworm,
+## no `dev-endpoints`, cached registry and target) and copies its hearth binary
+## to jepsen/docker/.build/hearth, which the control container sees at
+## /jepsen/docker/.build/hearth. The Jepsen `db` setup uploads it to each node.
+jepsen-binary:
+	docker build -t hearth-jepsen-binary .
+	mkdir -p jepsen/docker/.build
+	id=$$(docker create hearth-jepsen-binary) \
+		&& docker cp "$$id:/usr/local/bin/hearth" jepsen/docker/.build/hearth; \
+		status=$$?; docker rm "$$id" > /dev/null; exit $$status
+
+jepsen-up:
+	$(JEPSEN_COMPOSE) up -d --build --wait
+	$(JEPSEN_COMPOSE) exec -T control jepsen-ssh-check
+
+jepsen-down:
+	$(JEPSEN_COMPOSE) down -v --remove-orphans
 
 ## CI standard tier: fast + tests + SDK tests + proto breaking + perf gate + cluster route check (merge).
 ci-standard: ci-fast test proto-breaking sdk-test proto-check bench-gate cluster-route-check
