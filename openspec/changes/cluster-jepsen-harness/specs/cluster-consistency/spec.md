@@ -112,12 +112,17 @@ Expiry checks SHALL tolerate up to `60` seconds of clock skew between nodes.
 - **THEN** the token is not rejected as not yet valid
 
 ### Requirement: C4 A node warns about clock offset from the leader
-A node SHALL log a warning when its clock differs from the leader's by more than `1` second. The warning SHALL NOT change how the node answers requests.
+A node SHALL log a warning when its clock differs from the leader's by more than `1` second. It SHALL estimate the offset from the leader timestamps of the entries it receives that the leader has not yet committed, take the smallest age over a `30`-second window, and warn at most once per window. Replication delay alone SHALL NOT cause the warning. The warning SHALL NOT change how the node answers requests.
 
 #### Scenario: A follower's clock drifts
 - **WHEN** a follower's clock is `2` seconds ahead of the leader's
-- **THEN** the follower logs a clock-offset warning
+- **AND** the follower receives new entries for `30` seconds
+- **THEN** the follower logs one clock-offset warning
 - **AND** it keeps serving requests
+
+#### Scenario: A follower catches up after a restart
+- **WHEN** a follower whose clock agrees with the leader's receives entries the leader committed while it was down
+- **THEN** the follower logs no clock-offset warning
 
 ### Requirement: Node-local state is per node
 Attempt trackers (user login, IP login, MFA, magic link, password reset, registration), rate limiters and the KDF admission gate SHALL be per node. A client MUST NOT expect lockout counts or rate limits to agree between nodes. When `hearth.yaml` does not configure the session-cookie secret or the DPoP nonce secret, each process SHALL generate its own, so a cookie or nonce from one node fails on another.

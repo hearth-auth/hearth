@@ -243,9 +243,47 @@ roll back, delete `jepsen/` and the workflow.
    (decision 5) fails, the fallback is the console login and token mint, scripted as a real
    operator would do it. Task 0.2 answers whether the first-boot setup flow runs on a node that
    later joins a cluster.
-3. **W4 and W5 targets.** Which single-use artifact can a script mint and redeem through the
-   API (refresh-token rotation, an authorization code)? Is any replicated counter readable
-   through the API? Task 0.3 answers this.
+
+   **Spike result (task 0.2, 2026-10-06).** Scripts:
+   `jepsen/scripts/{gen-material.sh,seed-store.sh,spike-cold-cluster.sh}`. Decision 5 works
+   as written: the first-boot setup and email verification on a single-node seed store,
+   `hearth admin token` into it, then three nodes started from copies of it. The first run
+   found five server bugs. The owner chose to fix them on this branch, each test-first:
+   - `serve` never gave the HTTP layer its cluster engine (`AppState::with_cluster` had no
+     caller), so every `/admin/cluster/*` route answered `503 not in cluster mode` on a running
+     cluster. Decision 8 and the leader-isolating nemesis need `/admin/cluster/status`.
+     Test: `tests/cluster_serve_admin_status.rs`.
+   - With that fixed, `POST /admin/cluster/bootstrap` on a formed cluster answered `500`, not
+     `409`: it matched openraft's error text. It now matches the typed error.
+   - `hearth admin token` signed with the default issuer `https://hearth.local` and audience
+     `hearth`, not the configured ones. Production config refuses a `.local` issuer, so no
+     production server accepted its tokens. Test: `tests/cli_admin_token.rs`.
+   - The host allowlist read only the `Host` header, so a node with native TLS refused every
+     HTTP/2 request with `400 host not allowed`. It now checks `:authority` too.
+   - Each follower warned `clock skew with leader exceeds 1 s` (`skew_ms=2234`) on one shared
+     clock: the check took a late entry's age as the offset (C4). The delta spec now states the
+     estimate (in-flight entries, smallest age over 30 s).
+   - Also found: the console's login `Origin` check expects the issuer's origin, so a script
+     sends no `Origin` (an absent header is same-site by design). And a node opens HTTP only
+     after a leader exists, so `POST /admin/cluster/bootstrap` cannot form a cold cluster;
+     `docs/guides/clustering.md` claimed it could and is corrected.
+3. **W4 and W5 targets.** Answered 2026-10-06 (task 0.3, from the code):
+   - **W4: a presented refresh token**, with the authorization code as the second choice.
+     ARCHITECTURE.md §16.3 lists both as claimed with one `put_if_absent` in the state
+     machine's apply. One hosted sign-in (the console driver in `jepsen/scripts/` signs in the
+     same way) gives a refresh token. Clients on several nodes then redeem the same token at
+     `POST /oauth/token`. The one `:ok` answer carries the next refresh token, which is the next
+     artifact, so a test needs one sign-in, not one per operation. When no redemption of a token
+     is `:ok`, the workload signs in again. The test realm sets
+     `realms.<name>.auth.mfa_required: false`, so a script signs in with a password alone (or
+     the workload enrols TOTP, as the console driver does). Task 4.3 proves this path at run
+     time.
+   - **W5: no readable counter.** The only `IncrementU64` counter is the control epoch
+     (`src/identity/engine/control.rs:499`, `src/identity/engine/mod.rs:5439`). No API returns
+     its value, and `/metrics` exports only `hearth_control_epoch_bump_failures_total` and
+     `hearth_control_epoch_bumps_owed`. Every election also bumps it, so a final count could not
+     separate test bumps from election bumps. W5 stays covered by the unit tests in
+     `src/cluster/state_machine.rs`; task 4.4 records this in CONSISTENCY.md §9.
 4. **Freeze.** Resolved 2026-10-06 (owner): G1, G2, G3, G4, G6 and G8 are defect fixes and may
    start during the `trusted-core-confidence` freeze. G5 (membership changes) and G7 (a new
    client request ID) are features and wait until that change is archived. G9 needs G5, so it

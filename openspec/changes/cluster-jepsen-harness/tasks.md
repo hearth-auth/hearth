@@ -1,8 +1,8 @@
 ## 0. Decisions and spike (before any harness code)
 
 - [x] 0.1 Owner decision on Open Question 1 (EPL-1.0 for a test-only tool). Record it in `design.md`
-- [ ] 0.2 Spike: script the first operator token for a cold cluster without `--dev` (design decision 5). Proof: a shell script that starts 3 production-mode nodes on the host and ends with `GET /admin/cluster/status` answering `200` to a system-realm token on every node. The path MUST NOT use `--dev`, `dev-endpoints` or any test-only shortcut in the binary (design Open Question 2). If no path works without a server change, stop and report to the owner
-- [ ] 0.3 Spike: answer Open Question 3. Name one single-use artifact a script can mint and redeem through the API, and say whether any replicated counter is readable through the API. Record the answers in `design.md`
+- [x] 0.2 Spike: script the first operator token for a cold cluster without `--dev` (design decision 5). Proof: a shell script that starts 3 production-mode nodes on the host and ends with `GET /admin/cluster/status` answering `200` to a system-realm token on every node. The path MUST NOT use `--dev`, `dev-endpoints` or any test-only shortcut in the binary (design Open Question 2). If no path works without a server change, stop and report to the owner
+- [x] 0.3 Spike: answer Open Question 3. Name one single-use artifact a script can mint and redeem through the API, and say whether any replicated counter is readable through the API. Record the answers in `design.md`
 - [x] 0.4 Owner decision on Open Question 4 (are the G-item follow-ups allowed under the freeze). Record it in `design.md`
 
 ## 1. Containers and binary
