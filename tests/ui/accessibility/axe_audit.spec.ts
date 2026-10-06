@@ -271,4 +271,10 @@ test.describe('Accessibility audit — public pages', () => {
       await assertMainLandmarkFocusable(page, `${label} (chromeless)`);
     });
   }
+
+  // The dev console (`--dev` servers only) is a standalone page with no app
+  // chrome and no skip link, so it gets the axe audit alone.
+  test('dev-console — no blocking a11y violations', async ({ page }) => {
+    await auditPage(page, 'dev-console', `${BASE_URL}/dev`);
+  });
 });

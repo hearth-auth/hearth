@@ -275,7 +275,7 @@ pub(crate) fn method_label(method: &axum::http::Method) -> &'static str {
 /// one a production build (no `dev-endpoints` feature, or `dev_mode = false`)
 /// returns. A remote scanner cannot tell a dev server from a production one.
 #[cfg(feature = "dev-endpoints")]
-async fn dev_loopback_only(req: Request, next: Next) -> Response {
+pub(crate) async fn dev_loopback_only(req: Request, next: Next) -> Response {
     use std::net::{IpAddr, SocketAddr};
 
     let peer = req

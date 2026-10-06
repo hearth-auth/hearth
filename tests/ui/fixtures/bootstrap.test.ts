@@ -105,21 +105,56 @@ test('existing realm, expired token: 401 triggers refresh then retry with fresh 
   assert.equal(h.getWritten()?.access_token, 'rebootstrap-access');
 });
 
-test('401 with no cached refresh token: throws a clear error', async () => {
-  const h = harness([() => jsonResponse(401, { error: 'missing authorization header' })], null);
-  await assert.rejects(bootstrap(h.deps), /401/);
+const DEV_CREDS: Credentials = {
+  realm_id: 'realm-1',
+  user_id: 'user-1',
+  access_token: 'dev-console-access',
+  refresh_token: 'dev-console-refresh',
+  totp_secret: 'REALMSECRET',
+  admin_totp_secret: 'ADMINSECRET',
+};
+
+test('401 with no cache: falls back to the dev console credentials', async () => {
+  // The accounts were set up by a visit to /dev, so there is no first
+  // bootstrap response to have cached.
+  const h = harness(
+    [
+      () => jsonResponse(401, { error: 'missing authorization header' }),
+      () => jsonResponse(200, DEV_CREDS),
+    ],
+    null,
+  );
+  const creds = await bootstrap(h.deps);
+  assert.equal(h.calls[1].url, `${BASE_URL}/dev/credentials`);
+  assert.equal(creds.access_token, 'dev-console-access');
+  assert.equal(creds.admin_totp_secret, 'ADMINSECRET');
+  assert.equal(h.getWritten()?.totp_secret, 'REALMSECRET');
 });
 
-test('401 then refresh also fails: throws a clear error', async () => {
+test('401 then refresh fails: falls back to the dev console credentials', async () => {
   const cached: Credentials = { ...FRESH, access_token: 'stale', refresh_token: 'expired-refresh' };
   const h = harness(
     [
       () => jsonResponse(401, { error: 'missing authorization header' }),
       () => jsonResponse(400, { error: 'invalid_grant' }),
+      () => jsonResponse(200, DEV_CREDS),
     ],
     cached,
   );
-  await assert.rejects(bootstrap(h.deps), /refresh/i);
+  const creds = await bootstrap(h.deps);
+  assert.equal(h.calls[2].url, `${BASE_URL}/dev/credentials`);
+  assert.equal(creds.access_token, 'dev-console-access');
+});
+
+test('401 and no dev console either: throws a clear error', async () => {
+  const h = harness(
+    [
+      () => jsonResponse(401, { error: 'missing authorization header' }),
+      () => jsonResponse(404, {}),
+    ],
+    null,
+  );
+  await assert.rejects(bootstrap(h.deps), /make dev-reset/);
 });
 
 test('re-bootstrap keeps the cached TOTP secrets the server returns only once', async () => {

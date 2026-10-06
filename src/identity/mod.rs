@@ -1203,6 +1203,16 @@ pub trait IdentityEngine: Send + Sync {
         user_id: &UserId,
     ) -> Result<TotpEnrollment, IdentityError>;
 
+    /// The base32 secret of the user's active TOTP factor, or `None` when the
+    /// user has none. Dev builds only: the dev console (`/dev`) shows the dev
+    /// accounts' current codes. Production code never reads a secret back.
+    #[cfg(feature = "dev-endpoints")]
+    fn dev_totp_secret(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<Option<String>, IdentityError>;
+
     /// Verifies the initial TOTP setup code and enables MFA.
     ///
     /// The user must have a pending enrollment (from `enroll_totp()`).

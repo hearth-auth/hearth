@@ -386,7 +386,7 @@ async fn bootstrap_returns_admin_password_on_first_call() {
     );
     assert_eq!(
         pwd_str,
-        super::admin::DEV_SYSTEM_ADMIN_PASSWORD,
+        crate::protocol::dev_accounts::SYSTEM_ADMIN_PASSWORD,
         "admin_password must match the well-known dev constant"
     );
 
@@ -780,7 +780,7 @@ async fn bootstrap_requires_auth_on_second_call() {
 
 /// HEA-1716: Fresh bootstraps always return the fixed dev password constant.
 ///
-/// The system admin now uses a stable password (DEV_SYSTEM_ADMIN_PASSWORD) so
+/// The system admin now uses a stable password (`dev_accounts::SYSTEM_ADMIN_PASSWORD`) so
 /// the Playwright UI test suite can log in without reading the bootstrap response.
 #[cfg(feature = "dev-endpoints")]
 #[tokio::test]
@@ -815,12 +815,12 @@ async fn bootstrap_returns_fixed_dev_password_on_first_call() {
 
     assert_eq!(
         pwd_a,
-        super::admin::DEV_SYSTEM_ADMIN_PASSWORD,
+        crate::protocol::dev_accounts::SYSTEM_ADMIN_PASSWORD,
         "first bootstrap must return the well-known dev constant"
     );
     assert_eq!(
         pwd_b,
-        super::admin::DEV_SYSTEM_ADMIN_PASSWORD,
+        crate::protocol::dev_accounts::SYSTEM_ADMIN_PASSWORD,
         "second fresh install must also return the well-known dev constant"
     );
 }

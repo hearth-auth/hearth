@@ -77,109 +77,107 @@ Reports land in `tests/ui/reports/`:
 ## Quick Start
 
 ```bash
-make dev                              # cargo run --features dev-endpoints -- serve --dev  (preferred)
-# or:
-cargo build --release --features dev-endpoints
-./target/release/hearth serve --dev   # binds 127.0.0.1:8420, in-memory storage
-curl http://127.0.0.1:8420/health
-curl -X POST http://127.0.0.1:8420/admin/bootstrap  # dev-only, creates realm+admin+token
+make dev
 ```
 
-`dev-endpoints` is **not** a default cargo feature: it compiles in `/admin/bootstrap`, the
-`/dev/seed-*` routes and the hard-coded dev admin password, so a plain `cargo build --release`
-is a production build without them. `make dev`, `make build`, `make test`, `make check`, bacon
-and CI opt in; a bare `cargo nextest run` compiles the bootstrap-dependent tests out (pass
-`--features dev-endpoints` to run them). `serve --dev` on a featureless binary logs a warning
-that bootstrap is unavailable.
+Then open **http://127.0.0.1:8420/dev** (the startup panel prints the link) and click
+**Sign in** on the account you want. That is the whole local sign-in.
 
-`--dev` auto-enables the in-process **mailcatcher** email transport. All outbound emails are captured and visible at `http://127.0.0.1:8420/dev/mail`. No Docker or external mail server needed.
+`make dev` runs `cargo run --features dev-endpoints -- serve --dev` on `127.0.0.1:8420`, with
+persistent data in `./data/dev` (`make dev-reset` wipes it). The first visit to `/dev` creates the
+dev accounts, so a fresh data directory needs no bootstrap call and no setup link.
 
-## Bootstrap & Browser Login (dev-only)
+`dev-endpoints` is **not** a default cargo feature: it compiles in the dev console,
+`/admin/bootstrap`, the `/dev/seed-*` routes and the hard-coded dev passwords, so a plain
+`cargo build --release` is a production build without them. `make dev`, `make build`,
+`make test`, `make check`, bacon and CI opt in; a bare `cargo nextest run` compiles the
+bootstrap-dependent tests out (pass `--features dev-endpoints` to run them). `serve --dev` on a
+featureless binary logs a warning that these routes are unavailable.
 
-The bootstrap endpoint creates credentials on **first call only**. Re-bootstrap
-(when the dev-realm already exists) refreshes tokens but does **not** change the
-admin password — include the Bearer token from the first bootstrap.
+`--dev` auto-enables the in-process **mailcatcher** email transport. All outbound emails are
+captured and visible at `http://127.0.0.1:8420/dev/mail` (its password is in the startup panel).
+No Docker or external mail server needed.
 
-```bash
-# 1. Start the server (in background or a separate terminal)
-make dev &
-# Wait for: "listening on 127.0.0.1:8420"
+## Dev console and dev accounts (dev-only)
 
-# 2. First bootstrap — creates realm + admin user + API token, and enrols TOTP
-#    for both admins. admin_password, totp_secret and admin_totp_secret are
-#    returned ONLY on this first call — save them securely.
-BOOTSTRAP=$(curl -sf -X POST http://127.0.0.1:8420/admin/bootstrap)
-REALM_ID=$(echo "$BOOTSTRAP" | jq -r '.realm_id')
-ADMIN_TOKEN=$(echo "$BOOTSTRAP" | jq -r '.access_token')
-ADMIN_PASSWORD=$(echo "$BOOTSTRAP" | jq -r '.admin_password')
-SYSTEM_TOKEN=$(echo "$BOOTSTRAP" | jq -r '.system_access_token')
-SYSTEM_REALM_ID=$(echo "$BOOTSTRAP" | jq -r '.system_realm_id')
-ADMIN_TOTP_SECRET=$(echo "$BOOTSTRAP" | jq -r '.admin_totp_secret')  # admin@hearth.test
-TOTP_SECRET=$(echo "$BOOTSTRAP" | jq -r '.totp_secret')              # admin@dev.local
+`/dev` lists the two dev accounts:
 
-echo "Realm:         $REALM_ID"
-echo "Token:         $ADMIN_TOKEN"
-echo "Password:      $ADMIN_PASSWORD"   # store this — it will not be shown again
-echo "System Token:  $SYSTEM_TOKEN"
-echo "System Realm:  $SYSTEM_REALM_ID"
-echo "Admin TOTP:    $ADMIN_TOTP_SECRET"   # store this — it will not be shown again
-echo "Dev TOTP:      $TOTP_SECRET"         # store this — it will not be shown again
+| Account | Signs in to | Password |
+|---------|-------------|----------|
+| `admin@hearth.test` | the admin console (`/ui/admin`), system realm | `HearthTest123!` |
+| `admin@dev.local` | the `dev-realm` tenant (`/ui/realms/dev-realm/login`) | `HearthDev123!` |
 
-# 3. Re-bootstrap (after server restart / token expiry) — requires the Bearer token.
-BOOTSTRAP=$(curl -sf -X POST http://127.0.0.1:8420/admin/bootstrap \
-  -H "Authorization: Bearer $ADMIN_TOKEN")
-ADMIN_TOKEN=$(echo "$BOOTSTRAP" | jq -r '.access_token')
-SYSTEM_TOKEN=$(echo "$BOOTSTRAP" | jq -r '.system_access_token')
-```
+For each account the page shows:
 
-**Browser login:** navigate to `http://127.0.0.1:8420/ui/admin/login` and sign in with:
+- **Sign in** — opens a browser session counted as having proved a second factor, then
+  redirects to the console (or the realm home). No TOTP code is typed.
+- The **current TOTP code** (it refreshes every 30 seconds), the TOTP secret and a QR code, for
+  testing the real password-plus-TOTP sign-in.
+- A fresh **API access token** (valid 15 minutes; reload for a new one) and the **realm ID**
+  for the `X-Realm-ID` header.
 
-| Field    | Value                                      |
-|----------|--------------------------------------------|
-| Email    | `admin@hearth.test`                        |
-| Password | the `admin_password` from first bootstrap  |
-| TOTP code | a code from `admin_totp_secret`, e.g. `oathtool --totp -b "$ADMIN_TOTP_SECRET"` |
+The console answers only under `--dev` and only to a loopback client, like every dev endpoint.
+A form post from another site cannot use its **Sign in** button.
 
-The system realm always requires MFA, so the console asks for a TOTP code after the
-password. Add `admin_totp_secret` (base32) to an authenticator app, or compute a code
-with `oathtool`. Both TOTP secrets are empty on re-bootstrap. Bootstrap spends the
-current 30-second code when it enrols the factor, and a spent code is refused, so right
-after bootstrap use the next code (wait up to 30 s).
+If `/dev` reports that the accounts could not be set up, the data directory predates the
+current code: run `make dev-reset` and reload.
 
-A successful login answers `303` to `/ui` (the dashboard). `/ui/admin` redirects on to
-`/ui/admin/realms`. There is no `/admin` HTML page — that prefix is the JSON admin API
-and answers `404` in a browser. Note the two bootstrap admins are different accounts:
-`admin@hearth.test` lives in the system realm and is the one the console accepts;
-`admin@dev.local` is the dev-realm identity behind `access_token` and `401`s at this form.
+### Admin API from a shell
 
-**API usage with the tokens:**
+Copy a token and the realm ID from `/dev`, then:
 
 ```bash
-# Dev-realm operations (most admin API calls).
 # X-Realm-ID is MANDATORY on every /admin/* route — without it the call answers
 # 400 {"error":"missing X-Realm-ID header"}, not 401.
-curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "X-Realm-ID: $REALM_ID" \
-  http://127.0.0.1:8420/admin/realms | jq .
-
-# Cross-realm operations (e.g. rotate a non-dev realm's signing key)
-# Use the system token + X-Realm-ID header
-curl -s -X POST \
-  -H "Authorization: Bearer $SYSTEM_TOKEN" \
-  -H "X-Realm-ID: $SYSTEM_REALM_ID" \
-  http://127.0.0.1:8420/admin/realms/<other-realm-id>/rotate-signing-key | jq .
+curl -s -H "Authorization: Bearer <token>" -H "X-Realm-ID: <realm-id>" \
+  http://127.0.0.1:8420/admin/realms
 ```
 
-> `access_token` is scoped to the dev realm only — it 403s on cross-realm operations.
-> `system_access_token` carries the nil-UUID system-realm identity and can manage any realm.
-> Both are long-lived Bearer tokens. They are **not** session cookies — browser pages require
-> the cookie set by the login form above.
+The `admin@dev.local` token is scoped to `dev-realm` and answers `403` on cross-realm
+operations. The `admin@hearth.test` token carries the system-realm identity and can manage any
+realm (for example, rotate another realm's signing key).
+
+### Scripted bootstrap (CI, SDK and UI test harnesses)
+
+Scripts that need tokens without a browser call `POST /admin/bootstrap` on a fresh data
+directory. It creates the same accounts and returns, on the **first call only**, the passwords
+and TOTP secrets with the tokens:
+
+```bash
+BOOTSTRAP=$(curl -sf -X POST http://127.0.0.1:8420/admin/bootstrap)
+jq -r '.realm_id, .access_token, .system_access_token' <<< "$BOOTSTRAP"
+```
+
+Use `jq ... <<< "$BOOTSTRAP"` (or `printf '%s'`), not `echo "$BOOTSTRAP" | jq`: zsh's `echo`
+turns the `\n` escapes inside the JSON strings into line breaks, and `jq` then refuses the input.
+
+Once the accounts exist (after a first bootstrap, or a visit to `/dev`), a call without a token
+answers `401`. A re-bootstrap needs the Bearer token of an earlier call, returns fresh tokens,
+and never changes a password:
+
+```bash
+curl -sf -X POST http://127.0.0.1:8420/admin/bootstrap -H "Authorization: Bearer <access_token>"
+```
+
+When the accounts were set up from `/dev`, there is no first-call response to reuse.
+`GET /dev/credentials` returns the same fields as the bootstrap response, with fresh tokens and
+both TOTP secrets, under the same `--dev` and loopback gates. The UI test harness
+(`tests/ui/fixtures/bootstrap.ts`) falls back to it when a re-bootstrap answers `401`.
 
 ## Release-cut procedure
 
-When cutting a versioned release (`vX.Y.Z`):
+Releases are automatic. Do not tag by hand.
 
-1. Replace `## [Unreleased]` in `CHANGELOG.md` with `## [X.Y.Z] — YYYY-MM-DD`.
-2. Add a fresh `## [Unreleased]` section above it (empty categories can be omitted).
-3. Tag the commit: `git tag -s vX.Y.Z -m "Release vX.Y.Z"`.
-4. The changelog entry for the release commit itself is the version heading — no bullet needed.
+- `semantic-release` (`.github/workflows/semantic-release.yml`) runs on every push to `main`. It
+  reads the squash-merge title (Conventional Commits): `fix:` cuts a patch, `feat:` a minor, a
+  `!` or `BREAKING CHANGE` a major. `docs:`, `chore:`, `ci:` and the like cut no release.
+- It first waits for `main`'s CI on that commit (`required-summary`). If CI failed for an
+  infrastructure reason (a rate limit, no runner), re-run the failed jobs with
+  `gh run rerun <id> --failed`, then re-run the release.
+- The `v*` tag triggers `release.yml` (signed binaries, SBOM, provenance), `docker.yml` and
+  `helm.yml`. The SDK tags (`sdk-ts-v*`, `sdks/go/v*`, `sdk-python-v*`, `sdk-php-v*`) trigger
+  their publish workflows.
+- After a new binary release is published, `scripts/check-readme-version.sh` fails every PR until
+  the README's install pins name it. Update them in a `docs:` PR.
+
+`CHANGELOG.md` entries stay under `## [Unreleased]`, written with each PR (see `CLAUDE.md`).

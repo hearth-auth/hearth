@@ -17,6 +17,13 @@ libraries, admin clients generated from OpenAPI, one conformance harness for all
 testing, an external pentest). Hearth is not yet production-ready until the second one is done.
 
 ### Added
+- **Dev console at `/dev`** (`dev-endpoints` builds under `--dev`, loopback only). `make dev`
+  prints its link, and its first visit creates the dev accounts. Each account has a one-click
+  **Sign in**, which counts the second factor as proved, plus its password, live TOTP code, TOTP
+  secret and QR code, a fresh API token and its realm ID. `GET /dev/credentials` returns the
+  same data in the `POST /admin/bootstrap` response shape. Local sign-in no longer needs
+  `curl`, `jq` or `oathtool`. The startup panel's `Admin:` link now points at the admin console
+  (`/ui/admin`), and under `--dev` it shows `Dev:` in place of the first-run `Setup:` link.
 - **`organization` parameter on `/authorize`** (`scope-consent-integrity`). An organization ID
   or slug, in the browser query, a signed request object (JAR) or a pushed request (PAR); the
   JSON `POST /authorize` takes it through a pushed `request_uri`. Hearth accepts it only for an

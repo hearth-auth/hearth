@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hearth Dev Console</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/ui/static/app.css">
+  <script src="/ui/static/dev/console.js" defer></script>
+</head>
+<body class="min-h-screen bg-ht-surface-base text-ht-content-primary">
+
+  <header class="border-b border-white/6 bg-ht-surface-raised px-6 py-4">
+    <div class="mx-auto flex max-w-4xl items-center justify-between">
+      <div>
+        <h1 class="font-display text-lg font-semibold text-ht-content-primary">Dev Console</h1>
+        <p class="text-xs text-ht-content-muted">Local dev server only (<code class="font-mono">--dev</code>, loopback). Nothing here exists in a production build.</p>
+      </div>
+      <a href="/dev/mail"
+         class="rounded border border-white/6 bg-ht-surface px-3 py-1.5 text-xs font-medium text-ht-content-secondary hover:bg-ht-surface-hover hover:text-ht-content-primary transition-colors">
+        Mail catcher
+      </a>
+    </div>
+  </header>
+
+  <main class="mx-auto max-w-4xl space-y-6 px-6 py-6">
+    {% match error %}
+      {% when Some with (message) %}
+      <div role="alert" class="rounded-lg border border-white/6 bg-ht-surface-elevated px-6 py-4 text-sm text-danger-fg">{{ message }}</div>
+      {% when None %}
+    {% endmatch %}
+
+    {% for account in accounts %}
+    <section class="rounded-lg border border-white/6 bg-ht-surface-elevated p-6" aria-labelledby="account-{{ account.key }}">
+      <div class="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h2 id="account-{{ account.key }}" class="font-display text-base font-semibold text-ht-content-primary">{{ account.title }}</h2>
+          <p class="mt-1 font-mono text-sm text-ht-content-secondary">{{ account.email }}</p>
+        </div>
+        <form method="post" action="/dev/sign-in/{{ account.key }}">
+          <button type="submit" class="btn-ember rounded px-4 py-2 text-sm font-semibold">Sign in</button>
+        </form>
+      </div>
+
+      <dl class="mt-5 grid grid-cols-1 gap-x-6 gap-y-4 text-sm sm:grid-cols-[10rem_1fr]">
+        <dt class="text-ht-content-muted">Password</dt>
+        <dd class="flex items-center gap-2">
+          <code id="password-{{ account.key }}" class="font-mono text-ht-content-primary">{{ account.password }}</code>
+          <button type="button" data-copy="password-{{ account.key }}" class="text-xs font-medium text-ht-content-brand hover:text-ht-brand-deep">Copy</button>
+        </dd>
+
+        <dt class="text-ht-content-muted">Password sign-in</dt>
+        <dd><a href="{{ account.login_url }}" class="font-mono text-ht-content-brand hover:text-ht-brand-deep">{{ account.login_url }}</a></dd>
+
+        {% if account.totp_secret != "" %}
+        <dt class="text-ht-content-muted">Current TOTP code</dt>
+        <dd class="flex items-center gap-3">
+          <code id="code-{{ account.key }}" data-code="{{ account.key }}" class="font-mono text-lg tracking-widest text-ht-content-primary">{{ account.totp_code }}</code>
+          <button type="button" data-copy="code-{{ account.key }}" class="text-xs font-medium text-ht-content-brand hover:text-ht-brand-deep">Copy</button>
+          <span class="text-xs text-ht-content-muted"><span data-seconds-left>{{ seconds_left }}</span>s left</span>
+        </dd>
+
+        <dt class="text-ht-content-muted">TOTP secret</dt>
+        <dd>
+          <div class="flex items-center gap-2">
+            <code id="secret-{{ account.key }}" class="font-mono text-xs break-all text-ht-content-secondary">{{ account.totp_secret }}</code>
+            <button type="button" data-copy="secret-{{ account.key }}" class="text-xs font-medium text-ht-content-brand hover:text-ht-brand-deep">Copy</button>
+          </div>
+          {% if account.totp_qr_svg != "" %}
+          <details class="mt-2">
+            <summary class="cursor-pointer text-xs font-medium text-ht-content-brand hover:text-ht-brand-deep">QR code for an authenticator app</summary>
+            <div class="mt-2 inline-block rounded-lg bg-white p-3">{{ account.totp_qr_svg|safe }}</div>
+          </details>
+          {% endif %}
+        </dd>
+        {% else %}
+        <dt class="text-ht-content-muted">TOTP</dt>
+        <dd class="text-ht-content-secondary">No factor enrolled.</dd>
+        {% endif %}
+
+        <dt class="text-ht-content-muted">Realm ID</dt>
+        <dd class="flex items-center gap-2">
+          <code id="realm-{{ account.key }}" class="font-mono text-xs text-ht-content-secondary">{{ account.realm_id }}</code>
+          <button type="button" data-copy="realm-{{ account.key }}" class="text-xs font-medium text-ht-content-brand hover:text-ht-brand-deep">Copy</button>
+        </dd>
+
+        <dt class="text-ht-content-muted">API access token</dt>
+        <dd>
+          {% if account.access_token != "" %}
+          <div class="flex items-start gap-2">
+            <code id="token-{{ account.key }}" class="block max-h-16 overflow-hidden font-mono text-xs break-all text-ht-content-secondary">{{ account.access_token }}</code>
+            <button type="button" data-copy="token-{{ account.key }}" class="text-xs font-medium text-ht-content-brand hover:text-ht-brand-deep">Copy</button>
+          </div>
+          <p class="mt-1 text-xs text-ht-content-muted">Valid 15 minutes; reload the page for a new one. Send it with <code class="font-mono">X-Realm-ID: {{ account.realm_id }}</code>.</p>
+          {% else %}
+          <span class="text-ht-content-secondary">Not available (see the server log).</span>
+          {% endif %}
+        </dd>
+      </dl>
+    </section>
+    {% endfor %}
+  </main>
+</body>
+</html>

@@ -10145,6 +10145,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
     // ===== MFA / TOTP (Step 23) =====
 
+    #[cfg(feature = "dev-endpoints")]
+    fn dev_totp_secret(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<Option<String>, IdentityError> {
+        Ok(self
+            .load_mfa_state(realm_id, user_id)?
+            .filter(|state| state.enabled)
+            .map(|state| state.secret_base32.clone()))
+    }
+
     fn enroll_totp(
         &self,
         realm_id: &RealmId,

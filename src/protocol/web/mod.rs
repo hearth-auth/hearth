@@ -54,6 +54,8 @@ pub mod admin;
 pub mod auth;
 mod authorize_gate;
 pub mod consent_delegations;
+#[cfg(feature = "dev-endpoints")]
+mod dev_console;
 pub mod federation;
 pub mod handlers;
 pub(crate) mod handlers_common;
@@ -1782,7 +1784,7 @@ pub fn router(state: WebState) -> Router {
     } else {
         Vec::new()
     };
-    Router::new()
+    let web = Router::new()
         .route(
             "/ui/",
             axum::routing::get(|| async { Redirect::permanent("/ui") }),
@@ -1832,7 +1834,16 @@ pub fn router(state: WebState) -> Router {
         .route(
             "/required-action/enroll-mfa/passkey/complete",
             axum::routing::post(required_action::passkey_complete),
-        )
+        );
+    // The dev console (`/dev`): `dev-endpoints` builds under `--dev` only,
+    // behind the same loopback guard as the other dev endpoints.
+    #[cfg(feature = "dev-endpoints")]
+    let web = if shared.dev_mode {
+        web.merge(dev_console::routes())
+    } else {
+        web
+    };
+    web
         // Branded 404 for any /ui/* path that no nested route matched, plus
         // every other unrouted path on the web tree. Without this, axum's
         // default falls through with an empty body and the browser paints
@@ -1935,6 +1946,8 @@ const ADMIN_RBAC_DEBUG_JS: &[u8] = include_bytes!("assets/admin/rbac-debug.js");
 const ADMIN_ATTR_ROWS_JS: &[u8] = include_bytes!("assets/admin/attr-rows.js");
 /// Standalone dev-mailcatcher detail-page script (HEA-886).
 const DEV_MAIL_DETAIL_JS: &[u8] = include_bytes!("assets/dev/mail-detail.js");
+/// Copy buttons and live TOTP codes of the dev console (`/dev`).
+const DEV_CONSOLE_JS: &[u8] = include_bytes!("assets/dev/console.js");
 /// Self-hosted Fraunces upright woff2 (HEA-630).
 const FONT_FRAUNCES: &[u8] = include_bytes!("assets/fonts/fraunces-latin.woff2");
 /// Self-hosted Fraunces italic woff2 (HEA-630).
@@ -2149,6 +2162,7 @@ async fn serve_static(
         }
         "admin/attr-rows.js" => Some((ADMIN_ATTR_ROWS_JS, "application/javascript; charset=utf-8")),
         "dev/mail-detail.js" => Some((DEV_MAIL_DETAIL_JS, "application/javascript; charset=utf-8")),
+        "dev/console.js" => Some((DEV_CONSOLE_JS, "application/javascript; charset=utf-8")),
         "passkey.js" => Some((PASSKEY_JS, "application/javascript; charset=utf-8")),
         "favicon.svg" => Some((FAVICON_SVG, "image/svg+xml")),
         "img/hearth-wide-web.svg" => Some((HEARTH_WIDE_SVG, "image/svg+xml")),

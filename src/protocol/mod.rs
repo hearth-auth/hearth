@@ -10,6 +10,8 @@ pub(crate) mod client_admin;
 pub(crate) mod client_info;
 pub(crate) mod cluster_admin;
 pub mod convert;
+#[cfg(feature = "dev-endpoints")]
+pub(crate) mod dev_accounts;
 pub mod error_codes;
 pub mod http;
 pub mod proto;

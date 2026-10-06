@@ -3353,132 +3353,11 @@ pub(super) struct DevSeedPasswordRequest {
     password: FormSecret,
 }
 
-/// Fixed dev-mode password for `admin@hearth.test`.
-///
-/// Using a stable value (rather than a random one) lets the Playwright UI
-/// test suite log in without needing to propagate the password through the
-/// bootstrap response. Acceptable in dev mode; `admin_bootstrap` is a 404
-/// in production.
-#[cfg(feature = "dev-endpoints")]
-pub(super) const DEV_SYSTEM_ADMIN_PASSWORD: &str = "HearthTest123!";
-
-/// Seeds a system-realm admin user (`admin@hearth.test`) the first time a dev
-/// server is bootstrapped. Returns `Some(password)` when the user was newly
-/// created (caller should include it in the response). Returns `None` if the
-/// user already existed — the existing password is left untouched.
-///
-/// Best-effort: logs on error but never returns a failure to the caller.
-/// Returns the password and the base32 TOTP secret, on creation only: the
-/// system realm requires MFA, so the admin gets a TOTP factor (spec
-/// `mfa-policy`).
+/// Seeds the system-realm admin (`admin@hearth.test`) the first time a dev
+/// server is bootstrapped; see [`crate::protocol::dev_accounts::seed_system_admin`].
 #[cfg(feature = "dev-endpoints")]
 fn dev_seed_system_admin(state: &AppState) -> Option<(String, String)> {
-    let sys = crate::identity::keys::system_realm_id();
-
-    // Ensure the system realm has RBAC roles seeded.
-    if let Err(e) = state.rbac.seed_realm(&sys) {
-        tracing::warn!(error = %e, "dev bootstrap: RBAC seed for system realm failed");
-        return None;
-    }
-
-    // If the user already exists, leave the password unchanged. Re-bootstrap
-    // only issues fresh tokens — it never resets credentials (HEA-1670).
-    match state.identity.get_user_by_email(&sys, "admin@hearth.test") {
-        Ok(Some(_)) => return None,
-        Ok(None) => {}
-        Err(e) => {
-            tracing::warn!(error = %e, "dev bootstrap: system realm user lookup failed");
-            return None;
-        }
-    }
-
-    let admin = match state
-        .identity
-        .create_admin_user(&crate::identity::CreateUserRequest {
-            email: "admin@hearth.test".to_string(),
-            display_name: "Dev Admin".to_string(),
-            ..Default::default()
-        }) {
-        Ok(u) => u,
-        Err(e) => {
-            tracing::warn!(error = %e, "dev bootstrap: system realm user creation failed");
-            return None;
-        }
-    };
-
-    // Ensure the account is Active regardless of server default_status config,
-    // so dev logins work without completing email verification.
-    let _ = state.identity.update_user(
-        &sys,
-        admin.id(),
-        &crate::identity::UpdateUserRequest {
-            status: Some(crate::identity::UserStatus::Active),
-            ..Default::default()
-        },
-    );
-
-    let password = DEV_SYSTEM_ADMIN_PASSWORD.to_string();
-    let pwd = crate::identity::CleartextPassword::from_string(password.clone());
-    if let Err(e) = state.identity.set_password(&sys, admin.id(), &pwd) {
-        tracing::warn!(error = %e, "dev bootstrap: system realm password set failed");
-        return None;
-    }
-
-    let role = match state.rbac.get_role_by_name(&sys, "realm.admin") {
-        Ok(Some(r)) => r,
-        Ok(None) => {
-            tracing::warn!("dev bootstrap: realm.admin role missing from system realm");
-            return None;
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "dev bootstrap: system realm role lookup failed");
-            return None;
-        }
-    };
-
-    if let Err(e) = state.rbac.assign_role(
-        &sys,
-        &AssignRoleRequest {
-            subject: Subject::User(admin.id().clone()),
-            role_id: role.id.clone(),
-            scope: Scope::Realm,
-            assigned_by: None,
-        },
-    ) {
-        tracing::warn!(error = %e, "dev bootstrap: system realm role assignment failed");
-    }
-
-    match dev_enrol_totp(state, &sys, admin.id()) {
-        Ok(secret) => Some((password, secret)),
-        Err(e) => {
-            tracing::warn!(error = %e, "dev bootstrap: system admin TOTP enrolment failed");
-            None
-        }
-    }
-}
-
-/// Enrols TOTP for a dev admin and activates it with a code computed from
-/// the new secret — the step a person makes with an authenticator app.
-/// Returns the base32 secret, which bootstrap hands back once.
-#[cfg(feature = "dev-endpoints")]
-fn dev_enrol_totp(
-    state: &AppState,
-    realm_id: &RealmId,
-    user_id: &UserId,
-) -> Result<String, crate::identity::IdentityError> {
-    let enrolment = state.identity.enroll_totp(realm_id, user_id)?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let code = crate::identity::totp::code_at(&enrolment.secret_base32, now).ok_or_else(|| {
-        crate::identity::IdentityError::Internal {
-            reason: "dev bootstrap: TOTP secret did not decode".to_string(),
-        }
-    })?;
-    state
-        .identity
-        .verify_totp_enrollment(realm_id, user_id, &code)?;
-    Ok(enrolment.secret_base32.clone())
+    crate::protocol::dev_accounts::seed_system_admin(state.identity.as_ref(), state.rbac.as_ref())
 }
 
 /// The session context for a dev-endpoint session (bootstrap and the seed
@@ -3595,16 +3474,7 @@ pub(super) async fn admin_bootstrap(
     // wiping state. On DuplicateRealmName we look up the existing realm and
     // admin user, create a new session, and return fresh tokens as 200 OK.
     // Re-bootstrap requires an existing valid Bearer token (HEA-1670).
-    let realm = match state
-        .identity
-        .create_realm(&crate::identity::CreateRealmRequest {
-            name: "dev-realm".to_string(),
-            // The production MFA default holds under `--dev` too.
-            config: Some(crate::identity::RealmConfig {
-                mfa_required: Some(true),
-                ..Default::default()
-            }),
-        }) {
+    let realm = match crate::protocol::dev_accounts::create_dev_realm(state.identity.as_ref()) {
         Ok(t) => t,
         Err(crate::identity::IdentityError::DuplicateRealmName) => {
             // Dev-realm already exists — this is a re-bootstrap. Require a
@@ -3613,7 +3483,10 @@ pub(super) async fn admin_bootstrap(
                 Ok(t) => t,
                 Err(e) => return e.into_response(),
             };
-            let existing = match state.identity.get_realm_by_name("dev-realm") {
+            let existing = match state
+                .identity
+                .get_realm_by_name(crate::protocol::dev_accounts::DEV_REALM_NAME)
+            {
                 Ok(Some(r)) => r,
                 Ok(None) => {
                     return (
@@ -3664,52 +3537,34 @@ pub(super) async fn admin_bootstrap(
                 }
             }
 
-            let admin = match state.identity.get_user_by_email(&rid, "admin@dev.local") {
+            let admin = match state
+                .identity
+                .get_user_by_email(&rid, crate::protocol::dev_accounts::DEV_REALM_ADMIN_EMAIL)
+            {
                 Ok(Some(u)) => u,
                 Ok(None) => {
                     // User was deleted while dev-realm survived — re-create idempotently
                     // so callers never need to wipe data just to re-bootstrap.
-                    let _ = state.rbac.seed_realm(&rid);
-                    let new_user = match state.identity.create_user(
-                        &rid,
-                        &crate::identity::CreateUserRequest {
-                            email: "admin@dev.local".to_string(),
-                            display_name: "Dev Admin".to_string(),
-                            ..Default::default()
-                        },
-                    ) {
-                        Ok(u) => u,
-                        Err(e) => return identity_error_to_response(&e).into_response(),
-                    };
-                    let new_uid = new_user.id().clone();
-                    let _ = state.identity.update_user(
-                        &rid,
-                        &new_uid,
-                        &crate::identity::UpdateUserRequest {
-                            status: Some(crate::identity::UserStatus::Active),
-                            ..Default::default()
-                        },
-                    );
-                    let dev_pwd = crate::identity::CleartextPassword::from_string(
-                        "HearthDev123!".to_string(),
-                    );
-                    let _ = state.identity.set_password(&rid, &new_uid, &dev_pwd);
-                    if let Ok(Some(admin_role)) = state.rbac.get_role_by_name(&rid, "realm.admin") {
-                        let _ = state.rbac.assign_role(
+                    let (new_uid, secret) =
+                        match crate::protocol::dev_accounts::provision_dev_realm_admin(
+                            state.identity.as_ref(),
+                            state.rbac.as_ref(),
                             &rid,
-                            &AssignRoleRequest {
-                                subject: Subject::User(new_uid.clone()),
-                                role_id: admin_role.id.clone(),
-                                scope: Scope::Realm,
-                                assigned_by: None,
-                            },
-                        );
-                    }
-                    totp_secret = match dev_enrol_totp(&state, &rid, &new_uid) {
-                        Ok(secret) => secret,
+                        ) {
+                            Ok(created) => created,
+                            Err(e) => return identity_error_to_response(&e).into_response(),
+                        };
+                    totp_secret = secret;
+                    match state.identity.get_user(&rid, &new_uid) {
+                        Ok(Some(u)) => u,
+                        Ok(None) => {
+                            return identity_error_to_response(
+                                &crate::identity::IdentityError::UserNotFound,
+                            )
+                            .into_response()
+                        }
                         Err(e) => return identity_error_to_response(&e).into_response(),
-                    };
-                    new_user
+                    }
                 }
                 Err(e) => return identity_error_to_response(&e).into_response(),
             };
@@ -3759,75 +3614,16 @@ pub(super) async fn admin_bootstrap(
 
     let realm_id = realm.id().clone();
 
-    // Seed RBAC defaults on the new realm. Hard error: a dev bootstrap
-    // with a broken seed produces a realm where the admin user cannot be
-    // granted realm.admin, making the bootstrap useless.
-    if let Err(e) = state.rbac.seed_realm(&realm_id) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("RBAC seed failed: {e}")})),
-        )
-            .into_response();
-    }
-
-    // Create admin user
-    let user = match state.identity.create_user(
+    // RBAC defaults, the admin user with its dev password, `realm.admin`
+    // (before tokens are issued, so the token carries the admin permissions)
+    // and a TOTP factor: every realm requires MFA by default, and activating
+    // the factor proves it for the session below.
+    let (user_id, totp_secret) = match crate::protocol::dev_accounts::provision_dev_realm_admin(
+        state.identity.as_ref(),
+        state.rbac.as_ref(),
         &realm_id,
-        &crate::identity::CreateUserRequest {
-            email: "admin@dev.local".to_string(),
-            display_name: "Dev Admin".to_string(),
-            ..Default::default()
-        },
     ) {
-        Ok(u) => u,
-        Err(e) => return identity_error_to_response(&e).into_response(),
-    };
-
-    let user_id = user.id().clone();
-
-    // Activate the user and set a well-known dev password so browser-based
-    // UI tests can log in at /ui/realms/dev-realm/login.
-    let _ = state.identity.update_user(
-        &realm_id,
-        &user_id,
-        &crate::identity::UpdateUserRequest {
-            status: Some(crate::identity::UserStatus::Active),
-            ..Default::default()
-        },
-    );
-    let dev_pwd = crate::identity::CleartextPassword::from_string("HearthDev123!".to_string());
-    let _ = state.identity.set_password(&realm_id, &user_id, &dev_pwd);
-
-    // Grant the realm.admin role to the admin user BEFORE issuing tokens so
-    // the access-token `permissions` claim contains `hearth.admin` — otherwise
-    // the returned token would be unable to call any admin endpoint.
-    let admin_role = match state.rbac.get_role_by_name(&realm_id, "realm.admin") {
-        Ok(Some(r)) => r,
-        Ok(None) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "seed role realm.admin missing"})),
-            )
-                .into_response();
-        }
-        Err(e) => return rbac_error_to_response(&e).into_response(),
-    };
-    if let Err(e) = state.rbac.assign_role(
-        &realm_id,
-        &AssignRoleRequest {
-            subject: Subject::User(user_id.clone()),
-            role_id: admin_role.id.clone(),
-            scope: Scope::Realm,
-            assigned_by: None,
-        },
-    ) {
-        return rbac_error_to_response(&e).into_response();
-    }
-
-    // Every realm requires MFA by default, so the admin gets a TOTP factor;
-    // activating it proves the factor for the session below.
-    let totp_secret = match dev_enrol_totp(&state, &realm_id, &user_id) {
-        Ok(secret) => secret,
+        Ok(created) => created,
         Err(e) => return identity_error_to_response(&e).into_response(),
     };
     let proof = crate::identity::MfaProof::Proved;
