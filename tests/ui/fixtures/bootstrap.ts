@@ -96,7 +96,10 @@ async function refreshAccessToken(
  *   1. presents the cached access token (if any) so an in-TTL re-bootstrap
  *      succeeds directly, then
  *   2. on 401, mints a fresh access token from the cached refresh token via the
- *      clientless session-refresh arm of /token and retries once.
+ *      clientless session-refresh arm of /token and retries once;
+ *   3. when there is no usable cache — the accounts were set up by a visit to
+ *      the dev console (`/dev`), not by a first bootstrap — reads them from the
+ *      dev console's JSON twin, `GET /dev/credentials`.
  */
 export async function bootstrap(deps: BootstrapDeps = {}): Promise<Credentials> {
   const fetchFn = deps.fetchFn ?? fetch;
@@ -118,19 +121,29 @@ export async function bootstrap(deps: BootstrapDeps = {}): Promise<Credentials> 
   // refreshing the cached session and retrying re-bootstrap exactly once.
   if (resp.status === 401 && cached?.refresh_token) {
     const freshAccess = await refreshAccessToken(fetchFn, cached);
-    if (!freshAccess) {
-      throw new Error(
-        '[bootstrap] re-bootstrap returned 401 and the cached refresh token is ' +
-          'expired/invalid. Delete tests/ui/.auth/credentials.json and restart ' +
-          '`make dev` (or wipe the dev data dir) to re-bootstrap the dev-realm.',
-      );
+    if (freshAccess) {
+      resp = await callBootstrap(fetchFn, freshAccess);
+      if (resp.ok) {
+        const creds = keepSecrets((await resp.json()) as Credentials, cached);
+        writeCache(creds);
+        return creds;
+      }
     }
-    resp = await callBootstrap(fetchFn, freshAccess);
-    if (resp.ok) {
-      const creds = keepSecrets((await resp.json()) as Credentials, cached);
+  }
+
+  // Still 401 with nothing usable cached: the dev console set the accounts up.
+  if (resp.status === 401) {
+    const dev = await fetchFn(`${BASE_URL}/dev/credentials`, { method: 'GET' });
+    if (dev.ok) {
+      const creds = keepSecrets((await dev.json()) as Credentials, cached);
       writeCache(creds);
       return creds;
     }
+    throw new Error(
+      '[bootstrap] re-bootstrap returned 401, nothing usable is cached, and ' +
+        `${BASE_URL}/dev/credentials answered HTTP ${dev.status}. Run ` +
+        '`make dev-reset`, restart `make dev`, and retry.',
+    );
   }
 
   const body = await resp.text();

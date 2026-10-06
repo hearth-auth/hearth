@@ -17,15 +17,15 @@ Reflex MCP tools (`mcp__reflex__*`) index this repo. Prefer them over `grep`/`gl
 | `make test-detached` | The full suite, detached — **agents MUST use this for full runs** (see "Long-running commands") |
 | `make clippy` | clippy `--all-targets -D warnings`, without and with `dev-endpoints` |
 | `make ci-local-fast` | Host-side mirror of PR-blocking CI — run before push |
-| `make dev` | `cargo run --features dev-endpoints -- serve --dev` on `127.0.0.1:8420`, in-memory, mailcatcher at `/dev/mail` |
+| `make dev` | `cargo run --features dev-endpoints -- serve --dev` on `127.0.0.1:8420`, data in `./data/dev`; open `/dev` to sign in with one click; mailcatcher at `/dev/mail` |
 
-Every other command (UI tests, coverage, load tests, seeding, scratch pruning), first-clone setup, the bootstrap/TOTP login recipe and the release-cut procedure: [`docs/dev/DEVELOPMENT.md`](docs/dev/DEVELOPMENT.md).
+Every other command (UI tests, coverage, load tests, seeding, scratch pruning), first-clone setup, the dev console and dev accounts, and the (automatic) release procedure: [`docs/dev/DEVELOPMENT.md`](docs/dev/DEVELOPMENT.md).
 
 **Build prerequisites:** `PROTOC` must point to `protoc`; `buf` is required (pre-commit hook and CI); `ui/tailwindcss` for CSS changes (`make tailwind-install`); `hearth.yaml` is gitignored — copy `hearth.example.yaml`.
 
 **`dev-endpoints`** is not a default feature: it compiles in `/admin/bootstrap`, `/dev/seed-*` and the dev admin password. A bare `cargo nextest run` compiles the bootstrap-dependent tests out — pass `--features dev-endpoints`. `--dev` storage does not fsync.
 
-**Admin API gotchas:** every `/admin/*` route needs `X-Realm-ID` (without it: `400`, not `401`). The system realm (nil UUID) always requires MFA, so the console login needs a TOTP code from bootstrap's `admin_totp_secret`.
+**Admin API gotchas:** every `/admin/*` route needs `X-Realm-ID` (without it: `400`, not `401`). The system realm (nil UUID) always requires MFA: in dev, sign in from `/dev` (one click, or its live TOTP code).
 
 ### UI changes
 

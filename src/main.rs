@@ -3263,12 +3263,20 @@ fn build_startup_panel(
     }
     lines.push("  ─────────────────────────────────────────────────".to_string());
     // URL links — labels padded to 7 chars so values align at column 11.
+    // The dev console signs a developer in with one click and replaces the
+    // first-run setup link (`docs/dev/DEVELOPMENT.md`).
+    let dev_console = dev_mode && cfg!(feature = "dev-endpoints");
+    if dev_console {
+        lines.push(format!("  Dev:     {base}/dev  ← sign in here"));
+    }
     lines.push(format!("  API:     {base}"));
-    lines.push(format!("  Admin:   {base}/ui"));
+    // The console itself: `/ui` is the realm sign-in, which a server with
+    // several realms answers with "Sign-in URL required".
+    lines.push(format!("  Admin:   {base}/ui/admin"));
     if let Some(issuer) = &stats.oidc_issuer {
         lines.push(format!("  Issuer:  {issuer}"));
     }
-    if let Some(token) = setup_token {
+    if let Some(token) = setup_token.filter(|_| !dev_console) {
         if dev_mode {
             let preview: String = token.chars().take(8).collect();
             lines.push(format!(
@@ -7346,6 +7354,23 @@ mod tests {
                 "panel must not print a plaintext URL while TLS is enabled: {line}"
             );
         }
+    }
+
+    #[test]
+    fn startup_panel_points_a_dev_server_at_the_dev_console() {
+        // `make dev` is one step: the panel names the dev console, which signs
+        // the developer in, and not the first-run setup link it replaces.
+        let addr = "127.0.0.1:8420".parse().expect("valid socket addr");
+        let lines = build_startup_panel(addr, true, Some("tok"), None, &panel_stats_tls(false));
+        let has = |needle: &str| lines.iter().any(|l| l.contains(needle));
+        if cfg!(feature = "dev-endpoints") {
+            assert!(has("http://127.0.0.1:8420/dev"), "{lines:?}");
+            assert!(!has("Setup:"), "{lines:?}");
+        }
+        assert!(
+            has("http://127.0.0.1:8420/ui/admin"),
+            "the admin console URL, not the realm sign-in at /ui: {lines:?}"
+        );
     }
 
     #[test]
