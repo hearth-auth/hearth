@@ -3175,7 +3175,7 @@ async fn run_serve(
 }
 
 // Unicode full-block logo — █ (U+2588), 5 contiguous letter rows.
-const HEARTH_LOGO: &str = "\
+const HEARTH_LOGO: &str = "\n\
 \x20 ██   ██ ███████  █████  ██████  ████████ ██   ██\n\
 \x20 ██   ██ ██      ██   ██ ██   ██    ██    ██   ██\n\
 \x20 ███████ █████   ███████ ██████     ██    ███████\n\

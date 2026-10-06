@@ -10,7 +10,7 @@
     "@semantic-release/npm": "^13.2.0",
     "context-mode": "^1.0.169",
     "multi-semantic-release": "^3.1.0",
-    "reflex-search": "^2.0.1",
+    "reflex-search": "^2.2.0",
     "semantic-release": "^25.0.9"
   },
   "scripts": {
