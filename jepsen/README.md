@@ -44,7 +44,7 @@ make jepsen-down              # remove the containers and their volumes
 `make jepsen` runs `make jepsen-binary` (build the shipped image, copy its hearth binary
 to `jepsen/docker/.build/`) and `make jepsen-up` (start control and n1–n5, then
 `ssh <node> true` on all five) first. It prints one line per test and exits 1 only when a
-test FAILs:
+test FAILs. The format, with an illustrative xfail line:
 
 ```
 PASS        noop
