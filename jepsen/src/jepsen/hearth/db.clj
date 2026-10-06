@@ -13,13 +13,14 @@
   (:require [clojure.java.io :as io]
             [clojure.java.shell :as shell]
             [clojure.string :as str]
-            [clojure.tools.logging :refer [info]]
+            [clojure.tools.logging :refer [info warn]]
             [jepsen [control :as c]
                     [core :as jepsen]
                     [db :as db]
                     [util :as util]]
             [jepsen.control.core :as cc]
-            [jepsen.control.util :as cu]))
+            [jepsen.control.util :as cu]
+            [jepsen.hearth.http :as http]))
 
 (def root "/opt/hearth")
 (def binary (str root "/hearth"))
@@ -33,6 +34,8 @@
 (def https-port 8443)
 
 (def operator-email "operator@jepsen.test")
+
+(def system-realm "00000000-0000-0000-0000-000000000000")
 
 (def node-ip-prefix
   "Node nX has address <prefix>.(10+X) on the Compose network."
@@ -199,6 +202,8 @@
                   :log-interval   10000
                   :log-message    (str "waiting for " node " /readyz")}))
 
+(declare cluster-status)
+
 (defrecord HearthDB [state]
   db/DB
   (setup! [_ test node]
@@ -225,7 +230,18 @@
   (kill! [_ test node] (kill!*))
 
   db/Primary
-  (primaries [_ test] [(jepsen/primary test)])
+  ; The nodes that report role "leader". The :primaries partition isolates
+  ; them. During an election there may be none; then one node at random, so
+  ; the fault still happens and the history records which node it hit.
+  (primaries [this test]
+    (let [leaders (->> (:nodes test)
+                       (filter #(= "leader" (get-in (cluster-status this %)
+                                                    [:body "role"])))
+                       vec)]
+      (if (seq leaders)
+        leaders
+        (do (warn "no node reports role leader; isolating a random node")
+            [(rand-nth (:nodes test))]))))
   (setup-primary! [_ test node])
 
   db/LogFiles
@@ -251,3 +267,19 @@
   "The path of the run's CA certificate on the control node."
   [db]
   (str (:material @(:state db)) "/ca.crt"))
+
+(defn http-client
+  "The db's HTTPS client, which trusts the run's CA. Built on first use."
+  [db]
+  (or (:client @(:state db))
+      (:client (swap! (:state db)
+                      #(if (:client %) % (assoc % :client (http/client (ca-cert db))))))))
+
+(defn cluster-status
+  "GET /admin/cluster/status on `node` with the operator token, as an
+  http/request! result."
+  [db node]
+  (http/request! (http-client db) (str (node-url node) "/admin/cluster/status")
+                 {:headers {"Authorization" (str "Bearer " (operator-token db))
+                            "X-Realm-ID"    system-realm}
+                  :timeout 5000}))

@@ -8,10 +8,7 @@
             [clojure.tools.logging :refer [info warn]]
             [jepsen [checker :as checker]
                     [nemesis :as nemesis]]
-            [jepsen.hearth [db :as hdb]
-                           [http :as http]]))
-
-(def system-realm "00000000-0000-0000-0000-000000000000")
+            [jepsen.hearth.db :as hdb]))
 
 (def default-recovery-timeout-ms
   "How long the nodes may take to agree after the heal."
@@ -84,15 +81,11 @@
 
 (defn status-fetcher
   "A fetch function for `await-convergence` that reads last_applied_index
-  from GET /admin/cluster/status with the operator token. When a node gives
-  no index, it returns the reason: the status and error code, or the client
-  error."
-  [client token]
+  from GET /admin/cluster/status. When a node gives no index, it returns the
+  reason: the status and body, or the client error."
+  [db]
   (fn [node]
-    (let [r (http/request! client (str (hdb/node-url node) "/admin/cluster/status")
-                           {:headers {"Authorization" (str "Bearer " token)
-                                      "X-Realm-ID"    system-realm}
-                            :timeout 5000})]
+    (let [r (hdb/cluster-status db node)]
       (or (when (= 200 (:status r))
             (get-in r [:body "last_applied_index"]))
           (:error r)
@@ -102,18 +95,15 @@
   "Handles {:f :converge}: waits for every node to reach the same
   last_applied_index. Compose it with the fault nemeses."
   [opts]
-  (let [client (atom nil)]
-    (reify
+  (reify
       nemesis/Reflection
       (fs [_] #{:converge})
 
       nemesis/Nemesis
-      (setup! [this test]
-        (reset! client (http/client (hdb/ca-cert (:db test))))
-        this)
+      (setup! [this _test] this)
 
       (invoke! [_ test op]
-        (let [fetch  (status-fetcher @client (hdb/operator-token (:db test)))
+        (let [fetch  (status-fetcher (:db test))
               result (await-convergence
                        fetch (:nodes test)
                        {:timeout-ms (:recovery-timeout-ms
@@ -123,4 +113,4 @@
             (warn "nodes did not converge:" (:lagging result) (:indices result)))
           (assoc op :type :info :value result)))
 
-      (teardown! [_ _test]))))
+      (teardown! [_ _test])))
