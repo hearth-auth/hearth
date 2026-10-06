@@ -21,8 +21,8 @@
 
 ## 3. Expectations and result runner
 
-- [ ] 3.1 `jepsen/expectations.edn` and the runner that classifies pass / fail / xfail / xpass (spec "Results are classified…"). Test first: unit tests on four canned `results.edn` files, one per row of the table, plus the exit code of the run
-- [ ] 3.2 `make jepsen` and `make jepsen TEST=<name>`, with `TIME_LIMIT` (default 300 s). Proof: `make jepsen TEST=noop` exits 0
+- [x] 3.1 `jepsen/expectations.edn` and the runner that classifies pass / fail / xfail / xpass (spec "Results are classified…"). Test first: unit tests on four canned `results.edn` files, one per row of the table, plus the exit code of the run
+- [x] 3.2 `make jepsen` and `make jepsen TEST=<name>`, with `TIME_LIMIT` (default 300 s). Proof: `make jepsen TEST=noop` exits 0
 
 ## 4. Workloads with required passes
 

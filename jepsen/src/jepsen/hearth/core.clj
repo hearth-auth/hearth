@@ -3,13 +3,17 @@
   the control container. See README.md."
   (:gen-class)
   (:require [clojure.string :as str]
+            [clojure.tools.logging :refer [error info]]
             [jepsen [checker :as checker]
                     [cli :as cli]
+                    [core :as jepsen]
                     [generator :as gen]
+                    [store :as store]
                     [tests :as tests]]
             [jepsen.hearth [converge :as converge]
                            [db :as hdb]
-                           [nemesis :as hn]]))
+                           [nemesis :as hn]
+                           [runner :as runner]]))
 
 (def workloads
   "Workload name -> function of the CLI options that returns the workload's
@@ -20,6 +24,11 @@
             ; No client operations: proves setup, teardown, log collection,
             ; the faults and the convergence check (tasks 2.2, 2.4, 2.5).
             {})})
+
+(def catalog
+  "The suite: test name -> the options that define it. Each name has an
+  entry in expectations.edn."
+  {"noop" {:workload "noop" :nemesis []}})
 
 (def ssh-key
   "The key pair the control container generates; the nodes trust it."
@@ -85,10 +94,49 @@
     :parse-fn parse-long
     :validate [pos? "must be positive"]]])
 
+(defn- run-one
+  "Runs catalog test `test-name` with `options`. A setup error is a result,
+  not a crash, so the rest of the suite still runs."
+  [test-name options]
+  (try
+    (let [t (jepsen/run! (hearth-test (merge options (catalog test-name))))]
+      {:test   test-name
+       :valid? (:valid? (:results t))
+       :store  (str (store/path t))})
+    (catch Exception e
+      (error e "setup or run error in" test-name)
+      {:test   test-name
+       :valid? :unknown
+       :reason (str "setup or run error, not a consistency result: " (.getMessage e))})))
+
+(defn- run-suite
+  "Runs the selected catalog tests, classifies them against
+  expectations.edn, prints the report and exits 1 when any test failed."
+  [{:keys [options]}]
+  (let [names (or (seq (:only options)) (sort (keys catalog)))
+        runs  (mapv #(run-one % options) names)
+        v     (runner/verdict (runner/load-expectations "expectations.edn") runs)]
+    (info (str "Suite results:\n" (runner/report v)))
+    (println (runner/report v))
+    (System/exit (:exit v))))
+
+(def suite-opts
+  "Options of the suite command on top of Jepsen's and ours."
+  [[nil "--only NAMES" "Comma-separated catalog tests to run (default: all)."
+    :default []
+    :parse-fn #(vec (remove str/blank? (map str/trim (str/split % #","))))
+    :validate [#(every? catalog %) (str "must be among " (sort (keys catalog)))]]])
+
 (defn -main
-  "Runs the CLI."
+  "Runs the CLI: `test` runs one test from flags, `suite` runs catalog
+  tests and classifies them."
   [& args]
   (cli/run! (merge (cli/single-test-cmd {:test-fn  hearth-test
                                          :opt-spec cli-opts})
+                   {"suite" {:opt-spec (cli/merge-opt-specs cli/test-opt-spec
+                                                            (into cli-opts suite-opts))
+                             :opt-fn   cli/test-opt-fn
+                             :usage    "Usage: lein run suite [--only NAMES] [OPTIONS ...]"
+                             :run      run-suite}}
                    (cli/serve-cmd))
             args))

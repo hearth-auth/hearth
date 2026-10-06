@@ -33,9 +33,11 @@ RUN curl -fsSL -o /usr/local/bin/lein \
 COPY ssh_config /root/.ssh/config
 COPY entrypoint.sh /usr/local/bin/control-entrypoint
 COPY ssh-check.sh /usr/local/bin/jepsen-ssh-check
+COPY jepsen-run.sh /usr/local/bin/jepsen-run
 RUN chmod 0700 /root/.ssh \
     && chmod 0600 /root/.ssh/config \
-    && chmod 0755 /usr/local/bin/control-entrypoint /usr/local/bin/jepsen-ssh-check
+    && chmod 0755 /usr/local/bin/control-entrypoint /usr/local/bin/jepsen-ssh-check \
+        /usr/local/bin/jepsen-run
 
 WORKDIR /jepsen
 ENTRYPOINT ["/usr/local/bin/control-entrypoint"]

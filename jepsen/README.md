@@ -8,10 +8,9 @@ cluster in Docker. They check the cluster-mode promises (W1–W5, R1, V1, …) i
 The plan, the decisions and the open items are in the OpenSpec change
 [`cluster-jepsen-harness`](../openspec/changes/cluster-jepsen-harness/).
 
-> **Status:** in progress. The containers, the binary, the per-node material
-> and node setup work: the `noop` test sets up and tears down all five nodes.
-> `make jepsen` arrives with task 3.2. Until then, run a test by hand inside the
-> control container: `lein run test --workload noop`.
+> **Status:** in progress. The harness works end to end: setup, the four
+> faults, heal-and-converge and result classification. The suite holds only
+> the `noop` test so far; the consistency workloads (tasks 4 and 5) come next.
 
 ## Warning: privileged containers
 
@@ -36,21 +35,43 @@ an ephemeral CI runner. **Never run them on a shared host.**
 From the repository root:
 
 ```bash
-make jepsen-binary   # build the shipped image; copy its hearth binary to jepsen/docker/.build/
-make jepsen-up       # start control + n1–n5; ends with `ssh <node> true` on all five
-make jepsen-down     # remove the containers and their volumes
+make jepsen                   # build, start the cluster, run every test in the suite
+make jepsen TEST=noop         # one test (comma-separate several)
+make jepsen TIME_LIMIT=60     # each test's fault phase in seconds (default 300)
+make jepsen-down              # remove the containers and their volumes
 ```
+
+`make jepsen` runs `make jepsen-binary` (build the shipped image, copy its hearth binary
+to `jepsen/docker/.build/`) and `make jepsen-up` (start control and n1–n5, then
+`ssh <node> true` on all five) first. It prints one line per test and exits 1 only when a
+test FAILs:
+
+```
+PASS        noop
+XFAIL G1    r2-partition
+1 pass, 0 fail, 1 xfail, 0 xpass: run PASSED
+```
+
+Each test's expectation is in `expectations.edn`: `:pass`, or `{:xfail "G<n>"}` for a
+promise that an open item in `docs/dev/CONSISTENCY.md` breaks today. An xpass (an xfail
+test that found no violation) is a warning, not a failure.
 
 `make jepsen-binary` builds the root `Dockerfile`, so the tests run the binary the
 published image ships: Debian bookworm, built without `dev-endpoints`. A run refuses
 a binary that serves `/admin/bootstrap`.
 
-To work by hand inside the control container:
+To run a single test with your own faults, inside the control container:
 
 ```bash
 docker compose -f jepsen/docker/compose.yaml exec control bash
+jepsen-run test --workload noop --nemesis partition,kill --time-limit 60
 ssh n1                                  # root on node n1
 ```
+
+The faults are `partition` (majority/minority split), `partition-leader` (isolate the
+current leader), `kill` (`kill -9` a minority, then restart) and `packet` (delay on the
+node-to-node links). After the last fault, every test heals the cluster and waits until all
+nodes report the same `last_applied_index`; a test whose nodes never agree is invalid.
 
 ## Layout
 
@@ -61,7 +82,8 @@ ssh n1                                  # root on node n1
 | `scripts/gen-configs.sh` | One bundle per node for `/opt/hearth`: `hearth.yaml`, seed config, master key, TLS files |
 | `scripts/seed-store.sh` | Seeds one store with an operator and mints a system-realm token into it |
 | `scripts/spike-cold-cluster.sh` | The task 0.2 spike: the same seeding path on 3 host processes |
-| `project.clj`, `src/`, `test/` | The Jepsen project |
+| `project.clj`, `src/`, `test/` | The Jepsen project; `lein test` runs its unit tests |
+| `expectations.edn` | `:pass` or `{:xfail "G<n>"}` for each test in the suite |
 
 ## How a node is set up
 

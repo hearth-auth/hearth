@@ -180,6 +180,9 @@ Jepsen's `results.edn` for each test:
 | xfail | invalid | pass (reported as "xfail G-n") |
 | xfail | valid | pass, with a warning: "xpass G-n" |
 
+An xfail test whose checker returns `:unknown` is a fail: the test could not decide, so it
+proves nothing (task 3.1). A test with no entry in `expectations.edn` is a fail too.
+
 An xpass does not fail the run. A fault test can pass by luck while the bug is still there.
 The PR that closes a G-item changes its entry to `:pass`. That PR's review is where the
 promotion is checked.
