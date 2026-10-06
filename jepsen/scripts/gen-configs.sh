@@ -8,16 +8,19 @@
 #                        (decision 5); only in the first node's bundle
 #   master_key           HEARTH_MASTER_KEY for `hearth serve` (0600)
 #   tls/ca.crt           CA for peer mTLS and HTTPS
-#   tls/peer.{crt,key}   peer mTLS leaf, SAN DNS:<node>
-#   tls/https.{crt,key}  HTTPS leaf, SAN DNS:<node>
+#   tls/peer.{crt,key}   peer mTLS leaf, SAN DNS:<node> (and the node's IP)
+#   tls/https.{crt,key}  HTTPS leaf, SAN DNS:<node> (and the node's IP)
 #
 # Every node listens on the same ports: HTTPS on 8443 (the HTTP->HTTPS
-# redirect on 8442) and peer gRPC on 7443. Peers and clients reach a node by
-# its name, so its name is in security.allowed_hosts.
+# redirect on 8442) and peer gRPC on 7443. Clients reach a node by its name,
+# so its name is in security.allowed_hosts. Peers reach it by its IP address,
+# <prefix>.<10+id>: hearth's peer server binds cluster.peer_address, which must
+# be an IP address, and gen-material.sh puts the IP in each leaf.
 #
 # Usage: gen-configs.sh <material-dir> <node>...
-# Env:   HEARTH_ROOT  install directory on the nodes (default /opt/hearth)
-#        ISSUER       oidc.issuer (default https://hearth.jepsen.test)
+# Env:   HEARTH_ROOT     install directory on the nodes (default /opt/hearth)
+#        ISSUER          oidc.issuer (default https://hearth.jepsen.test)
+#        NODE_IP_PREFIX  first three octets of the node addresses (default 10.77.0)
 set -euo pipefail
 
 if [ "$#" -lt 2 ]; then
@@ -31,6 +34,8 @@ root=${HEARTH_ROOT:-/opt/hearth}
 issuer=${ISSUER:-https://hearth.jepsen.test}
 https_port=8443
 peer_port=7443
+ip_prefix=${NODE_IP_PREFIX:-10.77.0}
+peer_addr() { echo "$ip_prefix.$((10 + ${1#n})):$peer_port"; }
 
 kek=$(cat "$material/kek")
 issuer_host=${issuer#https://}
@@ -90,12 +95,12 @@ for node in "${nodes[@]}"; do
     common "$node" "$root/data"
     echo "cluster:"
     echo "  node_id: ${node#n}"
-    echo "  peer_address: \"$node:$peer_port\""
+    echo "  peer_address: \"$(peer_addr "$node")\""
     echo "  peers:"
     for peer in "${nodes[@]}"; do
       [ "$peer" = "$node" ] && continue
       echo "    - id: ${peer#n}"
-      echo "      address: \"$peer:$peer_port\""
+      echo "      address: \"$(peer_addr "$peer")\""
     done
     echo "  tls_cert_path: \"$root/tls/peer.crt\""
     echo "  tls_key_path: \"$root/tls/peer.key\""

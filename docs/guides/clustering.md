@@ -59,13 +59,19 @@ bootstrap node. Verified on three nodes on 2026-09-21; the transcript is in
 
 * A cold cluster forms on its own. `POST /admin/cluster/bootstrap` answers
   `409` on an already-initialised cluster.
-* **The lowest-ID node must start.** A node opens its HTTP port only after the
-  start-up write window, and the window needs a leader. So while no leader
-  exists, no node serves `POST /admin/cluster/bootstrap`: the endpoint cannot
-  form a cold cluster. If the lowest-ID node never starts, the remaining nodes
-  wait out the 120 s window and exit. Start that node.
+* **Start the lowest-ID node.** A node opens its HTTP port only after the
+  start-up write window. The window ends when the node can write, or at once
+  when its store already holds the system realm.
+  * On an **empty** data directory only a leader ends the window. So no node
+    serves HTTP, and `POST /admin/cluster/bootstrap` is out of reach, until a
+    leader exists. If the lowest-ID node never starts, the other nodes wait out
+    the 120 s window and exit.
+  * On a seeded or restored store the window ends at once. The nodes serve HTTP
+    with no leader, and `/readyz` answers `200`: it checks only local storage
+    (seen 2026-10-06 in the Jepsen harness, `jepsen/`). Every write fails until
+    a leader exists.
 * A `cluster:` section with an empty `peers` list does **not** self-initialise,
-  and so it does not start: its start-up writes find no leader and the process
+  so it never gets a leader. When start-up has anything to write, the process
   exits before it serves HTTP (seen 2026-10-06 while writing
   `tests/cluster_serve_admin_status.rs`). Omit the `cluster:` section for a
   single node.
@@ -398,14 +404,12 @@ first-boot setup at `/ui/setup`, verify the operator's email, stop the node, min
 
 ### Bootstrap Sequence
 
-> **This endpoint cannot form a cold cluster.** The lowest-ID node in the
-> configured membership initialises the cluster itself at start-up — see
-> [G-1](#g-1--a-cold-cluster-could-not-be-bootstrapped-fixed). A node opens its
-> HTTP port only after its start-up write window, and that window needs a
-> leader, so while no leader exists no node serves this endpoint (seen
-> 2026-10-06). If the lowest-ID node is down, start it. On a formed cluster the
-> endpoint answers `409` (`tests/cluster_serve_admin_status.rs`). The steps
-> below describe the endpoint only.
+> **Start the lowest-ID node instead.** It initialises the cluster itself at
+> start-up — see [G-1](#g-1--a-cold-cluster-could-not-be-bootstrapped-fixed). On
+> empty data directories no node serves HTTP until a leader exists, so this
+> endpoint is out of reach. On a seeded or restored store the nodes serve HTTP
+> with no leader, so the endpoint is reachable; see the bullets under G-1 above.
+> On a formed cluster it answers `409` (`tests/cluster_serve_admin_status.rs`).
 
 Bootstrapping initializes the cluster's initial membership. Do this **once** — running bootstrap on an already-initialized cluster is a no-op (Raft rejects double-initialization).
 

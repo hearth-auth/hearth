@@ -9,7 +9,8 @@
 #
 # Each leaf carries subjectAltName=DNS:<node>; rustls ignores the CN. Set
 # EXTRA_SAN to add entries to every leaf, e.g. EXTRA_SAN=DNS:localhost,IP:127.0.0.1
-# when the nodes run on one host.
+# when the nodes run on one host. Set NODE_IP_PREFIX (e.g. 10.77.0) to add
+# IP:<prefix>.<10+id> to node n<id>'s leaves: peers dial each other by IP.
 #
 # Usage: gen-material.sh <out-dir> <node>...
 set -euo pipefail
@@ -51,7 +52,11 @@ leaf() {
 }
 
 for node in "$@"; do
-  san="DNS:$node${EXTRA_SAN:+,$EXTRA_SAN}"
+  san="DNS:$node"
+  if [ -n "${NODE_IP_PREFIX:-}" ]; then
+    san+=",IP:$NODE_IP_PREFIX.$((10 + ${node#n}))"
+  fi
+  san+="${EXTRA_SAN:+,$EXTRA_SAN}"
   leaf "$node-peer" "hearth-peer-$node" "$san"
   leaf "$node-https" "hearth-https-$node" "$san"
 done

@@ -34,6 +34,10 @@
 
 (def operator-email "operator@jepsen.test")
 
+(def node-ip-prefix
+  "Node nX has address <prefix>.(10+X) on the Compose network."
+  "10.77.0")
+
 (defn node-url
   "The HTTPS base URL of a node."
   [node]
@@ -86,7 +90,9 @@
                  (random-uuid) "/material")]
     ; gen-material.sh creates `dir` itself and refuses one that exists.
     (.mkdirs (.getParentFile (io/file dir)))
-    (apply sh! "scripts/gen-material.sh" dir nodes)
+    (apply sh! "scripts/gen-material.sh" (concat [dir] nodes
+                                                [:env (assoc (into {} (System/getenv))
+                                                             "NODE_IP_PREFIX" node-ip-prefix)]))
     (apply sh! "scripts/gen-configs.sh" dir nodes)
     (info "per-run material in" dir)
     dir))

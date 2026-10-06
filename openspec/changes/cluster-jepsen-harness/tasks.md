@@ -15,8 +15,8 @@
 
 - [x] 2.1 `jepsen/project.clj` with pinned Jepsen version; `jepsen/README.md` (how to run, `privileged` warning, how to read `store/`)
 - [x] 2.2 `db` namespace: install binary, write config, seed the store (task 0.2 path), start, stop, `kill -9`, wipe, collect logs. A run refuses a binary that serves `/admin/bootstrap` (spec "The harness is pointed at a dev binary"). Proof: a no-op test with no workload and no faults sets up and tears down 5 nodes, and its `store/` holds 5 node logs
-- [ ] 2.3 Shared HTTP client with the outcome mapping (design decision 6). Test first: unit tests in `jepsen/test/` feed canned answers (`200`, both `503` codes, timeout, `400`) and assert `:ok` / `:info` / `:fail` for write and read
-- [ ] 2.4 Heal-and-converge final phase (spec "Final reads follow a heal"). Test first: a unit test with stubbed status answers where one node lags past the timeout, asserting an invalid result naming that node
+- [x] 2.3 Shared HTTP client with the outcome mapping (design decision 6). Test first: unit tests in `jepsen/test/` feed canned answers (`200`, both `503` codes, timeout, `400`) and assert `:ok` / `:info` / `:fail` for write and read
+- [x] 2.4 Heal-and-converge final phase (spec "Final reads follow a heal"). Test first: a unit test with stubbed status answers where one node lags past the timeout, asserting an invalid result naming that node
 - [ ] 2.5 Nemesis package: majority/minority partition, isolate leader, `kill -9` minority, restart, peer-link delay. Proof: a no-workload test per fault; the node logs show the expected leader change or peer errors
 
 ## 3. Expectations and result runner

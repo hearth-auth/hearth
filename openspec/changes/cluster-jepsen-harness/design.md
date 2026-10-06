@@ -271,9 +271,9 @@ roll back, delete `jepsen/` and the workflow.
      clock: the check took a late entry's age as the offset (C4). The delta spec now states the
      estimate (in-flight entries, smallest age over 30 s).
    - Also found: the console's login `Origin` check expects the issuer's origin, so a script
-     sends no `Origin` (an absent header is same-site by design). And a node opens HTTP only
-     after a leader exists, so `POST /admin/cluster/bootstrap` cannot form a cold cluster;
-     `docs/guides/clustering.md` claimed it could and is corrected.
+     sends no `Origin` (an absent header is same-site by design). And on an empty data directory
+     a node opens HTTP only after a leader exists, so there `POST /admin/cluster/bootstrap` is
+     out of reach; `docs/guides/clustering.md` claimed it was an escape hatch and is corrected.
 3. **W4 and W5 targets.** Answered 2026-10-06 (task 0.3, from the code):
    - **W4: a presented refresh token**, with the authorization code as the second choice.
      ARCHITECTURE.md §16.3 lists both as claimed with one `put_if_absent` in the state

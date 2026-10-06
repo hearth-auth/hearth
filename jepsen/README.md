@@ -24,6 +24,10 @@ an ephemeral CI runner. **Never run them on a shared host.**
 
 - Docker with Compose v2 and BuildKit.
 - About 8 GB of free memory: six containers and one JVM.
+- The subnet `10.77.0.0/24` free on the host. The containers use fixed addresses
+  in it, because `cluster.peer_address` must be an IP address. If it collides
+  with a host network, change it in `docker/compose.yaml` and `node-ip-prefix`
+  in `src/jepsen/hearth/db.clj`.
 - Network access on the first run: the images, the cargo registry and the Jepsen
   libraries download once and are then cached.
 
