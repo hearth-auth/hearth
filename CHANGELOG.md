@@ -368,6 +368,12 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   the leader had already committed, takes the freshest entry over a 30 s window, and warns at
   most once per window: `clock offset from the leader exceeds 1 s` (leader ahead) or
   `clock offset from the leader may exceed 1 s` (this node ahead).
+- **A node whose Raft peer server cannot start no longer serves.** When the peer server could
+  not bind `cluster.peer_address` (port in use, or a host name in place of an IP address), it
+  logged one `ERROR` and the node went on serving, ready, outside any cluster. `hearth serve` now
+  exits at start-up and names the address. `hearth config validate` refuses a `peer_address`
+  that is not an IP address and port, such as `hearth-1.internal:8421`. A peer's `address` may
+  still be a host name.
 - **`POST /device_authorization` now ignores an unknown parameter.** The header-routed device
   authorization endpoint refused a parameter RFC 8628 does not define with `400`, unlike its
   realm-routed twin and the other OAuth endpoints. It now ignores it, as RFC 6749 §3.1 requires.

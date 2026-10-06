@@ -252,7 +252,7 @@ When present, Hearth starts a Raft engine and participates in peer-to-peer log r
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `node_id` | integer | — | **Required.** This node's numeric ID. Must be unique across the cluster. Typically `1`, `2`, `3`, … |
-| `peer_address` | string | `"127.0.0.1:8421"` | `host:port` this node listens on for inbound Raft RPCs from peers. Use a routable address in production (not loopback). |
+| `peer_address` | string | `"127.0.0.1:8421"` | IP address and port this node listens on for inbound Raft RPCs from peers, for example `10.0.0.1:8421` or `[fd00::1]:8421`. The node binds it, so a host name is refused. Use a routable address in production (not loopback). |
 | `peers` | list | `[]` | Known cluster peers. Each entry has `id` (integer) and `address` (string `host:port`). List all nodes except this one. **This list is fixed at bootstrap and cannot be changed without a full-cluster restart.** |
 | `tls_cert_path` | path | — | **Required.** Path to this node's PEM certificate (presented to peers during mTLS). |
 | `tls_key_path` | path | — | **Required.** Path to this node's PEM private key. |

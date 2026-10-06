@@ -896,6 +896,7 @@ onboarding:
 # cluster:
 #   node_id: 1                           # unique integer per node (1, 2, 3, …)
 #   peer_address: "10.0.0.1:8421"        # this node's inbound Raft RPC address
+#                                        # an IP and port, not a host name (it is bound)
 #                                        # default: "127.0.0.1:8421"
 #   peers:                               # all other nodes in the cluster
 #     - id: 2

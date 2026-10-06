@@ -313,7 +313,7 @@ An empty result means the certificate will not work.
 
 ### Configuration
 
-Each node gets its own `hearth.yaml`. The `cluster.node_id` and `cluster.peer_address` are unique per node; the CA cert and `peers` list are the same across all nodes.
+Each node gets its own `hearth.yaml`. The `cluster.node_id` and `cluster.peer_address` are unique per node; the CA cert and `peers` list are the same across all nodes. `peer_address` must be an IP address and port, because the node binds it: `hearth config validate` refuses a host name, and `hearth serve` exits if it cannot bind the address. A `peers[].address` may be a host name.
 
 **Node 1 (`hearth-1.yaml`):**
 

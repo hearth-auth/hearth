@@ -1324,17 +1324,9 @@ async fn run_serve(
             {
                 Ok(engine) => {
                     let engine = Arc::new(engine);
-                    let serve_cfg = cluster_cfg.clone();
-                    let serve_engine = Arc::clone(&engine);
-                    let shutdown = shutdown_requested(shutdown_signal_rx.clone());
-                    raft_server = Some(tokio::spawn(async move {
-                        if let Err(e) =
-                            hearth::cluster::serve_with_shutdown(&serve_cfg, serve_engine, shutdown)
-                                .await
-                        {
-                            error!(error = %e, "Raft peer gRPC server terminated");
-                        }
-                    }));
+                    let rx = shutdown_signal_rx.clone();
+                    let handle = spawn_peer_server(cluster_cfg, Arc::clone(&engine), rx).await?;
+                    raft_server = Some(handle);
                     // HEA-2154: multi-node clustering is EXPERIMENTAL. The
                     // consistency model and its open items (G1–G9) are in
                     // docs/dev/CONSISTENCY.md. Operators must not learn this
@@ -3539,6 +3531,29 @@ async fn shutdown_requested(
     mut signal: tokio::sync::watch::Receiver<Option<tokio::time::Instant>>,
 ) {
     let _ = signal.wait_for(Option::is_some).await;
+}
+
+/// Binds the Raft peer server, then spawns it. A node whose peer server
+/// cannot start can never join the cluster, so a bind failure is fatal here,
+/// at start-up. The spawned task used to bind, and only logged the failure.
+async fn spawn_peer_server(
+    cluster_cfg: &hearth::config::ClusterConfig,
+    engine: Arc<hearth::cluster::ClusterEngine>,
+    shutdown: tokio::sync::watch::Receiver<Option<tokio::time::Instant>>,
+) -> Result<tokio::task::JoinHandle<()>, Box<dyn std::error::Error>> {
+    let peer_server = match hearth::cluster::PeerServer::bind(cluster_cfg).await {
+        Ok(peer_server) => peer_server,
+        Err(e) => {
+            report_startup_fatal(&format!("Raft peer gRPC server cannot start: {e}"));
+            return Err(e);
+        }
+    };
+    let shutdown = shutdown_requested(shutdown);
+    Ok(tokio::spawn(async move {
+        if let Err(e) = peer_server.serve_with_shutdown(engine, shutdown).await {
+            error!(error = %e, "Raft peer gRPC server terminated");
+        }
+    }))
 }
 
 /// The one drain deadline every listener shares: `drain` after the shutdown

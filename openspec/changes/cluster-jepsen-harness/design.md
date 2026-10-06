@@ -277,6 +277,14 @@ roll back, delete `jepsen/` and the workflow.
      sends no `Origin` (an absent header is same-site by design). And on an empty data directory
      a node opens HTTP only after a leader exists, so there `POST /admin/cluster/bootstrap` is
      out of reach; `docs/guides/clustering.md` claimed it was an escape hatch and is corrected.
+   - Task 2.2 found a sixth: with `cluster.peer_address` set to a host name (`n1:7443`), the
+     peer server failed to parse it inside a spawned task. It logged one `ERROR`, and the node
+     went on serving with `/readyz` at `200`, outside any cluster. The owner chose to fix it on
+     this branch too. `config validate` now refuses a `peer_address` that is not an IP address
+     and port, and `serve` binds the peer port before it continues, so a bind failure exits.
+     Tests: `tests/cli_config.rs`, `tests/cli.rs` (`serve_exits_when_the_peer_server_cannot_bind`).
+     The harness still gives each node a fixed IP (decision 2), because the bound address must
+     be the node's own IP.
 3. **W4 and W5 targets.** Answered 2026-10-06 (task 0.3, from the code):
    - **W4: a presented refresh token**, with the authorization code as the second choice.
      ARCHITECTURE.md §16.3 lists both as claimed with one `put_if_absent` in the state
