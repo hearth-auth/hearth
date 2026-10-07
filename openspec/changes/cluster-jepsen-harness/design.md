@@ -352,3 +352,21 @@ roll back, delete `jepsen/` and the workflow.
 6. **CI capacity.** Resolved 2026-10-06 (owner): measure it. Task 6.2 runs the full suite on a
    standard GitHub runner and records time and memory. If it does not fit, the measurement
    decides between a larger runner and three nodes in CI.
+
+   Answer (2026-10-07, dispatch run 37632977580 on `main` at 7059fada, `ubuntu-latest`, 16 GB):
+   it fits; keep five nodes on a standard runner.
+
+   | Measure | Value |
+   |---|---|
+   | Job | 64 min, against the 240 min limit |
+   | Binary build and container start | 6 min |
+   | Suite, 11 tests at 300 s of faults | 58 min |
+   | Runner memory, peak (119 samples, every 30 s) | 4,933 MiB used of 15,989 MiB |
+   | Control container, peak | 859 MiB, 334 % CPU |
+   | One node container, peak | 202 to 433 MiB, 39 % to 243 % CPU |
+   | Artifact (`jepsen-store.tar.gz`) | 29.9 MB |
+   | Result | 6 pass, 0 fail, 5 xfail, 0 xpass |
+
+   A trial run on 2026-10-07 gave the same result in 62 minutes. Its upload failed:
+   `upload-artifact` refuses the colons in Jepsen's run directory names, so the workflow now
+   uploads the store as one tarball.

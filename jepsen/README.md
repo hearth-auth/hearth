@@ -80,6 +80,18 @@ current leader), `kill` (`kill -9` a minority, then restart) and `packet` (delay
 node-to-node links). After the last fault, every test heals the cluster and waits until all
 nodes report the same `last_applied_index`; a test whose nodes never agree is invalid.
 
+### In CI
+
+`.github/workflows/jepsen.yml` runs the suite nightly and on manual dispatch (inputs: `test`,
+`time_limit`). It is not a required check. A full run takes about 64 minutes on a standard
+GitHub runner, with a peak of about 5 GB of memory. The artifact `jepsen-store-<run id>` holds
+`jepsen-store.tar.gz` (the store, with `runner-usage.txt`) for 14 days.
+
+```bash
+gh workflow run jepsen.yml                                        # the whole suite
+gh workflow run jepsen.yml -f test=staleness -f time_limit=60     # one test
+```
+
 ## Layout
 
 | Path | What it is |
