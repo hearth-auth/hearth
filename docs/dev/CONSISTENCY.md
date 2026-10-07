@@ -218,7 +218,7 @@ and flips to **pass** when the G-item lands.
 | W1 | Add unique items to a set (e.g. group members) | Partitions, `kill -9` | Set checker: every acknowledged add is present at the end | pass |
 | W3 | Same as W1, record unknown outcomes as `:info` | Partitions during writes | Knossos treats `:info` as maybe-applied | pass |
 | W4 | Many clients redeem one magic link or auth code on different nodes | Partitions, `kill -9` | At most one success per artifact | pass |
-| W5 | Bump the control epoch from many nodes | Partitions, `kill -9`, snapshot install | Final counter = number of acknowledged bumps (+ unknowns at most) | pass |
+| W5 | None: unit tests only (see below) | — | `src/cluster/state_machine.rs`: `increment_command_returns_successive_values`, `a_replayed_increment_is_not_counted_twice` | unit tests |
 | W7 | Concurrent audited admin changes on two nodes | none needed | Audit chain verifies end to end | xfail (G4) |
 | R1 | Write then read on the same node | Partitions | Read shows the write | pass |
 | R2 | Read on every node | Partition one node, or isolate the leader | No stale read after `read_lag_threshold_ms` | xfail (G1) |
@@ -227,6 +227,12 @@ and flips to **pass** when the G-item lands.
 | V2 | Revoke a session, then validate it on an isolated node | Partition | Isolated node answers unavailable, never accepts | xfail (G1) |
 | C1 | W1 and W4 workloads | Clock skew (needs VMs, not Docker) | Same checkers as W1 / W4 | pass |
 | Section 6 | Wipe a node's data directory, restart with the same ID | Partitions | W1 checker | xfail (G9) |
+
+W5 has no Jepsen test. The only replicated counter is the control epoch, and no API returns
+its value; `/metrics` exports only `hearth_control_epoch_bump_failures_total` and
+`hearth_control_epoch_bumps_owed`. Every election also bumps it, so a final count could not
+separate test bumps from election bumps. The unit tests above cover W5, including a replayed
+entry. A Jepsen test needs a counter an API can read back.
 
 Membership-change tests (`kill -9` during a membership change) wait for G5.
 
