@@ -20,7 +20,8 @@
                     [util :as util]]
             [jepsen.control.core :as cc]
             [jepsen.control.util :as cu]
-            [jepsen.hearth.http :as http]))
+            [jepsen.hearth [http :as http]
+                           [secret :as secret]]))
 
 (def root "/opt/hearth")
 (def binary (str root "/hearth"))
@@ -160,10 +161,10 @@
                               :SEED_CA           (str root "/tls/ca.crt")
                               :SEED_LOG          seed-log
                               :OPERATOR_EMAIL    operator-email
-                              :OPERATOR_PASSWORD password
+                              :OPERATOR_PASSWORD (secret/reveal password)
                               :REALM             realm
                               :REALM_ADMIN_EMAIL realm-admin-email
-                              :REALM_ADMIN_PASSWORD realm-admin-password
+                              :REALM_ADMIN_PASSWORD (secret/reveal realm-admin-password)
                               :TOKEN_TTL         "1h"})
                       :bash :-c (with-master-key (str root "/seed-store.sh")))]
     (when (str/blank? token)
@@ -227,7 +228,7 @@
       (install! test node material)
       (jepsen/synchronize test)
       (when (= node (jepsen/primary test))
-        (swap! state assoc :token (seed! node material @state)))
+        (swap! state assoc :token (secret/secret (seed! node material @state))))
       (jepsen/synchronize test 120)
       (populate! material)
       (jepsen/synchronize test)
@@ -271,19 +272,20 @@
   [opts]
   (verify-binary! (:binary opts))
   (->HearthDB (atom {:material (gen-material! (:nodes opts) (:read-lag-threshold-ms opts))
-                     :password (str "jepsen-" (random-uuid))
-                     :realm-admin-password (str "jepsen-" (random-uuid))
+                     ; Secrets: Jepsen prints this state into jepsen.log.
+                     :password (secret/secret (str "jepsen-" (random-uuid)))
+                     :realm-admin-password (secret/secret (str "jepsen-" (random-uuid)))
                      :token    nil})))
 
 (defn realm-admin-password
   "The password of the realm admin seed-store.sh created."
   [db]
-  (:realm-admin-password @(:state db)))
+  (secret/reveal (:realm-admin-password @(:state db))))
 
 (defn operator-token
   "The system-realm token seeded into the store; nil before setup."
   [db]
-  (:token @(:state db)))
+  (secret/reveal (:token @(:state db))))
 
 (defn ca-cert
   "The path of the run's CA certificate on the control node."

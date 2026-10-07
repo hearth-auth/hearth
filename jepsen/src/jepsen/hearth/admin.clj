@@ -6,7 +6,8 @@
   (:require [clojure.tools.logging :refer [info warn]]
             [jepsen.hearth [auth :as auth]
                            [db :as hdb]
-                           [http :as http]]))
+                           [http :as http]
+                           [secret :as secret]]))
 
 (defn session!
   "The realm admin's {:token :realm-id}, signing in on the first call. Tries
@@ -20,7 +21,7 @@
                                      (hdb/realm-admin-password db))]
                 (cond
                   (:access r)
-                  (let [admin {:token    (:access r)
+                  (let [admin {:token    (secret/secret (:access r))
                                :realm-id (auth/realm-id db node)}]
                     (info "realm admin signed in on" node)
                     (swap! (:state db) assoc :admin admin)
@@ -38,7 +39,8 @@
   "An admin API request on `node` as the realm admin: http/request! with
   the bearer token and X-Realm-ID added. `path` starts with /admin."
   [db node path opts]
-  (let [{:keys [token realm-id]} (:admin @(:state db))]
+  (let [{:keys [token realm-id]} (:admin @(:state db))
+        token                    (secret/reveal token)]
     (http/request! (hdb/http-client db) (str (hdb/node-url node) path)
                    (update opts :headers merge {"Authorization" (str "Bearer " token)
                                                 "X-Realm-ID"    realm-id}))))
