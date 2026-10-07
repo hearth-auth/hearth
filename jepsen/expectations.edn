@@ -4,4 +4,5 @@
 {"noop"     :pass
  "set"      :pass
  "register" :pass
- "single-use" :pass}
+ "single-use" :pass
+ "same-node"  :pass}

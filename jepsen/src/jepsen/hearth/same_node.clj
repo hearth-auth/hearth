@@ -5,7 +5,61 @@
   read returned in :read.
 
   Checker: every :ok op read back the value it wrote."
-  (:require [jepsen.checker :as checker]))
+  (:require [jepsen [checker :as checker]
+                    [client :as client]
+                    [generator :as gen]]
+            [jepsen.hearth [admin :as admin]
+                           [http :as http]
+                           [register :as register]]))
+
+(defrecord Client [db state node]
+  client/Client
+  (open! [this _test node] (assoc this :node node))
+
+  (setup! [_ test]
+    (admin/session! db test)
+    (locking state
+      (when-not (:users @state)
+        (swap! state assoc :users
+               (into {}
+                     (for [n (:nodes test)]
+                       (let [r (admin/request! db (first (:nodes test)) "/admin/users"
+                                               {:method :post
+                                                :json   {"email"        (str "r1-" n "@jepsen.test")
+                                                         "display_name" "init"}})]
+                         [n (or (get-in r [:body "id"])
+                                (throw (ex-info "creating an R1 user failed"
+                                                {:status (:status r) :body (:body r)})))])))))))
+
+  (invoke! [_ _test op]
+    (let [path  (str "/admin/users/" (get-in @state [:users node]))
+          wrote (admin/request! db node path
+                                {:method :patch
+                                 :json   {"display_name" (register/render-value (:value op))}})
+          op    (assoc op :node node)]
+      (if-not (= 200 (:status wrote))
+        (http/complete op :write wrote)
+        (let [read (admin/request! db node path {})]
+          (if (= 200 (:status read))
+            (assoc op :type :ok
+                   :read (register/parse-value (get-in read [:body "display_name"])))
+            ; The write happened; the read that would check it did not.
+            (assoc op :type :info :error {:read (:error (http/outcome :read read))}))))))
+
+  (teardown! [_ _test])
+  (close! [_ _test]))
+
+(declare checker)
+
+(defn workload
+  "Each client writes a fresh value to its own node's user, then reads it
+  back on the same node."
+  [_opts db]
+  {:client    (->Client db (atom {}) nil)
+   :generator (->> (range)
+                   (map (fn [n] {:f :write-read :value n}))
+                   (gen/stagger 1/10))
+   :checker   (checker)})
 
 (defn checker
   "Valid when every :ok :write-read read its own write, and at least one did

@@ -14,6 +14,7 @@
                            [db :as hdb]
                            [nemesis :as hn]
                            [register :as register]
+                           [same-node :as same-node]
                            [runner :as runner]
                            [set :as hset]
                            [single-use :as single-use]]))
@@ -29,7 +30,8 @@
             {})
    "set"      hset/workload
    "register" register/workload
-   "single-use" single-use/workload})
+   "single-use" single-use/workload
+   "same-node"  same-node/workload})
 
 (def catalog
   "The suite: test name -> the options that define it. Each name has an
@@ -40,7 +42,9 @@
    ; W1, W2, W3: partitions, kill -9 and restart.
    "register" {:workload "register" :nemesis [:partition :partition-leader :kill]}
    ; W4: partitions and kill -9.
-   "single-use" {:workload "single-use" :nemesis [:partition :kill]}})
+   "single-use" {:workload "single-use" :nemesis [:partition :kill]}
+   ; R1: partitions, including one that isolates the leader.
+   "same-node"  {:workload "same-node" :nemesis [:partition :partition-leader]}})
 
 (def ssh-key
   "The key pair the control container generates; the nodes trust it."
