@@ -47,8 +47,8 @@ Each checker first gets a unit test on a hand-written history with a planted vio
 
 ## 6. CI
 
-- [ ] 6.1 `.github/workflows/jepsen.yml`: nightly and `workflow_dispatch` with a test filter, artifact retention 14 days, not in any required-check list. Proof: one manual dispatch run, green, with the artifact attached
-- [ ] 6.2 Measure runner time and memory on that run; answer Open Question 6 in `design.md`
+- [x] 6.1 `.github/workflows/jepsen.yml`: nightly and `workflow_dispatch` with a test filter, artifact retention 14 days, not in any required-check list. Proof: one manual dispatch run, green, with the artifact attached
+- [x] 6.2 Measure runner time and memory on that run; answer Open Question 6 in `design.md`
 
 ## 7. Docs and spec move
 
