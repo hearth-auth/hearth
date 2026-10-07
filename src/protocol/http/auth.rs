@@ -117,6 +117,7 @@ pub(crate) fn extract_admin_auth(
             &realm_id,
             &claims,
         )
+        .map_err(|e| identity_error_to_response(&e))?
     {
         return Err((
             StatusCode::FORBIDDEN,
@@ -1224,7 +1225,9 @@ pub(crate) fn extract_first_party_user_auth(
         state.identity.as_ref(),
         realm_id,
         &claims,
-    ) {
+    )
+    .map_err(|e| identity_error_to_response(&e))?
+    {
         return Err(third_party_token_forbidden());
     }
     Ok(user_id)

@@ -1874,6 +1874,7 @@ fn require_dcr_initial_access(
             realm_id,
             claims,
         )
+        .map_err(|e| super::auth::identity_error_to_response(&e).into_response())?
     {
         return Ok(());
     }
@@ -3616,14 +3617,16 @@ async fn self_revoke_consent(
         .client_id()
         .and_then(|raw| raw.parse::<crate::core::ClientId>().ok())
         .is_some_and(|issued_to| issued_to == client_id);
-    if !own_consent
-        && !crate::protocol::admin_auth::token_client_may_administer(
+    if !own_consent {
+        match crate::protocol::admin_auth::token_client_may_administer(
             state.identity.as_ref(),
             &realm_id,
             &claims,
-        )
-    {
-        return super::auth::third_party_token_forbidden().into_response();
+        ) {
+            Ok(true) => {}
+            Ok(false) => return super::auth::third_party_token_forbidden().into_response(),
+            Err(e) => return super::auth::identity_error_to_response(&e).into_response(),
+        }
     }
     match state.identity.revoke_consent(
         &realm_id,

@@ -379,6 +379,12 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   while every write failed. In cluster mode it now answers `503` with `"cluster": "no_leader"` or
   `"cluster": "no_quorum"` (a leader no quorum has acknowledged for over 3 s, such as a node
   restarted alone on its own last vote).
+- **A cluster node that cannot read answers `503`, not `403`, to a valid admin token.** While a
+  node had follower reads disabled (replication lag, such as during a snapshot install), the
+  check that the token's client is first-party failed its read and refused the token
+  `403 forbidden`. The admin API, `/oauth/session-versions`, dynamic client registration and the
+  account consent and passkey endpoints now answer `503` with `HEARTH_CLUSTER_UNAVAILABLE` and a
+  `Retry-After` instead. The request is still refused.
 - **`POST /device_authorization` now ignores an unknown parameter.** The header-routed device
   authorization endpoint refused a parameter RFC 8628 does not define with `400`, unlike its
   realm-routed twin and the other OAuth endpoints. It now ignores it, as RFC 6749 §3.1 requires.

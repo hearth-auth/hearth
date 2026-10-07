@@ -324,13 +324,14 @@ struct SvDeltaQuery {
 /// carries `hearth.sv_feed` or `hearth.admin`, and was not issued to a
 /// third-party client — the feed is an administrative read that a third-party
 /// token never gets, even when a claim profile releases those permissions to
-/// it (GA audit 3 I-14; the admin API's B1 gate).
+/// it (GA audit 3 I-14; the admin API's B1 gate). `Err` when the token's
+/// client could not be read.
 fn may_read_sv_feed(
     state: &AppState,
     realm_id: &crate::core::RealmId,
     claims: &crate::identity::TokenClaims,
-) -> bool {
-    claims
+) -> Result<bool, crate::identity::IdentityError> {
+    Ok(claims
         .permissions
         .iter()
         .any(|p| p == "hearth.sv_feed" || p == "hearth.admin")
@@ -338,7 +339,7 @@ fn may_read_sv_feed(
             state.identity.as_ref(),
             realm_id,
             claims,
-        )
+        )?)
 }
 
 /// `GET /oauth/session-versions?since=<seq>` — session-version delta feed.
@@ -386,12 +387,16 @@ async fn oauth_sv_delta_feed(
         Err(e) => return e.into_response(),
     };
 
-    if !may_read_sv_feed(&state, &realm_id, &claims) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "requires hearth.sv_feed permission"})),
-        )
-            .into_response();
+    match may_read_sv_feed(&state, &realm_id, &claims) {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "requires hearth.sv_feed permission"})),
+            )
+                .into_response();
+        }
+        Err(e) => return super::auth::identity_error_to_response(&e).into_response(),
     }
 
     let limit = params.limit.unwrap_or(1000).min(5000);
@@ -478,12 +483,16 @@ async fn oauth_sv_snapshot(
         Err(e) => return e.into_response(),
     };
 
-    if !may_read_sv_feed(&state, &realm_id, &claims) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "requires hearth.sv_feed permission"})),
-        )
-            .into_response();
+    match may_read_sv_feed(&state, &realm_id, &claims) {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "requires hearth.sv_feed permission"})),
+            )
+                .into_response();
+        }
+        Err(e) => return super::auth::identity_error_to_response(&e).into_response(),
     }
 
     let result = tokio::task::spawn_blocking({
