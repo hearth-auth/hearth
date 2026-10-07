@@ -126,10 +126,10 @@ reason = "Same bundled undici 6.28.0 inside the npm CLI (release tooling, dev sc
 id = "GHSA-vfj7-8cjw-p6xm"
 reason = "braces 3.0.3 (latest; no patched release as of 2026-10-03) via micromatch/chokidar in Docusaurus (docs-site build) and @semantic-release/git (release tooling, dev scope). Stack exhaustion on a crafted deeply nested pattern; both tools expand only glob patterns written in this repo, never external input. Revisit when braces publishes a fix."
 
-# guard: package=http-cache-semantics lockfile=docs-site/package-lock.json
+# guard: package=http-cache-semantics lockfile=package-lock.json
 [[IgnoredVulns]]
 id = "GHSA-ch52-4w7c-c8xp"
-reason = "http-cache-semantics 4.2.0 (latest; no patched release as of 2026-10-03) via got/cacheable-request in Docusaurus's update-notifier (docs-site build) and bundled inside the npm CLI (release tooling, dev scope). The flaw discloses cached responses across users of a shared cache; both tools run as one CI user with no shared HTTP cache. Revisit when http-cache-semantics publishes a fix."
+reason = "http-cache-semantics 4.2.0 bundled inside the npm CLI (node_modules/npm/node_modules/http-cache-semantics, release-tooling lockfile, dev scope); docs-site moved to 4.3.0 on 2026-10-07. The flaw discloses cached responses across users of a shared cache; the release job runs as one CI user with no shared HTTP cache. Revisit when npm bundles http-cache-semantics >= 4.3.0."
 
 # CVE-2026-42507, CVE-2026-42504 and CVE-2026-27145 were removed on 2026-09-28
 # (GA audit supply-chain fix). Their reasons blamed google.golang.org/protobuf
