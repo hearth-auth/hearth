@@ -14,6 +14,7 @@
                            [db :as hdb]
                            [nemesis :as hn]
                            [register :as register]
+                           [revocation :as revocation]
                            [same-node :as same-node]
                            [runner :as runner]
                            [set :as hset]
@@ -31,7 +32,8 @@
    "set"      hset/workload
    "register" register/workload
    "single-use" single-use/workload
-   "same-node"  same-node/workload})
+   "same-node"  same-node/workload
+   "revocation" revocation/workload})
 
 (def catalog
   "The suite: test name -> the options that define it. Each name has an
@@ -44,7 +46,9 @@
    ; W4: partitions and kill -9.
    "single-use" {:workload "single-use" :nemesis [:partition :kill]}
    ; R1: partitions, including one that isolates the leader.
-   "same-node"  {:workload "same-node" :nemesis [:partition :partition-leader]}})
+   "same-node"  {:workload "same-node" :nemesis [:partition :partition-leader]}
+   ; V1: delay on the peer links.
+   "revocation" {:workload "revocation" :nemesis [:packet]}})
 
 (def ssh-key
   "The key pair the control container generates; the nodes trust it."
@@ -70,6 +74,8 @@
            opts
            (when-let [c (:client workload)] {:client c})
            {:name      (test-name opts)
+            ; The V1 bound's injected delay (Open Question 5).
+            :v1-delay-ms (hn/injected-delay-ms (:nemesis opts))
             :db        db
             :nemesis   (:nemesis pkg)
             ; The CLI sets :private-key-path to nil when the flag is absent.

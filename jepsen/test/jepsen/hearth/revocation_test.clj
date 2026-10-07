@@ -34,8 +34,17 @@
   (is (= 1400 (revocation/bound-ms 0)))
   (is (= 1800 (revocation/bound-ms 200))))
 
+(deftest a-probe-that-never-saw-a-live-session-proves-nothing
+  (testing "every validation rejects, even before the revocation"
+    (let [r (check (validate 1 "n2" :s1 0 false)
+                   (revoke 0 :s1 10 20)
+                   (validate 1 "n2" :s1 2000 false))]
+      (is (false? (:valid? r)))
+      (is (re-find #"never saw a live session" (:error r)) (pr-str r)))))
+
 (deftest rejection-within-the-bound-is-valid
-  (let [r (check (revoke 0 :s1 0 10)
+  (let [r (check (validate 3 "n1" :s1 -10 true)
+                 (revoke 0 :s1 0 10)
                  ; Before the bound a node may still accept.
                  (validate 1 "n2" :s1 500 true)
                  (validate 2 "n3" :s1 1500 false)
@@ -45,7 +54,8 @@
 
 (deftest acceptance-after-the-bound-is-invalid
   (testing "planted violation: n3 accepts the session 2 s after the revoke"
-    (let [r (check (revoke 0 :s1 0 10)
+    (let [r (check (validate 3 "n1" :s1 -10 true)
+                   (revoke 0 :s1 0 10)
                    (validate 1 "n2" :s1 1500 false)
                    (validate 2 "n3" :s1 2010 true))]
       (is (false? (:valid? r)))

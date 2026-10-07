@@ -174,6 +174,18 @@
          :refresh    (get-in token [:body "refresh_token"])
          :session-id (session-id access)}))))
 
+(defn sign-in-anywhere!
+  "sign-in! on `node`, then on each other node of the test until one works.
+  Every step of one attempt runs on one node. Returns sign-in!'s result plus
+  :node, or the last attempt's {:error ...}."
+  [db test node email password]
+  (loop [[at & more] (cons node (remove #{node} (:nodes test)))]
+    (let [r (sign-in! db at email password)]
+      (cond
+        (:access r)  (assoc r :node at)
+        (seq more)   (recur more)
+        :else        r))))
+
 (defn redeem!
   "Redeems refresh token `refresh` on `node` (grant_type=refresh_token).
   Returns the http/request! result; its body holds the next refresh token."

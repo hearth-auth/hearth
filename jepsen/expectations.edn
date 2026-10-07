@@ -5,4 +5,5 @@
  "set"      :pass
  "register" :pass
  "single-use" :pass
- "same-node"  :pass}
+ "same-node"  :pass
+ "revocation" :pass}

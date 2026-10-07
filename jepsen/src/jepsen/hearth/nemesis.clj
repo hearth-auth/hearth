@@ -33,6 +33,22 @@
        sort
        vec))
 
+(def packet-delay-ms
+  "The packet fault's one-way delay on each peer link."
+  200)
+
+(def packet-jitter-ms
+  "The packet fault's jitter on top of `packet-delay-ms`."
+  50)
+
+(defn injected-delay-ms
+  "The worst one-way peer delay the faults inject: delay plus jitter with
+  :packet, else 0. The V1 bound (Open Question 5) takes it."
+  [fault-names]
+  (if (some #{:packet} fault-names)
+    (+ packet-delay-ms packet-jitter-ms)
+    0))
+
 (defn- combined-opts
   [db fault-names interval]
   (let [parts (map faults fault-names)]
@@ -42,7 +58,8 @@
      :partition {:targets (vec (distinct (mapcat :partition-targets parts)))}
      :kill      {:targets [:minority]}
      :packet    {:targets   [:all]
-                 :behaviors [{:delay {:time :200ms :jitter :50ms}}]}}))
+                 :behaviors [{:delay {:time   (keyword (str packet-delay-ms "ms"))
+                                      :jitter (keyword (str packet-jitter-ms "ms"))}}]}}))
 
 (defn package
   "A map with :nemesis, :generator (the faults, staggered by `interval`

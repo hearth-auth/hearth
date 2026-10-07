@@ -25,14 +25,12 @@
         ; token is presented twice, so every round needs its own sign-in.
         ; A sign-in runs on one node; when this client's node fails, it
         ; tries the others, so a dead node does not waste the round.
-        :sign-in (loop [[at & more] (cons node (remove #{node} (:nodes test)))]
-                   (let [r (auth/sign-in! db at hdb/realm-admin-email
-                                          (hdb/realm-admin-password db))]
-                     (cond
-                       (:refresh r) (do (reset! state {:round n :refresh (:refresh r)})
-                                        (assoc op :type :ok :signed-in-on at))
-                       (seq more)   (recur more)
-                       :else        (assoc op :type :fail :error (:error r)))))
+        :sign-in (let [r (auth/sign-in-anywhere! db test node hdb/realm-admin-email
+                                                 (hdb/realm-admin-password db))]
+                   (if (:refresh r)
+                     (do (reset! state {:round n :refresh (:refresh r)})
+                         (assoc op :type :ok :signed-in-on (:node r)))
+                     (assoc op :type :fail :error (:error r))))
 
         :redeem  (let [{:keys [round refresh]} @state]
                    (if (= n round)
