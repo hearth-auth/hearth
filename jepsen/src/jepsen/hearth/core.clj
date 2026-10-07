@@ -15,7 +15,8 @@
                            [nemesis :as hn]
                            [register :as register]
                            [runner :as runner]
-                           [set :as hset]]))
+                           [set :as hset]
+                           [single-use :as single-use]]))
 
 (def workloads
   "Workload name -> function of the CLI options and the db that returns the
@@ -27,7 +28,8 @@
             ; the faults and the convergence check (tasks 2.2, 2.4, 2.5).
             {})
    "set"      hset/workload
-   "register" register/workload})
+   "register" register/workload
+   "single-use" single-use/workload})
 
 (def catalog
   "The suite: test name -> the options that define it. Each name has an
@@ -36,7 +38,9 @@
    ; W1, W2 (CONSISTENCY.md section 9): partitions and kill -9.
    "set"  {:workload "set" :nemesis [:partition :kill]}
    ; W1, W2, W3: partitions, kill -9 and restart.
-   "register" {:workload "register" :nemesis [:partition :partition-leader :kill]}})
+   "register" {:workload "register" :nemesis [:partition :partition-leader :kill]}
+   ; W4: partitions and kill -9.
+   "single-use" {:workload "single-use" :nemesis [:partition :kill]}})
 
 (def ssh-key
   "The key pair the control container generates; the nodes trust it."

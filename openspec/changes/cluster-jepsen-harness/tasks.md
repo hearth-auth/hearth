@@ -28,9 +28,9 @@
 
 Each checker first gets a unit test on a hand-written history with a planted violation (spec "The checkers are proven before they are trusted").
 
-- [ ] 4.1 set (W1, W2): unique adds, final list on every node, `set-full` checker. Planted violation: an `:ok` add missing from the final read
-- [ ] 4.2 register (W1, W2, W3): one mutable user field per key, final read on every node after heal, Knossos on writes plus final reads, all nodes agree. Planted violations: a final value no linearization allows; a `:fail` write visible at the end
-- [ ] 4.3 single-use (W4): the artifact from task 0.3, redeemed on many nodes. Planted violation: two `:ok` redemptions of one artifact
+- [x] 4.1 set (W1, W2): unique adds, final list on every node, `set-full` checker. Planted violation: an `:ok` add missing from the final read
+- [x] 4.2 register (W1, W2, W3): one mutable user field per key, final read on every node after heal, Knossos on writes plus final reads, all nodes agree. Planted violations: a final value no linearization allows; a `:fail` write visible at the end
+- [x] 4.3 single-use (W4): the artifact from task 0.3, redeemed on many nodes. Planted violation: two `:ok` redemptions of one artifact
 - [x] 4.4 counter (W5), only if task 0.3 found a readable counter. Otherwise record in `docs/dev/CONSISTENCY.md` §9 that W5 is covered by unit tests only
 - [ ] 4.5 same-node read (R1): clients pinned to one node, write then read. Planted violation: a read on the writing node that misses the write
 - [ ] 4.6 revocation (V1): revoke on one node, validate on all nodes in a loop, bound from Open Question 5. Planted violation: a node that accepts the session after the bound

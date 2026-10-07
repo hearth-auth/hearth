@@ -3,4 +3,5 @@
 ;; change that closes a G-item flips its tests to :pass.
 {"noop"     :pass
  "set"      :pass
- "register" :pass}
+ "register" :pass
+ "single-use" :pass}
