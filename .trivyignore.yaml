@@ -75,3 +75,13 @@ vulnerabilities:
     paths:
       - "docs-site/package-lock.json"
     statement: "http-cache-semantics via Docusaurus update-notifier; no shared HTTP cache in CI; no patched release."
+  # sprintf-js 1.0.3, only via argparse 1.0.10 (gray-matter's front-matter
+  # parsing at docs build time). Every release through 1.1.3 is affected and
+  # none is fixed. argparse formats only its own help and error templates,
+  # never a format string from outside the repo. Same assessment as the
+  # osv-scanner.toml entry (GHSA-hp3w-g68c-fv3c), which Trivy keys by CVE id.
+  # Revisit when a fixed sprintf-js is published or argparse moves off it.
+  - id: CVE-2026-97058
+    paths:
+      - "docs-site/package-lock.json"
+    statement: "sprintf-js via argparse in Docusaurus build tooling; formats only its own templates; no patched release."
