@@ -52,12 +52,12 @@ Each checker first gets a unit test on a hand-written history with a planted vio
 
 ## 7. Docs and spec move
 
-- [ ] 7.1 `docs/dev/CONSISTENCY.md`: header no longer says "Normative"; it links to `openspec/specs/cluster-consistency/spec.md` and `jepsen/README.md`; §9 gets the real test names and the reasons for untested promises (C1 skew, membership, W5 if task 4.4 skipped it)
-- [ ] 7.2 `docs/dev/TESTING.md`: replace "not implemented" for partition simulation (line 96) and the line 721 entry with the Jepsen layer and `make jepsen`
-- [ ] 7.3 `CLAUDE.md`: add `cluster-consistency` and `cluster-fault-testing` to the capability table
-- [ ] 7.4 `hearth.example.yaml` cluster warning block: it still says followers never invalidate caches (C-5) and that a node is replaced by editing YAML (C-6). Align it with `docs/guides/clustering.md` and link `docs/dev/CONSISTENCY.md`
-- [ ] 7.5 Any statement in `docs/guides/clustering.md` that a run proved wrong: fix it, citing the run
-- [ ] 7.6 `openspec validate cluster-jepsen-harness --strict` passes
+- [x] 7.1 `docs/dev/CONSISTENCY.md`: header no longer says "Normative"; it links to `openspec/specs/cluster-consistency/spec.md` and `jepsen/README.md`; §9 gets the real test names and the reasons for untested promises (C1 skew, membership, W5 if task 4.4 skipped it)
+- [x] 7.2 `docs/dev/TESTING.md`: replace "not implemented" for partition simulation (line 96) and the line 721 entry with the Jepsen layer and `make jepsen`
+- [x] 7.3 `CLAUDE.md`: add `cluster-consistency` and `cluster-fault-testing` to the capability table
+- [x] 7.4 `hearth.example.yaml` cluster warning block: it still says followers never invalidate caches (C-5) and that a node is replaced by editing YAML (C-6). Align it with `docs/guides/clustering.md` and link `docs/dev/CONSISTENCY.md`
+- [x] 7.5 Any statement in `docs/guides/clustering.md` that a run proved wrong: fix it, citing the run
+- [x] 7.6 `openspec validate cluster-jepsen-harness --strict` passes
 
 ## 8. Follow-up changes (propose only, after task 5.6)
 

@@ -181,6 +181,13 @@ HTTPS admin and OAuth APIs. None reads the store directly.
   node during a forced snapshot install), V2 (validation on an isolated node never accepts),
   and node replacement (wipe one node, restart it with the same ID; the W1 checker).
 
+  R3/R4 forces the install with a partition, not a kill: a killed node installs the snapshot
+  at start-up, before it serves HTTP. With the default `read_lag_threshold_ms` (500), the lag
+  monitor refuses reads within 50 ms of the snapshot's arrival, before the restore deletes a
+  key, so no read can see G2. The owner chose (2026-10-06) to run this one test with the
+  threshold raised through the normal config key (`3600000`, set from the catalog): no
+  test-only flag, and only a fence of the install itself (the G2 fix) makes it pass.
+
 ### 8. Nemeses
 
 Jepsen's combined nemesis package with these faults: majority/minority partitions, a

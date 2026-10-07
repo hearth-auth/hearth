@@ -93,8 +93,26 @@ failure — but **without** a deterministic scheduler.
 > Where a test declares a fixed `seed` constant, that value is a **static diagnostic label**
 > surfaced in assertion messages — it does not drive scheduling or reproducible replay.
 > A failing run is not guaranteed to reproduce from its reported seed. See `simulation/src/lib.rs`.
-> Network-partition and clock-skew simulation are **not** implemented. The planned Jepsen harness
-> will cover them; its oracle is [CONSISTENCY.md](./CONSISTENCY.md) §9.
+> This crate does not simulate a network. Partitions, `kill -9` of cluster nodes and peer-link
+> delays are the Jepsen layer's job (below). Clock skew is not tested: Docker containers share
+> one kernel clock.
+
+#### Cluster fault testing (Jepsen)
+
+`jepsen/` runs real Jepsen against five hearth nodes in Docker, built from the shipped image
+without `dev-endpoints`. Workloads drive the admin API and the OAuth endpoints while faults hit
+the cluster; checkers (Knossos, set, and Hearth-specific ones, each proven first on a planted
+violation) read the history. Each test expects **pass**, or **xfail** for a promise that an open
+item (G1–G9) in [CONSISTENCY.md](./CONSISTENCY.md) breaks today; the test list is in §9 there.
+
+```bash
+make jepsen                   # every test, 300 s of faults each
+make jepsen TEST=staleness    # one test
+docker compose -f jepsen/docker/compose.yaml exec -T control \
+  bash -c 'cd /jepsen && lein test'   # the harness's own unit tests (after make jepsen-up)
+```
+
+How to read a run: [`jepsen/README.md`](../../jepsen/README.md).
 
 **We provide the domain-specific test oracles** — assertions about what must be true regardless of the failure scenario:
 - "After crash recovery, no committed session is lost"
@@ -104,7 +122,7 @@ failure — but **without** a deterministic scheduler.
 
 **Phasing**: Simulation testing grows incrementally:
 - **Phase 0**: Storage engine fault injection — simulated disk failures during WAL writes, crashes mid-flush, recovery verification
-- **Phase 2+**: Full network partition simulation — Raft consensus correctness, leader election under partition, split-brain prevention, replication consistency. Promises and expected results: [CONSISTENCY.md](./CONSISTENCY.md) §9
+- **Phase 2+**: Network partitions, `kill -9` and peer-link delays on a real cluster — the Jepsen layer above (`make jepsen`). Promises and expected results: [CONSISTENCY.md](./CONSISTENCY.md) §9
 
 **Structure**:
 ```
@@ -718,7 +736,7 @@ make test-quality          # or: bash scripts/check-test-quality.sh
 - Adversarial tests for token handling (forgery, replay, algorithm confusion)
 
 ### Phase 2+ (Clustering, SAML, SCIM)
-- Simulation tests with network partitions (Raft consensus, leader election, split-brain) — Jepsen harness, test list in [CONSISTENCY.md](./CONSISTENCY.md) §9
+- Cluster fault tests (partitions, leader isolation, `kill -9`, peer-link delays, node replacement) — the Jepsen layer, `make jepsen`; test list in [CONSISTENCY.md](./CONSISTENCY.md) §9
 - Multi-node black box tests (replication consistency, failover behavior)
 - SAML conformance tests — **not done.** SAML ships as a service provider only (the IdP side was removed in 3.0.0); coverage is `tests/saml_sp.rs` (with the XSW1–XSW8 corpus), `tests/saml_web_hardening.rs` and `tests/abuse_scim_saml.rs`, not a conformance suite
 - SCIM compliance tests — **not done.** SCIM ships; coverage is `tests/scim*.rs`, not a compliance suite

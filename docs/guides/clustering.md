@@ -91,7 +91,10 @@ machine's replicated-write observer (`impl ReplicatedWriteObserver for EmbeddedI
 - the row to the **RBAC engine**, which bumps the realm's decision-cache generation for role,
   permission and assignment rows (task 23.16) — so a role unassignment or permission revocation on
   the leader stops resolving on followers;
-- the row to the **audit engine**, which drops its cached signed chain head (task 26.47);
+- the row to the **audit engine**, which drops its cached signed chain head (task 26.47). This
+  does not stop two nodes from chaining an event from the same head at the same time: in the
+  Jepsen `audit` test (2026-10-06), audited admin changes on all five nodes at once left a chain
+  that verifies on no node ([CONSISTENCY.md](../dev/CONSISTENCY.md) G4);
 - **revoked-token (JTI) rows** into the node's revocation cache;
 - the replicated **control epoch**, which makes the node reload its control caches.
 
@@ -109,7 +112,7 @@ on a follower for an access decision that must reflect the latest revocation. Th
 
 `add_learner` and `change_membership` are not implemented. The only path to set cluster membership is `raft.initialize()` from static YAML at first bootstrap.
 
-**Consequence:** Nodes cannot be added or removed from a running cluster. Editing `peers` and restarting does not change membership, because membership lives in the Raft log. A failed node stays a voter, so a 3-node cluster with one dead node tolerates no further failure. See [CONSISTENCY.md](../dev/CONSISTENCY.md#6-membership) §6 (G5, G9).
+**Consequence:** Nodes cannot be added or removed from a running cluster. Editing `peers` and restarting does not change membership, because membership lives in the Raft log. A failed node stays a voter, so a 3-node cluster with one dead node tolerates no further failure. Do not replace a failed node by restarting it with an empty data directory under its old ID: it forgets its vote, and the lowest ID starts a cluster of its own. In the Jepsen `replace` test (2026-10-06) node 1, restarted this way, never rejoined and exited after its start-up window. See [CONSISTENCY.md](../dev/CONSISTENCY.md#6-membership) §6 (G5, G9).
 
 ### H-3 — Writes to a follower: forwarded to the leader (fixed)
 
@@ -381,8 +384,12 @@ cluster:
 (`/ui/admin/api-tokens`), pick a lifetime (1 to 60 minutes, default 15) and confirm with your
 password and your second factor (see the [realm admin API](./admin-api.md#realms)). The token's
 session and its audit record are ordinary writes, proposed through Raft: once they commit, the
-token validates on **every** node, and revoking its session on the leader revokes it everywhere
+token validates on **every** node, and revoking its session on the leader revokes it on every node
+in contact with the leader
 (`tests/cluster_three_node_control_coherence.rs::an_operator_token_minted_on_the_leader_validates_and_revokes_on_both_followers`).
+A node cut off from the cluster never learns of the revocation and goes on accepting the token: in
+the Jepsen `revocation-isolated` test (2026-10-06) the cut-off node accepted a revoked session for
+the whole 4 s it was watched ([CONSISTENCY.md](../dev/CONSISTENCY.md) G1).
 On a follower both the console login and the mint are writes that the follower forwards to the
 leader ([H-3](#h-3--writes-to-a-follower-forwarded-to-the-leader-fixed)), so they work there too.
 Keep the whole console session on one node, though: the session-cookie secret is per node unless
@@ -418,7 +425,7 @@ first-boot setup at `/ui/setup`, verify the operator's email, stop the node, min
 
 Bootstrapping initializes the cluster's initial membership. Do this **once** — running bootstrap on an already-initialized cluster is a no-op (Raft rejects double-initialization).
 
-> **Membership is fixed at bootstrap.** The peers list set here cannot be changed without a full-cluster restart. There is no online membership change API in Hearth 1.x (see C-6 above).
+> **Membership is fixed at bootstrap.** The peers list set here cannot be changed: membership lives in the Raft log, so editing `peers` and restarting, even every node at once, does not change it. There is no online membership change API in Hearth 1.x (see C-6 above).
 
 1. Start all nodes: `hearth serve -c hearth-N.yaml`
 2. Wait until all nodes are listening (check logs for `"Raft peer gRPC server starting (mTLS)"`).

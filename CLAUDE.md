@@ -47,6 +47,7 @@ specs of the active changes in `openspec/changes/` are part of the contract too.
 | Authorization | `rbac-model`, `rbac-token-claims`, `rbac-admin-api`, `custom-permissions`, `credential-hashing` |
 | OAuth 2.0 / OIDC | `oidc-provider`, `client-authentication`, `dpop`, `rp-initiated-logout` |
 | Agent auth | `agent-identity`, `mcp-authorization`, `delegated-authorization`, `tool-permissions`, `agent-approvals` |
+| Cluster | `cluster-consistency`, `cluster-fault-testing` |
 | Other | `saml-sp-profile`, `sdk-support-contract`, `abuse-prevention`, `ui-routing`, `performance-budgets` |
 
 ### Contributor docs

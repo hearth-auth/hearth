@@ -1,7 +1,10 @@
-# Cluster Consistency — Normative Specification
+# Cluster Consistency
 
-Status: **Normative target. Cluster mode is incomplete.** Requirement levels follow RFC 2119
-(MUST / SHOULD / MAY).
+Status: **Reference. Cluster mode is incomplete.** The normative promises — the ones Hearth
+meets today — are in [`openspec/specs/cluster-consistency/spec.md`](../../openspec/specs/cluster-consistency/spec.md).
+The Jepsen harness that tests them is described in [`jepsen/README.md`](../../jepsen/README.md).
+This document keeps the target model, the evidence for each status and the open items (G1–G9).
+Requirement levels follow RFC 2119 (MUST / SHOULD / MAY).
 Scope: what a client of a multi-node Hearth cluster may rely on — for writes, reads,
 revocations, clocks and membership. The implementation lives under `src/cluster/`, with the
 cluster-facing parts of the identity engine under `src/identity/engine/`.
@@ -208,31 +211,42 @@ are build steps for finishing cluster mode, not regressions.
 
 ## 9. Jepsen test mapping
 
-This section is the input for the Jepsen harness. Each row is one test. "Expected" says how CI
-reads the result: **pass** is required; **xfail** is an expected failure that tracks a G-item
-and flips to **pass** when the G-item lands.
+Each row is one test of the Jepsen suite; "Test" is its name in the catalog
+(`jepsen/src/jepsen/hearth/core.clj`) and in `make jepsen TEST=<name>`. "Expected" says how the
+suite reads the result: **pass** is required; **xfail** is an expected failure that tracks a
+G-item and flips to **pass** when the G-item lands (`jepsen/expectations.edn`).
 
-| Promise | Workload | Nemesis | Checker | Expected |
-|---|---|---|---|---|
-| W1, W2 | Read/write one user attribute per key (register) | Partitions, `kill -9`, restart | Knossos, linearizable on writes; reads only from the leader that confirms quorum | pass (writes) |
-| W1 | Add unique items to a set (e.g. group members) | Partitions, `kill -9` | Set checker: every acknowledged add is present at the end | pass |
-| W3 | Same as W1, record unknown outcomes as `:info` | Partitions during writes | Knossos treats `:info` as maybe-applied | pass |
-| W4 | Many clients redeem one magic link or auth code on different nodes | Partitions, `kill -9` | At most one success per artifact | pass |
-| W5 | None: unit tests only (see below) | — | `src/cluster/state_machine.rs`: `increment_command_returns_successive_values`, `a_replayed_increment_is_not_counted_twice` | unit tests |
-| W7 | Concurrent audited admin changes on two nodes | none needed | Audit chain verifies end to end | xfail (G4) |
-| R1 | Write then read on the same node | Partitions | Read shows the write | pass |
-| R2 | Read on every node | Partition one node, or isolate the leader | No stale read after `read_lag_threshold_ms` | xfail (G1) |
-| R3, R4 | Read one node in a loop | Force a snapshot install on that node | No read goes backwards or sees empty data | xfail (G2) |
-| V1 | Revoke a session, then validate it on every node | Delays on the peer links | Rejected on every node within the V1 bound | pass |
-| V2 | Revoke a session, then validate it on an isolated node | Partition | Isolated node answers unavailable, never accepts | xfail (G1) |
-| C1 | W1 and W4 workloads | Clock skew (needs VMs, not Docker) | Same checkers as W1 / W4 | pass |
-| Section 6 | Wipe a node's data directory, restart with the same ID | Partitions | W1 checker | xfail (G9) |
+| Promise | Test | Workload | Faults | Checker | Expected |
+|---|---|---|---|---|---|
+| W1, W2, W3 | `register` | Write one user attribute per key; every node reads every key after the heal | Partitions, leader isolation, `kill -9` and restart | Knossos per key over the writes and final reads (an `:info` write may or may not have happened); every node reads the same final value | pass |
+| W1 | `set` | Add unique users; every node reads the full set after the heal | Partitions, `kill -9` | Every acknowledged add is in every node's final read; no failed add is | pass |
+| W4 | `single-use` | Every node redeems the same refresh token | Partitions, `kill -9` | At most one success per token | pass |
+| W5 | none | — | — | Unit tests only (see below) | unit tests |
+| W7 | `audit` | Audited admin changes on every node at once; every node verifies the audit chain | none | The chain verifies on every node | xfail (G4) |
+| R1 | `same-node` | Write, then read back on the same node | Partitions, leader isolation | The read shows the write | pass |
+| R2 | `staleness` | One writer writes increasing values; every node reads | Partitions, leader isolation | No read returns less than a write acknowledged more than `read_lag_threshold_ms` before it began | xfail (G1) |
+| R3, R4 | `snapshot` | Cut one node off, write past the snapshot point, heal; read the node while it installs the snapshot | Timed partition; `read_lag_threshold_ms` raised for this test only | No read goes backwards or misses data; at least one install logged | xfail (G2) |
+| V1 | `revocation` | Revoke a session, then validate it on every node | Delays on the peer links | Rejected on every node within the V1 bound | pass |
+| V2 | `revocation-isolated` | Cut one node off, revoke a session elsewhere, validate it on the cut-off node | Timed partition | The cut-off node never accepts the session after the bound | xfail (G1) |
+| Section 6 | `replace` | The `set` workload while the lowest Raft ID is replaced: killed, data directory emptied, restarted with the same ID | Partitions, the replacement | The `set` checkers | xfail (G9) |
+| — | `noop` | No client operations | none | Setup, faults, log collection and convergence work | pass |
+
+The `snapshot` test raises `cluster.read_lag_threshold_ms`. With the default (500 ms), the lag
+monitor happens to refuse reads within 50 ms of a snapshot's arrival, before the restore
+deletes a key, so a client cannot see G2. G2 stays open: the install itself does not refuse
+reads, and an operator who raises the threshold gets partial reads. Mid-install, the realm
+admin's token is refused `401` or `403` because the session, grant or client behind it is
+gone; the test counts that as missing data.
+
+C1 has no test. Docker containers share one kernel clock, so a node cannot be given its own
+skew; C1 needs VMs.
 
 W5 has no Jepsen test. The only replicated counter is the control epoch, and no API returns
 its value; `/metrics` exports only `hearth_control_epoch_bump_failures_total` and
 `hearth_control_epoch_bumps_owed`. Every election also bumps it, so a final count could not
-separate test bumps from election bumps. The unit tests above cover W5, including a replayed
-entry. A Jepsen test needs a counter an API can read back.
+separate test bumps from election bumps. The unit tests in `src/cluster/state_machine.rs`
+(`increment_command_returns_successive_values`, `a_replayed_increment_is_not_counted_twice`)
+cover W5, including a replayed entry. A Jepsen test needs a counter an API can read back.
 
 Membership-change tests (`kill -9` during a membership change) wait for G5.
 

@@ -48,9 +48,12 @@ test FAILs. The format, with an illustrative xfail line:
 
 ```
 PASS        noop
-XFAIL G1    r2-partition
+XFAIL G1    staleness
 1 pass, 0 fail, 1 xfail, 0 xpass: run PASSED
 ```
+
+The suite's tests, the promise each checks and its faults are listed in
+`docs/dev/CONSISTENCY.md` section 9.
 
 Each test's expectation is in `expectations.edn`: `:pass`, or `{:xfail "G<n>"}` for a
 promise that an open item in `docs/dev/CONSISTENCY.md` breaks today. An xpass (an xfail
@@ -67,6 +70,10 @@ docker compose -f jepsen/docker/compose.yaml exec control bash
 jepsen-run test --workload noop --nemesis partition,kill --time-limit 60
 ssh n1                                  # root on node n1
 ```
+
+`jepsen-run test` takes only the options you give it. A suite test can add more: the
+`snapshot` test raises `cluster.read_lag_threshold_ms`. To run a suite test as the suite
+does, use `jepsen-run suite --only <name>`.
 
 The faults are `partition` (majority/minority split), `partition-leader` (isolate the
 current leader), `kill` (`kill -9` a minority, then restart) and `packet` (delay on the
