@@ -10,7 +10,8 @@
                     [generator :as gen]
                     [store :as store]
                     [tests :as tests]]
-            [jepsen.hearth [converge :as converge]
+            [jepsen.hearth [audit :as audit]
+                           [converge :as converge]
                            [db :as hdb]
                            [nemesis :as hn]
                            [register :as register]
@@ -38,7 +39,8 @@
    "same-node"  same-node/workload
    "revocation" revocation/workload
    "revocation-isolated" revocation/isolated-workload
-   "staleness"  staleness/workload})
+   "staleness"  staleness/workload
+   "audit"      audit/workload})
 
 (def catalog
   "The suite: test name -> the options that define it. Each name has an
@@ -61,7 +63,10 @@
    ; R2 (xfail G1): reads on every node while a minority or the leader is
    ; cut off. A cut-off node goes on serving its older data after
    ; read_lag_threshold_ms; R2 says it must answer unavailable instead.
-   "staleness"  {:workload "staleness" :nemesis [:partition :partition-leader]}})
+   "staleness"  {:workload "staleness" :nemesis [:partition :partition-leader]}
+   ; W7 (xfail G4): audited admin changes on every node at once. Two nodes
+   ; can chain an event from the same head, and the chain stops verifying.
+   "audit"      {:workload "audit" :nemesis []}})
 
 (def ssh-key
   "The key pair the control container generates; the nodes trust it."

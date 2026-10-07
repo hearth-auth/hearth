@@ -38,7 +38,7 @@ Each checker first gets a unit test on a hand-written history with a planted vio
 
 ## 5. Expected-failure workloads
 
-- [ ] 5.1 W7 (`xfail G4`): concurrent audited admin changes on two nodes, then verify the audit chain end to end
+- [x] 5.1 W7 (`xfail G4`): concurrent audited admin changes on two nodes, then verify the audit chain end to end
 - [x] 5.2 R2 (`xfail G1`): reads on every node while one node or the leader is isolated; no stale read after `read_lag_threshold_ms`
 - [ ] 5.3 R3/R4 (`xfail G2`): reads in a loop on one node while it installs a snapshot (stop it, write past the snapshot threshold, restart)
 - [x] 5.4 V2 (`xfail G1`): validate a revoked session on an isolated node; it never accepts
