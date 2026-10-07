@@ -142,10 +142,17 @@ This mapping is what makes W3 testable.
 | `2xx` | `:ok` | `:ok` |
 | `503` `HEARTH_CLUSTER_WRITE_OUTCOME_UNKNOWN` | `:info` (maybe applied) | n/a |
 | `503` `HEARTH_CLUSTER_UNAVAILABLE` | `:fail` (not applied) | `:fail` |
-| Timeout or connection error | `:info` | `:fail` |
+| Timeout, or a connection that broke during the request | `:info` | `:fail` |
+| Connection refused (no connection made, nothing sent) | `:fail` | `:fail` |
 | Any other error | `:fail`, with the code kept in the history | `:fail` |
 
 A `:fail` write that is later seen applied breaks W3, and the checker reports it.
+
+The refused row was split from "connection error" in task 4.2 (2026-10-06). A client whose
+node is down had every write recorded as `:info`; Knossos keeps an `:info` write open for the
+rest of the history, and a 60 s register run with `kill` ran out of heap at 667 of them. A
+refused connection sent nothing, so `:fail` is exact. After a refused connection the client
+waits 1 s: otherwise its thread is always free first and takes most of the run's operations.
 
 ### 7. Workloads
 

@@ -82,9 +82,23 @@
       (is (false? (:valid? r)))
       (is (= {:a {"n1" 1 "n2" 2 "n3" 2}} (get-in r [:agree :disagree])) (pr-str r)))))
 
+(deftest a-key-whose-writes-all-failed-reads-nil-everywhere
+  (testing "nil is a value read, not a missing read"
+    (let [r (check (write 0 :a 1 :fail)
+                   (reads-on-every-node :a [nil nil nil]))]
+      (is (true? (:valid? r)) (pr-str r)))))
+
 (deftest a-node-without-a-final-read-is-invalid
   (let [r (check (write 0 :a 1 :ok)
                  (final-read 10 "n1" :a 1)
                  (final-read 11 "n2" :a 1))]
     (is (false? (:valid? r)))
     (is (= {:a ["n3"]} (get-in r [:agree :unread])) (pr-str r))))
+
+(deftest a-register-value-is-the-display-name-without-its-prefix
+  ; hearth's REST layer turns an all-digit string into a JSON number, so the
+  ; value carries a prefix; "init" is the value before any write.
+  (is (= 3 (register/parse-value "v3")))
+  (is (nil? (register/parse-value "init")))
+  (is (nil? (register/parse-value nil)))
+  (is (= "v3" (register/render-value 3))))

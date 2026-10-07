@@ -13,6 +13,7 @@
             [jepsen.hearth [converge :as converge]
                            [db :as hdb]
                            [nemesis :as hn]
+                           [register :as register]
                            [runner :as runner]
                            [set :as hset]]))
 
@@ -25,12 +26,17 @@
             ; No client operations: proves setup, teardown, log collection,
             ; the faults and the convergence check (tasks 2.2, 2.4, 2.5).
             {})
-   "set"  hset/workload})
+   "set"      hset/workload
+   "register" register/workload})
 
 (def catalog
   "The suite: test name -> the options that define it. Each name has an
   entry in expectations.edn."
-  {"noop" {:workload "noop" :nemesis []}})
+  {"noop" {:workload "noop" :nemesis []}
+   ; W1, W2 (CONSISTENCY.md section 9): partitions and kill -9.
+   "set"  {:workload "set" :nemesis [:partition :kill]}
+   ; W1, W2, W3: partitions, kill -9 and restart.
+   "register" {:workload "register" :nemesis [:partition :partition-leader :kill]}})
 
 (def ssh-key
   "The key pair the control container generates; the nodes trust it."

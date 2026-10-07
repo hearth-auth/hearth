@@ -39,12 +39,18 @@
   (testing "timeout"
     (is (= :info (:type (http/outcome :write {:error :timeout}))))
     (is (= :fail (:type (http/outcome :read {:error :timeout})))))
-  (testing "connection error"
+  (testing "a connection that broke during the request"
     (is (= :info (:type (http/outcome :write {:error :connect}))))
     (is (= :fail (:type (http/outcome :read {:error :connect})))))
   (testing "the history keeps which one it was"
     (is (= {:client :timeout}
            (:error (http/outcome :write {:error :timeout}))))))
+
+(deftest a-refused-connection-is-fail-for-a-write
+  (testing "no connection was made, so nothing reached the server"
+    (is (= {:type :fail :error {:client :refused}}
+           (http/outcome :write {:error :refused})))
+    (is (= :fail (:type (http/outcome :read {:error :refused}))))))
 
 (deftest any-other-error-is-fail-and-keeps-its-code
   (doseq [kind [:write :read]]

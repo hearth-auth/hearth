@@ -116,7 +116,8 @@ Each Hearth answer maps to one outcome (design decision 6):
 | `2xx` | `:ok` | `:ok` |
 | `503` `HEARTH_CLUSTER_WRITE_OUTCOME_UNKNOWN` | `:info` | — |
 | `503` `HEARTH_CLUSTER_UNAVAILABLE` | `:fail` | `:fail` |
-| Timeout or connection error | `:info` | `:fail` |
+| Timeout, or connection broken during the request | `:info` | `:fail` |
+| Connection refused (nothing sent) | `:fail` | `:fail` |
 | Any other error | `:fail`, with the code in the history | `:fail` |
 
 `:ok` means Hearth acknowledged the write. `:fail` means it did not happen. `:info`

@@ -6,7 +6,8 @@
     | 2xx                                         | :ok     | :ok     |
     | 503 HEARTH_CLUSTER_WRITE_OUTCOME_UNKNOWN    | :info   | :fail   |
     | 503 HEARTH_CLUSTER_UNAVAILABLE              | :fail   | :fail   |
-    | timeout or connection error                 | :info   | :fail   |
+    | timeout, or connection broken mid-request   | :info   | :fail   |
+    | connection refused (nothing was sent)       | :fail   | :fail   |
     | any other error                             | :fail   | :fail   |
 
   Every :fail and :info keeps the HTTP status and the Hearth error code, or
@@ -31,6 +32,12 @@
   server-side 503 arrives before the client gives up."
   15000)
 
+(def refused-backoff-ms
+  "How long a request waits after a refused connection before it returns.
+  Without it a client on a dead node fails at once, its thread is free
+  first, and the generator hands it most of the run's operations."
+  1000)
+
 (defn- error-code
   "The Hearth error_code of a parsed body, or nil."
   [body]
@@ -39,10 +46,10 @@
 (defn outcome
   "Maps one HTTP result to a Jepsen completion: a map with :type and, unless
   :ok, :error. `kind` is :write or :read. `result` is either
-  {:status n :body parsed-json} or {:error :timeout | :connect}."
+  {:status n :body parsed-json} or {:error :timeout | :connect | :refused}."
   [kind result]
   (if-let [client-error (:error result)]
-    {:type  (if (= kind :write) :info :fail)
+    {:type  (if (and (= kind :write) (not= :refused client-error)) :info :fail)
      :error {:client client-error}}
     (let [status (:status result)
           code   (error-code (:body result))]
@@ -96,7 +103,8 @@
 
 (defn request!
   "Sends one request and returns {:status n :body parsed-json :headers m} or
-  {:error :timeout | :connect}. The client follows no redirect. Options:
+  {:error :timeout | :connect | :refused}. The client follows no redirect.
+  Options:
 
     :method   :get (default), :post, :put, :patch or :delete
     :headers  map of header name to value
@@ -133,7 +141,11 @@
          :headers (into {}
                         (map (fn [[k vs]] [(str/lower-case k) (vec vs)]))
                         (.map (.headers resp)))})
-      (catch HttpConnectTimeoutException _ {:error :connect})
+      ; No connection was made: nothing reached the server.
+      (catch HttpConnectTimeoutException _ {:error :refused})
+      (catch ConnectException _
+        (Thread/sleep (long refused-backoff-ms))
+        {:error :refused})
       (catch HttpTimeoutException _ {:error :timeout})
-      (catch ConnectException _ {:error :connect})
+      ; A connection that broke during the request: the outcome is unknown.
       (catch java.io.IOException _ {:error :connect}))))
