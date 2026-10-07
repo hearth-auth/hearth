@@ -18,7 +18,8 @@
                            [same-node :as same-node]
                            [runner :as runner]
                            [set :as hset]
-                           [single-use :as single-use]]))
+                           [single-use :as single-use]
+                           [staleness :as staleness]]))
 
 (def workloads
   "Workload name -> function of the CLI options and the db that returns the
@@ -36,7 +37,8 @@
    "single-use" single-use/workload
    "same-node"  same-node/workload
    "revocation" revocation/workload
-   "revocation-isolated" revocation/isolated-workload})
+   "revocation-isolated" revocation/isolated-workload
+   "staleness"  staleness/workload})
 
 (def catalog
   "The suite: test name -> the options that define it. Each name has an
@@ -55,7 +57,11 @@
    ; V2 (xfail G1): the same rounds under partitions. A node cut off from
    ; the cluster never learns of the revocation and goes on accepting the
    ; session after the bound; V2 says it must answer unavailable instead.
-   "revocation-isolated" {:workload "revocation-isolated" :nemesis [:partition]}})
+   "revocation-isolated" {:workload "revocation-isolated" :nemesis [:partition]}
+   ; R2 (xfail G1): reads on every node while a minority or the leader is
+   ; cut off. A cut-off node goes on serving its older data after
+   ; read_lag_threshold_ms; R2 says it must answer unavailable instead.
+   "staleness"  {:workload "staleness" :nemesis [:partition :partition-leader]}})
 
 (def ssh-key
   "The key pair the control container generates; the nodes trust it."
