@@ -9,4 +9,5 @@
  "revocation" :pass
  "revocation-isolated" {:xfail "G1"}
  "staleness"  {:xfail "G1"}
- "audit"      {:xfail "G4"}}
+ "audit"      {:xfail "G4"}
+ "snapshot"   {:xfail "G2"}}

@@ -20,6 +20,7 @@
                            [runner :as runner]
                            [set :as hset]
                            [single-use :as single-use]
+                           [snapshot :as snapshot]
                            [staleness :as staleness]]))
 
 (def workloads
@@ -40,7 +41,8 @@
    "revocation" revocation/workload
    "revocation-isolated" revocation/isolated-workload
    "staleness"  staleness/workload
-   "audit"      audit/workload})
+   "audit"      audit/workload
+   "snapshot"   snapshot/workload})
 
 (def catalog
   "The suite: test name -> the options that define it. Each name has an
@@ -66,7 +68,11 @@
    "staleness"  {:workload "staleness" :nemesis [:partition :partition-leader]}
    ; W7 (xfail G4): audited admin changes on every node at once. Two nodes
    ; can chain an event from the same head, and the chain stops verifying.
-   "audit"      {:workload "audit" :nemesis []}})
+   "audit"      {:workload "audit" :nemesis []}
+   ; R3, R4 (xfail G2): reads on a node while it installs a snapshot. The
+   ; install deletes every key before it writes the snapshot, and reads are
+   ; not fenced meanwhile. The workload times its own partition.
+   "snapshot"   {:workload "snapshot" :nemesis [:partition]}})
 
 (def ssh-key
   "The key pair the control container generates; the nodes trust it."
