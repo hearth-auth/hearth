@@ -326,6 +326,7 @@ fn serve_exits_when_the_peer_server_cannot_bind() {
         if std::time::Instant::now() >= deadline {
             break None;
         }
+        // AUDIT: justified-sleep: poll interval for a child process's exit, bounded by the 30 s deadline
         std::thread::sleep(Duration::from_millis(100));
     };
     if status.is_none() {

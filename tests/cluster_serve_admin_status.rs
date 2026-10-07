@@ -354,6 +354,7 @@ async fn the_cluster_admin_api_reaches_the_raft_engine_of_every_serving_node() {
                 node.id,
                 server_logs()
             );
+            // AUDIT: justified-sleep: poll interval for /readyz on a child process, bounded by the 40 s deadline
             tokio::time::sleep(Duration::from_millis(200)).await;
         };
         assert_eq!(
@@ -460,6 +461,7 @@ async fn readyz_is_not_ready_while_the_node_cannot_commit_a_write() {
                     "node {id} was not ready in 40 s:\n{}",
                     log_of(id)
                 );
+                // AUDIT: justified-sleep: poll interval for /readyz on a child process, bounded by the 40 s deadline
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
         }
@@ -485,12 +487,14 @@ async fn readyz_is_not_ready_while_the_node_cannot_commit_a_write() {
             "node 1 did not serve HTTP in 40 s:\n{}",
             log_of(1)
         );
+        // AUDIT: justified-sleep: poll interval for node 1's HTTP listener, bounded by the 40 s deadline
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     // A follower keeps a dead leader until its election timeout (at most
     // 3 s) passes; after that, and for longer than another election
     // timeout, node 1 must not be ready. If node 1 led the first run, it
     // resumes as leader with no quorum and is `no_quorum` from the start.
+    // AUDIT: justified-sleep: node 1 must stay not ready past a real election timeout (3 s) of separate processes
     tokio::time::sleep(Duration::from_millis(3500)).await;
     let mut answer = probe(&cluster[0]).await.expect("node 1 still serves HTTP");
     let watch_until = Instant::now() + Duration::from_secs(4);
@@ -510,6 +514,7 @@ async fn readyz_is_not_ready_while_the_node_cannot_commit_a_write() {
         if Instant::now() >= watch_until {
             break;
         }
+        // AUDIT: justified-sleep: probe interval while watching node 1 stay not ready for a span of real time
         tokio::time::sleep(Duration::from_millis(250)).await;
         answer = probe(&cluster[0]).await.expect("node 1 still serves HTTP");
     }
