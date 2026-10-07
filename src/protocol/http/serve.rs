@@ -265,6 +265,8 @@ async fn accept_until(
                     }
                 };
 
+                prepare_accepted(&stream);
+
                 // Synchronous and first: a client already at its allowance
                 // costs neither a task nor a place in the admission queue.
                 let Some(ip_guard) = per_ip.try_acquire(peer_addr.ip()) else {
@@ -332,6 +334,18 @@ async fn accept_until(
             }
             () = &mut shutdown => break,
         }
+    }
+}
+
+/// Sets the socket options every accepted connection needs.
+///
+/// `TCP_NODELAY`: TLS records and HTTP/2 frames leave in separate small
+/// writes. With Nagle's algorithm on, each waits for the ACK of the one before,
+/// and a client that delays its ACKs stalls the response by about 40 ms.
+/// A failure only costs that latency, so it is logged and the connection kept.
+fn prepare_accepted(stream: &tokio::net::TcpStream) {
+    if let Err(e) = stream.set_nodelay(true) {
+        debug!(error = %e, "could not set TCP_NODELAY on an accepted connection");
     }
 }
 
@@ -457,4 +471,31 @@ pub async fn serve_redirect(
     graceful.shutdown().await;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // TLS records and HTTP/2 frames leave in separate small writes. With
+    // Nagle's algorithm on, such a write waits for the ACK of the one before,
+    // and a client that delays its ACKs stalls the response by about 40 ms.
+    #[tokio::test]
+    async fn an_accepted_connection_turns_off_nagle() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let _client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let (stream, _) = listener.accept().await.expect("accept");
+        assert!(
+            !stream.nodelay().expect("read TCP_NODELAY"),
+            "precondition: a new socket starts with Nagle's algorithm on"
+        );
+
+        prepare_accepted(&stream);
+
+        assert!(
+            stream.nodelay().expect("read TCP_NODELAY"),
+            "an accepted connection must set TCP_NODELAY"
+        );
+    }
 }
