@@ -1,0 +1,83 @@
+name: Jepsen
+
+# The cluster fault suite (openspec change cluster-jepsen-harness, task 6.1):
+# five hearth nodes and a Jepsen control node in Docker, `make jepsen`.
+#
+# Nightly and on demand. Not a required check: tests of open items (G1-G9 in
+# docs/dev/CONSISTENCY.md) are expected failures, and a run takes over an
+# hour. The job fails only when a test FAILs (jepsen/README.md, "Run").
+#
+# The store (histories, checker results, every node's log) is uploaded for
+# 14 days. runner-usage.txt in it samples the runner's memory and the
+# containers' usage every 30 s (task 6.2).
+
+on:
+  schedule:
+    # 03:30 UTC daily, after the UI nightly.
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "Tests to run, comma-separated (empty: the whole suite)"
+        required: false
+        default: ""
+      time_limit:
+        description: "Seconds of faults per test"
+        required: false
+        default: "300"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  jepsen:
+    name: Jepsen suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Check the inputs
+        env:
+          TEST: ${{ inputs.test }}
+          TIME_LIMIT: ${{ inputs.time_limit }}
+        run: |
+          [[ "${TEST:-}" =~ ^[a-z,-]*$ ]] || { echo "test: catalog names only"; exit 1; }
+          [[ "${TIME_LIMIT:-300}" =~ ^[0-9]+$ ]] || { echo "time_limit: seconds"; exit 1; }
+
+      - name: Sample runner usage
+        run: |
+          mkdir -p jepsen/store
+          nohup bash -c 'while true; do
+              date -u +%FT%TZ
+              free -m | awk "NR==2 {print \"runner used MiB:\", \$3, \"of\", \$2}"
+              docker stats --no-stream --format "{{.Name}} {{.CPUPerc}} {{.MemUsage}}" 2>/dev/null
+              sleep 30
+            done' > jepsen/store/runner-usage.txt 2>&1 &
+
+      - name: Run the suite
+        env:
+          TEST: ${{ inputs.test }}
+          TIME_LIMIT: ${{ inputs.time_limit }}
+        run: make jepsen ${TEST:+TEST="$TEST"} TIME_LIMIT="${TIME_LIMIT:-300}"
+
+      - name: Upload the store
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: jepsen-store-${{ github.run_id }}
+          path: jepsen/store
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Remove the containers
+        if: always()
+        run: make jepsen-down
