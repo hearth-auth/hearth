@@ -291,7 +291,7 @@ Run these checks immediately after bringing the new binary up, regardless of dep
   |----------|----------|-----------------------|
   | `/health` | Process liveness — always 200 if the binary is running. Subject to the `security.allowed_hosts` check, so a probe addressed to a pod IP gets `400` | — |
   | `/healthz` | Same as `/health`, but answers whatever the `Host` header | `livenessProbe` |
-  | `/readyz` | Readiness — verifies storage is responsive; fails until WAL replay completes | `readinessProbe` |
+  | `/readyz` | Readiness — verifies storage is responsive; fails until WAL replay completes. In cluster mode it also fails while the node knows no leader, or leads without a quorum (see the clustering guide) | `readinessProbe` |
 
   The Helm chart already routes these correctly. If you are writing your own Kubernetes manifests, configure `/healthz` as the liveness probe and `/readyz` as the readiness probe.
 

@@ -374,6 +374,11 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   exits at start-up and names the address. `hearth config validate` refuses a `peer_address`
   that is not an IP address and port, such as `hearth-1.internal:8421`. A peer's `address` may
   still be a host name.
+- **`/readyz` reports a cluster node that cannot commit a write as not ready.** It checked only
+  local storage, so a node with no leader, or a leader cut off from its quorum, answered `200`
+  while every write failed. In cluster mode it now answers `503` with `"cluster": "no_leader"` or
+  `"cluster": "no_quorum"` (a leader no quorum has acknowledged for over 3 s, such as a node
+  restarted alone on its own last vote).
 - **`POST /device_authorization` now ignores an unknown parameter.** The header-routed device
   authorization endpoint refused a parameter RFC 8628 does not define with `400`, unlike its
   realm-routed twin and the other OAuth endpoints. It now ignores it, as RFC 6749 §3.1 requires.

@@ -285,6 +285,14 @@ roll back, delete `jepsen/` and the workflow.
      Tests: `tests/cli_config.rs`, `tests/cli.rs` (`serve_exits_when_the_peer_server_cannot_bind`).
      The harness still gives each node a fixed IP (decision 2), because the bound address must
      be the node's own IP.
+   - Task 2.2 also found that `/readyz` checked only storage and the write fence, so a node with
+     no leader answered `200` while every write failed. Fixed on this branch: in cluster mode it
+     answers `503` with `no_leader`, or `no_quorum` for a leader no quorum has acknowledged for
+     over 3 s. The test found that a node restarted alone on its own committed vote resumes as
+     leader with no quorum (openraft 0.9). Test: `tests/cluster_serve_admin_status.rs`
+     (`readyz_is_not_ready_while_the_node_cannot_commit_a_write`). The harness setup
+     (`jepsen/src/jepsen/hearth/db.clj`) waits on `/readyz`, so it now waits for a working
+     leader, not only for storage.
 3. **W4 and W5 targets.** Answered 2026-10-06 (task 0.3, from the code):
    - **W4: a presented refresh token**, with the authorization code as the second choice.
      ARCHITECTURE.md §16.3 lists both as claimed with one `put_if_absent` in the state

@@ -67,9 +67,14 @@ bootstrap node. Verified on three nodes on 2026-09-21; the transcript is in
     leader exists. If the lowest-ID node never starts, the other nodes wait out
     the 120 s window and exit.
   * On a seeded or restored store the window ends at once. The nodes serve HTTP
-    with no leader, and `/readyz` answers `200`: it checks only local storage
-    (seen 2026-10-06 in the Jepsen harness, `jepsen/`). Every write fails until
-    a leader exists.
+    with no leader (seen 2026-10-06 in the Jepsen harness, `jepsen/`). Every
+    write fails until a leader exists, so `/readyz` answers `503` until then.
+* **`/readyz` in cluster mode** answers `503` with `"cluster": "no_leader"`
+  while the node knows no leader, and with `"cluster": "no_quorum"` while it
+  leads but no quorum has acknowledged it for over 3 s. A node restarted on
+  its own last vote resumes as a leader with no quorum, so it reports
+  `no_quorum` until a quorum is back. A follower whose leader died stays ready
+  until its own election timeout (1.5–3 s) passes.
 * A `cluster:` section with an empty `peers` list does **not** self-initialise,
   so it never gets a leader. When start-up has anything to write, the process
   exits before it serves HTTP (seen 2026-10-06 while writing

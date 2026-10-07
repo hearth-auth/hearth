@@ -151,6 +151,7 @@ fn seed_operator(data_dir: &Path) {
 }
 
 /// One node of the test cluster.
+#[derive(Clone)]
 struct NodeSpec {
     id: u64,
     port: u16,
@@ -275,20 +276,28 @@ fn start_nodes(
     let mut logs = Vec::new();
     for (node, config) in cluster.iter().zip(configs) {
         copy_dir(seed, &dir.join(format!("data{}", node.id)));
-        let log_path = dir.join(format!("node{}.log", node.id));
-        let log = std::fs::File::create(&log_path).expect("log file");
-        servers.push(Server(
-            hearth()
-                .args(["serve", "--config"])
-                .arg(config)
-                .stdout(Stdio::from(log.try_clone().expect("clone log")))
-                .stderr(Stdio::from(log))
-                .spawn()
-                .expect("spawn hearth serve"),
-        ));
+        let (server, log_path) = spawn_node(dir, node, config);
+        servers.push(server);
         logs.push(log_path);
     }
     (servers, logs)
+}
+
+/// Starts `hearth serve` for `node` on the data directory it already has.
+/// Returns the server and its log file (truncated on each start).
+fn spawn_node(dir: &Path, node: &NodeSpec, config: &Path) -> (Server, PathBuf) {
+    let log_path = dir.join(format!("node{}.log", node.id));
+    let log = std::fs::File::create(&log_path).expect("log file");
+    let server = Server(
+        hearth()
+            .args(["serve", "--config"])
+            .arg(config)
+            .stdout(Stdio::from(log.try_clone().expect("clone log")))
+            .stderr(Stdio::from(log))
+            .spawn()
+            .expect("spawn hearth serve"),
+    );
+    (server, log_path)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -394,4 +403,122 @@ async fn the_cluster_admin_api_reaches_the_raft_engine_of_every_serving_node() {
     )
     .await;
     assert_eq!(status, 409, "POST /admin/cluster/bootstrap: {body}");
+}
+
+/// `/readyz` on a node that cannot commit a write. A node whose store needs
+/// no start-up writes (a restart, or a store seeded through `/ui/setup`)
+/// serves HTTP before any quorum exists, and `/readyz` answered `200` there:
+/// it checked storage and the write fence, never Raft. A node restarted on
+/// its own committed vote even resumes as leader, with no quorum.
+#[tokio::test(flavor = "multi_thread")]
+async fn readyz_is_not_ready_while_the_node_cannot_commit_a_write() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ca_pem = write_certs(dir.path());
+    let cluster: Vec<NodeSpec> = (1..=3)
+        .map(|id| NodeSpec {
+            id,
+            port: free_port_pair(),
+            peer_port: free_port(),
+        })
+        .collect();
+    let configs: Vec<PathBuf> = cluster
+        .iter()
+        .map(|n| write_config(dir.path(), n, &cluster))
+        .collect();
+    let seed = dir.path().join("seed");
+    seed_operator(&seed);
+    let client = reqwest::Client::builder()
+        .add_root_certificate(reqwest::Certificate::from_pem(ca_pem.as_bytes()).expect("ca"))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("client");
+    let probe = |node: &NodeSpec| {
+        let req = client.get(format!("https://localhost:{}/readyz", node.port));
+        async move {
+            let resp = req.send().await.ok()?;
+            let status = resp.status().as_u16();
+            Some((status, resp.text().await.unwrap_or_default()))
+        }
+    };
+    let log_of = |id: u64| {
+        std::fs::read_to_string(dir.path().join(format!("node{id}.log"))).unwrap_or_default()
+    };
+    let await_ready = |node: &NodeSpec| {
+        let probe = &probe;
+        let log_of = &log_of;
+        let id = node.id;
+        let node = node.clone();
+        async move {
+            let deadline = Instant::now() + Duration::from_secs(40);
+            loop {
+                if let Some((200, body)) = probe(&node).await {
+                    assert!(body.contains("\"ready\""), "node {id} ready body: {body}");
+                    return;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "node {id} was not ready in 40 s:\n{}",
+                    log_of(id)
+                );
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    };
+
+    // First run: every start-up write is applied, on every node.
+    let (servers, _) = start_nodes(dir.path(), &seed, &cluster, &configs);
+    for node in &cluster {
+        await_ready(node).await;
+    }
+    drop(servers);
+
+    // Node 1 alone: nothing to write, so HTTP comes up; one of three is no
+    // quorum, so no leader.
+    let (_first, _) = spawn_node(dir.path(), &cluster[0], &configs[0]);
+    let deadline = Instant::now() + Duration::from_secs(40);
+    loop {
+        if probe(&cluster[0]).await.is_some() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node 1 did not serve HTTP in 40 s:\n{}",
+            log_of(1)
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    // A follower keeps a dead leader until its election timeout (at most
+    // 3 s) passes; after that, and for longer than another election
+    // timeout, node 1 must not be ready. If node 1 led the first run, it
+    // resumes as leader with no quorum and is `no_quorum` from the start.
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    let mut answer = probe(&cluster[0]).await.expect("node 1 still serves HTTP");
+    let watch_until = Instant::now() + Duration::from_secs(4);
+    loop {
+        assert_eq!(
+            answer.0,
+            503,
+            "a node with no leader or no quorum must not be ready: {}\n{}",
+            answer.1,
+            log_of(1)
+        );
+        assert!(
+            answer.1.contains("no_leader") || answer.1.contains("no_quorum"),
+            "the body names the reason: {}",
+            answer.1
+        );
+        if Instant::now() >= watch_until {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        answer = probe(&cluster[0]).await.expect("node 1 still serves HTTP");
+    }
+
+    // The other two come back; a leader is elected, and node 1 is ready.
+    let _rest: Vec<_> = cluster[1..]
+        .iter()
+        .zip(&configs[1..])
+        .map(|(node, config)| spawn_node(dir.path(), node, config))
+        .collect();
+    await_ready(&cluster[0]).await;
 }

@@ -193,6 +193,11 @@ const FORWARD_GRACE: Duration = Duration::from_secs(2);
 /// retry on a new leader when the first provably did not propose it.
 const MAX_ROUTING_ROUNDS: usize = 4;
 
+/// Upper bound of the Raft election timeout, in milliseconds. A leader that
+/// no quorum has acknowledged for longer than this may already be replaced:
+/// a majority elsewhere can elect a new leader after one election timeout.
+const ELECTION_TIMEOUT_MAX_MS: u64 = 3000;
+
 /// Error produced when building a [`ClusterEngine`].
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
@@ -372,7 +377,7 @@ impl ClusterEngine {
             RaftConfig {
                 heartbeat_interval: 500,
                 election_timeout_min: 1500,
-                election_timeout_max: 3000,
+                election_timeout_max: ELECTION_TIMEOUT_MAX_MS,
                 // Chunks well under the peer message limit (see
                 // `cluster::wire`); openraft's default is 3 MiB.
                 snapshot_max_chunk_size: SNAPSHOT_CHUNK_BYTES,
@@ -574,6 +579,30 @@ impl ClusterEngine {
         };
         let metrics = raft.metrics().borrow().clone();
         metrics.current_leader == Some(metrics.id)
+    }
+
+    /// Why this node cannot take a write now, or `None` when it can.
+    /// `/readyz` reports the reason as not-ready. Always `None` in
+    /// single-node mode.
+    ///
+    /// - `"no_leader"`: no known leader (an election, or no quorum reachable).
+    /// - `"no_quorum"`: this node leads, but no quorum has acknowledged it
+    ///   within [`ELECTION_TIMEOUT_MAX_MS`]. openraft 0.9 never steps such a
+    ///   leader down (docs/dev/CONSISTENCY.md G1), and a node restarted on a
+    ///   store whose last vote was its own resumes as leader with no quorum.
+    ///
+    /// Local knowledge only: a follower whose leader is gone keeps it as
+    /// leader until its own election timeout (1.5–3 s) passes.
+    pub fn not_ready_reason(&self) -> Option<&'static str> {
+        let raft = self.raft.as_ref()?;
+        let metrics = raft.metrics();
+        let m = metrics.borrow();
+        leader_gap(
+            m.id,
+            m.current_leader,
+            m.millis_since_quorum_ack,
+            m.membership_config.membership().voter_ids().count(),
+        )
     }
 
     /// Initial cluster membership map built from config at startup.
@@ -1639,6 +1668,24 @@ fn min_in_flight_age(req: &AppendEntriesRequest<HearthRaftConfig>, now_micros: i
         .min()
 }
 
+/// The decision of [`ClusterEngine::not_ready_reason`], from the Raft
+/// metrics of node `id`. A sole voter is its own quorum.
+fn leader_gap(
+    id: u64,
+    current_leader: Option<u64>,
+    millis_since_quorum_ack: Option<u64>,
+    voters: usize,
+) -> Option<&'static str> {
+    match current_leader {
+        None => Some("no_leader"),
+        Some(leader) if leader == id && voters > 1 => match millis_since_quorum_ack {
+            Some(ms) if ms <= ELECTION_TIMEOUT_MAX_MS => None,
+            _ => Some("no_quorum"),
+        },
+        Some(_) => None,
+    }
+}
+
 /// Decodes an `AppendEntries` payload and runs [`min_in_flight_age`] on it at
 /// the current time; `None` when the payload does not decode.
 #[cfg(test)]
@@ -2105,6 +2152,30 @@ mod tests {
 
     fn make_realm() -> RealmId {
         RealmId::new(Uuid::new_v4())
+    }
+
+    /// `/readyz` readiness from the Raft metrics: a follower needs a known
+    /// leader; a leader needs a quorum acknowledgement within the election
+    /// timeout, unless it is the only voter.
+    #[test]
+    fn leader_gap_requires_a_leader_and_a_leader_requires_a_recent_quorum() {
+        // Follower.
+        assert_eq!(leader_gap(2, Some(1), None, 3), None);
+        assert_eq!(leader_gap(2, None, None, 3), Some("no_leader"));
+        // Leader with a fresh, a borderline and a stale quorum ack.
+        assert_eq!(leader_gap(1, Some(1), Some(0), 3), None);
+        assert_eq!(
+            leader_gap(1, Some(1), Some(ELECTION_TIMEOUT_MAX_MS), 3),
+            None
+        );
+        assert_eq!(
+            leader_gap(1, Some(1), Some(ELECTION_TIMEOUT_MAX_MS + 1), 3),
+            Some("no_quorum")
+        );
+        // Leader never acknowledged (restarted on its own committed vote).
+        assert_eq!(leader_gap(1, Some(1), None, 3), Some("no_quorum"));
+        // A sole voter is its own quorum.
+        assert_eq!(leader_gap(1, Some(1), None, 1), None);
     }
 
     /// A data directory written by an earlier release (no persisted applied

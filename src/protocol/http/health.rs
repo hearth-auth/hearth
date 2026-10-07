@@ -30,16 +30,24 @@ async fn healthz() -> impl IntoResponse {
 
 /// Readiness probe endpoint.
 ///
-/// Returns `200 OK` when the storage engine is accessible, accepts writes, and
-/// the server is prepared to handle traffic. Returns `503 Service Unavailable`
-/// when the storage layer is unreachable (e.g. during startup or after a
-/// corruption event), or when the WAL write fence is engaged. Kubernetes gates
-/// inbound traffic behind this check.
+/// Returns `200 OK` when the storage engine is accessible, the WAL write fence
+/// is not engaged and, in cluster mode, the node knows a current leader.
+/// Returns `503 Service Unavailable` otherwise, naming the reason: storage
+/// unreachable (e.g. during startup or after a corruption event), the write
+/// fence engaged, or no known leader. Kubernetes gates inbound traffic behind
+/// this check.
 ///
-/// The fence is the second case, and it needs its own probe: a fenced node
-/// serves reads normally and refuses every write, so a read probe alone
-/// reported it ready (audit 2026-08-28 §4.11#8). The fence is permanent for the
-/// life of the process — restart the node to clear it.
+/// The fence needs its own probe: a fenced node serves reads normally and
+/// refuses every write, so a read probe alone reported it ready (audit
+/// 2026-08-28 §4.11#8). The fence is permanent for the life of the process —
+/// restart the node to clear it.
+///
+/// The cluster check has the same reason. A cluster node with no known
+/// leader, or a leader no quorum has acknowledged, cannot commit a write; and
+/// a node started on a store that needs no start-up writes serves HTTP before
+/// any quorum exists. It reported ready then. The body names the reason:
+/// `"cluster": "no_leader"` or `"no_quorum"` (see
+/// [`ClusterEngine::not_ready_reason`](crate::cluster::ClusterEngine::not_ready_reason)).
 async fn readyz(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let identity = Arc::clone(&state.identity);
     let probe = tokio::task::spawn_blocking(move || {
@@ -57,17 +65,26 @@ async fn readyz(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         );
     }
 
-    if healthy {
-        (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "ready", "storage": "ok"})),
-        )
-    } else {
-        (
+    if !healthy {
+        return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({"status": "not_ready", "storage": "unavailable"})),
-        )
+        );
     }
+
+    if let Some(reason) = state.cluster.as_ref().and_then(|c| c.not_ready_reason()) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "not_ready", "storage": "ok", "cluster": reason
+            })),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"status": "ready", "storage": "ok"})),
+    )
 }
 
 /// Prometheus metrics scrape endpoint (`/metrics`).
