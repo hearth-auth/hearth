@@ -112,7 +112,7 @@ on a follower for an access decision that must reflect the latest revocation. Th
 
 `add_learner` and `change_membership` are not implemented. The only path to set cluster membership is `raft.initialize()` from static YAML at first bootstrap.
 
-**Consequence:** Nodes cannot be added or removed from a running cluster. Editing `peers` and restarting does not change membership, because membership lives in the Raft log. A failed node stays a voter, so a 3-node cluster with one dead node tolerates no further failure. Do not replace a failed node by restarting it with an empty data directory under its old ID: it forgets its vote, and the lowest ID starts a cluster of its own. In the Jepsen `replace` test (2026-10-06) node 1, restarted this way, never rejoined and exited after its start-up window. See [CONSISTENCY.md](../dev/CONSISTENCY.md#6-membership) §6 (G5, G9).
+**Consequence:** Nodes cannot be added or removed from a running cluster. Editing `peers` and restarting does not change membership, because membership lives in the Raft log. A failed node stays a voter, so a 3-node cluster with one dead node tolerates no further failure. Do not replace a failed node by restarting it with an empty data directory under its old ID: it forgets its vote, and the lowest ID starts a cluster of its own. In the Jepsen `replace` test (2026-10-06) node 1, restarted this way, never rejoined and exited after its start-up window; in a second run (2026-10-07) another node, replicating to it, aborted. See [CONSISTENCY.md](../dev/CONSISTENCY.md#6-membership) §6 (G5, G9).
 
 ### H-3 — Writes to a follower: forwarded to the leader (fixed)
 

@@ -43,7 +43,7 @@ Each checker first gets a unit test on a hand-written history with a planted vio
 - [x] 5.3 R3/R4 (`xfail G2`): reads in a loop on one node while it installs a snapshot (stop it, write past the snapshot threshold, restart)
 - [x] 5.4 V2 (`xfail G1`): validate a revoked session on an isolated node; it never accepts
 - [x] 5.5 Node replacement (`xfail G9`): wipe one node's data directory, restart it with the same ID, W1 set checker
-- [ ] 5.6 First full run: every task 5 test reports xfail. An xpass here is a harness defect: find it and fix it before task 6 (spec "The checkers are proven before they are trusted")
+- [x] 5.6 First full run: every task 5 test reports xfail. An xpass here is a harness defect: find it and fix it before task 6 (spec "The checkers are proven before they are trusted")
 
 ## 6. CI
 

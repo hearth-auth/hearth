@@ -205,7 +205,7 @@ are build steps for finishing cluster mode, not regressions.
 | **G6** | [ARCHITECTURE.md §12.5](./ARCHITECTURE.md#125-graceful-shutdown) | Shutdown calls only `raft.shutdown()` (`src/main.rs:3155` → `engine.rs:546-552`). | Step down before the drain when the node is leader. |
 | **G7** | W6 | `RaftCommand` has no request ID. No idempotency key exists. | A client request ID, deduplicated in the state machine. |
 | **G8** | C3 | `leader_timestamp` is discarded at apply (`state_machine.rs:499-531`). | Apply the leader's timestamp to replicated records, or drop the C3 promise. |
-| **G9** | Section 6 | Replacing a node reuses its ID with an empty data directory, which discards its saved vote. If that node is the lowest ID, it also self-initialises on start (`engine.rs:493-497`). | A replacement procedure that does not reuse a voter's identity — needs G5. |
+| **G9** | Section 6 | Replacing a node reuses its ID with an empty data directory, which discards its saved vote. If that node is the lowest ID, it also self-initialises on start (`engine.rs:493-497`). The leader also still records the entries the node had: in a Jepsen `replace` run (2026-10-07) a node replicating to the wiped node aborted on an integer underflow in openraft's progress tracking (`progress/entry/mod.rs:267`; the release profile checks overflow and aborts on panic). | A replacement procedure that does not reuse a voter's identity — needs G5. |
 
 ---
 
