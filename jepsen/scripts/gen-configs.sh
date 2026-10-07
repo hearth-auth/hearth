@@ -21,6 +21,8 @@
 # Env:   HEARTH_ROOT     install directory on the nodes (default /opt/hearth)
 #        ISSUER          oidc.issuer (default https://hearth.jepsen.test)
 #        NODE_IP_PREFIX  first three octets of the node addresses (default 10.77.0)
+#        READ_LAG_THRESHOLD_MS  cluster.read_lag_threshold_ms (default: omitted,
+#                        so the server's own default applies)
 set -euo pipefail
 
 if [ "$#" -lt 2 ]; then
@@ -123,6 +125,9 @@ for node in "${nodes[@]}"; do
     echo "  tls_cert_path: \"$root/tls/peer.crt\""
     echo "  tls_key_path: \"$root/tls/peer.key\""
     echo "  tls_ca_cert_path: \"$root/tls/ca.crt\""
+    if [ -n "${READ_LAG_THRESHOLD_MS:-}" ]; then
+      echo "  read_lag_threshold_ms: $READ_LAG_THRESHOLD_MS"
+    fi
   } > "$bundle/hearth.yaml"
 done
 

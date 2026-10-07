@@ -76,8 +76,13 @@
    "audit"      {:workload "audit" :nemesis []}
    ; R3, R4 (xfail G2): reads on a node while it installs a snapshot. The
    ; install deletes every key before it writes the snapshot, and reads are
-   ; not fenced meanwhile. The workload times its own partition.
-   "snapshot"   {:workload "snapshot" :nemesis [:partition]}
+   ; not fenced meanwhile. The workload times its own partition. With the
+   ; default read_lag_threshold_ms the lag monitor happens to fence reads
+   ; within 50 ms of the snapshot's arrival, before the restore deletes a
+   ; key; this test raises it, so only a fence of the install itself (the G2
+   ; fix) makes it pass.
+   "snapshot"   {:workload "snapshot" :nemesis [:partition]
+                 :read-lag-threshold-ms 3600000}
    ; Section 6 (xfail G9): the set workload while the lowest Raft ID is
    ; replaced with an empty data directory under its old ID.
    "replace"    {:workload "replace" :nemesis [:partition]}})

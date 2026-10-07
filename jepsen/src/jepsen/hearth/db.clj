@@ -94,8 +94,10 @@
 
 (defn gen-material!
   "Generates the run's secrets, certificates and per-node bundles on the
-  control node. Returns the material directory."
-  [nodes]
+  control node. Returns the material directory. A non-nil
+  `read-lag-threshold-ms` sets cluster.read_lag_threshold_ms on every node;
+  nil leaves the server's default."
+  [nodes read-lag-threshold-ms]
   (let [dir (str (System/getProperty "java.io.tmpdir") "/hearth-jepsen-"
                  (random-uuid) "/material")]
     ; gen-material.sh creates `dir` itself and refuses one that exists.
@@ -103,7 +105,11 @@
     (apply sh! "scripts/gen-material.sh" (concat [dir] nodes
                                                 [:env (assoc (into {} (System/getenv))
                                                              "NODE_IP_PREFIX" node-ip-prefix)]))
-    (apply sh! "scripts/gen-configs.sh" dir nodes)
+    (apply sh! "scripts/gen-configs.sh"
+           (concat [dir] nodes
+                   [:env (cond-> (into {} (System/getenv))
+                           read-lag-threshold-ms
+                           (assoc "READ_LAG_THRESHOLD_MS" (str read-lag-threshold-ms)))]))
     (info "per-run material in" dir)
     dir))
 
@@ -264,7 +270,7 @@
   material now, so a bad binary stops the run before any node is touched."
   [opts]
   (verify-binary! (:binary opts))
-  (->HearthDB (atom {:material (gen-material! (:nodes opts))
+  (->HearthDB (atom {:material (gen-material! (:nodes opts) (:read-lag-threshold-ms opts))
                      :password (str "jepsen-" (random-uuid))
                      :realm-admin-password (str "jepsen-" (random-uuid))
                      :token    nil})))

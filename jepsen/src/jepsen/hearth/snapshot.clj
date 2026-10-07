@@ -9,6 +9,10 @@
   increasing values to one user on the other nodes; one reader thread reads
   that user on the target in a loop; the rest pad the log.
 
+  The suite runs it with cluster.read_lag_threshold_ms raised (see the
+  catalog): with the default, the lag monitor happens to fence reads before
+  the restore deletes a key, which hides G2.
+
   Checker: the target's reads never go backwards (R3) and never miss the
   user (R4). With G2 open, an install deletes every key before it writes the
   snapshot, and reads are not fenced meanwhile, so the test is xfail."
@@ -167,9 +171,12 @@
                                 :value (if u
                                          (register/parse-value (get u "display_name"))
                                          :missing)))
-                   ; The admin's session is gone: it existed before the
-                   ; round, and nothing deletes it.
-                   401 (assoc op :type :ok :node at :value :missing :status 401)
+                   ; The admin's session (401), or the grant or first-party
+                   ; client that admits its token (403), is gone. All existed
+                   ; before the round and nothing deletes them; a node that
+                   ; cannot read answers 503.
+                   (401 403) (assoc op :type :ok :node at :value :missing
+                                    :status (:status r))
                    (assoc (http/complete op :read r) :node at))))))
 
   (teardown! [_ _test])
@@ -192,8 +199,10 @@
   so the values keep increasing."
   [write]
   (let [writer (fn [secs] (gen/time-limit secs (gen/stagger 1/10 write)))
-        ; One thread reads back to back, under the admin rate limit.
-        reader (fn [secs] (gen/time-limit secs (gen/repeat {:f :read})))]
+        ; One thread reads about every millisecond: below the admin rate
+        ; limit (security.rate_limiting.admin_per_minute, 100000 in
+        ; gen-configs.sh), which back-to-back reads exceed.
+        reader (fn [secs] (gen/time-limit secs (gen/stagger 1/1000 (gen/repeat {:f :read}))))]
     (gen/phases
       (cut-off-target)
       (gen/clients (gen/reserve 1 (writer pad-seconds)
