@@ -6,4 +6,5 @@
  "register" :pass
  "single-use" :pass
  "same-node"  :pass
- "revocation" :pass}
+ "revocation" :pass
+ "revocation-isolated" {:xfail "G1"}}

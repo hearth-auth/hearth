@@ -24,7 +24,9 @@
   "Workload name -> function of the CLI options and the db that returns the
   workload's part of the test: :client, :generator (client ops during the
   faults), :final-generator (client reads after the heal) and :checker. Any
-  may be nil."
+  may be nil. A workload that must time its own faults returns
+  :combined-generator (client and nemesis ops) instead of :generator; the
+  random fault schedule then does not run, the heal phase still does."
   {"noop" (fn [_opts _db]
             ; No client operations: proves setup, teardown, log collection,
             ; the faults and the convergence check (tasks 2.2, 2.4, 2.5).
@@ -33,7 +35,8 @@
    "register" register/workload
    "single-use" single-use/workload
    "same-node"  same-node/workload
-   "revocation" revocation/workload})
+   "revocation" revocation/workload
+   "revocation-isolated" revocation/isolated-workload})
 
 (def catalog
   "The suite: test name -> the options that define it. Each name has an
@@ -48,7 +51,11 @@
    ; R1: partitions, including one that isolates the leader.
    "same-node"  {:workload "same-node" :nemesis [:partition :partition-leader]}
    ; V1: delay on the peer links.
-   "revocation" {:workload "revocation" :nemesis [:packet]}})
+   "revocation" {:workload "revocation" :nemesis [:packet]}
+   ; V2 (xfail G1): the same rounds under partitions. A node cut off from
+   ; the cluster never learns of the revocation and goes on accepting the
+   ; session after the bound; V2 says it must answer unavailable instead.
+   "revocation-isolated" {:workload "revocation-isolated" :nemesis [:partition]}})
 
 (def ssh-key
   "The key pair the control container generates; the nodes trust it."
@@ -83,8 +90,9 @@
             :plot      {:nemeses (:perf pkg)}
             :generator (gen/phases
                          (gen/time-limit (:time-limit opts)
-                                         (gen/nemesis (:generator pkg)
-                                                      (:generator workload)))
+                                         (or (:combined-generator workload)
+                                             (gen/nemesis (:generator pkg)
+                                                          (:generator workload))))
                          (gen/nemesis (:final-generator pkg))
                          ; Clients only: each-thread would otherwise give the
                          ; nemesis thread its own copy of the final reads.

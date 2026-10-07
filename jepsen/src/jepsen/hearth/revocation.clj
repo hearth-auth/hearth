@@ -67,6 +67,10 @@
           :else
           {:valid? true :bound-ms bound :revoked (count revoked)})))))
 
+(def revoke-timeout-ms
+  "How long a revocation waits on one node before it tries the next."
+  3000)
+
 (def watch-seconds
   "How long every client validates a round's session after it is revoked:
   longer than the bound under the packet fault (1.9 s)."
@@ -98,10 +102,15 @@
                           (assoc op :type :ok :signed-in-on (:node r)))
                       (assoc op :type :fail :error (:error r))))
 
+        ; Tries each node in turn, from this client's own: under a partition
+        ; this client's node may be the cut-off one.
         :revoke   (if (= n round)
-                    (http/complete op :write
-                                   (admin/request! db node (str "/admin/sessions/" session-id)
-                                                   {:method :delete}))
+                    (loop [[at & more] (cons node (remove #{node} (:nodes test)))]
+                      (let [r (admin/request! db at (str "/admin/sessions/" session-id)
+                                              {:method :delete :timeout revoke-timeout-ms})]
+                        (if (and (not (<= 200 (:status r 0) 299)) (seq more))
+                          (recur more)
+                          (assoc (http/complete op :write r) :revoked-on at))))
                     (assoc op :type :fail :error :no-session))
 
         :validate (if (= n round)
@@ -133,3 +142,29 @@
                                                                              :value n}))))))
                    (range))
    :checker   (checker)})
+
+(defn isolated-workload
+  "V2 (xfail G1): rounds that cut one node off between the control
+  validation and the revocation, so the cut-off node holds a session the
+  rest of the cluster revokes. It must answer unavailable, never accept;
+  with G1 open it accepts. The round drives the partition itself, so the
+  workload replaces the fault schedule (:combined-generator)."
+  [opts db]
+  (let [w (workload opts db)]
+    (assoc w :combined-generator
+           (map (fn [n]
+                  (gen/phases
+                    (gen/clients {:f :sign-in :value n})
+                    ; Time for the new session to reach every node.
+                    (gen/sleep 1)
+                    (gen/clients (gen/each-thread {:f :validate :value n}))
+                    (gen/nemesis {:type :info :f :start-partition :value :one})
+                    (gen/clients {:f :revoke :value n})
+                    (gen/clients (gen/each-thread
+                                   (gen/time-limit watch-seconds
+                                                   (gen/stagger 1/10
+                                                                (gen/repeat {:f :validate
+                                                                             :value n})))))
+                    (gen/nemesis {:type :info :f :stop-partition :value nil})
+                    (gen/sleep 2)))
+                (range)))))
