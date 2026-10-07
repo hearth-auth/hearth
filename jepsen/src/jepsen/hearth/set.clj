@@ -7,7 +7,81 @@
   lost only when its last absent read follows its last present read, so a
   node that misses an add can hide behind a later read on another node."
   (:require [clojure.set :as set]
-            [jepsen.checker :as checker]))
+            [jepsen [checker :as checker]
+                    [client :as client]
+                    [generator :as gen]]
+            [jepsen.hearth [admin :as admin]
+                           [http :as http]]))
+
+(defn- email
+  "The user an add of item `x` creates."
+  [x]
+  (str "set-" x "@jepsen.test"))
+
+(def ^:private item-pattern #"^set-(\d+)@jepsen\.test$")
+
+(def page-size
+  "Users per GET /admin/users page (the server's maximum)."
+  100)
+
+(defn read-items
+  "Lists every user on `node`, page by page, and returns {:items #{x ...}}
+  for the set's users, or the failed page's http/request! result."
+  [db node]
+  (loop [cursor nil, items #{}]
+    (let [r (admin/request! db node
+                            (str "/admin/users?limit=" page-size
+                                 (when cursor (str "&cursor=" cursor)))
+                            {})]
+      (if (not= 200 (:status r))
+        r
+        (let [users  (get-in r [:body "items"])
+              items' (into items
+                           (keep #(some->> (get % "email") (re-matches item-pattern)
+                                           second parse-long))
+                           users)
+              next   (get-in r [:body "next_cursor"])]
+          (if (and next (seq users))
+            (recur next items')
+            {:items items'}))))))
+
+(defrecord Client [db node]
+  client/Client
+  (open! [this _test node] (assoc this :node node))
+
+  (setup! [_ test] (admin/session! db test))
+
+  (invoke! [_ _test op]
+    (case (:f op)
+      :add  (http/complete op :write
+                           (admin/request! db node "/admin/users"
+                                           {:method :post
+                                            :json   {"email"        (email (:value op))
+                                                     "display_name" (str "set " (:value op))}}))
+      :read (let [r (read-items db node)]
+              (if-let [items (:items r)]
+                (assoc op :type :ok :value items :node node)
+                (assoc (http/complete op :read r) :node node)))))
+
+  (teardown! [_ _test])
+  (close! [_ _test]))
+
+(declare checker)
+
+(defn workload
+  "Adds unique users during the faults; after the heal, each client thread
+  (one per node) reads the full set until a read succeeds, for at most
+  120 s."
+  [_opts db]
+  {:client          (->Client db nil)
+   :generator       (->> (range)
+                         (map (fn [x] {:f :add :value x}))
+                         (gen/stagger 1/20))
+   :final-generator (gen/time-limit 120
+                                    (gen/each-thread
+                                      (gen/until-ok
+                                        (gen/stagger 1 (gen/repeat {:f :read})))))
+   :checker         (checker)})
 
 (defn- values
   "The :value of every op with this :f and :type."

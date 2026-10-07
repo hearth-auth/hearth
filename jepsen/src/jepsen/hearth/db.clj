@@ -35,6 +35,13 @@
 
 (def operator-email "operator@jepsen.test")
 
+(def realm
+  "The realm the workloads use. gen-configs.sh declares it; seed-store.sh
+  creates its admin through the console."
+  "jepsen")
+
+(def realm-admin-email "admin@jepsen.test")
+
 (def system-realm "00000000-0000-0000-0000-000000000000")
 
 (def node-ip-prefix
@@ -137,7 +144,7 @@
 (defn- seed!
   "Phase 2 on the primary: seeds one store and mints the operator token into
   it. Returns the token. The tarball of the store lands in `material`."
-  [node material password]
+  [node material {:keys [password realm-admin-password]}]
   (c/upload "scripts/seed-store.sh" (str root "/seed-store.sh"))
   (c/exec :chmod "0700" (str root "/seed-store.sh"))
   (let [token (c/exec (cc/env {:HEARTH            binary
@@ -148,6 +155,9 @@
                               :SEED_LOG          seed-log
                               :OPERATOR_EMAIL    operator-email
                               :OPERATOR_PASSWORD password
+                              :REALM             realm
+                              :REALM_ADMIN_EMAIL realm-admin-email
+                              :REALM_ADMIN_PASSWORD realm-admin-password
                               :TOKEN_TTL         "1h"})
                       :bash :-c (with-master-key (str root "/seed-store.sh")))]
     (when (str/blank? token)
@@ -211,7 +221,7 @@
       (install! test node material)
       (jepsen/synchronize test)
       (when (= node (jepsen/primary test))
-        (swap! state assoc :token (seed! node material (:password @state))))
+        (swap! state assoc :token (seed! node material @state)))
       (jepsen/synchronize test 120)
       (populate! material)
       (jepsen/synchronize test)
@@ -256,7 +266,13 @@
   (verify-binary! (:binary opts))
   (->HearthDB (atom {:material (gen-material! (:nodes opts))
                      :password (str "jepsen-" (random-uuid))
+                     :realm-admin-password (str "jepsen-" (random-uuid))
                      :token    nil})))
+
+(defn realm-admin-password
+  "The password of the realm admin seed-store.sh created."
+  [db]
+  (:realm-admin-password @(:state db)))
 
 (defn operator-token
   "The system-realm token seeded into the store; nil before setup."

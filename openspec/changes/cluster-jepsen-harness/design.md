@@ -115,6 +115,20 @@ and so through Raft.
 Alternative: sign in to the console of a running node and mint at `/ui/admin/api-tokens`. That
 needs a scripted password and TOTP form flow on every run.
 
+**The realm admin (found in task 4.1, 2026-10-06).** "All later setup goes through the admin
+API" does not hold for users: a token is valid only in its own realm (`X-Realm-ID` names the
+realm it is checked against), and the system realm refuses new users (`403 system realm is
+read-only`). No YAML key or CLI command creates a realm's first admin. So step 2 continues in
+the admin console, still on the single seed node: the operator signs in, enrols TOTP (the
+system realm always requires MFA; `seed-store.sh` computes the code with `openssl`), creates
+`admin@jepsen.test` in realm `jepsen` with a password, and grants it `realm.admin`. These are
+the console forms an operator uses. At run time the workloads sign in as that admin through
+the hosted login form and authorization code + PKCE, with the public `harness` application
+declared under `realms.jepsen.applications` (`jepsen/src/jepsen/hearth/auth.clj`). The login
+form's cookie is signed with a per-process secret, so one sign-in runs on one node; the tokens
+it returns go through Raft and work on every node. `gen-configs.sh` also raises the per-admin
+and per-token rate limits, since every client is one admin on one IP address.
+
 Task 1 is a spike that proves this path before any workload is written. If no path works
 without a server change, the spike stops and reports. A cluster that cannot get its first
 operator without `--dev` is itself a cluster gap, and it goes to the owner.
@@ -304,6 +318,11 @@ roll back, delete `jepsen/` and the workflow.
      `realms.<name>.auth.mfa_required: false`, so a script signs in with a password alone (or
      the workload enrols TOTP, as the console driver does). Task 4.3 proves this path at run
      time.
+   - **Correction (task 4.1, 2026-10-06):** hearth has no password grant. A sign-in is the
+     hosted login form plus authorization code + PKCE (decision 5). A reused refresh token
+     revokes its whole grant family (`401 HEARTH_TOKEN_REVOKED`), so after a contested
+     round the next token is dead as well: each round of W4 starts with a fresh sign-in, and
+     each round is one artifact.
    - **W5: no readable counter.** The only `IncrementU64` counter is the control epoch
      (`src/identity/engine/control.rs:499`, `src/identity/engine/mod.rs:5439`). No API returns
      its value, and `/metrics` exports only `hearth_control_epoch_bump_failures_total` and

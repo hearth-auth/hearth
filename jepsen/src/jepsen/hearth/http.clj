@@ -15,7 +15,7 @@
             [clojure.java.io :as io]
             [clojure.string :as str])
   (:import (java.net ConnectException URI)
-           (java.net.http HttpClient HttpClient$Version HttpConnectTimeoutException
+           (java.net.http HttpClient HttpClient$Redirect HttpClient$Version HttpConnectTimeoutException
                           HttpRequest HttpRequest$BodyPublishers HttpResponse
                           HttpResponse$BodyHandlers HttpTimeoutException)
            (java.security KeyStore)
@@ -83,6 +83,8 @@
   (-> (HttpClient/newBuilder)
       (.sslContext (trust-only ca-path))
       (.version HttpClient$Version/HTTP_2)
+      ; Sign-in reads each redirect's Location and cookies itself.
+      (.followRedirects HttpClient$Redirect/NEVER)
       (.connectTimeout (Duration/ofSeconds 5))
       (.build)))
 
@@ -93,8 +95,8 @@
          (catch Exception _ s))))
 
 (defn request!
-  "Sends one request and returns {:status n :body parsed-json} or
-  {:error :timeout | :connect}. Options:
+  "Sends one request and returns {:status n :body parsed-json :headers m} or
+  {:error :timeout | :connect}. The client follows no redirect. Options:
 
     :method   :get (default), :post, :put, :patch or :delete
     :headers  map of header name to value
@@ -125,8 +127,12 @@
     (try
       (let [^HttpResponse resp (.send http (.build builder)
                                       (HttpResponse$BodyHandlers/ofString))]
-        {:status (.statusCode resp)
-         :body   (parse-body (.body resp))})
+        {:status  (.statusCode resp)
+         :body    (parse-body (.body resp))
+         ; Lower-case name -> every value, for Set-Cookie and Location.
+         :headers (into {}
+                        (map (fn [[k vs]] [(str/lower-case k) (vec vs)]))
+                        (.map (.headers resp)))})
       (catch HttpConnectTimeoutException _ {:error :connect})
       (catch HttpTimeoutException _ {:error :timeout})
       (catch ConnectException _ {:error :connect})

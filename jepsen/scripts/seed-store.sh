@@ -9,7 +9,11 @@
 #   2. The first-boot setup form at /ui/setup, with the token from
 #      <data_dir>/.setup_token (production never logs it).
 #   3. The email-verification link from <data_dir>/.verification_url.
-#   4. Stop the server; `hearth admin token` on the store, which holds no raft.db.
+#   4. The admin console, as the operator: sign in, enrol TOTP (the system
+#      realm always requires MFA), create the realm admin with a password,
+#      and grant it realm.admin. A system-realm token cannot manage another
+#      realm's users, so the workloads act as this admin.
+#   5. Stop the server; `hearth admin token` on the store, which holds no raft.db.
 #
 # The token goes to stdout and nowhere else. Progress goes to stderr.
 #
@@ -23,12 +27,17 @@
 #   SEED_CA            CA certificate that signed the server's HTTPS leaf
 #   OPERATOR_EMAIL     operator account to create
 #   OPERATOR_PASSWORD  its password (12 characters or more)
+#   REALM              realm the workloads use, default jepsen (declared in SEED_CONFIG)
+#   REALM_ADMIN_EMAIL  that realm's admin account to create
+#   REALM_ADMIN_PASSWORD  its password
 #   TOKEN_TTL          token lifetime, default 1h (the CLI maximum)
 #   SEED_LOG           server log file, default <data_dir>.log
 set -euo pipefail
 
 : "${HEARTH:?}" "${HEARTH_MASTER_KEY:?}" "${SEED_CONFIG:?}" "${SEED_DATA_DIR:?}"
 : "${SEED_URL:?}" "${SEED_CA:?}" "${OPERATOR_EMAIL:?}" "${OPERATOR_PASSWORD:?}"
+: "${REALM_ADMIN_EMAIL:?}" "${REALM_ADMIN_PASSWORD:?}"
+REALM=${REALM:-jepsen}
 TOKEN_TTL=${TOKEN_TTL:-1h}
 SEED_LOG=${SEED_LOG:-$SEED_DATA_DIR.log}
 
@@ -64,6 +73,30 @@ http() {
 # The value of one hidden input in the page last fetched.
 hidden() {
   sed -n "s/.*name=\"$1\" value=\"\([^\"]*\)\".*/\1/p" "$page" | head -n 1
+}
+
+# totp <base32-secret>: the current RFC 6238 code (SHA-1, 30 s, 6 digits).
+totp() {
+  local secret=$1 pad key counter mac off bin
+  pad=$(((8 - ${#secret} % 8) % 8))
+  key=$(printf '%s%*s' "$secret" "$pad" '' | tr ' ' '=' | base32 -d | od -An -v -tx1 | tr -d ' \n')
+  counter=$(printf '%016x' $(($(date +%s) / 30)) | sed 's/../\\x&/g')
+  mac=$(printf "$counter" | openssl dgst -sha1 -mac HMAC -macopt "hexkey:$key" -binary \
+    | od -An -v -tx1 | tr -d ' \n')
+  off=$((16#${mac:39:1} * 2))
+  bin=$((16#${mac:off:8} & 0x7fffffff))
+  printf '%06d\n' $((bin % 1000000))
+}
+
+# post <path> <expected-status> [curl --data-urlencode args...]: POSTs a form
+# with the page's _csrf and sets $location to the redirect target.
+post() {
+  local path=$1 want=$2 got
+  shift 2
+  got=$(http -o "$page" -w '%{http_code} %{redirect_url}' -X POST "$SEED_URL$path" \
+    --data-urlencode "_csrf=$(hidden _csrf)" "$@")
+  location=${got#* }
+  [ "${got%% *}" = "$want" ] || die "POST $path answered ${got%% *}, expected $want"
 }
 
 log "starting the seed server ($SEED_URL)"
@@ -106,6 +139,30 @@ case "$status" in
   2??) ;;
   *) die "POST $action answered $status" ;;
 esac
+
+log "console sign-in as the operator, enrolling TOTP"
+http -o "$page" "$SEED_URL/ui/admin/login"
+post /ui/admin/login 303 \
+  --data-urlencode "email=$OPERATOR_EMAIL" --data-urlencode "password=$OPERATOR_PASSWORD"
+case "$location" in
+  */ui/mfa-enroll-required) ;;
+  *) die "the console sign-in went to '$location', not TOTP enrolment" ;;
+esac
+http -o "$page" "$location"
+secret=$(sed -n 's/.*secret=\([A-Z2-7]*\).*/\1/p' "$page" | head -n 1)
+[ -n "$secret" ] || die "the TOTP enrolment page shows no secret"
+post /ui/mfa-enroll-required/activate 303 --data-urlencode "code=$(totp "$secret")"
+
+log "creating $REALM_ADMIN_EMAIL, admin of realm $REALM"
+http -o "$page" "$SEED_URL/ui/admin/realms/$REALM/users/new"
+post "/ui/admin/realms/$REALM/users/new" 303 \
+  --data-urlencode "email=$REALM_ADMIN_EMAIL" --data-urlencode "display_name=Jepsen realm admin" \
+  --data-urlencode "first_name=" --data-urlencode "last_name=" \
+  --data-urlencode "password=$REALM_ADMIN_PASSWORD"
+user_id=${location##*/users/}
+[[ $user_id =~ ^[0-9a-f-]{36}$ ]] || die "creating the realm admin went to '$location'"
+http -o "$page" "$location"
+post "/ui/admin/realms/$REALM/admins/grant" 303 --data-urlencode "user_id=$user_id"
 
 log "stopping the seed server"
 kill -TERM "$server_pid"

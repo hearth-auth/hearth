@@ -35,6 +35,7 @@ issuer=${ISSUER:-https://hearth.jepsen.test}
 https_port=8443
 peer_port=7443
 ip_prefix=${NODE_IP_PREFIX:-10.77.0}
+harness_redirect_uri=https://harness.jepsen.test/callback
 peer_addr() { echo "$ip_prefix.$((10 + ${1#n})):$peer_port"; }
 
 kek=$(cat "$material/kek")
@@ -59,6 +60,14 @@ security:
   key_encryption_key: "$kek"
   # Clients reach each node by its own name, not the issuer's host.
   allowed_hosts: [$allowed_hosts]
+  # Every client runs in the control container, so every request comes from
+  # one IP address and one realm admin. The defaults (100 admin requests a
+  # minute, 100 requests a second per IP) would throttle the workloads.
+  rate_limiting:
+    admin_per_minute: 100000
+    token_per_minute: 100000
+  request_shaper:
+    ip_rps: 10000
 storage:
   data_dir: "$2"
 email:
@@ -67,11 +76,20 @@ email:
 onboarding:
   base_url: "https://$1:$https_port"
 realms:
-  # W4 redeems a refresh token through the password flow (design.md, Open
-  # Question 3), so this realm does not require MFA.
+  # The workloads' realm. Its admin (created by seed-store.sh through the
+  # console) signs in with a password through the hosted login form, so this
+  # realm does not require MFA.
   jepsen:
     auth:
       mfa_required: false
+    applications:
+      # Public client for authorization code + PKCE. The redirect URI is never
+      # fetched: the client reads the code from the Location header.
+      harness:
+        name: "Jepsen harness"
+        redirect_uris: ["$harness_redirect_uri"]
+        grant_types: [authorization_code, refresh_token]
+        require_consent: false
 EOF
 }
 

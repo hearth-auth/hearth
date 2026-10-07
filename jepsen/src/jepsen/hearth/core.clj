@@ -13,17 +13,19 @@
             [jepsen.hearth [converge :as converge]
                            [db :as hdb]
                            [nemesis :as hn]
-                           [runner :as runner]]))
+                           [runner :as runner]
+                           [set :as hset]]))
 
 (def workloads
-  "Workload name -> function of the CLI options that returns the workload's
-  part of the test: :generator (client ops during the faults),
-  :final-generator (client reads after the heal) and :checker. Any may be
-  nil."
-  {"noop" (fn [_opts]
+  "Workload name -> function of the CLI options and the db that returns the
+  workload's part of the test: :client, :generator (client ops during the
+  faults), :final-generator (client reads after the heal) and :checker. Any
+  may be nil."
+  {"noop" (fn [_opts _db]
             ; No client operations: proves setup, teardown, log collection,
             ; the faults and the convergence check (tasks 2.2, 2.4, 2.5).
-            {})})
+            {})
+   "set"  hset/workload})
 
 (def catalog
   "The suite: test name -> the options that define it. Each name has an
@@ -49,9 +51,10 @@
                               :fault-names         (:nemesis opts)
                               :interval            (:nemesis-interval opts)
                               :recovery-timeout-ms (* 1000 (:recovery-timeout opts))})
-        workload ((workloads (:workload opts)) opts)]
+        workload ((workloads (:workload opts)) opts db)]
     (merge tests/noop-test
            opts
+           (when-let [c (:client workload)] {:client c})
            {:name      (test-name opts)
             :db        db
             :nemesis   (:nemesis pkg)
@@ -63,7 +66,9 @@
                                          (gen/nemesis (:generator pkg)
                                                       (:generator workload)))
                          (gen/nemesis (:final-generator pkg))
-                         (:final-generator workload))
+                         ; Clients only: each-thread would otherwise give the
+                         ; nemesis thread its own copy of the final reads.
+                         (gen/clients (:final-generator workload)))
             :checker   (checker/compose
                          (cond-> {:converge (converge/checker)}
                            (:checker workload)
