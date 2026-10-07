@@ -370,8 +370,11 @@ async fn strip_server_header(req: Request, next: Next) -> Response {
 
 /// A-40: Host header allowlist enforcement (DNS rebinding protection).
 ///
-/// When `allowed_hosts` is non-empty in [`AppState`], rejects requests whose
-/// `Host` header is absent or does not match any entry. The comparison ignores
+/// When `allowed_hosts` is non-empty in [`AppState`], rejects requests that
+/// carry no host name, or any host name that matches no entry. A request
+/// carries its host in the `Host` header (HTTP/1.1), the URI authority (HTTP/2
+/// `:authority`, which comes without a `Host` header), or both; when both are
+/// present, both must match. The comparison ignores
 /// case and any `:port` on either side. An empty list disables the check; the
 /// server never builds one (`Config::effective_allowed_hosts` defaults to the
 /// `oidc.issuer` host), so only embedders and tests see that mode.
@@ -402,18 +405,31 @@ async fn enforce_host_allowlist(
     if state.allowed_hosts.is_empty() || is_host_exempt_probe(req.uri().path()) {
         return next.run(req).await;
     }
-    let host = req
+    // Every host name the request carries must be allowlisted: the `Host`
+    // header (HTTP/1.1) and the URI authority (HTTP/2 `:authority`, which
+    // comes with no `Host` header, or an HTTP/1.1 absolute-form target). A
+    // request with neither is refused. A header that is not UTF-8 checks as
+    // empty, and so is refused.
+    let header_host = req
         .headers()
         .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let bare = host_without_port(host);
-    let permitted = (!bare.is_empty()
-        && state
-            .allowed_hosts
-            .iter()
-            .any(|h| host_without_port(h).eq_ignore_ascii_case(bare)))
-        || (state.dev_mode && is_loopback_host(host));
+        .map(|v| v.to_str().unwrap_or(""));
+    let authority = req
+        .uri()
+        .authority()
+        .map(axum::http::uri::Authority::as_str);
+    let allowed = |host: &str| {
+        let bare = host_without_port(host);
+        (!bare.is_empty()
+            && state
+                .allowed_hosts
+                .iter()
+                .any(|h| host_without_port(h).eq_ignore_ascii_case(bare)))
+            || (state.dev_mode && is_loopback_host(host))
+    };
+    let permitted = (header_host.is_some() || authority.is_some())
+        && header_host.is_none_or(allowed)
+        && authority.is_none_or(allowed);
     if permitted {
         next.run(req).await
     } else {

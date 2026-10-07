@@ -1,0 +1,88 @@
+# Jepsen test cluster (design decision 2): one control container and five
+# hearth nodes on a private network. Start it with `make jepsen-up`.
+#
+# The nodes run `privileged`: the partition and delay nemeses change iptables
+# and tc. Run this only on a developer machine or an ephemeral CI runner,
+# never on a shared host.
+#
+# Fixed addresses on 10.77.0.0/24: control is .10, node nX is .(10+X).
+# hearth's cluster.peer_address must be an IP address (the peer server binds
+# it), so the per-node configs name these addresses.
+name: hearth-jepsen
+
+x-node: &node
+  build: ./node
+  privileged: true
+  init: true
+  volumes:
+    - keys:/keys:ro
+  depends_on:
+    control:
+      condition: service_healthy
+  healthcheck:
+    # sshd answers only after the entrypoint has installed the control key.
+    test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/22"]
+    interval: 1s
+    timeout: 2s
+    retries: 90
+
+services:
+  control:
+    build: ./control
+    hostname: control
+    init: true
+    volumes:
+      - keys:/keys
+      - ..:/jepsen
+      - m2:/root/.m2
+    healthcheck:
+      test: ["CMD", "test", "-s", "/keys/id_ed25519.pub"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+    networks:
+      jepsen:
+        ipv4_address: 10.77.0.10
+
+  n1:
+    <<: *node
+    hostname: n1
+    networks:
+      jepsen:
+        ipv4_address: 10.77.0.11
+  n2:
+    <<: *node
+    hostname: n2
+    networks:
+      jepsen:
+        ipv4_address: 10.77.0.12
+  n3:
+    <<: *node
+    hostname: n3
+    networks:
+      jepsen:
+        ipv4_address: 10.77.0.13
+  n4:
+    <<: *node
+    hostname: n4
+    networks:
+      jepsen:
+        ipv4_address: 10.77.0.14
+  n5:
+    <<: *node
+    hostname: n5
+    networks:
+      jepsen:
+        ipv4_address: 10.77.0.15
+
+volumes:
+  # The control node's SSH key pair; the nodes mount it read-only.
+  keys:
+  # Leiningen's Maven cache, so a run does not download Jepsen again.
+  m2:
+
+networks:
+  jepsen:
+    ipam:
+      config:
+        - subnet: 10.77.0.0/24

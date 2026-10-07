@@ -1408,23 +1408,31 @@ pub fn admin_realm_scope(
 /// [`crate::identity::ClientTrustLevel::FirstParty`]: a third-party app a user
 /// signed in to must never administer the realm on the user's behalf, even
 /// when a claim profile releases the user's admin permissions to it. An
-/// unparseable claim, a deleted client or a storage error fail closed.
+/// unparseable claim or a deleted client answers `false`.
+///
+/// # Errors
+///
+/// The client could not be read. The caller refuses the request with the
+/// error's response (`503` when the cluster is unavailable), never as a
+/// third-party token: a node fenced by replication lag must not tell a valid
+/// admin `403 forbidden`.
 pub(crate) fn token_client_may_administer(
     identity: &dyn crate::identity::IdentityEngine,
     realm_id: &RealmId,
     claims: &crate::identity::TokenClaims,
-) -> bool {
+) -> Result<bool, crate::identity::IdentityError> {
     let Some(raw) = claims.client_id() else {
-        return true;
+        return Ok(true);
     };
     // The claim carries the issued client_id; any other form fails closed.
     let Some(client_id) = crate::identity::tokens::parse_issued_client_id(raw) else {
-        return false;
+        return Ok(false);
     };
-    matches!(
-        identity.get_client(realm_id, &client_id),
-        Ok(Some(client)) if client.trust_level() == crate::identity::ClientTrustLevel::FirstParty
-    )
+    Ok(identity
+        .get_client(realm_id, &client_id)?
+        .is_some_and(|client| {
+            client.trust_level() == crate::identity::ClientTrustLevel::FirstParty
+        }))
 }
 
 #[cfg(test)]

@@ -917,6 +917,63 @@ async fn host_allowlist_allows_listed_host() {
     );
 }
 
+/// Sends `GET /health` the way hyper hands over an HTTP/2 request: the host is
+/// the URI's authority (`:authority`), and `host`, when given, is an extra
+/// `Host` header next to it.
+async fn host_allowlist_status(authority: &str, host: Option<&str>) -> StatusCode {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let state =
+        test_state_with_allowed_hosts(temp_dir.path(), vec!["allowed.example.com".to_string()]);
+    let mut req = axum::http::Request::builder()
+        .method("GET")
+        .uri(format!("https://{authority}/health"));
+    if let Some(host) = host {
+        req = req.header("host", host);
+    }
+    router(state)
+        .oneshot(req.body(axum::body::Body::empty()).expect("request"))
+        .await
+        .expect("response")
+        .status()
+}
+
+/// A-40: an HTTP/2 request carries its host in `:authority`, not in a `Host`
+/// header. An allowlisted authority must pass, or every HTTP/2 client (every
+/// browser over TLS) is refused.
+#[tokio::test]
+async fn host_allowlist_allows_a_listed_http2_authority() {
+    assert_eq!(
+        host_allowlist_status("allowed.example.com:8443", None).await,
+        StatusCode::OK
+    );
+}
+
+/// A-40: an unlisted `:authority` is refused like an unlisted `Host`.
+#[tokio::test]
+async fn host_allowlist_blocks_an_unlisted_http2_authority() {
+    assert_eq!(
+        host_allowlist_status("evil.attacker.com", None).await,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+/// A-40: every host name a request carries must be allowlisted. A listed
+/// `Host` must not carry an unlisted authority past the check, nor the other
+/// way round.
+#[tokio::test]
+async fn host_allowlist_blocks_a_request_whose_host_and_authority_disagree() {
+    assert_eq!(
+        host_allowlist_status("evil.attacker.com", Some("allowed.example.com")).await,
+        StatusCode::BAD_REQUEST,
+        "unlisted authority behind a listed Host"
+    );
+    assert_eq!(
+        host_allowlist_status("allowed.example.com", Some("evil.attacker.com")).await,
+        StatusCode::BAD_REQUEST,
+        "unlisted Host next to a listed authority"
+    );
+}
+
 /// A-40: When allowed_hosts is empty the middleware is fail-open (any Host passes).
 #[tokio::test]
 async fn host_allowlist_empty_allows_any_host() {
@@ -3598,7 +3655,8 @@ fn method_label_is_a_closed_set() {
 
 /// A storage handle whose writes fail the way cluster storage fails when no
 /// leader is reachable (`mode` 1) or a forwarded write's outcome is unknown
-/// (`mode` 2). Reads, and writes in mode 0, pass through.
+/// (`mode` 2), and whose reads fail the way a node fenced by replication lag
+/// refuses them (`mode` 3). Everything else passes through.
 struct ClusterOutage {
     inner: Arc<EmbeddedStorageEngine>,
     mode: std::sync::atomic::AtomicU8,
@@ -3617,6 +3675,16 @@ impl ClusterOutage {
             _ => Ok(()),
         }
     }
+
+    fn fail_read(&self) -> Result<(), crate::storage::StorageError> {
+        if self.mode.load(std::sync::atomic::Ordering::SeqCst) == 3 {
+            return Err(crate::storage::StorageError::ClusterUnavailable {
+                cause: crate::storage::ClusterUnavailableCause::NoLeader,
+                reason: "replication lag exceeded; redirect to 10.9.9.9:8421".to_string(),
+            });
+        }
+        Ok(())
+    }
 }
 
 impl StorageEngine for ClusterOutage {
@@ -3625,6 +3693,7 @@ impl StorageEngine for ClusterOutage {
         r: &crate::core::RealmId,
         k: &[u8],
     ) -> Result<Option<Vec<u8>>, crate::storage::StorageError> {
+        self.fail_read()?;
         self.inner.get(r, k)
     }
     fn put(
@@ -3650,6 +3719,7 @@ impl StorageEngine for ClusterOutage {
         a: &[u8],
         b: &[u8],
     ) -> Result<Vec<crate::storage::ScanEntry>, crate::storage::StorageError> {
+        self.fail_read()?;
         self.inner.scan(r, a, b)
     }
     fn put_batch(
@@ -3786,6 +3856,69 @@ async fn a_cluster_outage_answers_503_with_retry_after_and_a_stable_code() {
             "mode {mode}: internal detail leaked: {body}"
         );
     }
+}
+
+/// A node that cannot read the token's client (no leader, or fenced by
+/// replication lag) answers the first-party check "unavailable", never
+/// "third-party": the admin API used to refuse a valid admin `403 forbidden`
+/// while the node caught up.
+#[test]
+fn an_unreadable_client_is_unavailable_not_third_party() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let config = StorageConfig::dev(temp_dir.path().to_path_buf());
+    let storage = Arc::new(ClusterOutage {
+        inner: Arc::new(EmbeddedStorageEngine::open(config).expect("open storage")),
+        mode: std::sync::atomic::AtomicU8::new(0),
+    });
+    let clock = Arc::new(SystemClock) as Arc<dyn crate::core::Clock>;
+    let rbac: Arc<dyn RbacEngine> = Arc::new(EmbeddedRbacEngine::new(
+        Arc::clone(&storage) as Arc<dyn StorageEngine>,
+        Arc::clone(&clock),
+    ));
+    let audit = Arc::new(EmbeddedAuditEngine::new(
+        Arc::clone(&storage) as Arc<dyn StorageEngine>,
+        Arc::clone(&clock),
+    ));
+    let identity = EmbeddedIdentityEngine::with_rbac(
+        Arc::clone(&storage) as Arc<dyn StorageEngine>,
+        clock,
+        IdentityConfig {
+            credential: CredentialConfig::fast_for_testing(),
+            ..IdentityConfig::default()
+        },
+        rbac,
+        audit as Arc<dyn AuditEngine>,
+    )
+    .expect("identity engine");
+    let client = ClientId::new(uuid::Uuid::new_v4());
+    let claims: crate::identity::TokenClaims = serde_json::from_value(serde_json::json!({
+        "sub": format!("user_{}", uuid::Uuid::new_v4()),
+        "iss": "https://hearth.test",
+        "aud": "https://hearth.test",
+        "exp": 0,
+        "iat": 0,
+        "sid": "session_x",
+        "tid": "t",
+        "token_type": "access",
+        "permissions": ["hearth.admin"],
+        "client_id": client.as_uuid().to_string(),
+    }))
+    .expect("claims");
+    storage.mode.store(3, std::sync::atomic::Ordering::SeqCst);
+
+    let err = crate::protocol::admin_auth::token_client_may_administer(
+        &identity,
+        &RealmId::new(uuid::Uuid::new_v4()),
+        &claims,
+    )
+    .expect_err("an unreadable client is neither first- nor third-party");
+    let (status, axum::Json(body)) = super::auth::identity_error_to_response(&err);
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(
+        body["error_code"],
+        crate::protocol::error_codes::CLUSTER_UNAVAILABLE,
+        "{body}"
+    );
 }
 
 /// A realm user who is a member of a fresh organization, with `docs.read`

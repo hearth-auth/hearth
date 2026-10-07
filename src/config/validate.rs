@@ -9,10 +9,11 @@ use super::env;
 use super::error::ConfigError;
 use super::removed::{removed_key_issue, REMOVED_KEYS};
 use super::types::{
-    parse_duration_to_micros, AgentAuthConfig, AuthConfig, BrandingConfig, CompactionSection,
-    Config, DemoConfig, EmailConfig, EmailTransport, MetricsConfig, ObservabilityConfig,
-    OidcYamlConfig, OnboardingConfig, OperationalConfig, RealmYamlConfig, RegistrationModeYaml,
-    SecurityYaml, ServerConfig, StorageSection, TokenYamlConfig, ValidationIssue,
+    parse_duration_to_micros, AgentAuthConfig, AuthConfig, BrandingConfig, ClusterConfig,
+    CompactionSection, Config, DemoConfig, EmailConfig, EmailTransport, MetricsConfig,
+    ObservabilityConfig, OidcYamlConfig, OnboardingConfig, OperationalConfig, RealmYamlConfig,
+    RegistrationModeYaml, SecurityYaml, ServerConfig, StorageSection, TokenYamlConfig,
+    ValidationIssue,
 };
 use crate::identity::credentials::{CredentialConfig, PepperConfig, PepperKey};
 
@@ -565,6 +566,7 @@ impl Config {
         }
 
         validate_trusted_proxies(&self.server, &mut issues);
+        validate_cluster_all(self.cluster.as_ref(), &mut issues);
         validate_cidr_policies(self.realms.as_ref(), &mut issues);
         validate_argon2_costs_all(&self.auth, self.realms.as_ref(), self.dev_mode, &mut issues);
 
@@ -1154,6 +1156,32 @@ fn validate_cidr_policies(
                 }
             }
         }
+    }
+}
+
+/// Validates the `cluster:` section. The peer server binds
+/// `cluster.peer_address`, so it must parse as a socket address: an IP
+/// address and a port. A host name used to pass here; the peer server then
+/// stopped at start-up while the node went on serving, and no cluster formed.
+/// A peer's `address` is dialled, not bound, so a host name is valid there.
+fn validate_cluster_all(cluster: Option<&ClusterConfig>, issues: &mut Vec<ValidationIssue>) {
+    let Some(cluster) = cluster else {
+        return;
+    };
+    if cluster
+        .peer_address
+        .parse::<std::net::SocketAddr>()
+        .is_err()
+    {
+        issues.push(ValidationIssue {
+            field: "cluster.peer_address".to_string(),
+            reason: format!(
+                "'{}' is not an IP address and port (for example \"10.0.0.1:8421\" or \
+                 \"[fd00::1]:8421\"); this node's peer server binds it, so a host name \
+                 is not accepted",
+                cluster.peer_address
+            ),
+        });
     }
 }
 
@@ -2418,6 +2446,57 @@ mod tests {
         ] {
             let issues = trusted_proxy_issues(&[bad]);
             assert_eq!(issues.len(), 1, "'{bad}' must be refused: {issues:?}");
+        }
+    }
+
+    /// The `cluster.peer_address` issues of a config whose cluster section
+    /// names `addr`.
+    fn peer_address_issues(addr: &str) -> Vec<ValidationIssue> {
+        let yaml = format!(
+            "cluster:\n  node_id: 1\n  peer_address: \"{addr}\"\n  peers:\n    \
+             - id: 2\n      address: \"hearth-2.internal:8421\"\n  \
+             tls_cert_path: \"/etc/hearth/peer.crt\"\n  \
+             tls_key_path: \"/etc/hearth/peer.key\"\n  \
+             tls_ca_cert_path: \"/etc/hearth/ca.crt\"\n"
+        );
+        let config = Config::from_yaml_str_unchecked(&yaml).expect("parses");
+        config
+            .validate_all()
+            .into_iter()
+            .filter(|i| i.field.starts_with("cluster."))
+            .collect()
+    }
+
+    /// The peer server binds `cluster.peer_address`, so it must be an IP
+    /// address and a port. A host name used to pass validation; the peer
+    /// server then stopped at start-up while the node kept serving, so no
+    /// cluster formed and nothing said so. A peer's `address` is dialled,
+    /// not bound, so a host name stays valid there.
+    #[test]
+    fn a_peer_address_that_cannot_be_bound_is_refused() {
+        for good in [
+            "10.0.0.1:8421",
+            "0.0.0.0:8421",
+            "[::1]:8421",
+            "[fd00::7]:7443",
+        ] {
+            let issues = peer_address_issues(good);
+            assert!(issues.is_empty(), "'{good}' is bindable: {issues:?}");
+        }
+        for bad in [
+            "n1:7443",
+            "hearth-1.internal:8421",
+            "10.0.0.1",
+            "::1:8421",
+            "",
+        ] {
+            let issues = peer_address_issues(bad);
+            assert_eq!(issues.len(), 1, "'{bad}' must be refused: {issues:?}");
+            assert_eq!(issues[0].field, "cluster.peer_address");
+            assert!(
+                issues[0].reason.contains(&format!("'{bad}'")),
+                "the reason names the value: {issues:?}"
+            );
         }
     }
 

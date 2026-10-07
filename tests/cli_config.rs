@@ -351,6 +351,42 @@ fn validate_accepts_a_saml_idp_certificate_bundle() {
     );
 }
 
+/// `VALID_CONFIG` with a cluster section whose `peer_address` is `addr`.
+fn config_with_peer_address(addr: &str) -> String {
+    format!(
+        "{VALID_CONFIG}cluster:\n  node_id: 1\n  peer_address: \"{addr}\"\n  peers:\n    \
+         - id: 2\n      address: \"hearth-2.internal:8421\"\n  \
+         tls_cert_path: \"/etc/hearth/peer.crt\"\n  \
+         tls_key_path: \"/etc/hearth/peer.key\"\n  \
+         tls_ca_cert_path: \"/etc/hearth/ca.crt\"\n"
+    )
+}
+
+/// The peer server binds `cluster.peer_address`. A host name used to pass
+/// `config validate`, and then the node served without its peer server.
+#[test]
+fn validate_returns_1_for_a_host_name_peer_address() {
+    let output = run_validate(&config_with_peer_address("hearth-1.internal:8421"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
+    assert!(
+        stderr.contains("cluster.peer_address") && stderr.contains("'hearth-1.internal:8421'"),
+        "the report must name the field and the value: {stderr}"
+    );
+}
+
+/// Control: an IP address and port validate, and a peer's `address` may
+/// still be a host name (it is dialled, not bound).
+#[test]
+fn validate_accepts_an_ip_peer_address() {
+    let output = run_validate(&config_with_peer_address("10.0.0.1:8421"));
+    assert!(
+        output.status.success(),
+        "an IP peer_address must validate; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 // === hearth config example ===
 
 #[test]

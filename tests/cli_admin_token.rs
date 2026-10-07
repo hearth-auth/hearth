@@ -437,3 +437,66 @@ fn admin_token_refuses_a_non_operator_and_a_long_ttl() {
         "a refusal records no issuance: {issued:?}"
     );
 }
+
+/// The token carries the issuer and audience `serve` signs with: `iss` is
+/// `<oidc.issuer>/realms/system` and `aud` defaults to `oidc.issuer`. With the
+/// built-in defaults instead (`https://hearth.local`, `hearth`), no production
+/// server accepts it, because production config refuses a `.local` issuer.
+#[test]
+fn admin_token_signs_with_the_configured_issuer_and_audience() {
+    const ISSUER: &str = "https://auth.hearth.example";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let data_dir = dir.path().join("data");
+    seed_store(&data_dir);
+    let config = dir.path().join("hearth.yaml");
+    std::fs::write(
+        &config,
+        format!(
+            "oidc:\n  issuer: \"{ISSUER}\"\nstorage:\n  data_dir: \"{}\"\n\
+             security:\n  key_encryption_key: \"{KEK_HEX}\"\n",
+            data_dir.display()
+        ),
+    )
+    .expect("write config");
+
+    let run = hearth(&[
+        os("admin"),
+        os("token"),
+        os("--config"),
+        config.as_os_str(),
+        os("--user"),
+        os(OPERATOR),
+    ]);
+    assert_eq!(
+        run.code,
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        run.stdout,
+        run.stderr
+    );
+
+    let claims = jwt_claims(run.stdout.trim());
+    assert_eq!(
+        claims["iss"],
+        format!("{ISSUER}/realms/system"),
+        "the token must name the configured issuer: {claims}"
+    );
+    assert_eq!(
+        claims["aud"], ISSUER,
+        "the audience defaults to oidc.issuer, as in serve: {claims}"
+    );
+}
+
+/// The JSON claims of a compact JWT. No signature check: the claims are what
+/// the test is about.
+fn jwt_claims(token: &str) -> serde_json::Value {
+    use base64::Engine as _;
+    let payload = token
+        .split('.')
+        .nth(1)
+        .expect("a compact JWT has a payload");
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .expect("base64url payload");
+    serde_json::from_slice(&bytes).expect("JSON claims")
+}

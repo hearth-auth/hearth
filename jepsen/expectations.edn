@@ -1,0 +1,14 @@
+;; Expectation per test (design decision 9): :pass, or {:xfail "G<n>"} for a
+;; promise that an open item in docs/dev/CONSISTENCY.md breaks today. The
+;; change that closes a G-item flips its tests to :pass.
+{"noop"     :pass
+ "set"      :pass
+ "register" :pass
+ "single-use" :pass
+ "same-node"  :pass
+ "revocation" :pass
+ "revocation-isolated" {:xfail "G1"}
+ "staleness"  {:xfail "G1"}
+ "audit"      {:xfail "G4"}
+ "snapshot"   {:xfail "G2"}
+ "replace"    {:xfail "G9"}}

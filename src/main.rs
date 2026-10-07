@@ -1324,17 +1324,9 @@ async fn run_serve(
             {
                 Ok(engine) => {
                     let engine = Arc::new(engine);
-                    let serve_cfg = cluster_cfg.clone();
-                    let serve_engine = Arc::clone(&engine);
-                    let shutdown = shutdown_requested(shutdown_signal_rx.clone());
-                    raft_server = Some(tokio::spawn(async move {
-                        if let Err(e) =
-                            hearth::cluster::serve_with_shutdown(&serve_cfg, serve_engine, shutdown)
-                                .await
-                        {
-                            error!(error = %e, "Raft peer gRPC server terminated");
-                        }
-                    }));
+                    let rx = shutdown_signal_rx.clone();
+                    let handle = spawn_peer_server(cluster_cfg, Arc::clone(&engine), rx).await?;
+                    raft_server = Some(handle);
                     // HEA-2154: multi-node clustering is EXPERIMENTAL. The
                     // consistency model and its open items (G1–G9) are in
                     // docs/dev/CONSISTENCY.md. Operators must not learn this
@@ -1375,86 +1367,10 @@ async fn run_serve(
     // Initialize identity engine
     let clock = Arc::new(SystemClock) as Arc<dyn Clock>;
 
-    // Build OidcConfig from YAML
-    let oidc_config = {
-        let mut oc = OidcConfig::default();
-        if let Some(issuer) = &config.oidc.issuer {
-            oc.issuer.clone_from(issuer);
-        } else if config.dev_mode {
-            // In --dev mode without an explicit oidc.issuer, default to the
-            // actual server address so token iss claims are reachable.  This
-            // lets JWKS-verifying clients derive the per-realm JWKS URL from
-            // the iss claim without a hostname mismatch.
-            oc.issuer = format!("http://127.0.0.1:{}", config.server.port);
-        }
-        if let Some(ttl) = &config.oidc.authorization_code_ttl {
-            if let Ok(micros) = hearth::config::parse_duration_to_micros(ttl) {
-                oc.authorization_code_ttl_secs = micros / 1_000_000;
-            }
-        }
-        oc
-    };
-
-    // Build TokenConfig from YAML. Both token.issuer and token.audience default to
-    // oidc.issuer when omitted, so operators only need one config key for the common case.
-    let token_config = {
-        let mut tc = TokenConfig::default();
-        if let Some(issuer) = &config.token.issuer {
-            tc.issuer.clone_from(issuer);
-        } else if let Some(issuer) = &config.oidc.issuer {
-            tc.issuer.clone_from(issuer);
-        }
-        if let Some(audience) = &config.token.audience {
-            tc.audience.clone_from(audience);
-        } else if let Some(issuer) = &config.oidc.issuer {
-            // RFC 7519 §4.1.3: aud identifies the intended recipient.  When the
-            // operator has not set an explicit audience, default to the issuer URL
-            // so standard OIDC clients can validate aud without extra config.
-            tc.audience.clone_from(issuer);
-        }
-        if let Some(ttl) = &config.token.access_token_ttl {
-            if let Ok(micros) = hearth::config::parse_duration_to_micros(ttl) {
-                tc.access_token_ttl_secs = micros / 1_000_000;
-            }
-        }
-        if let Some(ttl) = &config.token.refresh_token_ttl {
-            if let Ok(micros) = hearth::config::parse_duration_to_micros(ttl) {
-                tc.refresh_token_ttl_secs = micros / 1_000_000;
-            }
-        }
-        if let Some(ttl) = &config.token.signing_key_rotation_grace_period {
-            // A negative value is rejected by `validate_token` before we reach
-            // here; clamp defensively so a stray negative can never wrap
-            // through `as u64` into an effectively infinite grace window
-            // (audit 2026-08-28 §4.15#2).
-            if let Ok(micros) = hearth::config::parse_duration_to_micros(ttl) {
-                tc.signing_key_rotation_grace_period_secs = micros.max(0) as u64 / 1_000_000;
-            }
-        }
-        if let Some(max) = config.token.claims_cache_max {
-            // Clamp to at least 1 so the hot-path cache can always hold one entry.
-            tc.claims_cache_max = max.max(1);
-        }
-        // Warn when the audience is still the placeholder value but oidc.issuer is a
-        // real URL.  This only triggers when token.audience is explicitly set to "hearth"
-        // in the config file while oidc.issuer is configured — the implicit default case
-        // is already resolved to oidc.issuer above.
-        if tc.audience == "hearth" {
-            if let Some(oidc_issuer) = &config.oidc.issuer {
-                if oidc_issuer != "hearth" {
-                    tracing::warn!(
-                        audience = %tc.audience,
-                        oidc_issuer = %oidc_issuer,
-                        "token.audience is the placeholder \"hearth\" but oidc.issuer is \
-                         configured. OIDC clients that validate aud against their client_id \
-                         or resource server URL will reject all tokens. Set token.audience \
-                         to a meaningful value (e.g. your issuer URL or service name)."
-                    );
-                }
-            }
-        }
-        tc
-    };
+    // The issuer, audience and token lifetimes: shared with `hearth admin
+    // token`, so a token minted on the host validates on this server.
+    let oidc_config = oidc_config_from(&config);
+    let token_config = token_config_from(&config);
 
     // Build rate-limit config from YAML, falling back to compiled-in defaults.
     let rate_limit_config = {
@@ -2651,59 +2567,63 @@ async fn run_serve(
     );
 
     let app_state = if config.dev_mode {
-        Arc::new(
-            AppState::new_dev(
-                Arc::clone(&identity_engine),
-                Arc::clone(&rbac_engine),
-                Arc::clone(&audit_engine),
-            )
-            .with_webhook(Arc::clone(&webhook_engine))
-            .with_metrics_enabled(config.metrics.enabled)
-            .with_metrics_bearer_token(config.metrics.bearer_token.clone())
-            .with_trusted_proxies(api_trusted_proxies.clone())
-            .with_dpop_nonce_secret(dpop_nonce_secret)
-            .with_jwks_rate_limiter(Arc::clone(&jwks_rate_limiter))
-            .with_allowed_hosts(allowed_hosts.clone())
-            .with_request_shaper(Arc::clone(&request_shaper))
-            .with_rate_limits(admin_rate_limit, token_rate_limit, export_rate_limit)
-            .with_rate_limiters_disabled(load_test_unthrottled)
-            .with_backup_verify_key(backup_verify_key)
-            // In --dev, enable all agent-auth capability phases regardless of
-            // what hearth.yaml says, so developers can exercise Phase D routes
-            // without manually setting every capability flag.
-            .with_agent_identity(true)
-            .with_agent_approval(true)
-            .with_agent_advanced(true)
-            .with_email(Some(Arc::clone(&email_service)))
-            .with_public_base_url(public_base_url.clone())
-            .with_abuse_guards(Arc::clone(&abuse_guards)),
+        AppState::new_dev(
+            Arc::clone(&identity_engine),
+            Arc::clone(&rbac_engine),
+            Arc::clone(&audit_engine),
         )
+        .with_webhook(Arc::clone(&webhook_engine))
+        .with_metrics_enabled(config.metrics.enabled)
+        .with_metrics_bearer_token(config.metrics.bearer_token.clone())
+        .with_trusted_proxies(api_trusted_proxies.clone())
+        .with_dpop_nonce_secret(dpop_nonce_secret)
+        .with_jwks_rate_limiter(Arc::clone(&jwks_rate_limiter))
+        .with_allowed_hosts(allowed_hosts.clone())
+        .with_request_shaper(Arc::clone(&request_shaper))
+        .with_rate_limits(admin_rate_limit, token_rate_limit, export_rate_limit)
+        .with_rate_limiters_disabled(load_test_unthrottled)
+        .with_backup_verify_key(backup_verify_key)
+        // In --dev, enable all agent-auth capability phases regardless of
+        // what hearth.yaml says, so developers can exercise Phase D routes
+        // without manually setting every capability flag.
+        .with_agent_identity(true)
+        .with_agent_approval(true)
+        .with_agent_advanced(true)
+        .with_email(Some(Arc::clone(&email_service)))
+        .with_public_base_url(public_base_url.clone())
+        .with_abuse_guards(Arc::clone(&abuse_guards))
     } else {
-        Arc::new(
-            AppState::new(
-                Arc::clone(&identity_engine),
-                Arc::clone(&rbac_engine),
-                Arc::clone(&audit_engine),
-            )
-            .with_webhook(Arc::clone(&webhook_engine))
-            .with_metrics_enabled(config.metrics.enabled)
-            .with_metrics_bearer_token(config.metrics.bearer_token.clone())
-            .with_trusted_proxies(api_trusted_proxies.clone())
-            .with_dpop_nonce_secret(dpop_nonce_secret)
-            .with_jwks_rate_limiter(Arc::clone(&jwks_rate_limiter))
-            .with_allowed_hosts(allowed_hosts)
-            .with_request_shaper(Arc::clone(&request_shaper))
-            .with_rate_limits(admin_rate_limit, token_rate_limit, export_rate_limit)
-            .with_rate_limiters_disabled(load_test_unthrottled)
-            .with_backup_verify_key(backup_verify_key)
-            .with_agent_identity(config.agent_auth.capabilities.identity)
-            .with_agent_approval(config.agent_auth.capabilities.approval)
-            .with_agent_advanced(config.agent_auth.capabilities.advanced)
-            .with_email(Some(Arc::clone(&email_service)))
-            .with_public_base_url(public_base_url.clone())
-            .with_abuse_guards(Arc::clone(&abuse_guards)),
+        AppState::new(
+            Arc::clone(&identity_engine),
+            Arc::clone(&rbac_engine),
+            Arc::clone(&audit_engine),
         )
+        .with_webhook(Arc::clone(&webhook_engine))
+        .with_metrics_enabled(config.metrics.enabled)
+        .with_metrics_bearer_token(config.metrics.bearer_token.clone())
+        .with_trusted_proxies(api_trusted_proxies.clone())
+        .with_dpop_nonce_secret(dpop_nonce_secret)
+        .with_jwks_rate_limiter(Arc::clone(&jwks_rate_limiter))
+        .with_allowed_hosts(allowed_hosts)
+        .with_request_shaper(Arc::clone(&request_shaper))
+        .with_rate_limits(admin_rate_limit, token_rate_limit, export_rate_limit)
+        .with_rate_limiters_disabled(load_test_unthrottled)
+        .with_backup_verify_key(backup_verify_key)
+        .with_agent_identity(config.agent_auth.capabilities.identity)
+        .with_agent_approval(config.agent_auth.capabilities.approval)
+        .with_agent_advanced(config.agent_auth.capabilities.advanced)
+        .with_email(Some(Arc::clone(&email_service)))
+        .with_public_base_url(public_base_url.clone())
+        .with_abuse_guards(Arc::clone(&abuse_guards))
     };
+    // The cluster admin API (`/admin/cluster/*`) reaches Raft through this
+    // handle. Without it every one of those routes answers `503 not in
+    // cluster mode`, the single-node answer, on a node that is in a cluster.
+    let app_state = Arc::new(if config.cluster.is_some() {
+        app_state.with_cluster(Arc::clone(&cluster_engine))
+    } else {
+        app_state
+    });
 
     // Build server address
     let addr: SocketAddr = format!("{}:{}", config.server.bind_address, config.server.port)
@@ -3613,6 +3533,29 @@ async fn shutdown_requested(
     let _ = signal.wait_for(Option::is_some).await;
 }
 
+/// Binds the Raft peer server, then spawns it. A node whose peer server
+/// cannot start can never join the cluster, so a bind failure is fatal here,
+/// at start-up. The spawned task used to bind, and only logged the failure.
+async fn spawn_peer_server(
+    cluster_cfg: &hearth::config::ClusterConfig,
+    engine: Arc<hearth::cluster::ClusterEngine>,
+    shutdown: tokio::sync::watch::Receiver<Option<tokio::time::Instant>>,
+) -> Result<tokio::task::JoinHandle<()>, Box<dyn std::error::Error>> {
+    let peer_server = match hearth::cluster::PeerServer::bind(cluster_cfg).await {
+        Ok(peer_server) => peer_server,
+        Err(e) => {
+            report_startup_fatal(&format!("Raft peer gRPC server cannot start: {e}"));
+            return Err(e);
+        }
+    };
+    let shutdown = shutdown_requested(shutdown);
+    Ok(tokio::spawn(async move {
+        if let Err(e) = peer_server.serve_with_shutdown(engine, shutdown).await {
+            error!(error = %e, "Raft peer gRPC server terminated");
+        }
+    }))
+}
+
 /// The one drain deadline every listener shares: `drain` after the shutdown
 /// signal fired (or after now, if it has not been recorded).
 fn shared_drain_deadline(
@@ -4407,6 +4350,137 @@ fn cli_storage_config(data_dir: &std::path::Path) -> StorageConfig {
     config
 }
 
+/// The OIDC settings `serve` signs with, from `oidc` in `hearth.yaml`.
+///
+/// `hearth admin token` uses the same, so the token it mints names the
+/// issuer the server validates against.
+fn oidc_config_from(config: &Config) -> OidcConfig {
+    let mut oc = OidcConfig::default();
+    if let Some(issuer) = &config.oidc.issuer {
+        oc.issuer.clone_from(issuer);
+    } else if config.dev_mode {
+        // In --dev mode without an explicit oidc.issuer, default to the
+        // actual server address so token iss claims are reachable.  This
+        // lets JWKS-verifying clients derive the per-realm JWKS URL from
+        // the iss claim without a hostname mismatch.
+        oc.issuer = format!("http://127.0.0.1:{}", config.server.port);
+    }
+    if let Some(ttl) = &config.oidc.authorization_code_ttl {
+        if let Ok(micros) = hearth::config::parse_duration_to_micros(ttl) {
+            oc.authorization_code_ttl_secs = micros / 1_000_000;
+        }
+    }
+    oc
+}
+
+/// The access-token settings `serve` signs with, from `token` and `oidc` in
+/// `hearth.yaml`. Both `token.issuer` and `token.audience` default to
+/// `oidc.issuer`, so operators only need one config key for the common case.
+///
+/// `hearth admin token` uses the same, so the token it mints carries the
+/// issuer and audience the server validates against.
+fn token_config_from(config: &Config) -> TokenConfig {
+    let mut tc = TokenConfig::default();
+    if let Some(issuer) = &config.token.issuer {
+        tc.issuer.clone_from(issuer);
+    } else if let Some(issuer) = &config.oidc.issuer {
+        tc.issuer.clone_from(issuer);
+    }
+    if let Some(audience) = &config.token.audience {
+        tc.audience.clone_from(audience);
+    } else if let Some(issuer) = &config.oidc.issuer {
+        // RFC 7519 §4.1.3: aud identifies the intended recipient.  When the
+        // operator has not set an explicit audience, default to the issuer URL
+        // so standard OIDC clients can validate aud without extra config.
+        tc.audience.clone_from(issuer);
+    }
+    if let Some(ttl) = &config.token.access_token_ttl {
+        if let Ok(micros) = hearth::config::parse_duration_to_micros(ttl) {
+            tc.access_token_ttl_secs = micros / 1_000_000;
+        }
+    }
+    if let Some(ttl) = &config.token.refresh_token_ttl {
+        if let Ok(micros) = hearth::config::parse_duration_to_micros(ttl) {
+            tc.refresh_token_ttl_secs = micros / 1_000_000;
+        }
+    }
+    if let Some(ttl) = &config.token.signing_key_rotation_grace_period {
+        // A negative value is rejected by `validate_token` before we reach
+        // here; clamp defensively so a stray negative can never wrap
+        // through `as u64` into an effectively infinite grace window
+        // (audit 2026-08-28 §4.15#2).
+        if let Ok(micros) = hearth::config::parse_duration_to_micros(ttl) {
+            tc.signing_key_rotation_grace_period_secs = micros.max(0) as u64 / 1_000_000;
+        }
+    }
+    if let Some(max) = config.token.claims_cache_max {
+        // Clamp to at least 1 so the hot-path cache can always hold one entry.
+        tc.claims_cache_max = max.max(1);
+    }
+    // Warn when the audience is still the placeholder value but oidc.issuer is a
+    // real URL.  This only triggers when token.audience is explicitly set to "hearth"
+    // in the config file while oidc.issuer is configured — the implicit default case
+    // is already resolved to oidc.issuer above.
+    if tc.audience == "hearth" {
+        if let Some(oidc_issuer) = &config.oidc.issuer {
+            if oidc_issuer != "hearth" {
+                tracing::warn!(
+                    audience = %tc.audience,
+                    oidc_issuer = %oidc_issuer,
+                    "token.audience is the placeholder \"hearth\" but oidc.issuer is \
+                     configured. OIDC clients that validate aud against their client_id \
+                     or resource server URL will reject all tokens. Set token.audience \
+                     to a meaningful value (e.g. your issuer URL or service name)."
+                );
+            }
+        }
+    }
+    tc
+}
+
+/// Opens a stopped node's store for `hearth admin token`, with the identity
+/// engine set to sign as `serve` does for `config`.
+fn admin_token_identity(
+    data_dir: &std::path::Path,
+    config: Option<&Config>,
+) -> Result<Arc<dyn hearth::identity::IdentityEngine>, Box<dyn std::error::Error>> {
+    let kek = if std::env::var_os("HEARTH_KEK").is_some() {
+        resolve_storage_kek(None)?
+    } else {
+        resolve_storage_kek(config.and_then(|c| c.security.key_encryption_key.as_deref()))?
+    };
+    let storage = match EmbeddedStorageEngine::open(cli_storage_config(data_dir)) {
+        Ok(storage) => Arc::new(storage),
+        Err(hearth::storage::StorageError::AlreadyLocked { data_dir }) => {
+            return Err(format!(
+                "data directory '{}' is locked by another process. `hearth admin token` opens \
+                 the store itself: stop `hearth serve` on this node, run it, then start the \
+                 server again and use the token",
+                data_dir.display()
+            )
+            .into());
+        }
+        Err(e) => return Err(e.into()),
+    };
+    // Sign with the issuer and audience `serve` uses for this config: with the
+    // built-in defaults (`https://hearth.local`) no production server accepts
+    // the token.
+    let (oidc, token) = config.map_or_else(
+        || (OidcConfig::default(), TokenConfig::default()),
+        |c| (oidc_config_from(c), token_config_from(c)),
+    );
+    let (identity, _audit, _rbac) = build_all_engines_with(
+        Arc::clone(&storage) as Arc<dyn StorageEngine>,
+        IdentityConfig {
+            oidc,
+            token,
+            key_encryption_key: kek,
+            ..IdentityConfig::default()
+        },
+    )?;
+    Ok(identity)
+}
+
 /// Runs `hearth admin token`: mints a short-lived system-realm token for an
 /// operator account against a stopped, single-node data directory, and prints
 /// it — alone — to stdout (GA audit 3 DOC-2).
@@ -4477,30 +4551,7 @@ fn run_admin_token(
         .into());
     }
 
-    let kek = if std::env::var_os("HEARTH_KEK").is_some() {
-        resolve_storage_kek(None)?
-    } else {
-        resolve_storage_kek(
-            config
-                .as_ref()
-                .and_then(|c| c.security.key_encryption_key.as_deref()),
-        )?
-    };
-    let storage = match EmbeddedStorageEngine::open(cli_storage_config(&data_dir)) {
-        Ok(storage) => Arc::new(storage),
-        Err(hearth::storage::StorageError::AlreadyLocked { data_dir }) => {
-            return Err(format!(
-                "data directory '{}' is locked by another process. `hearth admin token` opens \
-                 the store itself: stop `hearth serve` on this node, run it, then start the \
-                 server again and use the token",
-                data_dir.display()
-            )
-            .into());
-        }
-        Err(e) => return Err(e.into()),
-    };
-    let (identity, _audit, _rbac) =
-        build_all_engines(Arc::clone(&storage) as Arc<dyn StorageEngine>, kek)?;
+    let identity = admin_token_identity(&data_dir, config.as_ref())?;
 
     let system_realm = hearth::core::RealmId::new(uuid::Uuid::nil());
     let operator = identity
@@ -5376,6 +5427,23 @@ fn build_all_engines(
     storage: Arc<dyn StorageEngine>,
     key_encryption_key: Option<hearth::identity::key_encryption::StorageKek>,
 ) -> Result<AllEngines, Box<dyn std::error::Error>> {
+    build_all_engines_with(
+        storage,
+        IdentityConfig {
+            key_encryption_key,
+            ..IdentityConfig::default()
+        },
+    )
+}
+
+/// [`build_all_engines`] with a caller-built [`IdentityConfig`], for a
+/// one-shot command whose output must match what `serve` signs (the issuer
+/// and audience of `hearth admin token`).
+fn build_all_engines_with(
+    storage: Arc<dyn StorageEngine>,
+    identity_config: IdentityConfig,
+) -> Result<AllEngines, Box<dyn std::error::Error>> {
+    let key_encryption_key = identity_config.key_encryption_key.as_ref();
     let clock = Arc::new(SystemClock) as Arc<dyn Clock>;
     let raw_rbac = Arc::new(EmbeddedRbacEngine::new(
         Arc::clone(&storage),
@@ -5389,17 +5457,14 @@ fn build_all_engines(
     // --include-audit` died at `audit HMAC key unwrap failed: ... no
     // key_encryption_key is configured` — while the very same command without
     // `--include-audit` succeeded (audit re-run 23.5).
-    let audit_kek = key_encryption_key.as_ref().map(|k| *k.as_bytes());
+    let audit_kek = key_encryption_key.map(|k| *k.as_bytes());
     let audit = Arc::new(
         EmbeddedAuditEngine::new(Arc::clone(&storage), Arc::clone(&clock)).with_kek(audit_kek),
     ) as Arc<dyn hearth::audit::AuditEngine>;
     let raw_identity = Arc::new(EmbeddedIdentityEngine::with_rbac(
         Arc::clone(&storage),
         clock,
-        IdentityConfig {
-            key_encryption_key,
-            ..IdentityConfig::default()
-        },
+        identity_config,
         Arc::clone(&rbac),
         Arc::clone(&audit),
     )?);

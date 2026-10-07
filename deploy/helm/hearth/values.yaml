@@ -242,8 +242,10 @@ extraEnv: []
 #                          is worse than leaving the pod alive while storage
 #                          recovers.  Kill only when the process itself is hung.)
 #   readiness → /readyz  (genuine storage probe; fails until WAL + memtable are
-#                          ready.  Kubernetes removes the pod from the endpoints
-#                          list so traffic is not routed to an unready pod.)
+#                          ready, and in cluster mode while the node knows no
+#                          leader or leads without a quorum.  Kubernetes removes
+#                          the pod from the endpoints list so traffic is not
+#                          routed to an unready pod.)
 # httpGet.scheme is filled in by the chart: HTTPS when the pod terminates TLS
 # (see `tls`), HTTP otherwise. Set it here only to override that.
 livenessProbe:

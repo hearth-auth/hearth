@@ -3814,7 +3814,9 @@ pub struct PeerConfig {
 pub struct ClusterConfig {
     /// This node's numeric ID — must be unique across the cluster.
     pub node_id: u64,
-    /// Local address this node listens on for Raft peer RPCs (`host:port`).
+    /// Local address this node listens on for Raft peer RPCs: an IP address
+    /// and a port (`10.0.0.1:8421`, `[fd00::1]:8421`). The peer server binds
+    /// it, so a host name is refused by validation.
     #[serde(default = "ClusterConfig::default_peer_address")]
     pub peer_address: String,
     /// Known cluster peers.

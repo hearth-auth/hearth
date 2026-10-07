@@ -126,6 +126,12 @@ pub enum ClusterError {
     )]
     CommandTooLarge { size: usize, limit: usize },
 
+    /// Raft refused to initialise the cluster because this node's Raft state
+    /// is not empty: the cluster was initialised already, by this node or by
+    /// the leader that replicated to it.
+    #[error("the cluster is already initialised: {0}")]
+    AlreadyInitialized(String),
+
     /// Raft or runtime error.
     #[error("raft: {0}")]
     Raft(String),
@@ -187,6 +193,11 @@ const FORWARD_GRACE: Duration = Duration::from_secs(2);
 /// retry on a new leader when the first provably did not propose it.
 const MAX_ROUTING_ROUNDS: usize = 4;
 
+/// Upper bound of the Raft election timeout, in milliseconds. A leader that
+/// no quorum has acknowledged for longer than this may already be replaced:
+/// a majority elsewhere can elect a new leader after one election timeout.
+const ELECTION_TIMEOUT_MAX_MS: u64 = 3000;
+
 /// Error produced when building a [`ClusterEngine`].
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
@@ -228,6 +239,9 @@ pub struct ClusterEngine {
     /// Follower write forwarding (client and leader-side limit). `None` in
     /// single-node mode, which never forwards anything.
     forwarding: Option<Forwarding>,
+    /// Estimates this node's clock offset from the leader (C4). Unused in
+    /// single-node mode, which receives no entries.
+    clock_offset: ClockOffsetMonitor,
 }
 
 impl ClusterEngine {
@@ -255,6 +269,7 @@ impl ClusterEngine {
             initial_members: None,
             observer_slot: None,
             forwarding: None,
+            clock_offset: ClockOffsetMonitor::default(),
         }
     }
 
@@ -362,7 +377,7 @@ impl ClusterEngine {
             RaftConfig {
                 heartbeat_interval: 500,
                 election_timeout_min: 1500,
-                election_timeout_max: 3000,
+                election_timeout_max: ELECTION_TIMEOUT_MAX_MS,
                 // Chunks well under the peer message limit (see
                 // `cluster::wire`); openraft's default is 3 MiB.
                 snapshot_max_chunk_size: SNAPSHOT_CHUNK_BYTES,
@@ -397,23 +412,7 @@ impl ClusterEngine {
         });
         tokio::spawn(watch_leadership(raft.clone(), Arc::clone(&observer_slot)));
 
-        // Build initial membership map for use by the bootstrap HTTP handler.
-        let mut initial_members = BTreeMap::new();
-        initial_members.insert(
-            config.node_id,
-            HearthNode {
-                addr: config.peer_address.clone(),
-            },
-        );
-        for peer in &config.peers {
-            initial_members.insert(
-                peer.id,
-                HearthNode {
-                    addr: peer.address.clone(),
-                },
-            );
-        }
-
+        let initial_members = initial_members_of(config);
         Self::self_initialise_if_designated(&raft, config, &initial_members).await;
 
         info!(
@@ -434,6 +433,7 @@ impl ClusterEngine {
             initial_members: Some(initial_members),
             observer_slot: Some(observer_slot),
             forwarding: Some(forwarding),
+            clock_offset: ClockOffsetMonitor::default(),
         })
     }
 
@@ -525,9 +525,12 @@ impl ClusterEngine {
         let raft = self.raft.as_ref().ok_or_else(|| {
             ClusterError::Raft("cannot initialise cluster on a single-node engine".to_string())
         })?;
-        raft.initialize(members)
-            .await
-            .map_err(|e| ClusterError::Raft(e.to_string()))
+        raft.initialize(members).await.map_err(|e| match e {
+            RaftError::APIError(openraft::error::InitializeError::NotAllowed(not_allowed)) => {
+                ClusterError::AlreadyInitialized(not_allowed.to_string())
+            }
+            other => ClusterError::Raft(other.to_string()),
+        })
     }
 
     // ── Metrics ───────────────────────────────────────────────────────────────
@@ -576,6 +579,30 @@ impl ClusterEngine {
         };
         let metrics = raft.metrics().borrow().clone();
         metrics.current_leader == Some(metrics.id)
+    }
+
+    /// Why this node cannot take a write now, or `None` when it can.
+    /// `/readyz` reports the reason as not-ready. Always `None` in
+    /// single-node mode.
+    ///
+    /// - `"no_leader"`: no known leader (an election, or no quorum reachable).
+    /// - `"no_quorum"`: this node leads, but no quorum has acknowledged it
+    ///   within [`ELECTION_TIMEOUT_MAX_MS`]. openraft 0.9 never steps such a
+    ///   leader down (docs/dev/CONSISTENCY.md G1), and a node restarted on a
+    ///   store whose last vote was its own resumes as leader with no quorum.
+    ///
+    /// Local knowledge only: a follower whose leader is gone keeps it as
+    /// leader until its own election timeout (1.5–3 s) passes.
+    pub fn not_ready_reason(&self) -> Option<&'static str> {
+        let raft = self.raft.as_ref()?;
+        let metrics = raft.metrics();
+        let m = metrics.borrow();
+        leader_gap(
+            m.id,
+            m.current_leader,
+            m.millis_since_quorum_ack,
+            m.membership_config.membership().voter_ids().count(),
+        )
     }
 
     /// Initial cluster membership map built from config at startup.
@@ -772,6 +799,29 @@ impl ClusterEngine {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_micros() as i64
+    }
+
+    /// Feeds one `AppendEntries` request to the clock-offset monitor and logs
+    /// its verdict (C4). The warning never changes how the node answers.
+    fn note_clock_offset(&self, req: &AppendEntriesRequest<HearthRaftConfig>) {
+        let now = Self::leader_timestamp_now();
+        let Some(age) = min_in_flight_age(req, now) else {
+            return;
+        };
+        match self.clock_offset.observe(age, now) {
+            Some(ClockOffset::LeaderAhead { ms }) => warn!(
+                offset_ms = ms,
+                "clock offset from the leader exceeds 1 s: the leader's clock is ahead of this \
+                 node's — ensure NTP is configured"
+            ),
+            Some(ClockOffset::FollowerAhead { ms }) => warn!(
+                offset_ms = ms,
+                "clock offset from the leader may exceed 1 s: for 30 s no entry arrived less than \
+                 offset_ms after the leader proposed it, so this node's clock may be ahead — \
+                 ensure NTP is configured"
+            ),
+            None => {}
+        }
     }
 
     /// Returns `true` if reads should be served.
@@ -1446,7 +1496,7 @@ impl IncomingRpcDispatch for ClusterEngine {
     async fn append_entries(&self, payload: &[u8]) -> Result<Vec<u8>, String> {
         let raft = self.raft.as_ref().ok_or("Raft not initialised")?;
         let req: AppendEntriesRequest<HearthRaftConfig> = wire::decode(payload)?;
-        clock_skew_of(&req);
+        self.note_clock_offset(&req);
         let resp = raft.append_entries(req).await.map_err(|e| e.to_string())?;
         wire::encode(&resp)
     }
@@ -1552,36 +1602,46 @@ pub(crate) fn compute_lag_ms(metrics: &RaftMetrics<u64, HearthNode>) -> u64 {
     }
 }
 
-// ── Clock-skew check (§16.4) ──────────────────────────────────────────────────
-
-/// Absolute clock skew in milliseconds between a leader timestamp and the local
-/// clock, both in microseconds since the UNIX epoch. Pulled out as a pure
-/// function so the >1 s boundary is unit-testable without a live cluster.
-fn clock_skew_ms(leader_ts_micros: i64, now_micros: i64) -> u64 {
-    (now_micros - leader_ts_micros).unsigned_abs() / 1_000
+/// The membership `config` names: this node plus every `cluster.peers` entry.
+/// Used for self-initialisation and by the bootstrap HTTP handler.
+fn initial_members_of(config: &ClusterConfig) -> BTreeMap<u64, HearthNode> {
+    std::iter::once((config.node_id, config.peer_address.clone()))
+        .chain(config.peers.iter().map(|p| (p.id, p.address.clone())))
+        .map(|(id, addr)| (id, HearthNode { addr }))
+        .collect()
 }
 
-/// Decodes an `AppendEntries` payload and runs [`clock_skew_of`] on it;
-/// `None` when the payload does not decode.
-#[cfg(test)]
-fn check_clock_skew(payload: &[u8]) -> Option<u64> {
-    let req = wire::decode::<AppendEntriesRequest<HearthRaftConfig>>(payload).ok()?;
-    clock_skew_of(&req)
+// ── Clock-offset check (§16.4, C4) ────────────────────────────────────────────
+
+/// The clock offset from the leader above which a node warns (C4).
+const CLOCK_OFFSET_LIMIT_MICROS: i64 = 1_000_000;
+
+/// How long [`ClockOffsetMonitor`] observes before it gives a verdict.
+const CLOCK_OFFSET_WINDOW_MICROS: i64 = 30_000_000;
+
+/// A clock offset from the leader over [`CLOCK_OFFSET_LIMIT_MICROS`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClockOffset {
+    /// The leader's clock is ahead of this node's by at least `ms`.
+    LeaderAhead { ms: u64 },
+    /// This node's clock is ahead of the leader's by at most `ms`.
+    FollowerAhead { ms: u64 },
 }
 
-/// Inspect an `AppendEntries` request for embedded leader timestamps and warn
-/// if the clock skew between this node and the leader exceeds 1 second.
+/// The age on arrival, in microseconds, of the freshest in-flight entry of an
+/// `AppendEntries` request, or `None` when the request carries none.
 ///
-/// Returns `Some(skew_ms)` for the first timestamped entry inspected, or `None`
-/// when it carries no usable leader timestamp — the return value exists so
-/// robustness tests can assert on the outcome rather than merely on the
-/// absence of a panic.
-///
-/// NTP synchronisation is a deployment prerequisite for cluster mode.
-fn clock_skew_of(req: &AppendEntriesRequest<HearthRaftConfig>) -> Option<u64> {
-    for entry in &req.entries {
-        let leader_ts = match &entry.payload {
-            EntryPayload::Normal(cmd) => match cmd {
+/// An entry's age is `now - leader_timestamp`: this node's clock offset from
+/// the leader, plus the time the entry took to arrive. Only entries above
+/// `leader_commit` count. Committed entries are a catch-up after a restart or
+/// a partition, and their age is mostly that delay, not an offset.
+fn min_in_flight_age(req: &AppendEntriesRequest<HearthRaftConfig>, now_micros: i64) -> Option<i64> {
+    let committed = req.leader_commit.map_or(0, |id| id.index);
+    req.entries
+        .iter()
+        .filter(|entry| req.leader_commit.is_none() || entry.log_id.index > committed)
+        .filter_map(|entry| match &entry.payload {
+            EntryPayload::Normal(
                 RaftCommand::Put {
                     leader_timestamp, ..
                 }
@@ -1599,27 +1659,91 @@ fn clock_skew_of(req: &AppendEntriesRequest<HearthRaftConfig>) -> Option<u64> {
                 }
                 | RaftCommand::IncrementU64 {
                     leader_timestamp, ..
-                } => *leader_timestamp,
-            },
-            _ => continue,
-        };
-        if leader_ts == 0 {
-            continue;
-        }
-        let now_micros = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_micros() as i64;
-        let skew_ms = clock_skew_ms(leader_ts, now_micros);
-        if skew_ms > 1_000 {
-            warn!(
-                skew_ms,
-                "clock skew with leader exceeds 1 s — ensure NTP is configured"
-            );
-        }
-        return Some(skew_ms);
+                },
+            ) => Some(*leader_timestamp),
+            _ => None,
+        })
+        .filter(|&leader_ts| leader_ts != 0)
+        .map(|leader_ts| now_micros - leader_ts)
+        .min()
+}
+
+/// The decision of [`ClusterEngine::not_ready_reason`], from the Raft
+/// metrics of node `id`. A sole voter is its own quorum.
+fn leader_gap(
+    id: u64,
+    current_leader: Option<u64>,
+    millis_since_quorum_ack: Option<u64>,
+    voters: usize,
+) -> Option<&'static str> {
+    match current_leader {
+        None => Some("no_leader"),
+        Some(leader) if leader == id && voters > 1 => match millis_since_quorum_ack {
+            Some(ms) if ms <= ELECTION_TIMEOUT_MAX_MS => None,
+            _ => Some("no_quorum"),
+        },
+        Some(_) => None,
     }
-    None
+}
+
+/// Decodes an `AppendEntries` payload and runs [`min_in_flight_age`] on it at
+/// the current time; `None` when the payload does not decode.
+#[cfg(test)]
+fn check_clock_skew(payload: &[u8]) -> Option<i64> {
+    let req = wire::decode::<AppendEntriesRequest<HearthRaftConfig>>(payload).ok()?;
+    min_in_flight_age(&req, ClusterEngine::leader_timestamp_now())
+}
+
+/// Estimates this node's clock offset from the leader and reports it once per
+/// observation window (C4). NTP is a deployment prerequisite for cluster mode.
+///
+/// An entry's age (see [`min_in_flight_age`]) is the offset plus a delay that
+/// is never negative. So the smallest age seen in a window is the best
+/// estimate: a node in contact receives fresh entries, and their delay is
+/// small. A negative smallest age proves the leader's clock is ahead. A
+/// positive one bounds this node's lead from above.
+#[derive(Debug, Default)]
+struct ClockOffsetMonitor {
+    window: std::sync::Mutex<Option<OffsetWindow>>,
+}
+
+/// One observation window of a [`ClockOffsetMonitor`].
+#[derive(Debug, Clone, Copy)]
+struct OffsetWindow {
+    start_micros: i64,
+    min_age_micros: i64,
+}
+
+impl ClockOffsetMonitor {
+    /// Records the smallest entry age of one request. Returns a verdict when
+    /// this observation closes a window whose smallest age is more than
+    /// [`CLOCK_OFFSET_LIMIT_MICROS`] from zero; then a new window starts.
+    fn observe(&self, min_age_micros: i64, now_micros: i64) -> Option<ClockOffset> {
+        // A poisoned lock only means another observation panicked; the
+        // window it left is still a valid estimate.
+        let mut slot = self
+            .window
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let window = slot.get_or_insert(OffsetWindow {
+            start_micros: now_micros,
+            min_age_micros,
+        });
+        window.min_age_micros = window.min_age_micros.min(min_age_micros);
+        if now_micros - window.start_micros < CLOCK_OFFSET_WINDOW_MICROS {
+            return None;
+        }
+        let min_age = window.min_age_micros;
+        *slot = None;
+        let ms = min_age.unsigned_abs() / 1_000;
+        if min_age < -CLOCK_OFFSET_LIMIT_MICROS {
+            Some(ClockOffset::LeaderAhead { ms })
+        } else if min_age > CLOCK_OFFSET_LIMIT_MICROS {
+            Some(ClockOffset::FollowerAhead { ms })
+        } else {
+            None
+        }
+    }
 }
 
 // ── ClusterStorageAdapter ─────────────────────────────────────────────────────
@@ -1757,7 +1881,9 @@ pub(crate) fn cluster_to_storage_err(e: ClusterError) -> crate::storage::Storage
         | ClusterError::NotAppliedLocally { .. } => StorageError::ClusterWriteOutcomeUnknown {
             reason: format!("raft: {e}"),
         },
-        e @ (ClusterError::CommandTooLarge { .. } | ClusterError::ForwardRejected { .. }) => {
+        e @ (ClusterError::CommandTooLarge { .. }
+        | ClusterError::ForwardRejected { .. }
+        | ClusterError::AlreadyInitialized(_)) => {
             StorageError::Io(std::io::Error::other(format!("raft: {e}")))
         }
         ClusterError::Raft(msg) => StorageError::Io(std::io::Error::other(format!("raft: {msg}"))),
@@ -2026,6 +2152,30 @@ mod tests {
 
     fn make_realm() -> RealmId {
         RealmId::new(Uuid::new_v4())
+    }
+
+    /// `/readyz` readiness from the Raft metrics: a follower needs a known
+    /// leader; a leader needs a quorum acknowledgement within the election
+    /// timeout, unless it is the only voter.
+    #[test]
+    fn leader_gap_requires_a_leader_and_a_leader_requires_a_recent_quorum() {
+        // Follower.
+        assert_eq!(leader_gap(2, Some(1), None, 3), None);
+        assert_eq!(leader_gap(2, None, None, 3), Some("no_leader"));
+        // Leader with a fresh, a borderline and a stale quorum ack.
+        assert_eq!(leader_gap(1, Some(1), Some(0), 3), None);
+        assert_eq!(
+            leader_gap(1, Some(1), Some(ELECTION_TIMEOUT_MAX_MS), 3),
+            None
+        );
+        assert_eq!(
+            leader_gap(1, Some(1), Some(ELECTION_TIMEOUT_MAX_MS + 1), 3),
+            Some("no_quorum")
+        );
+        // Leader never acknowledged (restarted on its own committed vote).
+        assert_eq!(leader_gap(1, Some(1), None, 3), Some("no_quorum"));
+        // A sole voter is its own quorum.
+        assert_eq!(leader_gap(1, Some(1), None, 1), None);
     }
 
     /// A data directory written by an earlier release (no persisted applied
@@ -2355,14 +2505,105 @@ mod tests {
         assert_eq!(check_clock_skew(b""), None);
     }
 
+    /// An `AppendEntries` request with one `IncrementU64` entry per
+    /// `(index, leader_timestamp)` pair, and the leader's commit index.
+    fn append_with(
+        entries: &[(u64, i64)],
+        leader_commit: Option<u64>,
+    ) -> AppendEntriesRequest<HearthRaftConfig> {
+        let log_id = |index| LogId::new(CommittedLeaderId::new(1, 1), index);
+        AppendEntriesRequest {
+            vote: Vote::new_committed(1, 1),
+            prev_log_id: None,
+            entries: entries
+                .iter()
+                .map(|&(index, leader_timestamp)| openraft::Entry {
+                    log_id: log_id(index),
+                    payload: EntryPayload::Normal(RaftCommand::IncrementU64 {
+                        leader_timestamp,
+                        realm: RealmId::new(Uuid::nil()),
+                        key: b"ctr".to_vec(),
+                    }),
+                })
+                .collect(),
+            leader_commit: leader_commit.map(log_id),
+        }
+    }
+
+    const NOW: i64 = 1_800_000_000_000_000;
+    const SEC: i64 = 1_000_000;
+
+    /// A follower that catches up receives entries the leader committed long
+    /// ago. Their age is the time it was away, not a clock offset (C4 false
+    /// warning seen on a 3-node cluster sharing one clock: `skew_ms=2234`).
     #[test]
-    fn clock_skew_ms_is_absolute_and_scaled() {
-        // Leader ahead or behind by the same amount yields the same magnitude.
-        assert_eq!(clock_skew_ms(1_000_000, 2_500_000), 1_500); // leader behind
-        assert_eq!(clock_skew_ms(2_500_000, 1_000_000), 1_500); // leader ahead
-                                                                // Boundary: 1_000 ms is not "exceeds 1 s"; 1_001 ms is.
-        assert_eq!(clock_skew_ms(0, 1_000_000), 1_000);
-        assert!(clock_skew_ms(0, 1_001_000) > 1_000);
+    fn a_catch_up_of_committed_entries_gives_no_clock_sample() {
+        let req = append_with(&[(1, NOW - 300 * SEC), (2, NOW - 200 * SEC)], Some(2));
+        assert_eq!(min_in_flight_age(&req, NOW), None);
+    }
+
+    /// Of the in-flight entries, the freshest one gives the age: its delay is
+    /// the smallest, so its age is closest to the offset.
+    #[test]
+    fn the_freshest_in_flight_entry_gives_the_clock_sample() {
+        let req = append_with(
+            &[(3, NOW - 300 * SEC), (4, NOW - 5 * SEC), (5, NOW - 10_000)],
+            Some(3),
+        );
+        assert_eq!(min_in_flight_age(&req, NOW), Some(10_000));
+    }
+
+    /// Entries without a leader timestamp give no sample.
+    #[test]
+    fn entries_without_a_timestamp_give_no_clock_sample() {
+        assert_eq!(min_in_flight_age(&append_with(&[(1, 0)], None), NOW), None);
+        assert_eq!(min_in_flight_age(&append_with(&[], None), NOW), None);
+    }
+
+    /// One late entry (queued while the leader was elected) does not warn
+    /// when a fresh one arrives in the same window.
+    #[test]
+    fn a_late_entry_does_not_warn_when_a_fresh_one_arrives_in_the_window() {
+        let m = ClockOffsetMonitor::default();
+        assert_eq!(m.observe(2_234_000, NOW), None);
+        assert_eq!(m.observe(12_000, NOW + SEC), None);
+        assert_eq!(m.observe(2_234_000, NOW + 31 * SEC), None);
+    }
+
+    /// A follower whose clock is ahead sees every entry arrive late. It warns
+    /// once, when the window closes, and starts a new window.
+    #[test]
+    fn a_follower_clock_ahead_warns_once_per_window() {
+        let m = ClockOffsetMonitor::default();
+        assert_eq!(m.observe(2_100_000, NOW), None);
+        assert_eq!(m.observe(2_000_000, NOW + 10 * SEC), None);
+        assert_eq!(
+            m.observe(2_050_000, NOW + 30 * SEC),
+            Some(ClockOffset::FollowerAhead { ms: 2_000 })
+        );
+        assert_eq!(m.observe(2_000_000, NOW + 31 * SEC), None, "a new window");
+    }
+
+    /// An entry that arrives before the leader proposed it proves the
+    /// leader's clock is ahead.
+    #[test]
+    fn a_leader_clock_ahead_warns() {
+        let m = ClockOffsetMonitor::default();
+        assert_eq!(m.observe(-1_400_000, NOW), None);
+        assert_eq!(
+            m.observe(-1_500_000, NOW + 30 * SEC),
+            Some(ClockOffset::LeaderAhead { ms: 1_500 })
+        );
+    }
+
+    /// Offsets within 1 s either way do not warn; 1 s itself is not "exceeds".
+    #[test]
+    fn an_offset_within_one_second_does_not_warn() {
+        for age in [-1_000_000, -400_000, 0, 900_000, 1_000_000] {
+            let m = ClockOffsetMonitor::default();
+            assert_eq!(m.observe(age, NOW), None);
+            assert_eq!(m.observe(age, NOW + 30 * SEC), None, "age {age} µs");
+        }
     }
 
     // ── ClusterStorageAdapter::list_realms delegation ─────────────────────────

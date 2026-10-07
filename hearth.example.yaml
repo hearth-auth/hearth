@@ -866,17 +866,19 @@ onboarding:
 # │  WARNING: Cluster mode is EXPERIMENTAL and NOT production-supported     │
 # │  in Hearth 1.x.                                                         │
 # │                                                                         │
-# │  Known defects:                                                         │
-# │  • C-5: Followers do NOT invalidate RBAC or session caches. A revoked  │
-# │    permission or terminated session is honoured indefinitely on         │
-# │    followers until they restart.                                        │
-# │  • C-6: Cluster membership is IMMUTABLE after bootstrap. Nodes cannot  │
-# │    be added or removed from a running cluster. Replacing a failed node  │
-# │    requires a full-cluster restart with updated YAML.                   │
-# │  • H-3 (fixed): writes to a follower are forwarded to the leader, so   │
+# │  Known limits (details: docs/guides/clustering.md; promises and         │
+# │  open items G1-G9: docs/dev/CONSISTENCY.md):                            │
+# │  • C-5: follower cache invalidation is partial. A read served by a      │
+# │    follower may be stale, and a node cut off from the leader keeps      │
+# │    serving reads (G1).                                                  │
+# │  • C-6: membership is fixed at bootstrap. Editing peers and             │
+# │    restarting does not change it. Restarting a node with an empty       │
+# │    data directory under its old ID is unsafe: it forgets its vote,      │
+# │    and the lowest ID starts a cluster of its own (G9).                  │
+# │  • H-3 (fixed): writes to a follower are forwarded to the leader, so    │
 # │    any node accepts writes and logins.                                  │
 # │                                                                         │
-# │  The supported deployment model for Hearth 1.x is single-node.         │
+# │  The supported deployment model for Hearth 1.x is single-node.          │
 # │  Omit the cluster: section entirely for production deployments.         │
 # │                                                                         │
 # │  Hearth will emit a WARN-level "cluster mode EXPERIMENTAL" message at   │
@@ -896,6 +898,7 @@ onboarding:
 # cluster:
 #   node_id: 1                           # unique integer per node (1, 2, 3, …)
 #   peer_address: "10.0.0.1:8421"        # this node's inbound Raft RPC address
+#                                        # an IP and port, not a host name (it is bound)
 #                                        # default: "127.0.0.1:8421"
 #   peers:                               # all other nodes in the cluster
 #     - id: 2

@@ -8,6 +8,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use tonic::transport::server::TcpIncoming;
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status};
 use tracing::{debug, info, warn};
@@ -165,7 +166,7 @@ pub async fn serve<D: IncomingRpcDispatch>(
 ///
 /// # Errors
 ///
-/// Returns an error when the TLS material cannot be read or the server fails.
+/// Returns an error when [`PeerServer::bind`] fails or the server fails.
 pub async fn serve_with_shutdown<D, F>(
     config: &ClusterConfig,
     dispatch: Arc<D>,
@@ -175,39 +176,110 @@ where
     D: IncomingRpcDispatch,
     F: std::future::Future<Output = ()>,
 {
-    let cert = tokio::fs::read(&config.tls_cert_path).await?;
-    let key = tokio::fs::read(&config.tls_key_path).await?;
-    let ca = tokio::fs::read(&config.tls_ca_cert_path).await?;
+    PeerServer::bind(config)
+        .await?
+        .serve_with_shutdown(dispatch, shutdown)
+        .await
+}
 
-    let identity = Identity::from_pem(cert, key);
-    let ca_cert = Certificate::from_pem(ca);
+/// The Raft peer gRPC server, bound and ready to serve.
+///
+/// [`PeerServer::bind`] does every step that can fail on a bad config: it
+/// reads the TLS material, parses `peer_address` and binds it. `serve` awaits
+/// it before it spawns the server, so a node that cannot take part in the
+/// cluster exits at start-up. The spawned task used to do all of this and
+/// only log an error, and the node went on serving without a peer server.
+pub struct PeerServer {
+    server: Server,
+    incoming: TcpIncoming,
+    addr: SocketAddr,
+    node_id: u64,
+}
 
-    let tls = ServerTlsConfig::new()
-        .identity(identity)
-        .client_ca_root(ca_cert);
+impl PeerServer {
+    /// Reads the peer TLS material and binds `config.peer_address`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, naming the file or the address, when a TLS file
+    /// cannot be read, the TLS material is unusable, `peer_address` is not
+    /// an IP address and port, or the bind fails (for example, port in use).
+    pub async fn bind(
+        config: &ClusterConfig,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let read = |path: &std::path::Path| {
+            let path = path.to_path_buf();
+            async move {
+                tokio::fs::read(&path)
+                    .await
+                    .map_err(|e| format!("cannot read {}: {e}", path.display()))
+            }
+        };
+        let cert = read(&config.tls_cert_path).await?;
+        let key = read(&config.tls_key_path).await?;
+        let ca = read(&config.tls_ca_cert_path).await?;
 
-    let addr: SocketAddr = config
-        .peer_address
-        .parse()
-        .map_err(|e| format!("invalid peer_address '{}': {e}", config.peer_address))?;
+        let tls = ServerTlsConfig::new()
+            .identity(Identity::from_pem(cert, key))
+            .client_ca_root(Certificate::from_pem(ca));
+        let server = Server::builder().tls_config(tls)?;
 
-    info!(
-        node_id = config.node_id,
-        addr = %addr,
-        "Raft peer gRPC server starting (mTLS)"
-    );
+        let addr: SocketAddr = config
+            .peer_address
+            .parse()
+            .map_err(|e| format!("invalid peer_address '{}': {e}", config.peer_address))?;
+        // The settings tonic's own `serve` binds with: TCP_NODELAY on, no
+        // keepalive.
+        let incoming = TcpIncoming::bind(addr)
+            .map_err(|e| format!("cannot bind peer_address '{addr}': {e}"))?
+            .with_nodelay(Some(true));
+        let addr = incoming.local_addr().unwrap_or(addr);
 
-    Server::builder()
-        .tls_config(tls)?
-        .add_service(
-            RaftServiceServer::new(RaftRpcHandler::new(dispatch))
-                .max_decoding_message_size(MAX_PEER_MESSAGE_BYTES)
-                .max_encoding_message_size(MAX_PEER_MESSAGE_BYTES),
-        )
-        .serve_with_shutdown(addr, shutdown)
-        .await?;
+        Ok(Self {
+            server,
+            incoming,
+            addr,
+            node_id: config.node_id,
+        })
+    }
 
-    Ok(())
+    /// The bound address (useful when `peer_address` names port 0).
+    #[must_use]
+    pub const fn local_addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// Serves peer RPCs until `shutdown` resolves.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the server fails.
+    pub async fn serve_with_shutdown<D, F>(
+        mut self,
+        dispatch: Arc<D>,
+        shutdown: F,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    where
+        D: IncomingRpcDispatch,
+        F: std::future::Future<Output = ()>,
+    {
+        info!(
+            node_id = self.node_id,
+            addr = %self.addr,
+            "Raft peer gRPC server starting (mTLS)"
+        );
+
+        self.server
+            .add_service(
+                RaftServiceServer::new(RaftRpcHandler::new(dispatch))
+                    .max_decoding_message_size(MAX_PEER_MESSAGE_BYTES)
+                    .max_encoding_message_size(MAX_PEER_MESSAGE_BYTES),
+            )
+            .serve_with_incoming_shutdown(self.incoming, shutdown)
+            .await?;
+
+        Ok(())
+    }
 }
 
 // ── NoopDispatch (test helper) ────────────────────────────────────────────────

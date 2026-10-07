@@ -1,0 +1,2 @@
+{:valid? :unknown
+ :workload {:valid? :unknown :error "no ops"}}

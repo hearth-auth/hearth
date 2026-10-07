@@ -55,9 +55,7 @@ pub(crate) async fn admin_cluster_bootstrap(
     let members = cluster.initial_members().cloned().unwrap_or_default();
 
     if let Err(e) = cluster.initialize_cluster(members).await {
-        let status = if e.to_string().contains("already initialized")
-            || e.to_string().contains("NotAllowed")
-        {
+        let status = if matches!(e, crate::cluster::ClusterError::AlreadyInitialized(_)) {
             StatusCode::CONFLICT
         } else {
             StatusCode::INTERNAL_SERVER_ERROR

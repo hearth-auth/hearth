@@ -57,14 +57,29 @@ bootstrap node. Verified on three nodes on 2026-09-21; the transcript is in
 
 **Operational consequences.**
 
-* A cold cluster forms on its own. `POST /admin/cluster/bootstrap` still works
-  and now answers `409` on an already-initialised cluster; it remains the
-  escape hatch when the lowest-ID node is the one that is down.
-* Provision the lowest-ID node first, or at least start it alongside the
-  others. If it never starts, the remaining nodes wait out the 120 s window and
-  exit — bootstrap one of them explicitly instead.
-* A `cluster:` section with an empty `peers` list does **not** self-initialise;
-  there is nothing to replicate to. Use the endpoint.
+* A cold cluster forms on its own. `POST /admin/cluster/bootstrap` answers
+  `409` on an already-initialised cluster.
+* **Start the lowest-ID node.** A node opens its HTTP port only after the
+  start-up write window. The window ends when the node can write, or at once
+  when its store already holds the system realm.
+  * On an **empty** data directory only a leader ends the window. So no node
+    serves HTTP, and `POST /admin/cluster/bootstrap` is out of reach, until a
+    leader exists. If the lowest-ID node never starts, the other nodes wait out
+    the 120 s window and exit.
+  * On a seeded or restored store the window ends at once. The nodes serve HTTP
+    with no leader (seen 2026-10-06 in the Jepsen harness, `jepsen/`). Every
+    write fails until a leader exists, so `/readyz` answers `503` until then.
+* **`/readyz` in cluster mode** answers `503` with `"cluster": "no_leader"`
+  while the node knows no leader, and with `"cluster": "no_quorum"` while it
+  leads but no quorum has acknowledged it for over 3 s. A node restarted on
+  its own last vote resumes as a leader with no quorum, so it reports
+  `no_quorum` until a quorum is back. A follower whose leader died stays ready
+  until its own election timeout (1.5–3 s) passes.
+* A `cluster:` section with an empty `peers` list does **not** self-initialise,
+  so it never gets a leader. When start-up has anything to write, the process
+  exits before it serves HTTP (seen 2026-10-06 while writing
+  `tests/cluster_serve_admin_status.rs`). Omit the `cluster:` section for a
+  single node.
 
 ### C-5 — Follower cache invalidation is partial (was: "followers never invalidate")
 
@@ -76,7 +91,10 @@ machine's replicated-write observer (`impl ReplicatedWriteObserver for EmbeddedI
 - the row to the **RBAC engine**, which bumps the realm's decision-cache generation for role,
   permission and assignment rows (task 23.16) — so a role unassignment or permission revocation on
   the leader stops resolving on followers;
-- the row to the **audit engine**, which drops its cached signed chain head (task 26.47);
+- the row to the **audit engine**, which drops its cached signed chain head (task 26.47). This
+  does not stop two nodes from chaining an event from the same head at the same time: in the
+  Jepsen `audit` test (2026-10-06), audited admin changes on all five nodes at once left a chain
+  that verifies on no node ([CONSISTENCY.md](../dev/CONSISTENCY.md) G4);
 - **revoked-token (JTI) rows** into the node's revocation cache;
 - the replicated **control epoch**, which makes the node reload its control caches.
 
@@ -94,7 +112,7 @@ on a follower for an access decision that must reflect the latest revocation. Th
 
 `add_learner` and `change_membership` are not implemented. The only path to set cluster membership is `raft.initialize()` from static YAML at first bootstrap.
 
-**Consequence:** Nodes cannot be added or removed from a running cluster. Editing `peers` and restarting does not change membership, because membership lives in the Raft log. A failed node stays a voter, so a 3-node cluster with one dead node tolerates no further failure. See [CONSISTENCY.md](../dev/CONSISTENCY.md#6-membership) §6 (G5, G9).
+**Consequence:** Nodes cannot be added or removed from a running cluster. Editing `peers` and restarting does not change membership, because membership lives in the Raft log. A failed node stays a voter, so a 3-node cluster with one dead node tolerates no further failure. Do not replace a failed node by restarting it with an empty data directory under its old ID: it forgets its vote, and the lowest ID starts a cluster of its own. In the Jepsen `replace` test (2026-10-06) node 1, restarted this way, never rejoined and exited after its start-up window; in a second run (2026-10-07) another node, replicating to it, aborted. See [CONSISTENCY.md](../dev/CONSISTENCY.md#6-membership) §6 (G5, G9).
 
 ### H-3 — Writes to a follower: forwarded to the leader (fixed)
 
@@ -303,7 +321,7 @@ An empty result means the certificate will not work.
 
 ### Configuration
 
-Each node gets its own `hearth.yaml`. The `cluster.node_id` and `cluster.peer_address` are unique per node; the CA cert and `peers` list are the same across all nodes.
+Each node gets its own `hearth.yaml`. The `cluster.node_id` and `cluster.peer_address` are unique per node; the CA cert and `peers` list are the same across all nodes. `peer_address` must be an IP address and port, because the node binds it: `hearth config validate` refuses a host name, and `hearth serve` exits if it cannot bind the address. A `peers[].address` may be a host name.
 
 **Node 1 (`hearth-1.yaml`):**
 
@@ -366,8 +384,12 @@ cluster:
 (`/ui/admin/api-tokens`), pick a lifetime (1 to 60 minutes, default 15) and confirm with your
 password and your second factor (see the [realm admin API](./admin-api.md#realms)). The token's
 session and its audit record are ordinary writes, proposed through Raft: once they commit, the
-token validates on **every** node, and revoking its session on the leader revokes it everywhere
+token validates on **every** node, and revoking its session on the leader revokes it on every node
+in contact with the leader
 (`tests/cluster_three_node_control_coherence.rs::an_operator_token_minted_on_the_leader_validates_and_revokes_on_both_followers`).
+A node cut off from the cluster never learns of the revocation and goes on accepting the token: in
+the Jepsen `revocation-isolated` test (2026-10-06) the cut-off node accepted a revoked session for
+the whole 4 s it was watched ([CONSISTENCY.md](../dev/CONSISTENCY.md) G1).
 On a follower both the console login and the mint are writes that the follower forwards to the
 leader ([H-3](#h-3--writes-to-a-follower-forwarded-to-the-leader-fixed)), so they work there too.
 Keep the whole console session on one node, though: the session-cookie secret is per node unless
@@ -386,21 +408,24 @@ data directory, and on a cluster node it is limited:
   into it **before** copying it to every node and the token validates on all of them (the
   [purged-log upgrade](./upgrading.md#upgrading-a-cluster-whose-raft-logs-were-purged), step 4).
 
-Neither source helps a **cold cluster with empty data directories**: it has no operator account
-yet, so there is nobody to mint for (see the bootstrap note below).
+A **cold cluster with empty data directories** has no operator account yet. To hold a token
+before the first start, seed one store as a single node (no `cluster:` section): finish the
+first-boot setup at `/ui/setup`, verify the operator's email, stop the node, mint with
+`hearth admin token` into that store, then copy it to every node before any node starts.
+`jepsen/scripts/seed-store.sh` scripts these steps.
 
 ### Bootstrap Sequence
 
-> **Usually unnecessary.** As of task 26.46 the lowest-ID node in the
-> configured membership initialises the cluster itself at start-up — see
-> [G-1](#g-1--a-cold-cluster-could-not-be-bootstrapped-fixed). Follow this
-> sequence when that node is unavailable, or when you want to form the cluster
-> from a different node's membership. On an already-initialised cluster the
-> endpoint answers `409`.
+> **Start the lowest-ID node instead.** It initialises the cluster itself at
+> start-up — see [G-1](#g-1--a-cold-cluster-could-not-be-bootstrapped-fixed). On
+> empty data directories no node serves HTTP until a leader exists, so this
+> endpoint is out of reach. On a seeded or restored store the nodes serve HTTP
+> with no leader, so the endpoint is reachable; see the bullets under G-1 above.
+> On a formed cluster it answers `409` (`tests/cluster_serve_admin_status.rs`).
 
 Bootstrapping initializes the cluster's initial membership. Do this **once** — running bootstrap on an already-initialized cluster is a no-op (Raft rejects double-initialization).
 
-> **Membership is fixed at bootstrap.** The peers list set here cannot be changed without a full-cluster restart. There is no online membership change API in Hearth 1.x (see C-6 above).
+> **Membership is fixed at bootstrap.** The peers list set here cannot be changed: membership lives in the Raft log, so editing `peers` and restarting, even every node at once, does not change it. There is no online membership change API in Hearth 1.x (see C-6 above).
 
 1. Start all nodes: `hearth serve -c hearth-N.yaml`
 2. Wait until all nodes are listening (check logs for `"Raft peer gRPC server starting (mTLS)"`).

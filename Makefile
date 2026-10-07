@@ -13,7 +13,7 @@ BUF := buf
 ## with `--workspace`.
 DEV_FEATURES ?= --features hearth/dev-endpoints
 
-.PHONY: setup build test test-detached test-no-dev-endpoints clippy fmt miri asan heap-check unsafe-check loadtest loadtest-check loadtest-smoke seed check coverage css css-check css-watch tailwind-install openapi openapi-check sdk-admin-gen sdk-admin-check sdk-conformance proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test sdk-lint test-quality abuse-check auth-discard-check mfa-resolver-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template scratch-prune scratch-prune-dry-run scratch-timer-install
+.PHONY: setup build test test-detached test-no-dev-endpoints clippy fmt miri asan heap-check unsafe-check loadtest loadtest-check loadtest-smoke seed check coverage css css-check css-watch tailwind-install openapi openapi-check sdk-admin-gen sdk-admin-check sdk-conformance proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test sdk-lint test-quality abuse-check auth-discard-check mfa-resolver-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke jepsen jepsen-binary jepsen-up jepsen-down ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template scratch-prune scratch-prune-dry-run scratch-timer-install
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -616,6 +616,45 @@ cluster-route-check:
 ## Estimated runtime: ~60 s on a laptop (election timeouts dominate).
 cluster-smoke:
 	PROTOC=$(PROTOC) cargo nextest run --package hearth-simulation --test-threads=1 $(CARGO_FLAGS) -E 'test(~simulation)'
+
+## Jepsen test cluster (openspec change `cluster-jepsen-harness`): one control
+## container and five privileged hearth nodes, from jepsen/docker/compose.yaml.
+## `jepsen-up` builds and starts them, then proves `ssh <node> true` from the
+## control container on all five nodes. `jepsen-down` removes the containers
+## and their volumes (the SSH key pair and the Maven cache).
+JEPSEN_COMPOSE := docker compose -f jepsen/docker/compose.yaml
+
+## `jepsen-binary` builds the shipped image from the root Dockerfile (bookworm,
+## no `dev-endpoints`, cached registry and target) and copies its hearth binary
+## to jepsen/docker/.build/hearth, which the control container sees at
+## /jepsen/docker/.build/hearth. The Jepsen `db` setup uploads it to each node.
+## hearth.sha256 records where the binary came from: a run refuses any binary
+## that does not match it, because a dev build run without --dev looks like a
+## production build from outside (spec: "The harness is pointed at a dev binary").
+jepsen-binary:
+	docker build -t hearth-jepsen-binary .
+	mkdir -p jepsen/docker/.build
+	rm -f jepsen/docker/.build/hearth jepsen/docker/.build/hearth.sha256
+	id=$$(docker create hearth-jepsen-binary) \
+		&& docker cp "$$id:/usr/local/bin/hearth" jepsen/docker/.build/hearth; \
+		status=$$?; docker rm "$$id" > /dev/null; exit $$status
+	cd jepsen/docker/.build && sha256sum hearth > hearth.sha256
+
+jepsen-up:
+	$(JEPSEN_COMPOSE) up -d --build --wait
+	$(JEPSEN_COMPOSE) exec -T control jepsen-ssh-check
+
+jepsen-down:
+	$(JEPSEN_COMPOSE) down -v --remove-orphans
+
+## `make jepsen` runs the whole suite; `make jepsen TEST=<name>` runs one
+## catalog test (comma-separate several). TIME_LIMIT is each test's fault
+## phase in seconds. It classifies every result against
+## jepsen/expectations.edn and fails only on a FAIL (xfail and xpass do not).
+TIME_LIMIT ?= 300
+jepsen: jepsen-binary jepsen-up
+	$(JEPSEN_COMPOSE) exec -T control jepsen-run suite --time-limit $(TIME_LIMIT) \
+		$(if $(TEST),--only $(TEST))
 
 ## CI standard tier: fast + tests + SDK tests + proto breaking + perf gate + cluster route check (merge).
 ci-standard: ci-fast test proto-breaking sdk-test proto-check bench-gate cluster-route-check

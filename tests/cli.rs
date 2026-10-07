@@ -222,7 +222,7 @@ cluster:
   node_id: 1
   peer_address: "127.0.0.1:19001"
   peers:
-    - node_id: 2
+    - id: 2
       address: "127.0.0.1:19002"
   tls_cert_path: "/nonexistent/cert.pem"
   tls_key_path: "/nonexistent/key.pem"
@@ -250,10 +250,108 @@ cluster:
          stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    // The report is a log line on stdout. This used to read stderr only, and
+    // the config said `node_id:` for a peer's `id:`, so the test passed on
+    // the YAML parse error and never reached cluster init.
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(
-        stderr.contains("cluster") || stderr.contains("Raft") || stderr.contains("fatal"),
-        "stderr should mention cluster failure; got: {stderr}"
+        all.contains("Raft ClusterEngine init failed"),
+        "the output must report the cluster init failure; got: {all}"
+    );
+}
+
+/// Writes a CA and one `127.0.0.1` leaf into `dir` as `ca.crt`, `node.crt`
+/// and `node.key`, for the peer mTLS paths of a cluster config.
+fn write_peer_tls(dir: &std::path::Path) {
+    let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("ca params");
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let ca_key = rcgen::KeyPair::generate().expect("ca key");
+    let ca = ca_params.self_signed(&ca_key).expect("ca cert");
+    let leaf_key = rcgen::KeyPair::generate().expect("leaf key");
+    let leaf = rcgen::CertificateParams::new(vec!["127.0.0.1".into()])
+        .expect("leaf params")
+        .signed_by(&leaf_key, &ca, &ca_key)
+        .expect("leaf cert");
+    std::fs::write(dir.join("ca.crt"), ca.pem()).expect("write ca");
+    std::fs::write(dir.join("node.crt"), leaf.pem()).expect("write leaf");
+    std::fs::write(dir.join("node.key"), leaf_key.serialize_pem()).expect("write key");
+}
+
+/// The peer server binds `cluster.peer_address` at start-up. When it could
+/// not (here: the port is taken), it used to fail inside a spawned task:
+/// one ERROR line, and the node went on running without a peer server, so
+/// it could never join a cluster. `serve` must exit instead.
+#[test]
+fn serve_exits_when_the_peer_server_cannot_bind() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_peer_tls(dir.path());
+    let taken = TcpListener::bind("127.0.0.1:0").expect("hold a port");
+    let peer_address = taken.local_addr().expect("addr");
+    let cfg_path = dir.path().join("hearth.yaml");
+    let tls = dir.path().display();
+    std::fs::write(
+        &cfg_path,
+        format!(
+            "server:\n  port: {http_port}\nstorage:\n  data_dir: \"{tls}/data\"\n\
+             cluster:\n  node_id: 1\n  peer_address: \"{peer_address}\"\n  peers:\n    \
+             - id: 2\n      address: \"127.0.0.1:{peer_port}\"\n  \
+             tls_cert_path: \"{tls}/node.crt\"\n  tls_key_path: \"{tls}/node.key\"\n  \
+             tls_ca_cert_path: \"{tls}/ca.crt\"\n",
+            http_port = find_available_port(),
+            peer_port = find_available_port(),
+        ),
+    )
+    .expect("write config");
+
+    let mut child = Command::new(hearth_bin())
+        .args([
+            "serve",
+            "--dev",
+            "--config",
+            cfg_path.to_str().expect("path"),
+        ])
+        .stdout(std::fs::File::create(dir.path().join("out.log")).expect("stdout file"))
+        .stderr(std::fs::File::create(dir.path().join("err.log")).expect("stderr file"))
+        .spawn()
+        .expect("spawn hearth serve");
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break Some(status);
+        }
+        if std::time::Instant::now() >= deadline {
+            break None;
+        }
+        // AUDIT: justified-sleep: poll interval for a child process's exit, bounded by the 30 s deadline
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    if status.is_none() {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+    drop(taken);
+    // Logs go to stdout, the start-up fatal report to stderr: read both.
+    let output = ["out.log", "err.log"]
+        .map(|f| std::fs::read_to_string(dir.path().join(f)).unwrap_or_default())
+        .concat();
+    // A debug-level log of 30 s is long: keep its end for the failure message.
+    let skip = output.chars().count().saturating_sub(4000);
+    let tail: String = output.chars().skip(skip).collect();
+
+    let status = status.unwrap_or_else(|| {
+        panic!("serve kept running for 30 s without its peer server; output ends: {tail}")
+    });
+    assert!(
+        !status.success(),
+        "serve must exit non-zero; output ends: {tail}"
+    );
+    assert!(
+        output.contains(&peer_address.to_string()),
+        "the error must name the peer address {peer_address}; output ends: {tail}"
     );
 }
 
