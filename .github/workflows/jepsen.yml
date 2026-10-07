@@ -8,8 +8,10 @@ name: Jepsen
 # hour. The job fails only when a test FAILs (jepsen/README.md, "Run").
 #
 # The store (histories, checker results, every node's log) is uploaded for
-# 14 days. runner-usage.txt in it samples the runner's memory and the
-# containers' usage every 30 s (task 6.2).
+# 14 days as one tarball: Jepsen names each run's directory by its start
+# time, and upload-artifact refuses the colons in those names.
+# runner-usage.txt in it samples the runner's memory and the containers'
+# usage every 30 s (task 6.2); the job summary gives the runner's peak.
 
 on:
   schedule:
@@ -55,13 +57,13 @@ jobs:
 
       - name: Sample runner usage
         run: |
-          mkdir -p jepsen/store
           nohup bash -c 'while true; do
               date -u +%FT%TZ
               free -m | awk "NR==2 {print \"runner used MiB:\", \$3, \"of\", \$2}"
               docker stats --no-stream --format "{{.Name}} {{.CPUPerc}} {{.MemUsage}}" 2>/dev/null
               sleep 30
-            done' > jepsen/store/runner-usage.txt 2>&1 &
+            done' > "$RUNNER_TEMP/runner-usage.txt" 2>&1 &
+          echo $! > "$RUNNER_TEMP/sampler.pid"
 
       - name: Run the suite
         env:
@@ -69,12 +71,25 @@ jobs:
           TIME_LIMIT: ${{ inputs.time_limit }}
         run: make jepsen ${TEST:+TEST="$TEST"} TIME_LIMIT="${TIME_LIMIT:-300}"
 
+      - name: Pack the store
+        if: always()
+        run: |
+          kill "$(cat "$RUNNER_TEMP/sampler.pid")" 2>/dev/null || true
+          # The control container writes the store as root.
+          sudo mkdir -p jepsen/store
+          sudo cp "$RUNNER_TEMP/runner-usage.txt" jepsen/store/runner-usage.txt
+          awk '/^runner used MiB:/ { if ($4 > peak) peak = $4; total = $6; n++ }
+               END { printf "Runner memory: peak %d MiB used of %d MiB (%d samples, every 30 s)\n", peak, total, n }' \
+            jepsen/store/runner-usage.txt | tee -a "$GITHUB_STEP_SUMMARY"
+          sudo tar -czf "$RUNNER_TEMP/jepsen-store.tar.gz" -C jepsen store
+          sudo chown "$(id -u):$(id -g)" "$RUNNER_TEMP/jepsen-store.tar.gz"
+
       - name: Upload the store
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: jepsen-store-${{ github.run_id }}
-          path: jepsen/store
+          path: ${{ runner.temp }}/jepsen-store.tar.gz
           retention-days: 14
           if-no-files-found: warn
 
