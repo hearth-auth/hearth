@@ -10,4 +10,5 @@
  "revocation-isolated" {:xfail "G1"}
  "staleness"  {:xfail "G1"}
  "audit"      {:xfail "G4"}
- "snapshot"   {:xfail "G2"}}
+ "snapshot"   {:xfail "G2"}
+ "replace"    {:xfail "G9"}}

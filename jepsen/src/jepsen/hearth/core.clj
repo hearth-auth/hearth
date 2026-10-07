@@ -8,6 +8,7 @@
                     [cli :as cli]
                     [core :as jepsen]
                     [generator :as gen]
+                    [nemesis :as n]
                     [store :as store]
                     [tests :as tests]]
             [jepsen.hearth [audit :as audit]
@@ -15,6 +16,7 @@
                            [db :as hdb]
                            [nemesis :as hn]
                            [register :as register]
+                           [replace :as replace]
                            [revocation :as revocation]
                            [same-node :as same-node]
                            [runner :as runner]
@@ -29,7 +31,9 @@
   faults), :final-generator (client reads after the heal) and :checker. Any
   may be nil. A workload that must time its own faults returns
   :combined-generator (client and nemesis ops) instead of :generator; the
-  random fault schedule then does not run, the heal phase still does."
+  random fault schedule then does not run, the heal phase still does. A
+  workload with a fault of its own returns :nemesis (composed with the
+  package's) and :nemesis-generator (mixed into the fault schedule)."
   {"noop" (fn [_opts _db]
             ; No client operations: proves setup, teardown, log collection,
             ; the faults and the convergence check (tasks 2.2, 2.4, 2.5).
@@ -42,7 +46,8 @@
    "revocation-isolated" revocation/isolated-workload
    "staleness"  staleness/workload
    "audit"      audit/workload
-   "snapshot"   snapshot/workload})
+   "snapshot"   snapshot/workload
+   "replace"    replace/workload})
 
 (def catalog
   "The suite: test name -> the options that define it. Each name has an
@@ -72,7 +77,10 @@
    ; R3, R4 (xfail G2): reads on a node while it installs a snapshot. The
    ; install deletes every key before it writes the snapshot, and reads are
    ; not fenced meanwhile. The workload times its own partition.
-   "snapshot"   {:workload "snapshot" :nemesis [:partition]}})
+   "snapshot"   {:workload "snapshot" :nemesis [:partition]}
+   ; Section 6 (xfail G9): the set workload while the lowest Raft ID is
+   ; replaced with an empty data directory under its old ID.
+   "replace"    {:workload "replace" :nemesis [:partition]}})
 
 (def ssh-key
   "The key pair the control container generates; the nodes trust it."
@@ -101,14 +109,18 @@
             ; The V1 bound's injected delay (Open Question 5).
             :v1-delay-ms (hn/injected-delay-ms (:nemesis opts))
             :db        db
-            :nemesis   (:nemesis pkg)
+            :nemesis   (if-let [own (:nemesis workload)]
+                         (n/compose [(:nemesis pkg) own])
+                         (:nemesis pkg))
             ; The CLI sets :private-key-path to nil when the flag is absent.
             :ssh       (update (:ssh opts) :private-key-path #(or % ssh-key))
             :plot      {:nemeses (:perf pkg)}
             :generator (gen/phases
                          (gen/time-limit (:time-limit opts)
                                          (or (:combined-generator workload)
-                                             (gen/nemesis (:generator pkg)
+                                             (gen/nemesis (if-let [own (:nemesis-generator workload)]
+                                                            (gen/any (:generator pkg) own)
+                                                            (:generator pkg))
                                                           (:generator workload))))
                          (gen/nemesis (:final-generator pkg))
                          ; Clients only: each-thread would otherwise give the
