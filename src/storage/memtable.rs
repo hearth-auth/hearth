@@ -418,7 +418,9 @@ impl Memtable {
     /// Returns all entries for a given realm, sorted by key.
     ///
     /// Includes tombstones. The returned keys are the raw data keys
-    /// (without the realm prefix).
+    /// (without the realm prefix). Test-only: production scans read a window
+    /// with [`iter_realm_range`](Self::iter_realm_range).
+    #[cfg(test)]
     pub(crate) fn iter_realm(&self, realm_id: &RealmId) -> Vec<(Vec<u8>, MemtableValue)> {
         let active = self.data.load_full();
         let flushing = self.flushing.load_full();
@@ -440,6 +442,7 @@ impl Memtable {
     }
 
     /// Realm-scoped full scan of a single backing map, sorted by key.
+    #[cfg(test)]
     fn scan_realm(
         map: &SkipMap<CompositeKey, MemtableValue>,
         realm_id: &RealmId,
@@ -450,6 +453,56 @@ impl Memtable {
         };
         map.range(start..)
             .take_while(|entry| entry.key().realm_id == *realm_id)
+            .map(|entry| (entry.key().key.clone(), entry.value().clone()))
+            .collect()
+    }
+
+    /// Range scan within a realm — the entries with `start <= key < end`,
+    /// sorted by key, tombstones included.
+    ///
+    /// Seeks to `start` and stops at `end`, so the cost follows the size of the
+    /// window, not of the realm. `StorageEngine::scan` serves every prefix scan
+    /// from this; reading the whole realm instead made each scan as slow as
+    /// all unflushed writes together.
+    pub(crate) fn iter_realm_range(
+        &self,
+        realm_id: &RealmId,
+        start: &[u8],
+        end: &[u8],
+    ) -> Vec<(Vec<u8>, MemtableValue)> {
+        let active = self.data.load_full();
+        let flushing = self.flushing.load_full();
+        let Some(parked) = flushing.as_ref() else {
+            // Common case — no flush in progress: scan the active map directly.
+            return Self::scan_realm_range(&active, realm_id, start, end);
+        };
+        // A flush is in progress: merge parked (older) under active (newer).
+        let mut merged: BTreeMap<Vec<u8>, MemtableValue> = BTreeMap::new();
+        for (k, v) in Self::scan_realm_range(parked, realm_id, start, end) {
+            merged.insert(k, v);
+        }
+        for (k, v) in Self::scan_realm_range(&active, realm_id, start, end) {
+            merged.insert(k, v);
+        }
+        merged.into_iter().collect()
+    }
+
+    /// Realm-scoped range scan of a single backing map — the entries with
+    /// `start <= key < end`, sorted by key.
+    fn scan_realm_range(
+        map: &SkipMap<CompositeKey, MemtableValue>,
+        realm_id: &RealmId,
+        start: &[u8],
+        end: &[u8],
+    ) -> Vec<(Vec<u8>, MemtableValue)> {
+        let start_key = CompositeKey {
+            realm_id: realm_id.clone(),
+            key: start.to_vec(),
+        };
+        map.range(start_key..)
+            .take_while(|entry| {
+                entry.key().realm_id == *realm_id && entry.key().key.as_slice() < end
+            })
             .map(|entry| (entry.key().key.clone(), entry.value().clone()))
             .collect()
     }
@@ -1205,6 +1258,57 @@ mod tests {
                 b"delta".as_slice(),
             ]
         );
+    }
+
+    // `iter_realm_range` serves `StorageEngine::scan`: exactly the realm's rows
+    // in `[start, end)`, tombstones included, in key order.
+    #[test]
+    fn iter_realm_range_returns_only_the_window() {
+        let mt = Memtable::new(MemtableConfig::default());
+        let realm = RealmId::generate();
+        let other = RealmId::generate();
+        for key in [b"a".as_slice(), b"b", b"ba", b"c", b"d"] {
+            mt.put(&realm, key, b"v").expect("put");
+            mt.put(&other, key, b"other").expect("put other realm");
+        }
+        mt.delete(&realm, b"ba").expect("delete");
+
+        assert_eq!(
+            mt.iter_realm_range(&realm, b"b", b"d"),
+            vec![
+                (b"b".to_vec(), MemtableValue::Data(b"v".to_vec())),
+                (b"ba".to_vec(), MemtableValue::Tombstone),
+                (b"c".to_vec(), MemtableValue::Data(b"v".to_vec())),
+            ]
+        );
+        assert_eq!(mt.iter_realm_range(&realm, b"b", b"b"), vec![]);
+        assert_eq!(mt.iter_realm_range(&realm, b"x", b"z"), vec![]);
+    }
+
+    // During a flush the window's rows are split between the parked map and the
+    // fresh active map; the active map wins on a key written in both.
+    #[test]
+    fn iter_realm_range_reads_the_parked_map_mid_flush() {
+        let mt = Memtable::new(MemtableConfig::default());
+        let realm = RealmId::generate();
+        mt.put(&realm, b"b", b"old").expect("put");
+        mt.put(&realm, b"c", b"parked").expect("put");
+        mt.put(&realm, b"z", b"outside").expect("put");
+
+        mt.flush_streaming(|_| {
+            mt.put(&realm, b"b", b"new").expect("racing put");
+            mt.put(&realm, b"ca", b"active").expect("racing put");
+            assert_eq!(
+                mt.iter_realm_range(&realm, b"b", b"d"),
+                vec![
+                    (b"b".to_vec(), MemtableValue::Data(b"new".to_vec())),
+                    (b"c".to_vec(), MemtableValue::Data(b"parked".to_vec())),
+                    (b"ca".to_vec(), MemtableValue::Data(b"active".to_vec())),
+                ]
+            );
+            Ok(())
+        })
+        .expect("flush");
     }
 
     // ===== Supplementary Unit Tests (architecture requirements) =====

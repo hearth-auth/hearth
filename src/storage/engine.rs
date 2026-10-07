@@ -2132,7 +2132,11 @@ impl StorageEngine for EmbeddedStorageEngine {
         // nor the emptied memtable, and the scan dropped them. Sessions are
         // listed with a scan, so `revoke_all_user_sessions` skipped live ones
         // (`a_scan_never_misses_a_key_a_concurrent_flush_moves`).
-        let memtable_entries = self.active_memtable.iter_realm(realm_id);
+        //
+        // Only the window is read: copying the realm's every unflushed row
+        // made a narrow scan as slow as all recent writes together
+        // (`a_narrow_scan_does_not_slow_down_as_the_memtable_grows`).
+        let memtable_entries = self.active_memtable.iter_realm_range(realm_id, start, end);
 
         // Merge results from memtable and all SST files.
         // Use a BTreeMap to deduplicate — memtable entries (newest) win.
@@ -2152,9 +2156,7 @@ impl StorageEngine for EmbeddedStorageEngine {
         // and flushed after the snapshot above keeps its snapshot value: the
         // value it had when this scan read the memtable.
         for (key, value) in memtable_entries {
-            if key.as_slice() >= start && key.as_slice() < end {
-                merged.insert(key, value);
-            }
+            merged.insert(key, value);
         }
 
         // Filter out tombstones and build result
@@ -3019,6 +3021,59 @@ mod tests {
     /// (`list_sessions_by_user`). A scan that drops the keys a concurrent
     /// flush is moving skips live sessions, and their tokens keep validating
     /// after a password change or a disable.
+    #[test]
+    fn a_narrow_scan_does_not_slow_down_as_the_memtable_grows() {
+        // A scan used to copy every unflushed row of the realm before it
+        // filtered to its window, so a one-key scan cost time in proportion to
+        // all recent writes. Every sign-in does such scans. The ratio between
+        // two store sizes, not a fixed time, keeps this independent of the
+        // machine's speed: the copying scan measured well over 10×.
+        use std::time::{Duration, Instant};
+
+        fn engine_with_rows(rows: u32) -> (tempfile::TempDir, EmbeddedStorageEngine, RealmId) {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let mut config = StorageConfig::test_config(dir.path().to_path_buf());
+            // Keep every row in the memtable: the cost under test is there.
+            config.memtable_config.flush_threshold_bytes = 1 << 30;
+            let engine = EmbeddedStorageEngine::open(config).expect("open");
+            let realm = RealmId::generate();
+            let filler: Vec<(Vec<u8>, Vec<u8>)> = (0..rows)
+                .map(|i| (format!("user:{i:08}").into_bytes(), vec![0u8; 64]))
+                .collect();
+            for chunk in filler.chunks(1_000) {
+                engine.put_batch(&realm, chunk).expect("put_batch");
+            }
+            engine
+                .put(&realm, b"session:target", b"v")
+                .expect("put target");
+            (dir, engine, realm)
+        }
+
+        fn fastest_scan(engine: &EmbeddedStorageEngine, realm: &RealmId) -> Duration {
+            (0..20)
+                .map(|_| {
+                    let started = Instant::now();
+                    let rows = engine.scan(realm, b"session:", b"session;").expect("scan");
+                    let elapsed = started.elapsed();
+                    assert_eq!(rows.len(), 1, "the window holds exactly one row");
+                    elapsed
+                })
+                .min()
+                .expect("samples")
+        }
+
+        let (_small_dir, small, small_realm) = engine_with_rows(1_000);
+        let (_large_dir, large, large_realm) = engine_with_rows(100_000);
+        let small_scan = fastest_scan(&small, &small_realm);
+        let large_scan = fastest_scan(&large, &large_realm);
+        let ratio = large_scan.as_secs_f64() / small_scan.as_secs_f64().max(1e-9);
+        assert!(
+            ratio < 10.0,
+            "a one-row scan took {large_scan:?} with 100,000 unflushed rows and \
+             {small_scan:?} with 1,000 ({ratio:.1}×): the scan reads outside its window"
+        );
+    }
+
     #[test]
     fn a_scan_never_misses_a_key_a_concurrent_flush_moves() {
         let (scans, misses) = scans_racing_flushes(|engine, realm| {
