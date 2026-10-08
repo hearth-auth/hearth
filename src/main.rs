@@ -551,9 +551,82 @@ enum AppAction {
     },
 }
 
-#[tokio::main]
+/// What [`cap_malloc_arenas`] did. Kept for the startup log, because tracing
+/// does not exist yet when it runs. Unset on platforms without glibc.
+static MALLOC_ARENA_CAP: std::sync::OnceLock<ArenaCap> = std::sync::OnceLock::new();
+
+/// Outcome of [`cap_malloc_arenas`].
+#[derive(Clone, Copy, Debug)]
+enum ArenaCap {
+    /// Hearth capped glibc at this many arenas.
+    Capped(usize),
+    /// The operator's environment sets the limit; Hearth left it alone.
+    Operator,
+    /// glibc refused the cap; its default applies.
+    Refused,
+}
+
+/// The glibc malloc arena limit for a host with `cores` CPUs: one per core,
+/// at least two.
+///
+/// glibc's default is 8 arenas per core. Each keeps the memory its threads
+/// free, so a 2-vCPU server under steady load held ~3.1 GB for ~0.6 GB of
+/// live heap until the kernel killed it. Two arenas held 575 MB under the
+/// same load, with no slower logins (2026-10-08 soak).
+fn malloc_arena_limit(cores: usize) -> usize {
+    cores.max(2)
+}
+
+/// Whether the operator set glibc's arena limit in the environment, through
+/// `MALLOC_ARENA_MAX` or the `glibc.malloc.arena_max` tunable.
+fn operator_sets_arena_limit(env: impl Fn(&str) -> Option<String>) -> bool {
+    env("MALLOC_ARENA_MAX").is_some()
+        || env("GLIBC_TUNABLES").is_some_and(|t| t.contains("glibc.malloc.arena_max"))
+}
+
+/// Caps glibc's malloc arenas at `limit`. Returns whether glibc accepted it.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn limit_malloc_arenas(limit: usize) -> bool {
+    let Ok(limit) = libc::c_int::try_from(limit) else {
+        return false;
+    };
+    // SAFETY: `mallopt` sets a process-wide allocator parameter; it takes no
+    // pointers and is safe to call while other threads allocate.
+    unsafe { libc::mallopt(libc::M_ARENA_MAX, limit) == 1 }
+}
+
+/// Caps glibc's malloc arenas before any thread starts, unless the operator
+/// set the limit. Threads pick their arena on first allocation, so this must
+/// run before the Tokio runtime exists.
+fn cap_malloc_arenas() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        let outcome = if operator_sets_arena_limit(|key| std::env::var(key).ok()) {
+            ArenaCap::Operator
+        } else {
+            let cores = std::thread::available_parallelism().map_or(2, std::num::NonZeroUsize::get);
+            let arenas = malloc_arena_limit(cores);
+            if limit_malloc_arenas(arenas) {
+                ArenaCap::Capped(arenas)
+            } else {
+                ArenaCap::Refused
+            }
+        };
+        let _ = MALLOC_ARENA_CAP.set(outcome);
+    }
+}
+
+fn main() {
+    cap_malloc_arenas();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to start the Tokio runtime")
+        .block_on(async_main());
+}
+
 #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
-async fn main() {
+async fn async_main() {
     let cli = Cli::parse();
 
     match cli.command {
@@ -1165,6 +1238,18 @@ async fn run_serve(
         bind = %config.server.bind_address,
         "Hearth identity server starting"
     );
+    match MALLOC_ARENA_CAP.get() {
+        Some(ArenaCap::Capped(arenas)) => info!(arenas, "glibc malloc arenas capped"),
+        Some(ArenaCap::Operator) => {
+            info!("glibc malloc arena limit left to the operator's environment");
+        }
+        Some(ArenaCap::Refused) => {
+            warn!(
+                "glibc refused the malloc arena cap; resident memory can grow far past live heap"
+            );
+        }
+        None => {}
+    }
 
     if config.dev_mode {
         error!("{DEV_MODE_BANNER}");
@@ -6152,6 +6237,94 @@ fn print_migration_report(report: &hearth::identity::MigrationReport) {
 mod tests {
     use super::*;
     use hearth::config::{Config, EmailTransport};
+
+    // ── glibc malloc arenas ───────────────────────────────────────────────
+
+    /// One arena per core, never fewer than two: a 2-vCPU host gets 2, not
+    /// glibc's default of 16.
+    #[test]
+    fn malloc_arena_limit_is_one_per_core_with_a_floor_of_two() {
+        assert_eq!(malloc_arena_limit(1), 2);
+        assert_eq!(malloc_arena_limit(2), 2);
+        assert_eq!(malloc_arena_limit(16), 16);
+    }
+
+    /// An operator's own `MALLOC_ARENA_MAX` or `glibc.malloc.arena_max`
+    /// tunable wins: Hearth then leaves the allocator alone.
+    #[test]
+    fn an_operator_arena_setting_is_detected() {
+        let env = |vars: &'static [(&'static str, &'static str)]| {
+            move |key: &str| {
+                vars.iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| (*v).to_owned())
+            }
+        };
+        assert!(operator_sets_arena_limit(env(&[("MALLOC_ARENA_MAX", "4")])));
+        assert!(operator_sets_arena_limit(env(&[(
+            "GLIBC_TUNABLES",
+            "glibc.malloc.trim_threshold=1:glibc.malloc.arena_max=4"
+        )])));
+        assert!(!operator_sets_arena_limit(env(&[(
+            "GLIBC_TUNABLES",
+            "glibc.malloc.trim_threshold=131072"
+        )])));
+        assert!(!operator_sets_arena_limit(env(&[])));
+    }
+
+    /// Number of heaps (arenas) glibc reports in `malloc_info`.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    fn malloc_heap_count() -> usize {
+        let mut buf: *mut libc::c_char = std::ptr::null_mut();
+        let mut len: libc::size_t = 0;
+        // SAFETY: `buf` and `len` are valid out-pointers that outlive the stream.
+        let stream = unsafe { libc::open_memstream(&raw mut buf, &raw mut len) };
+        assert!(!stream.is_null(), "open_memstream failed");
+        // SAFETY: `stream` is the open stream returned above.
+        let rc = unsafe { libc::malloc_info(0, stream) };
+        // SAFETY: closes the stream once; `buf`/`len` then hold the written bytes.
+        unsafe { libc::fclose(stream) };
+        assert_eq!(rc, 0, "malloc_info failed");
+        // SAFETY: `buf` points at `len` initialised bytes owned by this function.
+        let xml = unsafe { std::slice::from_raw_parts(buf.cast::<u8>(), len) };
+        let heaps = String::from_utf8_lossy(xml).matches("<heap nr=").count();
+        // SAFETY: open_memstream's buffer is malloc'd and released with free.
+        unsafe { libc::free(buf.cast()) };
+        heaps
+    }
+
+    /// With the cap in place, eight threads that allocate at the same time
+    /// share at most two heaps. Without it glibc gives each thread its own.
+    /// (nextest runs every test in its own process, so the process-wide cap
+    /// cannot leak into another test.)
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[test]
+    fn capped_malloc_arenas_bound_the_heaps_threads_allocate_from() {
+        const THREADS: usize = 8;
+        assert!(
+            limit_malloc_arenas(2),
+            "mallopt(M_ARENA_MAX) refused the cap"
+        );
+        let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+        let threads: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let blocks: Vec<Vec<u8>> = (0..256).map(|_| vec![1_u8; 4096]).collect();
+                    // Every thread holds its blocks at once, so none can
+                    // borrow a heap another thread has left idle.
+                    barrier.wait();
+                    blocks.len()
+                })
+            })
+            .collect();
+        for thread in threads {
+            assert_eq!(thread.join().expect("allocating thread panicked"), 256);
+        }
+        let heaps = malloc_heap_count();
+        assert!(heaps <= 2, "glibc used {heaps} heaps; the cap is 2");
+    }
 
     // ── `serve --dev` on a binary built without `dev-endpoints` ───────────
 

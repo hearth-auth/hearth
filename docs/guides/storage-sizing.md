@@ -106,6 +106,22 @@ storage:
   hot_tier_capacity: 500000   # explicit override; 0 = auto-size
 ```
 
+## Allocator arenas (Linux, glibc)
+
+glibc keeps the memory a thread frees in that thread's allocator arena, and by
+default it creates up to 8 arenas per core. Under steady load this made a
+2-vCPU Hearth hold about 3.1 GB of memory for about 0.6 GB of live data.
+
+Hearth therefore caps glibc at one arena per core, with a minimum of two,
+before it starts any thread. The startup log shows the cap
+(`glibc malloc arenas capped arenas=2`). With the cap, the same load held
+575 MB, and sign-ins were no slower.
+
+To choose your own limit, set `MALLOC_ARENA_MAX` (or the
+`glibc.malloc.arena_max` tunable in `GLIBC_TUNABLES`) in Hearth's environment.
+Hearth then leaves the allocator alone and logs that it did so. Other
+platforms and C libraries are not affected.
+
 ## Working-set vs dataset size
 
 ### Datasets that fit in hot tier

@@ -1265,6 +1265,7 @@ dependencies = [
  "hyper-util",
  "ipnet",
  "lettre",
+ "libc",
  "memmap2",
  "openraft",
  "opentelemetry",
