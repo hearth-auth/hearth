@@ -4,7 +4,9 @@
 //! power-of-two shards; writes (promote, invalidate, evict) are serialized
 //! behind their shard's `Mutex` and use clone-mutate-swap on that shard's map
 //! only — `O(capacity / shard count)` per write, off the hot path
-//! (audit 2026-08-28 §4.21#4).
+//! (audit 2026-08-28 §4.21#4). The shard count grows with capacity so a shard
+//! stays near [`MIN_SHARD_CAPACITY`] entries, and keys sit behind an `Arc`, so
+//! a clone copies one pointer per entry and allocates only the table.
 //!
 //! A fill (`promote`) is guarded against racing an invalidation: the caller
 //! opens a [`FillGuard`] before its authoritative memtable/SST read, and a
@@ -24,7 +26,39 @@ use std::sync::{Arc, Mutex};
 use hashbrown::{DefaultHashBuilder, HashMap};
 
 use crate::core::{EpochCell, RealmId};
-use crate::storage::memtable::CompositeKey;
+
+/// A hot-tier key. The bytes sit behind an `Arc`, so a shard-map clone (every
+/// promote and invalidate) copies one pointer per key instead of the bytes.
+///
+/// The derived `Hash` must agree with [`HotTier::hash_key`]: realm, then the
+/// key bytes hashed as a `[u8]` slice, which is how `Arc<[u8]>` hashes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct HotKey {
+    /// The realm that owns this key.
+    realm_id: RealmId,
+    /// The raw key bytes, shared by every map clone that carries the key.
+    key: Arc<[u8]>,
+}
+
+impl HotKey {
+    /// Copies `key` once into a shared buffer.
+    fn new(realm_id: RealmId, key: &[u8]) -> Self {
+        Self {
+            realm_id,
+            key: Arc::from(key),
+        }
+    }
+
+    /// The realm that owns this key.
+    pub(crate) fn realm_id(&self) -> &RealmId {
+        &self.realm_id
+    }
+
+    /// The raw key bytes.
+    pub(crate) fn key(&self) -> &[u8] {
+        &self.key
+    }
+}
 
 /// A single entry in the hot tier.
 pub(crate) struct HotEntry {
@@ -124,7 +158,13 @@ impl Default for TieredConfig {
 
 /// Maximum number of hot-tier shards. Must be a power of two so shard
 /// selection is a mask.
-const MAX_SHARDS: usize = 64;
+///
+/// A promote or invalidate clones its whole shard, so the shard count grows
+/// with capacity to keep a shard at most `2 × MIN_SHARD_CAPACITY` entries, up
+/// to ~8 M entries. At the former cap of 64, the 1.47 M-entry tier a 4 GB host
+/// auto-sizes held ~23,000 entries per shard, and a promote into a half-full
+/// tier took ~1.3 ms and ~10,000 allocations (examples/hot_tier_cost.rs).
+const MAX_SHARDS: usize = 4096;
 
 /// Smallest per-shard capacity worth splitting for. Tiers below
 /// `2 × MIN_SHARD_CAPACITY` stay single-shard, which keeps eviction
@@ -144,7 +184,7 @@ fn shard_count_for(capacity: usize) -> usize {
 /// shard's map and contends only with writers on the same shard.
 struct Shard {
     /// The shard's cached data, swapped atomically on mutations.
-    data: EpochCell<HashMap<CompositeKey, HotEntry>>,
+    data: EpochCell<HashMap<HotKey, HotEntry>>,
     /// Serializes this shard's write operations (promote, invalidate, evict).
     write_lock: Mutex<()>,
     /// Clock hand position for sweeps over this shard.
@@ -216,8 +256,8 @@ impl HotTier {
         }
     }
 
-    /// Hashes a key the same way every shard map does (`CompositeKey`'s
-    /// derived `Hash`: realm then key), without allocating a `CompositeKey`.
+    /// Hashes a key the same way every shard map does (`HotKey`'s
+    /// derived `Hash`: realm then key), without allocating a `HotKey`.
     fn hash_key(&self, realm_id: &RealmId, key: &[u8]) -> u64 {
         let mut hasher = self.hash_builder.build_hasher();
         realm_id.hash(&mut hasher);
@@ -292,7 +332,7 @@ impl HotTier {
     /// layers, and repeatedly-read (hot) keys are admitted quickly (HEA-1775).
     pub(crate) fn promote(&self, guard: FillGuard, realm_id: &RealmId, key: &[u8], value: &[u8]) {
         // Probabilistic admission gate — cheap atomic, evaluated before any
-        // allocation (CompositeKey) or lock acquisition so skipped promotions
+        // allocation (HotKey) or lock acquisition so skipped promotions
         // cost almost nothing. Counter starts at 0, so the first promotion is
         // always admitted.
         let sample_rate = self.config.promote_sample_rate;
@@ -309,7 +349,7 @@ impl HotTier {
             "FillGuard was opened for a different key's shard"
         );
         let shard = &self.shards[shard_idx];
-        let composite = CompositeKey::new(realm_id.clone(), key.to_vec());
+        let composite = HotKey::new(realm_id.clone(), key);
 
         let Ok(_lock) = shard.write_lock.lock() else {
             return; // Poisoned mutex — silently skip promotion
@@ -372,7 +412,7 @@ impl HotTier {
         // (audit 2026-08-28 §4.21#3).
         shard.invalidation_epoch.fetch_add(1, Ordering::SeqCst);
 
-        let composite = CompositeKey::new(realm_id.clone(), key.to_vec());
+        let composite = HotKey::new(realm_id.clone(), key);
 
         let Ok(_guard) = shard.write_lock.lock() else {
             return;
@@ -401,7 +441,7 @@ impl HotTier {
     /// that clearing a reference bit and evicting are separate sweep passes.
     ///
     /// Acquires the swept shard's write lock.
-    pub(crate) fn clock_sweep_step(&self) -> Option<CompositeKey> {
+    pub(crate) fn clock_sweep_step(&self) -> Option<HotKey> {
         let shard =
             &self.shards[self.sweep_cursor.fetch_add(1, Ordering::Relaxed) % self.shards.len()];
 
@@ -410,51 +450,44 @@ impl HotTier {
         };
 
         let current = shard.data.load_full();
-        if current.is_empty() {
+        let len = current.len();
+        if len == 0 {
             return None;
         }
 
-        // Collect keys for indexed access (deterministic order via sorted keys)
-        let mut keys: Vec<CompositeKey> = current.keys().cloned().collect();
-        keys.sort();
-
-        let len = keys.len();
-        // Never scan more entries than exist — prevents wrapping in one call
+        // Walk the map in its own order from the hand. Never scan more
+        // entries than exist — prevents wrapping in one call.
         let scan_count = self.config.eviction_batch_size.min(len);
-        let mut hand = shard.clock_hand.load(Ordering::Relaxed) % len;
-
-        for _ in 0..scan_count {
-            let key = &keys[hand];
-
-            if let Some(entry) = current.get(key) {
-                if !entry.reference_bit.load(Ordering::Relaxed) {
-                    // Evict this entry
-                    let evicted_key = key.clone();
-                    let mut new_map = (*current).clone();
-                    new_map.remove(&evicted_key);
-                    shard.data.store(Arc::new(new_map));
-                    crate::metrics::metrics()
-                        .storage_hot_tier_evictions_total
-                        .inc();
-                    if self.config.per_realm_metrics {
-                        count_by_realm(
-                            &crate::metrics::metrics().storage_hot_tier_evictions_by_realm_total,
-                            evicted_key.realm_id(),
-                        );
-                    }
-                    hand = (hand + 1) % len;
-                    shard.clock_hand.store(hand, Ordering::Relaxed);
-                    return Some(evicted_key);
-                }
-                // Clear reference bit — give it a second chance
-                entry.reference_bit.store(false, Ordering::Relaxed);
+        let start = shard.clock_hand.load(Ordering::Relaxed) % len;
+        let mut scanned = 0;
+        let mut victim = None;
+        for (key, entry) in current.iter().cycle().skip(start).take(scan_count) {
+            scanned += 1;
+            if !entry.reference_bit.load(Ordering::Relaxed) {
+                victim = Some(key.clone());
+                break;
             }
-
-            hand = (hand + 1) % len;
+            // Clear reference bit — give it a second chance
+            entry.reference_bit.store(false, Ordering::Relaxed);
         }
+        shard
+            .clock_hand
+            .store((start + scanned) % len, Ordering::Relaxed);
 
-        shard.clock_hand.store(hand, Ordering::Relaxed);
-        None
+        let evicted_key = victim?;
+        let mut new_map = (*current).clone();
+        new_map.remove(&evicted_key);
+        shard.data.store(Arc::new(new_map));
+        crate::metrics::metrics()
+            .storage_hot_tier_evictions_total
+            .inc();
+        if self.config.per_realm_metrics {
+            count_by_realm(
+                &crate::metrics::metrics().storage_hot_tier_evictions_by_realm_total,
+                evicted_key.realm_id(),
+            );
+        }
+        Some(evicted_key)
     }
 
     /// Returns the number of entries currently in the hot tier.
@@ -508,6 +541,19 @@ impl HotTier {
     pub(crate) fn shard_map_ptr(&self, idx: usize) -> *const () {
         Arc::as_ptr(&self.shards[idx].data.load_full()).cast()
     }
+
+    /// Address of a cached key's bytes — lets tests assert that a map clone
+    /// shares keys instead of copying them.
+    #[cfg(test)]
+    pub(crate) fn key_bytes_ptr(&self, realm_id: &RealmId, key: &[u8]) -> Option<*const u8> {
+        let hash = self.hash_key(realm_id, key);
+        self.shards[self.shard_index(hash)]
+            .data
+            .load()
+            .raw_entry()
+            .from_hash(hash, |k| k.realm_id() == realm_id && k.key() == key)
+            .map(|(k, _)| k.key().as_ptr())
+    }
 }
 
 /// Runs clock sweep eviction on the mutable map (the shard's write lock must
@@ -519,57 +565,43 @@ impl HotTier {
 ///
 /// `per_realm_metrics` carries [`TieredConfig::per_realm_metrics`] in, because
 /// this is a free function with no handle on the tier's config.
-fn evict_locked(shard: &Shard, map: &mut HashMap<CompositeKey, HotEntry>, per_realm_metrics: bool) {
-    if map.is_empty() {
+fn evict_locked(shard: &Shard, map: &mut HashMap<HotKey, HotEntry>, per_realm_metrics: bool) {
+    let len = map.len();
+    if len == 0 {
         return;
     }
 
-    let mut keys: Vec<CompositeKey> = map.keys().cloned().collect();
-    keys.sort();
-
-    let len = keys.len();
-    let mut hand = shard.clock_hand.load(Ordering::Relaxed) % len;
-
-    // Two full passes: first clears ref bits, second evicts
-    for _ in 0..len * 2 {
-        let key = &keys[hand];
-
-        if let Some(entry) = map.get(key) {
-            if !entry.reference_bit.load(Ordering::Relaxed) {
-                let evicted = key.clone();
-                map.remove(&evicted);
-                crate::metrics::metrics()
-                    .storage_hot_tier_evictions_total
-                    .inc();
-                if per_realm_metrics {
-                    count_by_realm(
-                        &crate::metrics::metrics().storage_hot_tier_evictions_by_realm_total,
-                        evicted.realm_id(),
-                    );
-                }
-                hand = (hand + 1) % len;
-                shard.clock_hand.store(hand, Ordering::Relaxed);
-                return;
-            }
-            entry.reference_bit.store(false, Ordering::Relaxed);
+    // Up to two passes from the hand, in the map's own order: the first
+    // clears reference bits, the second meets an entry it cleared. Only the
+    // victim's key is cloned — a refcount increment.
+    let start = shard.clock_hand.load(Ordering::Relaxed) % len;
+    let mut scanned = 0;
+    let mut victim = None;
+    for (key, entry) in map.iter().cycle().skip(start).take(len * 2) {
+        scanned += 1;
+        if !entry.reference_bit.load(Ordering::Relaxed) {
+            victim = Some(key.clone());
+            break;
         }
-
-        hand = (hand + 1) % len;
+        entry.reference_bit.store(false, Ordering::Relaxed);
     }
+    shard
+        .clock_hand
+        .store((start + scanned) % len, Ordering::Relaxed);
 
-    shard.clock_hand.store(hand, Ordering::Relaxed);
-
-    // If we still couldn't evict (shouldn't happen after 2 passes, but be safe),
-    // force-evict at current hand position.
-    let key = keys[hand % len].clone();
-    map.remove(&key);
+    // `map` is this write's private clone, so no reader can set a bit again
+    // between the passes; the fallback only guarantees progress.
+    let Some(evicted) = victim.or_else(|| map.keys().nth(start).cloned()) else {
+        return;
+    };
+    map.remove(&evicted);
     crate::metrics::metrics()
         .storage_hot_tier_evictions_total
         .inc();
     if per_realm_metrics {
         count_by_realm(
             &crate::metrics::metrics().storage_hot_tier_evictions_by_realm_total,
-            key.realm_id(),
+            evicted.realm_id(),
         );
     }
 }
@@ -855,7 +887,7 @@ mod tests {
         assert_eq!(
             large.shard_count(),
             64,
-            "the default 100k-capacity tier must use the full shard fan-out"
+            "the default 100k-capacity tier must split into 64 shards"
         );
 
         for small_capacity in [3, 20, 100, 2047] {
@@ -877,6 +909,43 @@ mod tests {
     // other shard's map must remain pointer-identical. This is the bound that
     // stops one unauthenticated cold read cloning the entire hot tier
     // (audit §4.21#4).
+    #[test]
+    fn shards_stay_small_at_any_capacity() {
+        // A promote clones its whole shard. At 64 shards a 1.47 M-entry tier
+        // (the live 4 GB host's auto-size) held ~23,000 entries per shard, and
+        // one promote took ~1.3 ms half full (examples/hot_tier_cost.rs).
+        for capacity in [100_000_usize, 1_474_140, 4_000_000] {
+            let per_shard = capacity.div_ceil(shard_count_for(capacity));
+            assert!(
+                per_shard <= 2 * MIN_SHARD_CAPACITY,
+                "capacity {capacity}: {per_shard} entries per shard"
+            );
+        }
+    }
+
+    #[test]
+    fn promote_shares_cached_keys_instead_of_copying_them() {
+        // A 10-entry tier has one shard, so both keys share a map.
+        let tier = HotTier::new(TieredConfig {
+            hot_tier_capacity: 10,
+            ..TieredConfig::default()
+        });
+        assert_eq!(tier.shard_count(), 1);
+        let realm = RealmId::generate();
+        tier.promote_now(&realm, b"first", b"v1");
+        let before = tier.key_bytes_ptr(&realm, b"first");
+        assert!(before.is_some());
+
+        tier.promote_now(&realm, b"second", b"v2");
+        tier.invalidate(&realm, b"second");
+
+        assert_eq!(
+            tier.key_bytes_ptr(&realm, b"first"),
+            before,
+            "a promote or invalidate must not reallocate the keys it carries over"
+        );
+    }
+
     #[test]
     fn promote_clones_only_the_target_shard() {
         let tier = HotTier::new(TieredConfig::default());
