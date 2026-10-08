@@ -1282,3 +1282,77 @@ async fn filter_users_by_attr_missing_colon_returns_400() {
 
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
+
+// ===== Create and the KDF gate =====
+
+/// Creating a user hashes nothing (`CreateUserRequest` carries no password), so
+/// it must not wait for an Argon2 permit. It did: both create handlers ran the
+/// whole create, storage write included, under the KDF gate, so concurrent
+/// creates were limited to the gate's permits and the rest failed with `503`
+/// after the queue wait (2026-10-08 AWS stress run: ~316 sheds/s with the CPU
+/// at 20%).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_user_does_not_wait_for_a_kdf_permit() {
+    // nextest runs this in its own process, so it wins the OnceLock.
+    assert!(hearth::identity::init_gate(
+        hearth::identity::KdfGateConfig {
+            max_in_flight: 1,
+            max_queue_wait: std::time::Duration::from_millis(20),
+            retry_after: std::time::Duration::from_secs(1),
+        }
+    ));
+    let h = common::TestHarness::in_process().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = admin_token(&h, &realm).await;
+    let app = build_app(&h).await;
+
+    // Hold the gate's only permit, as an in-flight password hash would.
+    let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let holder = tokio::spawn(async move {
+        let _ = hearth::identity::gate()
+            .run(move || {
+                let _ = held_tx.send(());
+                let _ = release_rx.recv_timeout(std::time::Duration::from_secs(30));
+            })
+            .await;
+    });
+    held_rx.await.expect("holder admitted");
+
+    let mut statuses = Vec::new();
+    for (i, uri) in ["/admin/users", "/users"].into_iter().enumerate() {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("X-Realm-ID", realm.as_uuid().to_string())
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "email": format!("gate{i}@example.com"),
+                            "display_name": format!("Gate {i}"),
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        statuses.push((uri, resp.status()));
+    }
+    release_tx.send(()).expect("release");
+    holder.await.expect("holder joins");
+
+    assert_eq!(
+        statuses,
+        [
+            ("/admin/users", StatusCode::CREATED),
+            ("/users", StatusCode::CREATED)
+        ],
+        "a create must not be shed while a password hash holds the KDF permit"
+    );
+}

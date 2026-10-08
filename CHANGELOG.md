@@ -348,6 +348,13 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   inside `assertion`, is refused instead of being read with the field dropped.
 
 ### Fixed
+- **Creating users no longer fails with `503` under concurrent load.** `POST /admin/users`
+  and `POST /users` waited for one of the few password-hashing slots (2 on a 2-CPU host),
+  although creating a user hashes no password. Each create held the slot through its disk
+  write, so bulk provisioning was limited by disk latency times the slot count, and every
+  request that waited more than 250 ms failed with `503 kdf_overloaded` while the CPU sat
+  idle (~316 failures/s on an AWS gp3 disk). Creates now run without a slot; the slots
+  still bound every real password hash.
 - **Reads no longer slow down as the in-memory cache fills.** Each time a record entered the
   hot-tier cache, Hearth copied the cache shard it landed in, key by key. On a 4 GB host the
   cache auto-sizes to ~1.5 M entries in 64 shards, so a half-full cache made the read that

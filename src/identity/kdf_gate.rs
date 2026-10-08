@@ -31,8 +31,11 @@
 //! a `/ui/register` flood alone re-introduced the unbounded `offered × 19 MiB`
 //! blowup. Peak was really `(permits + concurrent registrations + resets + …)
 //! × 19 MiB`. As of HEA-1891 all of those callers route through this gate
-//! (`run_kdf_gated` for UI `Response` handlers, `run_kdf_gated_rest` for REST
-//! JSON handlers), so the `permits × 19 MiB` ceiling is now server-wide.
+//! (`run_kdf_gated` for UI `Response` handlers; engine-side callers such as
+//! client authentication map a shed to `IdentityError::KdfOverloaded`), so the
+//! `permits × 19 MiB` ceiling is now server-wide. REST `create_user` is not a
+//! caller: its request carries no password, and gating it only limited
+//! concurrent creates to the permit count (2026-10-08 stress run).
 //!
 //! Every op is instrumented (`hearth_kdf_*`): in-flight gauge, queue-wait and
 //! compute-time histograms, and a shed counter — the telemetry whose absence
