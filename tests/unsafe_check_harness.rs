@@ -26,12 +26,20 @@ use std::path::{Path, PathBuf};
 
 /// Files in `src/` that hold `unsafe` the harness does not compile, each with
 /// the reason Miri cannot run it.
-const NOT_UNDER_MIRI: &[(&str, &str)] = &[(
-    "src/storage/fs.rs",
-    "`memmap2::Mmap::map` — Miri cannot model mmap, and the call's soundness \
-     rests on the file not being truncated under the mapping, a property of \
-     the data directory rather than of code",
-)];
+const NOT_UNDER_MIRI: &[(&str, &str)] = &[
+    (
+        "src/storage/fs.rs",
+        "`memmap2::Mmap::map` — Miri cannot model mmap, and the call's soundness \
+         rests on the file not being truncated under the mapping, a property of \
+         the data directory rather than of code",
+    ),
+    (
+        "src/main.rs",
+        "glibc FFI only — `mallopt(M_ARENA_MAX)` at startup, and `open_memstream` / \
+         `malloc_info` / `free` in its test. Miri cannot call foreign C functions, \
+         and the binary's entry point does not build as a standalone harness file",
+    ),
+];
 
 /// Dependencies whose code the harness exercises in place of hearth's.
 const PINNED_WITH_HEARTH: &[&str] = &["crossbeam-epoch", "crossbeam-utils"];
