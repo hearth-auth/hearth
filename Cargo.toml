@@ -65,6 +65,10 @@ lettre = { version = "0.11", default-features = false, features = [
     "builder",
     "hostname",
 ] }
+# `mallopt(M_ARENA_MAX)` at startup: glibc's default of 8 malloc arenas per
+# core kept ~2.6 GB of freed memory on a 2-vCPU host until the kernel killed
+# the process. Already in the tree through tokio; MIT/Apache-2.0.
+libc = "0.2"
 memmap2 = "0.9"
 password-hash = "0.5"
 pbkdf2 = { version = "0.12", default-features = false }

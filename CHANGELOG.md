@@ -348,6 +348,13 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   inside `assertion`, is refused instead of being read with the field dropped.
 
 ### Fixed
+- **Memory no longer grows until the kernel kills the server.** On Linux with glibc, each
+  thread's freed memory stayed in one of up to 8 allocator arenas per core instead of going
+  back to the OS. Under a steady sign-in and refresh load on a 2-vCPU, 4 GB host, memory
+  reached 3.7 GB for about 0.6 GB of live data, and the kernel killed Hearth after 43 minutes.
+  Hearth now caps glibc at one arena per core (at least two) before it starts any thread; the
+  same load held 575 MB. It logs the cap at startup, and leaves the limit alone when you set
+  `MALLOC_ARENA_MAX` or the `glibc.malloc.arena_max` tunable yourself.
 - **Sign-in no longer slows down as writes pile up.** Every storage range scan copied all of
   the realm's rows not yet flushed to disk before keeping the ones it asked for. Sign-in does
   several such scans, so it got slower with every recent write until the next flush. Under a live load test with 100,000 users this took about 0.6 s per scan, starved the
