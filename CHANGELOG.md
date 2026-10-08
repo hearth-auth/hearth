@@ -348,6 +348,14 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   inside `assertion`, is refused instead of being read with the field dropped.
 
 ### Fixed
+- **Sign-in no longer slows down as writes pile up.** Every storage range scan copied all of
+  the realm's rows not yet flushed to disk before keeping the ones it asked for. Sign-in does
+  several such scans, so it got slower with every recent write until the next flush. Under a live load test with 100,000 users this took about 0.6 s per scan, starved the
+  password hasher of CPU and made sign-ins fail with `503`. A scan now reads only its own key
+  range.
+- **HTTPS responses no longer wait on Nagle's algorithm.** Accepted connections now set
+  `TCP_NODELAY`. Without it, a response sent in several small writes could wait about 40 ms for
+  the client's delayed ACK.
 - **`/admin/cluster/*` works on a running cluster.** `GET /admin/cluster/status`,
   `POST /admin/cluster/bootstrap` and `POST /admin/cluster/transfer-leadership` answered
   `503 not in cluster mode` on every node of a cluster, because `serve` never gave the HTTP layer
