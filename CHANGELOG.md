@@ -348,6 +348,12 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   inside `assertion`, is refused instead of being read with the field dropped.
 
 ### Fixed
+- **Reads no longer slow down as the in-memory cache fills.** Each time a record entered the
+  hot-tier cache, Hearth copied the cache shard it landed in, key by key. On a 4 GB host the
+  cache auto-sizes to ~1.5 M entries in 64 shards, so a half-full cache made the read that
+  cached a record wait ~1.3 ms and allocate ~10,000 times. Keys are now shared between copies,
+  and the shard count grows with the cache so a shard holds at most ~2,000 entries: the same
+  read now costs 3–50 µs and 9 allocations, at any fill.
 - **Memory no longer grows until the kernel kills the server.** On Linux with glibc, each
   thread's freed memory stayed in one of up to 8 allocator arenas per core instead of going
   back to the OS. Under a steady sign-in and refresh load on a 2-vCPU, 4 GB host, memory
