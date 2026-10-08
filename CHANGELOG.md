@@ -348,6 +348,12 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   inside `assertion`, is refused instead of being read with the field dropped.
 
 ### Fixed
+- **Audited writes in a realm no longer wait for each other's disk flush.** On a single node,
+  every write that records an audit event (user creation, sign-in, token refresh, admin
+  changes) flushed the disk while it held the realm's audit-chain lock, so these writes ran one
+  at a time: ~168 user creations/s on an AWS gp3 disk with the CPU at ~15%. The storage layer
+  that every server uses now passes the engine's group commit through, so concurrent writes
+  share one flush; each write is still on disk before Hearth acknowledges it.
 - **Reads no longer slow down as the in-memory cache fills.** Each time a record entered the
   hot-tier cache, Hearth copied the cache shard it landed in, key by key. On a 4 GB host the
   cache auto-sizes to ~1.5 M entries in 64 shards, so a half-full cache made the read that
