@@ -1993,24 +1993,35 @@ impl StorageEngine for EmbeddedStorageEngine {
     /// TOCTOU window: two concurrent tasks can both observe the key as absent
     /// and both proceed to write. This override serializes the check-and-write
     /// under [`put_if_absent_lock`](Self::put_if_absent_lock) so exactly one
-    /// concurrent writer wins for a given key (HEA-1767). The lock is held only
-    /// across the in-memory existence check and the `put` — the underlying WAL
-    /// append still fsyncs for durability.
+    /// concurrent writer wins for a given key (HEA-1767).
+    ///
+    /// The lock covers the existence check and the enqueue, which applies the
+    /// write to the memtable, so a racing caller's check sees it and loses.
+    /// The fsync wait happens after the lock is released: holding it across
+    /// the fsync made every refresh, replay marker and nonce in the process
+    /// wait for the one before it to reach the disk (2026-10-08 AWS run:
+    /// refresh capped at ~180/s with the CPU at ~30%). The caller still
+    /// returns only once its write is durable. A racing caller can lose to a
+    /// claim that is not yet durable; if that fsync fails the WAL fences, so
+    /// the error fails closed.
     fn put_if_absent(
         &self,
         realm_id: &RealmId,
         key: &[u8],
         value: &[u8],
     ) -> Result<bool, StorageError> {
-        let Ok(_guard) = self.put_if_absent_lock.lock() else {
-            return Err(StorageError::Io(std::io::Error::other(
-                "put_if_absent mutex poisoned",
-            )));
+        let handle = {
+            let Ok(_guard) = self.put_if_absent_lock.lock() else {
+                return Err(StorageError::Io(std::io::Error::other(
+                    "put_if_absent mutex poisoned",
+                )));
+            };
+            if self.get(realm_id, key)?.is_some() {
+                return Ok(false);
+            }
+            self.enqueue_batch(realm_id, &[(key.to_vec(), value.to_vec())])?
         };
-        if self.get(realm_id, key)?.is_some() {
-            return Ok(false);
-        }
-        self.put(realm_id, key, value)?;
+        self.await_batch_durable(handle)?;
         Ok(true)
     }
 
@@ -2636,6 +2647,161 @@ mod tests {
         assert_eq!(
             engine.get(&realm, b"ctr").expect("get"),
             Some(b"xyz".to_vec())
+        );
+    }
+
+    /// Release gate for [`WalSyncGateFs`].
+    type Gate = Arc<(Mutex<bool>, std::sync::Condvar)>;
+    /// Signals that [`WalSyncGateFs`] parked a `sync_data`.
+    type Reached = Arc<Mutex<Option<std::sync::mpsc::SyncSender<()>>>>;
+
+    /// Parks the first WAL `sync_data` after arming until released.
+    struct WalSyncGateFs {
+        inner: RealFs,
+        armed: Arc<std::sync::atomic::AtomicBool>,
+        reached: Reached,
+        release: Gate,
+    }
+    struct GatedFile {
+        inner: Box<dyn crate::storage::fs::FsFile>,
+        armed: Arc<std::sync::atomic::AtomicBool>,
+        reached: Reached,
+        release: Gate,
+    }
+    impl crate::storage::fs::FsFile for GatedFile {
+        fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+            self.inner.write_all(buf)
+        }
+        fn read_to_end(&mut self, buf: &mut Vec<u8>) -> std::io::Result<usize> {
+            self.inner.read_to_end(buf)
+        }
+        fn sync_all(&self) -> std::io::Result<()> {
+            self.inner.sync_all()
+        }
+        fn sync_data(&self) -> std::io::Result<()> {
+            if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
+                if let Some(tx) = self.reached.lock().expect("reached").take() {
+                    let _ = tx.send(());
+                    let (lock, cv) = &*self.release;
+                    let mut released = lock.lock().expect("release");
+                    while !*released {
+                        released = cv.wait(released).expect("release wait");
+                    }
+                }
+            }
+            self.inner.sync_data()
+        }
+        fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(pos)
+        }
+        fn set_len(&self, size: u64) -> std::io::Result<()> {
+            self.inner.set_len(size)
+        }
+    }
+    impl crate::storage::fs::Fs for WalSyncGateFs {
+        fn open_append(
+            &self,
+            path: &std::path::Path,
+        ) -> std::io::Result<Box<dyn crate::storage::fs::FsFile>> {
+            Ok(Box::new(GatedFile {
+                inner: self.inner.open_append(path)?,
+                armed: Arc::clone(&self.armed),
+                reached: Arc::clone(&self.reached),
+                release: Arc::clone(&self.release),
+            }))
+        }
+        fn create(
+            &self,
+            path: &std::path::Path,
+        ) -> std::io::Result<Box<dyn crate::storage::fs::FsFile>> {
+            self.inner.create(path)
+        }
+        fn open_read(
+            &self,
+            path: &std::path::Path,
+        ) -> std::io::Result<Box<dyn crate::storage::fs::FsFile>> {
+            self.inner.open_read(path)
+        }
+        fn read(&self, path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+            self.inner.read(path)
+        }
+        fn map_readonly(
+            &self,
+            path: &std::path::Path,
+        ) -> std::io::Result<crate::storage::fs::FileBacking> {
+            self.inner.map_readonly(path)
+        }
+        fn write(&self, path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+            self.inner.write(path, data)
+        }
+        fn create_dir_all(&self, path: &std::path::Path) -> std::io::Result<()> {
+            self.inner.create_dir_all(path)
+        }
+        fn read_dir(&self, path: &std::path::Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+            self.inner.read_dir(path)
+        }
+        fn remove_file(&self, path: &std::path::Path) -> std::io::Result<()> {
+            self.inner.remove_file(path)
+        }
+        fn rename(&self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+            self.inner.rename(from, to)
+        }
+        fn sync_dir(&self, dir: &std::path::Path) -> std::io::Result<()> {
+            self.inner.sync_dir(dir)
+        }
+    }
+
+    /// Every refresh spends its old token through `put_if_absent`, and so do
+    /// replay markers, nonces and OTP single-use claims. The engine-wide lock
+    /// was held across the `put`, fsync included, so every such write in the
+    /// process waited for the one before it to reach the disk (2026-10-08 AWS
+    /// run, ~1.9 ms per synced write: refresh capped at ~180/s, CPU ~30%).
+    /// The lock must cover the check and the enqueue only.
+    #[test]
+    fn put_if_absent_waits_for_its_fsync_outside_the_lock() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Condvar;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = StorageConfig::test_config(dir.path().to_path_buf());
+        config.wal_config.sync_mode = SyncMode::EveryWrite;
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let fs = Arc::new(WalSyncGateFs {
+            inner: RealFs,
+            armed: Arc::new(AtomicBool::new(false)),
+            reached: Arc::new(Mutex::new(Some(tx))),
+            release: Arc::new((Mutex::new(false), Condvar::new())),
+        });
+        let engine = Arc::new(
+            EmbeddedStorageEngine::open_with_fs(config, Arc::clone(&fs) as Arc<dyn Fs>)
+                .expect("open"),
+        );
+        let realm = RealmId::generate();
+
+        fs.armed.store(true, Ordering::SeqCst);
+        let writer = {
+            let engine = Arc::clone(&engine);
+            let realm = realm.clone();
+            std::thread::spawn(move || engine.put_if_absent(&realm, b"spent", b"1"))
+        };
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the write reached its fsync");
+
+        let free = engine.put_if_absent_lock.try_lock().is_ok();
+
+        let (lock, cv) = &*fs.release;
+        *lock.lock().expect("release") = true;
+        cv.notify_all();
+        assert!(writer.join().expect("writer").expect("put_if_absent"));
+        assert!(
+            free,
+            "put_if_absent held the engine-wide lock while it waited for its fsync"
+        );
+        assert!(
+            !engine
+                .put_if_absent(&realm, b"spent", b"2")
+                .expect("second"),
+            "a second claim of the same key must still lose"
         );
     }
 
