@@ -361,13 +361,15 @@ async fn serve_connection<IO>(
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let io = hyper_util::rt::TokioIo::new(FirstBytesDeadline::new(io, limits.header_read_timeout));
-    // Layer `ConnectInfo<SocketAddr>` onto the router so every handler sees the
+    // Add `ConnectInfo<SocketAddr>` to every request so each handler sees the
     // real peer via `PeerAddr` / `ConnectInfo<SocketAddr>` rather than the
-    // FALLBACK_PEER sentinel (HEA-2164).
-    let service = hyper_util::service::TowerToHyperService::new(
-        app.layer(axum::Extension(ConnectInfo::<SocketAddr>(peer_addr)))
-            .into_service(),
-    );
+    // FALLBACK_PEER sentinel (HEA-2164). The extension wraps the router once:
+    // `Router::layer` re-wraps every route, which gave each connection its own
+    // copy of the route table (~550 KB with the full router).
+    let service = hyper_util::service::TowerToHyperService::new(tower::Layer::layer(
+        &axum::Extension(ConnectInfo::<SocketAddr>(peer_addr)),
+        app,
+    ));
 
     let builder = connection_builder(limits);
     let result = if upgrades {

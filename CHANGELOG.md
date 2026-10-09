@@ -351,6 +351,10 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   inside `assertion`, is refused instead of being read with the field dropped.
 
 ### Fixed
+- **An open connection no longer costs ~550 KB of memory.** Every connection built its own copy
+  of the full route table, so a server holding 2,000 client connections spent ~1.1 GB on them
+  and came close to running out of memory on a 4 GB host. A connection now wraps the shared
+  routes once and costs ~30 KB.
 - **Creating users no longer fails with `503` under concurrent load.** `POST /admin/users`
   and `POST /users` waited for one of the few password-hashing slots (2 on a 2-CPU host),
   although creating a user hashes no password. Each create held the slot through its disk
