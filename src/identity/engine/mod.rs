@@ -8992,14 +8992,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.persist_session(realm_id, &session)?;
         drop(row);
 
-        self.record_audit(
-            realm_id,
-            None,
-            AuditAction::SessionCreated,
-            "session",
-            &session_id.as_uuid().to_string(),
-        )?;
-
+        // No audit event here: a refresh creates no session (#448). The
+        // refresh-token grant that calls this records `TokenRefreshed`.
         Ok(session)
     }
 
@@ -21787,6 +21781,37 @@ mod tests {
             .refresh_session(&realm, session.id())
             .expect_err("should fail");
         assert!(matches!(err, IdentityError::SessionNotFound));
+    }
+
+    /// #448: extending a session's expiry creates no session, so it must not
+    /// append a `SessionCreated` audit event. Only `create_session` does.
+    #[test]
+    fn refresh_session_records_no_session_created_audit_event() {
+        let (_dir, engine, clock, audit) = setup_engine_with_audit();
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+
+        let session = engine
+            .create_session(&realm, user.id(), &SessionContext::default())
+            .expect("create session");
+        let mut query = crate::audit::AuditQuery::for_realm(realm.clone());
+        query.action = Some(AuditAction::SessionCreated);
+        let created_before = audit.query(&query).expect("query audit").len();
+        assert_eq!(
+            created_before, 1,
+            "setup: create_session must record exactly one SessionCreated event"
+        );
+
+        clock.advance(1_000_000);
+        engine
+            .refresh_session(&realm, session.id())
+            .expect("refresh");
+
+        let created_after = audit.query(&query).expect("query audit").len();
+        assert_eq!(
+            created_after, created_before,
+            "refresh_session must not record a SessionCreated audit event"
+        );
     }
 
     // ===== Delete cascades to sessions =====

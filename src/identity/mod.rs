@@ -668,6 +668,7 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// Returns the updated session. Returns `Err(SessionNotFound)` if
     /// the session does not exist, is expired, or has been revoked.
+    /// Records no audit event: no session is created.
     fn refresh_session(
         &self,
         realm_id: &RealmId,
