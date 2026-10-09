@@ -21,7 +21,7 @@
 
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use hashbrown::{DefaultHashBuilder, HashMap};
 
@@ -186,7 +186,9 @@ struct Shard {
     /// The shard's cached data, swapped atomically on mutations.
     data: EpochCell<HashMap<HotKey, HotEntry>>,
     /// Serializes this shard's write operations (promote, invalidate, evict).
-    write_lock: Mutex<()>,
+    /// Guards the shard's entry count as last added to
+    /// `hearth_storage_hot_tier_entries` (see [`publish_len`]).
+    write_lock: Mutex<usize>,
     /// Clock hand position for sweeps over this shard.
     clock_hand: AtomicUsize,
     /// Monotonic count of invalidations that touched this shard. `promote`
@@ -238,7 +240,7 @@ impl HotTier {
                 // maps hash identically — `get` computes one hash for both
                 // shard selection and the in-map `raw_entry` lookup.
                 data: EpochCell::from_pointee(HashMap::with_hasher(hash_builder.clone())),
-                write_lock: Mutex::new(()),
+                write_lock: Mutex::new(0),
                 clock_hand: AtomicUsize::new(0),
                 invalidation_epoch: AtomicU64::new(0),
             })
@@ -351,7 +353,7 @@ impl HotTier {
         let shard = &self.shards[shard_idx];
         let composite = HotKey::new(realm_id.clone(), key);
 
-        let Ok(_lock) = shard.write_lock.lock() else {
+        let Ok(mut published) = shard.write_lock.lock() else {
             return; // Poisoned mutex — silently skip promotion
         };
 
@@ -385,7 +387,7 @@ impl HotTier {
             let mut new_map = (*current).clone();
             new_map.insert(composite, HotEntry::new(Arc::from(value)));
             shard.data.store(Arc::new(new_map));
-            return;
+            return; // An update: the entry count is unchanged.
         }
 
         // Evict if the shard is at its share of the capacity
@@ -395,6 +397,7 @@ impl HotTier {
         }
 
         new_map.insert(composite, HotEntry::new(Arc::from(value)));
+        publish_len(&mut published, new_map.len());
         shard.data.store(Arc::new(new_map));
     }
 
@@ -414,7 +417,7 @@ impl HotTier {
 
         let composite = HotKey::new(realm_id.clone(), key);
 
-        let Ok(_guard) = shard.write_lock.lock() else {
+        let Ok(mut published) = shard.write_lock.lock() else {
             return;
         };
 
@@ -425,6 +428,7 @@ impl HotTier {
 
         let mut new_map = (*current).clone();
         new_map.remove(&composite);
+        publish_len(&mut published, new_map.len());
         shard.data.store(Arc::new(new_map));
     }
 
@@ -445,7 +449,7 @@ impl HotTier {
         let shard =
             &self.shards[self.sweep_cursor.fetch_add(1, Ordering::Relaxed) % self.shards.len()];
 
-        let Ok(_guard) = shard.write_lock.lock() else {
+        let Ok(mut published) = shard.write_lock.lock() else {
             return None;
         };
 
@@ -477,6 +481,7 @@ impl HotTier {
         let evicted_key = victim?;
         let mut new_map = (*current).clone();
         new_map.remove(&evicted_key);
+        publish_len(&mut published, new_map.len());
         shard.data.store(Arc::new(new_map));
         crate::metrics::metrics()
             .storage_hot_tier_evictions_total
@@ -603,6 +608,38 @@ fn evict_locked(shard: &Shard, map: &mut HashMap<HotKey, HotEntry>, per_realm_me
             &crate::metrics::metrics().storage_hot_tier_evictions_by_realm_total,
             evicted.realm_id(),
         );
+    }
+}
+
+/// Adds the change in one shard's entry count to
+/// `hearth_storage_hot_tier_entries` (#450).
+///
+/// `published` is the count this shard last added, held inside the shard's
+/// write lock: updates are ordered with the writes that cause them, and each
+/// shard adds only its own difference, so the gauge is the exact sum over
+/// shards (and over tiers, when a process holds several). Off the read path —
+/// called only by writers, after they have cloned the shard's map.
+fn publish_len(published: &mut usize, len: usize) {
+    #[allow(clippy::cast_precision_loss)] // exact below 2^53
+    let delta = len as f64 - *published as f64;
+    if delta != 0.0 {
+        crate::metrics::metrics()
+            .storage_hot_tier_entries
+            .add(delta);
+    }
+    *published = len;
+}
+
+impl Drop for HotTier {
+    /// Takes this tier's entries out of `hearth_storage_hot_tier_entries`.
+    fn drop(&mut self) {
+        for shard in &mut self.shards {
+            let published = shard
+                .write_lock
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner);
+            publish_len(published, 0);
+        }
     }
 }
 
@@ -1491,6 +1528,94 @@ mod tests {
                 residency, ROUNDS, CAPACITY,
             );
         }
+    }
+
+    // ===== #450: hot-tier live entry gauge =====
+
+    /// `hearth_storage_hot_tier_entries` minus `base`. The registry is
+    /// process-global, so each test measures against what it saw before
+    /// creating its tier.
+    fn entries_gauge_since(base: f64) -> f64 {
+        crate::metrics::metrics().storage_hot_tier_entries.get() - base
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn as_gauge(n: usize) -> f64 {
+        n as f64
+    }
+
+    // #450: the live entry gauge follows every promote, update, capacity
+    // eviction, invalidation and clock-sweep eviction, and a dropped tier
+    // takes its entries out of it.
+    #[test]
+    fn entries_gauge_follows_promotes_invalidations_and_evictions() {
+        let base = crate::metrics::metrics().storage_hot_tier_entries.get();
+        let tier = HotTier::new(TieredConfig {
+            hot_tier_capacity: 2,
+            eviction_batch_size: 10,
+            promote_sample_rate: 1,
+            per_realm_metrics: false,
+        });
+        let realm = RealmId::generate();
+
+        tier.promote_now(&realm, b"k1", b"v1");
+        tier.promote_now(&realm, b"k2", b"v2");
+        assert_eq!(entries_gauge_since(base), as_gauge(2));
+        assert_eq!(tier.len(), 2);
+
+        tier.promote_now(&realm, b"k1", b"updated");
+        assert_eq!(
+            entries_gauge_since(base),
+            as_gauge(2),
+            "an update adds no entry"
+        );
+
+        tier.promote_now(&realm, b"k3", b"v3");
+        assert_eq!(tier.len(), 2, "capacity eviction made room for k3");
+        assert_eq!(entries_gauge_since(base), as_gauge(2));
+
+        tier.invalidate(&realm, b"k3");
+        assert_eq!(entries_gauge_since(base), as_gauge(1));
+        tier.invalidate(&realm, b"never-cached");
+        assert_eq!(entries_gauge_since(base), as_gauge(1));
+
+        for _ in 0..4 {
+            let _ = tier.clock_sweep_step();
+            assert_eq!(entries_gauge_since(base), as_gauge(tier.len()));
+        }
+        assert_eq!(tier.len(), 0, "two sweeps clear the bit, then evict");
+
+        tier.promote_now(&realm, b"k4", b"v4");
+        assert_eq!(entries_gauge_since(base), as_gauge(1));
+        drop(tier);
+        assert_eq!(entries_gauge_since(base), 0.0);
+    }
+
+    // #450: a sharded tier's gauge is the sum over its shards.
+    #[test]
+    fn entries_gauge_sums_every_shard() {
+        let base = crate::metrics::metrics().storage_hot_tier_entries.get();
+        let tier = HotTier::new(TieredConfig {
+            hot_tier_capacity: 4 * MIN_SHARD_CAPACITY,
+            eviction_batch_size: 10,
+            promote_sample_rate: 1,
+            per_realm_metrics: false,
+        });
+        assert!(tier.shard_count() > 1);
+        let realm = RealmId::generate();
+
+        for i in 0u32..200 {
+            tier.promote_now(&realm, &i.to_be_bytes(), b"v");
+        }
+        assert_eq!(tier.len(), 200);
+        assert_eq!(entries_gauge_since(base), as_gauge(200));
+
+        for i in 0u32..50 {
+            tier.invalidate(&realm, &i.to_be_bytes());
+        }
+        assert_eq!(entries_gauge_since(base), as_gauge(150));
+        drop(tier);
+        assert_eq!(entries_gauge_since(base), 0.0);
     }
 
     // ===== Phase C: Simulation tests — see simulation/ crate =====

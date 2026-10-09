@@ -262,6 +262,41 @@ pub struct Metrics {
     /// cold `get`.
     pub storage_sst_files: Gauge,
 
+    // ── Storage size gauges (#450) ──────────────────────────────────────────
+    /// Entries held by the storage memtable, by state.
+    ///
+    /// Labels: `state` — see [`MemtableStateLabel`]: `active` (the map taking
+    /// writes) and `flushing` (the map parked while it streams to an SST; `0`
+    /// between flushes). Tombstones count as entries. Both series are present
+    /// at 0 from the first scrape. Updated off the hot path, under the
+    /// memtable's write lock, on every write, flush and clear — never on a
+    /// read. Summed over the process's storage engines (a server runs one).
+    pub storage_memtable_entries: GaugeVec,
+
+    /// Bytes held by the storage memtable, by state, as the memtable's own
+    /// size estimate (key + value bytes + 16 per entry) — the figure that
+    /// triggers a flush, not allocator overhead.
+    ///
+    /// Labels: `state` (`active` | `flushing`), as for
+    /// `storage_memtable_entries`, and updated at the same points.
+    pub storage_memtable_bytes: GaugeVec,
+
+    /// Pre-resolved `storage_memtable_entries` children, indexed by
+    /// [`MemtableStateLabel::index`], so a write adjusts a plain atomic gauge
+    /// without the `GaugeVec` label-map lock.
+    memtable_entries_by_state: [Gauge; 2],
+
+    /// Pre-resolved `storage_memtable_bytes` children, indexed like
+    /// `memtable_entries_by_state`.
+    memtable_bytes_by_state: [Gauge; 2],
+
+    /// Live hot-tier entry count.
+    ///
+    /// Updated off the hot path, under the shard write lock, whenever a
+    /// promotion, invalidation or eviction changes a shard — never on a
+    /// hot-tier hit. Summed over the process's storage engines (a server runs one).
+    pub storage_hot_tier_entries: Gauge,
+
     // ── KDF admission control (HEA-1887 / R1) ───────────────────────────────
     /// Argon2id operations currently executing on the **shared** blocking pool
     /// (holding a shared-gate permit). Bounded above by `hearth_kdf_permits`; if
@@ -393,6 +428,38 @@ impl ForwardedWriteOutcomeLabel {
             Self::Busy => "busy",
             Self::Rejected => "rejected",
             Self::OutcomeUnknown => "outcome_unknown",
+        }
+    }
+}
+
+/// The `state` label of `hearth_storage_memtable_entries` and
+/// `hearth_storage_memtable_bytes`. A closed set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemtableStateLabel {
+    /// The map taking writes.
+    Active,
+    /// The map parked while it streams to an SST.
+    Flushing,
+}
+
+impl MemtableStateLabel {
+    /// Every label value, for pre-creating the series.
+    pub const ALL: [Self; 2] = [Self::Active, Self::Flushing];
+
+    /// The Prometheus label value.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Flushing => "flushing",
+        }
+    }
+
+    /// Position of this state in [`Self::ALL`].
+    fn index(self) -> usize {
+        match self {
+            Self::Active => 0,
+            Self::Flushing => 1,
         }
     }
 }
@@ -658,6 +725,44 @@ impl Metrics {
             .register(Box::new(storage_sst_files.clone()))
             .expect("metric registration succeeds on a fresh registry");
 
+        let storage_memtable_entries = GaugeVec::new(
+            Opts::new(
+                "hearth_storage_memtable_entries",
+                "Entries held by the storage memtable (active map, or the map flushing to an SST)",
+            ),
+            &["state"],
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(storage_memtable_entries.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+        let memtable_entries_by_state = MemtableStateLabel::ALL
+            .map(|state| storage_memtable_entries.with_label_values(&[state.as_str()]));
+
+        let storage_memtable_bytes = GaugeVec::new(
+            Opts::new(
+                "hearth_storage_memtable_bytes",
+                "Estimated bytes held by the storage memtable (active map, or the map flushing \
+                 to an SST)",
+            ),
+            &["state"],
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(storage_memtable_bytes.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+        let memtable_bytes_by_state = MemtableStateLabel::ALL
+            .map(|state| storage_memtable_bytes.with_label_values(&[state.as_str()]));
+
+        let storage_hot_tier_entries = Gauge::new(
+            "hearth_storage_hot_tier_entries",
+            "Live hot-tier entry count",
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(storage_hot_tier_entries.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
         let kdf_in_flight = Gauge::new(
             "hearth_kdf_in_flight",
             "Argon2id operations currently executing (holding an admission permit)",
@@ -796,6 +901,11 @@ impl Metrics {
             storage_hot_tier_promotions_by_realm_total,
             storage_hot_tier_stale_fills_discarded_total,
             storage_sst_files,
+            storage_memtable_entries,
+            storage_memtable_bytes,
+            memtable_entries_by_state,
+            memtable_bytes_by_state,
+            storage_hot_tier_entries,
             kdf_in_flight,
             kdf_admin_in_flight,
             kdf_permits,
@@ -838,6 +948,36 @@ impl Metrics {
     #[inline]
     pub fn inc_get_hot_hit(&self) {
         self.storage_get_hot_hit.inc();
+    }
+
+    /// Adds `entries` and `bytes` (either may be negative) to the memtable
+    /// size gauges for `state`.
+    ///
+    /// Off the hot path: the memtable calls it under its write lock, after a
+    /// write, flush or clear has changed its size. Each gauge is a lock-free
+    /// atomic add on a pre-resolved child.
+    pub fn adjust_memtable_size(&self, state: MemtableStateLabel, entries: f64, bytes: f64) {
+        let i = state.index();
+        if entries != 0.0 {
+            self.memtable_entries_by_state[i].add(entries);
+        }
+        if bytes != 0.0 {
+            self.memtable_bytes_by_state[i].add(bytes);
+        }
+    }
+
+    /// The current `hearth_storage_memtable_entries{state}` value (tests,
+    /// diagnostics).
+    #[must_use]
+    pub fn memtable_entries(&self, state: MemtableStateLabel) -> f64 {
+        self.memtable_entries_by_state[state.index()].get()
+    }
+
+    /// The current `hearth_storage_memtable_bytes{state}` value (tests,
+    /// diagnostics).
+    #[must_use]
+    pub fn memtable_bytes(&self, state: MemtableStateLabel) -> f64 {
+        self.memtable_bytes_by_state[state.index()].get()
     }
 
     /// Records a tier fall-through `get` outcome (off the hot path).
@@ -909,7 +1049,7 @@ pub fn metrics() -> &'static Metrics {
 
 #[cfg(test)]
 mod tests {
-    use super::{ForwardedWriteOutcomeLabel, Metrics};
+    use super::{ForwardedWriteOutcomeLabel, MemtableStateLabel, Metrics};
 
     /// Every forwarded-write outcome is scraped from the start (at 0), and
     /// recording one moves only its own series.
@@ -936,6 +1076,47 @@ mod tests {
         assert_eq!(
             metrics.forwarded_writes(ForwardedWriteOutcomeLabel::Committed),
             0
+        );
+    }
+
+    /// #450: the storage size gauges are scraped from the start (at 0), and
+    /// adjusting one memtable state moves only that state's series.
+    #[test]
+    fn storage_size_gauges_are_pre_created_and_move_per_state() {
+        let metrics = Metrics::new();
+        let rendered = metrics.render();
+        for state in MemtableStateLabel::ALL {
+            for family in [
+                "hearth_storage_memtable_entries",
+                "hearth_storage_memtable_bytes",
+            ] {
+                let series = format!("{family}{{state=\"{}\"}} 0", state.as_str());
+                assert!(
+                    rendered.contains(&series),
+                    "missing {series} in:\n{rendered}"
+                );
+            }
+        }
+        assert!(
+            rendered.contains("\nhearth_storage_hot_tier_entries 0"),
+            "missing hearth_storage_hot_tier_entries in:\n{rendered}"
+        );
+
+        metrics.adjust_memtable_size(MemtableStateLabel::Flushing, 3.0, 120.0);
+        metrics.adjust_memtable_size(MemtableStateLabel::Flushing, -1.0, -40.0);
+        assert_eq!(
+            (
+                metrics.memtable_entries(MemtableStateLabel::Flushing),
+                metrics.memtable_bytes(MemtableStateLabel::Flushing),
+            ),
+            (2.0, 80.0)
+        );
+        assert_eq!(
+            (
+                metrics.memtable_entries(MemtableStateLabel::Active),
+                metrics.memtable_bytes(MemtableStateLabel::Active),
+            ),
+            (0.0, 0.0)
         );
     }
 
