@@ -2052,6 +2052,36 @@ impl StorageEngine for ClusterStorageAdapter {
         .map_err(cluster_to_storage_err)
     }
 
+    /// Forwarded in single-node mode so the inner engine's WAL group commit
+    /// runs: the caller (the audit engine, under its realm chain lock) gets a
+    /// pending handle back and waits for the fsync after it drops the lock,
+    /// so concurrent audited writes share one fsync. The trait default is a
+    /// full `put_batch`, fsync included, inside the caller's lock. In cluster
+    /// mode a write is a Raft proposal, durable when it returns, so the
+    /// default is right there.
+    fn enqueue_batch(
+        &self,
+        realm_id: &RealmId,
+        entries: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<crate::storage::StorageDurabilityHandle, crate::storage::StorageError> {
+        if let Some(done) = self.single_node_write(|inner| inner.enqueue_batch(realm_id, entries)) {
+            return done;
+        }
+        self.put_batch(realm_id, entries)?;
+        Ok(crate::storage::StorageDurabilityHandle(
+            crate::storage::StorageDurabilityHandleKind::Immediate,
+        ))
+    }
+
+    /// Forwarded to the inner engine, which issued the handle; see
+    /// [`Self::enqueue_batch`]. A cluster-mode handle is `Immediate`, a no-op.
+    fn await_batch_durable(
+        &self,
+        handle: crate::storage::StorageDurabilityHandle,
+    ) -> Result<(), crate::storage::StorageError> {
+        tokio::task::block_in_place(|| self.engine.inner.await_batch_durable(handle))
+    }
+
     fn write_batch(
         &self,
         realm_id: &RealmId,
@@ -2267,6 +2297,42 @@ mod tests {
             Arc::ptr_eq(&inner_barrier, &adapter_barrier),
             "the adapter must expose the SAME barrier the export blocks on"
         );
+    }
+
+    /// `serve` always installs a `ClusterStorageAdapter`, and the audit engine
+    /// appends through `enqueue_batch` under its realm chain lock, waiting for
+    /// the fsync only after it drops the lock. The adapter inherited the trait
+    /// default, a full `put_batch` with its fsync, so the fsync ran inside the
+    /// chain lock and every audited write in a realm waited for the one before
+    /// it (2026-10-08 stress run: ~168 user creates/s, CPU ~15%, disk-bound).
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::unwrap_used)]
+    async fn adapter_hands_back_the_inner_group_commit_handle() {
+        let dir = tempdir().unwrap();
+        let mut config = StorageConfig::dev(dir.path().join("data"));
+        config.wal_config.sync_mode = crate::storage::wal::SyncMode::EveryWrite;
+        let inner = Arc::new(EmbeddedStorageEngine::open(config).expect("open engine"));
+        let adapter =
+            ClusterStorageAdapter::new(Arc::new(ClusterEngine::single_node(Arc::clone(&inner))));
+        let realm = RealmId::generate();
+
+        let handle = adapter
+            .enqueue_batch(&realm, &[(b"k".to_vec(), b"v".to_vec())])
+            .expect("enqueue");
+        assert!(
+            matches!(
+                handle.0,
+                crate::storage::StorageDurabilityHandleKind::Pending(_)
+            ),
+            "the adapter must return the inner engine's group-commit handle, \
+             so the caller waits for the fsync outside its own lock"
+        );
+        adapter.await_batch_durable(handle).expect("durable");
+        assert!(
+            inner.wal_sync_count() >= 1,
+            "awaiting the handle must leave the batch fsynced"
+        );
+        assert_eq!(adapter.get(&realm, b"k").unwrap(), Some(b"v".to_vec()));
     }
 
     /// `serve` reads the WAL write fence through the adapter (`/readyz` →
