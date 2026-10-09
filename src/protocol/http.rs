@@ -144,6 +144,54 @@ pub(crate) fn kdf_shed_json_response(retry_after: std::time::Duration) -> Respon
     resp
 }
 
+// ── User-create admission gate (#446) ────────────────────────────────────────
+
+/// Runs a blocking user-create closure under the process-global user-create
+/// admission gate ([`crate::identity::user_create_gate`]).
+///
+/// Every REST route that creates users goes through here, so a provisioning
+/// burst waits for a permit asynchronously and is shed with `503` +
+/// `Retry-After` past the queue wait, instead of filling the blocking pool
+/// that password hashing shares. A `Join` failure (panic or cancellation) is
+/// handed to `on_join`, which maps it to the handler's own result type.
+pub(crate) async fn run_user_create_admitted<F, T>(
+    f: F,
+    on_join: impl FnOnce(crate::identity::UserCreateGateError) -> T,
+) -> Result<T, Response>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    match crate::identity::user_create_gate().run(f).await {
+        Ok(v) => Ok(v),
+        Err(crate::identity::UserCreateGateError::Overloaded { retry_after }) => {
+            Err(user_create_shed_json_response(retry_after))
+        }
+        Err(e) => Ok(on_join(e)),
+    }
+}
+
+/// Builds the `503 Service Unavailable` JSON response for a user create shed
+/// by the user-create admission gate: `Retry-After` (seconds, at least 1) and
+/// the `HEARTH_RATE_LIMITED` error code every other shed body uses.
+pub(crate) fn user_create_shed_json_response(retry_after: std::time::Duration) -> Response {
+    let secs = retry_after.as_secs().max(1);
+    let mut resp = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        axum::Json(serde_json::json!({
+            "error": "user_create_overloaded",
+            "error_description": "Server is busy creating other users. Please retry shortly.",
+            "error_code": crate::protocol::error_codes::RATE_LIMITED,
+        })),
+    )
+        .into_response();
+    resp.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        axum::http::HeaderValue::from(secs),
+    );
+    resp
+}
+
 /// `Retry-After` (seconds) given to a `503` whose handler set none. A cluster
 /// that lost its leader elects a new one in roughly 5 s; two seconds keeps a
 /// well-behaved client from hammering it and from waiting needlessly long.

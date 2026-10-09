@@ -1527,6 +1527,18 @@ async fn run_serve(
         "kdf admission gate installed from security.password.kdf"
     );
 
+    // Install the user-create admission gate (#446) from
+    // `operational.user_create`. Creates take no KDF permit, so this is the
+    // limit that keeps a provisioning burst out of the blocking pool logins
+    // share. First-wins; safe to call before the engine is built.
+    let user_create_gate_cfg = config.operational.user_create.resolve();
+    hearth::identity::init_user_create_gate(user_create_gate_cfg);
+    info!(
+        max_in_flight = user_create_gate_cfg.max_in_flight,
+        max_queue_wait_ms = config.operational.user_create.max_queue_wait_ms,
+        "user-create admission gate installed from operational.user_create"
+    );
+
     // Install the separate admin-reserved KDF gate (HEA-1892 / F2). Admin login
     // draws from this small isolated pool so a flood against a tenant realm's
     // login form cannot exhaust the shared gate and lock the operator out of the

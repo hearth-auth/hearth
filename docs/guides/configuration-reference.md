@@ -329,6 +329,10 @@ The `/metrics` endpoint returns metrics in Prometheus text exposition format (`t
 | `hearth_kdf_queue_wait_seconds` | histogram | — | Seconds spent waiting for a KDF permit (successful acquisitions only) |
 | `hearth_kdf_compute_seconds` | histogram | — | Wall-clock seconds for one Argon2id operation (excludes queue wait) |
 | `hearth_kdf_shed_total` | counter | — | Argon2id operations shed (`503`/`Retry-After`) due to a full KDF queue (HEA-1887) |
+| `hearth_user_create_in_flight` | gauge | — | User creates holding a user-create admission permit (#446) |
+| `hearth_user_create_permits` | gauge | — | Configured max concurrent user creates (`operational.user_create.max_in_flight`) |
+| `hearth_user_create_queue_wait_seconds` | histogram | — | Seconds a user create waited for an admission permit (successful acquisitions only) |
+| `hearth_user_create_shed_total` | counter | — | User creates shed (`503`/`Retry-After`) because the user-create admission limit was full |
 | `hearth_cluster_forwarded_writes_total` | counter | `outcome` | Cluster mode: writes this node forwarded to the Raft leader, by outcome — a fixed set: `committed`, `not_applied_locally`, `not_leader`, `unreachable`, `busy`, `rejected`, `outcome_unknown` (all present at 0). See the clustering guide (H-3) |
 
 ### `observability`
@@ -362,6 +366,26 @@ Operational limits and timeouts.
 | `http2_keepalive_interval_secs` | integer | `30` | Seconds between HTTP/2 keep-alive `PING`s (HTTP(S) listener); a peer that does not acknowledge within 20 s is disconnected. `0` disables pings. |
 
 Together, `max_connections_per_ip`, `header_read_timeout_secs` and `tls_handshake_timeout_secs` stop one client from holding every connection slot with requests it never finishes (GA audit 2026-09-28, B6).
+
+#### `operational.user_create`
+
+Admission limit for user creation (#446). Every route that creates users takes a permit first: `POST /admin/users`, `POST /users`, `POST /admin/users/bulk` (`create`), `POST /admin/users/import`, `POST /scim/v2/Users`, self-registration (`POST /ui/register` and its realm-scoped twin), and the admin console's create-user form and CSV imports. A bulk call, a JSON import or a CSV import takes one permit for the whole batch. A create waits for a permit without holding a thread, for at most `max_queue_wait_ms`; past that it is shed with **`503 Service Unavailable` + `Retry-After`** (REST body: `"error": "user_create_overloaded"`, `"error_code": "HEARTH_RATE_LIMITED"`; SCIM: a SCIM error with status `503`). Creating a user hashes no password, so it takes no KDF permit (`security.password.kdf`); without this limit a provisioning job or SCIM sync could fill the blocking thread pool that password hashing shares and slow sign-in for everyone. A self-registration takes this permit before its KDF permit.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_in_flight` | integer | `64` | Maximum concurrent user creates. A queue depth, not a core count: a create spends most of its time waiting for an fsync. 64 permits sustain 600 creates/s (the rate measured on a 2-vCPU host) until a single create takes 107 ms, nine times the measured p99, and leave most of Tokio's 512 blocking threads to password hashing and storage. Must be greater than 0. |
+| `max_queue_wait_ms` | integer | `250` | Milliseconds a create waits for a permit before it is shed. A healthy create waits about one create latency, so only real overload reaches this. Must be greater than 0. |
+| `retry_after_secs` | integer | `1` | `Retry-After` value (seconds) on a shed response. |
+
+```yaml
+operational:
+  user_create:
+    max_in_flight: 64
+    max_queue_wait_ms: 250
+    retry_after_secs: 1
+```
+
+Observability: `hearth_user_create_in_flight`, `hearth_user_create_permits`, `hearth_user_create_queue_wait_seconds` and `hearth_user_create_shed_total` (see the [`/metrics`](#metrics) families table). A rising `hearth_user_create_shed_total` means creates arrive faster than storage completes them; raise `max_in_flight` only if logins stay fast while it rises.
 
 ```yaml
 operational:
@@ -2118,6 +2142,9 @@ Every field's default value at a glance.
 | `operational` | `header_read_timeout_secs` | `10` |
 | `operational` | `tls_handshake_timeout_secs` | `10` |
 | `operational` | `http2_keepalive_interval_secs` | `30` |
+| `operational.user_create` | `max_in_flight` | `64` |
+| `operational.user_create` | `max_queue_wait_ms` | `250` |
+| `operational.user_create` | `retry_after_secs` | `1` |
 | `branding` | `product_name` | `"Hearth"` |
 | `branding` | `theme` | `"ember"` |
 | `email` | `transport` | `"log"` |

@@ -5456,6 +5456,32 @@ fn register_pre_gate(
     })
 }
 
+/// Takes the user-create permit a registration holds for its whole create,
+/// Argon2id hash included (#446), or renders the themed `503` page with
+/// `Retry-After` when the user-create limit is full. Taken before the KDF
+/// permit, so a registration shed here never occupies a hashing slot.
+async fn admit_registration(
+    state: &WebState,
+    headers: &HeaderMap,
+    email: &str,
+    form_action: &str,
+) -> Result<crate::identity::UserCreatePermit, Response> {
+    match crate::identity::user_create_gate().admit().await {
+        Ok(permit) => Ok(permit),
+        Err(crate::identity::UserCreateGateError::Overloaded { retry_after }) => {
+            Err(kdf_shed_html_response(
+                state,
+                headers,
+                retry_after,
+                Some(email.to_string()),
+                None,
+                Some(form_action.to_string()),
+            ))
+        }
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+    }
+}
+
 /// Handles registration form submission (bare `/ui/register`).
 pub async fn register_submit(
     State(state): State<Arc<WebState>>,
@@ -5474,8 +5500,16 @@ pub async fn register_submit(
     let shed_email = form.email.trim().to_string();
     let shed_headers = headers.clone();
     let shed_action = format!("{}/register", prepared.action_prefix);
+    let create_permit =
+        match admit_registration(&shed_state, &shed_headers, &shed_email, &shed_action).await {
+            Ok(permit) => permit,
+            Err(resp) => return resp,
+        };
     match gate()
-        .run(move || register_submit_impl(state, headers, form, prepared, peer_addr))
+        .run(move || {
+            let _create_permit = create_permit;
+            register_submit_impl(state, headers, form, prepared, peer_addr)
+        })
         .await
     {
         Ok(resp) => resp,
@@ -5508,8 +5542,16 @@ pub async fn register_submit_scoped(
     let shed_email = form.email.trim().to_string();
     let shed_headers = headers.clone();
     let shed_action = format!("{}/register", prepared.action_prefix);
+    let create_permit =
+        match admit_registration(&shed_state, &shed_headers, &shed_email, &shed_action).await {
+            Ok(permit) => permit,
+            Err(resp) => return resp,
+        };
     match gate()
-        .run(move || register_submit_impl(state, headers, form, prepared, peer_addr))
+        .run(move || {
+            let _create_permit = create_permit;
+            register_submit_impl(state, headers, form, prepared, peer_addr)
+        })
         .await
     {
         Ok(resp) => resp,

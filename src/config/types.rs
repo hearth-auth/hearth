@@ -467,6 +467,70 @@ pub struct OperationalConfig {
     /// keep-alive pings.
     #[serde(default = "OperationalConfig::default_http2_keepalive_interval_secs")]
     pub http2_keepalive_interval_secs: u64,
+    /// Admission limit for user creation (#446). See
+    /// [`UserCreateAdmissionConfig`].
+    #[serde(default)]
+    pub user_create: UserCreateAdmissionConfig,
+}
+
+/// `operational.user_create` — admission limit for user creation (#446).
+///
+/// Every route that creates users (admin API, `POST /users`, bulk and JSON
+/// import, SCIM, self-registration, the admin console) takes a permit first.
+/// A create waits at most `max_queue_wait_ms` for one and is then shed with
+/// `503` + `Retry-After`, so a provisioning burst cannot fill the blocking
+/// pool that password hashing shares.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UserCreateAdmissionConfig {
+    /// Maximum concurrent user creates. A queue depth, not a core count: a
+    /// create mostly waits for an fsync. Default:
+    /// [`crate::identity::DEFAULT_USER_CREATE_MAX_IN_FLIGHT`]. MUST be `>= 1`.
+    #[serde(default = "UserCreateAdmissionConfig::default_max_in_flight")]
+    pub max_in_flight: usize,
+    /// Maximum milliseconds a create waits for a permit before it is shed.
+    /// Default: [`crate::identity::DEFAULT_USER_CREATE_MAX_QUEUE_WAIT_MS`].
+    /// MUST be `>= 1`.
+    #[serde(default = "UserCreateAdmissionConfig::default_max_queue_wait_ms")]
+    pub max_queue_wait_ms: u64,
+    /// `Retry-After` (seconds) advertised on a shed response. Default: `1`.
+    #[serde(default = "UserCreateAdmissionConfig::default_retry_after_secs")]
+    pub retry_after_secs: u64,
+}
+
+impl UserCreateAdmissionConfig {
+    const fn default_max_in_flight() -> usize {
+        crate::identity::DEFAULT_USER_CREATE_MAX_IN_FLIGHT
+    }
+
+    const fn default_max_queue_wait_ms() -> u64 {
+        crate::identity::DEFAULT_USER_CREATE_MAX_QUEUE_WAIT_MS
+    }
+
+    const fn default_retry_after_secs() -> u64 {
+        1
+    }
+
+    /// Resolves this block into the identity layer's gate configuration.
+    /// Assumes validation already rejected a `0` bound or queue wait.
+    #[must_use]
+    pub fn resolve(&self) -> crate::identity::UserCreateGateConfig {
+        crate::identity::UserCreateGateConfig {
+            max_in_flight: self.max_in_flight,
+            max_queue_wait: std::time::Duration::from_millis(self.max_queue_wait_ms),
+            retry_after: std::time::Duration::from_secs(self.retry_after_secs),
+        }
+    }
+}
+
+impl Default for UserCreateAdmissionConfig {
+    fn default() -> Self {
+        Self {
+            max_in_flight: Self::default_max_in_flight(),
+            max_queue_wait_ms: Self::default_max_queue_wait_ms(),
+            retry_after_secs: Self::default_retry_after_secs(),
+        }
+    }
 }
 
 impl OperationalConfig {
@@ -514,6 +578,7 @@ impl Default for OperationalConfig {
             tls_handshake_timeout_secs: Self::default_tls_handshake_timeout_secs(),
             max_connections_per_ip: Self::default_max_connections_per_ip(),
             http2_keepalive_interval_secs: Self::default_http2_keepalive_interval_secs(),
+            user_create: UserCreateAdmissionConfig::default(),
         }
     }
 }
@@ -4151,6 +4216,9 @@ mod tests {
         assert_eq!(cfg.shutdown_timeout_secs, 10);
         assert_eq!(cfg.max_connections, 1024);
         assert_eq!(cfg.queue_depth, 4096);
+        assert_eq!(cfg.user_create.max_in_flight, 64);
+        assert_eq!(cfg.user_create.max_queue_wait_ms, 250);
+        assert_eq!(cfg.user_create.retry_after_secs, 1);
     }
 
     #[test]

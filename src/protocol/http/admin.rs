@@ -818,11 +818,36 @@ async fn admin_import_users(
             .into_response();
     }
 
+    // An import creates users: it takes one user-create permit and runs on the
+    // blocking pool (#446), not inline on an async worker.
+    let identity = Arc::clone(&state.identity);
+    let realm_id = auth.realm_id.clone();
+    let users = body.users;
+    match super::run_user_create_admitted(
+        move || import_users_blocking(identity.as_ref(), &realm_id, &users),
+        |e| {
+            tracing::error!(error = %e, "admin_import_users task failed");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        },
+    )
+    .await
+    {
+        Ok(resp) | Err(resp) => resp,
+    }
+}
+
+/// The blocking body of `POST /admin/users/import`: imports each entry and
+/// reports per-entry results. Runs under a user-create permit.
+fn import_users_blocking(
+    identity: &dyn crate::identity::IdentityEngine,
+    realm_id: &RealmId,
+    users: &[ImportUserEntry],
+) -> Response {
     let mut imported = 0u32;
     let mut failed = 0u32;
     let mut results = Vec::new();
 
-    for entry in &body.users {
+    for entry in users {
         let status = match entry.status.as_deref().unwrap_or("active") {
             "active" => crate::identity::UserStatus::Active,
             "disabled" => crate::identity::UserStatus::Disabled,
@@ -848,7 +873,7 @@ async fn admin_import_users(
             attributes: entry.attributes.clone(),
         };
 
-        match state.identity.import_user(&auth.realm_id, &req) {
+        match identity.import_user(realm_id, &req) {
             Ok(u) => {
                 imported += 1;
                 results.push(serde_json::json!({
@@ -994,21 +1019,27 @@ async fn admin_create_user(
     let realm_id = auth.realm_id.clone();
     let admin_actor = auth.user_id.clone();
     // Creating a user hashes nothing (the request carries no password), so it
-    // runs on the blocking pool without a KDF permit: under the gate, the
-    // storage write held one of the few Argon2 permits and concurrent creates
-    // were shed with `503` while the CPU sat idle.
-    let result = tokio::task::spawn_blocking(move || {
-        let audit_ctx = AuditContext {
-            actor: Actor::User(admin_actor),
-            metadata: Some(serde_json::json!({"via": "admin_api"})),
-        };
-        identity.create_user_attributed(&realm_id, &request, &audit_ctx)
-    })
+    // takes no KDF permit (#439). It takes a user-create permit instead (#446):
+    // a provisioning burst waits for one asynchronously and is shed with `503`
+    // past the queue wait, rather than filling the blocking pool logins share.
+    let result = match super::run_user_create_admitted(
+        move || {
+            let audit_ctx = AuditContext {
+                actor: Actor::User(admin_actor),
+                metadata: Some(serde_json::json!({"via": "admin_api"})),
+            };
+            identity.create_user_attributed(&realm_id, &request, &audit_ctx)
+        },
+        |e| {
+            tracing::error!(error = %e, "admin_create_user task failed");
+            Err(crate::identity::IdentityError::Storage(Box::new(e)))
+        },
+    )
     .await
-    .unwrap_or_else(|e| {
-        tracing::error!(error = %e, "admin_create_user task failed");
-        Err(crate::identity::IdentityError::Storage(Box::new(e)))
-    });
+    {
+        Ok(r) => r,
+        Err(shed) => return shed,
+    };
 
     match result {
         Ok(user) => (
@@ -1200,7 +1231,23 @@ async fn admin_bulk_users(
                 .map(crate::identity::CreateUserRequest::from)
                 .collect();
 
-            match state.identity.bulk_create_users(&auth.realm_id, &requests) {
+            // A bulk create takes one user-create permit and runs on the
+            // blocking pool (#446), not inline on an async worker.
+            let identity = Arc::clone(&state.identity);
+            let realm_id = auth.realm_id.clone();
+            let outcome = match super::run_user_create_admitted(
+                move || identity.bulk_create_users(&realm_id, &requests),
+                |e| {
+                    tracing::error!(error = %e, "admin_bulk_users create task failed");
+                    Err(crate::identity::IdentityError::Storage(Box::new(e)))
+                },
+            )
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(shed) => return shed,
+            };
+            match outcome {
                 Ok(results) => {
                     crate::protocol::audit_log::record(
                         state.audit.as_ref(),

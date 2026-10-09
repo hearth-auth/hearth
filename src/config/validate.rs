@@ -483,6 +483,20 @@ impl Config {
                 reason: "must be greater than 0".to_string(),
             });
         }
+        // #446: a bound of 0 would refuse every user create, and a 0 ms queue
+        // wait would shed every create that meets another one.
+        if self.operational.user_create.max_in_flight == 0 {
+            issues.push(ValidationIssue {
+                field: "operational.user_create.max_in_flight".to_string(),
+                reason: "must be greater than 0".to_string(),
+            });
+        }
+        if self.operational.user_create.max_queue_wait_ms == 0 {
+            issues.push(ValidationIssue {
+                field: "operational.user_create.max_queue_wait_ms".to_string(),
+                reason: "must be greater than 0".to_string(),
+            });
+        }
         // B6: a zero budget would close every connection before its first
         // request, and "no timeout" is exactly the defect being closed.
         if self.operational.header_read_timeout_secs == 0 {
@@ -3978,6 +3992,36 @@ realms:
                 "{field} = 0 must be refused; issues: {fields:?}"
             );
         }
+    }
+
+    // ── #446: user-create admission limit ──────────────────────────────────
+
+    #[test]
+    fn a_zero_user_create_bound_or_queue_wait_is_refused() {
+        let mut config = Config::dev();
+        config.operational.user_create.max_in_flight = 0;
+        config.operational.user_create.max_queue_wait_ms = 0;
+        let fields: Vec<String> = config.validate_all().into_iter().map(|i| i.field).collect();
+        for field in [
+            "operational.user_create.max_in_flight",
+            "operational.user_create.max_queue_wait_ms",
+        ] {
+            assert!(
+                fields.iter().any(|f| f == field),
+                "{field} = 0 must be refused; issues: {fields:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn operational_user_create_parses_and_resolves() {
+        let yaml = "operational:\n  user_create:\n    max_in_flight: 8\n    \
+                    max_queue_wait_ms: 40\n    retry_after_secs: 5\n";
+        let config = Config::from_yaml_str_unchecked(yaml).expect("parse");
+        let gate = config.operational.user_create.resolve();
+        assert_eq!(gate.max_in_flight, 8);
+        assert_eq!(gate.max_queue_wait, std::time::Duration::from_millis(40));
+        assert_eq!(gate.retry_after, std::time::Duration::from_secs(5));
     }
 
     // ── GA audit 2026-09-28 OPS-11: non-UTF-8 HEARTH_KEK ────────────────────

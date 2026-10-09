@@ -38,6 +38,7 @@ pub mod tool_permissions;
 pub(crate) mod totp;
 mod types;
 pub mod user_code;
+pub mod user_create_gate;
 mod validation;
 pub(crate) mod webauthn;
 
@@ -146,6 +147,11 @@ pub use types::{
     RegisterSpiffeIdRequest, RetiringSigningKeyExport, RevocationExport, Rfc8693Request,
     Rfc8693Response, SpiffeIdentityMapping, StoredDelegationGrant, TransactionTokenClaims,
     TransactionTokenResponse, UpdateAgentRequest, UpdateProtectedResourceRequest,
+};
+pub use user_create_gate::{
+    init_user_create_gate, user_create_gate, UserCreateGate, UserCreateGateConfig,
+    UserCreateGateError, UserCreatePermit, DEFAULT_USER_CREATE_MAX_IN_FLIGHT,
+    DEFAULT_USER_CREATE_MAX_QUEUE_WAIT_MS,
 };
 pub use validation::fuzz_validate_redirect_uri;
 pub use webauthn::{

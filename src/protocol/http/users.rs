@@ -57,21 +57,27 @@ async fn create_user(
     let realm_id = auth.realm_id.clone();
     let admin_actor = auth.user_id.clone();
     // Creating a user hashes nothing (the request carries no password), so it
-    // runs on the blocking pool without a KDF permit: under the gate, the
-    // storage write held one of the few Argon2 permits and concurrent creates
-    // were shed with `503` while the CPU sat idle.
-    let result = tokio::task::spawn_blocking(move || {
-        let audit_ctx = AuditContext {
-            actor: Actor::User(admin_actor),
-            metadata: Some(serde_json::json!({"via": "user_api"})),
-        };
-        identity.create_user_attributed(&realm_id, &request, &audit_ctx)
-    })
+    // takes no KDF permit (#439). It takes a user-create permit instead (#446):
+    // a provisioning burst waits for one asynchronously and is shed with `503`
+    // past the queue wait, rather than filling the blocking pool logins share.
+    let result = match super::run_user_create_admitted(
+        move || {
+            let audit_ctx = AuditContext {
+                actor: Actor::User(admin_actor),
+                metadata: Some(serde_json::json!({"via": "user_api"})),
+            };
+            identity.create_user_attributed(&realm_id, &request, &audit_ctx)
+        },
+        |e| {
+            tracing::error!(error = %e, "create_user task failed");
+            Err(crate::identity::IdentityError::Storage(Box::new(e)))
+        },
+    )
     .await
-    .unwrap_or_else(|e| {
-        tracing::error!(error = %e, "create_user task failed");
-        Err(crate::identity::IdentityError::Storage(Box::new(e)))
-    });
+    {
+        Ok(r) => r,
+        Err(shed) => return shed,
+    };
 
     match result {
         Ok(user) => (

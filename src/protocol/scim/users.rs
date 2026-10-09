@@ -195,6 +195,35 @@ pub async fn create_user(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    // A SCIM sync is a provisioning burst: each create takes a user-create
+    // permit and runs on the blocking pool (#446). Past the queue wait it is
+    // shed with `503` + `Retry-After`, which SCIM clients retry.
+    match crate::identity::user_create_gate()
+        .run(move || create_user_admitted(&state, &auth, &body))
+        .await
+    {
+        Ok(resp) => resp,
+        Err(crate::identity::UserCreateGateError::Overloaded { retry_after }) => {
+            let mut resp = ScimError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Server is busy creating other users. Please retry shortly.",
+            )
+            .into_response();
+            resp.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                HeaderValue::from(retry_after.as_secs().max(1)),
+            );
+            resp
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "SCIM create_user task failed");
+            ScimError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+        }
+    }
+}
+
+/// The blocking body of `POST /scim/v2/Users`, run under a user-create permit.
+fn create_user_admitted(state: &AppState, auth: &ScimAuth, body: &ScimUser) -> Response {
     let _span = tracing::info_span!(
         "hearth.scim.users.create",
         "hearth.realm_id" = %auth.realm_id,
@@ -217,8 +246,8 @@ pub async fn create_user(
         }
     }
 
-    let email = primary_email(&body);
-    let (first_name, last_name) = match require_name(&body) {
+    let email = primary_email(body);
+    let (first_name, last_name) = match require_name(body) {
         Ok(v) => v,
         Err(e) => return e.into_response(),
     };
@@ -268,7 +297,7 @@ pub async fn create_user(
         .unwrap_or(user.clone());
 
     audit(
-        &state,
+        state,
         &auth.realm_id,
         &auth.actor,
         AuditAction::ScimUserCreated,

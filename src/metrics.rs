@@ -353,6 +353,24 @@ pub struct Metrics {
     /// shedding — without conflating it with tenant-realm login sheds.
     pub kdf_admin_shed_total: Counter,
 
+    // ── User-create admission control (#446) ─────────────────────────────────
+    /// User creates currently holding a user-create admission permit (running
+    /// or waiting for a blocking-pool thread). Bounded above by
+    /// `hearth_user_create_permits`.
+    pub user_create_in_flight: Gauge,
+
+    /// Configured maximum concurrent user creates
+    /// (`operational.user_create.max_in_flight`).
+    pub user_create_permits: Gauge,
+
+    /// Seconds a user create waited for an admission permit (successful
+    /// acquisitions only).
+    pub user_create_queue_wait_seconds: Histogram,
+
+    /// User creates shed (`503`/`Retry-After`) because no admission permit
+    /// freed within `operational.user_create.max_queue_wait_ms`.
+    pub user_create_shed_total: Counter,
+
     /// Total control-epoch bumps that could not be persisted.
     ///
     /// A control (token or session revocation, DPoP key block, realm status
@@ -841,6 +859,45 @@ impl Metrics {
             .register(Box::new(kdf_admin_shed_total.clone()))
             .expect("metric registration succeeds on a fresh registry");
 
+        let user_create_in_flight = Gauge::new(
+            "hearth_user_create_in_flight",
+            "User creates currently holding a user-create admission permit",
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(user_create_in_flight.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
+        let user_create_permits = Gauge::new(
+            "hearth_user_create_permits",
+            "Configured maximum concurrent user creates (permit count)",
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(user_create_permits.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
+        let user_create_queue_wait_seconds = Histogram::with_opts(
+            HistogramOpts::new(
+                "hearth_user_create_queue_wait_seconds",
+                "Seconds a user create waited for an admission permit (successful acquisitions only)",
+            )
+            .buckets(KDF_QUEUE_WAIT_BUCKETS.to_vec()),
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(user_create_queue_wait_seconds.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
+        let user_create_shed_total = Counter::new(
+            "hearth_user_create_shed_total",
+            "Total user creates shed (503/Retry-After) because the user-create admission limit was full",
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(user_create_shed_total.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
         let control_epoch_bump_failures_total = Counter::new(
             "hearth_control_epoch_bump_failures_total",
             "Control-epoch bumps that could not be persisted (other nodes miss the control \
@@ -914,6 +971,10 @@ impl Metrics {
             kdf_compute_seconds,
             kdf_shed_total,
             kdf_admin_shed_total,
+            user_create_in_flight,
+            user_create_permits,
+            user_create_queue_wait_seconds,
+            user_create_shed_total,
             control_epoch_bump_failures_total,
             control_epoch_bumps_owed,
             cluster_forwarded_writes_total,
