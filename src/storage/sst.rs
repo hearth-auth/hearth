@@ -57,6 +57,7 @@ use crate::storage::encryption::{
 };
 use crate::storage::error::StorageError;
 use crate::storage::fs::{FileBacking, Fs, FsFile, RealFs};
+use crate::storage::key_merge::KeyCursor;
 use crate::storage::memtable::{CompositeKey, MemtableValue};
 
 /// SST format V1 magic bytes — original format, no bloom filter.
@@ -741,6 +742,96 @@ impl SstWriter {
     }
 }
 
+/// A position in one SST's keys within a realm's window; see
+/// [`SstReader::key_cursor`].
+pub(crate) enum SstKeyCursor<'a> {
+    /// The window is exhausted, or the SST never overlapped it.
+    Done,
+    /// A V1/V2 SST: the window's resident entries not yet visited.
+    Eager {
+        /// Remaining entries, all inside the window.
+        entries: &'a [(CompositeKey, MemtableValue)],
+    },
+    /// A V3 SST, read one block at a time.
+    Blocked(BlockedKeyCursor<'a>),
+}
+
+/// The V3 state of an [`SstKeyCursor`].
+pub(crate) struct BlockedKeyCursor<'a> {
+    body: &'a BlockedBody,
+    sst_number: u64,
+    /// The window's exclusive upper bound.
+    end: CompositeKey,
+    /// The block `block` was fetched from.
+    block_index: usize,
+    /// The current block, or `None` once the window is exhausted.
+    block: Option<Arc<CachedBlock>>,
+    /// The current entry's position in `block`.
+    pos: usize,
+}
+
+impl BlockedKeyCursor<'_> {
+    /// Fetches block `block_index`, or ends the walk when no such block
+    /// exists or it starts at or after the window's end.
+    fn load_block(&mut self) -> Result<(), StorageError> {
+        self.block = match self.body.index.get(self.block_index) {
+            Some(entry) if entry.first_key < self.end => {
+                Some(self.body.fetch_block(self.block_index, self.sst_number)?)
+            }
+            _ => None,
+        };
+        self.pos = 0;
+        Ok(())
+    }
+
+    /// Moves past the end of an exhausted block into the next one, and ends
+    /// the walk at the window's end.
+    fn settle(&mut self) -> Result<(), StorageError> {
+        loop {
+            let Some(block) = &self.block else {
+                return Ok(());
+            };
+            match block.entries.get(self.pos) {
+                Some((key, _)) => {
+                    if key >= &self.end {
+                        self.block = None;
+                    }
+                    return Ok(());
+                }
+                None => {
+                    self.block_index += 1;
+                    self.load_block()?;
+                }
+            }
+        }
+    }
+}
+
+impl KeyCursor for SstKeyCursor<'_> {
+    fn current(&self) -> Option<(&[u8], bool)> {
+        let (key, value) = match self {
+            Self::Done => return None,
+            Self::Eager { entries } => entries.first()?,
+            Self::Blocked(blocked) => blocked.block.as_ref()?.entries.get(blocked.pos)?,
+        };
+        Some((key.key(), matches!(value, MemtableValue::Data(_))))
+    }
+
+    fn advance(&mut self) -> Result<(), StorageError> {
+        match self {
+            Self::Done => Ok(()),
+            Self::Eager { entries } => {
+                *entries = entries.get(1..).unwrap_or_default();
+                Ok(())
+            }
+            Self::Blocked(blocked) => {
+                blocked.pos += 1;
+                blocked.settle()
+            }
+        }
+    }
+}
+
 /// Backing representation of an SST reader's entries.
 enum SstBody {
     /// V1/V2 legacy formats: all entries eagerly decrypted and resident.
@@ -1362,6 +1453,59 @@ impl SstReader {
                     bi += 1;
                 }
                 Ok(out)
+            }
+        }
+    }
+
+    /// A cursor over this SST's keys in a realm's `[start_key, end_key)`
+    /// window, for a streaming key walk: it holds one decrypted block at a
+    /// time and copies no key (#447).
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::InvalidRange`] for a reversed window, or the error
+    /// fetching the window's first block.
+    pub(crate) fn key_cursor(
+        &self,
+        realm_id: &RealmId,
+        start_key: &[u8],
+        end_key: &[u8],
+    ) -> Result<SstKeyCursor<'_>, StorageError> {
+        // The same reversed-window guard as `range_scan_inner` (audit §4.9#7).
+        if start_key > end_key {
+            return Err(StorageError::InvalidRange);
+        }
+        if !self.overlaps_range(realm_id, start_key, end_key) {
+            return Ok(SstKeyCursor::Done);
+        }
+        let start = CompositeKey::new(realm_id.clone(), start_key.to_vec());
+        let end = CompositeKey::new(realm_id.clone(), end_key.to_vec());
+        match &self.body {
+            SstBody::Eager(entries) => {
+                let lo = entries.partition_point(|(k, _)| k < &start);
+                let hi = entries.partition_point(|(k, _)| k < &end);
+                Ok(SstKeyCursor::Eager {
+                    entries: &entries[lo..hi],
+                })
+            }
+            SstBody::Blocked(body) => {
+                // The block that may hold `start`, or block 0 when `start`
+                // precedes every block.
+                let block_index = body.block_for_key(realm_id, start_key).unwrap_or(0);
+                let mut blocked = BlockedKeyCursor {
+                    body,
+                    sst_number: self.sst_number,
+                    end,
+                    block_index,
+                    block: None,
+                    pos: 0,
+                };
+                blocked.load_block()?;
+                if let Some(block) = &blocked.block {
+                    blocked.pos = block.entries.partition_point(|(k, _)| k < &start);
+                }
+                blocked.settle()?;
+                Ok(SstKeyCursor::Blocked(blocked))
             }
         }
     }
@@ -3461,5 +3605,79 @@ mod tests {
             "cache residency {} exceeds cap + slack",
             cache.resident_bytes()
         );
+    }
+
+    /// Every key and live flag a cursor walks over `[start, end)`.
+    fn walk_cursor(
+        reader: &SstReader,
+        realm: &RealmId,
+        start: &[u8],
+        end: &[u8],
+    ) -> Vec<(Vec<u8>, bool)> {
+        let mut cursor = reader.key_cursor(realm, start, end).expect("key_cursor");
+        let mut out = Vec::new();
+        while let Some((key, alive)) = cursor.current() {
+            out.push((key.to_vec(), alive));
+            cursor.advance().expect("advance");
+        }
+        out
+    }
+
+    /// The streaming key cursor (#447) walks exactly what `range_scan_keys`
+    /// collects — tombstones flagged, windows starting and ending inside and
+    /// between blocks — on a V3 blocked SST and on a legacy eager one.
+    #[test]
+    fn key_cursor_walks_what_range_scan_keys_collects() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let realm = RealmId::generate();
+        let other_realm = RealmId::generate();
+        let mut entries = fixed_entries(&realm, 400);
+        for (i, (_, value)) in entries.iter_mut().enumerate() {
+            if i % 7 == 0 {
+                *value = MemtableValue::Tombstone;
+            }
+        }
+        let (dek, enc) = test_encryption_context();
+        let blocked_path = dir.path().join("cursor_v3.sst");
+        SstWriter::write_sst(&blocked_path, &entries, 1, &dek, &enc).expect("write v3");
+        let eager_path = dir.path().join("cursor_v2.sst");
+        write_v2_manual(&eager_path, &entries, 2, &dek, &enc);
+        let blocked = SstReader::open(&blocked_path, 1, &dek).expect("open v3");
+        let eager = SstReader::open(&eager_path, 2, &dek).expect("open v2");
+        assert!(
+            matches!(&blocked.body, SstBody::Blocked(body) if body.index.len() > 3),
+            "precondition: a V3 SST of several blocks"
+        );
+        assert!(
+            matches!(eager.body, SstBody::Eager(_)),
+            "precondition: eager"
+        );
+
+        let windows: [(&[u8], &[u8]); 6] = [
+            (b"k", b"l"),
+            (b"k000123", b"k000321"),
+            (b"k000050", b"k000051"),
+            (b"k000050", b"k000050"),
+            (b"a", b"b"),
+            (b"k000399", b"z"),
+        ];
+        for (kind, reader) in [("blocked", &blocked), ("eager", &eager)] {
+            for (start, end) in windows {
+                assert_eq!(
+                    walk_cursor(reader, &realm, start, end),
+                    reader
+                        .range_scan_keys(&realm, start, end)
+                        .expect("range_scan_keys"),
+                    "window {:?}..{:?} on the {kind} SST",
+                    String::from_utf8_lossy(start),
+                    String::from_utf8_lossy(end),
+                );
+            }
+            assert_eq!(walk_cursor(reader, &other_realm, b"k", b"l"), Vec::new());
+            assert!(matches!(
+                reader.key_cursor(&realm, b"k000150", b"k000050"),
+                Err(StorageError::InvalidRange)
+            ));
+        }
     }
 }

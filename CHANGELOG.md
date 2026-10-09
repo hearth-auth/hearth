@@ -357,6 +357,12 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   inside `assertion`, is refused instead of being read with the field dropped.
 
 ### Fixed
+- **Paging through `GET /admin/users` no longer costs memory for every user in the realm.**
+  Each page collected every user key in the realm to compute `total` — about 100 MB per
+  request at 1,000,000 users, even for a 200-row page. The total is now counted without
+  keeping the keys and only the requested page is read, so a page costs memory for its own
+  rows. `total` is still the exact number of users. The same applies to the other admin
+  lists that report a total, such as clients and organizations. (#447)
 - **A token refresh no longer records a `session_created` audit event.** Every refresh-token
   rotation logged `session_created` next to `token_refreshed`, so the audit log, and webhooks
   subscribed to `session_created`, over-reported sign-ins by one per refresh. A refresh now

@@ -1997,6 +1997,22 @@ impl StorageEngine for ClusterStorageAdapter {
         .map_err(cluster_to_storage_err)
     }
 
+    /// Forwarded so the inner engine's streaming key merge runs; the trait
+    /// default collects the range through [`Self::scan_keys`] first (#447).
+    fn visit_keys(
+        &self,
+        realm_id: &RealmId,
+        start: &[u8],
+        end: &[u8],
+        visit: &mut dyn FnMut(&[u8]) -> std::ops::ControlFlow<()>,
+    ) -> Result<(), crate::storage::StorageError> {
+        tokio::task::block_in_place(|| {
+            self.engine
+                .read_inline(|inner| inner.visit_keys(realm_id, start, end, visit))
+        })
+        .map_err(cluster_to_storage_err)
+    }
+
     /// Forwarded to the inner engine; see [`Self::scan_keys`].
     fn count_prefix(
         &self,
@@ -2363,7 +2379,7 @@ mod tests {
         );
     }
 
-    /// The adapter's key-only scans (`scan_keys`, `count_prefix`,
+    /// The adapter's key-only scans (`scan_keys`, `visit_keys`, `count_prefix`,
     /// `scan_prefix_paged`) answer exactly what the inner engine answers,
     /// tombstones included — they are forwarded, not rebuilt from `scan`.
     #[tokio::test(flavor = "multi_thread")]
@@ -2382,6 +2398,14 @@ mod tests {
         let keys = adapter.scan_keys(&realm, b"p:", b"p;").unwrap();
         assert_eq!(keys, vec![b"p:a".to_vec(), b"p:c".to_vec()]);
         assert_eq!(keys, inner.scan_keys(&realm, b"p:", b"p;").unwrap());
+        let mut visited = Vec::new();
+        adapter
+            .visit_keys(&realm, b"p:", b"p;", &mut |key| {
+                visited.push(key.to_vec());
+                std::ops::ControlFlow::Continue(())
+            })
+            .unwrap();
+        assert_eq!(visited, keys);
         assert_eq!(adapter.count_prefix(&realm, b"p:", 0).unwrap(), 2);
         assert_eq!(adapter.count_prefix(&realm, b"p:", 1).unwrap(), 1);
         let (window, total) = adapter.scan_prefix_paged(&realm, b"p:", 1, 5, 0).unwrap();

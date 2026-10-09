@@ -51,6 +51,7 @@ use crossbeam_skiplist::SkipMap;
 use crate::core::{EpochCell, EpochCellOption, RealmId};
 use crate::metrics::MemtableStateLabel;
 use crate::storage::error::StorageError;
+use crate::storage::key_merge::KeyCursor;
 use crate::storage::wal::{WalEntry, WalOperation};
 
 /// Composite key combining realm identity with a data key.
@@ -622,6 +623,17 @@ impl Memtable {
             .collect()
     }
 
+    /// The memtable's maps at this instant, for a key walk that outlives one
+    /// call: the active map, then the map parked for flushing, if any.
+    ///
+    /// Loaded in the order every scan uses — active first — and owned, so a
+    /// flush that swaps them during the walk cannot pull keys from under it.
+    pub(crate) fn maps(&self) -> MemtableMaps {
+        let active = self.data.load_full();
+        let parked = self.flushing.load_full();
+        MemtableMaps { active, parked }
+    }
+
     /// Returns the set of distinct realm IDs present in the memtable.
     ///
     /// Scans both the active map and the map currently being flushed to an SST
@@ -750,6 +762,60 @@ impl Memtable {
             self.approximate_size
                 .fetch_sub(old_size - new_size, Ordering::Relaxed);
         }
+    }
+}
+
+/// One backing map of the memtable.
+pub(crate) type MemtableMap = SkipMap<CompositeKey, MemtableValue>;
+
+/// The memtable's maps at one instant, newest first (see [`Memtable::maps`]).
+pub(crate) struct MemtableMaps {
+    /// The map writes go to.
+    pub(crate) active: Arc<MemtableMap>,
+    /// The map being flushed to an SST, older than `active`.
+    pub(crate) parked: Option<Arc<MemtableMap>>,
+}
+
+/// A position in one memtable map, restricted to a realm's `[start, end)`
+/// window. Walks the live skiplist without copying it: each step holds one
+/// entry, and no epoch pin is held between steps.
+pub(crate) struct MemtableKeyCursor<'a> {
+    range: crossbeam_skiplist::map::Range<
+        'a,
+        CompositeKey,
+        std::ops::Range<CompositeKey>,
+        CompositeKey,
+        MemtableValue,
+    >,
+    current: Option<crossbeam_skiplist::map::Entry<'a, CompositeKey, MemtableValue>>,
+}
+
+impl<'a> MemtableKeyCursor<'a> {
+    /// A cursor at the first key `>= start` of `realm_id` in `map`. The caller
+    /// guarantees `start <= end`.
+    pub(crate) fn new(map: &'a MemtableMap, realm_id: &RealmId, start: &[u8], end: &[u8]) -> Self {
+        let mut range = map.range(
+            CompositeKey::new(realm_id.clone(), start.to_vec())
+                ..CompositeKey::new(realm_id.clone(), end.to_vec()),
+        );
+        let current = range.next();
+        Self { range, current }
+    }
+}
+
+impl KeyCursor for MemtableKeyCursor<'_> {
+    fn current(&self) -> Option<(&[u8], bool)> {
+        self.current.as_ref().map(|entry| {
+            (
+                entry.key().key(),
+                matches!(entry.value(), MemtableValue::Data(_)),
+            )
+        })
+    }
+
+    fn advance(&mut self) -> Result<(), StorageError> {
+        self.current = self.range.next();
+        Ok(())
     }
 }
 

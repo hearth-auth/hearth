@@ -16,11 +16,13 @@ pub mod encryption;
 mod engine;
 pub mod error;
 pub mod fs;
+mod key_merge;
 #[allow(dead_code)]
 pub(crate) mod key_registry;
 #[allow(dead_code)]
 pub(crate) mod memtable;
 pub mod migrations;
+mod paging;
 #[allow(dead_code)]
 pub(crate) mod sst;
 #[allow(dead_code)]
@@ -303,27 +305,43 @@ pub trait StorageEngine: Send + Sync {
         Ok(entries.into_iter().map(|e| e.key).collect())
     }
 
+    /// Visits, in key order, every live key in `[start, end)` for the given
+    /// realm, one at a time, until the range ends or `visit` breaks.
+    ///
+    /// Unlike [`scan_keys`](Self::scan_keys), nothing is collected: a walk over
+    /// a million keys holds one key at a time. `count_prefix` and
+    /// `scan_prefix_paged` are built on it, so an admin list page costs memory
+    /// for the page it serves, not for every record in the realm (#447).
+    ///
+    /// The default implementation collects the range with `scan_keys` and then
+    /// visits it, so its memory still grows with the range.
+    /// [`EmbeddedStorageEngine`] overrides it with a streaming merge of the
+    /// memtable and the SSTs.
+    fn visit_keys(
+        &self,
+        realm_id: &RealmId,
+        start: &[u8],
+        end: &[u8],
+        visit: &mut dyn FnMut(&[u8]) -> std::ops::ControlFlow<()>,
+    ) -> Result<(), StorageError> {
+        paging::visit_collected_keys(self, realm_id, start, end, visit)
+    }
+
     /// Counts entries whose key starts with `prefix` for the given realm.
     ///
     /// A `cap` of `0` means **no ceiling** — return the exact count. A non-zero
     /// `cap` truncates the reported count to `cap` (callers may then display
-    /// e.g. "N+" to make the ceiling visible). The full prefix scan runs
-    /// regardless; the cap only bounds the reported number.
+    /// e.g. "N+" to make the ceiling visible), and the walk stops there.
     ///
-    /// Uses a key-only scan to avoid materialising value bytes.
+    /// Walks the keys with [`visit_keys`](Self::visit_keys) without keeping
+    /// them or reading any value.
     fn count_prefix(
         &self,
         realm_id: &RealmId,
         prefix: &[u8],
         cap: u64,
     ) -> Result<u64, StorageError> {
-        if prefix.is_empty() {
-            return Ok(0);
-        }
-        let end = prefix_scan_end(prefix);
-        let keys = self.scan_keys(realm_id, prefix, &end)?;
-        let n = keys.len() as u64;
-        Ok(if cap == 0 { n } else { n.min(cap) })
+        paging::count_prefix(self, realm_id, prefix, cap)
     }
 
     /// Scans a key prefix with offset-based pagination, returning the items
@@ -338,9 +356,9 @@ pub trait StorageEngine: Send + Sync {
     /// The item window is always exact. Only the reported `total` is subject to
     /// `cap`.
     ///
-    /// Two-phase implementation: key-only scan for the total (no value bytes
-    /// allocated for out-of-window entries), then a bounded value scan covering
-    /// only the `limit` window entries.
+    /// One [`visit_keys`](Self::visit_keys) walk counts the total and finds the
+    /// window's bounds without keeping the other keys; a value scan then reads
+    /// only the window. Memory follows `limit`, not the prefix (#447).
     fn scan_prefix_paged(
         &self,
         realm_id: &RealmId,
@@ -349,36 +367,7 @@ pub trait StorageEngine: Send + Sync {
         limit: u32,
         cap: u64,
     ) -> Result<(Vec<ScanEntry>, u64), StorageError> {
-        if prefix.is_empty() {
-            return Ok((vec![], 0));
-        }
-        let prefix_end = prefix_scan_end(prefix);
-
-        // Phase 1: key-only scan for total (no value bytes allocated).
-        let all_keys = self.scan_keys(realm_id, prefix, &prefix_end)?;
-        let n = all_keys.len() as u64;
-        let total = if cap == 0 { n } else { n.min(cap) };
-
-        // Phase 2: bounded value scan for the window only.
-        let start_idx = (offset as usize).min(all_keys.len());
-        let end_idx = (start_idx + limit as usize).min(all_keys.len());
-
-        if start_idx >= end_idx {
-            return Ok((vec![], total));
-        }
-
-        // Bound the scan to exactly the window keys. `win_end` is either the
-        // key immediately after the window (exclusive) or the prefix sentinel.
-        let win_start = &all_keys[start_idx];
-        let win_end: Vec<u8> = if end_idx < all_keys.len() {
-            all_keys[end_idx].clone()
-        } else {
-            prefix_end
-        };
-
-        // This scan processes only O(limit) entries instead of O(N).
-        let window = self.scan(realm_id, win_start, &win_end)?;
-        Ok((window, total))
+        paging::scan_prefix_paged(self, realm_id, prefix, offset, limit, cap)
     }
 
     /// Atomically writes a batch of puts and deletes for a single realm.
