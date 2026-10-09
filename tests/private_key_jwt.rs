@@ -721,12 +721,15 @@ async fn assertion_excessive_lifetime_rejected() {
     let env = setup_cc_client().await;
     let aud = token_endpoint_aud(&env.harness, &env.realm);
 
-    // exp = now + 301 seconds — just over the 5-minute ceiling.
+    // exp = now + 600 seconds — 2x the 300-second ceiling. The server reads its
+    // own clock after the test does, so a margin of 1 s (the original 301) let a
+    // second boundary between the two reads make the lifetime exactly 300 and the
+    // assertion pass (#449).
     let assertion = make_assertion(
         &env.auth_key,
         &env.client_id.as_uuid().to_string(),
         &aud,
-        301,
+        600,
         Some(uuid::Uuid::new_v4().to_string()),
     );
 
