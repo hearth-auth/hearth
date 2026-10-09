@@ -107,6 +107,8 @@ async fn an_open_connection_does_not_copy_the_router() {
     ));
     // Warm up: the first connection settles the runtime's one-time allocations.
     drop(open_and_serve_one(addr).await);
+    // The 64 KB bound has a wide margin against the 264 KB the defect cost.
+    // AUDIT: justified-sleep: lets the dropped warm-up connection free its buffers
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let before = LIVE.load(Ordering::Relaxed);
@@ -114,6 +116,7 @@ async fn an_open_connection_does_not_copy_the_router() {
     for _ in 0..CONNECTIONS {
         open.push(open_and_serve_one(addr).await);
     }
+    // AUDIT: justified-sleep: lets each served connection's task settle
     tokio::time::sleep(Duration::from_millis(200)).await;
     let per_connection =
         (LIVE.load(Ordering::Relaxed) - before) / isize::try_from(CONNECTIONS).expect("small");
