@@ -122,6 +122,53 @@ To choose your own limit, set `MALLOC_ARENA_MAX` (or the
 Hearth then leaves the allocator alone and logs that it did so. Other
 platforms and C libraries are not affected.
 
+### Large blocks and the mmap threshold
+
+glibc gives each allocation above its *mmap threshold* (128 KiB at start) its
+own mapping, which goes back to the kernel as soon as it is freed. But glibc
+raises the threshold each time it frees a larger mapping, up to 32 MiB. The
+first 19 MiB Argon2 buffer of a password hash moves it to ~19 MiB, and from
+then on every allocation below that comes from the arenas. Around those blocks
+the arenas fill with small allocations, and the freed space between them is not
+returned: a live soak (issue #445) found 880 MB free inside the arenas after 35
+minutes, for ~1.2 GB of live data.
+
+Hearth therefore fixes the threshold at 128 KiB before it starts any thread,
+which also stops glibc from moving it. The startup log shows it
+(`glibc malloc mmap threshold fixed bytes=131072`).
+
+Each Argon2 buffer is then a fresh mapping, and the kernel must fault its pages
+in for every hash. In 4 KiB pages that costs 35–40% more CPU per hash; with
+transparent huge pages it costs nothing measurable. Fresh mappings get huge
+pages when `/sys/kernel/mm/transparent_hugepage/enabled` is `always`, or when it
+is `madvise` (the default on most distributions) and glibc 2.35 or later runs
+with:
+
+```sh
+GLIBC_TUNABLES=glibc.malloc.hugetlb=1
+```
+
+The container image and the systemd unit in `deploy/` set it. If neither
+applies, Hearth says so in its startup log. To combine it with other tunables,
+separate them with `:`, e.g.
+`GLIBC_TUNABLES=glibc.malloc.hugetlb=1:glibc.malloc.arena_max=4`.
+
+Local measurement (2026-10-09, 12-core Linux workstation shared with other builds, glibc 2.42, two arenas, two
+threads hashing at Hearth's default cost and six threads allocating and freeing
+request-sized objects, 5 minutes; `cargo run --release --example
+malloc_retention`):
+
+| glibc setting | resident memory | free inside arenas | CPU per hash, p50 |
+|---|---|---|---|
+| default (dynamic threshold) | 432 MB | 199 MB | 40.7 ms |
+| `malloc_trim(0)` every 60 s | 416 MB | 187 MB | 40.1 ms |
+| threshold fixed at 128 KiB | 227 MB | 38 MB | 55.5 ms |
+| threshold fixed at 128 KiB + `hugetlb=1` | 221 MB | 34 MB | 38.9 ms |
+
+To choose your own threshold, set `MALLOC_MMAP_THRESHOLD_` (with the trailing
+underscore) or the `glibc.malloc.mmap_threshold` tunable. Hearth then leaves the
+threshold alone and logs that it did so.
+
 ## Working-set vs dataset size
 
 ### Datasets that fit in hot tier
