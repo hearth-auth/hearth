@@ -355,6 +355,19 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   of the full route table, so a server holding 2,000 client connections spent ~1.1 GB on them
   and came close to running out of memory on a 4 GB host. A connection now wraps the shared
   routes once and costs ~30 KB.
+- **Creating users no longer fails with `503` under concurrent load.** `POST /admin/users`
+  and `POST /users` waited for one of the few password-hashing slots (2 on a 2-CPU host),
+  although creating a user hashes no password. Each create held the slot through its disk
+  write, so bulk provisioning was limited by disk latency times the slot count, and every
+  request that waited more than 250 ms failed with `503 kdf_overloaded` while the CPU sat
+  idle (~316 failures/s on an AWS gp3 disk). Creates now run without a slot; the slots
+  still bound every real password hash.
+- **Audited writes in a realm no longer wait for each other's disk flush.** On a single node,
+  every write that records an audit event (user creation, sign-in, token refresh, admin
+  changes) flushed the disk while it held the realm's audit-chain lock, so these writes ran one
+  at a time: ~168 user creations/s on an AWS gp3 disk with the CPU at ~15%. The storage layer
+  that every server uses now passes the engine's group commit through, so concurrent writes
+  share one flush; each write is still on disk before Hearth acknowledges it.
 - **Reads no longer slow down as the in-memory cache fills.** Each time a record entered the
   hot-tier cache, Hearth copied the cache shard it landed in, key by key. On a 4 GB host the
   cache auto-sizes to ~1.5 M entries in 64 shards, so a half-full cache made the read that

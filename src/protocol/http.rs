@@ -112,36 +112,6 @@ pub(crate) const BODY_LIMIT_CSV_IMPORT: usize = 16 * 1024 * 1024;
 
 // ── KDF admission gate (HEA-1887 / R1, extended by HEA-1891) ──────────────────
 
-/// Runs a blocking Argon2id-bearing REST closure under the shared process-global
-/// KDF admission gate, mapping shed to a `503` JSON response.
-///
-/// Every REST handler whose engine call performs an Argon2id hash or verify
-/// (`create_user`, `import_user`, …) MUST route through this helper so it shares
-/// the *one* permit pool with the UI login/register/reset/change-password paths.
-/// That shared bound is what makes the `permits × ~19 MiB` peak-memory guarantee
-/// hold across **all** Argon2 callers rather than per-callsite (HEA-1889 F3).
-///
-/// The permit is acquired *before* `spawn_blocking`, so a waiting request holds
-/// neither a blocking-pool thread nor a 19 MiB allocation. A `Join` failure
-/// (panic/cancel) is surfaced to the caller as [`IdentityError::Storage`] via
-/// `on_join`, matching the previous ad-hoc `spawn_blocking(...).unwrap_or_else`.
-pub(crate) async fn run_kdf_gated_rest<F, T>(
-    f: F,
-    on_join: impl FnOnce(crate::identity::KdfGateError) -> T,
-) -> Result<T, Response>
-where
-    F: FnOnce() -> T + Send + 'static,
-    T: Send + 'static,
-{
-    match crate::identity::gate().run(f).await {
-        Ok(v) => Ok(v),
-        Err(crate::identity::KdfGateError::Overloaded { retry_after }) => {
-            Err(kdf_shed_json_response(retry_after))
-        }
-        Err(e @ crate::identity::KdfGateError::Join(_)) => Ok(on_join(e)),
-    }
-}
-
 /// [`identity_error_to_response`](auth::identity_error_to_response) as a full
 /// response, adding what the tuple form cannot carry: a KDF shed
 /// ([`crate::identity::IdentityError::KdfOverloaded`]) becomes the gate's
