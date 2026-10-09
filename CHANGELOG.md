@@ -351,6 +351,10 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   inside `assertion`, is refused instead of being read with the field dropped.
 
 ### Fixed
+- **A token refresh no longer records a `session_created` audit event.** Every refresh-token
+  rotation logged `session_created` next to `token_refreshed`, so the audit log, and webhooks
+  subscribed to `session_created`, over-reported sign-ins by one per refresh. A refresh now
+  records only `token_refreshed`, one audit write instead of two. (#448)
 - **An open connection no longer costs ~550 KB of memory.** Every connection built its own copy
   of the full route table, so a server holding 2,000 client connections spent ~1.1 GB on them
   and came close to running out of memory on a 4 GB host. A connection now wraps the shared
