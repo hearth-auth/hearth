@@ -320,6 +320,9 @@ The `/metrics` endpoint returns metrics in Prometheus text exposition format (`t
 | `hearth_storage_hot_tier_promotions_total` | counter | — | Hot-tier promotions admitted (write lock taken and entry inserted) |
 | `hearth_storage_hot_tier_evictions_by_realm_total` | counter | `realm` | Hot-tier evictions by the realm that owned the evicted key. Present only while `storage.hot_tier_per_realm_metrics` is `true` |
 | `hearth_storage_hot_tier_promotions_by_realm_total` | counter | `realm` | Hot-tier promotions admitted, by realm. Present only while `storage.hot_tier_per_realm_metrics` is `true` |
+| `hearth_storage_memtable_entries` | gauge | `state` | Entries in the storage memtable, tombstones included. `state="active"` is the map taking writes; `state="flushing"` is the map being written to an SST file (`0` between flushes). Both series are present from the first scrape (#450) |
+| `hearth_storage_memtable_bytes` | gauge | `state` | The memtable's own size estimate in bytes (key + value + 16 per entry, the figure compared with `storage.memtable_flush_bytes`), by the same `state` values. Allocator overhead is not included, so this is a lower bound on the memory the memtable holds (#450) |
+| `hearth_storage_hot_tier_entries` | gauge | — | Live hot-tier entry count. Updated when a promotion (a cold read admitted into the tier), an invalidation or an eviction changes the tier; a hot-tier hit never touches it (#450) |
 | `hearth_kdf_in_flight` | gauge | — | Argon2id operations currently executing (holding an admission permit) |
 | `hearth_kdf_permits` | gauge | — | Configured max concurrent Argon2id operations (`security.password.kdf.max_in_flight`) |
 | `hearth_kdf_admin_permits` | gauge | — | Configured max concurrent Argon2id operations reserved for admin login (`security.password.kdf.admin_max_in_flight`) |

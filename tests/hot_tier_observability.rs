@@ -242,3 +242,75 @@ fn hot_tier_per_realm_metrics_can_be_switched_off() {
          ({evict_total_before} -> {evict_total_after})"
     );
 }
+
+/// #450: the memtable's entry count and byte size, split into the `active`
+/// map and the one being `flushing` to an SST, and the hot tier's live entry
+/// count are exported as gauges that follow writes, flushes and promotions.
+#[test]
+fn memtable_and_hot_tier_size_gauges_are_observable() {
+    const ACTIVE_ENTRIES: &str = "hearth_storage_memtable_entries{state=\"active\"}";
+    const ACTIVE_BYTES: &str = "hearth_storage_memtable_bytes{state=\"active\"}";
+    const FLUSHING_ENTRIES: &str = "hearth_storage_memtable_entries{state=\"flushing\"}";
+    const FLUSHING_BYTES: &str = "hearth_storage_memtable_bytes{state=\"flushing\"}";
+    const HOT_ENTRIES: &str = "hearth_storage_hot_tier_entries";
+
+    // Default (large) flush threshold: the writes below stay in the memtable
+    // until the explicit flush.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let engine =
+        EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().to_path_buf())).expect("open");
+    let realm = RealmId::generate();
+
+    let base = metrics().render();
+    for i in 0u32..10 {
+        let k = format!("size-{i:02}");
+        engine
+            .put(&realm, k.as_bytes(), b"0123456789")
+            .expect("put");
+    }
+    let after_puts = metrics().render();
+    assert_eq!(
+        sample_value(&after_puts, ACTIVE_ENTRIES) - sample_value(&base, ACTIVE_ENTRIES),
+        10.0,
+        "ten new keys are ten active memtable entries, render:\n{after_puts}"
+    );
+    assert!(
+        sample_value(&after_puts, ACTIVE_BYTES) - sample_value(&base, ACTIVE_BYTES) >= 10.0 * 17.0,
+        "each entry adds at least its key and value bytes, render:\n{after_puts}"
+    );
+
+    // A completed flush moves everything out of the memtable.
+    engine.flush_memtable().expect("flush");
+    let after_flush = metrics().render();
+    assert!(
+        sample_value(&after_flush, ACTIVE_ENTRIES) <= sample_value(&base, ACTIVE_ENTRIES),
+        "a flush empties the active memtable, render:\n{after_flush}"
+    );
+    assert!(
+        sample_value(&after_flush, ACTIVE_BYTES) <= sample_value(&base, ACTIVE_BYTES),
+        "a flush empties the active memtable, render:\n{after_flush}"
+    );
+    assert_eq!(
+        sample_value(&after_flush, FLUSHING_ENTRIES),
+        sample_value(&base, FLUSHING_ENTRIES),
+        "nothing is left flushing once the flush returns, render:\n{after_flush}"
+    );
+    assert_eq!(
+        sample_value(&after_flush, FLUSHING_BYTES),
+        sample_value(&base, FLUSHING_BYTES),
+        "nothing is left flushing once the flush returns, render:\n{after_flush}"
+    );
+
+    // A read that falls through to the SST promotes the key into the hot tier.
+    let hot_before = sample_value(&metrics().render(), HOT_ENTRIES);
+    assert_eq!(
+        engine.get(&realm, b"size-00").expect("get"),
+        Some(b"0123456789".to_vec())
+    );
+    let hot_after = sample_value(&metrics().render(), HOT_ENTRIES);
+    assert_eq!(
+        hot_after - hot_before,
+        1.0,
+        "a promotion adds one live hot-tier entry ({hot_before} -> {hot_after})"
+    );
+}

@@ -17,6 +17,12 @@ libraries, admin clients generated from OpenAPI, one conformance harness for all
 testing, an external pentest). Hearth is not yet production-ready until the second one is done.
 
 ### Added
+- **Storage size gauges on `/metrics`** (#450): `hearth_storage_memtable_entries` and
+  `hearth_storage_memtable_bytes`, each with a `state` label (`active` for the map taking
+  writes, `flushing` for the map being written to an SST file), and
+  `hearth_storage_hot_tier_entries`, the hot tier's live entry count. They show what holds the
+  storage engine's memory between flushes. They are updated on writes, flushes and hot-tier
+  promotions, invalidations and evictions, never on a hot-tier hit.
 - **Dev console at `/dev`** (`dev-endpoints` builds under `--dev`, loopback only). `make dev`
   prints its link, and its first visit creates the dev accounts. Each account has a one-click
   **Sign in**, which counts the second factor as proved, plus its password, live TOTP code, TOTP

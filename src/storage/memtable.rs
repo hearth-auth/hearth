@@ -44,11 +44,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use crossbeam_skiplist::SkipMap;
 
 use crate::core::{EpochCell, EpochCellOption, RealmId};
+use crate::metrics::MemtableStateLabel;
 use crate::storage::error::StorageError;
 use crate::storage::wal::{WalEntry, WalOperation};
 
@@ -109,6 +110,38 @@ impl Default for MemtableConfig {
     }
 }
 
+/// The memtable's size as last added to the process-wide size gauges
+/// (`hearth_storage_memtable_entries` / `hearth_storage_memtable_bytes`, #450).
+///
+/// It lives inside the memtable's write lock, so each gauge update is ordered
+/// with the write that caused it, and a memtable adds only the difference from
+/// its own previous figure: several memtables in one process sum correctly,
+/// and dropping one subtracts exactly its share. Never touched by a read.
+#[derive(Debug, Default)]
+struct PublishedSize {
+    /// `(entries, bytes)` last published for the active map.
+    active: (usize, usize),
+    /// `(entries, bytes)` last published for the map parked for flushing.
+    flushing: (usize, usize),
+}
+
+impl PublishedSize {
+    /// Moves the `state` gauges to `entries` / `bytes` for this memtable.
+    fn set(&mut self, state: MemtableStateLabel, entries: usize, bytes: usize) {
+        let slot = match state {
+            MemtableStateLabel::Active => &mut self.active,
+            MemtableStateLabel::Flushing => &mut self.flushing,
+        };
+        #[allow(clippy::cast_precision_loss)] // exact below 2^53
+        crate::metrics::metrics().adjust_memtable_size(
+            state,
+            entries as f64 - slot.0 as f64,
+            bytes as f64 - slot.1 as f64,
+        );
+        *slot = (entries, bytes);
+    }
+}
+
 /// In-memory sorted key-value store with lock-free reads.
 ///
 /// Backed by a lock-free `SkipMap` so writes insert in O(log N) with no
@@ -131,8 +164,9 @@ pub(crate) struct Memtable {
     /// lock. Only ever one at a time — the engine's flush lock serializes flushes.
     flushing: EpochCellOption<SkipMap<CompositeKey, MemtableValue>>,
     /// Serializes write operations (put, delete, clear) so size accounting and
-    /// the flush swap-to-empty are race-free. Reads never acquire it.
-    write_lock: Mutex<()>,
+    /// the flush swap-to-empty are race-free. Reads never acquire it. Guards
+    /// the size last published to the gauges, so they move in write order.
+    write_lock: Mutex<PublishedSize>,
     /// Approximate total byte size of all entries in the **active** map. The
     /// map parked in `flushing` is excluded — it is on its way to an SST and
     /// must not keep re-triggering the size-based flush.
@@ -147,7 +181,7 @@ impl Memtable {
         Self {
             data: EpochCell::from_pointee(SkipMap::new()),
             flushing: EpochCellOption::empty(),
-            write_lock: Mutex::new(()),
+            write_lock: Mutex::new(PublishedSize::default()),
             approximate_size: AtomicUsize::new(0),
             config,
         }
@@ -169,7 +203,7 @@ impl Memtable {
         };
         let new_value = MemtableValue::Data(value.to_vec());
 
-        let _guard = self
+        let mut published = self
             .write_lock
             .lock()
             .map_err(|_| StorageError::Io(std::io::Error::other("memtable mutex poisoned")))?;
@@ -184,6 +218,11 @@ impl Memtable {
         map.insert(composite, new_value);
 
         self.update_size(old_entry_size, new_entry_size);
+        published.set(
+            MemtableStateLabel::Active,
+            map.len(),
+            self.approximate_size(),
+        );
 
         Ok(())
     }
@@ -205,7 +244,7 @@ impl Memtable {
             return Ok(());
         }
 
-        let _guard = self
+        let mut published = self
             .write_lock
             .lock()
             .map_err(|_| StorageError::Io(std::io::Error::other("memtable mutex poisoned")))?;
@@ -230,6 +269,11 @@ impl Memtable {
         }
 
         self.update_size(old_total, new_total);
+        published.set(
+            MemtableStateLabel::Active,
+            map.len(),
+            self.approximate_size(),
+        );
 
         Ok(())
     }
@@ -267,7 +311,7 @@ impl Memtable {
     {
         // Phase 1 — O(1) swap under the write lock.
         let parked = {
-            let _guard = self
+            let mut published = self
                 .write_lock
                 .lock()
                 .map_err(|_| StorageError::Io(std::io::Error::other("memtable mutex poisoned")))?;
@@ -288,7 +332,9 @@ impl Memtable {
             // one that still sees the old map finds the key in it.
             self.flushing.store(Some(Arc::clone(&current)));
             self.data.store(Arc::new(SkipMap::new()));
-            self.approximate_size.store(0, Ordering::Relaxed);
+            let parked_bytes = self.approximate_size.swap(0, Ordering::Relaxed);
+            published.set(MemtableStateLabel::Active, 0, 0);
+            published.set(MemtableStateLabel::Flushing, current.len(), parked_bytes);
             current
         };
 
@@ -297,6 +343,11 @@ impl Memtable {
             Ok(()) => {
                 // Persisted + registered by the closure; drop the parked copy.
                 self.flushing.store(None);
+                // A poisoned lock already fails every write; the gauge can
+                // stay as it is.
+                if let Ok(mut published) = self.write_lock.lock() {
+                    published.set(MemtableStateLabel::Flushing, 0, 0);
+                }
                 Ok(true)
             }
             Err(e) => {
@@ -324,7 +375,7 @@ impl Memtable {
     /// lock, inserting only keys the active map does not already hold — a write
     /// that raced the flush is newer and must win — and restoring their size.
     fn reabsorb(&self, parked: &SkipMap<CompositeKey, MemtableValue>) -> Result<(), StorageError> {
-        let _guard = self
+        let mut published = self
             .write_lock
             .lock()
             .map_err(|_| StorageError::Io(std::io::Error::other("memtable mutex poisoned")))?;
@@ -338,6 +389,12 @@ impl Memtable {
             }
         }
         self.approximate_size.fetch_add(restored, Ordering::Relaxed);
+        published.set(
+            MemtableStateLabel::Active,
+            active.len(),
+            self.approximate_size(),
+        );
+        published.set(MemtableStateLabel::Flushing, 0, 0);
         Ok(())
     }
 
@@ -352,7 +409,7 @@ impl Memtable {
         };
         let new_value = MemtableValue::Tombstone;
 
-        let _guard = self
+        let mut published = self
             .write_lock
             .lock()
             .map_err(|_| StorageError::Io(std::io::Error::other("memtable mutex poisoned")))?;
@@ -367,6 +424,11 @@ impl Memtable {
         map.insert(composite, new_value);
 
         self.update_size(old_entry_size, new_entry_size);
+        published.set(
+            MemtableStateLabel::Active,
+            map.len(),
+            self.approximate_size(),
+        );
 
         Ok(())
     }
@@ -654,7 +716,7 @@ impl Memtable {
 
     /// Clears all data and resets size tracking. Used after flushing to SST.
     pub(crate) fn clear(&self) -> Result<(), StorageError> {
-        let _guard = self
+        let mut published = self
             .write_lock
             .lock()
             .map_err(|_| StorageError::Io(std::io::Error::other("memtable mutex poisoned")))?;
@@ -662,6 +724,8 @@ impl Memtable {
         self.data.store(Arc::new(SkipMap::new()));
         self.flushing.store(None);
         self.approximate_size.store(0, Ordering::Relaxed);
+        published.set(MemtableStateLabel::Active, 0, 0);
+        published.set(MemtableStateLabel::Flushing, 0, 0);
 
         Ok(())
     }
@@ -686,6 +750,18 @@ impl Memtable {
             self.approximate_size
                 .fetch_sub(old_size - new_size, Ordering::Relaxed);
         }
+    }
+}
+
+impl Drop for Memtable {
+    /// Takes this memtable's share out of the process-wide size gauges.
+    fn drop(&mut self) {
+        let published = self
+            .write_lock
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner);
+        published.set(MemtableStateLabel::Active, 0, 0);
+        published.set(MemtableStateLabel::Flushing, 0, 0);
     }
 }
 
@@ -1613,5 +1689,197 @@ mod tests {
                 "key {i} missing after concurrent writes"
             );
         }
+    }
+
+    // ===== #450: memtable size gauges =====
+
+    /// The four memtable size gauges, read from the process-wide registry.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    struct SizeGauges {
+        active_entries: f64,
+        active_bytes: f64,
+        flushing_entries: f64,
+        flushing_bytes: f64,
+    }
+
+    impl SizeGauges {
+        fn read() -> Self {
+            use crate::metrics::MemtableStateLabel;
+            let m = crate::metrics::metrics();
+            Self {
+                active_entries: m.memtable_entries(MemtableStateLabel::Active),
+                active_bytes: m.memtable_bytes(MemtableStateLabel::Active),
+                flushing_entries: m.memtable_entries(MemtableStateLabel::Flushing),
+                flushing_bytes: m.memtable_bytes(MemtableStateLabel::Flushing),
+            }
+        }
+
+        /// The gauges' change since `base`. The registry is process-global, so
+        /// each test measures against what it saw before creating its memtable.
+        fn since(base: Self) -> Self {
+            let now = Self::read();
+            Self {
+                active_entries: now.active_entries - base.active_entries,
+                active_bytes: now.active_bytes - base.active_bytes,
+                flushing_entries: now.flushing_entries - base.flushing_entries,
+                flushing_bytes: now.flushing_bytes - base.flushing_bytes,
+            }
+        }
+
+        #[allow(clippy::cast_precision_loss)]
+        fn active(entries: usize, bytes: usize) -> Self {
+            Self {
+                active_entries: entries as f64,
+                active_bytes: bytes as f64,
+                flushing_entries: 0.0,
+                flushing_bytes: 0.0,
+            }
+        }
+    }
+
+    // #450: every write keeps the active gauges equal to the memtable's own
+    // count and size estimate — an overwrite adds bytes but no entry, and a
+    // delete's tombstone is an entry.
+    #[test]
+    fn size_gauges_follow_puts_overwrites_and_deletes() {
+        let base = SizeGauges::read();
+        let mt = Memtable::new(MemtableConfig::default());
+        let realm = RealmId::generate();
+
+        mt.put(&realm, b"k1", b"v1").expect("put");
+        mt.put(&realm, b"k2", b"v2").expect("put");
+        assert_eq!(
+            SizeGauges::since(base),
+            SizeGauges::active(2, mt.approximate_size())
+        );
+
+        mt.put_batch(
+            &realm,
+            &[
+                (b"k3".to_vec(), b"v3".to_vec()),
+                (b"k1".to_vec(), b"a-longer-value".to_vec()),
+            ],
+        )
+        .expect("put_batch");
+        mt.delete(&realm, b"k2").expect("delete");
+        mt.delete(&realm, b"k4").expect("delete of an absent key");
+
+        // k1 (overwritten), k2 (now a tombstone), k3, k4 (tombstone).
+        assert_eq!(
+            SizeGauges::since(base),
+            SizeGauges::active(4, mt.approximate_size())
+        );
+    }
+
+    // #450: a flush moves the parked map's size from `active` to `flushing`
+    // for as long as its SST is being written, then releases it.
+    #[test]
+    fn a_flush_moves_the_size_to_flushing_then_releases_it() {
+        let base = SizeGauges::read();
+        let mt = Memtable::new(MemtableConfig::default());
+        let realm = RealmId::generate();
+        mt.put(&realm, b"k1", b"v1").expect("put");
+        mt.put(&realm, b"k2", b"v2").expect("put");
+        let size = mt.approximate_size();
+
+        let mut during = None;
+        let flushed = mt
+            .flush_streaming(|_| {
+                during = Some(SizeGauges::since(base));
+                Ok(())
+            })
+            .expect("flush");
+        assert!(flushed);
+
+        #[allow(clippy::cast_precision_loss)]
+        let expected_during = SizeGauges {
+            active_entries: 0.0,
+            active_bytes: 0.0,
+            flushing_entries: 2.0,
+            flushing_bytes: size as f64,
+        };
+        assert_eq!(during, Some(expected_during));
+        assert_eq!(SizeGauges::since(base), SizeGauges::active(0, 0));
+    }
+
+    // #450: a write landing while the SST is written counts as active, beside
+    // the parked map's flushing size.
+    #[test]
+    fn a_write_during_a_flush_counts_as_active() {
+        let base = SizeGauges::read();
+        let mt = Memtable::new(MemtableConfig::default());
+        let realm = RealmId::generate();
+        mt.put(&realm, b"k1", b"v1").expect("put");
+        let parked_size = mt.approximate_size();
+
+        let mut during = None;
+        mt.flush_streaming(|_| {
+            mt.put(&realm, b"k2", b"v2-longer")
+                .expect("put during flush");
+            during = Some((SizeGauges::since(base), mt.approximate_size()));
+            Ok(())
+        })
+        .expect("flush");
+
+        let (during, active_size) = during.expect("closure ran");
+        #[allow(clippy::cast_precision_loss)]
+        let expected_during = SizeGauges {
+            flushing_entries: 1.0,
+            flushing_bytes: parked_size as f64,
+            ..SizeGauges::active(1, active_size)
+        };
+        assert_eq!(during, expected_during);
+        assert_eq!(
+            SizeGauges::since(base),
+            SizeGauges::active(1, mt.approximate_size())
+        );
+    }
+
+    // #450: a failed flush folds the parked map back, and its size with it.
+    #[test]
+    fn a_failed_flush_returns_the_size_to_active() {
+        let base = SizeGauges::read();
+        let mt = Memtable::new(MemtableConfig::default());
+        let realm = RealmId::generate();
+        mt.put(&realm, b"k1", b"v1").expect("put");
+        mt.put(&realm, b"k2", b"v2").expect("put");
+        let size = mt.approximate_size();
+
+        let res = mt.flush_streaming(|_| {
+            Err(StorageError::Io(std::io::Error::other(
+                "simulated SST failure",
+            )))
+        });
+        assert!(matches!(res, Err(StorageError::Io(_))));
+
+        assert_eq!(SizeGauges::since(base), SizeGauges::active(2, size));
+    }
+
+    // #450: the gauges sum every live memtable in the process, so clearing or
+    // dropping one removes exactly its own share.
+    #[test]
+    fn clear_and_drop_remove_only_that_memtables_share() {
+        let base = SizeGauges::read();
+        let realm = RealmId::generate();
+        let a = Memtable::new(MemtableConfig::default());
+        let b = Memtable::new(MemtableConfig::default());
+        a.put(&realm, b"a1", b"v").expect("put");
+        a.put(&realm, b"a2", b"v").expect("put");
+        b.put(&realm, b"b1", b"value").expect("put");
+        assert_eq!(
+            SizeGauges::since(base),
+            SizeGauges::active(3, a.approximate_size() + b.approximate_size())
+        );
+
+        a.clear().expect("clear");
+        assert_eq!(
+            SizeGauges::since(base),
+            SizeGauges::active(1, b.approximate_size())
+        );
+
+        drop(b);
+        assert_eq!(SizeGauges::since(base), SizeGauges::active(0, 0));
+        drop(a);
+        assert_eq!(SizeGauges::since(base), SizeGauges::active(0, 0));
     }
 }
