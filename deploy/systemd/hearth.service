@@ -31,6 +31,11 @@ WorkingDirectory=/var/lib/hearth
 # The leading "-" lets the unit start without the file; Hearth then refuses to
 # start with a message naming the missing key.
 EnvironmentFile=-/etc/hearth/hearth.env
+# Transparent huge pages for glibc's large blocks: each 19 MiB Argon2 buffer is
+# a fresh mapping, and in 4 KiB pages it cost 35–40% more CPU per password hash
+# (#445; see docs/guides/storage-sizing.md). Needs glibc >= 2.35. A
+# GLIBC_TUNABLES line in hearth.env replaces this one.
+Environment=GLIBC_TUNABLES=glibc.malloc.hugetlb=1
 ExecStart=/usr/local/bin/hearth serve -c /etc/hearth/hearth.yaml
 
 # Restart policy — restart on any unexpected exit (crashes, OOMs, etc.),
