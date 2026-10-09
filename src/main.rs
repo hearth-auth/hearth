@@ -1698,6 +1698,18 @@ async fn run_serve(
                  a stolen credential store is materially cheaper to crack offline"
             );
         }
+        // #445: each KDF permit keeps one Argon2 block buffer for reuse, so
+        // this much memory stays resident once the gates have been busy. A
+        // realm with a higher cost, or a stored hash with a larger `m`, grows
+        // a buffer to that size.
+        let buffers = kdf_gate_cfg.max_in_flight.max(1) + kdf_admin_gate_cfg.max_in_flight.max(1);
+        let buffer_kib = u64::from(cred.memory_cost_kib);
+        info!(
+            buffers,
+            buffer_kib,
+            bound_mib = buffers as u64 * buffer_kib / 1024,
+            "argon2 block buffers are reused, one per kdf permit (shared and admin gates)"
+        );
     }
 
     // Extract cleanup config before identity_config is consumed by the engine.

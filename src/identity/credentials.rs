@@ -22,15 +22,16 @@ use argon2::Argon2;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use base64::Engine as _;
 use hmac::{Hmac, Mac};
-use password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use password_hash::{Output, ParamsString, PasswordHash, PasswordVerifier as _, Salt, SaltString};
 use pbkdf2::pbkdf2;
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::identity::error::IdentityError;
+use crate::identity::kdf_gate;
 
 /// A secret pepper key used to pre-hash passwords before Argon2id.
 ///
@@ -304,38 +305,119 @@ impl CredentialConfig {
         }
     }
 
-    /// Builds an `Argon2` hasher from this configuration.
-    fn to_argon2(&self) -> Result<Argon2<'static>, IdentityError> {
-        let params =
-            argon2::Params::new(self.memory_cost_kib, self.time_cost, self.parallelism, None)
-                .map_err(|e| IdentityError::InvalidInput {
-                    reason: format!("invalid Argon2id parameters: {e}"),
-                })?;
-        Ok(Argon2::new(
-            argon2::Algorithm::Argon2id,
-            argon2::Version::V0x13,
-            params,
-        ))
+    /// The Argon2id parameters of this configuration.
+    fn argon2_params(&self) -> Result<argon2::Params, IdentityError> {
+        argon2::Params::new(self.memory_cost_kib, self.time_cost, self.parallelism, None).map_err(
+            |e| IdentityError::InvalidInput {
+                reason: format!("invalid Argon2id parameters: {e}"),
+            },
+        )
     }
 }
 
+/// Runs `argon2` over `input` and `salt` into `out`, in a block buffer from
+/// the KDF gate's pool (#445).
+///
+/// The crate's `hash_password_into` and its `PasswordHasher` /
+/// `PasswordVerifier` allocate a fresh `m` KiB buffer per call — 19 MiB at
+/// the default cost — and never zero it. Inside a gate-admitted closure this
+/// reuses the gate's buffer instead, and either way the blocks are zeroed
+/// when the run ends (see [`kdf_gate::with_argon2_blocks`]).
+fn argon2_hash_into(
+    argon2: &Argon2<'_>,
+    input: &[u8],
+    salt: &[u8],
+    out: &mut [u8],
+) -> argon2::Result<()> {
+    kdf_gate::with_argon2_blocks(argon2.params().block_count(), |blocks| {
+        argon2.hash_password_into_with_memory(input, salt, out, blocks)
+    })
+}
+
 /// Hashes `input` with Argon2id v19 at `params` and `salt` into a PHC string.
-#[cfg_attr(not(test), allow(dead_code))] // stub until the pool is wired in
+///
+/// Byte-identical to `PasswordHasher::hash_password(..).to_string()` for the
+/// same inputs, which built every stored hash before #445: the same salt
+/// decoding, default output length and field order.
 fn argon2id_phc(
     params: &argon2::Params,
     input: &[u8],
-    salt: password_hash::Salt<'_>,
-) -> Result<String, IdentityError> {
-    Argon2::new(
+    salt: Salt<'_>,
+) -> password_hash::Result<String> {
+    let argon2 = Argon2::new(
         argon2::Algorithm::Argon2id,
         argon2::Version::V0x13,
         params.clone(),
-    )
-    .hash_password(input, salt)
-    .map(|h| h.to_string())
-    .map_err(|e| IdentityError::InvalidInput {
-        reason: format!("password hashing failed: {e}"),
+    );
+    let mut salt_buf = [0_u8; Salt::MAX_LENGTH];
+    let salt_bytes = salt.decode_b64(&mut salt_buf)?;
+    let output_len = params
+        .output_len()
+        .unwrap_or(argon2::Params::DEFAULT_OUTPUT_LEN);
+    let output = Output::init_with(output_len, |out| {
+        Ok(argon2_hash_into(&argon2, input, salt_bytes, out)?)
+    })?;
+    let hash = PasswordHash {
+        algorithm: argon2::Algorithm::Argon2id.ident(),
+        version: Some(argon2::Version::V0x13.into()),
+        params: ParamsString::try_from(params)?,
+        salt: Some(salt),
+        hash: Some(output),
+    };
+    Ok(hash.to_string())
+}
+
+/// Hashes `input` with the configured Argon2id cost and a fresh random salt;
+/// `what` names the input in an error ("password", "secret").
+fn hash_argon2id(
+    input: &[u8],
+    config: &CredentialConfig,
+    what: &str,
+) -> Result<String, IdentityError> {
+    let params = config.argon2_params()?;
+    let salt = SaltString::generate(&mut OsRng);
+    argon2id_phc(&params, input, salt.as_salt()).map_err(|e| IdentityError::InvalidInput {
+        reason: format!("{what} hashing failed: {e}"),
     })
+}
+
+/// Whether `input` matches the Argon2 PHC string `parsed` (any of argon2d,
+/// argon2i, argon2id; version 16 or 19).
+///
+/// Takes the algorithm, version, cost, salt and output length from the
+/// string, as the crate's `PasswordVerifier` did, recomputes the output into
+/// a pooled block buffer and compares it in constant time. Every failure —
+/// no salt or no hash, an unknown algorithm, version or parameter, a cost the
+/// crate refuses — is a non-match, as it was with `verify_password(..).is_ok()`.
+/// The caller bounds the cost ([`argon2_params_within`]) before calling.
+fn argon2_phc_matches(input: &[u8], parsed: &PasswordHash<'_>) -> bool {
+    let (Some(salt), Some(expected)) = (parsed.salt, parsed.hash) else {
+        return false;
+    };
+    let Ok(algorithm) = argon2::Algorithm::try_from(parsed.algorithm) else {
+        return false;
+    };
+    let version = match parsed.version.map(argon2::Version::try_from).transpose() {
+        Ok(version) => version.unwrap_or_default(),
+        Err(_) => return false,
+    };
+    // Also sets the output length to the stored hash's.
+    let Ok(params) = argon2::Params::try_from(parsed) else {
+        return false;
+    };
+    let mut salt_buf = [0_u8; Salt::MAX_LENGTH];
+    let Ok(salt) = salt.decode_b64(&mut salt_buf) else {
+        return false;
+    };
+    let argon2 = Argon2::new(algorithm, version, params);
+    let mut computed = Zeroizing::new([0_u8; Output::MAX_LENGTH]);
+    let Some(computed) = computed.get_mut(..expected.len()) else {
+        return false;
+    };
+    if argon2_hash_into(&argon2, input, salt, computed).is_err() {
+        return false;
+    }
+    computed.ct_eq(expected.as_bytes()).into()
 }
 
 /// Applies HMAC-SHA256(key=pepper, msg=password) and returns the 32-byte digest.
@@ -362,9 +444,6 @@ pub fn hash_password(
     config: &CredentialConfig,
     created_at: i64,
 ) -> Result<StoredCredential, IdentityError> {
-    let argon2 = config.to_argon2()?;
-    let salt = SaltString::generate(&mut OsRng);
-
     // Apply pepper if configured — HMAC output replaces raw password bytes.
     let (effective_input, pepper_version) = if let Some(pepper_cfg) = &config.pepper {
         let peppered = apply_pepper(password.as_bytes(), &pepper_cfg.active_key);
@@ -373,16 +452,11 @@ pub fn hash_password(
         (password.as_bytes().to_vec(), None)
     };
 
-    let hash =
-        argon2
-            .hash_password(&effective_input, &salt)
-            .map_err(|e| IdentityError::InvalidInput {
-                reason: format!("password hashing failed: {e}"),
-            })?;
+    let hash = hash_argon2id(&effective_input, config, "password")?;
 
     Ok(StoredCredential {
         algorithm: PasswordAlgorithm::Argon2id,
-        hash: hash.to_string(),
+        hash,
         created_at,
         pepper_version,
     })
@@ -663,9 +737,7 @@ pub(crate) fn verify_hash(
         // Refuse BEFORE the KDF runs (26.36). `m` is memory in KiB, so an
         // unbounded one is an allocation request, not merely slow.
         argon2_params_within(&parsed)?;
-        Ok(Argon2::default()
-            .verify_password(password.as_bytes(), &parsed)
-            .is_ok())
+        Ok(argon2_phc_matches(password.as_bytes(), &parsed))
     } else if alg_id == scrypt::ALG_ID {
         // Refuse BEFORE the KDF runs (26.36). scrypt's memory is
         // 128 * 2^ln * r bytes, so both parameters are allocation inputs.
@@ -802,14 +874,7 @@ pub(crate) fn hash_raw_secret(
     secret: &[u8],
     config: &CredentialConfig,
 ) -> Result<String, IdentityError> {
-    let argon2 = config.to_argon2()?;
-    let salt = SaltString::generate(&mut OsRng);
-    let hash = argon2
-        .hash_password(secret, &salt)
-        .map_err(|e| IdentityError::InvalidInput {
-            reason: format!("secret hashing failed: {e}"),
-        })?;
-    Ok(hash.to_string())
+    hash_argon2id(secret, config, "secret")
 }
 
 /// Verifies a raw secret against an Argon2id hash string.
@@ -843,7 +908,7 @@ pub(crate) fn verify_raw_secret(secret: &[u8], hash_str: &str) -> Result<bool, I
         }
         return Ok(false);
     }
-    Ok(Argon2::default().verify_password(secret, &parsed).is_ok())
+    Ok(argon2_phc_matches(secret, &parsed))
 }
 
 /// Self-describing prefix of a fast client-secret hash.
@@ -1001,18 +1066,14 @@ pub(crate) fn verify_dummy_client_secret(secret: &[u8]) {
 /// against this dummy hash so the response time is indistinguishable
 /// from a real failed verification.
 pub(crate) fn compute_dummy_hash(config: &CredentialConfig) -> String {
-    let argon2 = config.to_argon2().expect("default config should be valid");
-    let salt = SaltString::generate(&mut OsRng);
     let dummy_password = b"dummy_password_for_timing_defense";
-    argon2
-        .hash_password(dummy_password, &salt)
-        .expect("dummy hash should succeed")
-        .to_string()
+    hash_argon2id(dummy_password, config, "dummy").expect("default config should be valid")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use password_hash::PasswordHasher as _;
 
     fn test_config() -> CredentialConfig {
         CredentialConfig::fast_for_testing()

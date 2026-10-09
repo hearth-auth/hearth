@@ -212,7 +212,7 @@ impl KdfGate {
     }
 
     /// The Argon2 block buffers this gate keeps for reuse.
-    #[cfg_attr(not(test), allow(dead_code))] // stub until the pool is wired in
+    #[cfg_attr(not(test), allow(dead_code))] // introspection for tests
     pub(crate) fn block_pool(&self) -> &BlockPool {
         &self.blocks
     }
@@ -400,7 +400,6 @@ impl Drop for Admitted {
 /// Holds at most `capacity` (the gate's permit count) buffers, every one of
 /// them all zeros. Off the hot path: a `Mutex` guards the list, held only to
 /// pop or push one buffer and never across an `.await`.
-#[cfg_attr(not(test), allow(dead_code))] // stub until the pool is wired in
 pub(crate) struct BlockPool {
     buffers: Mutex<Vec<Vec<Block>>>,
     capacity: usize,
@@ -409,7 +408,6 @@ pub(crate) struct BlockPool {
     fresh_allocations: AtomicU64,
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // stub until the pool is wired in
 impl BlockPool {
     /// An empty pool that keeps at most `capacity` buffers.
     fn new(capacity: usize) -> Self {
@@ -421,21 +419,25 @@ impl BlockPool {
     }
 
     /// The most buffers this pool keeps: its gate's permit count.
+    #[cfg_attr(not(test), allow(dead_code))] // introspection for tests
     pub(crate) fn capacity(&self) -> usize {
         self.capacity
     }
 
     /// Buffers held right now (not checked out).
+    #[cfg_attr(not(test), allow(dead_code))] // introspection for tests
     pub(crate) fn pooled(&self) -> usize {
         self.lock().len()
     }
 
     /// Bytes held right now in buffers that are not checked out.
+    #[cfg_attr(not(test), allow(dead_code))] // introspection for tests
     pub(crate) fn pooled_bytes(&self) -> usize {
         self.lock().iter().map(|b| b.len() * Block::SIZE).sum()
     }
 
     /// Buffers this pool has allocated since it was built.
+    #[cfg_attr(not(test), allow(dead_code))] // introspection for tests
     pub(crate) fn fresh_allocations(&self) -> u64 {
         self.fresh_allocations.load(Ordering::Relaxed)
     }
@@ -447,21 +449,51 @@ impl BlockPool {
         self.buffers.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// A zeroed buffer of at least `blocks` blocks.
+    /// A zeroed buffer of at least `blocks` blocks: a pooled one that is large
+    /// enough, or else a fresh one.
+    ///
+    /// When every pooled buffer is too small, one of them is dropped: the
+    /// fresh, larger buffer takes its place when it comes back, so the pool
+    /// keeps the larger size instead of holding both.
     fn take(&self, blocks: usize) -> Vec<Block> {
+        let (fits, outgrown) = {
+            let mut buffers = self.lock();
+            match buffers.iter().position(|b| b.len() >= blocks) {
+                Some(i) => (Some(buffers.swap_remove(i)), None),
+                None => (None, buffers.pop()),
+            }
+        };
+        // Freed outside the lock: unmapping a large buffer is a syscall.
+        drop(outgrown);
+        if let Some(buffer) = fits {
+            return buffer;
+        }
         self.fresh_allocations.fetch_add(1, Ordering::Relaxed);
         vec![Block::new(); blocks]
     }
 
-    /// Takes back a zeroed buffer, or drops it when the pool is full.
+    /// Takes back a zeroed buffer, or drops it when the pool already holds
+    /// `capacity` buffers (more than `capacity` can be out at once only when
+    /// an admitted closure runs Argon2 inside another Argon2 run).
     fn give_back(&self, buffer: Vec<Block>) {
-        drop(buffer);
+        if buffer.is_empty() {
+            return;
+        }
+        let rejected = {
+            let mut buffers = self.lock();
+            if buffers.len() < self.capacity {
+                buffers.push(buffer);
+                None
+            } else {
+                Some(buffer)
+            }
+        };
+        drop(rejected);
     }
 }
 
 /// A buffer checked out for one Argon2 run. Dropping it zeroes the blocks the
 /// run used and gives the buffer back to its pool, on success and on panic.
-#[cfg_attr(not(test), allow(dead_code))] // stub until the pool is wired in
 struct BlockLease {
     blocks: Vec<Block>,
     used: usize,
@@ -488,7 +520,6 @@ impl Drop for BlockLease {
 /// gate) the buffer is allocated for this call and freed after it. Either
 /// way the blocks are zeroed when `f` returns, so the memory-hard state of a
 /// password hash does not outlive it.
-#[cfg_attr(not(test), allow(dead_code))] // stub until the pool is wired in
 pub(crate) fn with_argon2_blocks<R>(blocks: usize, f: impl FnOnce(&mut [Block]) -> R) -> R {
     let pool = ADMITTED_BY.with_borrow(Option::clone);
     let buffer = match &pool {
