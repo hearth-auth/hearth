@@ -17,6 +17,12 @@ libraries, admin clients generated from OpenAPI, one conformance harness for all
 testing, an external pentest). Hearth is not yet production-ready until the second one is done.
 
 ### Added
+- **Storage size gauges on `/metrics`** (#450): `hearth_storage_memtable_entries` and
+  `hearth_storage_memtable_bytes`, each with a `state` label (`active` for the map taking
+  writes, `flushing` for the map being written to an SST file), and
+  `hearth_storage_hot_tier_entries`, the hot tier's live entry count. They show what holds the
+  storage engine's memory between flushes. They are updated on writes, flushes and hot-tier
+  promotions, invalidations and evictions, never on a hot-tier hit.
 - **Dev console at `/dev`** (`dev-endpoints` builds under `--dev`, loopback only). `make dev`
   prints its link, and its first visit creates the dev accounts. Each account has a one-click
   **Sign in**, which counts the second factor as proved, plus its password, live TOTP code, TOTP
@@ -357,6 +363,10 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   keeping the keys and only the requested page is read, so a page costs memory for its own
   rows. `total` is still the exact number of users. The same applies to the other admin
   lists that report a total, such as clients and organizations. (#447)
+- **A token refresh no longer records a `session_created` audit event.** Every refresh-token
+  rotation logged `session_created` next to `token_refreshed`, so the audit log, and webhooks
+  subscribed to `session_created`, over-reported sign-ins by one per refresh. A refresh now
+  records only `token_refreshed`, one audit write instead of two. (#448)
 - **An open connection no longer costs ~550 KB of memory.** Every connection built its own copy
   of the full route table, so a server holding 2,000 client connections spent ~1.1 GB on them
   and came close to running out of memory on a 4 GB host. A connection now wraps the shared

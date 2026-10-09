@@ -269,6 +269,43 @@ async fn metrics_tokens_issued_counter_increments() {
     );
 }
 
+/// #450: the scrape carries the storage size gauges — the memtable's entry
+/// count and byte size per `state` (`active`, `flushing`) and the hot tier's
+/// live entry count — from the first scrape, before any flush or eviction.
+#[tokio::test]
+async fn metrics_expose_memtable_and_hot_tier_size_gauges() {
+    let h = common::TestHarness::in_process().await.expect("harness");
+    let app = build_app(&h);
+
+    let body = body_to_string(
+        app.oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("response"),
+    )
+    .await;
+
+    for series in [
+        "# TYPE hearth_storage_memtable_entries gauge",
+        "# TYPE hearth_storage_memtable_bytes gauge",
+        "# TYPE hearth_storage_hot_tier_entries gauge",
+        "hearth_storage_memtable_entries{state=\"active\"}",
+        "hearth_storage_memtable_entries{state=\"flushing\"}",
+        "hearth_storage_memtable_bytes{state=\"active\"}",
+        "hearth_storage_memtable_bytes{state=\"flushing\"}",
+        "\nhearth_storage_hot_tier_entries ",
+    ] {
+        assert!(
+            body.contains(series),
+            "/metrics must expose {series:?}; got:\n{body}"
+        );
+    }
+}
+
 /// Tampering with the audit chain causes `verify_integrity` to detect the
 /// mismatch and increment `hearth_audit_integrity_failures_total`, which
 /// surfaces in the `/metrics` scrape output.
