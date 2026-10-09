@@ -351,6 +351,12 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   inside `assertion`, is refused instead of being read with the field dropped.
 
 ### Fixed
+- **Paging through `GET /admin/users` no longer costs memory for every user in the realm.**
+  Each page collected every user key in the realm to compute `total` — about 100 MB per
+  request at 1,000,000 users, even for a 200-row page. The total is now counted without
+  keeping the keys and only the requested page is read, so a page costs memory for its own
+  rows. `total` is still the exact number of users. The same applies to the other admin
+  lists that report a total, such as clients and organizations. (#447)
 - **An open connection no longer costs ~550 KB of memory.** Every connection built its own copy
   of the full route table, so a server holding 2,000 client connections spent ~1.1 GB on them
   and came close to running out of memory on a 4 GB host. A connection now wraps the shared

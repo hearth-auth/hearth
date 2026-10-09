@@ -56,8 +56,9 @@ use crate::core::{EpochCell, RealmId};
 use crate::storage::encryption;
 use crate::storage::error::StorageError;
 use crate::storage::fs::{Fs, RealFs};
+use crate::storage::key_merge::{self, KeyCursor};
 use crate::storage::key_registry::KeyRegistry;
-use crate::storage::memtable::{Memtable, MemtableConfig, MemtableValue};
+use crate::storage::memtable::{Memtable, MemtableConfig, MemtableKeyCursor, MemtableValue};
 use crate::storage::sst::{self, SstReader, SstWriter};
 use crate::storage::tiered::{HotTier, TieredConfig, PRODUCTION_PROMOTE_SAMPLE_RATE};
 use crate::storage::wal::{
@@ -2233,6 +2234,52 @@ impl StorageEngine for EmbeddedStorageEngine {
             .filter(|(_, alive)| *alive)
             .map(|(k, _)| k)
             .collect())
+    }
+
+    /// Streaming key walk: merges the memtable maps and the SSTs one key at a
+    /// time, newest source first, so a walk over a million keys collects none
+    /// of them. `count_prefix` and `scan_prefix_paged` run on it (#447).
+    ///
+    /// The memtable is loaded before the SST list, for the reason given in
+    /// `scan`: a flush registers its SST before it drops the map it parked, so
+    /// every key is in the maps held here or in the SSTs loaded after them.
+    fn visit_keys(
+        &self,
+        realm_id: &RealmId,
+        start: &[u8],
+        end: &[u8],
+        visit: &mut dyn FnMut(&[u8]) -> std::ops::ControlFlow<()>,
+    ) -> Result<(), StorageError> {
+        // Same reversed-window guard as `scan` (audit §4.9#7).
+        if start > end {
+            return Err(StorageError::InvalidRange);
+        }
+        let _timer = crate::metrics::metrics()
+            .storage_operation_duration_seconds
+            .with_label_values(&["visit_keys"])
+            .start_timer();
+
+        let maps = self.active_memtable.maps();
+        let sst_readers = self.sst_readers.load_full();
+
+        // Newest first: the active map, the map being flushed, then the SSTs
+        // (stored newest first).
+        let mut cursors: Vec<Box<dyn KeyCursor + '_>> = Vec::with_capacity(2 + sst_readers.len());
+        cursors.push(Box::new(MemtableKeyCursor::new(
+            &maps.active,
+            realm_id,
+            start,
+            end,
+        )));
+        if let Some(parked) = maps.parked.as_deref() {
+            cursors.push(Box::new(MemtableKeyCursor::new(
+                parked, realm_id, start, end,
+            )));
+        }
+        for reader in sst_readers.iter() {
+            cursors.push(Box::new(reader.key_cursor(realm_id, start, end)?));
+        }
+        key_merge::visit_merged(&mut cursors, visit)
     }
 
     /// Enumerates all distinct realm IDs present in the engine.
@@ -5302,6 +5349,103 @@ mod tests {
         // Empty start==end means no range → empty
         let keys = engine.scan_keys(&realm, b"", b"").expect("scan_keys");
         assert_eq!(keys, [] as [std::vec::Vec<u8>; 0]);
+    }
+
+    // ===== visit_keys: the streaming key walk (#447) =====
+
+    fn visited_keys(
+        engine: &EmbeddedStorageEngine,
+        realm: &RealmId,
+        start: &[u8],
+        end: &[u8],
+    ) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        engine
+            .visit_keys(realm, start, end, &mut |key| {
+                out.push(key.to_vec());
+                std::ops::ControlFlow::Continue(())
+            })
+            .expect("visit_keys");
+        out
+    }
+
+    /// Puts, rewrites and deletes spread over many SSTs (4 KiB flushes), a
+    /// memtable on top and a neighbouring realm: the walk sees exactly the
+    /// live keys, in order, as `scan_keys` and a model map do.
+    #[test]
+    fn visit_keys_walks_the_live_keys_across_ssts_and_the_memtable() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        let neighbour = RealmId::generate();
+        let mut model = std::collections::BTreeSet::new();
+        let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+        for step in 0..3_000_u32 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let key = format!("usr:{:04}", state % 600).into_bytes();
+            if state.is_multiple_of(4) {
+                engine.delete(&realm, &key).expect("delete");
+                model.remove(&key);
+            } else {
+                engine.put(&realm, &key, &step.to_le_bytes()).expect("put");
+                model.insert(key.clone());
+            }
+            engine.put(&neighbour, &key, b"other realm").expect("put");
+        }
+        assert!(
+            engine.sst_readers.load_full().len() > 2,
+            "precondition: the keys are spread over several SSTs"
+        );
+
+        let walked = visited_keys(&engine, &realm, b"usr:", b"usr;");
+        assert_eq!(walked, model.iter().cloned().collect::<Vec<_>>());
+        assert_eq!(
+            walked,
+            engine
+                .scan_keys(&realm, b"usr:", b"usr;")
+                .expect("scan_keys")
+        );
+
+        // A window inside the prefix starts and stops mid-SST.
+        let inner = visited_keys(&engine, &realm, b"usr:0100", b"usr:0200");
+        let expected: Vec<Vec<u8>> = model
+            .range(b"usr:0100".to_vec()..b"usr:0200".to_vec())
+            .cloned()
+            .collect();
+        assert_eq!(inner, expected);
+    }
+
+    #[test]
+    fn visit_keys_stops_when_the_visitor_breaks() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        put_prefixed(&engine, &realm, "usr", 500);
+        let mut seen = 0;
+        engine
+            .visit_keys(&realm, b"usr:", b"usr;", &mut |_| {
+                seen += 1;
+                if seen == 7 {
+                    std::ops::ControlFlow::Break(())
+                } else {
+                    std::ops::ControlFlow::Continue(())
+                }
+            })
+            .expect("visit_keys");
+        assert_eq!(seen, 7);
+    }
+
+    #[test]
+    fn visit_keys_refuses_a_reversed_window() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        put_prefixed(&engine, &realm, "usr", 50);
+        let err = engine
+            .visit_keys(&realm, b"usr:z", b"usr:a", &mut |_| {
+                std::ops::ControlFlow::Continue(())
+            })
+            .expect_err("a reversed window is an error, not a panic");
+        assert!(matches!(err, StorageError::InvalidRange), "{err:?}");
     }
 
     // ===== count_prefix / scan_prefix_paged tests (HEA-1616) =====
