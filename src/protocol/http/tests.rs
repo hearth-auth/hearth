@@ -3456,34 +3456,14 @@ fn http_client_auth_still_accepts_the_right_secret_and_refuses_the_wrong_one() {
     .is_ok());
 }
 
-/// A REST call shed by the KDF gate (the password paths route through
-/// `run_kdf_gated_rest`) answers the machine-readable `HEARTH_RATE_LIMITED`
-/// like every other error body, plus `Retry-After`.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// A REST call shed by the KDF gate (an engine call that returns
+/// `IdentityError::KdfOverloaded`) answers the machine-readable
+/// `HEARTH_RATE_LIMITED` like every other error body, plus `Retry-After`.
+#[tokio::test]
 async fn a_kdf_shed_rest_response_carries_the_rate_limited_error_code() {
-    // nextest runs this in its own process, so it wins the OnceLock.
-    assert!(crate::identity::init_gate(crate::identity::KdfGateConfig {
-        max_in_flight: 1,
-        max_queue_wait: std::time::Duration::from_millis(20),
+    let resp = super::identity_error_response(&crate::identity::IdentityError::KdfOverloaded {
         retry_after: std::time::Duration::from_secs(3),
-    }));
-    let (held_tx, held_rx) = tokio::sync::oneshot::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-    let holder = tokio::spawn(async move {
-        let _ = crate::identity::gate()
-            .run(move || {
-                let _ = held_tx.send(());
-                let _ = release_rx.recv_timeout(std::time::Duration::from_secs(30));
-            })
-            .await;
     });
-    held_rx.await.expect("holder admitted");
-
-    let resp = super::run_kdf_gated_rest(|| (), |_| ())
-        .await
-        .expect_err("a saturated gate sheds");
-    release_tx.send(()).expect("release");
-    holder.await.expect("holder joins");
 
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(

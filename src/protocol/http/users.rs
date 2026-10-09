@@ -56,27 +56,22 @@ async fn create_user(
     // Bind the realm to the validated token, not the raw header (HEA-2023).
     let realm_id = auth.realm_id.clone();
     let admin_actor = auth.user_id.clone();
-    // create_user hashes an Argon2id credential — route through the shared KDF
-    // admission gate (HEA-1891 / F3) so it shares the one permit pool with the
-    // UI auth paths rather than oversubscribing the blocking pool.
-    let result = match super::run_kdf_gated_rest(
-        move || {
-            let audit_ctx = AuditContext {
-                actor: Actor::User(admin_actor),
-                metadata: Some(serde_json::json!({"via": "user_api"})),
-            };
-            identity.create_user_attributed(&realm_id, &request, &audit_ctx)
-        },
-        |e| {
-            tracing::error!(error = %e, "create_user KDF task failed");
-            Err(crate::identity::IdentityError::Storage(Box::new(e)))
-        },
-    )
+    // Creating a user hashes nothing (the request carries no password), so it
+    // runs on the blocking pool without a KDF permit: under the gate, the
+    // storage write held one of the few Argon2 permits and concurrent creates
+    // were shed with `503` while the CPU sat idle.
+    let result = tokio::task::spawn_blocking(move || {
+        let audit_ctx = AuditContext {
+            actor: Actor::User(admin_actor),
+            metadata: Some(serde_json::json!({"via": "user_api"})),
+        };
+        identity.create_user_attributed(&realm_id, &request, &audit_ctx)
+    })
     .await
-    {
-        Ok(r) => r,
-        Err(shed) => return shed,
-    };
+    .unwrap_or_else(|e| {
+        tracing::error!(error = %e, "create_user task failed");
+        Err(crate::identity::IdentityError::Storage(Box::new(e)))
+    });
 
     match result {
         Ok(user) => (

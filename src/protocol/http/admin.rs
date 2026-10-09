@@ -993,27 +993,22 @@ async fn admin_create_user(
     let identity = Arc::clone(&state.identity);
     let realm_id = auth.realm_id.clone();
     let admin_actor = auth.user_id.clone();
-    // create_user hashes an Argon2id credential — route through the shared KDF
-    // admission gate so bulk provisioning can't oversubscribe the blocking pool
-    // and blow the peak-memory ceiling (HEA-1891 / F3).
-    let result = match super::run_kdf_gated_rest(
-        move || {
-            let audit_ctx = AuditContext {
-                actor: Actor::User(admin_actor),
-                metadata: Some(serde_json::json!({"via": "admin_api"})),
-            };
-            identity.create_user_attributed(&realm_id, &request, &audit_ctx)
-        },
-        |e| {
-            tracing::error!(error = %e, "admin_create_user KDF task failed");
-            Err(crate::identity::IdentityError::Storage(Box::new(e)))
-        },
-    )
+    // Creating a user hashes nothing (the request carries no password), so it
+    // runs on the blocking pool without a KDF permit: under the gate, the
+    // storage write held one of the few Argon2 permits and concurrent creates
+    // were shed with `503` while the CPU sat idle.
+    let result = tokio::task::spawn_blocking(move || {
+        let audit_ctx = AuditContext {
+            actor: Actor::User(admin_actor),
+            metadata: Some(serde_json::json!({"via": "admin_api"})),
+        };
+        identity.create_user_attributed(&realm_id, &request, &audit_ctx)
+    })
     .await
-    {
-        Ok(r) => r,
-        Err(shed) => return shed,
-    };
+    .unwrap_or_else(|e| {
+        tracing::error!(error = %e, "admin_create_user task failed");
+        Err(crate::identity::IdentityError::Storage(Box::new(e)))
+    });
 
     match result {
         Ok(user) => (

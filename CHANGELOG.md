@@ -160,6 +160,9 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   workflows and guides are gone.
 
 ### Security
+- **Go SDK: `golang.org/x/net` 0.60.0.** The SDK pulled in 0.57.0, which has five HTTP/2 advisories
+  (CVE-2026-97032, -78663, -78669, -78660, -78659: crashes, memory and CPU exhaustion in HTTP/2
+  servers and malformed-header acceptance in the transport). Update the SDK to pick up the fix.
 - **Consent is bound to the organization and the resource, and covers what it discloses**
   (`scope-consent-integrity`). A third-party consent row is now keyed by user, client,
   organization and RFC 8707 resource, and the browser gate, the JSON `/authorize` and refresh
@@ -348,6 +351,19 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   inside `assertion`, is refused instead of being read with the field dropped.
 
 ### Fixed
+- **Creating users no longer fails with `503` under concurrent load.** `POST /admin/users`
+  and `POST /users` waited for one of the few password-hashing slots (2 on a 2-CPU host),
+  although creating a user hashes no password. Each create held the slot through its disk
+  write, so bulk provisioning was limited by disk latency times the slot count, and every
+  request that waited more than 250 ms failed with `503 kdf_overloaded` while the CPU sat
+  idle (~316 failures/s on an AWS gp3 disk). Creates now run without a slot; the slots
+  still bound every real password hash.
+- **Audited writes in a realm no longer wait for each other's disk flush.** On a single node,
+  every write that records an audit event (user creation, sign-in, token refresh, admin
+  changes) flushed the disk while it held the realm's audit-chain lock, so these writes ran one
+  at a time: ~168 user creations/s on an AWS gp3 disk with the CPU at ~15%. The storage layer
+  that every server uses now passes the engine's group commit through, so concurrent writes
+  share one flush; each write is still on disk before Hearth acknowledges it.
 - **Token refreshes no longer wait in one line for the disk.** Each refresh spends its old
   token through a check-and-write that held one process-wide lock until the write was on disk,
   so all refreshes (and replay markers, nonces and one-time-code claims) ran one at a time:
