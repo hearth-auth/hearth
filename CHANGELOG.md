@@ -351,6 +351,10 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   inside `assertion`, is refused instead of being read with the field dropped.
 
 ### Fixed
+- **An open connection no longer costs ~550 KB of memory.** Every connection built its own copy
+  of the full route table, so a server holding 2,000 client connections spent ~1.1 GB on them
+  and came close to running out of memory on a 4 GB host. A connection now wraps the shared
+  routes once and costs ~30 KB.
 - **Reads no longer slow down as the in-memory cache fills.** Each time a record entered the
   hot-tier cache, Hearth copied the cache shard it landed in, key by key. On a 4 GB host the
   cache auto-sizes to ~1.5 M entries in 64 shards, so a half-full cache made the read that
