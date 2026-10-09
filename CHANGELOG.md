@@ -368,6 +368,11 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   at a time: ~168 user creations/s on an AWS gp3 disk with the CPU at ~15%. The storage layer
   that every server uses now passes the engine's group commit through, so concurrent writes
   share one flush; each write is still on disk before Hearth acknowledges it.
+- **Token refreshes no longer wait in one line for the disk.** Each refresh spends its old
+  token through a check-and-write that held one process-wide lock until the write was on disk,
+  so all refreshes (and replay markers, nonces and one-time-code claims) ran one at a time:
+  ~180 refreshes/s on an AWS gp3 disk with the CPU at ~30%. The lock now covers only the
+  check; each caller still waits for its own write to reach the disk before Hearth answers.
 - **Reads no longer slow down as the in-memory cache fills.** Each time a record entered the
   hot-tier cache, Hearth copied the cache shard it landed in, key by key. On a 4 GB host the
   cache auto-sizes to ~1.5 M entries in 64 shards, so a half-full cache made the read that
