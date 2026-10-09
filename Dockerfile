@@ -200,10 +200,5 @@ ENV HEARTH_HEALTHCHECK_URL=http://127.0.0.1:8420/readyz
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=5 \
     CMD wget -q -O /dev/null --no-check-certificate --no-hsts "$HEARTH_HEALTHCHECK_URL" || exit 1
 
-# Hearth fixes glibc's mmap threshold at 128 KiB (#445), so each 19 MiB Argon2
-# buffer is a fresh mapping. This tunable gives such mappings transparent huge
-# pages; without it, faulting a buffer in 4 KiB pages cost 35–40% more CPU per
-# password hash in a local measurement. glibc >= 2.35 (bookworm has 2.36).
-ENV GLIBC_TUNABLES=glibc.malloc.hugetlb=1
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/hearth"]
 CMD ["serve", "-c", "/etc/hearth/hearth.yaml"]

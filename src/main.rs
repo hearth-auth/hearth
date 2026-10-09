@@ -635,10 +635,15 @@ enum MmapThreshold {
 /// one returns its pages to the kernel at once.
 ///
 /// This is glibc's own starting value. Left alone, glibc raises the threshold
-/// to the size of each larger mmapped block that is freed, up to 32 MiB: after
-/// the first 19 MiB Argon2 buffer, every allocation below ~19 MiB comes from an
-/// arena, where the small allocations around it keep its freed pages from
-/// going back (#445). Setting the threshold also turns that adjustment off.
+/// to the size of each larger mmapped block that is freed, up to 32 MiB: once
+/// it has risen, every allocation below it comes from an arena, where the
+/// small allocations around it keep its freed pages from going back (#445).
+/// Setting the threshold also turns that adjustment off.
+///
+/// The KDF gates reuse their Argon2 buffers, so a hash no longer frees a
+/// 19 MiB block; but any freed block above 128 KiB still raises the dynamic
+/// threshold, and in a local measurement the request-sized blocks below it
+/// kept twice the resident memory in the arenas without this fix.
 const MALLOC_MMAP_THRESHOLD: usize = 128 * 1024;
 
 /// Whether the operator set glibc's mmap threshold in the environment,
@@ -660,22 +665,6 @@ fn set_malloc_mmap_threshold(bytes: usize) -> bool {
     // SAFETY: `mallopt` sets a process-wide allocator parameter; it takes no
     // pointers and is safe to call while other threads allocate.
     unsafe { libc::mallopt(libc::M_MMAP_THRESHOLD, bytes) == 1 }
-}
-
-/// Whether glibc's fresh mmapped blocks get transparent huge pages, from the
-/// `GLIBC_TUNABLES` value and the kernel's
-/// `/sys/kernel/mm/transparent_hugepage/enabled` (`None`: the kernel has no
-/// THP).
-///
-/// With the threshold fixed, each 19 MiB Argon2 buffer is a fresh mapping;
-/// faulted in 4 KiB pages it cost 35–40% more CPU per hash in a local
-/// measurement (#445), and with huge pages nothing.
-fn mmapped_blocks_get_huge_pages(tunables: Option<&str>, thp_enabled: Option<&str>) -> bool {
-    let Some(mode) = thp_enabled else {
-        return false;
-    };
-    let advised = tunables.is_some_and(|t| t.split(':').any(|kv| kv == "glibc.malloc.hugetlb=1"));
-    mode.contains("[always]") || (advised && mode.contains("[madvise]"))
 }
 
 /// Fixes glibc's mmap threshold at [`MALLOC_MMAP_THRESHOLD`] at startup,
@@ -1332,14 +1321,6 @@ async fn run_serve(
     match MALLOC_MMAP_THRESHOLD_SET.get() {
         Some(MmapThreshold::Fixed(bytes)) => {
             info!(bytes, "glibc malloc mmap threshold fixed");
-            let tunables = std::env::var("GLIBC_TUNABLES").ok();
-            let thp = std::fs::read_to_string("/sys/kernel/mm/transparent_hugepage/enabled").ok();
-            if !mmapped_blocks_get_huge_pages(tunables.as_deref(), thp.as_deref()) {
-                info!(
-                    "glibc's large blocks get no huge pages, so each password hash costs more \
-                     CPU; set GLIBC_TUNABLES=glibc.malloc.hugetlb=1 (see the storage sizing guide)"
-                );
-            }
         }
         Some(MmapThreshold::Operator) => {
             info!("glibc malloc mmap threshold left to the operator's environment");
@@ -6472,37 +6453,6 @@ mod tests {
             ("MALLOC_MMAP_THRESHOLD", "1048576"),
         ])));
         assert!(!operator_sets_mmap_threshold(env(&[])));
-    }
-
-    /// With the threshold fixed, each 19 MiB Argon2 buffer is a fresh mapping.
-    /// Faulted in 4 KiB at a time it costs 35–40% more CPU per hash (local
-    /// measurement, #445); huge pages remove that cost. A fresh mapping gets
-    /// them when the kernel backs all anonymous memory with them, or when
-    /// glibc's `hugetlb` tunable asks for them.
-    #[test]
-    fn huge_pages_for_mmapped_blocks_are_detected() {
-        let madvise = Some("always [madvise] never\n");
-        let always = Some("[always] madvise never\n");
-        let never = Some("always madvise [never]\n");
-        let tunable = Some("glibc.malloc.hugetlb=1");
-        assert!(mmapped_blocks_get_huge_pages(tunable, madvise));
-        assert!(mmapped_blocks_get_huge_pages(
-            Some("glibc.malloc.arena_max=2:glibc.malloc.hugetlb=1"),
-            madvise
-        ));
-        assert!(mmapped_blocks_get_huge_pages(None, always));
-        assert!(!mmapped_blocks_get_huge_pages(None, madvise));
-        assert!(!mmapped_blocks_get_huge_pages(
-            Some("glibc.malloc.hugetlb=0"),
-            madvise
-        ));
-        assert!(!mmapped_blocks_get_huge_pages(
-            Some("glibc.malloc.arena_max=2"),
-            madvise
-        ));
-        // The tunable only advises; with THP off, or absent, there are none.
-        assert!(!mmapped_blocks_get_huge_pages(tunable, never));
-        assert!(!mmapped_blocks_get_huge_pages(tunable, None));
     }
 
     /// Bytes glibc holds in mmapped blocks right now.

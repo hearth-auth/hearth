@@ -371,11 +371,12 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   raised its mmap threshold to ~19 MiB after the first Argon2 buffer was freed, so every
   allocation below that came from the arenas, and the space small allocations left around it
   was never returned: a live soak held 880 MB free in the arenas after 35 minutes. On Linux with
-  glibc, Hearth now fixes the threshold at 128 KiB at startup and logs it; in a local 5-minute
-  mixed load, resident memory went from 432 MB to 221 MB. Each password hash then maps a fresh
-  buffer, which costs 35–40% more hash CPU unless the mapping gets transparent huge pages: the
-  container image and the systemd unit now set `GLIBC_TUNABLES=glibc.malloc.hugetlb=1`, and
-  Hearth's startup log says when neither that nor THP `always` applies. Set
+  glibc, Hearth now fixes the threshold at 128 KiB at startup and logs it, and each KDF permit
+  keeps one Argon2 buffer that every password hash and verification reuses (zeroed after each
+  hash) instead of mapping and freeing 19 MiB per hash. In a local 5-minute mixed load, resident
+  memory went from 496 MB to 237 MB at unchanged hash CPU; no glibc tunable or huge-page setting
+  is needed. The reused buffers stay resident: one per permit of the shared and admin KDF gates,
+  at the largest Argon2 memory cost each has served (the startup log shows the bound). Set
   `MALLOC_MMAP_THRESHOLD_` or the `glibc.malloc.mmap_threshold` tunable to choose your own
   threshold; Hearth then leaves it alone.
 - **An open connection no longer costs ~550 KB of memory.** Every connection built its own copy

@@ -126,48 +126,53 @@ platforms and C libraries are not affected.
 
 glibc gives each allocation above its *mmap threshold* (128 KiB at start) its
 own mapping, which goes back to the kernel as soon as it is freed. But glibc
-raises the threshold each time it frees a larger mapping, up to 32 MiB. The
-first 19 MiB Argon2 buffer of a password hash moves it to ~19 MiB, and from
-then on every allocation below that comes from the arenas. Around those blocks
-the arenas fill with small allocations, and the freed space between them is not
-returned: a live soak (issue #445) found 880 MB free inside the arenas after 35
-minutes, for ~1.2 GB of live data.
+raises the threshold each time it frees a larger mapping, up to 32 MiB, and
+from then on every allocation below it comes from the arenas. Around those
+blocks the arenas fill with small allocations, and the freed space between them
+is not returned: a live soak (issue #445), in which each password hash freed a
+19 MiB Argon2 buffer, found 880 MB free inside the arenas after 35 minutes, for
+~1.2 GB of live data.
 
 Hearth therefore fixes the threshold at 128 KiB before it starts any thread,
 which also stops glibc from moving it. The startup log shows it
 (`glibc malloc mmap threshold fixed bytes=131072`).
 
-Each Argon2 buffer is then a fresh mapping, and the kernel must fault its pages
-in for every hash. In 4 KiB pages that costs 35–40% more CPU per hash; with
-transparent huge pages it costs nothing measurable. Fresh mappings get huge
-pages when `/sys/kernel/mm/transparent_hugepage/enabled` is `always`, or when it
-is `madvise` (the default on most distributions) and glibc 2.35 or later runs
-with:
-
-```sh
-GLIBC_TUNABLES=glibc.malloc.hugetlb=1
-```
-
-The container image and the systemd unit in `deploy/` set it. If neither
-applies, Hearth says so in its startup log. To combine it with other tunables,
-separate them with `:`, e.g.
-`GLIBC_TUNABLES=glibc.malloc.hugetlb=1:glibc.malloc.arena_max=4`.
-
-Local measurement (2026-10-09, 12-core Linux workstation shared with other builds, glibc 2.42, two arenas, two
-threads hashing at Hearth's default cost and six threads allocating and freeing
-request-sized objects, 5 minutes; `cargo run --release --example
-malloc_retention`):
-
-| glibc setting | resident memory | free inside arenas | CPU per hash, p50 |
-|---|---|---|---|
-| default (dynamic threshold) | 432 MB | 199 MB | 40.7 ms |
-| `malloc_trim(0)` every 60 s | 416 MB | 187 MB | 40.1 ms |
-| threshold fixed at 128 KiB | 227 MB | 38 MB | 55.5 ms |
-| threshold fixed at 128 KiB + `hugetlb=1` | 221 MB | 34 MB | 38.9 ms |
-
 To choose your own threshold, set `MALLOC_MMAP_THRESHOLD_` (with the trailing
 underscore) or the `glibc.malloc.mmap_threshold` tunable. Hearth then leaves the
 threshold alone and logs that it did so.
+
+### Argon2 block buffers
+
+Each password hash or verification at the default cost needs a 19 MiB Argon2
+buffer. Hearth keeps one such buffer per KDF permit (`security.password.kdf`)
+and reuses it, zeroed after every hash, so a hash does not map, fault in and
+free a fresh 19 MiB block. A realm with a higher memory cost, or a stored hash
+with a larger `m`, grows a buffer to that size, and the buffer keeps that size.
+The startup log shows the bound at the base cost
+(`argon2 block buffers are reused, one per kdf permit`, with `bound_mib`):
+for example 4 buffers, 76 MiB, on a 2-core host with the default two admin
+permits. This memory was already in use whenever all permits were busy; it now
+stays resident after a burst of sign-ins.
+
+No glibc tunable or huge-page setting is needed for this.
+
+Local measurement (2026-10-09, 12-core Linux workstation shared with other
+builds, glibc 2.42, THP `madvise`, two arenas; two threads hashing at Hearth's
+default cost and six threads allocating and freeing request-sized objects,
+5 minutes, three rounds, medians; `cargo run --release --example
+malloc_retention`). CPU per hash is measured with hashing alone, five
+alternating rounds:
+
+| glibc threshold, Argon2 buffer | resident memory | free inside arenas | CPU per hash, p50 |
+|---|---|---|---|
+| dynamic, fresh buffer per hash (before #445) | 496 MB | 211 MB | 19.9 ms |
+| dynamic, reused buffer | 436 MB | 163 MB | 19.9 ms |
+| **fixed 128 KiB, reused buffer (Hearth)** | **237 MB** | **30 MB** | **19.7 ms** |
+
+The fixed threshold is what holds memory down; reusing the buffer is what keeps
+it from costing hash CPU. With the threshold fixed and a fresh buffer per hash,
+the kernel faults each new 19 MiB mapping in 4 KiB pages: 29.3 ms per hash in
+the same measurement, 47% more.
 
 ## Working-set vs dataset size
 
