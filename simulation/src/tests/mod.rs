@@ -3,6 +3,7 @@ mod audit_crash;
 mod cluster_chaos;
 mod cluster_failover;
 mod migration_crash;
+mod put_if_absent_durability;
 mod rbac_concurrent_assignments;
 mod realm_concurrent_io;
 mod realm_crash;

@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use cluster_fixture::{
     blocking, counter, realm, wait_converged, wait_for_leader, Node, ThreeNodes,
 };
-use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
+use hearth::audit::{AuditAction, AuditEngine, AuditQuery, CreateAuditEvent, EmbeddedAuditEngine};
 use hearth::cluster::ClusterEngine;
 use hearth::core::{Clock, FakeClock, RealmId, Timestamp, UserId};
 use hearth::identity::{
@@ -347,6 +347,165 @@ async fn a_login_and_a_single_use_claim_served_by_a_follower_succeed() {
         leader.consume_par(&realm_id, &request_uri).is_err(),
         "a spent request_uri was redeemed again on the leader"
     );
+
+    cluster.shutdown();
+}
+
+// ── Split-commit writes (the audit engine's group commit) ────────────────────
+
+/// `enqueue_batch` / `await_batch_durable` are forwarded to the embedded
+/// engine's WAL group commit only in single-node mode (#441). In cluster mode
+/// they must stay a Raft proposal: a follower forwards the batch to the leader
+/// once, the batch is readable on the follower as soon as `enqueue_batch`
+/// returns (before the durability wait, which has nothing left to do), and it
+/// replicates to every node. Had the adapter handed the batch to the
+/// follower's own engine, nothing would be forwarded and the other two nodes
+/// would never see it (#451).
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn an_enqueued_batch_is_a_raft_proposal_on_the_leader_and_on_a_follower() {
+    let cluster = ThreeNodes::start().await;
+    let realm = realm();
+    let leader_id = cluster.leader_id;
+    let follower = cluster.followers()[0];
+    let committed_before = forwarded(ForwardedWriteOutcomeLabel::Committed);
+
+    let s = Arc::clone(&follower.storage);
+    let r = realm.clone();
+    let (read_before_wait, durable) = blocking(move || {
+        let handle = s
+            .enqueue_batch(
+                &r,
+                &[
+                    (b"f1".to_vec(), b"1".to_vec()),
+                    (b"f2".to_vec(), b"2".to_vec()),
+                ],
+            )
+            .expect("a follower's enqueue_batch is forwarded and committed");
+        let read = [b"f1".as_slice(), b"f2"].map(|k| s.get(&r, k).unwrap());
+        (read, s.await_batch_durable(handle))
+    })
+    .await;
+    durable.expect("a cluster-mode durability handle has nothing left to wait for");
+    assert_eq!(
+        read_before_wait,
+        [Some(b"1".to_vec()), Some(b"2".to_vec())],
+        "node {}: a committed batch must be readable on the follower before the durability \
+         wait",
+        follower.id
+    );
+    assert_eq!(
+        follower.faults.forwards_sent(leader_id),
+        1,
+        "node {}: a follower's enqueue_batch must be forwarded to the leader exactly once",
+        follower.id
+    );
+    assert_eq!(
+        forwarded(ForwardedWriteOutcomeLabel::Committed) - committed_before,
+        1,
+        "the forwarded batch must commit as one Raft entry"
+    );
+
+    let s = Arc::clone(&cluster.leader().storage);
+    let r = realm.clone();
+    blocking(move || {
+        let handle = s
+            .enqueue_batch(&r, &[(b"l1".to_vec(), b"3".to_vec())])
+            .expect("the leader's enqueue_batch is proposed");
+        s.await_batch_durable(handle)
+    })
+    .await
+    .expect("durable");
+
+    cluster.converge().await;
+    for node in &cluster.nodes {
+        let s = Arc::clone(&node.storage);
+        let r = realm.clone();
+        let got =
+            blocking(move || [b"f1".as_slice(), b"f2", b"l1"].map(|k| s.get(&r, k).unwrap())).await;
+        assert_eq!(
+            got,
+            [
+                Some(b"1".to_vec()),
+                Some(b"2".to_vec()),
+                Some(b"3".to_vec())
+            ],
+            "node {}: an enqueued batch did not replicate",
+            node.id
+        );
+    }
+
+    cluster.shutdown();
+}
+
+/// The audit engine appends through `enqueue_batch` under its realm chain
+/// lock and waits for durability after releasing it. In cluster mode an event
+/// appended on a follower must be the replicated log's: every node reads it,
+/// and every node's chain for the realm verifies (#441, #451).
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn an_audit_event_appended_on_a_follower_replicates_and_verifies_everywhere() {
+    let cluster = ThreeNodes::start().await;
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(
+        1_700_000_000_000_000,
+    ))) as Arc<dyn Clock>;
+    let audit_on = |node: &Node| {
+        Arc::new(EmbeddedAuditEngine::new(
+            Arc::clone(&node.storage),
+            Arc::clone(&clock),
+        )) as Arc<dyn AuditEngine>
+    };
+    let realm = realm();
+    let follower = cluster.followers()[0];
+
+    let audit = audit_on(follower);
+    let request = CreateAuditEvent {
+        realm_id: realm.clone(),
+        actor: "issue-451".to_string(),
+        action: AuditAction::UserCreated,
+        resource_type: "user".to_string(),
+        resource_id: "u-451".to_string(),
+        metadata: None,
+    };
+    let appended = blocking(move || audit.append(&request))
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "node {} (a follower) refused an audit append: {e}",
+                follower.id
+            )
+        });
+
+    cluster.converge().await;
+    for node in &cluster.nodes {
+        let audit = audit_on(node);
+        let r = realm.clone();
+        let (events, verified) = blocking(move || {
+            let events = audit
+                .query(&AuditQuery {
+                    realm_id: r.clone(),
+                    start_time: None,
+                    end_time: None,
+                    actor: None,
+                    action: None,
+                    limit: None,
+                    agent_id: None,
+                    tool: None,
+                })
+                .unwrap();
+            (events, audit.verify_integrity(&r, None, None).unwrap())
+        })
+        .await;
+        assert_eq!(
+            events.iter().map(|e| e.id.clone()).collect::<Vec<_>>(),
+            vec![appended.id.clone()],
+            "node {}: the follower's audit event did not replicate",
+            node.id
+        );
+        assert!(
+            verified,
+            "node {}: the realm's audit chain does not verify",
+            node.id
+        );
+    }
 
     cluster.shutdown();
 }

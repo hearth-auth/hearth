@@ -392,9 +392,11 @@ pub struct EmbeddedStorageEngine {
     ///
     /// The default trait implementation does a non-atomic `get` then `put`,
     /// leaving a TOCTOU window: two concurrent tasks can both observe the key
-    /// as absent and both write. Holding this lock across the check-and-write
-    /// closes that window (HEA-1767). This lock is used in both single-node and
-    /// cluster mode — there is no Raft-mediated path for `put_if_absent`.
+    /// as absent and both write. Holding this lock across the check and the
+    /// enqueue closes that window (HEA-1767); the fsync wait happens after it
+    /// is released (#442). Single-node mode only: in cluster mode a claim is a
+    /// Raft `PutIfAbsent`, which the state machine applies with its own check
+    /// and `write_batch`, never through this method.
     put_if_absent_lock: Mutex<()>,
     /// Serialises [`StorageEngine::increment_u64`]'s read-modify-write. Its
     /// own lock, not [`Self::put_if_absent_lock`]: the increment holds it
