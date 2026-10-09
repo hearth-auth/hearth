@@ -48,12 +48,27 @@
 //! saturates at the core count, so permits beyond it buy no throughput and only
 //! add queue latency. The *calibrated production default* is refined by the
 //! C7/HEA-1875 saturation sweep.
+//!
+//! # Reused Argon2 block buffers (#445)
+//!
+//! Each gate keeps up to `permits` Argon2 block buffers in a [`BlockPool`]. An
+//! admitted closure that runs Argon2 through [`with_argon2_blocks`] checks a
+//! buffer out, and gives it back zeroed when the hash ends. A hash at the
+//! default cost therefore no longer maps, faults in and frees 19 MiB: in 4 KiB
+//! pages that cost 35–40% more CPU per hash once glibc's mmap threshold was
+//! fixed at 128 KiB, and before that, glibc's dynamic threshold rose to 19 MiB
+//! after the first freed buffer and pulled every mid-size allocation into its
+//! arenas. A buffer grows to the largest cost it has served and stays that
+//! size, so a gate holds at most `permits × largest memory cost` bytes.
 
-use std::cell::Cell;
-use std::sync::OnceLock;
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
+use argon2::Block;
 use tokio::sync::Semaphore;
+use zeroize::Zeroize;
 
 /// Configuration for the [`KdfGate`].
 ///
@@ -136,6 +151,9 @@ pub struct KdfGate {
     retry_after: Duration,
     permits: usize,
     pool: Pool,
+    /// Argon2 block buffers for the closures this gate admits, at most one
+    /// per permit.
+    blocks: Arc<BlockPool>,
 }
 
 impl KdfGate {
@@ -183,6 +201,7 @@ impl KdfGate {
             retry_after: config.retry_after,
             permits,
             pool,
+            blocks: Arc::new(BlockPool::new(permits)),
         }
     }
 
@@ -190,6 +209,12 @@ impl KdfGate {
     #[must_use]
     pub fn permits(&self) -> usize {
         self.permits
+    }
+
+    /// The Argon2 block buffers this gate keeps for reuse.
+    #[cfg_attr(not(test), allow(dead_code))] // stub until the pool is wired in
+    pub(crate) fn block_pool(&self) -> &BlockPool {
+        &self.blocks
     }
 
     /// Permits currently available (for tests / introspection).
@@ -242,10 +267,11 @@ impl KdfGate {
         // disconnected client), which must neither leak the gauge nor free the
         // permit while the run still holds its memory.
         let in_flight = InFlight::enter(self, permit);
+        let blocks = Arc::clone(&self.blocks);
         let compute_start = Instant::now();
         let result = tokio::task::spawn_blocking(move || {
             let _in_flight = in_flight;
-            let _admitted = Admitted::enter();
+            let _admitted = Admitted::enter(blocks);
             f()
         })
         .await;
@@ -278,7 +304,7 @@ impl KdfGate {
     where
         F: FnOnce() -> T,
     {
-        if ADMITTED.get() {
+        if ADMITTED_BY.with_borrow(Option::is_some) {
             return Ok(f());
         }
         let Ok(permit) = std::sync::Arc::clone(&self.semaphore).try_acquire_owned() else {
@@ -290,7 +316,7 @@ impl KdfGate {
         let _in_flight = InFlight::enter(self, permit);
         let compute_start = Instant::now();
         let out = {
-            let _admitted = Admitted::enter();
+            let _admitted = Admitted::enter(Arc::clone(&self.blocks));
             f()
         };
         crate::metrics::metrics()
@@ -348,23 +374,133 @@ impl Drop for InFlight {
 }
 
 thread_local! {
-    /// Set while this thread runs a closure a [`KdfGate`] admitted.
-    static ADMITTED: Cell<bool> = const { Cell::new(false) };
+    /// While this thread runs a closure a [`KdfGate`] admitted: that gate's
+    /// block buffers. `None` outside any admitted closure.
+    static ADMITTED_BY: RefCell<Option<Arc<BlockPool>>> = const { RefCell::new(None) };
 }
 
-/// Marks the current thread as running an admitted KDF closure until dropped.
-struct Admitted(bool);
+/// Marks the current thread as running a closure admitted by the gate that
+/// owns `blocks`, until dropped.
+struct Admitted(Option<Arc<BlockPool>>);
 
 impl Admitted {
-    fn enter() -> Self {
-        Self(ADMITTED.replace(true))
+    fn enter(blocks: Arc<BlockPool>) -> Self {
+        Self(ADMITTED_BY.replace(Some(blocks)))
     }
 }
 
 impl Drop for Admitted {
     fn drop(&mut self) {
-        ADMITTED.set(self.0);
+        ADMITTED_BY.set(self.0.take());
     }
+}
+
+/// Argon2 block buffers one [`KdfGate`] keeps for reuse (#445).
+///
+/// Holds at most `capacity` (the gate's permit count) buffers, every one of
+/// them all zeros. Off the hot path: a `Mutex` guards the list, held only to
+/// pop or push one buffer and never across an `.await`.
+#[cfg_attr(not(test), allow(dead_code))] // stub until the pool is wired in
+pub(crate) struct BlockPool {
+    buffers: Mutex<Vec<Vec<Block>>>,
+    capacity: usize,
+    /// Buffers this pool had to allocate because none it held was large
+    /// enough (or it held none).
+    fresh_allocations: AtomicU64,
+}
+
+#[cfg_attr(not(test), allow(dead_code))] // stub until the pool is wired in
+impl BlockPool {
+    /// An empty pool that keeps at most `capacity` buffers.
+    fn new(capacity: usize) -> Self {
+        Self {
+            buffers: Mutex::new(Vec::new()),
+            capacity,
+            fresh_allocations: AtomicU64::new(0),
+        }
+    }
+
+    /// The most buffers this pool keeps: its gate's permit count.
+    pub(crate) fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Buffers held right now (not checked out).
+    pub(crate) fn pooled(&self) -> usize {
+        self.lock().len()
+    }
+
+    /// Bytes held right now in buffers that are not checked out.
+    pub(crate) fn pooled_bytes(&self) -> usize {
+        self.lock().iter().map(|b| b.len() * Block::SIZE).sum()
+    }
+
+    /// Buffers this pool has allocated since it was built.
+    pub(crate) fn fresh_allocations(&self) -> u64 {
+        self.fresh_allocations.load(Ordering::Relaxed)
+    }
+
+    /// The buffer list. A panic while it was held cannot leave it
+    /// inconsistent (every operation is one push or pop), so a poisoned lock
+    /// is taken as is.
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Vec<Block>>> {
+        self.buffers.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A zeroed buffer of at least `blocks` blocks.
+    fn take(&self, blocks: usize) -> Vec<Block> {
+        self.fresh_allocations.fetch_add(1, Ordering::Relaxed);
+        vec![Block::new(); blocks]
+    }
+
+    /// Takes back a zeroed buffer, or drops it when the pool is full.
+    fn give_back(&self, buffer: Vec<Block>) {
+        drop(buffer);
+    }
+}
+
+/// A buffer checked out for one Argon2 run. Dropping it zeroes the blocks the
+/// run used and gives the buffer back to its pool, on success and on panic.
+#[cfg_attr(not(test), allow(dead_code))] // stub until the pool is wired in
+struct BlockLease {
+    blocks: Vec<Block>,
+    used: usize,
+    pool: Option<Arc<BlockPool>>,
+}
+
+impl Drop for BlockLease {
+    fn drop(&mut self) {
+        for block in self.blocks.iter_mut().take(self.used) {
+            block.as_mut().zeroize();
+        }
+        if let Some(pool) = self.pool.take() {
+            pool.give_back(std::mem::take(&mut self.blocks));
+        }
+    }
+}
+
+/// Runs `f` with an Argon2 block buffer of exactly `blocks` blocks
+/// (`Params::block_count`), all zeros on entry.
+///
+/// Inside a closure a [`KdfGate`] admitted, the buffer comes from that gate's
+/// [`BlockPool`] and goes back to it when `f` returns: a hash at an unchanged
+/// cost allocates nothing. Elsewhere (start-up, tests, a caller outside the
+/// gate) the buffer is allocated for this call and freed after it. Either
+/// way the blocks are zeroed when `f` returns, so the memory-hard state of a
+/// password hash does not outlive it.
+#[cfg_attr(not(test), allow(dead_code))] // stub until the pool is wired in
+pub(crate) fn with_argon2_blocks<R>(blocks: usize, f: impl FnOnce(&mut [Block]) -> R) -> R {
+    let pool = ADMITTED_BY.with_borrow(Option::clone);
+    let buffer = match &pool {
+        Some(pool) => pool.take(blocks),
+        None => vec![Block::new(); blocks],
+    };
+    let mut lease = BlockLease {
+        blocks: buffer,
+        used: blocks,
+        pool,
+    };
+    f(&mut lease.blocks[..blocks])
 }
 
 /// Process-global gate singleton.
@@ -794,5 +930,184 @@ mod tests {
             admin_in_flight_before,
             "admin in-flight gauge must settle back after the op completes"
         );
+    }
+
+    // ── Argon2 block buffers (#445) ─────────────────────────────────────
+
+    fn pool_gate(permits: usize) -> KdfGate {
+        KdfGate::new(KdfGateConfig {
+            max_in_flight: permits,
+            max_queue_wait: Duration::from_secs(5),
+            retry_after: Duration::from_secs(1),
+        })
+    }
+
+    /// Whether every word of `blocks` is zero.
+    fn all_zero(blocks: &[Block]) -> bool {
+        blocks.iter().all(|b| b.as_ref().iter().all(|w| *w == 0))
+    }
+
+    /// The point of the pool: a second hash at the same cost through the same
+    /// gate takes the buffer the first one gave back instead of mapping,
+    /// faulting in and freeing a fresh one.
+    #[test]
+    fn a_hash_through_the_gate_reuses_the_pooled_buffer() {
+        let gate = pool_gate(1);
+        for _ in 0..3 {
+            let len = gate
+                .try_run_inline(|| with_argon2_blocks(64, |b| b.len()))
+                .expect("admitted");
+            assert_eq!(len, 64, "the closure gets exactly the blocks it asked for");
+        }
+        assert_eq!(
+            gate.block_pool().fresh_allocations(),
+            1,
+            "only the first hash allocates; the others reuse its buffer"
+        );
+        assert_eq!(gate.block_pool().pooled(), 1);
+        assert_eq!(gate.block_pool().pooled_bytes(), 64 * Block::SIZE);
+    }
+
+    /// The async path (`run`, on the blocking pool) reuses the buffer too,
+    /// whichever blocking thread runs the closure.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_async_path_reuses_the_pooled_buffer() {
+        let gate = pool_gate(1);
+        for _ in 0..3 {
+            gate.run(|| with_argon2_blocks(64, |b| b.len()))
+                .await
+                .expect("admitted");
+        }
+        assert_eq!(gate.block_pool().fresh_allocations(), 1);
+        assert_eq!(gate.block_pool().pooled(), 1);
+    }
+
+    /// A realm with a higher memory cost (or a stored hash with a larger `m`)
+    /// grows the buffer, and the pool keeps the larger one: a smaller cost
+    /// afterwards runs in it without allocating.
+    #[test]
+    fn a_larger_cost_grows_the_buffer_and_the_pool_keeps_it() {
+        let gate = pool_gate(1);
+        for blocks in [64, 256, 64, 256] {
+            let len = gate
+                .try_run_inline(|| with_argon2_blocks(blocks, |b| b.len()))
+                .expect("admitted");
+            assert_eq!(
+                len, blocks,
+                "a larger pooled buffer is handed out at the asked size"
+            );
+        }
+        assert_eq!(
+            gate.block_pool().fresh_allocations(),
+            2,
+            "one allocation at 64 blocks, one when the cost grew to 256"
+        );
+        assert_eq!(gate.block_pool().pooled(), 1);
+        assert_eq!(gate.block_pool().pooled_bytes(), 256 * Block::SIZE);
+    }
+
+    /// The pool's memory bound is `permits × buffer size`: even when more
+    /// buffers are out at once than there are permits (a nested Argon2 run
+    /// inside an admitted closure), it keeps at most `permits` of them.
+    #[test]
+    fn the_pool_never_holds_more_buffers_than_permits() {
+        let gate = pool_gate(2);
+        assert_eq!(gate.block_pool().capacity(), 2);
+        gate.try_run_inline(|| {
+            with_argon2_blocks(16, |_| {
+                with_argon2_blocks(16, |_| with_argon2_blocks(16, |_| ()));
+            });
+        })
+        .expect("admitted");
+        assert_eq!(gate.block_pool().fresh_allocations(), 3);
+        assert_eq!(
+            gate.block_pool().pooled(),
+            2,
+            "three buffers came back; a 2-permit pool keeps two"
+        );
+    }
+
+    /// Concurrent hashes through a saturated gate never leave more than
+    /// `permits` buffers behind, and once warm allocate nothing more.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_hashes_stay_within_the_pool_bound() {
+        let gate = Arc::new(pool_gate(2));
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let gate = Arc::clone(&gate);
+            tasks.push(tokio::spawn(async move {
+                gate.run(|| {
+                    with_argon2_blocks(32, |_| std::thread::sleep(Duration::from_millis(5)));
+                })
+                .await
+            }));
+        }
+        for task in tasks {
+            task.await.expect("joins").expect("admitted");
+        }
+        let pool = gate.block_pool();
+        assert!(pool.pooled() <= 2, "pool holds {} buffers", pool.pooled());
+        assert!(
+            pool.fresh_allocations() <= 2,
+            "16 hashes with 2 permits need at most 2 buffers, allocated {}",
+            pool.fresh_allocations()
+        );
+    }
+
+    /// The blocks a hash leaves behind are memory-hard state derived from the
+    /// password; with them, a guess costs one Blake2b instead of a full
+    /// Argon2 run. A buffer is zeroed before anyone else can take it.
+    #[test]
+    fn a_buffer_is_zeroed_before_it_is_reused() {
+        let gate = pool_gate(1);
+        gate.try_run_inline(|| {
+            with_argon2_blocks(64, |blocks| {
+                for block in blocks.iter_mut() {
+                    block.as_mut().fill(0xA5A5_A5A5_A5A5_A5A5);
+                }
+            });
+        })
+        .expect("admitted");
+        let zero = gate
+            .try_run_inline(|| with_argon2_blocks(64, |blocks| all_zero(blocks)))
+            .expect("admitted");
+        assert_eq!(gate.block_pool().fresh_allocations(), 1, "the same buffer");
+        assert!(
+            zero,
+            "the reused buffer still held the previous hash's blocks"
+        );
+    }
+
+    /// The blocks are zeroed even when the Argon2 run panics.
+    #[test]
+    fn a_panicking_hash_still_zeroes_and_returns_its_buffer() {
+        let gate = pool_gate(1);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            gate.try_run_inline(|| {
+                with_argon2_blocks(64, |blocks| {
+                    blocks[0].as_mut().fill(u64::MAX);
+                    panic!("argon2 run panicked");
+                });
+            })
+        }));
+        assert!(outcome.is_err(), "the panic propagates");
+        assert_eq!(gate.block_pool().pooled(), 1, "the buffer came back");
+        let zero = gate
+            .try_run_inline(|| with_argon2_blocks(64, |blocks| all_zero(blocks)))
+            .expect("admitted");
+        assert!(zero, "a panicking run left its blocks behind");
+        assert_eq!(gate.block_pool().fresh_allocations(), 1);
+    }
+
+    /// Outside an admitted closure there is no pool to draw from: the call
+    /// still gets a zeroed buffer of the asked size, and no gate's pool
+    /// changes.
+    #[test]
+    fn outside_the_gate_a_buffer_is_allocated_and_not_pooled() {
+        let gate = pool_gate(1);
+        let (len, zero) = with_argon2_blocks(48, |blocks| (blocks.len(), all_zero(blocks)));
+        assert_eq!((len, zero), (48, true));
+        assert_eq!(gate.block_pool().fresh_allocations(), 0);
+        assert_eq!(gate.block_pool().pooled(), 0);
     }
 }

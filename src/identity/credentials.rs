@@ -319,6 +319,25 @@ impl CredentialConfig {
     }
 }
 
+/// Hashes `input` with Argon2id v19 at `params` and `salt` into a PHC string.
+#[cfg_attr(not(test), allow(dead_code))] // stub until the pool is wired in
+fn argon2id_phc(
+    params: &argon2::Params,
+    input: &[u8],
+    salt: password_hash::Salt<'_>,
+) -> Result<String, IdentityError> {
+    Argon2::new(
+        argon2::Algorithm::Argon2id,
+        argon2::Version::V0x13,
+        params.clone(),
+    )
+    .hash_password(input, salt)
+    .map(|h| h.to_string())
+    .map_err(|e| IdentityError::InvalidInput {
+        reason: format!("password hashing failed: {e}"),
+    })
+}
+
 /// Applies HMAC-SHA256(key=pepper, msg=password) and returns the 32-byte digest.
 ///
 /// The result is used as the effective password input to Argon2, keeping the
@@ -2094,5 +2113,311 @@ mod tests {
             matches!(outcome, Ok(false)),
             "an unknown fast-hash version must never verify, got {outcome:?}"
         );
+    }
+
+    // ===== #445: Argon2 into reused block buffers =====
+    //
+    // Hashing and verification call `Argon2::hash_password_into_with_memory`
+    // with a buffer from the KDF gate's pool instead of the crate's
+    // `PasswordHasher` / `PasswordVerifier`, which allocate 19 MiB per call.
+    // These tests hold the two paths to the same results, in both directions.
+
+    /// Cost shapes for the equivalence tests: cheap, but covering more than
+    /// one pass, more than one lane, and a lane count that rounds `m` down.
+    const ARGON2_SHAPES: &[(u32, u32, u32)] = &[(8, 1, 1), (64, 2, 1), (256, 1, 2), (98, 3, 4)];
+
+    /// The crate's own verdict on `input` against `phc`.
+    fn crate_verifies(input: &[u8], phc: &str) -> bool {
+        let parsed = PasswordHash::new(phc).expect("parses");
+        Argon2::default().verify_password(input, &parsed).is_ok()
+    }
+
+    /// A PHC string from the crate's own hasher, as the previous code built
+    /// every stored hash.
+    fn crate_phc(
+        algorithm: argon2::Algorithm,
+        version: argon2::Version,
+        (m, t, p): (u32, u32, u32),
+        output_len: Option<usize>,
+        input: &[u8],
+    ) -> String {
+        let params = argon2::Params::new(m, t, p, output_len).expect("params");
+        Argon2::new(algorithm, version, params)
+            .hash_password(input, &SaltString::generate(&mut OsRng))
+            .expect("hash")
+            .to_string()
+    }
+
+    /// The PHC string the new hasher builds by hand is byte-for-byte the one
+    /// `PasswordHasher::hash_password` built for the same salt: algorithm,
+    /// version, parameter order, salt and output encoding all match.
+    #[test]
+    fn argon2id_phc_is_byte_identical_to_the_crate_hasher() {
+        for &(m, t, p) in ARGON2_SHAPES {
+            for output_len in [None, Some(16), Some(64)] {
+                let params = argon2::Params::new(m, t, p, output_len).expect("params");
+                let salt = SaltString::generate(&mut OsRng);
+                let ours = argon2id_phc(&params, b"correct horse", salt.as_salt()).expect("ours");
+                let theirs =
+                    Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
+                        .hash_password(b"correct horse", &salt)
+                        .expect("crate")
+                        .to_string();
+                assert_eq!(ours, theirs, "m={m} t={t} p={p} output_len={output_len:?}");
+            }
+        }
+    }
+
+    /// Hashes made by the new code verify with the crate's verifier (so a
+    /// rollback to the previous release still accepts them), and a wrong
+    /// password does not.
+    #[test]
+    fn new_hashes_verify_with_the_crate_verifier() {
+        let config = test_config();
+        let stored = hash_password(
+            &CleartextPassword::from_string("hunter2-new".to_string()),
+            &config,
+            0,
+        )
+        .expect("hash");
+        assert!(crate_verifies(b"hunter2-new", &stored.hash));
+        assert!(!crate_verifies(b"hunter2-old", &stored.hash));
+
+        let secret = hash_raw_secret(b"client-secret", &config).expect("hash");
+        assert!(crate_verifies(b"client-secret", &secret));
+        assert!(!crate_verifies(b"client-secreT", &secret));
+
+        let dummy = compute_dummy_hash(&config);
+        assert!(crate_verifies(b"dummy_password_for_timing_defense", &dummy));
+        assert!(!crate_verifies(b"anything else", &dummy));
+    }
+
+    /// Hashes made by the crate (the previous code) verify with the new
+    /// verifier exactly when the crate's verifier accepts them: every
+    /// supported algorithm, both versions, other costs and output lengths,
+    /// right and wrong inputs.
+    #[test]
+    fn crate_hashes_verify_with_the_new_verifier() {
+        let algorithms = [
+            argon2::Algorithm::Argon2id,
+            argon2::Algorithm::Argon2i,
+            argon2::Algorithm::Argon2d,
+        ];
+        let versions = [argon2::Version::V0x13, argon2::Version::V0x10];
+        for algorithm in algorithms {
+            for version in versions {
+                for &shape in ARGON2_SHAPES {
+                    for output_len in [None, Some(12), Some(64)] {
+                        let phc = crate_phc(algorithm, version, shape, output_len, b"s3cret");
+                        for (input, expected) in [(&b"s3cret"[..], true), (b"s3creT", false)] {
+                            assert_eq!(crate_verifies(input, &phc), expected, "{phc}");
+                            assert_eq!(
+                                verify_raw_secret(input, &phc).expect("verify"),
+                                expected,
+                                "verify_raw_secret: {phc}"
+                            );
+                            if algorithm == argon2::Algorithm::Argon2id {
+                                let password = CleartextPassword::new(input.to_vec());
+                                assert_eq!(
+                                    verify_hash(&password, &phc).expect("verify"),
+                                    expected,
+                                    "verify_hash: {phc}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Hashes written by the previous release (frozen here, minted with the
+    /// crate's `PasswordHasher`) still verify, and only with their own input.
+    #[test]
+    fn hashes_stored_by_the_previous_release_still_verify() {
+        for (phc, input) in PREVIOUS_RELEASE_HASHES {
+            let password = CleartextPassword::from_string((*input).to_string());
+            assert!(verify_hash(&password, phc).expect("verify"), "{phc}");
+            assert!(
+                verify_raw_secret(input.as_bytes(), phc).expect("verify"),
+                "{phc}"
+            );
+            let wrong = CleartextPassword::from_string("not the password".to_string());
+            assert!(!verify_hash(&wrong, phc).expect("verify"), "{phc}");
+        }
+    }
+
+    /// Hashes minted with the crate's `PasswordHasher` before #445, and the
+    /// input each was minted from.
+    const PREVIOUS_RELEASE_HASHES: &[(&str, &str)] = &[
+        (
+            "$argon2id$v=19$m=8,t=1,p=1$oiSx5dM7OzDyPQO5Z3s2Bg$WDD6X+B0oxkzDG/ICPTOk0LiQokuQisNVs6BXQriVYA",
+            "correct horse battery staple",
+        ),
+        (
+            "$argon2id$v=19$m=64,t=2,p=1$JPIR9D+83eVfRvoGr/NMZg$bDIdRvoWuTL+aJVUsqx7apIturzRotLIFvgYRVbzkzE",
+            "hunter2",
+        ),
+        (
+            "$argon2id$v=19$m=256,t=1,p=1$88N3ns1oJPIzC0EogjxQ9Q$Au91OrNRH+AV8uNer0NdkbDym/9AK9UKKVBD6Iv3LY4",
+            "fast-for-testing",
+        ),
+        (
+            "$argon2id$v=19$m=1024,t=3,p=2$3lQsrFVhGMvbO4oGlwt6bg$R87nNVw/uvqxPV1mNEDno3qBQkVBAdDRXEjIF93WV0w",
+            "two lanes, three passes",
+        ),
+        (
+            "$argon2id$v=16$m=32,t=1,p=1$MFEUb8fo0wJzZeUknga5fw$0VaqpDl1ZNzYieYZWA99zetysyp0hkHP8heByBykmkM",
+            "argon2 v16",
+        ),
+    ];
+
+    /// A peppered credential hashes the HMAC of the password; the new path
+    /// agrees with the crate on the peppered input in both directions.
+    #[test]
+    fn peppered_hashes_agree_with_the_crate() {
+        let key = PepperKey::new(vec![7_u8; 32]).expect("key");
+        let config = CredentialConfig::fast_for_testing_with_pepper(3, key.clone());
+        let password = CleartextPassword::from_string("peppered password".to_string());
+        let stored = hash_password(&password, &config, 0).expect("hash");
+        assert_eq!(stored.pepper_version, Some(3));
+        let peppered = apply_pepper(b"peppered password", &key);
+        assert!(crate_verifies(&peppered, &stored.hash));
+        assert!(!crate_verifies(b"peppered password", &stored.hash));
+        assert_eq!(
+            verify_password_with_pepper(&password, &stored, &config).expect("verify"),
+            (true, false)
+        );
+
+        // A peppered hash the crate made verifies through the new verifier.
+        let theirs = crate_phc(
+            argon2::Algorithm::Argon2id,
+            argon2::Version::V0x13,
+            (8, 1, 1),
+            None,
+            &peppered,
+        );
+        let legacy = StoredCredential {
+            algorithm: PasswordAlgorithm::Argon2id,
+            hash: theirs,
+            created_at: 0,
+            pepper_version: Some(3),
+        };
+        assert_eq!(
+            verify_password_with_pepper(&password, &legacy, &config).expect("verify"),
+            (true, false)
+        );
+        let wrong = CleartextPassword::from_string("peppered passworD".to_string());
+        assert_eq!(
+            verify_password_with_pepper(&wrong, &legacy, &config).expect("verify"),
+            (false, false)
+        );
+    }
+
+    /// A PHC string the crate's verifier refuses is refused by the new one:
+    /// no hash, no salt, an unknown version, an unknown parameter, an output
+    /// too short to be one. None of them may verify.
+    #[test]
+    fn a_malformed_argon2_phc_never_verifies() {
+        let good = crate_phc(
+            argon2::Algorithm::Argon2id,
+            argon2::Version::V0x13,
+            (8, 1, 1),
+            None,
+            b"pw",
+        );
+        let (head, hash) = good.rsplit_once('$').expect("hash part");
+        let (prefix, salt) = head.rsplit_once('$').expect("salt part");
+        let malformed = [
+            head.to_string(),                     // no hash
+            format!("{prefix}${salt}$AAAA"),      // 3-byte output
+            good.replacen("v=19", "v=18", 1),     // unknown version
+            good.replacen("m=8,", "m=8,x=1,", 1), // unknown parameter
+            good.replacen("m=8,", "m=7,", 1),     // below the minimum
+            format!("{prefix}${salt}x${hash}"),   // corrupted salt
+        ];
+        for phc in &malformed {
+            let Ok(parsed) = PasswordHash::new(phc) else {
+                continue; // unparseable: both paths refuse before any KDF
+            };
+            assert!(
+                Argon2::default().verify_password(b"pw", &parsed).is_err(),
+                "the crate accepts {phc}; the test case is wrong"
+            );
+            assert!(!verify_raw_secret(b"pw", phc).expect("verify"), "{phc}");
+            let password = CleartextPassword::from_string("pw".to_string());
+            assert!(
+                !verify_hash(&password, phc).unwrap_or(false),
+                "verify_hash accepted {phc}"
+            );
+        }
+    }
+
+    /// A password hash and its verification inside the KDF gate run in the
+    /// gate's pooled buffer: after the first, none allocates a buffer.
+    #[test]
+    fn hashing_and_verifying_through_the_gate_reuse_one_buffer() {
+        let gate = crate::identity::kdf_gate::KdfGate::new(crate::identity::KdfGateConfig {
+            max_in_flight: 1,
+            max_queue_wait: std::time::Duration::from_secs(5),
+            retry_after: std::time::Duration::from_secs(1),
+        });
+        let config = test_config();
+        let password = CleartextPassword::from_string("pooled password".to_string());
+        let stored = gate
+            .try_run_inline(|| hash_password(&password, &config, 0))
+            .expect("admitted")
+            .expect("hash");
+        for _ in 0..3 {
+            let ok = gate
+                .try_run_inline(|| verify_hash(&password, &stored.hash))
+                .expect("admitted")
+                .expect("verify");
+            assert!(ok);
+            gate.try_run_inline(|| hash_raw_secret(b"secret", &config))
+                .expect("admitted")
+                .expect("hash");
+        }
+        let pool = gate.block_pool();
+        assert_eq!(
+            pool.fresh_allocations(),
+            1,
+            "seven Argon2 runs at one cost through a 1-permit gate need one buffer"
+        );
+        assert_eq!(pool.pooled(), 1);
+        assert_eq!(
+            pool.pooled_bytes(),
+            config.memory_cost_kib as usize * 1024,
+            "the buffer is the configured cost's size"
+        );
+    }
+
+    /// A stored hash with a larger `m` than the configured cost grows the
+    /// pooled buffer, and verifies.
+    #[test]
+    fn a_stored_hash_with_a_larger_cost_grows_the_pooled_buffer() {
+        let gate = crate::identity::kdf_gate::KdfGate::new(crate::identity::KdfGateConfig {
+            max_in_flight: 1,
+            max_queue_wait: std::time::Duration::from_secs(5),
+            retry_after: std::time::Duration::from_secs(1),
+        });
+        let config = test_config();
+        let small = hash_raw_secret(b"s", &config).expect("hash");
+        let large_m = config.memory_cost_kib * 4;
+        let large = argon2id_hash_with(b"s", large_m, 1, 1);
+        for phc in [&small, &large, &small] {
+            let ok = gate
+                .try_run_inline(|| verify_raw_secret(b"s", phc))
+                .expect("admitted")
+                .expect("verify");
+            assert!(ok, "{phc}");
+        }
+        let pool = gate.block_pool();
+        assert_eq!(
+            pool.fresh_allocations(),
+            2,
+            "the larger cost grew the buffer once"
+        );
+        assert_eq!(pool.pooled_bytes(), large_m as usize * 1024);
     }
 }
