@@ -160,6 +160,9 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   workflows and guides are gone.
 
 ### Security
+- **Go SDK: `golang.org/x/net` 0.60.0.** The SDK pulled in 0.57.0, which has five HTTP/2 advisories
+  (CVE-2026-97032, -78663, -78669, -78660, -78659: crashes, memory and CPU exhaustion in HTTP/2
+  servers and malformed-header acceptance in the transport). Update the SDK to pick up the fix.
 - **Consent is bound to the organization and the resource, and covers what it discloses**
   (`scope-consent-integrity`). A third-party consent row is now keyed by user, client,
   organization and RFC 8707 resource, and the browser gate, the JSON `/authorize` and refresh
