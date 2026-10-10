@@ -122,6 +122,58 @@ To choose your own limit, set `MALLOC_ARENA_MAX` (or the
 Hearth then leaves the allocator alone and logs that it did so. Other
 platforms and C libraries are not affected.
 
+### Large blocks and the mmap threshold
+
+glibc gives each allocation above its *mmap threshold* (128 KiB at start) its
+own mapping, which goes back to the kernel as soon as it is freed. But glibc
+raises the threshold each time it frees a larger mapping, up to 32 MiB, and
+from then on every allocation below it comes from the arenas. Around those
+blocks the arenas fill with small allocations, and the freed space between them
+is not returned: a live soak (issue #445), in which each password hash freed a
+19 MiB Argon2 buffer, found 880 MB free inside the arenas after 35 minutes, for
+~1.2 GB of live data.
+
+Hearth therefore fixes the threshold at 128 KiB before it starts any thread,
+which also stops glibc from moving it. The startup log shows it
+(`glibc malloc mmap threshold fixed bytes=131072`).
+
+To choose your own threshold, set `MALLOC_MMAP_THRESHOLD_` (with the trailing
+underscore) or the `glibc.malloc.mmap_threshold` tunable. Hearth then leaves the
+threshold alone and logs that it did so.
+
+### Argon2 block buffers
+
+Each password hash or verification at the default cost needs a 19 MiB Argon2
+buffer. Hearth keeps one such buffer per KDF permit (`security.password.kdf`)
+and reuses it, zeroed after every hash, so a hash does not map, fault in and
+free a fresh 19 MiB block. A realm with a higher memory cost, or a stored hash
+with a larger `m`, grows a buffer to that size, and the buffer keeps that size.
+The startup log shows the bound at the base cost
+(`argon2 block buffers are reused, one per kdf permit`, with `bound_mib`):
+for example 4 buffers, 76 MiB, on a 2-core host with the default two admin
+permits. This memory was already in use whenever all permits were busy; it now
+stays resident after a burst of sign-ins.
+
+No glibc tunable or huge-page setting is needed for this.
+
+Local measurement (2026-10-09, 12-core Linux workstation shared with other
+builds, glibc 2.42, THP `madvise`, two arenas; two threads hashing at Hearth's
+default cost and six threads allocating and freeing request-sized objects,
+5 minutes, three rounds, medians; `cargo run --release --example
+malloc_retention`). CPU per hash is measured with hashing alone, five
+alternating rounds:
+
+| glibc threshold, Argon2 buffer | resident memory | free inside arenas | CPU per hash, p50 |
+|---|---|---|---|
+| dynamic, fresh buffer per hash (before #445) | 496 MB | 211 MB | 19.9 ms |
+| dynamic, reused buffer | 436 MB | 163 MB | 19.9 ms |
+| **fixed 128 KiB, reused buffer (Hearth)** | **237 MB** | **30 MB** | **19.7 ms** |
+
+The fixed threshold is what holds memory down; reusing the buffer is what keeps
+it from costing hash CPU. With the threshold fixed and a fresh buffer per hash,
+the kernel faults each new 19 MiB mapping in 4 KiB pages: 29.3 ms per hash in
+the same measurement, 47% more.
+
 ## Working-set vs dataset size
 
 ### Datasets that fit in hot tier

@@ -377,6 +377,18 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   rotation logged `session_created` next to `token_refreshed`, so the audit log, and webhooks
   subscribed to `session_created`, over-reported sign-ins by one per refresh. A refresh now
   records only `token_refreshed`, one audit write instead of two. (#448)
+- **Freed memory no longer piles up in glibc's arenas under sustained load (#445).** glibc
+  raised its mmap threshold to ~19 MiB after the first Argon2 buffer was freed, so every
+  allocation below that came from the arenas, and the space small allocations left around it
+  was never returned: a live soak held 880 MB free in the arenas after 35 minutes. On Linux with
+  glibc, Hearth now fixes the threshold at 128 KiB at startup and logs it, and each KDF permit
+  keeps one Argon2 buffer that every password hash and verification reuses (zeroed after each
+  hash) instead of mapping and freeing 19 MiB per hash. In a local 5-minute mixed load, resident
+  memory went from 496 MB to 237 MB at unchanged hash CPU; no glibc tunable or huge-page setting
+  is needed. The reused buffers stay resident: one per permit of the shared and admin KDF gates,
+  at the largest Argon2 memory cost each has served (the startup log shows the bound). Set
+  `MALLOC_MMAP_THRESHOLD_` or the `glibc.malloc.mmap_threshold` tunable to choose your own
+  threshold; Hearth then leaves it alone.
 - **An open connection no longer costs ~550 KB of memory.** Every connection built its own copy
   of the full route table, so a server holding 2,000 client connections spent ~1.1 GB on them
   and came close to running out of memory on a 4 GB host. A connection now wraps the shared
