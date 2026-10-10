@@ -103,6 +103,24 @@ pub trait StorageEngine: Send + Sync {
     /// Retrieves a value by realm and key. Returns `None` if not found.
     fn get(&self, realm_id: &RealmId, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError>;
 
+    /// Reads a key like [`get`](Self::get), without caching what it reads.
+    ///
+    /// A cold read through `get` promotes the row into the hot tier and puts
+    /// its SST block in the block cache. A background walk that reads each
+    /// row once, such as the cleanup sweep's grant-family check, would fill
+    /// both caches with rows no request reads (#445); it reads through this
+    /// instead. The answer is the same as `get`'s.
+    ///
+    /// The default implementation is `get`. [`EmbeddedStorageEngine`]
+    /// overrides it.
+    fn get_uncached(
+        &self,
+        realm_id: &RealmId,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        self.get(realm_id, key)
+    }
+
     /// Inserts or updates a key-value pair for the given realm.
     fn put(&self, realm_id: &RealmId, key: &[u8], value: &[u8]) -> Result<(), StorageError>;
 

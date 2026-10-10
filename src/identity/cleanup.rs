@@ -875,7 +875,10 @@ pub(crate) fn sweep_session_family_index(
         // A row we cannot parse is left alone rather than guessed at.
         |key, _| Ok(keys::decode_session_grant_family_id(key).map(keys::encode_grant_family)),
         |key, family_key| {
-            if storage.get(realm_id, &family_key)?.is_some() {
+            // An uncached read: this check runs for every index row on every
+            // sweep, and caching the families would fill the hot tier and the
+            // block cache with rows no request reads (#445).
+            if storage.get_uncached(realm_id, &family_key)?.is_some() {
                 return Ok(false);
             }
             storage.delete(realm_id, key)?;
@@ -1978,6 +1981,40 @@ mod tests {
             s.get(&realm, &live_row).expect("get").is_some(),
             "an index row for a live grant family must survive: it is what \
              cascades refresh-token revocation when the session ends"
+        );
+    }
+
+    /// The session-family sweep looks up the grant family of every index row,
+    /// every five minutes. A caching lookup promoted each family into the hot
+    /// tier and put its SST block in the block cache, so the sweep alone filled
+    /// both caches with rows no request reads (#445).
+    #[test]
+    fn the_session_family_sweep_caches_none_of_the_families_it_checks() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+        for i in 0..500 {
+            let family_id = format!("fam-{i:04}");
+            let session_id = crate::core::SessionId::generate();
+            s.put(&realm, &keys::encode_grant_family(&family_id), b"{}")
+                .expect("put family");
+            s.put(
+                &realm,
+                &keys::encode_session_grant_family(&session_id, &family_id),
+                &[],
+            )
+            .expect("put index row");
+        }
+        s.flush_memtable().expect("flush");
+        let before = s.cache_footprint();
+
+        let deleted = sweep_session_family_index(&realm, &s, CleanupConfig::default().max_per_type)
+            .expect("sweep");
+
+        assert_eq!(deleted, 0, "every family exists, so no index row goes");
+        assert_eq!(
+            s.cache_footprint(),
+            before,
+            "(hot-tier entries, block-cache bytes): the sweep cached nothing"
         );
     }
 }

@@ -1038,6 +1038,13 @@ impl EmbeddedStorageEngine {
         self.wal.engage_fence("test_fault");
     }
 
+    /// `(hot-tier entries, block-cache resident bytes)`, for tests that check
+    /// a read path caches nothing (#445).
+    #[cfg(test)]
+    pub(crate) fn cache_footprint(&self) -> (usize, usize) {
+        (self.hot_tier.len(), self.block_cache.resident_bytes())
+    }
+
     /// Returns the cumulative number of WAL `sync_all` calls completed since
     /// this engine was opened.
     ///
@@ -1710,6 +1717,33 @@ impl StorageEngine for EmbeddedStorageEngine {
         }
 
         metrics.record_get_fallthrough("miss", started.elapsed(), ssts_probed);
+        Ok(None)
+    }
+
+    fn get_uncached(
+        &self,
+        realm_id: &RealmId,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        // The layers `get` reads, newest first, with nothing promoted into the
+        // hot tier and no SST block cached (#445). A hot-tier hit is still
+        // the current value: writes invalidate the tier before they return.
+        if let Some(value) = self.hot_tier.get(realm_id, key) {
+            return Ok(Some(value.to_vec()));
+        }
+        match self.active_memtable.get_entry(realm_id, key) {
+            Some(MemtableValue::Data(data)) => return Ok(Some(data)),
+            Some(MemtableValue::Tombstone) => return Ok(None),
+            None => {}
+        }
+        let sst_readers = self.sst_readers.load_full();
+        for reader in sst_readers.iter() {
+            match reader.get_uncached(realm_id, key)? {
+                Some(MemtableValue::Data(data)) => return Ok(Some(data)),
+                Some(MemtableValue::Tombstone) => return Ok(None),
+                None => {}
+            }
+        }
         Ok(None)
     }
 
@@ -5619,6 +5653,48 @@ mod tests {
             })
             .expect_err("a reversed window is an error, not a panic");
         assert!(matches!(err, StorageError::InvalidRange), "{err:?}");
+    }
+
+    /// A background walk reads a row once (#445): `get_uncached` answers what
+    /// `get` answers — memtable overlay, tombstones and absent keys included —
+    /// but leaves the hot tier and the block cache as they were.
+    #[test]
+    fn get_uncached_answers_like_get_and_caches_nothing() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        put_prefixed(&engine, &realm, "fam", 2_000);
+        engine.flush_memtable().expect("flush");
+        engine.delete(&realm, b"fam:00007").expect("delete");
+        engine.put(&realm, b"fam:00009", b"new").expect("put");
+        let before = engine.cache_footprint();
+
+        let expected: [(&[u8], Option<&[u8]>); 6] = [
+            (b"fam:00001", Some(b"v")),
+            (b"fam:01999", Some(b"v")),
+            (b"fam:00007", None),
+            (b"fam:00009", Some(b"new")),
+            (b"fam:zzzzz", None),
+            (b"other", None),
+        ];
+        for (key, value) in expected {
+            assert_eq!(
+                engine.get_uncached(&realm, key).expect("get_uncached"),
+                value.map(<[u8]>::to_vec),
+                "{}",
+                String::from_utf8_lossy(key)
+            );
+        }
+        assert_eq!(
+            engine.cache_footprint(),
+            before,
+            "(hot-tier entries, block-cache bytes): nothing was cached"
+        );
+        for (key, _) in expected {
+            assert_eq!(
+                engine.get_uncached(&realm, key).expect("get_uncached"),
+                engine.get(&realm, key).expect("get"),
+            );
+        }
     }
 
     // ===== count_prefix / scan_prefix_paged tests (HEA-1616) =====

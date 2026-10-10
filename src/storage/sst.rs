@@ -1364,6 +1364,25 @@ impl SstReader {
         realm_id: &RealmId,
         key: &[u8],
     ) -> Result<Option<MemtableValue>, StorageError> {
+        self.get_with(realm_id, key, true)
+    }
+
+    /// A point lookup like [`get`](Self::get) that neither consults nor fills
+    /// the shared block cache: the probed block is decoded privately (#445).
+    pub(crate) fn get_uncached(
+        &self,
+        realm_id: &RealmId,
+        key: &[u8],
+    ) -> Result<Option<MemtableValue>, StorageError> {
+        self.get_with(realm_id, key, false)
+    }
+
+    fn get_with(
+        &self,
+        realm_id: &RealmId,
+        key: &[u8],
+        cached: bool,
+    ) -> Result<Option<MemtableValue>, StorageError> {
         // O(1) range prune: skip SSTs whose key range cannot contain the key
         // (HEA-1773). Cheaper than the Bloom filter's k hashes and also rejects
         // V1 SSTs that carry no filter.
@@ -1388,6 +1407,13 @@ impl SstReader {
                 let Some(bi) = body.block_for_key(realm_id, key) else {
                     return Ok(None);
                 };
+                if !cached {
+                    let entries = body.decode_block_uncached(bi, self.sst_number)?;
+                    return Ok(entries
+                        .binary_search_by(cmp)
+                        .ok()
+                        .map(|idx| entries[idx].1.clone()));
+                }
                 let block = body.fetch_block(bi, self.sst_number)?;
                 Ok(block
                     .entries

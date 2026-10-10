@@ -1934,6 +1934,20 @@ impl StorageEngine for ClusterStorageAdapter {
             .map_err(cluster_to_storage_err)
     }
 
+    /// Forwarded so the inner engine's non-caching read runs; the trait
+    /// default is a caching `get` (#445).
+    fn get_uncached(
+        &self,
+        realm_id: &RealmId,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, crate::storage::StorageError> {
+        tokio::task::block_in_place(|| {
+            self.engine
+                .read_inline(|inner| inner.get_uncached(realm_id, key))
+        })
+        .map_err(cluster_to_storage_err)
+    }
+
     fn put(
         &self,
         realm_id: &RealmId,
@@ -2395,10 +2409,10 @@ mod tests {
         );
     }
 
-    /// The adapter's streaming and key-only scans (`scan_keys`, `visit_keys`,
-    /// `visit_entries`, `count_prefix`, `scan_prefix_paged`) answer exactly
-    /// what the inner engine answers, tombstones included — they are
-    /// forwarded, not rebuilt from `scan`.
+    /// The adapter's streaming and key-only reads (`scan_keys`, `visit_keys`,
+    /// `visit_entries`, `get_uncached`, `count_prefix`, `scan_prefix_paged`)
+    /// answer exactly what the inner engine answers, tombstones included —
+    /// they are forwarded, not rebuilt from `scan` or `get`.
     #[tokio::test(flavor = "multi_thread")]
     #[allow(clippy::unwrap_used)]
     async fn adapter_key_only_scans_match_the_inner_engine() {
@@ -2437,6 +2451,11 @@ mod tests {
                 (b"p:c".to_vec(), b"v".to_vec())
             ]
         );
+        assert_eq!(
+            adapter.get_uncached(&realm, b"p:a").unwrap(),
+            Some(b"v".to_vec())
+        );
+        assert_eq!(adapter.get_uncached(&realm, b"p:b").unwrap(), None);
         assert_eq!(adapter.count_prefix(&realm, b"p:", 0).unwrap(), 2);
         assert_eq!(adapter.count_prefix(&realm, b"p:", 1).unwrap(), 1);
         let (window, total) = adapter.scan_prefix_paged(&realm, b"p:", 1, 5, 0).unwrap();
