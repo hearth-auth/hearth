@@ -813,6 +813,13 @@ impl KeyCursor for MemtableKeyCursor<'_> {
         })
     }
 
+    fn value(&self) -> Option<&[u8]> {
+        match self.current.as_ref()?.value() {
+            MemtableValue::Data(data) => Some(data),
+            MemtableValue::Tombstone => None,
+        }
+    }
+
     fn advance(&mut self) -> Result<(), StorageError> {
         self.current = self.range.next();
         Ok(())

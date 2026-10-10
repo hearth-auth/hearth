@@ -2284,6 +2284,45 @@ impl StorageEngine for EmbeddedStorageEngine {
         key_merge::visit_merged(&mut cursors, visit)
     }
 
+    fn visit_entries(
+        &self,
+        realm_id: &RealmId,
+        start: &[u8],
+        end: &[u8],
+        visit: &mut crate::storage::EntryVisitor<'_>,
+    ) -> Result<(), StorageError> {
+        // Same reversed-window guard as `scan` (audit §4.9#7).
+        if start > end {
+            return Err(StorageError::InvalidRange);
+        }
+        let _timer = crate::metrics::metrics()
+            .storage_operation_duration_seconds
+            .with_label_values(&["visit_entries"])
+            .start_timer();
+
+        let maps = self.active_memtable.maps();
+        let sst_readers = self.sst_readers.load_full();
+
+        // Newest first, as in `visit_keys`. The SST cursors bypass the block
+        // cache: this walk reads each block once (#445).
+        let mut cursors: Vec<Box<dyn KeyCursor + '_>> = Vec::with_capacity(2 + sst_readers.len());
+        cursors.push(Box::new(MemtableKeyCursor::new(
+            &maps.active,
+            realm_id,
+            start,
+            end,
+        )));
+        if let Some(parked) = maps.parked.as_deref() {
+            cursors.push(Box::new(MemtableKeyCursor::new(
+                parked, realm_id, start, end,
+            )));
+        }
+        for reader in sst_readers.iter() {
+            cursors.push(Box::new(reader.uncached_cursor(realm_id, start, end)?));
+        }
+        key_merge::visit_merged_entries(&mut cursors, visit)
+    }
+
     /// Enumerates all distinct realm IDs present in the engine.
     ///
     /// Collects realm IDs from both the memtable (active + any map being flushed
@@ -5444,6 +5483,138 @@ mod tests {
         put_prefixed(&engine, &realm, "usr", 50);
         let err = engine
             .visit_keys(&realm, b"usr:z", b"usr:a", &mut |_| {
+                std::ops::ControlFlow::Continue(())
+            })
+            .expect_err("a reversed window is an error, not a panic");
+        assert!(matches!(err, StorageError::InvalidRange), "{err:?}");
+    }
+
+    // ===== visit_entries tests (#445) =====
+
+    /// Walks `[start, end)` with `visit_entries`, collecting what it saw.
+    fn visited_entries(
+        engine: &EmbeddedStorageEngine,
+        realm: &RealmId,
+        start: &[u8],
+        end: &[u8],
+    ) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let mut out = Vec::new();
+        engine
+            .visit_entries(realm, start, end, &mut |key, value| {
+                out.push((key.to_vec(), value.to_vec()));
+                std::ops::ControlFlow::Continue(())
+            })
+            .expect("visit_entries");
+        out
+    }
+
+    /// Puts, rewrites and deletes spread over many SSTs (4 KiB flushes), a
+    /// memtable on top and a neighbouring realm: the walk sees exactly the
+    /// live entries, in order, each with its newest value, as `scan` and a
+    /// model map do.
+    #[test]
+    fn visit_entries_walks_the_live_entries_across_ssts_and_the_memtable() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        let neighbour = RealmId::generate();
+        let mut model = std::collections::BTreeMap::new();
+        let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+        for step in 0..3_000_u32 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let key = format!("usr:{:04}", state % 600).into_bytes();
+            if state.is_multiple_of(4) {
+                engine.delete(&realm, &key).expect("delete");
+                model.remove(&key);
+            } else {
+                let value = step.to_le_bytes().to_vec();
+                engine.put(&realm, &key, &value).expect("put");
+                model.insert(key.clone(), value);
+            }
+            engine.put(&neighbour, &key, b"other realm").expect("put");
+        }
+        assert!(
+            engine.sst_readers.load_full().len() > 2,
+            "precondition: the entries are spread over several SSTs"
+        );
+
+        let walked = visited_entries(&engine, &realm, b"usr:", b"usr;");
+        assert_eq!(
+            walked,
+            model
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<Vec<_>>()
+        );
+        let scanned: Vec<(Vec<u8>, Vec<u8>)> = engine
+            .scan(&realm, b"usr:", b"usr;")
+            .expect("scan")
+            .into_iter()
+            .map(|e| (e.key, e.value))
+            .collect();
+        assert_eq!(walked, scanned);
+
+        // A window inside the prefix starts and stops mid-SST.
+        let inner = visited_entries(&engine, &realm, b"usr:0100", b"usr:0200");
+        let expected: Vec<(Vec<u8>, Vec<u8>)> = model
+            .range(b"usr:0100".to_vec()..b"usr:0200".to_vec())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        assert_eq!(inner, expected);
+    }
+
+    /// A walk reads each block once and is done with it — the cleanup sweep's
+    /// pattern. Caching those blocks would fill the shared block cache with
+    /// rows nobody reads again and evict the query path's working set.
+    #[test]
+    fn visit_entries_leaves_the_block_cache_alone() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        put_prefixed(&engine, &realm, "usr", 2_000);
+        engine.flush_memtable().expect("flush");
+        assert!(
+            !engine.sst_readers.load_full().is_empty(),
+            "precondition: the entries are in SSTs"
+        );
+        let before = engine.block_cache.resident_bytes();
+
+        let walked = visited_entries(&engine, &realm, b"usr:", b"usr;");
+
+        assert_eq!(walked.len(), 2_000, "the walk read every entry");
+        assert_eq!(
+            engine.block_cache.resident_bytes(),
+            before,
+            "the walk cached none of the blocks it read"
+        );
+    }
+
+    #[test]
+    fn visit_entries_stops_when_the_visitor_breaks() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        put_prefixed(&engine, &realm, "usr", 500);
+        let mut seen = 0;
+        engine
+            .visit_entries(&realm, b"usr:", b"usr;", &mut |_, _| {
+                seen += 1;
+                if seen == 7 {
+                    std::ops::ControlFlow::Break(())
+                } else {
+                    std::ops::ControlFlow::Continue(())
+                }
+            })
+            .expect("visit_entries");
+        assert_eq!(seen, 7);
+    }
+
+    #[test]
+    fn visit_entries_refuses_a_reversed_window() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        put_prefixed(&engine, &realm, "usr", 50);
+        let err = engine
+            .visit_entries(&realm, b"usr:z", b"usr:a", &mut |_, _| {
                 std::ops::ControlFlow::Continue(())
             })
             .expect_err("a reversed window is an error, not a panic");

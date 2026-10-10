@@ -337,6 +337,125 @@ pub(crate) fn sweep_expired(
     stats
 }
 
+// --- the walk every sweep shares ---
+
+/// The most rows one pass of a sweep picks for deletion before deleting them.
+///
+/// A sweep walks its prefix with [`StorageEngine::visit_entries`] and holds
+/// only the rows it is about to delete, never the rows it keeps. It used to
+/// collect every row under the prefix first: one `consumed:refresh:` marker
+/// per refresh-token rotation, kept for the refresh token's lifetime (7 days
+/// by default), so each five-minute sweep copied hundreds of thousands of live
+/// rows an hour of traffic, and its peak heap grew for a week (#445).
+const SWEEP_CHUNK: usize = 512;
+
+/// Walks every row under `prefix` without collecting the range, and deletes
+/// the rows `select` picks: at most `limit` of them, or all with `None`.
+///
+/// `select` reads one row and returns what `delete` needs to remove it, or
+/// `None` to keep it; an error stops the sweep after the rows already picked
+/// are deleted, as the row-by-row loops this replaces did. `delete` returns
+/// whether it removed the row. Deletes never run inside a walk: a pass picks
+/// up to [`SWEEP_CHUNK`] rows, deletes them, and the next pass resumes after
+/// the last row picked.
+fn sweep_prefix<T>(
+    realm_id: &RealmId,
+    storage: &dyn StorageEngine,
+    prefix: &[u8],
+    limit: Option<usize>,
+    mut select: impl FnMut(&[u8], &[u8]) -> Result<Option<T>, crate::storage::StorageError>,
+    mut delete: impl FnMut(&[u8], T) -> Result<bool, crate::storage::StorageError>,
+) -> Result<u64, crate::storage::StorageError> {
+    let end = keys::prefix_end(prefix);
+    let mut start = prefix.to_vec();
+    let mut deleted: u64 = 0;
+    loop {
+        let chunk = match limit {
+            None => SWEEP_CHUNK,
+            Some(limit) => limit
+                .saturating_sub(usize::try_from(deleted).unwrap_or(usize::MAX))
+                .min(SWEEP_CHUNK),
+        };
+        if chunk == 0 {
+            return Ok(deleted);
+        }
+
+        let mut picked: Vec<(Vec<u8>, T)> = Vec::new();
+        let mut failure = None;
+        storage.visit_entries(realm_id, &start, &end, &mut |key, value| {
+            match select(key, value) {
+                Ok(Some(item)) => {
+                    picked.push((key.to_vec(), item));
+                    if picked.len() >= chunk {
+                        return std::ops::ControlFlow::Break(());
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    failure = Some(e);
+                    return std::ops::ControlFlow::Break(());
+                }
+            }
+            std::ops::ControlFlow::Continue(())
+        })?;
+
+        let full = picked.len() >= chunk;
+        // The walk resumes just after the last row picked: its key plus a
+        // zero byte is the next possible key.
+        let resume = picked.last().map(|(key, _)| {
+            let mut next = key.clone();
+            next.push(0);
+            next
+        });
+        for (key, item) in picked {
+            if delete(&key, item)? {
+                deleted += 1;
+            }
+        }
+        if let Some(e) = failure {
+            return Err(e);
+        }
+        match resume {
+            Some(next) if full => start = next,
+            _ => return Ok(deleted),
+        }
+    }
+}
+
+/// Deletes one row for [`sweep_prefix`].
+fn delete_row(
+    storage: &dyn StorageEngine,
+    realm_id: &RealmId,
+    key: &[u8],
+) -> Result<bool, crate::storage::StorageError> {
+    storage.delete(realm_id, key)?;
+    Ok(true)
+}
+
+/// Sweeps a prefix whose rows each hold an 8-byte little-endian `i64` expiry
+/// in Unix seconds, deleting those at or before `now_secs`. A row of any other
+/// size (a legacy encoding without an expiry) is kept.
+fn sweep_le_expiring(
+    realm_id: &RealmId,
+    storage: &dyn StorageEngine,
+    prefix: &[u8],
+    now_secs: i64,
+) -> Result<u64, crate::storage::StorageError> {
+    sweep_prefix(
+        realm_id,
+        storage,
+        prefix,
+        None,
+        |_, value| {
+            Ok(<[u8; 8]>::try_from(value)
+                .ok()
+                .filter(|bytes| i64::from_le_bytes(*bytes) <= now_secs)
+                .map(|_| ()))
+        },
+        |key, ()| delete_row(storage, realm_id, key),
+    )
+}
+
 // --- per-entity sweep helpers ---
 
 fn sweep_auth_codes(
@@ -350,29 +469,21 @@ fn sweep_auth_codes(
         expires_at: Timestamp,
     }
 
-    let prefix = keys::oauth_code_scan_prefix();
-    let end = keys::prefix_end(&prefix);
-    let entries = storage.scan(realm_id, &prefix, &end)?;
-
-    let mut deleted: u64 = 0;
-    for entry in &entries {
-        if deleted >= max_per_type as u64 {
-            break;
-        }
-
-        let exp: Expiry = serde_json::from_slice(&entry.value).map_err(|e| {
-            crate::storage::StorageError::DeserializationFailed {
-                reason: format!("cleanup: failed to deserialize auth code: {e}"),
-            }
-        })?;
-
-        if now >= exp.expires_at {
-            storage.delete(realm_id, &entry.key)?;
-            deleted += 1;
-        }
-    }
-
-    Ok(deleted)
+    sweep_prefix(
+        realm_id,
+        storage,
+        &keys::oauth_code_scan_prefix(),
+        Some(max_per_type),
+        |_, value| {
+            let exp: Expiry = serde_json::from_slice(value).map_err(|e| {
+                crate::storage::StorageError::DeserializationFailed {
+                    reason: format!("cleanup: failed to deserialize auth code: {e}"),
+                }
+            })?;
+            Ok((now >= exp.expires_at).then_some(()))
+        },
+        |key, ()| delete_row(storage, realm_id, key),
+    )
 }
 
 fn sweep_device_codes(
@@ -381,40 +492,36 @@ fn sweep_device_codes(
     now: Timestamp,
     max_per_type: usize,
 ) -> Result<u64, crate::storage::StorageError> {
-    let prefix = keys::device_code_scan_prefix();
-    let end = keys::prefix_end(&prefix);
-    let entries = storage.scan(realm_id, &prefix, &end)?;
-
-    let mut deleted: u64 = 0;
-    for entry in &entries {
-        if deleted >= max_per_type as u64 {
-            break;
-        }
-        let stored: StoredDeviceCode = serde_json::from_slice(&entry.value).map_err(|e| {
-            crate::storage::StorageError::DeserializationFailed {
-                reason: format!("cleanup: failed to deserialize device code: {e}"),
-            }
-        })?;
-
-        if now >= stored.expires_at {
-            storage.delete(realm_id, &entry.key)?;
+    sweep_prefix(
+        realm_id,
+        storage,
+        &keys::device_code_scan_prefix(),
+        Some(max_per_type),
+        |_, value| {
+            let stored: StoredDeviceCode = serde_json::from_slice(value).map_err(|e| {
+                crate::storage::StorageError::DeserializationFailed {
+                    reason: format!("cleanup: failed to deserialize device code: {e}"),
+                }
+            })?;
+            Ok((now >= stored.expires_at).then_some(stored.user_code))
+        },
+        |key, user_code| {
+            storage.delete(realm_id, key)?;
             // Also clean up the user_code → device_code index.
             // An orphaned index is benign garbage, but we make a
             // best-effort attempt to remove it.
-            let uc_key = keys::encode_user_code(&stored.user_code);
+            let uc_key = keys::encode_user_code(&user_code);
             if let Err(e) = storage.delete(realm_id, &uc_key) {
                 tracing::warn!(
                     realm = %realm_id,
-                    user_code = %stored.user_code,
+                    user_code = %user_code,
                     error = %e,
                     "cleanup: failed to delete user_code index for expired device code",
                 );
             }
-            deleted += 1;
-        }
-    }
-
-    Ok(deleted)
+            Ok(true)
+        },
+    )
 }
 
 fn sweep_pending_tickets(
@@ -423,29 +530,22 @@ fn sweep_pending_tickets(
     now: Timestamp,
     max_per_type: usize,
 ) -> Result<u64, crate::storage::StorageError> {
-    let prefix = keys::oauth_pending_auth_scan_prefix();
-    let end = keys::prefix_end(&prefix);
-    let entries = storage.scan(realm_id, &prefix, &end)?;
-
-    let mut deleted: u64 = 0;
-    for entry in &entries {
-        if deleted >= max_per_type as u64 {
-            break;
-        }
-        let ticket: PendingAuthorizationRequest =
-            serde_json::from_slice(&entry.value).map_err(|e| {
-                crate::storage::StorageError::DeserializationFailed {
-                    reason: format!("cleanup: failed to deserialize pending ticket: {e}"),
-                }
-            })?;
-
-        if now >= ticket.expires_at {
-            storage.delete(realm_id, &entry.key)?;
-            deleted += 1;
-        }
-    }
-
-    Ok(deleted)
+    sweep_prefix(
+        realm_id,
+        storage,
+        &keys::oauth_pending_auth_scan_prefix(),
+        Some(max_per_type),
+        |_, value| {
+            let ticket: PendingAuthorizationRequest =
+                serde_json::from_slice(value).map_err(|e| {
+                    crate::storage::StorageError::DeserializationFailed {
+                        reason: format!("cleanup: failed to deserialize pending ticket: {e}"),
+                    }
+                })?;
+            Ok((now >= ticket.expires_at).then_some(()))
+        },
+        |key, ()| delete_row(storage, realm_id, key),
+    )
 }
 
 fn sweep_grant_families(
@@ -454,34 +554,27 @@ fn sweep_grant_families(
     now: Timestamp,
     max_per_type: usize,
 ) -> Result<u64, crate::storage::StorageError> {
-    let prefix = keys::grant_family_scan_prefix();
-    let end = keys::prefix_end(&prefix);
-    let entries = storage.scan(realm_id, &prefix, &end)?;
-
-    let mut deleted: u64 = 0;
-    for entry in &entries {
-        if deleted >= max_per_type as u64 {
-            break;
-        }
-        let family: StoredGrantFamily = serde_json::from_slice(&entry.value).map_err(|e| {
-            crate::storage::StorageError::DeserializationFailed {
-                reason: format!("cleanup: failed to deserialize grant family: {e}"),
-            }
-        })?;
-
-        if now >= family.expires_at {
-            storage.delete(realm_id, &entry.key)?;
+    sweep_prefix(
+        realm_id,
+        storage,
+        &keys::grant_family_scan_prefix(),
+        Some(max_per_type),
+        |_, value| {
+            let family: StoredGrantFamily = serde_json::from_slice(value).map_err(|e| {
+                crate::storage::StorageError::DeserializationFailed {
+                    reason: format!("cleanup: failed to deserialize grant family: {e}"),
+                }
+            })?;
+            Ok((now >= family.expires_at).then_some(family.family_id))
+        },
+        |key, family_id| {
+            storage.delete(realm_id, key)?;
             // The revocation tombstone lives exactly as long as the row it
             // guards; nothing else removes it (G6).
-            storage.delete(
-                realm_id,
-                &keys::encode_grant_family_revoked(&family.family_id),
-            )?;
-            deleted += 1;
-        }
-    }
-
-    Ok(deleted)
+            storage.delete(realm_id, &keys::encode_grant_family_revoked(&family_id))?;
+            Ok(true)
+        },
+    )
 }
 
 fn sweep_par_requests(
@@ -490,29 +583,22 @@ fn sweep_par_requests(
     now: Timestamp,
     max_per_type: usize,
 ) -> Result<u64, crate::storage::StorageError> {
-    let prefix = keys::par_scan_prefix();
-    let end = keys::prefix_end(&prefix);
-    let entries = storage.scan(realm_id, &prefix, &end)?;
-
-    let mut deleted: u64 = 0;
-    for entry in &entries {
-        if deleted >= max_per_type as u64 {
-            break;
-        }
-        let par: StoredPushedAuthorizationRequest =
-            serde_json::from_slice(&entry.value).map_err(|e| {
-                crate::storage::StorageError::DeserializationFailed {
-                    reason: format!("cleanup: failed to deserialize PAR request: {e}"),
-                }
-            })?;
-
-        if now >= par.expires_at {
-            storage.delete(realm_id, &entry.key)?;
-            deleted += 1;
-        }
-    }
-
-    Ok(deleted)
+    sweep_prefix(
+        realm_id,
+        storage,
+        &keys::par_scan_prefix(),
+        Some(max_per_type),
+        |_, value| {
+            let par: StoredPushedAuthorizationRequest =
+                serde_json::from_slice(value).map_err(|e| {
+                    crate::storage::StorageError::DeserializationFailed {
+                        reason: format!("cleanup: failed to deserialize PAR request: {e}"),
+                    }
+                })?;
+            Ok((now >= par.expires_at).then_some(()))
+        },
+        |key, ()| delete_row(storage, realm_id, key),
+    )
 }
 
 /// Scans all `oauth:jar-jti:*` keys in `realm_id` and deletes entries whose
@@ -526,24 +612,7 @@ pub(crate) fn sweep_jar_jtis(
     storage: &dyn StorageEngine,
     now_secs: i64,
 ) -> Result<u64, crate::storage::StorageError> {
-    let prefix = keys::jar_jti_scan_prefix();
-    let end = keys::prefix_end(&prefix);
-    let entries = storage.scan(realm_id, &prefix, &end)?;
-
-    let mut deleted: u64 = 0;
-    for entry in &entries {
-        // Legacy b"1" entries and genuinely malformed entries both fail this conversion;
-        // legacy entries are left for cascade realm deletion and do not warrant a warning.
-        let Ok(bytes) = entry.value.as_slice().try_into() else {
-            continue;
-        };
-        let expires_at = i64::from_le_bytes(bytes);
-        if expires_at <= now_secs {
-            storage.delete(realm_id, &entry.key)?;
-            deleted += 1;
-        }
-    }
-    Ok(deleted)
+    sweep_le_expiring(realm_id, storage, &keys::jar_jti_scan_prefix(), now_secs)
 }
 
 /// Scans all `agt:dpop:jti:*` keys in `realm_id` and deletes entries whose
@@ -557,22 +626,7 @@ pub(crate) fn sweep_dpop_jtis(
     storage: &dyn StorageEngine,
     now_secs: i64,
 ) -> Result<u64, crate::storage::StorageError> {
-    let prefix = keys::dpop_jti_scan_prefix();
-    let end = keys::prefix_end(&prefix);
-    let entries = storage.scan(realm_id, &prefix, &end)?;
-
-    let mut deleted: u64 = 0;
-    for entry in &entries {
-        let Ok(bytes) = entry.value.as_slice().try_into() else {
-            continue;
-        };
-        let expires_at = i64::from_le_bytes(bytes);
-        if expires_at <= now_secs {
-            storage.delete(realm_id, &entry.key)?;
-            deleted += 1;
-        }
-    }
-    Ok(deleted)
+    sweep_le_expiring(realm_id, storage, &keys::dpop_jti_scan_prefix(), now_secs)
 }
 
 /// Evicts expired actor-token JTI entries (RFC 8693 §3.3 replay prevention).
@@ -584,22 +638,7 @@ pub(crate) fn sweep_actor_jtis(
     storage: &dyn StorageEngine,
     now_secs: i64,
 ) -> Result<u64, crate::storage::StorageError> {
-    let prefix = keys::actor_jti_scan_prefix();
-    let end = keys::prefix_end(&prefix);
-    let entries = storage.scan(realm_id, &prefix, &end)?;
-
-    let mut deleted: u64 = 0;
-    for entry in &entries {
-        let Ok(bytes) = entry.value.as_slice().try_into() else {
-            continue;
-        };
-        let expires_at = i64::from_le_bytes(bytes);
-        if expires_at <= now_secs {
-            storage.delete(realm_id, &entry.key)?;
-            deleted += 1;
-        }
-    }
-    Ok(deleted)
+    sweep_le_expiring(realm_id, storage, &keys::actor_jti_scan_prefix(), now_secs)
 }
 
 /// Evicts delegation parent-index rows (`dgrant:parent:`) whose child token
@@ -612,22 +651,12 @@ pub(crate) fn sweep_delegation_parent_index(
     storage: &dyn StorageEngine,
     now_secs: i64,
 ) -> Result<u64, crate::storage::StorageError> {
-    let prefix = keys::delegation_grant_parent_scan_prefix();
-    let end = keys::prefix_end(&prefix);
-    let entries = storage.scan(realm_id, &prefix, &end)?;
-
-    let mut deleted: u64 = 0;
-    for entry in &entries {
-        let Ok(bytes) = entry.value.as_slice().try_into() else {
-            continue;
-        };
-        let expires_at = i64::from_le_bytes(bytes);
-        if expires_at <= now_secs {
-            storage.delete(realm_id, &entry.key)?;
-            deleted += 1;
-        }
-    }
-    Ok(deleted)
+    sweep_le_expiring(
+        realm_id,
+        storage,
+        &keys::delegation_grant_parent_scan_prefix(),
+        now_secs,
+    )
 }
 
 /// Evicts the records of expired AATs (`aat:rec:`).
@@ -643,21 +672,19 @@ pub(crate) fn sweep_aat_records(
     struct Expiry {
         exp: i64,
     }
-    let prefix = keys::aat_record_scan_prefix();
-    let end = keys::prefix_end(&prefix);
-    let entries = storage.scan(realm_id, &prefix, &end)?;
-
-    let mut deleted: u64 = 0;
-    for entry in &entries {
-        let Ok(Expiry { exp }) = serde_json::from_slice(&entry.value) else {
-            continue;
-        };
-        if exp <= now_secs {
-            storage.delete(realm_id, &entry.key)?;
-            deleted += 1;
-        }
-    }
-    Ok(deleted)
+    sweep_prefix(
+        realm_id,
+        storage,
+        &keys::aat_record_scan_prefix(),
+        None,
+        |_, value| {
+            Ok(serde_json::from_slice::<Expiry>(value)
+                .ok()
+                .filter(|Expiry { exp }| *exp <= now_secs)
+                .map(|_| ()))
+        },
+        |key, ()| delete_row(storage, realm_id, key),
+    )
 }
 
 /// Evicts expired `private_key_jwt` client-assertion JTI markers
@@ -677,22 +704,12 @@ pub(crate) fn sweep_client_assertion_jtis(
     storage: &dyn StorageEngine,
     now_secs: i64,
 ) -> Result<u64, crate::storage::StorageError> {
-    let prefix = keys::client_assertion_jti_scan_prefix();
-    let end = keys::prefix_end(&prefix);
-    let entries = storage.scan(realm_id, &prefix, &end)?;
-
-    let mut deleted: u64 = 0;
-    for entry in &entries {
-        let Ok(bytes) = entry.value.as_slice().try_into() else {
-            continue;
-        };
-        let expires_at = i64::from_le_bytes(bytes);
-        if expires_at <= now_secs {
-            storage.delete(realm_id, &entry.key)?;
-            deleted += 1;
-        }
-    }
-    Ok(deleted)
+    sweep_le_expiring(
+        realm_id,
+        storage,
+        &keys::client_assertion_jti_scan_prefix(),
+        now_secs,
+    )
 }
 
 /// Reclaims expired SAML SP-side request state (`saml:state:` — audit
@@ -711,24 +728,22 @@ pub(crate) fn sweep_saml_states(
     storage: &dyn StorageEngine,
     now_secs: i64,
 ) -> Result<u64, crate::storage::StorageError> {
-    let prefix = keys::saml_state_scan_prefix();
-    let end = keys::prefix_end(&prefix);
-    let entries = storage.scan(realm_id, &prefix, &end)?;
-
-    let mut deleted: u64 = 0;
-    for entry in &entries {
-        let Ok(bag) =
-            serde_json::from_slice::<crate::identity::federation::saml::SamlStateBag>(&entry.value)
-        else {
-            continue;
-        };
-        let created_secs = bag.created_at.as_micros() / 1_000_000;
-        if now_secs.saturating_sub(created_secs) > SAML_STATE_TTL_SECS {
-            storage.delete(realm_id, &entry.key)?;
-            deleted += 1;
-        }
-    }
-    Ok(deleted)
+    sweep_prefix(
+        realm_id,
+        storage,
+        &keys::saml_state_scan_prefix(),
+        None,
+        |_, value| {
+            let Ok(bag) =
+                serde_json::from_slice::<crate::identity::federation::saml::SamlStateBag>(value)
+            else {
+                return Ok(None);
+            };
+            let created_secs = bag.created_at.as_micros() / 1_000_000;
+            Ok((now_secs.saturating_sub(created_secs) > SAML_STATE_TTL_SECS).then_some(()))
+        },
+        |key, ()| delete_row(storage, realm_id, key),
+    )
 }
 
 /// Reclaims expired SAML assertion replay sentinels (`saml:asn:` — audit
@@ -747,22 +762,12 @@ pub(crate) fn sweep_saml_assertions(
     storage: &dyn StorageEngine,
     now_secs: i64,
 ) -> Result<u64, crate::storage::StorageError> {
-    let prefix = keys::saml_assertion_scan_prefix();
-    let end = keys::prefix_end(&prefix);
-    let entries = storage.scan(realm_id, &prefix, &end)?;
-
-    let mut deleted: u64 = 0;
-    for entry in &entries {
-        let Ok(bytes) = entry.value.as_slice().try_into() else {
-            continue;
-        };
-        let expires_at = i64::from_le_bytes(bytes);
-        if expires_at <= now_secs {
-            storage.delete(realm_id, &entry.key)?;
-            deleted += 1;
-        }
-    }
-    Ok(deleted)
+    sweep_le_expiring(
+        realm_id,
+        storage,
+        &keys::saml_assertion_scan_prefix(),
+        now_secs,
+    )
 }
 
 /// Reclaims expired OIDC `nonce` replay sentinels (`oauth:nonce:` — 22.21).
@@ -781,22 +786,7 @@ pub(crate) fn sweep_oidc_nonces(
     storage: &dyn StorageEngine,
     now_secs: i64,
 ) -> Result<u64, crate::storage::StorageError> {
-    let prefix = keys::oidc_nonce_scan_prefix();
-    let end = keys::prefix_end(&prefix);
-    let entries = storage.scan(realm_id, &prefix, &end)?;
-
-    let mut deleted: u64 = 0;
-    for entry in &entries {
-        let Ok(bytes) = entry.value.as_slice().try_into() else {
-            continue;
-        };
-        let expires_at = i64::from_le_bytes(bytes);
-        if expires_at <= now_secs {
-            storage.delete(realm_id, &entry.key)?;
-            deleted += 1;
-        }
-    }
-    Ok(deleted)
+    sweep_le_expiring(realm_id, storage, &keys::oidc_nonce_scan_prefix(), now_secs)
 }
 
 /// Reclaims expired single-use redemption markers (`consumed:` — G4).
@@ -810,25 +800,23 @@ pub(crate) fn sweep_consumed_markers(
     storage: &dyn StorageEngine,
     now_secs: i64,
 ) -> Result<u64, crate::storage::StorageError> {
-    let prefix = keys::consumed_marker_scan_prefix();
-    let end = keys::prefix_end(&prefix);
-    let entries = storage.scan(realm_id, &prefix, &end)?;
-
-    let mut deleted: u64 = 0;
-    for entry in &entries {
-        let Ok(bytes) = entry.value.as_slice().try_into() else {
-            tracing::warn!(
-                realm = %realm_id,
-                "cleanup: single-use marker with an unreadable expiry kept"
-            );
-            continue;
-        };
-        if i64::from_le_bytes(bytes) <= now_secs {
-            storage.delete(realm_id, &entry.key)?;
-            deleted += 1;
-        }
-    }
-    Ok(deleted)
+    sweep_prefix(
+        realm_id,
+        storage,
+        &keys::consumed_marker_scan_prefix(),
+        None,
+        |_, value| {
+            let Ok(bytes) = value.try_into() else {
+                tracing::warn!(
+                    realm = %realm_id,
+                    "cleanup: single-use marker with an unreadable expiry kept"
+                );
+                return Ok(None);
+            };
+            Ok((i64::from_le_bytes(bytes) <= now_secs).then_some(()))
+        },
+        |key, ()| delete_row(storage, realm_id, key),
+    )
 }
 
 /// Reclaims expired entries from the sessionless-token revocation blocklist.
@@ -852,23 +840,13 @@ pub(crate) fn sweep_revoked_jtis(
     storage: &dyn StorageEngine,
     now_secs: i64,
 ) -> Result<u64, crate::storage::StorageError> {
-    let prefix = keys::revoked_jti_scan_prefix();
-    let end = keys::prefix_end(&prefix);
-    let entries = storage.scan(realm_id, &prefix, &end)?;
-
-    let mut deleted: u64 = 0;
-    for entry in &entries {
-        let Ok(bytes) = entry.value.as_slice().try_into() else {
-            // Legacy `b"1"` (no expiry) or a malformed row: never reclaimed.
-            continue;
-        };
-        let expires_at = i64::from_le_bytes(bytes);
-        if expires_at <= now_secs {
-            storage.delete(realm_id, &entry.key)?;
-            deleted += 1;
-        }
-    }
-    Ok(deleted)
+    // Legacy `b"1"` (no expiry) or malformed rows are never reclaimed.
+    sweep_le_expiring(
+        realm_id,
+        storage,
+        &keys::revoked_jti_scan_prefix(),
+        now_secs,
+    )
 }
 
 /// Reclaims `oauth:session_fam:` index rows whose grant family is gone.
@@ -889,26 +867,21 @@ pub(crate) fn sweep_session_family_index(
     storage: &dyn StorageEngine,
     max_per_type: usize,
 ) -> Result<u64, crate::storage::StorageError> {
-    let prefix = keys::session_grant_family_scan_prefix();
-    let end = keys::prefix_end(&prefix);
-    let entries = storage.scan(realm_id, &prefix, &end)?;
-
-    let mut deleted: u64 = 0;
-    for entry in &entries {
-        if deleted >= max_per_type as u64 {
-            break;
-        }
+    sweep_prefix(
+        realm_id,
+        storage,
+        &keys::session_grant_family_scan_prefix(),
+        Some(max_per_type),
         // A row we cannot parse is left alone rather than guessed at.
-        let Some(family_id) = keys::decode_session_grant_family_id(&entry.key) else {
-            continue;
-        };
-        let family_key = keys::encode_grant_family(family_id);
-        if storage.get(realm_id, &family_key)?.is_none() {
-            storage.delete(realm_id, &entry.key)?;
-            deleted += 1;
-        }
-    }
-    Ok(deleted)
+        |key, _| Ok(keys::decode_session_grant_family_id(key).map(keys::encode_grant_family)),
+        |key, family_key| {
+            if storage.get(realm_id, &family_key)?.is_some() {
+                return Ok(false);
+            }
+            storage.delete(realm_id, key)?;
+            Ok(true)
+        },
+    )
 }
 
 #[cfg(test)]

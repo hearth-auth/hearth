@@ -768,6 +768,9 @@ pub(crate) struct BlockedKeyCursor<'a> {
     block: Option<Arc<CachedBlock>>,
     /// The current entry's position in `block`.
     pos: usize,
+    /// Whether blocks go through the shared block cache. A one-shot walk
+    /// (see [`SstReader::uncached_cursor`]) decodes them privately instead.
+    cached: bool,
 }
 
 impl BlockedKeyCursor<'_> {
@@ -775,9 +778,14 @@ impl BlockedKeyCursor<'_> {
     /// exists or it starts at or after the window's end.
     fn load_block(&mut self) -> Result<(), StorageError> {
         self.block = match self.body.index.get(self.block_index) {
-            Some(entry) if entry.first_key < self.end => {
-                Some(self.body.fetch_block(self.block_index, self.sst_number)?)
-            }
+            Some(entry) if entry.first_key < self.end => Some(if self.cached {
+                self.body.fetch_block(self.block_index, self.sst_number)?
+            } else {
+                let entries = self
+                    .body
+                    .decode_block_uncached(self.block_index, self.sst_number)?;
+                Arc::new(CachedBlock::new(entries, 0))
+            }),
             _ => None,
         };
         self.pos = 0;
@@ -807,14 +815,28 @@ impl BlockedKeyCursor<'_> {
     }
 }
 
+impl SstKeyCursor<'_> {
+    /// The entry at this position, or `None` once the window is exhausted.
+    fn entry(&self) -> Option<&(CompositeKey, MemtableValue)> {
+        match self {
+            Self::Done => None,
+            Self::Eager { entries } => entries.first(),
+            Self::Blocked(blocked) => blocked.block.as_ref()?.entries.get(blocked.pos),
+        }
+    }
+}
+
 impl KeyCursor for SstKeyCursor<'_> {
     fn current(&self) -> Option<(&[u8], bool)> {
-        let (key, value) = match self {
-            Self::Done => return None,
-            Self::Eager { entries } => entries.first()?,
-            Self::Blocked(blocked) => blocked.block.as_ref()?.entries.get(blocked.pos)?,
-        };
+        let (key, value) = self.entry()?;
         Some((key.key(), matches!(value, MemtableValue::Data(_))))
+    }
+
+    fn value(&self) -> Option<&[u8]> {
+        match self.entry()? {
+            (_, MemtableValue::Data(data)) => Some(data),
+            (_, MemtableValue::Tombstone) => None,
+        }
     }
 
     fn advance(&mut self) -> Result<(), StorageError> {
@@ -1471,6 +1493,33 @@ impl SstReader {
         start_key: &[u8],
         end_key: &[u8],
     ) -> Result<SstKeyCursor<'_>, StorageError> {
+        self.cursor(realm_id, start_key, end_key, true)
+    }
+
+    /// A cursor like [`key_cursor`](Self::key_cursor) that neither consults
+    /// nor fills the shared block cache.
+    ///
+    /// For a walk that reads each block once and is done with it, such as the
+    /// cleanup sweep over a realm's expiring rows (#445): cached, those blocks
+    /// would fill the cache with rows nobody reads again and evict the query
+    /// path's working set. Compaction streams its inputs the same way
+    /// (HEA-1922).
+    pub(crate) fn uncached_cursor(
+        &self,
+        realm_id: &RealmId,
+        start_key: &[u8],
+        end_key: &[u8],
+    ) -> Result<SstKeyCursor<'_>, StorageError> {
+        self.cursor(realm_id, start_key, end_key, false)
+    }
+
+    fn cursor(
+        &self,
+        realm_id: &RealmId,
+        start_key: &[u8],
+        end_key: &[u8],
+        cached: bool,
+    ) -> Result<SstKeyCursor<'_>, StorageError> {
         // The same reversed-window guard as `range_scan_inner` (audit §4.9#7).
         if start_key > end_key {
             return Err(StorageError::InvalidRange);
@@ -1499,6 +1548,7 @@ impl SstReader {
                     block_index,
                     block: None,
                     pos: 0,
+                    cached,
                 };
                 blocked.load_block()?;
                 if let Some(block) = &blocked.block {

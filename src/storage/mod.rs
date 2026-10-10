@@ -32,6 +32,7 @@ pub mod wal;
 pub use engine::{CompactionConfig, EmbeddedStorageEngine, StorageConfig};
 pub use error::{ClusterUnavailableCause, RetryClass, StorageError};
 pub use fs::{Fs, FsFile, RealFs};
+pub use key_merge::EntryVisitor;
 
 use crate::core::RealmId;
 
@@ -325,6 +326,35 @@ pub trait StorageEngine: Send + Sync {
         visit: &mut dyn FnMut(&[u8]) -> std::ops::ControlFlow<()>,
     ) -> Result<(), StorageError> {
         paging::visit_collected_keys(self, realm_id, start, end, visit)
+    }
+
+    /// Visits, in key order, every live entry in `[start, end)` for the given
+    /// realm, one at a time, until the range ends or `visit` breaks.
+    ///
+    /// The value form of [`visit_keys`](Self::visit_keys): nothing is
+    /// collected, so a walk over a million rows holds one at a time. The
+    /// periodic cleanup sweep reads every expiring row of a realm this way
+    /// (#445). The walk reads each block once and does not put it in the
+    /// shared block cache, where it would only evict the query path's working
+    /// set.
+    ///
+    /// The default implementation collects the range with [`scan`](Self::scan)
+    /// and then visits it, so its memory still grows with the range.
+    /// [`EmbeddedStorageEngine`] overrides it with a streaming merge of the
+    /// memtable and the SSTs.
+    fn visit_entries(
+        &self,
+        realm_id: &RealmId,
+        start: &[u8],
+        end: &[u8],
+        visit: &mut EntryVisitor<'_>,
+    ) -> Result<(), StorageError> {
+        for entry in self.scan(realm_id, start, end)? {
+            if visit(&entry.key, &entry.value).is_break() {
+                break;
+            }
+        }
+        Ok(())
     }
 
     /// Counts entries whose key starts with `prefix` for the given realm.

@@ -2013,6 +2013,22 @@ impl StorageEngine for ClusterStorageAdapter {
         .map_err(cluster_to_storage_err)
     }
 
+    /// Forwarded so the inner engine's streaming entry merge runs; the trait
+    /// default collects the range through [`Self::scan`] first (#445).
+    fn visit_entries(
+        &self,
+        realm_id: &RealmId,
+        start: &[u8],
+        end: &[u8],
+        visit: &mut crate::storage::EntryVisitor<'_>,
+    ) -> Result<(), crate::storage::StorageError> {
+        tokio::task::block_in_place(|| {
+            self.engine
+                .read_inline(|inner| inner.visit_entries(realm_id, start, end, visit))
+        })
+        .map_err(cluster_to_storage_err)
+    }
+
     /// Forwarded to the inner engine; see [`Self::scan_keys`].
     fn count_prefix(
         &self,
@@ -2379,9 +2395,10 @@ mod tests {
         );
     }
 
-    /// The adapter's key-only scans (`scan_keys`, `visit_keys`, `count_prefix`,
-    /// `scan_prefix_paged`) answer exactly what the inner engine answers,
-    /// tombstones included — they are forwarded, not rebuilt from `scan`.
+    /// The adapter's streaming and key-only scans (`scan_keys`, `visit_keys`,
+    /// `visit_entries`, `count_prefix`, `scan_prefix_paged`) answer exactly
+    /// what the inner engine answers, tombstones included — they are
+    /// forwarded, not rebuilt from `scan`.
     #[tokio::test(flavor = "multi_thread")]
     #[allow(clippy::unwrap_used)]
     async fn adapter_key_only_scans_match_the_inner_engine() {
@@ -2406,6 +2423,20 @@ mod tests {
             })
             .unwrap();
         assert_eq!(visited, keys);
+        let mut entries = Vec::new();
+        adapter
+            .visit_entries(&realm, b"p:", b"p;", &mut |key, value| {
+                entries.push((key.to_vec(), value.to_vec()));
+                std::ops::ControlFlow::Continue(())
+            })
+            .unwrap();
+        assert_eq!(
+            entries,
+            vec![
+                (b"p:a".to_vec(), b"v".to_vec()),
+                (b"p:c".to_vec(), b"v".to_vec())
+            ]
+        );
         assert_eq!(adapter.count_prefix(&realm, b"p:", 0).unwrap(), 2);
         assert_eq!(adapter.count_prefix(&realm, b"p:", 1).unwrap(), 1);
         let (window, total) = adapter.scan_prefix_paged(&realm, b"p:", 1, 5, 0).unwrap();
