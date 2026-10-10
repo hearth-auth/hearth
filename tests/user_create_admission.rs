@@ -336,14 +336,16 @@ async fn a_full_user_create_limit_sheds_self_registration_with_503_and_retry_aft
 /// A registration that waits for a KDF permit holds no user-create permit
 /// (#446 review). Holding one there would let a login surge, which fills the
 /// KDF queue, use up the create limit and shed admin and SCIM creates that
-/// hash nothing.
+/// hash nothing. The registration takes its create permit only once it holds
+/// a KDF permit, so one that the KDF gate sheds never touches the create gate:
+/// no permit taken and no queue wait recorded.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_registration_waiting_for_a_kdf_permit_holds_no_user_create_permit() {
     const CREATE_PERMITS: usize = 4;
     assert!(hearth::identity::init_gate(
         hearth::identity::KdfGateConfig {
             max_in_flight: 1,
-            max_queue_wait: Duration::from_secs(10),
+            max_queue_wait: Duration::from_millis(300),
             retry_after: Duration::from_secs(1),
         }
     ));
@@ -355,6 +357,11 @@ async fn a_registration_waiting_for_a_kdf_permit_holds_no_user_create_permit() {
         }
     ));
     let (app, _storage_dir) = registration_rig();
+    let create_waits = || {
+        hearth::metrics::metrics()
+            .user_create_queue_wait_seconds
+            .get_sample_count()
+    };
 
     // Hold the only KDF permit until `release` is sent.
     let (release, held_until) = std::sync::mpsc::channel::<()>();
@@ -370,26 +377,31 @@ async fn a_registration_waiting_for_a_kdf_permit_holds_no_user_create_permit() {
     });
     kdf_held.await.expect("the holder holds the KDF permit");
 
-    let registration = tokio::spawn(app.clone().oneshot(register(0)));
-    // The registration is now in the KDF queue (10 s wait).
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(
-        !registration.is_finished(),
-        "the registration must still wait for the KDF permit"
+    let resp = app.clone().oneshot(register(0)).await.expect("response");
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "the registration waits out the KDF queue wait and is shed"
+    );
+    assert_eq!(
+        create_waits(),
+        0,
+        "a registration in the KDF queue must not take or wait for a user-create permit"
     );
     assert_eq!(
         hearth::identity::user_create_gate().available_permits(),
-        CREATE_PERMITS,
-        "a registration in the KDF queue must not hold a user-create permit"
+        CREATE_PERMITS
     );
 
     release.send(()).expect("release the KDF permit");
     holder.await.expect("holder task");
-    let resp = registration
-        .await
-        .expect("registration task")
-        .expect("response");
+    let resp = app.clone().oneshot(register(1)).await.expect("response");
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        create_waits(),
+        1,
+        "the registration takes its create permit once it holds the KDF permit"
+    );
     assert_eq!(
         hearth::identity::user_create_gate().available_permits(),
         CREATE_PERMITS,
