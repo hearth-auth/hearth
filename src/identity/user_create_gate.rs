@@ -137,8 +137,8 @@ impl UserCreateGate {
     /// Waits at most `max_queue_wait` for a permit. The wait is async: the
     /// caller holds no blocking-pool thread while it waits. The permit is
     /// released when the returned [`UserCreatePermit`] drops, so a caller that
-    /// runs its create elsewhere (inside a KDF-gated closure, for example)
-    /// moves the permit there.
+    /// runs its create elsewhere moves the permit there. A caller that holds a
+    /// KDF permit uses [`Self::try_admit`] instead, so it never waits here.
     ///
     /// # Errors
     ///
@@ -159,6 +159,24 @@ impl UserCreateGate {
         metrics
             .user_create_queue_wait_seconds
             .observe(wait_start.elapsed().as_secs_f64());
+        metrics.user_create_in_flight.inc();
+        Ok(UserCreatePermit { _permit: permit })
+    }
+
+    /// Takes a permit only if one is free now, without waiting. For a caller
+    /// that already holds a scarcer permit (a KDF permit) and so must not
+    /// wait here: waiting would hold that permit idle. A registration takes
+    /// its create permit this way.
+    ///
+    /// # Errors
+    ///
+    /// [`UserCreateGateError::Overloaded`] when no permit is free.
+    pub fn try_admit(&self) -> Result<UserCreatePermit, UserCreateGateError> {
+        let Ok(permit) = Arc::clone(&self.semaphore).try_acquire_owned() else {
+            return Err(self.shed());
+        };
+        let metrics = crate::metrics::metrics();
+        metrics.user_create_queue_wait_seconds.observe(0.0);
         metrics.user_create_in_flight.inc();
         Ok(UserCreatePermit { _permit: permit })
     }
@@ -264,6 +282,38 @@ mod tests {
             "the shed is bounded by the queue wait, took {elapsed:?}"
         );
         drop(held);
+    }
+
+    /// `try_admit` never waits: with every permit held it sheds at once,
+    /// with the configured `Retry-After`, even when the queue wait is long.
+    /// With a permit free it admits, and the permit returns on drop.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn try_admit_sheds_at_once_when_full_and_admits_when_free() {
+        let gate = gate(1, 60_000, 3);
+        let held = gate.try_admit().expect("a free permit is admitted");
+        assert_eq!(gate.available_permits(), 0);
+
+        let start = Instant::now();
+        let outcome = gate.try_admit();
+        let elapsed = start.elapsed();
+        assert!(
+            matches!(
+                outcome,
+                Err(UserCreateGateError::Overloaded { retry_after })
+                    if retry_after == Duration::from_secs(3)
+            ),
+            "a full gate must shed try_admit with Retry-After"
+        );
+        assert!(
+            elapsed < Duration::from_secs(30),
+            "try_admit must not wait for the 60 s queue wait, took {elapsed:?}"
+        );
+
+        drop(held);
+        assert_eq!(gate.available_permits(), 1);
+        let again = gate.try_admit().expect("the freed permit is admitted");
+        drop(again);
+        assert_eq!(gate.available_permits(), 1);
     }
 
     /// A create that waits for a permit is admitted as soon as one frees

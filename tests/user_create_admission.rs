@@ -272,34 +272,38 @@ fn registration_rig() -> (axum::Router, tempfile::TempDir) {
     (app, temp)
 }
 
+/// `POST /ui/register` for a fresh address. Dev mode skips the CSRF
+/// double-submit check.
+fn register(i: usize) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/ui/register")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(format!(
+            "email=new{i}%40example.test&display_name=New&\
+             password=correct-horse-battery-staple&\
+             password_confirm=correct-horse-battery-staple"
+        )))
+        .expect("request")
+}
+
 /// A self-registration creates a user too: with the user-create limit full,
-/// `POST /ui/register` is shed with the themed `503` page and `Retry-After`
-/// before it takes a KDF permit, and goes through once a permit is free.
+/// `POST /ui/register` is shed with the themed `503` page and `Retry-After`,
+/// and goes through once a permit is free. It takes the create permit only
+/// once it holds a KDF permit, so it does not wait for one: it is shed at
+/// once, not after the user-create queue wait.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_full_user_create_limit_sheds_self_registration_with_503_and_retry_after() {
+    let create_queue_wait = Duration::from_secs(10);
     assert!(hearth::identity::init_user_create_gate(
         UserCreateGateConfig {
             max_in_flight: 1,
-            max_queue_wait: QUEUE_WAIT,
+            max_queue_wait: create_queue_wait,
             retry_after: Duration::from_secs(3),
         }
     ));
 
     let (app, _storage_dir) = registration_rig();
-
-    // Dev mode skips the CSRF double-submit check.
-    let register = |i: usize| {
-        Request::builder()
-            .method("POST")
-            .uri("/ui/register")
-            .header("content-type", "application/x-www-form-urlencoded")
-            .body(Body::from(format!(
-                "email=new{i}%40example.test&display_name=New&\
-                 password=correct-horse-battery-staple&\
-                 password_confirm=correct-horse-battery-staple"
-            )))
-            .expect("request")
-    };
 
     let held = hearth::identity::user_create_gate()
         .admit()
@@ -316,8 +320,8 @@ async fn a_full_user_create_limit_sheds_self_registration_with_503_and_retry_aft
         Some("3")
     );
     assert!(
-        elapsed >= QUEUE_WAIT && elapsed < Duration::from_secs(5),
-        "a shed registration is answered after the queue wait (took {elapsed:?})"
+        elapsed < create_queue_wait / 2,
+        "a registration holding a KDF permit must not wait for a create permit (took {elapsed:?})"
     );
 
     drop(held);
@@ -326,5 +330,69 @@ async fn a_full_user_create_limit_sheds_self_registration_with_503_and_retry_aft
         resp.status(),
         StatusCode::SEE_OTHER,
         "with a permit free the registration goes through to register/sent"
+    );
+}
+
+/// A registration that waits for a KDF permit holds no user-create permit
+/// (#446 review). Holding one there would let a login surge, which fills the
+/// KDF queue, use up the create limit and shed admin and SCIM creates that
+/// hash nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_registration_waiting_for_a_kdf_permit_holds_no_user_create_permit() {
+    const CREATE_PERMITS: usize = 4;
+    assert!(hearth::identity::init_gate(
+        hearth::identity::KdfGateConfig {
+            max_in_flight: 1,
+            max_queue_wait: Duration::from_secs(10),
+            retry_after: Duration::from_secs(1),
+        }
+    ));
+    assert!(hearth::identity::init_user_create_gate(
+        UserCreateGateConfig {
+            max_in_flight: CREATE_PERMITS,
+            max_queue_wait: QUEUE_WAIT,
+            retry_after: Duration::from_secs(3),
+        }
+    ));
+    let (app, _storage_dir) = registration_rig();
+
+    // Hold the only KDF permit until `release` is sent.
+    let (release, held_until) = std::sync::mpsc::channel::<()>();
+    let (entered, kdf_held) = tokio::sync::oneshot::channel::<()>();
+    let holder = tokio::spawn(async move {
+        hearth::identity::gate()
+            .run(move || {
+                let _ = entered.send(());
+                let _ = held_until.recv();
+            })
+            .await
+            .expect("the holder is admitted");
+    });
+    kdf_held.await.expect("the holder holds the KDF permit");
+
+    let registration = tokio::spawn(app.clone().oneshot(register(0)));
+    // The registration is now in the KDF queue (10 s wait).
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !registration.is_finished(),
+        "the registration must still wait for the KDF permit"
+    );
+    assert_eq!(
+        hearth::identity::user_create_gate().available_permits(),
+        CREATE_PERMITS,
+        "a registration in the KDF queue must not hold a user-create permit"
+    );
+
+    release.send(()).expect("release the KDF permit");
+    holder.await.expect("holder task");
+    let resp = registration
+        .await
+        .expect("registration task")
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        hearth::identity::user_create_gate().available_permits(),
+        CREATE_PERMITS,
+        "the registration releases its create permit when it returns"
     );
 }

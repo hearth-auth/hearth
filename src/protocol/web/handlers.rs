@@ -5456,30 +5456,41 @@ fn register_pre_gate(
     })
 }
 
-/// Takes the user-create permit a registration holds for its whole create,
-/// Argon2id hash included (#446), or renders the themed `503` page with
-/// `Retry-After` when the user-create limit is full. Taken before the KDF
-/// permit, so a registration shed here never occupies a hashing slot.
-async fn admit_registration(
-    state: &WebState,
-    headers: &HeaderMap,
-    email: &str,
-    form_action: &str,
-) -> Result<crate::identity::UserCreatePermit, Response> {
-    match crate::identity::user_create_gate().admit().await {
-        Ok(permit) => Ok(permit),
+/// Runs inside the KDF gate, with its KDF permit held: takes a user-create
+/// permit (#446), then registers. The create permit is taken with
+/// [`try_admit`](crate::identity::UserCreateGate::try_admit), which does not
+/// wait, for two reasons:
+///
+/// - A registration never holds a create permit while it waits in the KDF
+///   queue. So a login surge cannot use up the create limit, and at most one
+///   registration per KDF permit holds a create permit at a time.
+/// - It never holds its KDF permit idle while it waits for a create permit.
+///
+/// With the create limit full it renders the themed `503` page with
+/// `Retry-After`. The permit is taken before the engine looks the address up,
+/// so a shed does not depend on whether the address is registered.
+fn register_with_create_permit(
+    state: Arc<WebState>,
+    headers: HeaderMap,
+    form: RegisterForm,
+    prepared: PreparedRegister,
+    peer_addr: SocketAddr,
+) -> Response {
+    let _create_permit = match crate::identity::user_create_gate().try_admit() {
+        Ok(permit) => permit,
         Err(crate::identity::UserCreateGateError::Overloaded { retry_after }) => {
-            Err(kdf_shed_html_response(
-                state,
-                headers,
+            return kdf_shed_html_response(
+                &state,
+                &headers,
                 retry_after,
-                Some(email.to_string()),
+                Some(form.email.trim().to_string()),
                 None,
-                Some(form_action.to_string()),
-            ))
+                Some(format!("{}/register", prepared.action_prefix)),
+            );
         }
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR.into_response()),
-    }
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    register_submit_impl(state, headers, form, prepared, peer_addr)
 }
 
 /// Handles registration form submission (bare `/ui/register`).
@@ -5500,16 +5511,8 @@ pub async fn register_submit(
     let shed_email = form.email.trim().to_string();
     let shed_headers = headers.clone();
     let shed_action = format!("{}/register", prepared.action_prefix);
-    let create_permit =
-        match admit_registration(&shed_state, &shed_headers, &shed_email, &shed_action).await {
-            Ok(permit) => permit,
-            Err(resp) => return resp,
-        };
     match gate()
-        .run(move || {
-            let _create_permit = create_permit;
-            register_submit_impl(state, headers, form, prepared, peer_addr)
-        })
+        .run(move || register_with_create_permit(state, headers, form, prepared, peer_addr))
         .await
     {
         Ok(resp) => resp,
@@ -5542,16 +5545,8 @@ pub async fn register_submit_scoped(
     let shed_email = form.email.trim().to_string();
     let shed_headers = headers.clone();
     let shed_action = format!("{}/register", prepared.action_prefix);
-    let create_permit =
-        match admit_registration(&shed_state, &shed_headers, &shed_email, &shed_action).await {
-            Ok(permit) => permit,
-            Err(resp) => return resp,
-        };
     match gate()
-        .run(move || {
-            let _create_permit = create_permit;
-            register_submit_impl(state, headers, form, prepared, peer_addr)
-        })
+        .run(move || register_with_create_permit(state, headers, form, prepared, peer_addr))
         .await
     {
         Ok(resp) => resp,
