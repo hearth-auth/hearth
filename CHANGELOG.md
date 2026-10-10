@@ -357,6 +357,16 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   inside `assertion`, is refused instead of being read with the field dropped.
 
 ### Fixed
+- **The periodic cleanup sweep no longer holds every expiring row of a realm in memory.**
+  Every five minutes the sweep copied all single-use markers, grant families and other
+  expiring rows into memory before deleting the expired ones. A refresh-token rotation leaves
+  one marker for the refresh token's lifetime (7 days by default), so under steady refresh
+  traffic the sweep's peak memory grew for a week: about 380 bytes per rotation, ~100 MB per
+  hour at 78 refreshes a second. The sweep now walks those rows one at a time and holds only
+  the rows it deletes, 512 at a time. Its reads no longer go through the block cache or the
+  hot tier either, which they used to fill with rows no request reads: the grant-family check
+  for each session index row promoted every grant family into the hot tier on every
+  sweep. (#445)
 - **Paging through `GET /admin/users` no longer costs memory for every user in the realm.**
   Each page collected every user key in the realm to compute `total` — about 100 MB per
   request at 1,000,000 users, even for a 200-row page. The total is now counted without
