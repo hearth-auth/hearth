@@ -23,6 +23,10 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   `hearth_storage_hot_tier_entries`, the hot tier's live entry count. They show what holds the
   storage engine's memory between flushes. They are updated on writes, flushes and hot-tier
   promotions, invalidations and evictions, never on a hot-tier hit.
+- **`operational.user_create`: an admission limit for user creation** (#446). Keys
+  `max_in_flight` (default `64`), `max_queue_wait_ms` (default `250`) and `retry_after_secs`
+  (default `1`). Metrics `hearth_user_create_in_flight`, `hearth_user_create_permits`,
+  `hearth_user_create_queue_wait_seconds` and `hearth_user_create_shed_total`.
 - **Dev console at `/dev`** (`dev-endpoints` builds under `--dev`, loopback only). `make dev`
   prints its link, and its first visit creates the dev accounts. Each account has a one-click
   **Sign in**, which counts the second factor as proved, plus its password, live TOTP code, TOTP
@@ -494,6 +498,15 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   short form was refused as "invalid status".
 
 ### Changed
+- **User creation answers `503` + `Retry-After` under overload** (#446). `POST /admin/users`,
+  `POST /users`, `POST /admin/users/bulk` (`create`), `POST /admin/users/import`,
+  `POST /scim/v2/Users`, self-registration and the admin console's create form and CSV imports
+  now wait at most 250 ms for one of 64 create slots, then answer `503` with `Retry-After`
+  (REST: `"error": "user_create_overloaded"`, `HEARTH_RATE_LIMITED`). Before, extra creates
+  queued in the thread pool that password hashing shares, so a large provisioning job or SCIM
+  sync could slow sign-in for everyone. The default does not limit normal bulk provisioning.
+  SCIM creates, bulk creates, JSON imports and CSV imports no longer run on a request worker
+  thread.
 - **Release signatures are Sigstore bundles.** Each binary, the SBOM and `SHA256SUMS` now
   ship one `<file>.sigstore.json` (signature, certificate and transparency-log proof) in place
   of the detached `<file>.sig` and `<file>.pem`. Verify with `cosign verify-blob --bundle`

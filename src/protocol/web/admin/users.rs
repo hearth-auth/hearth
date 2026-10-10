@@ -543,6 +543,10 @@ pub async fn admin_user_create_submit(
         attributes,
     };
 
+    // An admin-console create takes a user-create permit like every other
+    // create path (#446) and holds it through the create and password set.
+    let admission = crate::identity::user_create_gate().admit().await;
+
     // Re-populate attr_fields for error re-renders.
     let attr_fields: Vec<(crate::identity::AttributeDefinition, String)> = attr_defs
         .into_iter()
@@ -578,6 +582,26 @@ pub async fn admin_user_create_submit(
             realm_theme_url: state.realm_theme_url(),
             inline_theme_css: state.inline_theme_css(),
         })
+    };
+
+    let _create_permit = match admission {
+        Ok(permit) => permit,
+        Err(crate::identity::UserCreateGateError::Overloaded { retry_after }) => {
+            let secs = retry_after.as_secs().max(1);
+            let mut page = render_error(format!(
+                "The server is busy creating other users. Try again in {secs} s."
+            ));
+            *page.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+            page.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from(secs),
+            );
+            return page;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "user-create admission failed");
+            return render_error("Unable to create user. Try again.".to_string());
+        }
     };
 
     // The system realm guards `create_user` to prevent non-admin accounts.
@@ -3059,7 +3083,37 @@ pub async fn admin_users_import_submit(
         });
     }
 
-    let summary = process_csv_import(&state, target.id(), &text, &col_email, &col_name, &col_role);
+    let summary = match process_csv_import_admitted(
+        Arc::clone(&state),
+        target.id().clone(),
+        text,
+        col_email,
+        col_name,
+        col_role,
+    )
+    .await
+    {
+        Ok(summary) => summary,
+        Err(refusal) => {
+            let page = render(&UserImportTemplate {
+                error: Some(refusal.message()),
+                realm_name: realm_name.clone(),
+                list_url: format!("/ui/admin/realms/{realm_name}/users"),
+                chrome: true,
+                active: "users",
+                user_email: Some(session.user_email.clone()),
+                is_admin: true,
+                flash: None,
+                csrf: session.csrf.clone(),
+                narrow: false,
+                product_name: state.product_name_for(target.id()),
+                logo_url: state.logo_url.clone(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
+            });
+            return refusal.respond(page);
+        }
+    };
     let flash = format!(
         "import_done:created={},updated={},skipped={},errors={}",
         summary.created,
@@ -3072,6 +3126,68 @@ pub async fn admin_users_import_submit(
         "/ui/admin/realms/{realm_name}/users?flash={flash}"
     ))
     .into_response()
+}
+
+/// Why a CSV import did not run.
+enum CsvImportRefusal {
+    /// The user-create admission limit was full (#446).
+    Busy(std::time::Duration),
+    /// The blocking import task panicked or was cancelled.
+    Failed,
+}
+
+impl CsvImportRefusal {
+    /// The error shown on the re-rendered import page.
+    fn message(&self) -> String {
+        match self {
+            Self::Busy(retry_after) => format!(
+                "The server is busy creating other users. Try the import again in {} s.",
+                retry_after.as_secs().max(1)
+            ),
+            Self::Failed => "The import failed. Try again.".to_string(),
+        }
+    }
+
+    /// `page` with this refusal's status: `503` + `Retry-After` when busy.
+    fn respond(self, mut page: Response) -> Response {
+        match self {
+            Self::Busy(retry_after) => {
+                *page.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+                page.headers_mut().insert(
+                    axum::http::header::RETRY_AFTER,
+                    axum::http::HeaderValue::from(retry_after.as_secs().max(1)),
+                );
+            }
+            Self::Failed => *page.status_mut() = StatusCode::INTERNAL_SERVER_ERROR,
+        }
+        page
+    }
+}
+
+/// Runs [`process_csv_import`] on the blocking pool under one user-create
+/// permit (#446): an import creates users, so it must neither run inline on an
+/// async worker nor bypass the limit every other create path takes.
+async fn process_csv_import_admitted(
+    state: Arc<WebState>,
+    realm_id: crate::core::RealmId,
+    text: String,
+    col_email: String,
+    col_name: String,
+    col_role: String,
+) -> Result<ImportSummary, CsvImportRefusal> {
+    match crate::identity::user_create_gate()
+        .run(move || process_csv_import(&state, &realm_id, &text, &col_email, &col_name, &col_role))
+        .await
+    {
+        Ok(summary) => Ok(summary),
+        Err(crate::identity::UserCreateGateError::Overloaded { retry_after }) => {
+            Err(CsvImportRefusal::Busy(retry_after))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "CSV user import task failed");
+            Err(CsvImportRefusal::Failed)
+        }
+    }
 }
 
 /// Parses the CSV text and creates/updates users, returning a summary.
@@ -3339,14 +3455,22 @@ pub async fn admin_admin_users_import_submit(
         return render_error("Email column mapping is required.".to_string());
     }
 
-    let summary = process_csv_import(
-        &state,
-        &system_realm,
-        &text,
-        &col_email,
-        &col_name,
-        &col_role,
-    );
+    let summary = match process_csv_import_admitted(
+        Arc::clone(&state),
+        system_realm.clone(),
+        text,
+        col_email,
+        col_name,
+        col_role,
+    )
+    .await
+    {
+        Ok(summary) => summary,
+        Err(refusal) => {
+            let page = render_error(refusal.message());
+            return refusal.respond(page);
+        }
+    };
     let flash = format!(
         "import_done:created={},updated={},skipped={},errors={}",
         summary.created,

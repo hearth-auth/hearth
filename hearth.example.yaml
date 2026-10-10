@@ -219,6 +219,13 @@ operational:
   # header_read_timeout_secs: 10        # first bytes + each HTTP/1 header block
   # tls_handshake_timeout_secs: 10
   # http2_keepalive_interval_secs: 30   # 0 = no keep-alive pings
+  # User-create admission limit (#446): every create route (admin API, SCIM,
+  # bulk/import, self-registration) waits up to max_queue_wait_ms for one of
+  # max_in_flight permits, then answers 503 + Retry-After. Defaults shown.
+  # user_create:
+  #   max_in_flight: 64          # concurrent creates (a queue depth, not cores)
+  #   max_queue_wait_ms: 250     # > 0
+  #   retry_after_secs: 1
 
 # --- Branding (global) ------------------------------------------------------
 # Controls the product name and logo shown across the UI and email templates.

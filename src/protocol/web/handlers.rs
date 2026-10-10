@@ -5456,6 +5456,43 @@ fn register_pre_gate(
     })
 }
 
+/// Runs inside the KDF gate, with its KDF permit held: takes a user-create
+/// permit (#446), then registers. The create permit is taken with
+/// [`try_admit`](crate::identity::UserCreateGate::try_admit), which does not
+/// wait, for two reasons:
+///
+/// - A registration never holds a create permit while it waits in the KDF
+///   queue. So a login surge cannot use up the create limit, and at most one
+///   registration per KDF permit holds a create permit at a time.
+/// - It never holds its KDF permit idle while it waits for a create permit.
+///
+/// With the create limit full it renders the themed `503` page with
+/// `Retry-After`. The permit is taken before the engine looks the address up,
+/// so a shed does not depend on whether the address is registered.
+fn register_with_create_permit(
+    state: Arc<WebState>,
+    headers: HeaderMap,
+    form: RegisterForm,
+    prepared: PreparedRegister,
+    peer_addr: SocketAddr,
+) -> Response {
+    let _create_permit = match crate::identity::user_create_gate().try_admit() {
+        Ok(permit) => permit,
+        Err(crate::identity::UserCreateGateError::Overloaded { retry_after }) => {
+            return kdf_shed_html_response(
+                &state,
+                &headers,
+                retry_after,
+                Some(form.email.trim().to_string()),
+                None,
+                Some(format!("{}/register", prepared.action_prefix)),
+            );
+        }
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    register_submit_impl(state, headers, form, prepared, peer_addr)
+}
+
 /// Handles registration form submission (bare `/ui/register`).
 pub async fn register_submit(
     State(state): State<Arc<WebState>>,
@@ -5475,7 +5512,7 @@ pub async fn register_submit(
     let shed_headers = headers.clone();
     let shed_action = format!("{}/register", prepared.action_prefix);
     match gate()
-        .run(move || register_submit_impl(state, headers, form, prepared, peer_addr))
+        .run(move || register_with_create_permit(state, headers, form, prepared, peer_addr))
         .await
     {
         Ok(resp) => resp,
@@ -5509,7 +5546,7 @@ pub async fn register_submit_scoped(
     let shed_headers = headers.clone();
     let shed_action = format!("{}/register", prepared.action_prefix);
     match gate()
-        .run(move || register_submit_impl(state, headers, form, prepared, peer_addr))
+        .run(move || register_with_create_permit(state, headers, form, prepared, peer_addr))
         .await
     {
         Ok(resp) => resp,

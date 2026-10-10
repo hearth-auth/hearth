@@ -49,7 +49,7 @@ pub use types::{
     RealmScimYaml, RealmSecurityYaml, RealmTokenYaml, RealmWebYaml, RealmYamlConfig,
     RoleYamlConfig, ScopeBundleYamlConfig, SecurityYaml, SeedUserYamlConfig, SeedingYamlConfig,
     SendgridConfig, ServerConfig, SmtpConfig, SmtpEncryption, StorageSection, TlsMinVersionYaml,
-    TokenYamlConfig, TurnstileYaml,
+    TokenYamlConfig, TurnstileYaml, UserCreateAdmissionConfig,
 };
 pub use types::{
     AdaptiveBackoffYaml, CidrPolicyYaml, CrossRealmAggCapYaml, DistributedAttackDetectorYaml,

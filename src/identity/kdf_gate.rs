@@ -35,7 +35,8 @@
 //! client authentication map a shed to `IdentityError::KdfOverloaded`), so the
 //! `permits × 19 MiB` ceiling is now server-wide. REST `create_user` is not a
 //! caller: its request carries no password, and gating it only limited
-//! concurrent creates to the permit count (2026-10-08 stress run).
+//! concurrent creates to the permit count (2026-10-08 stress run). Creates
+//! have their own admission limit instead: [`super::user_create_gate`] (#446).
 //!
 //! Every op is instrumented (`hearth_kdf_*`): in-flight gauge, queue-wait and
 //! compute-time histograms, and a shed counter — the telemetry whose absence
