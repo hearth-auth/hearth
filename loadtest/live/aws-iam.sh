@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Creates or deletes the scoped AWS identity that a live stress run uses: the
 # managed policy hearth-stress-ec2 (aws-policy.json: EC2 in us-east-1 only, on
-# c7i instances and on resources tagged hearth-stress-* only), the IAM user
+# c7i and t3.medium instances and on resources tagged hearth-stress-* only), the IAM user
 # hearth-stress-runner with that policy, one access key, and the local CLI
 # profile hearth-stress.
 #
@@ -59,6 +59,14 @@ case ${1:-} in
     printf '\n[%s]\naws_access_key_id = %s\naws_secret_access_key = %s\n' \
       "$profile" "$kid" "$secret" >> ~/.aws/credentials
     printf '\n[profile %s]\nregion = us-east-1\noutput = json\n' "$profile" >> ~/.aws/config
+    # IAM is eventually consistent: a new key can be refused for some seconds.
+    # A round started at once failed its first call with InvalidClientTokenId.
+    for _ in $(seq 1 24); do
+      AWS_PROFILE=$profile aws sts get-caller-identity > /dev/null 2>&1 && break
+      sleep 5
+    done
+    AWS_PROFILE=$profile aws sts get-caller-identity > /dev/null 2>&1 \
+      || die "the new key of $user still does not work after 2 minutes"
     echo "aws-iam: user $user with policy $policy; local profile $profile"
     ;;
   down)

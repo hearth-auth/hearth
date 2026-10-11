@@ -1,0 +1,12 @@
+# #445 shakedown before the 12-hour memory soaks: 30 minutes on t3.medium (server and one
+# generator), 20,000 users, so every new piece runs once before the long runs: the t3 launch,
+# token renewal (ACCESS_TOKEN_TTL=10m, so each VU renews at minute 7.5 to 9), chain rotation,
+# the RssAnon/RssFile sampler columns, hearth_storage_sst_reader_bytes and memory.py.
+# Run it with:
+#   SETUP=1 USERS=20000 SERVER_SIZE=t3.medium GENERATOR_SIZE=t3.medium GENERATORS=1 VUS=500
+#   AWS_MAX_HOURS=3 ACCESS_TOKEN_TTL=10m SESSION_TTL=1h REFRESH_TOKEN_TTL=1h
+#   K6_ENV="CHAIN_REFRESHES=20 PRESENT=chain" SERVER_RUST_LOG=info,hearth::storage::heap=debug
+# Pass: no 401s after minute 10, token_renewals and chain_rotations above 0 in the summary,
+# and memory.py --warmup-min 5 --bin-min 5 prints a verdict.
+#    name           journey       rate  seconds  malloc_info minutes
+soak shake          mix           120   1800     10,29

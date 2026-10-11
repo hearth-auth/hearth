@@ -1,0 +1,11 @@
+# #445 12-hour memory soak (README, "Memory soaks"): t3.medium server and one t3.medium
+# generator, 1M users, 120 journeys/s of the default mix. Two rounds use this plan:
+#   A (small caches): HOT_TIER_CAPACITY=20000 BLOCK_CACHE_BYTES=33554432
+#   B (default caches): neither setting
+# Both with:
+#   SETUP=1 SERVER_SIZE=t3.medium GENERATOR_SIZE=t3.medium GENERATORS=1 VUS=500
+#   AWS_MAX_HOURS=15 SESSION_TTL=1h REFRESH_TOKEN_TTL=1h
+#   K6_ENV="CHAIN_REFRESHES=20 PRESENT=chain" SERVER_RUST_LOG=info,hearth::storage::heap=debug
+# Pass mark: memory.py (defaults: warm-up 120 min, 1-hour bins, 2 MiB/h) prints PASS for both.
+#    name           journey       rate  seconds  malloc_info minutes
+soak soak           mix           120   43200    60,120,240,480,719

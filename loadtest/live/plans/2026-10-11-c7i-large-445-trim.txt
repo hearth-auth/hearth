@@ -1,0 +1,9 @@
+# #445 2-hour plateau soak (server c7i.large, 2 c7i.xlarge generators, 1M users) with
+# malloc_trim after each flush and compaction (#468), on top of #466 and #467. Run it
+# with HOT_TIER_CAPACITY=20000 BLOCK_CACHE_BYTES=33554432 (every cache full by about
+# minute 25) and SERVER_RUST_LOG=info,hearth::storage::heap=debug (the trim's
+# duration). Hour 1 compares with the 60-minute soak of 2026-10-11 (no trim). In
+# hour 2 the userinfo and admin-lookup journeys get 401s: k6's pool tokens expire
+# after 1 hour (README, "Pitfalls").
+#    name           journey       rate  seconds  malloc_info minutes
+soak soak           mix           120   7200     20,35,59,90,119

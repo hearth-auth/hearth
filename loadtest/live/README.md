@@ -20,7 +20,7 @@ fails, and records how it fails. It complements the in-repo load test
 | `aws-iam.sh`, `aws-policy.json` | Create and delete the scoped IAM user and the local `hearth-stress` profile |
 | `remote/` | Scripts that run on the server: observer, `kill -9`, profiler, `malloc-info.sh` (glibc heap snapshot through gdb) |
 | `ramps.py` | Per-step table for each journey type, with server CPU and generator CPU |
-| `memory.py` | Server RSS over a soak: values at fixed minutes, trend, hot-tier and memtable gauges |
+| `memory.py` | Server memory over a soak: RSS, RssAnon and RssFile at fixed minutes, storage gauges, glibc heap, and the flatness test (`test_memory.py` tests it) |
 
 ## What "production mode" means here
 
@@ -93,7 +93,10 @@ availability zone). Later commands read the provider from the run. It needs
 an AWS CLI profile (default `hearth-stress`) for an IAM user with EC2 rights
 on resources tagged `hearth-stress` in one region only; it refuses the
 account root. Each instance terminates itself after `AWS_MAX_HOURS` (10) in
-case `down` never runs.
+case `down` never runs. `SERVER_SIZE` and `GENERATOR_SIZE` may also be c7i.2xlarge or
+t3.medium (2 vCPU, 4 GiB, about half the price of c7i.large). Use t3.medium for long memory
+soaks, not for latency: it starts in unlimited mode, so it never loses CPU when its credits run
+out, but its CPUs are older and slower.
 
 Results land in `loadtest/live/results/<run>/<name>/` (`report.md`,
 `report.json`, raw k6 CSV, sampler CSV, server log tail). Secrets live in
@@ -140,13 +143,44 @@ soaks on the same servers. A round on AWS takes 2–3 hours and costs a few doll
 5. **Analyse** the results in `results/<run>/`:
    ```bash
    python3 loadtest/live/ramps.py results/<run>/<name> ...   # per-step table per journey type
-   python3 loadtest/live/memory.py results/<run>/<soak>     # needs metrics-storage.txt: see below
+   python3 loadtest/live/memory.py results/<run>/<soak>     # memory over a soak; see below
    ```
-   `memory.py` reads the storage gauges from `metrics-storage.txt`. Make it from the soak's
-   `metrics.txt`: `grep -E " hearth_(storage_|kdf_)" metrics.txt > metrics-storage.txt`.
 6. **Clean up.** Check that `cloud.sh down` printed an empty "left over" list. Then, with an
    admin session, run `loadtest/live/aws-iam.sh down`.
 7. **Publish** the results as one file, `docs/perf/<date>-<server>.md` (see "Report format").
+
+## Memory soaks (#445)
+
+A memory soak answers one question: does Hearth's memory stop growing once its caches are full?
+Run it with these settings, on top of the round's:
+
+| Setting | Value | Why |
+|---------|-------|-----|
+| `GENERATORS`, `VUS` | `1`, `500` | k6 holds about 3.4 GB at 1,000 VUs; 500 VUs fit a 4 GiB generator and are far more than 120 journeys/s need |
+| `SESSION_TTL`, `REFRESH_TOKEN_TTL` | `1h`, `1h` | expired rows become deletable within the run, so the stored data can level off |
+| `K6_ENV` | `"CHAIN_REFRESHES=20 PRESENT=chain"` | each VU signs in again after 20 refreshes (new token families all the time), and userinfo presents the VU's newest token (the token cache fills) |
+| `SERVER_RUST_LOG` | `info,hearth::storage::heap=debug` | the log shows each return of free heap to the system |
+| `HOT_TIER_CAPACITY`, `BLOCK_CACHE_BYTES` | e.g. `20000`, `33554432` | optional: small caches fill in the first half hour. Leave them unset for a run with the default caches |
+
+The sampler records RssAnon (heap and other private memory, the part a leak grows) and RssFile
+(the mapped SST files, which the kernel drops when it needs the memory). Total RSS mixes the two,
+so do not judge a soak by it.
+
+**The flatness test** (`memory.py`, fixed before the runs of 2026-10-12):
+
+- The *floor* is the lowest RssAnon between two memtable flushes. It comes just after a flush,
+  when the memtable is empty and the freed heap was just returned to the system.
+- The stored data still grows during a run: no sweep deletes audit events before they are a day
+  old. The SST readers hold a block index and a Bloom filter for every file, so their heap grows
+  with the data. `hearth_storage_sst_reader_bytes` reports it, and the test subtracts it from the
+  floor.
+- After the warm-up (`--warmup-min`, 120), the test fits a line to the bin means
+  (`--bin-min`, 60) of floor minus SST reader heap. The 95 % upper bound of its slope uses
+  Student's t over the bin means, because one-second samples are not independent.
+- **PASS** when that upper bound is below `--max-slope` (2 MiB/h). Two 12-hour runs must pass:
+  one with small caches, one with the default caches.
+
+For a 4-hour soak, use `--warmup-min 60 --bin-min 30`.
 
 ## Method rules
 
@@ -169,9 +203,13 @@ soaks on the same servers. A round on AWS takes 2–3 hours and costs a few doll
 
 ## Pitfalls
 
-- k6's pool access tokens expire after 1 hour, and the userinfo and admin-lookup journeys do not
-  renew them. A soak longer than 1 hour shows `401`s on these journeys. They are test-tool
-  failures, not server failures.
+- Access tokens live 1 hour at most. k6 renews each one when 10–25 % of its lifetime is left,
+  by a sign-in tagged `name=renew` (not a journey; `token_renewals` in the summary). Before
+  2026-10-12 it did not, and soaks longer than 1 hour showed `401`s on userinfo and admin lookup.
+- k6 uses about 3.4 GB at 1,000 VUs and grows about 60 MB an hour in a soak. On a 4 GiB
+  generator, use 500 VUs.
+- A round started seconds after `aws-iam.sh up` failed with `InvalidClientTokenId`: IAM refuses a
+  new key for some seconds. `aws-iam.sh up` now waits until the key works.
 - The background SST compaction of a 1M-user store runs about 60 minutes after the start. It adds
   about 640 MiB of RSS for a few seconds and sheds some logins. Expect it in every soak.
 - `hearth --version` prints the Cargo version, not the release tag. Identify a build by the
