@@ -384,6 +384,13 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   217 MB of extra memory for each 64 MiB flush, under load. glibc could keep that memory for
   the process after the flush. The flush now writes each block to the file as it goes, as
   compaction already did, and holds less than a fifth of the flushed size. (#445)
+- **Memory freed by a memtable flush or a compaction now goes back to the operating system.**
+  On Linux with glibc, the allocator kept freed memory inside the process and gave memory
+  back only from the top of its arenas. A flush frees the whole old memtable, so after each
+  flush most of it stayed in RSS. In a 60-minute soak with every cache full, the heap in use
+  stayed near 300 MB while the kept free memory grew from 165 MB to 336 MB, and RSS grew
+  about 280 MiB an hour. Hearth now calls `malloc_trim` after each flush and each
+  compaction. (#445)
 - **Paging through `GET /admin/users` no longer costs memory for every user in the realm.**
   Each page collected every user key in the realm to compute `total` — about 100 MB per
   request at 1,000,000 users, even for a 200-row page. The total is now counted without

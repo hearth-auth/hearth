@@ -16,6 +16,7 @@ pub mod encryption;
 mod engine;
 pub mod error;
 pub mod fs;
+mod heap;
 mod key_merge;
 #[allow(dead_code)]
 pub(crate) mod key_registry;
