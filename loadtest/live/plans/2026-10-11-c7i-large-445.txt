@@ -1,0 +1,6 @@
+# #445 plateau soak (server c7i.large, 2 c7i.xlarge generators, 1M users), with the
+# lock-map fix (#466) and the streaming flush (#467). Run it with
+# HOT_TIER_CAPACITY=20000 BLOCK_CACHE_BYTES=33554432 so that every cache is full
+# by about minute 25: memory that still grows after that has no cap.
+#    name           journey       rate  seconds  malloc_info minutes
+soak soak           mix           120   3600     20,35,59

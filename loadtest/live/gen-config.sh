@@ -20,6 +20,10 @@
 #     hearth.env            HEARTH_MASTER_KEY, HEARTH_KEK, the seed passwords
 #     tls/https.crt tls/https.key
 #   generator.env           what the k6 scripts need (base URL, passwords)
+#
+# Environment (optional), for a soak that must fill every cache within the run:
+#   HOT_TIER_CAPACITY   storage.hot_tier_capacity (default: auto-size from memory)
+#   BLOCK_CACHE_BYTES   storage.block_cache_bytes (default: 256 MiB)
 set -euo pipefail
 
 out=${1:?usage: gen-config.sh <out-dir> <server-ip> [login-users]}
@@ -39,6 +43,18 @@ if ! [[ $login_users =~ ^[0-9]+$ ]] || [ "$login_users" -lt 1 ]; then
   echo "gen-config: login-users must be a positive integer" >&2
   exit 2
 fi
+
+storage_extra=""
+for setting in HOT_TIER_CAPACITY:hot_tier_capacity BLOCK_CACHE_BYTES:block_cache_bytes; do
+  var=${setting%%:*}
+  value=${!var:-}
+  [ -n "$value" ] || continue
+  if ! [[ $value =~ ^[0-9]+$ ]]; then
+    echo "gen-config: $var must be a non-negative integer" >&2
+    exit 2
+  fi
+  storage_extra+=$'\n'"  ${setting#*:}: $value"
+done
 
 umask 077
 mkdir -p "$out/server/tls"
@@ -110,7 +126,7 @@ token:
   # lifetime changes no per-request cost.
   access_token_ttl: "1h"
 storage:
-  data_dir: "/var/lib/hearth/data"
+  data_dir: "/var/lib/hearth/data"$storage_extra
 email:
   transport: log
   allow_log_transport_in_production: true
