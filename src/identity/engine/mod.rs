@@ -16520,6 +16520,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 "grant_families_deleted": stats.grant_families_deleted,
                 "rate_trackers_pruned": stats.rate_trackers_pruned,
                 "sessions_evicted": stats.sessions_evicted,
+                "sessions_deleted": stats.sessions_deleted,
                 "errors": stats.errors,
             }));
             let ctx = crate::audit::context::AuditContext {
@@ -19090,6 +19091,51 @@ mod tests {
         .expect("engine creation")
         .with_hibp_transport(Arc::new(NeverPwnedStub));
         (dir, engine, clock)
+    }
+
+    // ===== #445: expired sessions are deleted =====
+
+    /// A sign-in writes a session row and a user-index row. Before #445 only
+    /// deleting the user removed them, so every sign-in left both behind for
+    /// good and the stored data grew with every sign-in ever made. The cleanup
+    /// sweep now deletes a session an hour after it expires: a refresh that
+    /// extends a session writes it back within one request, so by then
+    /// nothing can extend it.
+    #[test]
+    fn the_cleanup_sweep_deletes_a_session_an_hour_after_it_expires() {
+        let (_dir, engine, clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+        let session = engine
+            .create_session(&realm, user.id(), &SessionContext::default())
+            .expect("create session");
+        let id_key = keys::encode_session_id(session.id());
+        let index_key = keys::encode_user_session(user.id(), session.id());
+        let rows = |engine: &EmbeddedIdentityEngine| {
+            (
+                engine.storage.get(&realm, &id_key).expect("get").is_some(),
+                engine
+                    .storage
+                    .get(&realm, &index_key)
+                    .expect("get")
+                    .is_some(),
+            )
+        };
+        let minute = 60 * 1_000_000;
+
+        clock.set(session.expires_at().add_micros(30 * minute));
+        let stats = engine.sweep_expired(&realm).expect("sweep");
+        assert_eq!(stats.sessions_deleted, 0, "30 minutes after expiry");
+        assert_eq!(rows(&engine), (true, true), "30 minutes after expiry");
+
+        clock.set(session.expires_at().add_micros(61 * minute));
+        let stats = engine.sweep_expired(&realm).expect("sweep");
+        assert_eq!(stats.sessions_deleted, 1, "61 minutes after expiry");
+        assert_eq!(
+            rows(&engine),
+            (false, false),
+            "the session row and its index row are both deleted"
+        );
     }
 
     // ===== 22.2: per-code / per-token advisory-lock map reclamation =====

@@ -1,8 +1,8 @@
 //! Periodic cleanup of expired OAuth entities.
 //!
 //! Sweeps expired authorization codes, device codes, pending
-//! authorization tickets, and grant families from storage. Called by a
-//! background task at a configurable interval.
+//! authorization tickets, grant families and sessions from storage. Called
+//! by a background task at a configurable interval.
 //!
 //! # Race semantics
 //!
@@ -31,8 +31,12 @@ pub struct CleanupConfig {
     /// Interval in seconds between OAuth entity cleanup sweeps. 0 disables
     /// the background task even when `enabled` is true.
     pub interval_secs: u64,
-    /// Maximum entities to delete per type per sweep. Bounds worst-case
-    /// sweep latency on the first run after feature enablement.
+    /// Maximum entities to delete per type per sweep, for authorization
+    /// codes, device codes, pending tickets and PAR requests. Bounds
+    /// worst-case sweep latency on the first run after feature enablement.
+    /// Kinds that every sign-in creates (grant families, their session index
+    /// rows, sessions) are not capped: a cap below the sign-in rate lets
+    /// expired rows pile up without bound (#445).
     pub max_per_type: usize,
 }
 
@@ -129,6 +133,12 @@ pub struct CleanupStats {
     /// zero storage writes (C-5); the actual eviction (revoke + audit + SV
     /// bump) is performed here on the periodic sweep.
     pub sessions_evicted: u64,
+    /// Sessions deleted an hour after their expiry: the `ses:id` row and its
+    /// `ses:user` index row (#445).
+    ///
+    /// Nothing else deletes an expired session; before this sweep every
+    /// sign-in left both rows behind for good.
+    pub sessions_deleted: u64,
     /// In-memory rate-tracker entries pruned across all five maps.
     ///
     /// Rate tracker `HashMap`s are not backed by storage; they are pruned
@@ -160,6 +170,7 @@ impl CleanupStats {
             + self.aat_records_deleted
             + self.rate_trackers_pruned
             + self.sessions_evicted
+            + self.sessions_deleted
     }
 }
 
@@ -233,7 +244,7 @@ pub(crate) fn sweep_expired(
         &mut stats.grant_families_deleted,
         &mut errors,
         "grant family",
-        sweep_grant_families(realm_id, storage, now, config.max_per_type),
+        sweep_grant_families(realm_id, storage, now),
     );
     record(
         realm_id,
@@ -330,7 +341,14 @@ pub(crate) fn sweep_expired(
         &mut stats.session_family_rows_deleted,
         &mut errors,
         "session grant-family index",
-        sweep_session_family_index(realm_id, storage, config.max_per_type),
+        sweep_session_family_index(realm_id, storage),
+    );
+    record(
+        realm_id,
+        &mut stats.sessions_deleted,
+        &mut errors,
+        "expired session",
+        sweep_sessions(realm_id, storage, now),
     );
 
     stats.errors = errors;
@@ -552,13 +570,12 @@ fn sweep_grant_families(
     realm_id: &RealmId,
     storage: &dyn StorageEngine,
     now: Timestamp,
-    max_per_type: usize,
 ) -> Result<u64, crate::storage::StorageError> {
     sweep_prefix(
         realm_id,
         storage,
         &keys::grant_family_scan_prefix(),
-        Some(max_per_type),
+        None,
         |_, value| {
             let family: StoredGrantFamily = serde_json::from_slice(value).map_err(|e| {
                 crate::storage::StorageError::DeserializationFailed {
@@ -865,13 +882,12 @@ pub(crate) fn sweep_revoked_jtis(
 pub(crate) fn sweep_session_family_index(
     realm_id: &RealmId,
     storage: &dyn StorageEngine,
-    max_per_type: usize,
 ) -> Result<u64, crate::storage::StorageError> {
     sweep_prefix(
         realm_id,
         storage,
         &keys::session_grant_family_scan_prefix(),
-        Some(max_per_type),
+        None,
         // A row we cannot parse is left alone rather than guessed at.
         |key, _| Ok(keys::decode_session_grant_family_id(key).map(keys::encode_grant_family)),
         |key, family_key| {
@@ -882,6 +898,48 @@ pub(crate) fn sweep_session_family_index(
                 return Ok(false);
             }
             storage.delete(realm_id, key)?;
+            Ok(true)
+        },
+    )
+}
+
+/// How long after its expiry a session is deleted.
+///
+/// A refresh extends a session only while it is valid, and writes it back
+/// within that one request. An hour past its expiry, no refresh can still be
+/// writing a session, so the sweep cannot delete one that a refresh extended.
+const SESSION_DELETE_GRACE_MICROS: i64 = 3_600 * 1_000_000;
+
+/// Deletes the sessions that expired more than
+/// [`SESSION_DELETE_GRACE_MICROS`] ago: the `ses:id` row and its `ses:user`
+/// index row, in one write. A revoked session goes too, once its own expiry
+/// passes. Nothing else deletes an expired session, so before this sweep
+/// every sign-in left both rows behind for good (#445).
+fn sweep_sessions(
+    realm_id: &RealmId,
+    storage: &dyn StorageEngine,
+    now: Timestamp,
+) -> Result<u64, crate::storage::StorageError> {
+    sweep_prefix(
+        realm_id,
+        storage,
+        &keys::session_id_scan_prefix(),
+        None,
+        // A row we cannot decode is left alone rather than guessed at.
+        |_, value| {
+            let Ok(record) = crate::identity::types::session::decode_session_record(value) else {
+                return Ok(None);
+            };
+            let session = crate::identity::types::Session::from_storage_record(record);
+            let deadline = session
+                .expires_at()
+                .as_micros()
+                .saturating_add(SESSION_DELETE_GRACE_MICROS);
+            Ok((now.as_micros() >= deadline)
+                .then(|| keys::encode_user_session(session.user_id(), session.id())))
+        },
+        |key, index_key| {
+            storage.write_batch(realm_id, &[], &[key.to_vec(), index_key])?;
             Ok(true)
         },
     )
@@ -1295,6 +1353,82 @@ mod tests {
     }
 
     // --- total deleted ---
+
+    /// An expired grant family with its revocation tombstone, as a sign-in
+    /// leaves it once its refresh token lifetime has passed.
+    fn seed_expired_family(s: &EmbeddedStorageEngine, realm: &RealmId, id: &str) {
+        let family = StoredGrantFamily {
+            family_id: id.into(),
+            current_refresh_hash: "h".into(),
+            session_id: crate::core::SessionId::generate(),
+            realm_id: realm.clone(),
+            revoked: false,
+            created_at: Timestamp::from_micros(T0),
+            expires_at: Timestamp::from_micros(T0 + ONE_HOUR),
+            client_id: None,
+            resources: Vec::new(),
+            amr_values: Vec::new(),
+            bound_jkt: None,
+            scope_narrowed: false,
+        };
+        s.put(
+            realm,
+            &keys::encode_grant_family(id),
+            &serde_json::to_vec(&family).expect("serialize"),
+        )
+        .expect("put family");
+    }
+
+    /// Every sign-in creates a grant family. A sweep capped at `max_per_type`
+    /// (1,000 per 5 minutes, 3.3 a second) fell behind any server signing in
+    /// more users than that, and expired families piled up without bound
+    /// (#445). One sweep now deletes every expired family.
+    #[test]
+    fn one_sweep_deletes_every_expired_grant_family_whatever_max_per_type() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+        for i in 0..5 {
+            seed_expired_family(&s, &realm, &format!("fam-{i}"));
+        }
+        let config = CleanupConfig {
+            max_per_type: 2,
+            ..Default::default()
+        };
+
+        let stats = sweep_expired(&realm, &s, &fake_clock(T0 + 2 * ONE_HOUR), &config);
+
+        assert_eq!(stats.grant_families_deleted, 5);
+        for i in 0..5 {
+            let key = keys::encode_grant_family(&format!("fam-{i}"));
+            assert!(s.get(&realm, &key).expect("get").is_none(), "fam-{i}");
+        }
+    }
+
+    /// The session-family index row of a deleted family goes in the same
+    /// sweep, or the index rows pile up in place of the families (#445).
+    #[test]
+    fn one_sweep_reclaims_every_orphaned_session_family_row_whatever_max_per_type() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+        let session_id = crate::core::SessionId::generate();
+        let rows: Vec<Vec<u8>> = (0..5)
+            .map(|i| keys::encode_session_grant_family(&session_id, &format!("gone-{i}")))
+            .collect();
+        for row in &rows {
+            s.put(&realm, row, &[]).expect("put orphan row");
+        }
+        let config = CleanupConfig {
+            max_per_type: 2,
+            ..Default::default()
+        };
+
+        let stats = sweep_expired(&realm, &s, &fake_clock(T0), &config);
+
+        assert_eq!(stats.session_family_rows_deleted, 5);
+        for row in &rows {
+            assert!(s.get(&realm, row).expect("get").is_none());
+        }
+    }
 
     #[test]
     fn total_deleted_sums_all_types() {
@@ -2007,8 +2141,7 @@ mod tests {
         s.flush_memtable().expect("flush");
         let before = s.cache_footprint();
 
-        let deleted = sweep_session_family_index(&realm, &s, CleanupConfig::default().max_per_type)
-            .expect("sweep");
+        let deleted = sweep_session_family_index(&realm, &s).expect("sweep");
 
         assert_eq!(deleted, 0, "every family exists, so no index row goes");
         assert_eq!(
