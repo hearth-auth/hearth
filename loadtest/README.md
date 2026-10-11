@@ -374,10 +374,12 @@ given lookup.
 
 ## Artifact contract and admissibility rules
 
-Every performance figure that a published doc cites (a report in [`docs/perf/`](../docs/perf/README.md))
-is backed by a committed artifact. Measurement artifacts go under
-`docs/perf/artifacts/<date>-<server>/`, with a `README.md` that says what each file is. Load-test
-report JSON goes under `loadtest/reports/published/` (see its `README.md`).
+Every performance figure that a published doc cites comes from a report in
+[`docs/perf/`](../docs/perf/), one Markdown file per round. A live stress report carries its
+per-step tables inline, as the analysis scripts print them (see
+[`live/README.md`](live/README.md) § "Report format"); its raw data is not committed. A Goose
+load-test report JSON that backs a figure goes under `loadtest/reports/published/` (see its
+`README.md`).
 
 These rules are binding. `loadtest/src/report.rs` enforces rule 3.
 

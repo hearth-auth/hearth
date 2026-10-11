@@ -89,6 +89,9 @@ loadtest/reports/*
 # and the README in published/ are tracked.
 !loadtest/reports/published
 loadtest/target/
+# Live stress runs: per-run secrets and raw results (loadtest/live/README.md).
+loadtest/live/.build/
+loadtest/live/results/
 
 *.tsbuildinfo
 **/.phpunit.cache

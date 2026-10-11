@@ -1,1 +1,0 @@
-8192000 bytes (8.2 MB, 7.8 MiB) copied, 6.56666 s, 1.2 MB/s

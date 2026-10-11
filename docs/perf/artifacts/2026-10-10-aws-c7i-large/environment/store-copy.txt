@@ -1,3 +1,0 @@
-757M	/var/lib/hearth.base
-Filesystem      Size  Used Avail Use% Mounted on
-/dev/root        38G  3.8G   34G  10% /

@@ -1,0 +1,12 @@
+# The round of docs/perf/2026-10-10-aws-c7i-large.md (server c7i.large, 2 c7i.xlarge
+# generators, 1M users). Rates are totals over both generators.
+#    name           journey       rate  seconds  malloc_info minutes
+soak soak           mix           120   3600     35,59
+#    name           journey       start step  steps hold_s
+ramp ramp-mix          mix           250   50    10    90
+ramp ramp-login        login         20    10    9     90
+ramp ramp-refresh      refresh       200   100   10    90
+ramp ramp-userinfo     userinfo      2000  2000  6     60
+ramp ramp-admin_lookup admin_lookup  2000  2000  6     60
+ramp ramp-introspect   introspect    1500  1500  6     60
+ramp ramp-create_user  create_user   200   200   7     60

@@ -1,9 +1,0 @@
-variant: main
-image: hearth-stress:ab445-main
-revision: 48378b06108d6fcbde65e1d3d38c94ce5c520682
-env: 
-POST /admin/bootstrap: 404
-environ GLIBC/MALLOC: 
-thp: always [madvise] never
-hearth 1.6.11
-[2m2026-10-09T16:27:37.205407Z[0m [32m INFO[0m [2mhearth[0m[2m:[0m glibc malloc arenas capped [3marenas[0m[2m=[0m2

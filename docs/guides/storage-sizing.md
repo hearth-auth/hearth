@@ -45,7 +45,7 @@ A gate is a ceiling that fails the build when crossed, not a typical value, so e
 number coincides it is not evidence of observed latency. For latencies that were actually
 measured, with the host, plane and raw artifact attached, see
 [the engine-plane figures of July 2026](https://github.com/hearth-auth/hearth/blob/3981837a75422969959d23b4324c81a61e0efc2f/docs/perf/PUBLISHED_FIGURES.md) §1 (removed from the tree; see
-[`docs/perf/`](../perf/README.md) for current results) — note that it publishes p50
+[`docs/perf/`](../perf/) for current results) — note that it publishes p50
 only; **no p99 read figure has been cleared for publication on either plane.** Run
 `make bench-gate` on your target hardware to collect numbers for your own deployment; treat those,
 not this table, as authoritative for capacity planning.

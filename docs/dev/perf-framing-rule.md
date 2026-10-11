@@ -1,7 +1,7 @@
 # Performance Framing Rule
 
 **Status:** Internal guidance. Enforced by code review and this document.
-**Issued:** 2026-08-12 (HEA-2152). **Updated:** 2026-10-10 (network plane; `docs/perf/` is the source of record). References `README.md` §Performance and [`docs/perf/README.md`](../perf/README.md).
+**Issued:** 2026-08-12 (HEA-2152). **Updated:** 2026-10-10 (network plane; `docs/perf/` is the source of record). References `README.md` §Performance and [`docs/perf/`](../perf/).
 
 ---
 
@@ -36,7 +36,7 @@ The SHA requirement exists because benchmark results are host-, build-, and conf
 
 Before adding or editing any performance claim in `README.md`, `docs/`, `docs/vision/`, blog posts, or comparison articles:
 
-1. Confirm the figure is in a report in [`docs/perf/`](../perf/README.md) (the source of record).
+1. Confirm the figure is in a report in [`docs/perf/`](../perf/) (the source of record).
 2. Confirm the SHA cited in that row passes `git merge-base --is-ancestor <sha> HEAD`.
 3. Add the plane label inline — e.g. "(engine plane)", "(HTTP plane)" or "(network plane)".
 4. If the SHA fails the ancestry check, either re-run the benchmark at a current SHA and add a new report to `docs/perf/`, or remove the claim until re-verification is done.

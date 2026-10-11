@@ -6,7 +6,7 @@
 | **Plane** | Network: HTTPS requests from 2 separate load-generator hosts. TLS, TCP and network time are included. |
 | **Server** | AWS c7i.large (2 vCPU, 3.8 GB RAM), us-east-1 |
 | **Data** | 1,000,000 users in one realm |
-| **Raw data** | [`artifacts/2026-10-10-aws-c7i-large/`](artifacts/2026-10-10-aws-c7i-large/README.md) |
+| **Tooling** | [`loadtest/live/`](../../loadtest/live/README.md), plan [`plans/2026-10-10-c7i-large.txt`](../../loadtest/live/plans/2026-10-10-c7i-large.txt) |
 
 This report gives two results for one server size:
 
@@ -21,7 +21,7 @@ Each feature had one ramp. Treat small differences as noise.
 
 - AWS c7i.large: 2 vCPU (1 physical core with hyper-threading), 3.8 GB RAM, Intel Xeon Platinum 8488C.
 - Ubuntu 24.04. Transparent huge pages: `madvise`. No swap was used: the lowest MemAvailable in any run was 2,290 MiB.
-- Disk: EBS root volume, 38 GB. A synced 4 KiB write takes about 3.3 ms (`dd oflag=dsync`: 2,000 writes in 6.57 s).
+- Disk: EBS gp3 root volume, 40 GB, 3,000 IOPS, 125 MB/s. A synced 4 KiB write takes about 3.3 ms (`dd oflag=dsync`: 2,000 writes in 6.57 s).
 - Production build, without the `dev-endpoints` feature. `POST /admin/bootstrap` answered `404` before each run.
 - Every write is fsynced to the write-ahead log (WAL) before the server acknowledges it.
 - HTTPS with TLS 1.3 and HTTP/2.
@@ -45,7 +45,7 @@ Each feature had one ramp. Treat small differences as noise.
 - 2 × AWS c7i.xlarge (4 vCPU, 7.8 GB RAM each), k6 2.0.0, 1,000 virtual users per generator.
 - Open loop: k6 starts journeys at the offered rate, also when the server is slow.
 - Before each run, the store was restored from the same post-import copy, the page cache was dropped, and Hearth was restarted.
-- The k6 script and the AWS driver are not in this repository yet.
+- Tooling: `loadtest/live/` (k6 2.0.0 script, AWS driver, samplers). Two one-off drivers ran this round with the same steps as the plan file; `round.sh` replaces them. The raw k6 CSVs (about 500 MB) are not committed; the tables below are the output of `loadtest/live/ramps.py` and `memory.py` on them.
 
 ## Units
 
