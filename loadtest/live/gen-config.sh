@@ -24,6 +24,7 @@
 # Environment (optional), for a soak that must fill every cache within the run:
 #   HOT_TIER_CAPACITY   storage.hot_tier_capacity (default: auto-size from memory)
 #   BLOCK_CACHE_BYTES   storage.block_cache_bytes (default: 256 MiB)
+#   SERVER_RUST_LOG     RUST_LOG for the server (default: unset, so log_level applies)
 set -euo pipefail
 
 out=${1:?usage: gen-config.sh <out-dir> <server-ip> [login-users]}
@@ -90,6 +91,9 @@ STRESS_ADMIN_PASSWORD=$admin_password
 STRESS_API_SECRET=$api_secret
 STRESS_METRICS_TOKEN=$metrics_token
 EOF
+if [ -n "${SERVER_RUST_LOG:-}" ]; then
+  printf 'RUST_LOG=%s\n' "$SERVER_RUST_LOG" >> "$out/server/hearth.env"
+fi
 
 {
   cat << EOF
