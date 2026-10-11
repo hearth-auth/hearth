@@ -885,7 +885,7 @@ pub struct EmbeddedIdentityEngine {
     ///
     // INVARIANT: outer guard released in scoped block before inner per-request lock is acquired.
     // INVARIANT: inner (per-request) guard held only across the sync read-check-mint-write window; no .await in scope.
-    approval_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    approval_locks: advisory_lock::AdvisoryLockMap,
     /// Per-`(realm_id, txn_id)` advisory lock for single-use enforcement in
     /// `issue_transaction_token_inner`.
     ///
@@ -898,7 +898,7 @@ pub struct EmbeddedIdentityEngine {
     ///
     // INVARIANT: outer guard released in scoped block before inner per-txn lock is acquired.
     // INVARIANT: inner (per-txn) guard held only across the sync guard-read + sign + guard-write; no .await in scope.
-    txn_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    txn_locks: advisory_lock::AdvisoryLockMap,
     /// Serializes realm-record lifecycle mutations (create/update/delete).
     ///
     /// Realm ops are not on the hot path, and a realm record and its
@@ -1036,9 +1036,11 @@ pub struct EmbeddedIdentityEngine {
     /// (audit 2026-08-28 §4.16#1). Callers hold this lock across the entire
     /// load → hash-check → issue → rotate-write sequence.
     ///
-    // INVARIANT: outer guard released inside grant_family_lock() before returning the inner Arc.
+    /// Refcount-reclaimed (see [`advisory_lock`]): one entry per family that
+    /// a holder is using, not one per family ever locked (#445).
+    ///
     // INVARIANT: inner (per-family) guard held only across the sync rotation window; no .await in scope.
-    grant_family_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    grant_family_locks: advisory_lock::AdvisoryLockMap,
     /// Per-code advisory lock serializing one-time-code redemption.
     ///
     /// Every one-time-code verifier is an unsynchronised read-modify-write:
@@ -1569,7 +1571,6 @@ impl EmbeddedIdentityEngine {
             // INVARIANT: outer guard released in scoped block before inner per-code lock is acquired.
             code_exchange_locks: Mutex::new(HashMap::new()),
             session_row_locks: Mutex::new(HashMap::new()),
-            // INVARIANT: outer guard released inside grant_family_lock() before returning the inner Arc.
             grant_family_locks: Mutex::new(HashMap::new()),
             // INVARIANT: outer guard released inside otp_redemption_lock() before returning the inner Arc.
             otp_redemption_locks: Mutex::new(HashMap::new()),
@@ -2000,7 +2001,6 @@ impl EmbeddedIdentityEngine {
             // INVARIANT: outer guard released in scoped block before inner per-code lock is acquired.
             code_exchange_locks: Mutex::new(HashMap::new()),
             session_row_locks: Mutex::new(HashMap::new()),
-            // INVARIANT: outer guard released inside grant_family_lock() before returning the inner Arc.
             grant_family_locks: Mutex::new(HashMap::new()),
             // INVARIANT: outer guard released inside otp_redemption_lock() before returning the inner Arc.
             otp_redemption_locks: Mutex::new(HashMap::new()),
@@ -6110,13 +6110,9 @@ impl EmbeddedIdentityEngine {
     /// The lock is **not** reentrant: a holder must release it before calling
     /// anything that re-takes it, which is why `rotate_grant_family` drops its
     /// guard before the theft-path `revoke_session`.
-    fn grant_family_lock(&self, realm_id: &RealmId, fid: &str) -> Arc<Mutex<()>> {
+    fn grant_family_lock(&self, realm_id: &RealmId, fid: &str) -> advisory_lock::AdvisoryLock<'_> {
         let key = format!("{}:{}", realm_id.as_uuid(), fid);
-        let mut map = self
-            .grant_family_locks
-            .lock()
-            .expect("grant_family_locks poisoned");
-        Arc::clone(map.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
+        advisory_lock::AdvisoryLock::acquire(&self.grant_family_locks, &key)
     }
 
     /// Lock key for the per-`(realm, user)` MFA state record.
@@ -6160,12 +6156,8 @@ impl EmbeddedIdentityEngine {
     /// sequence in `approve_approval_request_inner` and
     /// `deny_approval_request_inner` to prevent two concurrent callers from
     /// both passing the Pending check before either writes the final state.
-    fn approval_request_lock(&self, request_id: &str) -> Arc<Mutex<()>> {
-        let mut map = self.approval_locks.lock().expect("approval_locks poisoned");
-        Arc::clone(
-            map.entry(request_id.to_string())
-                .or_insert_with(|| Arc::new(Mutex::new(()))),
-        )
+    fn approval_request_lock(&self, request_id: &str) -> advisory_lock::AdvisoryLock<'_> {
+        advisory_lock::AdvisoryLock::acquire(&self.approval_locks, request_id)
     }
 
     /// Returns the per-`(realm_id, txn_id)` advisory lock for serializing
@@ -6173,10 +6165,13 @@ impl EmbeddedIdentityEngine {
     ///
     /// The outer `txn_locks` map guard is released before returning so that
     /// callers for different `txn_id` values never contend with each other.
-    fn txn_advisory_lock(&self, realm_id: &RealmId, txn_id: &str) -> Arc<Mutex<()>> {
+    fn txn_advisory_lock(
+        &self,
+        realm_id: &RealmId,
+        txn_id: &str,
+    ) -> advisory_lock::AdvisoryLock<'_> {
         let key = format!("{}:{}", realm_id.as_uuid(), txn_id);
-        let mut map = self.txn_locks.lock().expect("txn_locks poisoned");
-        Arc::clone(map.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
+        advisory_lock::AdvisoryLock::acquire(&self.txn_locks, &key)
     }
 
     /// Atomically checks and consumes a JWT Bearer assertion JTI for replay prevention.
@@ -19174,6 +19169,43 @@ mod tests {
             engine.code_exchange_locks.lock().expect("map").len(),
             0,
             "the last holder dropping must reclaim the entry"
+        );
+    }
+
+    /// `grant_family_locks`, `approval_locks` and `txn_locks` had the same
+    /// insert-only shape as the maps above. Every login creates a grant
+    /// family, and every refresh, revocation and consent cascade takes its
+    /// lock, so `grant_family_locks` gained one entry per login and kept it
+    /// for the life of the process: about 150–200 bytes per login, without
+    /// a bound (#445). Approval requests and transactions grew the other two
+    /// the same way.
+    #[test]
+    fn per_family_approval_and_txn_lock_maps_do_not_grow_without_bound() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = RealmId::generate();
+
+        for i in 0..512 {
+            let lock = engine.grant_family_lock(&realm, &format!("fid-{i}"));
+            let _guard = lock.lock().expect("family lock");
+        }
+        for i in 0..512 {
+            let lock = engine.approval_request_lock(&format!("request-{i}"));
+            let _guard = lock.lock().expect("approval lock");
+        }
+        for i in 0..512 {
+            let lock = engine.txn_advisory_lock(&realm, &format!("txn-{i}"));
+            let _guard = lock.lock().expect("txn lock");
+        }
+
+        let families = engine.grant_family_locks.lock().expect("map").len();
+        let approvals = engine.approval_locks.lock().expect("map").len();
+        let txns = engine.txn_locks.lock().expect("map").len();
+        assert_eq!(
+            (families, approvals, txns),
+            (0, 0, 0),
+            "every lock was released, so each map must be empty; they held \
+             {families} family, {approvals} approval and {txns} txn entries — \
+             one per key ever locked"
         );
     }
 

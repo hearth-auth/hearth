@@ -91,6 +91,13 @@ impl<'a> AdvisoryLock<'a> {
     }
 
     /// Returns the underlying mutex, for identity comparisons in tests.
+    /// Tries to take the lock without blocking (tests that probe whether a
+    /// holder is inside its critical section).
+    #[cfg(test)]
+    pub(super) fn try_lock(&self) -> std::sync::TryLockResult<MutexGuard<'_, ()>> {
+        self.inner.try_lock()
+    }
+
     #[cfg(test)]
     pub(super) fn mutex(&self) -> &Mutex<()> {
         &self.inner
