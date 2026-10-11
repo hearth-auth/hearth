@@ -1,0 +1,10 @@
+{
+  "journey": "login",
+  "started_at": 1791648588000,
+  "journeys": 25549,
+  "ok_rate": 0.8165094524247525,
+  "p50_ms": 306.17854100000005,
+  "p99_ms": 429.06195868000003,
+  "dropped_iterations": 0,
+  "relogins": 0
+}

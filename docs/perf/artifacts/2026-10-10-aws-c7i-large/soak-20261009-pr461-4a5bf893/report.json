@@ -1,0 +1,47 @@
+{
+  "journey": "mix",
+  "budget_p99_ms": 1000.0,
+  "ramp": {
+    "start_rps": 120,
+    "step_rps": 0,
+    "steps": 1,
+    "hold_s": 3600,
+    "ramp_s": 5
+  },
+  "steps": [
+    {
+      "step": 0,
+      "offered_rps": 120,
+      "completed_rps": 120.0,
+      "ok_rps": 119.4,
+      "error_ratio": 0.0053,
+      "fail_classes": {
+        "login_submit:503": 37,
+        "401": 2232
+      },
+      "dropped": 0,
+      "dropped_ratio": 0.0,
+      "p50_ms": 21.645037,
+      "p90_ms": 65.14425,
+      "p99_ms": 113.168411,
+      "p999_ms": 183.064191,
+      "max_ms": 1176.701581,
+      "server_cpu_pct_mean": 41.7,
+      "server_cpu_pct_max": 189.7,
+      "server_rss_mb_max": 2270.1,
+      "mem_available_mb_min": 2121.2,
+      "disk_write_iops_mean": 952.0,
+      "server_alive": true,
+      "generator_cpu_pct_mean": 6.7,
+      "generator_cpu_pct_by_generator": [
+        6.0,
+        6.7
+      ]
+    }
+  ],
+  "latency_knee_rps": null,
+  "error_knee_rps": null,
+  "collapse_rps": null,
+  "sustained_rps": 120,
+  "sustained_ok_rps": 119.4
+}

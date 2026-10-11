@@ -1,0 +1,10 @@
+{
+  "journey": "mix",
+  "started_at": 1791647528000,
+  "journeys": 225059,
+  "ok_rate": 0.9441968550468988,
+  "p50_ms": 25.232342,
+  "p99_ms": 353.4297030599997,
+  "dropped_iterations": 0,
+  "relogins": 0
+}

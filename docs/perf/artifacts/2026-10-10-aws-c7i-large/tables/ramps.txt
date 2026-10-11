@@ -1,0 +1,167 @@
+## soak-main462  (mix 120/s +0/s x1, hold 3600 s)
+offered    120/s (3601 s): ok    119.3/s  fail   2398 (0.56%)  dropped      0  HTTP    174.1/s  server CPU    54%  RSS  2120 MiB  k6 CPU g1    5% g2    7%  gen idle min/mean g1 nan/nan g2 nan/nan
+   admin_lookup       5.8/s ok  fail    700  p50      0.7 ms  p99      3.6 ms
+   login             18.0/s ok  fail     28  p50     74.4 ms  p99    165.7 ms
+   refresh           77.9/s ok  fail      0  p50     22.0 ms  p99     83.1 ms
+   userinfo          17.5/s ok  fail   1670  p50      0.8 ms  p99      3.7 ms
+   non-2xx/3xx: {'userinfo:401': 1670, 'admin_lookup:401': 700, 'login_submit:503': 28}
+## ramp-mix  (mix 250/s +50/s x10, hold 90 s)
+offered    250/s (91 s): ok    247.3/s  fail      0 (0.00%)  dropped      0  HTTP    357.7/s  server CPU   118%  RSS   932 MiB  k6 CPU g1   14% g2   15%  gen idle min/mean g1 72/95 g2 76/96
+   admin_lookup      12.3/s ok  fail      0  p50      0.8 ms  p99      5.5 ms
+   login             36.8/s ok  fail      0  p50     97.5 ms  p99    258.3 ms
+   refresh          160.4/s ok  fail      0  p50     22.1 ms  p99    108.1 ms
+   userinfo          37.8/s ok  fail      0  p50      0.9 ms  p99      5.8 ms
+offered    300/s (91 s): ok    296.3/s  fail     34 (0.13%)  dropped      0  HTTP    427.6/s  server CPU   136%  RSS   952 MiB  k6 CPU g1   12% g2   14%  gen idle min/mean g1 94/96 g2 93/97
+   admin_lookup      15.0/s ok  fail      0  p50      0.9 ms  p99      6.1 ms
+   login             43.5/s ok  fail     34  p50    122.2 ms  p99    341.3 ms
+   refresh          193.5/s ok  fail      0  p50     23.1 ms  p99    111.0 ms
+   userinfo          44.3/s ok  fail      0  p50      0.9 ms  p99      5.7 ms
+   non-2xx/3xx: {'login_submit:503': 34}
+offered    350/s (91 s): ok    341.7/s  fail    403 (1.28%)  dropped      0  HTTP    491.2/s  server CPU   156%  RSS   990 MiB  k6 CPU g1   12% g2   15%  gen idle min/mean g1 95/96 g2 92/96
+   admin_lookup      17.1/s ok  fail      0  p50      1.0 ms  p99      6.2 ms
+   login             46.9/s ok  fail    403  p50    256.7 ms  p99    401.0 ms
+   refresh          225.4/s ok  fail      0  p50     24.5 ms  p99     95.4 ms
+   userinfo          52.4/s ok  fail      0  p50      1.1 ms  p99      6.1 ms
+   non-2xx/3xx: {'login_submit:503': 403}
+offered    400/s (91 s): ok    385.8/s  fail    896 (2.49%)  dropped      0  HTTP    557.8/s  server CPU   157%  RSS   979 MiB  k6 CPU g1   15% g2   15%  gen idle min/mean g1 93/96 g2 95/96
+   admin_lookup      19.9/s ok  fail      0  p50      1.1 ms  p99      6.6 ms
+   login             50.8/s ok  fail    896  p50    296.4 ms  p99    419.5 ms
+   refresh          256.5/s ok  fail      0  p50     25.1 ms  p99     98.7 ms
+   userinfo          58.5/s ok  fail      0  p50      1.1 ms  p99      6.4 ms
+   non-2xx/3xx: {'login_submit:503': 896}
+offered    450/s (91 s): ok    428.5/s  fail   1505 (3.72%)  dropped      0  HTTP    614.1/s  server CPU   158%  RSS   863 MiB  k6 CPU g1   16% g2   18%  gen idle min/mean g1 90/95 g2 92/96
+   admin_lookup      22.3/s ok  fail      0  p50      1.0 ms  p99      5.6 ms
+   login             50.8/s ok  fail   1505  p50    304.6 ms  p99    405.8 ms
+   refresh          289.6/s ok  fail      0  p50     25.2 ms  p99     94.4 ms
+   userinfo          65.8/s ok  fail      0  p50      1.1 ms  p99      6.4 ms
+   non-2xx/3xx: {'login_submit:503': 1505}
+offered    500/s (91 s): ok    466.9/s  fail   2512 (5.58%)  dropped      0  HTTP    661.6/s  server CPU   163%  RSS   937 MiB  k6 CPU g1   17% g2   19%  gen idle min/mean g1 90/95 g2 91/96
+   admin_lookup      24.3/s ok  fail      0  p50      1.1 ms  p99      7.0 ms
+   login             46.5/s ok  fail   2512  p50    309.9 ms  p99    408.9 ms
+   refresh          322.1/s ok  fail      0  p50     25.5 ms  p99     90.8 ms
+   userinfo          74.0/s ok  fail      0  p50      1.2 ms  p99      7.7 ms
+   non-2xx/3xx: {'login_submit:503': 2512}
+offered    550/s (91 s): ok    505.3/s  fail   3517 (7.11%)  dropped      0  HTTP    710.2/s  server CPU   166%  RSS   944 MiB  k6 CPU g1   18% g2   20%  gen idle min/mean g1 90/95 g2 89/95
+   admin_lookup      26.9/s ok  fail      0  p50      1.1 ms  p99      6.8 ms
+   login             42.5/s ok  fail   3517  p50    298.3 ms  p99    410.0 ms
+   refresh          354.6/s ok  fail      0  p50     25.9 ms  p99     92.3 ms
+   userinfo          81.4/s ok  fail      0  p50      1.2 ms  p99      7.0 ms
+   non-2xx/3xx: {'login_submit:503': 3517}
+offered    600/s (91 s): ok    545.7/s  fail   4337 (8.03%)  dropped      0  HTTP    766.1/s  server CPU   168%  RSS   969 MiB  k6 CPU g1   19% g2   21%  gen idle min/mean g1 91/94 g2 90/95
+   admin_lookup      29.1/s ok  fail      0  p50      1.1 ms  p99      7.9 ms
+   login             41.7/s ok  fail   4337  p50    258.8 ms  p99    407.3 ms
+   refresh          387.0/s ok  fail      0  p50     26.8 ms  p99    152.2 ms
+   userinfo          88.0/s ok  fail      0  p50      1.3 ms  p99      8.0 ms
+   non-2xx/3xx: {'login_submit:503': 4337}
+offered    650/s (91 s): ok    587.6/s  fail   5030 (8.60%)  dropped      0  HTTP    820.4/s  server CPU   170%  RSS   984 MiB  k6 CPU g1   20% g2   22%  gen idle min/mean g1 90/94 g2 90/95
+   admin_lookup      32.1/s ok  fail      0  p50      1.1 ms  p99      7.8 ms
+   login             40.8/s ok  fail   5030  p50    256.9 ms  p99    406.2 ms
+   refresh          418.7/s ok  fail      0  p50     26.8 ms  p99     91.2 ms
+   userinfo          95.9/s ok  fail      0  p50      1.3 ms  p99      8.3 ms
+   non-2xx/3xx: {'login_submit:503': 5030}
+offered    700/s (91 s): ok    631.5/s  fail   5536 (8.79%)  dropped      0  HTTP    880.8/s  server CPU   170%  RSS  1000 MiB  k6 CPU g1   22% g2   24%  gen idle min/mean g1 90/94 g2 89/94
+   admin_lookup      34.9/s ok  fail      0  p50      1.1 ms  p99     10.4 ms
+   login             42.5/s ok  fail   5536  p50    257.0 ms  p99    409.5 ms
+   refresh          449.7/s ok  fail      0  p50     27.7 ms  p99     96.1 ms
+   userinfo         104.3/s ok  fail      0  p50      1.3 ms  p99      9.3 ms
+   non-2xx/3xx: {'login_submit:503': 5536}
+## ramp-login  (login 20/s +10/s x9, hold 90 s)
+offered     20/s (91 s): ok     19.8/s  fail      0 (0.00%)  dropped      0  HTTP     79.1/s  server CPU    61%  RSS   458 MiB  k6 CPU g1    4% g2    6%  gen idle min/mean g1 97/98 g2 96/98
+   login             19.8/s ok  fail      0  p50     87.2 ms  p99     91.7 ms
+offered     30/s (91 s): ok     29.7/s  fail      0 (0.00%)  dropped      0  HTTP    118.7/s  server CPU    87%  RSS   443 MiB  k6 CPU g1    4% g2    6%  gen idle min/mean g1 97/98 g2 97/98
+   login             29.7/s ok  fail      0  p50     87.8 ms  p99     99.2 ms
+offered     40/s (91 s): ok     39.6/s  fail      0 (0.00%)  dropped      0  HTTP    158.2/s  server CPU   115%  RSS   501 MiB  k6 CPU g1    4% g2    6%  gen idle min/mean g1 96/98 g2 96/98
+   login             39.6/s ok  fail      0  p50     83.7 ms  p99    168.1 ms
+offered     50/s (91 s): ok     49.5/s  fail      0 (0.00%)  dropped      0  HTTP    197.8/s  server CPU   142%  RSS   540 MiB  k6 CPU g1    6% g2    7%  gen idle min/mean g1 95/98 g2 95/98
+   login             49.5/s ok  fail      0  p50     87.2 ms  p99    206.7 ms
+offered     60/s (91 s): ok     50.7/s  fail    783 (14.50%)  dropped      0  HTTP    220.2/s  server CPU   150%  RSS   559 MiB  k6 CPU g1    7% g2    8%  gen idle min/mean g1 96/98 g2 96/98
+   login             50.7/s ok  fail    783  p50    319.4 ms  p99    441.0 ms
+   non-2xx/3xx: {'login_submit:503': 783}
+offered     70/s (91 s): ok     51.1/s  fail   1653 (26.24%)  dropped      0  HTTP    240.6/s  server CPU   149%  RSS   559 MiB  k6 CPU g1    7% g2    8%  gen idle min/mean g1 96/98 g2 96/98
+   login             51.1/s ok  fail   1653  p50    318.5 ms  p99    438.7 ms
+   non-2xx/3xx: {'login_submit:503': 1653}
+offered     80/s (91 s): ok     53.9/s  fail   2293 (31.85%)  dropped      0  HTTP    266.1/s  server CPU   149%  RSS   618 MiB  k6 CPU g1    7% g2    9%  gen idle min/mean g1 96/98 g2 96/98
+   login             53.9/s ok  fail   2293  p50    313.6 ms  p99    408.3 ms
+   non-2xx/3xx: {'login_submit:503': 2293}
+offered     90/s (91 s): ok     55.9/s  fail   3016 (37.24%)  dropped      0  HTTP    289.7/s  server CPU   148%  RSS   577 MiB  k6 CPU g1    8% g2   10%  gen idle min/mean g1 95/97 g2 96/97
+   login             55.9/s ok  fail   3016  p50    312.9 ms  p99    432.7 ms
+   non-2xx/3xx: {'login_submit:503': 3016}
+offered    100/s (91 s): ok     55.8/s  fail   3926 (43.62%)  dropped      0  HTTP    309.3/s  server CPU   148%  RSS   577 MiB  k6 CPU g1    9% g2   10%  gen idle min/mean g1 94/97 g2 95/97
+   login             55.8/s ok  fail   3926  p50    311.3 ms  p99    449.1 ms
+   non-2xx/3xx: {'login_submit:503': 3926}
+## ramp-refresh  (refresh 200/s +100/s x10, hold 90 s)
+offered    200/s (91 s): ok    197.8/s  fail      0 (0.00%)  dropped      0  HTTP    197.8/s  server CPU    19%  RSS   447 MiB  k6 CPU g1   12% g2   13%  gen idle min/mean g1 73/96 g2 71/96
+   refresh          197.8/s ok  fail      0  p50     20.1 ms  p99     84.7 ms
+offered    300/s (91 s): ok    296.7/s  fail      0 (0.00%)  dropped      0  HTTP    296.7/s  server CPU    26%  RSS   463 MiB  k6 CPU g1    8% g2   10%  gen idle min/mean g1 96/97 g2 95/97
+   refresh          296.7/s ok  fail      0  p50     19.3 ms  p99     68.9 ms
+offered    400/s (91 s): ok    395.6/s  fail      0 (0.00%)  dropped      0  HTTP    395.6/s  server CPU    33%  RSS   485 MiB  k6 CPU g1   11% g2   13%  gen idle min/mean g1 94/97 g2 94/96
+   refresh          395.6/s ok  fail      0  p50     18.8 ms  p99     68.4 ms
+offered    500/s (91 s): ok    494.5/s  fail      0 (0.00%)  dropped      0  HTTP    494.5/s  server CPU    48%  RSS   553 MiB  k6 CPU g1   14% g2   15%  gen idle min/mean g1 94/96 g2 93/96
+   refresh          494.5/s ok  fail      0  p50     19.9 ms  p99    117.3 ms
+offered    600/s (91 s): ok    593.4/s  fail      0 (0.00%)  dropped      0  HTTP    593.4/s  server CPU    56%  RSS   568 MiB  k6 CPU g1   15% g2   16%  gen idle min/mean g1 92/96 g2 94/96
+   refresh          593.4/s ok  fail      0  p50     19.9 ms  p99     73.3 ms
+offered    700/s (91 s): ok    692.3/s  fail      0 (0.00%)  dropped      0  HTTP    692.3/s  server CPU    66%  RSS   646 MiB  k6 CPU g1   17% g2   19%  gen idle min/mean g1 92/96 g2 91/95
+   refresh          692.3/s ok  fail      0  p50     20.5 ms  p99     75.3 ms
+offered    800/s (91 s): ok    791.2/s  fail      0 (0.00%)  dropped      0  HTTP    791.2/s  server CPU    75%  RSS   654 MiB  k6 CPU g1   18% g2   21%  gen idle min/mean g1 93/95 g2 91/94
+   refresh          791.2/s ok  fail      0  p50     21.3 ms  p99     81.2 ms
+offered    900/s (91 s): ok    890.1/s  fail      0 (0.00%)  dropped      0  HTTP    890.1/s  server CPU    85%  RSS   732 MiB  k6 CPU g1   20% g2   22%  gen idle min/mean g1 91/95 g2 90/94
+   refresh          890.1/s ok  fail      0  p50     22.0 ms  p99     80.4 ms
+offered   1000/s (91 s): ok    989.0/s  fail      0 (0.00%)  dropped      0  HTTP    989.0/s  server CPU    95%  RSS   719 MiB  k6 CPU g1   22% g2   24%  gen idle min/mean g1 90/94 g2 90/94
+   refresh          989.0/s ok  fail      0  p50     23.1 ms  p99     90.5 ms
+offered   1100/s (91 s): ok   1087.9/s  fail      0 (0.00%)  dropped      0  HTTP   1087.9/s  server CPU   104%  RSS   781 MiB  k6 CPU g1   25% g2   27%  gen idle min/mean g1 88/93 g2 89/93
+   refresh         1087.9/s ok  fail      0  p50     24.2 ms  p99     85.9 ms
+## ramp-userinfo  (userinfo 2000/s +2000/s x6, hold 60 s)
+offered   2000/s (61 s): ok   1967.2/s  fail      0 (0.00%)  dropped      0  HTTP   1967.2/s  server CPU    28%  RSS   428 MiB  k6 CPU g1   40% g2   43%  gen idle min/mean g1 82/87 g2 87/90
+   userinfo        1967.2/s ok  fail      0  p50      0.3 ms  p99      0.9 ms
+offered   4000/s (61 s): ok   3934.4/s  fail      0 (0.00%)  dropped      0  HTTP   3934.4/s  server CPU    59%  RSS   432 MiB  k6 CPU g1   77% g2   80%  gen idle min/mean g1 77/80 g2 84/85
+   userinfo        3934.4/s ok  fail      0  p50      0.4 ms  p99      0.9 ms
+offered   6000/s (61 s): ok   5901.6/s  fail      0 (0.00%)  dropped      0  HTTP   5901.6/s  server CPU    86%  RSS   439 MiB  k6 CPU g1  120% g2  127%  gen idle min/mean g1 64/67 g2 67/68
+   userinfo        5901.6/s ok  fail      0  p50      0.3 ms  p99      1.6 ms
+offered   8000/s (61 s): ok   7868.8/s  fail      0 (0.00%)  dropped      0  HTTP   7868.8/s  server CPU   142%  RSS   464 MiB  k6 CPU g1  156% g2  166%  gen idle min/mean g1 57/61 g2 55/57
+   userinfo        7868.8/s ok  fail      0  p50      0.4 ms  p99     10.3 ms
+offered  10000/s (61 s): ok   9804.3/s  fail      0 (0.00%)  dropped   2236  HTTP   9804.3/s  server CPU   185%  RSS   476 MiB  k6 CPU g1  192% g2  209%  gen idle min/mean g1 46/49 g2 46/49
+   userinfo        9804.3/s ok  fail      0  p50     14.9 ms  p99    395.6 ms
+offered  12000/s (61 s): ok   9966.3/s  fail      0 (0.00%)  dropped 112072  HTTP   9966.3/s  server CPU   188%  RSS   477 MiB  k6 CPU g1  187% g2  205%  gen idle min/mean g1 50/54 g2 46/48
+   userinfo        9966.3/s ok  fail      0  p50    224.4 ms  p99    465.0 ms
+## ramp-admin_lookup  (admin_lookup 2000/s +2000/s x6, hold 60 s)
+offered   2000/s (61 s): ok   1967.2/s  fail      0 (0.00%)  dropped      0  HTTP   1967.2/s  server CPU    24%  RSS   821 MiB  k6 CPU g1   42% g2   45%  gen idle min/mean g1 88/90 g2 84/89
+   admin_lookup    1967.2/s ok  fail      0  p50      0.3 ms  p99      1.0 ms
+offered   4000/s (61 s): ok   3934.4/s  fail      0 (0.00%)  dropped      0  HTTP   3934.4/s  server CPU    53%  RSS   824 MiB  k6 CPU g1   80% g2   84%  gen idle min/mean g1 84/85 g2 81/83
+   admin_lookup    3934.4/s ok  fail      0  p50      0.3 ms  p99      1.0 ms
+offered   6000/s (61 s): ok   5901.6/s  fail      0 (0.00%)  dropped      0  HTTP   5901.6/s  server CPU    71%  RSS   827 MiB  k6 CPU g1  126% g2  132%  gen idle min/mean g1 68/72 g2 60/63
+   admin_lookup    5901.6/s ok  fail      0  p50      0.3 ms  p99      1.4 ms
+offered   8000/s (61 s): ok   7868.9/s  fail      0 (0.00%)  dropped      0  HTTP   7868.9/s  server CPU   112%  RSS   842 MiB  k6 CPU g1  163% g2  172%  gen idle min/mean g1 54/56 g2 52/56
+   admin_lookup    7868.9/s ok  fail      0  p50      0.4 ms  p99      6.4 ms
+offered  10000/s (61 s): ok   9833.2/s  fail      0 (0.00%)  dropped      0  HTTP   9833.2/s  server CPU   157%  RSS   847 MiB  k6 CPU g1  200% g2  214%  gen idle min/mean g1 43/47 g2 45/48
+   admin_lookup    9833.2/s ok  fail      0  p50      0.6 ms  p99     21.1 ms
+offered  12000/s (61 s): ok  11193.4/s  fail      0 (0.00%)  dropped  37197  HTTP  11193.4/s  server CPU   181%  RSS   849 MiB  k6 CPU g1  221% g2  238%  gen idle min/mean g1 43/45 g2 36/39
+   admin_lookup   11193.4/s ok  fail      0  p50    187.5 ms  p99    449.7 ms
+## ramp-introspect  (introspect 1500/s +1500/s x6, hold 60 s)
+offered   1500/s (61 s): ok   1475.4/s  fail      0 (0.00%)  dropped      0  HTTP   1475.4/s  server CPU    42%  RSS   428 MiB  k6 CPU g1   35% g2   37%  gen idle min/mean g1 86/91 g2 86/91
+   introspect      1475.4/s ok  fail      0  p50      0.4 ms  p99      1.3 ms
+offered   3000/s (61 s): ok   2950.8/s  fail      0 (0.00%)  dropped      0  HTTP   2950.8/s  server CPU    93%  RSS   451 MiB  k6 CPU g1   63% g2   66%  gen idle min/mean g1 83/85 g2 81/82
+   introspect      2950.8/s ok  fail      0  p50      0.5 ms  p99      4.6 ms
+offered   4500/s (61 s): ok   4426.2/s  fail      0 (0.00%)  dropped      0  HTTP   4426.2/s  server CPU   153%  RSS   465 MiB  k6 CPU g1   92% g2   99%  gen idle min/mean g1 73/77 g2 73/76
+   introspect      4426.2/s ok  fail      0  p50      0.7 ms  p99     18.1 ms
+offered   6000/s (61 s): ok   5414.3/s  fail      0 (0.00%)  dropped  30443  HTTP   5414.3/s  server CPU   195%  RSS   470 MiB  k6 CPU g1  117% g2  130%  gen idle min/mean g1 70/72 g2 63/65
+   introspect      5414.3/s ok  fail      0  p50    385.3 ms  p99    735.3 ms
+offered   7500/s (61 s): ok   5409.1/s  fail      0 (0.00%)  dropped 122031  HTTP   5409.1/s  server CPU   195%  RSS   472 MiB  k6 CPU g1  116% g2  126%  gen idle min/mean g1 68/70 g2 65/68
+   introspect      5409.1/s ok  fail      0  p50    403.4 ms  p99    757.3 ms
+offered   9000/s (61 s): ok   5428.2/s  fail      0 (0.00%)  dropped 208899  HTTP   5428.2/s  server CPU   194%  RSS   473 MiB  k6 CPU g1  114% g2  123%  gen idle min/mean g1 69/70 g2 67/69
+   introspect      5428.2/s ok  fail      0  p50    403.4 ms  p99    747.2 ms
+## ramp-create_user  (create_user 200/s +200/s x7, hold 60 s)
+offered    200/s (61 s): ok    196.7/s  fail      0 (0.00%)  dropped      0  HTTP    196.7/s  server CPU    11%  RSS   412 MiB  k6 CPU g1    9% g2   11%  gen idle min/mean g1 95/97 g2 94/97
+   create_user      196.7/s ok  fail      0  p50     11.4 ms  p99     54.1 ms
+offered    400/s (61 s): ok    393.4/s  fail      0 (0.00%)  dropped      0  HTTP    393.4/s  server CPU    18%  RSS   435 MiB  k6 CPU g1   14% g2   15%  gen idle min/mean g1 95/96 g2 95/96
+   create_user      393.4/s ok  fail      0  p50     10.5 ms  p99     54.5 ms
+offered    600/s (61 s): ok    590.2/s  fail      0 (0.00%)  dropped      0  HTTP    590.2/s  server CPU    24%  RSS   469 MiB  k6 CPU g1   19% g2   21%  gen idle min/mean g1 94/95 g2 93/94
+   create_user      590.2/s ok  fail      0  p50     10.0 ms  p99     56.0 ms
+offered    800/s (61 s): ok    786.9/s  fail      0 (0.00%)  dropped      0  HTTP    786.9/s  server CPU    31%  RSS   547 MiB  k6 CPU g1   24% g2   25%  gen idle min/mean g1 93/94 g2 92/93
+   create_user      786.9/s ok  fail      0  p50      9.8 ms  p99     55.4 ms
+offered   1000/s (61 s): ok    981.0/s  fail    156 (0.26%)  dropped      0  HTTP    983.6/s  server CPU    37%  RSS   564 MiB  k6 CPU g1   28% g2   30%  gen idle min/mean g1 92/93 g2 92/93
+   create_user      981.0/s ok  fail    156  p50      9.9 ms  p99     58.0 ms
+   non-2xx/3xx: {'create_user:503': 156}
+offered   1200/s (61 s): ok   1180.3/s  fail      0 (0.00%)  dropped      0  HTTP   1180.3/s  server CPU    43%  RSS   598 MiB  k6 CPU g1   32% g2   33%  gen idle min/mean g1 90/92 g2 89/91
+   create_user     1180.3/s ok  fail      0  p50     10.1 ms  p99     56.2 ms
+offered   1400/s (61 s): ok   1377.1/s  fail      0 (0.00%)  dropped      0  HTTP   1377.1/s  server CPU    51%  RSS   628 MiB  k6 CPU g1   35% g2   38%  gen idle min/mean g1 89/91 g2 87/90
+   create_user     1377.1/s ok  fail      0  p50     10.1 ms  p99     55.8 ms

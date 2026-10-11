@@ -1,0 +1,10 @@
+{
+  "journey": "refresh",
+  "started_at": 1791649649000,
+  "journeys": 307620,
+  "ok_rate": 1,
+  "p50_ms": 21.471280999999998,
+  "p99_ms": 80.8758039,
+  "dropped_iterations": 0,
+  "relogins": 0
+}

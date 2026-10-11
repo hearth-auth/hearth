@@ -1,0 +1,13 @@
+run: 20261010-143106
+region: us-east-1
+target server: 1
+server: 2 3812 MB loop0   28.4M    0 loop1   44.7M    0 loop2     74M    0 model name	: Intel(R) Xeon(R) Platinum 8488C 
+generator 1: c7i.xlarge 4 7775 MB model name	: Intel(R) Xeon(R) Platinum 8488C 
+generator 2: c7i.xlarge 4 7775 MB model name	: Intel(R) Xeon(R) Platinum 8488C 
+hearth: hearth 1.6.11
+hearth revision (image label): 119601490f3f35f7db3589f7aeeae1932420291f
+binary: ELF 64-bit LSB pie executable, x86-64, stripped
+tooling revision: 5aa11ba50ba09095646e4b5b1af6ddb86669a90f
+k6: 2.0.0
+login_users: 1000
+vus per generator: 1000

@@ -374,10 +374,10 @@ given lookup.
 
 ## Artifact contract and admissibility rules
 
-Every performance figure that a published doc cites (`docs/perf/PUBLISHED_FIGURES.md`,
-`docs/perf/PERFORMANCE_REPORT_2_1.md`) is backed by a committed artifact. Measurement
-artifacts go under `docs/perf/artifacts/<child>-<axis>.json` (schema 1). Load-test report
-JSON goes under `loadtest/reports/published/` (see its `README.md`).
+Every performance figure that a published doc cites (a report in [`docs/perf/`](../docs/perf/README.md))
+is backed by a committed artifact. Measurement artifacts go under
+`docs/perf/artifacts/<date>-<server>/`, with a `README.md` that says what each file is. Load-test
+report JSON goes under `loadtest/reports/published/` (see its `README.md`).
 
 These rules are binding. `loadtest/src/report.rs` enforces rule 3.
 

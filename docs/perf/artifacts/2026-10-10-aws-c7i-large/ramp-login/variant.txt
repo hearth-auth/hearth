@@ -1,0 +1,7 @@
+name: ramp-login
+image: hearth-stress:ab445-main462
+revision: 119601490f3f35f7db3589f7aeeae1932420291f
+restart: 2026-10-10T16:09:16Z (store restored from the post-import copy, page cache dropped)
+POST /admin/bootstrap: 404
+hearth 1.6.11
+[2m2026-10-10T16:09:13.080639Z[0m [32m INFO[0m [2mhearth[0m[2m:[0m glibc malloc arenas capped [3marenas[0m[2m=[0m2

@@ -1,0 +1,10 @@
+{
+  "journey": "introspect",
+  "started_at": 1791651999001,
+  "journeys": 824879,
+  "ok_rate": 1,
+  "p50_ms": 102.270672,
+  "p99_ms": 737.7068452599999,
+  "dropped_iterations": 189450,
+  "relogins": 0
+}

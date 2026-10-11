@@ -169,13 +169,16 @@ const VISION_OPS_PER_CORE: f64 = 200_000.0;
 ///
 /// The board revised T4 down from 50,000 to 30,000 ops/s on 2026-07-29,
 /// describing 50,000 at the time as "a totally arbitrary number", and
-/// `docs/perf/PUBLISHED_FIGURES.md` §2.1 has said so since. This harness kept
+/// `docs/perf/PUBLISHED_FIGURES.md` §2.1 said so until its removal on 2026-10-10
+/// (<https://github.com/hearth-auth/hearth/blob/3981837a75422969959d23b4324c81a61e0efc2f/docs/perf/PUBLISHED_FIGURES.md>).
+/// This harness kept
 /// the old figure, so every verdict it printed — `t4_met`, `t4_ceiling_met`,
 /// the shortfall in ops/s, and the concurrency `required_for_target` derives
 /// from it — was measured against a bar 67% higher than the one that applies.
 ///
 /// The number is a measurement threshold, not a constant of nature: if it
-/// moves again, it moves in `PUBLISHED_FIGURES.md` §2.1 first and here second.
+/// moves again, it moves in `openspec/specs/performance-budgets/spec.md`
+/// ("Durable session creation throughput") first and here second.
 /// A harness that silently disagrees with the document it reports into is
 /// worse than one with no target at all.
 const T4_TARGET_OPS_S: f64 = 30_000.0;

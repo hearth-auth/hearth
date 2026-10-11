@@ -1,0 +1,7 @@
+{
+  "generators": 2,
+  "users": 1000000,
+  "failed": 0,
+  "duration_s": 726.4,
+  "users_per_s": 1376.7
+}

@@ -1,0 +1,10 @@
+{
+  "journey": "admin_lookup",
+  "started_at": 1791651350001,
+  "journeys": 1336325,
+  "ok_rate": 1,
+  "p50_ms": 0.511188,
+  "p99_ms": 405.79833448000005,
+  "dropped_iterations": 16109,
+  "relogins": 0
+}

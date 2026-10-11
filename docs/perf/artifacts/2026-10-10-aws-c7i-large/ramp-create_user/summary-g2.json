@@ -1,0 +1,10 @@
+{
+  "journey": "create_user",
+  "started_at": 1791652538001,
+  "journeys": 180492,
+  "ok_rate": 0.9995678478824547,
+  "p50_ms": 10.0595695,
+  "p99_ms": 56.040937729999996,
+  "dropped_iterations": 0,
+  "relogins": 0
+}
