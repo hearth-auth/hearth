@@ -219,7 +219,7 @@ The latency and throughput budgets, the measurement conditions, and the gate tha
 budget (bench assertion, `make bench-gate`, `bench-regression.yml`, the load-test budget) are
 normative and live in [`openspec/specs/performance-budgets/spec.md`](../../openspec/specs/performance-budgets/spec.md).
 Change a budget only through an OpenSpec change. Published figures live in
-[`docs/perf/PUBLISHED_FIGURES.md`](../perf/PUBLISHED_FIGURES.md).
+[`docs/perf/`](../perf/).
 
 ---
 

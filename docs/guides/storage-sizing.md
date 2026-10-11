@@ -44,7 +44,8 @@ The gates are looser, and two of the four rows have no gate at all:
 A gate is a ceiling that fails the build when crossed, not a typical value, so even where a
 number coincides it is not evidence of observed latency. For latencies that were actually
 measured, with the host, plane and raw artifact attached, see
-[`docs/perf/PUBLISHED_FIGURES.md`](../perf/PUBLISHED_FIGURES.md) §1 — note that it publishes p50
+[the engine-plane figures of July 2026](https://github.com/hearth-auth/hearth/blob/3981837a75422969959d23b4324c81a61e0efc2f/docs/perf/PUBLISHED_FIGURES.md) §1 (removed from the tree; see
+[`docs/perf/`](../perf/) for current results) — note that it publishes p50
 only; **no p99 read figure has been cleared for publication on either plane.** Run
 `make bench-gate` on your target hardware to collect numbers for your own deployment; treat those,
 not this table, as authoritative for capacity planning.
@@ -131,7 +132,7 @@ lock-free, epoch-pinned `EpochCell` loads. A p99 under 10 µs is the **design ta
 deployment with ≤ 1 M active sessions on a node with ≥ 4 GiB RAM — it is not a published
 measurement. The CI gate for this path admits up to 100 µs p99, and no p99 read figure has been
 cleared for publication; the measured p50 for a hot-tier session lookup is 0.118 µs, engine plane
-(`docs/perf/PUBLISHED_FIGURES.md` L2).
+([July 2026 figures](https://github.com/hearth-auth/hearth/blob/3981837a75422969959d23b4324c81a61e0efc2f/docs/perf/PUBLISHED_FIGURES.md) L2).
 
 ### Datasets that exceed hot tier but fit in RAM
 
@@ -190,7 +191,7 @@ Hearth node where the total on-disk dataset is approximately 10× physical RAM.
 > estimates; uniform random access will approach the worst-case column.
 
 > **Nothing in this table above 1 M users has been measured.** The largest corpus this project
-> has ever measured is **1,000,000 users** (`docs/perf/PUBLISHED_FIGURES.md` §3.1). The 10 M,
+> has ever measured is **1,000,000 users** ([July 2026 figures](https://github.com/hearth-auth/hearth/blob/3981837a75422969959d23b4324c81a61e0efc2f/docs/perf/PUBLISHED_FIGURES.md) §3.1). The 10 M,
 > 100 M and 1 B rows — including their `p99 read (warm)` column — are extrapolations from the
 > measured per-user RAM slope (100 B/user) and per-user disk slope (1,195.6 B/user), not
 > observations. Size from them if you have nothing better, but do not cite them as results, and

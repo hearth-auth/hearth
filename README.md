@@ -233,66 +233,27 @@ Apache 2.0, self-hosted, no per-seat pricing, no vendor lock-in, no phone-home t
 
 ## Performance
 
-All figures measured on `dev-ryzen-7840hs` (AMD Ryzen 7 7840HS, 8 cores / 16 threads, NVMe SSD, `powersave` governor — a mobile laptop part, not an isolated server). Figures from this host are a **floor, not a ceiling**: a server-class CPU on a performance governor should do better. Source of record for every figure below: [`docs/perf/PUBLISHED_FIGURES.md`](docs/perf/PUBLISHED_FIGURES.md) §6.
+All figures below are from one load test on 2026-10-10 (network plane, build `11960149` = v3.4.0). The source of record is [`docs/perf/2026-10-10-aws-c7i-large.md`](docs/perf/2026-10-10-aws-c7i-large.md), with the raw data and the method.
 
-**Two measurement planes — not interchangeable:**
+- **Server:** AWS c7i.large (2 vCPU, 3.8 GB RAM), 1,000,000 users, production build, HTTPS (TLS 1.3, HTTP/2), every write fsynced to the WAL before the acknowledgement.
+- **Load:** 2 separate c7i.xlarge hosts with k6, open loop. The network plane includes TLS, TCP and network time.
+- **Password hashing:** Argon2id with memory 19,456 KiB, 2 iterations, parallelism 1 (OWASP). At most 2 hashes run at the same time on this server.
 
-- **Engine** — a direct in-process call into the embedded engine, excluding HTTP parsing, TCP, TLS, and connection handling.
-- **HTTP** — a real loopback request to the running server, excluding TLS and network RTT.
+"Clean" means 0 dropped requests, errors below 0.1%, and p99 below 1 s.
 
-Do not place engine figures beside competitor HTTP figures — that is a category error.
-
-**We publish no competitor comparison.** Every competitor's published figure is end-to-end HTTP, and the only HTTP-plane figure we can currently stand behind is password login below. Producing the rest requires a quiesced server-class host (isolated cores, performance governor, no battery); the host above is a mobile laptop part and is disqualified for that purpose. We would rather ship no multiplier than a wrong one — so until that hardware exists, the numbers below are ours alone, unratioed.
-
-### Hot path (engine plane)
-
-All engine-plane figures were measured on `dev-ryzen-7840hs` as of 2026-07-29; full methodology, raw artifacts, and per-figure notes: [`docs/perf/PUBLISHED_FIGURES.md`](docs/perf/PUBLISHED_FIGURES.md). Published values are conservative: where re-verification measured better than the prior report, the older lower figure is used. A re-verification pass against a current HEAD SHA is pending.
-
-> **Two caveats on this table.** (1) The token-validation and session-lookup time figures
-> are **per-core mean time per operation derived from throughput** (1 ÷ ops per core-second
-> in `c7-saturation-v2-raw.json`), not measured medians — the column previously labelled
-> them p50. (2) Every hot-path figure here predates PR #358, which replaced the
-> `arc-swap` primitive on the read path; none has been re-measured since. Criterion reports
-> means, not p99, so this table does not measure the "sub-millisecond p99" headline either.
-
-| Operation | Time per op | Throughput | Plane |
+| Feature | Clean rate | p99 at that rate | Max served |
 |---|---|---|---|
-| Token validation (`validate_token`, hot tier) | **1.31 µs** (per-core mean, from throughput) | **760,877 /core/s** · 9,409,220 /s @16T | engine |
-| Session lookup (hot tier) | **0.118 µs** (per-core mean, from throughput) | — | engine |
-| Token introspection (RFC 7662) | **44.0 µs** p50 | — | engine |
-| Permission check | — | **5,987,782 /core/s** · 52,048,086 /s @16T | engine |
-| Password login (Argon2id `m=19,456 KiB t=2 p=1`) | **16.4 ms** p50 | — | engine |
-| Durable session creation (**fsync-before-ack, `W=1.000`**) | — | **484 /s** @T=1 (floor) | engine |
+| Password login (4 requests, 1 Argon2id check) | 50 logins/s | 207 ms | ~56 logins/s (limited by Argon2id) |
+| Token refresh (with rotation) | ≥1,088 refreshes/s | 86 ms | Not reached (server CPU 104% of 200%) |
+| Userinfo | 8,000 req/s | 10 ms | ~9,970 req/s |
+| Admin user lookup | 10,000 req/s | 21 ms | ~11,200 req/s |
+| Token introspection | 4,500 req/s | 18 ms | ~5,410 req/s |
+| User creation (admin API) | ≥1,377 creates/s | 56 ms | Not reached (server CPU 51%) |
+| Mix: 65% refresh, 15% login, 15% userinfo, 5% admin lookup | 250 journeys/s | 258 ms (login) | 632 journeys/s, with login sheds |
 
-`W=1.000` at T=1 means one WAL `fsync` per durable write — the theoretical floor. No write is acknowledged before it is on stable storage. `SyncMode::Async` was evaluated as a default and rejected; every write figure above carries full durability.
+On this 2-vCPU server, password login is the limit: each Argon2id check takes 33–38 ms on one vCPU. The other features have much more headroom. In a 60-minute soak at 120 journeys/s, refresh p99 was 83 ms and login p99 was 166 ms. Server memory grew 291 MiB/h in the second half of the soak; whether it levels off is still open (#445).
 
-> **We publish no peak figure for durable session creation.** A previously published `41,255 /s @T=256` was **retracted** on 2026-07-30: five alternating runs on the same host measured 10,047–33,888 ops/s — a 3.4× spread with a median of ~16,281 — so the number was jitter, not a measurement. `W=1.000` held on every run, so durability is not in question; the *rate* is not reproducible on this host. Only the single-threaded 484 /s floor survives. A peak figure returns when a quiesced server-class host exists. See [`docs/perf/PUBLISHED_FIGURES.md`](docs/perf/PUBLISHED_FIGURES.md) §2.1.
-
-### Password login (HTTP plane, re-verified)
-
-At `m=19,456 KiB t=2 p=1` (OWASP parameters), roughly 16 ms of Argon2id compute per login dominates server overhead by ~400:1, making this the one endpoint whose HTTP-plane figures reproduce reliably across host conditions. This figure reproduced within 2.4% at HEAD.
-
-| Endpoint | p50 | @T=1 | @T=8 | Plane |
-|---|---|---|---|---|
-| `POST /login` (loopback, no TLS) | **20.1 ms** | **49 /s** | **185 /s** | **HTTP** |
-
-Hearth is the only identity provider in its competitive set that publishes its KDF parameters alongside throughput — which lets you reproduce and verify the figures independently rather than taking a number on faith.
-
-### Memory and disk footprint (engine plane)
-
-No other self-hosted identity provider publishes a measured per-user memory or disk footprint. Hearth does:
-
-| Metric | Figure | Plane |
-|---|---|---|
-| Marginal RAM per user (OLS slope, R²=0.9988) | **100 B/user** | engine |
-| δRSS at 1 million users (64 MiB block cache) | **97.1 MiB** | engine |
-| Total process RAM at 1 million hot users (256 MiB block cache, est.) | **~329 MB** | engine, est. |
-| Total process RAM at 10 million hot users (est.) | **~0.9 GB** | engine, est. |
-| Total process RAM at 100 million hot users (est.) | **~6.5 GB** | engine, est. |
-| Disk per user (asymptotic, OLS R²=0.999772, N≥60k) | **1,195.6 B/user** | engine |
-| Disk at 100 million users (extrapolated) | **≈111.3 GiB** | engine, est. |
-
-RAM grows sub-linearly with corpus: measured log-log exponent 0.8778 above the block-cache saturation point (~213k users), asymptoting toward 100 B/user marginal cost. The block cache is bounded by `storage.block_cache_bytes` (default 64 MiB; 256 MiB used for production sizing above). Full methodology, hardware details, and reproduction commands: [`docs/perf/PUBLISHED_FIGURES.md`](docs/perf/PUBLISHED_FIGURES.md).
+We publish no competitor comparison. These figures are for one server size and one run per feature.
 
 ---
 

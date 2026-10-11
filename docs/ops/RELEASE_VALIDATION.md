@@ -103,7 +103,7 @@ Fails if `src/protocol/web/assets/app.css` is stale relative to the Tailwind inp
 
 ## Step 7 — Benchmark gate
 
-Runs the five Criterion benchmark suites against the hot path. This is an advisory gate — use it to catch regressions, not as a pass/fail blocker unless a benchmark shows >20% regression against the baseline recorded in `docs/perf/PUBLISHED_FIGURES.md`.
+Runs the five Criterion benchmark suites against the hot path. This is an advisory gate — use it to catch regressions, not as a pass/fail blocker unless a benchmark shows >20% regression against the baseline of the previous release's bench gate.
 
 ```bash
 make bench-gate 2>&1 | tee /tmp/bench-gate-release.log
@@ -228,7 +228,7 @@ gates** step re-raises any hard-gate failure and fails the job. The publish job 
 signature and no SLSA provenance (audit §4.8#2).
 
 > The benchmark gate is deliberately advisory: judging a regression requires comparing
-> against the baseline in `docs/perf/PUBLISHED_FIGURES.md`, which needs human judgement.
+> against the previous release's bench-gate output, which needs human judgement.
 > Its output is captured to the summary and to `bench.log` in the workflow artifacts.
 
 **Outputs.** The job uploads a `validation-summary` artifact containing

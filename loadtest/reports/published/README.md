@@ -2,8 +2,8 @@
 
 `loadtest/reports/` is gitignored (bearer tokens in seed handles must never be
 committed). This subdirectory is the exception: **any report JSON that backs a
-figure cited in a published performance doc (`docs/perf/PUBLISHED_FIGURES.md`,
-`docs/perf/PERFORMANCE_REPORT_2_1.md`) MUST be committed here** so the figure is
+figure cited in a published performance report (`docs/perf/<date>-<server>.md`) MUST be
+committed here** so the figure is
 re-auditable without re-running the test. The admissibility rules are in
 `loadtest/README.md` § "Artifact contract and admissibility rules".
 

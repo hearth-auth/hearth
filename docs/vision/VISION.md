@@ -369,8 +369,8 @@ figure of 41,255 ops/s at T=256 on `dev-ryzen-7840hs` was published and then **r
 was never in question: `W`=1.000 on every run, one WAL fsync per durable write, `fsync`-before-ack
 intact throughout. What survives is the single-threaded floor, **484 ops/s at T=1, engine plane**.
 A peak figure returns only after a re-measurement on a quiesced server-class host. Source of
-record: `docs/perf/PUBLISHED_FIGURES.md` §2.1 and §6; background in
-`docs/perf/PERFORMANCE_REPORT_2_1.md` §3.2 (T4) and [`docs/perf/HEA-1959-commit-cycle.md`](https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/perf/HEA-1959-commit-cycle.md), both of
+record: [`docs/perf/PUBLISHED_FIGURES.md`](https://github.com/hearth-auth/hearth/blob/3981837a75422969959d23b4324c81a61e0efc2f/docs/perf/PUBLISHED_FIGURES.md) §2.1 and §6 (removed on 2026-10-10); background in
+[`docs/perf/PERFORMANCE_REPORT_2_1.md`](https://github.com/hearth-auth/hearth/blob/3981837a75422969959d23b4324c81a61e0efc2f/docs/perf/PERFORMANCE_REPORT_2_1.md) §3.2 (T4) and [`docs/perf/HEA-1959-commit-cycle.md`](https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/perf/HEA-1959-commit-cycle.md), both of
 which predate the retraction.
 
 ### 7.3 Capacity Targets (Single Node)
