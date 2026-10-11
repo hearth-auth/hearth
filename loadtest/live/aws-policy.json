@@ -3,10 +3,11 @@
   "Statement": [
     {"Sid": "Read", "Effect": "Allow", "Action": ["ec2:Describe*"], "Resource": "*",
      "Condition": {"StringEquals": {"aws:RequestedRegion": "us-east-1"}}},
-    {"Sid": "LaunchTaggedC7i", "Effect": "Allow", "Action": "ec2:RunInstances",
+    {"Sid": "LaunchTaggedInstances", "Effect": "Allow", "Action": "ec2:RunInstances",
      "Resource": "arn:aws:ec2:us-east-1:ACCOUNT_ID:instance/*",
      "Condition": {"StringLike": {"aws:RequestTag/hearth-stress": "hearth-stress-*",
-                                  "ec2:InstanceType": ["c7i.large", "c7i.xlarge", "c7i.2xlarge"]}}},
+                                  "ec2:InstanceType": ["c7i.large", "c7i.xlarge", "c7i.2xlarge",
+                                                       "t3.medium"]}}},
     {"Sid": "LaunchTaggedVolumes", "Effect": "Allow", "Action": "ec2:RunInstances",
      "Resource": "arn:aws:ec2:us-east-1:ACCOUNT_ID:volume/*",
      "Condition": {"StringLike": {"aws:RequestTag/hearth-stress": "hearth-stress-*"}}},

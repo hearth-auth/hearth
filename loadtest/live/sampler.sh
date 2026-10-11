@@ -20,6 +20,10 @@
 #   disk_writes       completed writes on the disk (cumulative)
 #   disk_write_sectors sectors written (cumulative)
 #   load1             1-minute load average
+#   rss_anon_kb       its RssAnon: heap and other private memory, the part a
+#                     leak grows
+#   rss_file_kb       its RssFile: mapped file pages (the SST files), which the
+#                     kernel drops when it needs the memory
 set -euo pipefail
 
 out=${1:?usage: sampler.sh <out.csv> [disk-device] [process]}
@@ -32,11 +36,11 @@ if [ -z "$dev" ]; then
 fi
 clk=$(getconf CLK_TCK)
 
-echo "ts,alive,pid,cpu_ticks,clk_tck,rss_kb,threads,fds,mem_available_kb,disk_writes,disk_write_sectors,load1" > "$out"
+echo "ts,alive,pid,cpu_ticks,clk_tck,rss_kb,threads,fds,mem_available_kb,disk_writes,disk_write_sectors,load1,rss_anon_kb,rss_file_kb" > "$out"
 while true; do
   ts=$(date +%s.%N)
   pid=$(pgrep -o -x "$proc" || true)
-  alive=0 ticks="" rss="" threads="" fds=""
+  alive=0 ticks="" rss="" threads="" fds="" anon="" file=""
   if [ -n "$pid" ] && [ -r "/proc/$pid/stat" ]; then
     # Fields 14 and 15 of /proc/<pid>/stat, counted after the ") " that ends
     # the command name (which may contain spaces).
@@ -46,14 +50,15 @@ while true; do
       rest=${stat##*) }
       read -r -a f <<< "$rest"
       ticks=$((f[11] + f[12]))
-      rss=$(awk '/^VmRSS:/ {print $2}' "/proc/$pid/status" 2> /dev/null || true)
-      threads=$(awk '/^Threads:/ {print $2}' "/proc/$pid/status" 2> /dev/null || true)
+      read -r rss threads anon file < <(awk '/^VmRSS:/ {r = $2} /^Threads:/ {t = $2}
+        /^RssAnon:/ {a = $2} /^RssFile:/ {f = $2} END {print r, t, a, f}' \
+        "/proc/$pid/status" 2> /dev/null || true)
       fds=$(find "/proc/$pid/fd" -mindepth 1 -maxdepth 1 2> /dev/null | wc -l)
     fi
   fi
   mem=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
   read -r writes sectors < <(awk -v d="$dev" '$3 == d {print $8, $10}' /proc/diskstats)
   load=$(cut -d' ' -f1 /proc/loadavg)
-  echo "$ts,$alive,$pid,$ticks,$clk,$rss,$threads,$fds,$mem,${writes:-0},${sectors:-0},$load" >> "$out"
+  echo "$ts,$alive,$pid,$ticks,$clk,$rss,$threads,$fds,$mem,${writes:-0},${sectors:-0},$load,$anon,$file" >> "$out"
   sleep 1
 done

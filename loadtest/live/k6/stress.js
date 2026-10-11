@@ -28,7 +28,15 @@
 // ("refresh:65,login:15,userinfo:15,admin_lookup:5"), ABORT_FAIL_RATIO (0.5),
 // RUN_ID (a label for created users), START_AT (epoch seconds: with several
 // generators, each waits after its setup until this moment, so their ramps
-// start together).
+// start together), CHAIN_REFRESHES (0: after this many refreshes, a VU signs
+// in again and starts a new chain, so a soak keeps making new token families;
+// 0 = never), PRESENT (pool: the tokens userinfo and introspect present;
+// see userToken()).
+//
+// Tokens never expire under a run: each VU replaces a token when 10 to 25 % of
+// its lifetime is left (a fraction each VU draws once), by a sign-in tagged
+// name=renew. A ramp ends before its tokens get near their expiry, so this does
+// not change ramps.
 import { sleep } from 'k6';
 import http from 'k6/http';
 import exec from 'k6/execution';
@@ -65,6 +73,12 @@ const adminIds = num('ADMIN_IDS', 1000);
 const abortRatio = parseFloat(__ENV.ABORT_FAIL_RATIO || '0.5');
 const runId = __ENV.RUN_ID || `${Date.now()}`;
 const stepS = rampS + holdS;
+const chainRefreshes = num('CHAIN_REFRESHES', 0);
+const present = __ENV.PRESENT || 'pool';
+if (!['pool', 'chain'].includes(present)) throw new Error('PRESENT must be pool or chain');
+// Init code runs once per VU, so each VU draws its own fraction and the VUs
+// do not all sign in again at the same moment.
+const renewFraction = 0.1 + Math.random() * 0.15;
 
 function num(name, dflt) {
   const raw = __ENV[name];
@@ -96,6 +110,10 @@ const journeyOk = new Rate('journey_ok');
 const journeyFail = new Counter('journey_fail');
 // Refresh chains restarted by a fresh sign-in after an unknown outcome.
 const relogins = new Counter('refresh_relogins');
+// Refresh chains restarted by a fresh sign-in after CHAIN_REFRESHES refreshes.
+const rotations = new Counter('chain_rotations');
+// Sign-ins that replace a token before it expires.
+const renewals = new Counter('token_renewals');
 
 function stages() {
   const out = [];
@@ -129,7 +147,13 @@ export const options = {
 export function setup() {
   const admin = adminSession();
   const realmId = claims(admin.access).tid.replace(/^realm_/, '');
-  const data = { admin: admin.access, realmId, sessions: [], userIds: [] };
+  const data = {
+    admin: admin.access,
+    adminLife: life(admin.access),
+    realmId,
+    sessions: [],
+    userIds: [],
+  };
 
   if (uses.some(needsTokens)) {
     if (uses.includes('refresh') && pool < vus) {
@@ -143,7 +167,7 @@ export function setup() {
     if (r.sessions.length < Math.ceil(pool * 0.9)) {
       throw new Error(`token pool: ${r.failed} of ${pool} sign-ins failed`);
     }
-    data.sessions = r.sessions;
+    data.sessions = r.sessions.map((s) => Object.assign(life(s.access), s));
   }
   if (uses.includes('admin_lookup')) {
     let cursor = null;
@@ -173,9 +197,77 @@ export function setup() {
   return data;
 }
 
-// VU-local state: this VU's refresh chain, and a window of recent outcomes.
+// VU-local state: this VU's session ({ refresh, access, iat, exp, refreshes },
+// or 'relogin' when it must sign in again), its own admin token once setup()'s
+// nears expiry ({ access, iat, exp }), and a window of recent outcomes.
 let chain = null;
+let admin = null;
 const recent = [];
+
+// A token's issue and expiry times (epoch seconds), from its claims.
+function life(jwt) {
+  const c = claims(jwt);
+  return { iat: c.iat, exp: c.exp };
+}
+
+// True when this VU must replace a token with these times.
+function due(t) {
+  return Date.now() / 1000 >= t.exp - (t.exp - t.iat) * renewFraction;
+}
+
+// A VU session from a sign-in, or 'relogin' when the sign-in failed.
+function session(s) {
+  if (!s.ok) return 'relogin';
+  return Object.assign({ refresh: s.refresh, access: s.access, refreshes: 0 }, life(s.access));
+}
+
+// Signs this VU's own user in; `name` tags the requests (they are not a journey).
+function signInOwn(name) {
+  return signIn(userEmail(1 + (exec.vu.idInTest % env.loginUsers)), env.userPassword, { name });
+}
+
+// This VU's session, or null when the VU must sign in again. The first call
+// takes the VU's own session from the pool. A session whose access token
+// nears expiry is replaced by a fresh sign-in.
+function ownSession(data) {
+  if (chain === null) {
+    chain =
+      exec.vu.idInTest <= data.sessions.length
+        ? Object.assign({ refreshes: 0 }, data.sessions[exec.vu.idInTest - 1])
+        : 'relogin';
+  }
+  if (chain !== 'relogin' && due(chain)) {
+    renewals.add(1);
+    chain = session(signInOwn('renew'));
+  }
+  return chain === 'relogin' ? null : chain;
+}
+
+// The access token a userinfo or introspect journey presents.
+//   PRESENT=pool   the pool's tokens in turn (the same few hundred all run)
+//   PRESENT=chain  this VU's newest token, as a real client presents it: a new
+//                  one after each refresh, so the server's token cache fills
+// A pool token near its expiry gives way to this VU's own session.
+function userToken(data) {
+  if (present === 'pool') {
+    const s = pickSession(data);
+    if (!due(s)) return s.access;
+  }
+  const own = ownSession(data);
+  return own ? own.access : pickSession(data).access;
+}
+
+// The realm admin's token. setup()'s expires after the access-token lifetime,
+// so near its expiry each VU signs the admin in for itself.
+function adminToken(data) {
+  if (!due(data.adminLife)) return data.admin;
+  if (admin === null || due(admin)) {
+    renewals.add(1);
+    const s = signIn(env.adminEmail, env.adminPassword, { name: 'renew' });
+    if (s.ok) admin = Object.assign({ access: s.access }, life(s.access));
+  }
+  return admin ? admin.access : data.admin;
+}
 
 function tagIteration() {
   const elapsed = (Date.now() - exec.scenario.startTime) / 1000;
@@ -214,10 +306,9 @@ function pickSession(data) {
 }
 
 function introspect(data) {
-  const s = pickSession(data);
   const res = http.post(
     `${env.base}/realms/${env.realm}/introspect`,
-    { token: s.access },
+    { token: userToken(data) },
     { headers: { Authorization: apiBasic(env.apiSecret) }, timeout: TIMEOUT, tags: { name: 'introspect' } },
   );
   const ok = res.status === 200 && res.json('active') === true;
@@ -225,9 +316,8 @@ function introspect(data) {
 }
 
 function userinfo(data) {
-  const s = pickSession(data);
   const res = http.get(`${env.base}/realms/${env.realm}/userinfo`, {
-    headers: { Authorization: `Bearer ${s.access}` },
+    headers: { Authorization: `Bearer ${userToken(data)}` },
     timeout: TIMEOUT,
     tags: { name: 'userinfo' },
   });
@@ -235,30 +325,30 @@ function userinfo(data) {
 }
 
 function refresh(data) {
-  if (chain === null) {
-    // The VU's first iteration takes its own session from the pool.
-    chain =
-      exec.vu.idInTest <= data.sessions.length
-        ? data.sessions[exec.vu.idInTest - 1].refresh
-        : 'relogin';
-  }
-  if (chain === 'relogin') {
-    const s = signIn(userEmail(1 + (exec.vu.idInTest % env.loginUsers)), env.userPassword, {
-      name: 'relogin',
-    });
+  const own = ownSession(data);
+  if (own === null) {
     relogins.add(1);
-    chain = s.ok ? s.refresh : 'relogin';
+    chain = session(signInOwn('relogin'));
+    return;
+  }
+  if (chainRefreshes > 0 && own.refreshes >= chainRefreshes) {
+    rotations.add(1);
+    chain = session(signInOwn('rotate'));
     return;
   }
   const res = http.post(
     `${env.base}/realms/${env.realm}/token`,
-    { grant_type: 'refresh_token', refresh_token: chain, client_id: env.appClientId },
+    { grant_type: 'refresh_token', refresh_token: own.refresh, client_id: env.appClientId },
     { timeout: TIMEOUT, tags: { name: 'refresh' } },
   );
   const ok = res.status === 200;
   record('refresh', ok, res.timings.duration, fail(res));
   if (ok) {
-    chain = res.json('refresh_token');
+    const b = res.json();
+    chain = Object.assign(
+      { refresh: b.refresh_token, access: b.access_token, refreshes: own.refreshes + 1 },
+      life(b.access_token),
+    );
   } else if (res.status === 429 || res.status === 503 || (res.status >= 400 && res.status < 500)) {
     // 429/503: refused before rotation, so the token is still valid.
     // 4xx: the token is spent or revoked; start a new chain.
@@ -280,7 +370,7 @@ function login() {
 function adminLookup(data) {
   const id = data.userIds[exec.scenario.iterationInTest % data.userIds.length];
   const res = http.get(`${env.base}/admin/users/${id}`, {
-    headers: adminHeaders(data.admin, data.realmId),
+    headers: adminHeaders(adminToken(data), data.realmId),
     timeout: TIMEOUT,
     tags: { name: 'admin_lookup' },
   });
@@ -292,7 +382,7 @@ function createUser(data) {
   const res = http.post(
     `${env.base}/admin/users`,
     JSON.stringify({ email, display_name: 'Stress created' }),
-    { headers: adminHeaders(data.admin, data.realmId), timeout: TIMEOUT, tags: { name: 'create_user' } },
+    { headers: adminHeaders(adminToken(data), data.realmId), timeout: TIMEOUT, tags: { name: 'create_user' } },
   );
   const ok = res.status === 201;
   record('create_user', ok, res.timings.duration, fail(res));
@@ -346,5 +436,7 @@ function summaryObject(data) {
     p99_ms: v('journey_ms', 'p(99)'),
     dropped_iterations: v('dropped_iterations', 'count') || 0,
     relogins: v('refresh_relogins', 'count') || 0,
+    chain_rotations: v('chain_rotations', 'count') || 0,
+    token_renewals: v('token_renewals', 'count') || 0,
   };
 }

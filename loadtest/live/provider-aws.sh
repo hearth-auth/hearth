@@ -12,6 +12,10 @@
 #   AWS_AZ           us-east-1a (all instances share one availability zone)
 #   SERVER_SIZE      c7i.large   (2 vCPU, 4 GiB)
 #   GENERATOR_SIZE   c7i.xlarge  (4 vCPU, 8 GiB)
+#                    The policy also allows c7i.2xlarge and t3.medium (2 vCPU,
+#                    4 GiB, about half the price of c7i.large; for long memory
+#                    soaks, not for latency). A t3 instance starts in unlimited
+#                    mode, so a run never loses CPU when its credits run out.
 #   AWS_DISK_GB      30          (gp3 root volume, 3,000 IOPS, 125 MB/s, encrypted)
 #   AWS_MAX_HOURS    10          (each instance shuts itself down, and so
 #                                 terminates, after this long: a cost guard if
@@ -72,8 +76,10 @@ create_droplet() {
   # instance schedules its own shutdown, which terminates it.
   ud=$(printf '#cloud-config\ndisable_root: false\nruncmd:\n  - [shutdown, -h, "+%s"]\n' \
     "$((aws_max_hours * 60))")
+  local credits=()
+  case $size in t3.* | t3a.*) credits=(--credit-specification CpuCredits=unlimited) ;; esac
   id=$(aws_ ec2 run-instances \
-    --image-id "$AWS_AMI" --instance-type "$size" --key-name "$KEY_ID" \
+    --image-id "$AWS_AMI" --instance-type "$size" --key-name "$KEY_ID" "${credits[@]}" \
     --security-group-ids "$FW_ID" --subnet-id "$AWS_SUBNET" --associate-public-ip-address \
     --instance-initiated-shutdown-behavior terminate \
     --metadata-options HttpTokens=required,HttpEndpoint=enabled \

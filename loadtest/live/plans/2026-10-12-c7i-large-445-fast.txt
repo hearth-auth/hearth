@@ -1,0 +1,10 @@
+# #445 fast memory soak: twice the traffic of the 12-hour soaks (240 journeys/s, near the
+# mix's clean maximum of about 250 on c7i.large), so 4 hours do the work of 8. c7i.large server,
+# one t3.medium generator, 1M users, small caches. Run it with:
+#   SETUP=1 SERVER_SIZE=c7i.large GENERATOR_SIZE=t3.medium GENERATORS=1 VUS=500
+#   AWS_MAX_HOURS=7 HOT_TIER_CAPACITY=20000 BLOCK_CACHE_BYTES=33554432
+#   SESSION_TTL=1h REFRESH_TOKEN_TTL=1h
+#   K6_ENV="CHAIN_REFRESHES=20 PRESENT=chain" SERVER_RUST_LOG=info,hearth::storage::heap=debug
+# Pass mark: memory.py --warmup-min 60 --bin-min 30 prints PASS.
+#    name           journey       rate  seconds  malloc_info minutes
+soak fast           mix           240   14400    30,60,120,239

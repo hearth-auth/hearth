@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Creates or deletes the scoped AWS identity that a live stress run uses: the
 # managed policy hearth-stress-ec2 (aws-policy.json: EC2 in us-east-1 only, on
-# c7i instances and on resources tagged hearth-stress-* only), the IAM user
+# c7i and t3.medium instances and on resources tagged hearth-stress-* only), the IAM user
 # hearth-stress-runner with that policy, one access key, and the local CLI
 # profile hearth-stress.
 #
