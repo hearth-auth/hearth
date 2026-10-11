@@ -17,6 +17,11 @@ libraries, admin clients generated from OpenAPI, one conformance harness for all
 testing, an external pentest). Hearth is not yet production-ready until the second one is done.
 
 ### Added
+- **`hearth_storage_sst_reader_bytes` on `/metrics`** (#445): the memory the open SST files'
+  indexes take: one block-index entry per ~4 KiB of stored data and a 10-bit-per-entry Bloom
+  filter per file. It grows with the stored data, not with time, so it separates memory that
+  follows the data from a leak. It changes after each flush and compaction, with
+  `hearth_storage_sst_files`.
 - **Storage size gauges on `/metrics`** (#450): `hearth_storage_memtable_entries` and
   `hearth_storage_memtable_bytes`, each with a `state` label (`active` for the map taking
   writes, `flushing` for the map being written to an SST file), and

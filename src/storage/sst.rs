@@ -776,6 +776,44 @@ enum SstBody {
     Blocked(BlockedBody),
 }
 
+/// Heap an open reader holds besides its file mapping: the entries of a v1/v2
+/// SST or the block index of a v3 SST, plus its Bloom filter and key range.
+/// Key bytes count at their length. This grows with the entries in the file,
+/// not with time, and `hearth_storage_sst_reader_bytes` reports the sum over
+/// the live readers (#445).
+fn count_resident_bytes(
+    body: &SstBody,
+    bloom_filter: Option<&BloomFilter>,
+    key_range: Option<&(CompositeKey, CompositeKey)>,
+) -> usize {
+    let body_bytes = match body {
+        SstBody::Eager(entries) => {
+            entries.capacity() * std::mem::size_of::<(CompositeKey, MemtableValue)>()
+                + entries
+                    .iter()
+                    .map(|(key, value)| {
+                        key.key().len()
+                            + match value {
+                                MemtableValue::Data(v) => v.len(),
+                                MemtableValue::Tombstone => 0,
+                            }
+                    })
+                    .sum::<usize>()
+        }
+        SstBody::Blocked(blocked) => {
+            blocked.index.capacity() * std::mem::size_of::<BlockIndexEntry>()
+                + blocked
+                    .index
+                    .iter()
+                    .map(|entry| entry.first_key.key().len())
+                    .sum::<usize>()
+        }
+    };
+    let bloom_bytes = bloom_filter.map_or(0, |filter| filter.bits.capacity());
+    let range_bytes = key_range.map_or(0, |(min, max)| min.key().len() + max.key().len());
+    body_bytes + bloom_bytes + range_bytes
+}
+
 /// Process-wide source of unique `reader_id`s. Each physical `SstReader::open`
 /// gets a fresh value so block-cache keys never collide across a compaction
 /// that reuses an SST file number (see [`BlockId`]).
@@ -905,6 +943,9 @@ pub(crate) struct SstReader {
     /// bounds cold-read fan-out `S` when SSTs cover disjoint key ranges (e.g.
     /// realm-partitioned data), independent of compaction cadence.
     key_range: Option<(CompositeKey, CompositeKey)>,
+    /// Heap this reader holds while it is open, counted once at open (see
+    /// [`count_resident_bytes`]); a reader never changes after open.
+    resident_bytes: usize,
 }
 
 impl std::fmt::Debug for SstReader {
@@ -1020,12 +1061,15 @@ impl SstReader {
             _ => None,
         };
 
+        let body = SstBody::Eager(entries);
+        let resident_bytes = count_resident_bytes(&body, bloom_filter.as_ref(), key_range.as_ref());
         Ok(Self {
-            body: SstBody::Eager(entries),
+            body,
             entry_count,
             sst_number,
             bloom_filter,
             key_range,
+            resident_bytes,
         })
     }
 
@@ -1097,18 +1141,21 @@ impl SstReader {
         }
 
         let reader_id = NEXT_READER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let body = SstBody::Blocked(BlockedBody {
+            backing,
+            index,
+            dek: dek.clone_key(),
+            cache,
+            reader_id,
+        });
+        let resident_bytes = count_resident_bytes(&body, bloom_filter.as_ref(), key_range.as_ref());
         Ok(Self {
-            body: SstBody::Blocked(BlockedBody {
-                backing,
-                index,
-                dek: dek.clone_key(),
-                cache,
-                reader_id,
-            }),
+            body,
             entry_count,
             sst_number,
             bloom_filter,
             key_range,
+            resident_bytes,
         })
     }
 
@@ -1496,6 +1543,13 @@ impl SstReader {
                 Ok(SstKeyCursor::Blocked(blocked))
             }
         }
+    }
+
+    /// Heap bytes this reader holds while it is open: its block index (v3) or
+    /// entries (v1/v2), its Bloom filter and its key range. The file mapping
+    /// is not heap and is not counted.
+    pub(crate) fn resident_bytes(&self) -> usize {
+        self.resident_bytes
     }
 
     /// Returns the entry count as declared in the SST header.
@@ -2081,6 +2135,52 @@ mod tests {
         for (orig, read) in original_entries.iter().zip(read_entries.iter()) {
             assert_eq!(orig, read);
         }
+    }
+
+    /// A reader reports the heap it holds while it is open: its Bloom filter
+    /// and its block index, which grow with the entries in the file (#445).
+    #[test]
+    fn a_reader_reports_the_heap_of_its_bloom_filter_and_block_index() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (dek, enc_header) = test_encryption_context();
+        let realm = RealmId::generate();
+        let entries = |n: usize| -> Vec<(CompositeKey, MemtableValue)> {
+            (0..n)
+                .map(|i| {
+                    (
+                        CompositeKey::new(realm.clone(), format!("key-{i:08}").into_bytes()),
+                        MemtableValue::Data(vec![b'v'; 200]),
+                    )
+                })
+                .collect()
+        };
+        let small_path = dir.path().join("small.sst");
+        let large_path = dir.path().join("large.sst");
+        SstWriter::write_sst(&small_path, &entries(1_000), 1, &dek, &enc_header)
+            .expect("write small");
+        SstWriter::write_sst(&large_path, &entries(10_000), 2, &dek, &enc_header)
+            .expect("write large");
+        let small = SstReader::open(&small_path, 1, &dek).expect("open small");
+        let large = SstReader::open(&large_path, 2, &dek).expect("open large");
+
+        let SstBody::Blocked(body) = &large.body else {
+            panic!("a new SST is block-structured (v3)");
+        };
+        let bloom_bytes = 10_000 * 10 / 8;
+        let index_bytes = body.index.len() * std::mem::size_of::<BlockIndexEntry>();
+        assert!(
+            large.resident_bytes() >= bloom_bytes + index_bytes,
+            "{} bytes reported; the Bloom filter alone is {bloom_bytes} and the {} index \
+             entries {index_bytes}",
+            large.resident_bytes(),
+            body.index.len()
+        );
+        assert!(
+            large.resident_bytes() > 5 * small.resident_bytes(),
+            "10 times the entries: {} bytes against {}",
+            large.resident_bytes(),
+            small.resident_bytes()
+        );
     }
 
     #[test]

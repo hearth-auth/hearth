@@ -262,6 +262,14 @@ pub struct Metrics {
     /// cold `get`.
     pub storage_sst_files: Gauge,
 
+    /// Heap bytes the live SST readers hold: each v3 SST's block index (one
+    /// entry per ~4 KiB block), each Bloom filter (10 bits per entry) and each
+    /// key range. It grows with the stored entries, not with time, so it tells
+    /// memory that follows the data apart from a leak (#445). Set with
+    /// `storage_sst_files`, off the hot path, whenever the reader set is
+    /// swapped. The SST file mappings are not heap and are not counted.
+    pub storage_sst_reader_bytes: Gauge,
+
     // ── Storage size gauges (#450) ──────────────────────────────────────────
     /// Entries held by the storage memtable, by state.
     ///
@@ -743,6 +751,15 @@ impl Metrics {
             .register(Box::new(storage_sst_files.clone()))
             .expect("metric registration succeeds on a fresh registry");
 
+        let storage_sst_reader_bytes = Gauge::new(
+            "hearth_storage_sst_reader_bytes",
+            "Heap held by the live SST readers: block indexes, Bloom filters and key ranges",
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(storage_sst_reader_bytes.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
         let storage_memtable_entries = GaugeVec::new(
             Opts::new(
                 "hearth_storage_memtable_entries",
@@ -958,6 +975,7 @@ impl Metrics {
             storage_hot_tier_promotions_by_realm_total,
             storage_hot_tier_stale_fills_discarded_total,
             storage_sst_files,
+            storage_sst_reader_bytes,
             storage_memtable_entries,
             storage_memtable_bytes,
             memtable_entries_by_state,
