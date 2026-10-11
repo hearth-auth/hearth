@@ -361,6 +361,13 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   inside `assertion`, is refused instead of being read with the field dropped.
 
 ### Fixed
+- **Memory no longer grows with every refreshed sign-in for the life of the process** (#445).
+  The lock that serializes refresh-token rotation and revocation of a grant family stayed in
+  memory after its last use: about 150–200 bytes for each grant family that was ever
+  refreshed or revoked, never freed until a restart. At 18 sign-ins a second whose tokens
+  are later refreshed, that is about 10 MB an hour. The same applied to the per-request
+  locks of agent approvals and transaction tokens. These locks are now freed when their
+  last holder releases them.
 - **The periodic cleanup sweep no longer holds every expiring row of a realm in memory.**
   Every five minutes the sweep copied all single-use markers, grant families and other
   expiring rows into memory before deleting the expired ones. A refresh-token rotation leaves
