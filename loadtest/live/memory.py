@@ -212,8 +212,8 @@ def flat_test(pts, gauges, end, has_anon, warmup, bin_min, max_slope):
     cuts = flushes(gauges)
     how = f"{len(cuts)} memtable flushes"
     if len(cuts) < 3:
+        how = f"only {len(cuts)} memtable flushes, so 5-minute windows"
         cuts = [m for m in range(0, int(end) + 1, 5)]
-        how = "no flushes seen; 5-minute windows"
     fl = [f for f in floors(pts, cuts) if f[0] >= warmup]
     gm = sorted(gauges)
     have_sst = any("sst_reader_bytes" in g for g in gauges.values())

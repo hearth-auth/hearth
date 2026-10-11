@@ -95,7 +95,8 @@ load_run() {
     SERVER_PRIVATE=$SERVER2_PRIVATE
   fi
   GEN_COUNT=${GEN_COUNT:-1}
-  GEN_PUBLIC=$GEN1_PUBLIC
+  # Empty when `up` failed before a generator started; `down` must still run.
+  GEN_PUBLIC=${GEN1_PUBLIC:-}
   results=$here/results/$RUN_ID
   mkdir -p "$results"
 }
