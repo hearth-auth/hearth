@@ -1,0 +1,10 @@
+# #445 heap accounting, the 12-hour point (README, "Heap accounting"): Hearth under heaptrack,
+# c7i.large server, one t3.medium generator, 1M users, small caches, 60 journeys/s (heaptrack
+# slows every allocation). Compare its live heap by call site with the 2-hour run
+# (2026-10-12-c7i-large-445-heaptrack-2h.txt). Run it with an image that has symbols:
+#   SETUP=1 HEAPTRACK=1 IMAGE=hearth-stress:<tag>-symbols SERVER_SIZE=c7i.large
+#   GENERATOR_SIZE=t3.medium GENERATORS=1 VUS=500 AWS_MAX_HOURS=15
+#   HOT_TIER_CAPACITY=20000 BLOCK_CACHE_BYTES=33554432 SESSION_TTL=1h REFRESH_TOKEN_TTL=1h
+#   K6_ENV="CHAIN_REFRESHES=20 PRESENT=chain"
+#    name           journey       rate  seconds  malloc_info minutes
+soak h12            mix           60    43200    120,719

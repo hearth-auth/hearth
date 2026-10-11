@@ -182,6 +182,29 @@ so do not judge a soak by it.
 
 For a 4-hour soak, use `--warmup-min 60 --bin-min 30`.
 
+### Heap accounting
+
+The flatness test says whether memory grows; heaptrack says what holds it. `HEAPTRACK=1` runs
+each plan line's Hearth under heaptrack (setup and the import run without it) and ends each
+soak with `kill -9`. The trace's "leaked" memory is then the live heap at that moment, by call
+site, and `round.sh` fetches the trace as `heaptrack.zst`. Compare a 2-hour run with a 12-hour
+run (`plans/2026-10-12-c7i-large-445-heaptrack-*.txt`): a call site whose live heap grows
+between them, and is not a capped cache or the SST readers, is a leak.
+
+heaptrack needs a binary with symbols. Build the image from a modified copy of the Dockerfile,
+outside the repository:
+
+```bash
+sed -e '/&& strip target\/release\/hearth/d' \
+    -e 's/&& cargo build --release/\&\& CARGO_PROFILE_RELEASE_STRIP=none CARGO_PROFILE_RELEASE_DEBUG=line-tables-only cargo build --release/' \
+    Dockerfile > /tmp/Dockerfile.symbols
+docker build -f /tmp/Dockerfile.symbols -t hearth-stress:<tag>-symbols \
+  --build-arg BUILD_REVISION=$(git rev-parse HEAD) .
+```
+
+heaptrack slows every allocation, so run at 60 journeys/s on c7i.large. Read a trace with
+`heaptrack_print --print-leaks 1 -s 400 heaptrack.zst` (the default `-s 5` cuts the stacks).
+
 ## Method rules
 
 - **Units.** k6 counts journeys. A login journey is 4 HTTP requests; the other journeys are 1.

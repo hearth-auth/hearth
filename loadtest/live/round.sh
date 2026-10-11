@@ -19,9 +19,13 @@
 #   IMAGE        Docker image the binary comes from (needs a revision label)
 #   PLAN_FILE    the plan; default: the PLAN variable
 #   KEEP=1       leave the run up at the end
+#   HEAPTRACK=1  run each plan line's Hearth under heaptrack, and end each soak
+#                with kill -9, so the trace's "leaked" memory is the live heap
+#                (needs an image with symbols: README, "Heap accounting")
 #
 # Results: results/<run>/<name>/ as cloud.sh writes them, plus variant.txt,
-# vmstat-gen<i>-<name>.txt and, for a soak, m<minute>.malloc_info.xml.
+# vmstat-gen<i>-<name>.txt and, for a soak, m<minute>.malloc_info.xml and, with
+# HEAPTRACK=1, heaptrack.zst.
 set -uo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -89,6 +93,9 @@ prepare() {
     rm -rf /var/lib/hearth && cp -a /var/lib/hearth.base /var/lib/hearth
     [ ! -f /opt/hearth/out/hearth.log ] || mv /opt/hearth/out/hearth.log /opt/hearth/out/hearth-before-$name.log
     sync; echo 3 > /proc/sys/vm/drop_caches" || { note "$name: remote restore failed"; return 1; }
+  if [ "${HEAPTRACK:-}" = 1 ]; then
+    heaptrack_setup || { note "$name: heaptrack setup FAILED"; return 1; }
+  fi
   "$c" restart || return 1
   code=$(s "curl -sk -o /dev/null -w '%{http_code}' -X POST https://127.0.0.1:8443/admin/bootstrap")
   {
@@ -129,6 +136,42 @@ ramp() {
   observed "$name" "$c" ramp "$name" "$journey" "$start" "$step" "$steps" "$hold"
 }
 
+# Runs Hearth under heaptrack from its next start: one trace per start, in
+# /opt/hearth/out/heaptrack (prepare deletes /var/lib/hearth). Setup and the
+# import run without it, at full speed.
+heaptrack_setup() {
+  s "set -e
+    if ! command -v heaptrack > /dev/null; then
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get -qq update > /dev/null
+      apt-get -qq install -y heaptrack > /dev/null
+    fi
+    install -d -o hearth -g hearth /opt/hearth/out/heaptrack
+    cat > /opt/hearth/heaptrack-hearth.sh << 'EOF'
+#!/bin/sh
+# Hearth under heaptrack (round.sh HEAPTRACK=1), one trace per start.
+exec /usr/bin/heaptrack -o /opt/hearth/out/heaptrack/hearth-\$(date -u +%Y%m%dT%H%M%SZ) \\
+  /opt/hearth/hearth serve -c /opt/hearth/hearth.yaml
+EOF
+    chmod 0755 /opt/hearth/heaptrack-hearth.sh
+    mkdir -p /etc/systemd/system/hearth.service.d
+    printf '[Service]\nExecStart=\nExecStart=/opt/hearth/heaptrack-hearth.sh\n' \
+      > /etc/systemd/system/hearth.service.d/heaptrack.conf
+    systemctl daemon-reload"
+}
+
+# Ends a heaptrack soak. kill -9 leaves Hearth's live heap as the trace's
+# "leaked" memory; heaptrack's interpreter writes the file when its pipe closes.
+heaptrack_collect() {
+  local name=$1 out=$2 f
+  f=$(s "pkill -9 -x hearth || true
+    for _ in \$(seq 1 360); do systemctl is-active -q hearth || break; sleep 5; done
+    ls -t /opt/hearth/out/heaptrack/hearth-* 2> /dev/null | head -n 1")
+  [ -n "$f" ] || { note "$name: no heaptrack trace"; return; }
+  sp "root@$SERVER_PUBLIC:$f" "$out/heaptrack.${f##*.}" || { note "$name: fetching $f FAILED"; return; }
+  note "$name: heaptrack trace $(du -h "$out/heaptrack.${f##*.}" | cut -f1)"
+}
+
 soak() {
   local name=$1 journey=$2 rate=$3 secs=$4 minutes=${5:-} out=$results/$1 start_at m f
   prepare "$name" || { note "$name: prepare FAILED"; return; }
@@ -152,6 +195,7 @@ soak() {
         || note "$name: no minute-$m $f"
     done
   done
+  if [ "${HEAPTRACK:-}" = 1 ]; then heaptrack_collect "$name" "$out"; fi
 }
 
 # The plan is read on fd 3: ssh inside the loop would read stdin and eat it.
