@@ -73,11 +73,15 @@ use crate::storage::{
 /// Called off the hot path after every swap of the SST reader set (initial
 /// open, memtable flush, WAL-rotation flush, compaction) so a scrape always
 /// reflects the current cold-tier fan-out width.
-fn record_sst_file_count(count: usize) {
-    #[allow(clippy::cast_precision_loss)]
-    crate::metrics::metrics()
-        .storage_sst_files
-        .set(count as f64);
+/// Publishes the live SST readers' file count and heap
+/// (`hearth_storage_sst_files`, `hearth_storage_sst_reader_bytes`).
+#[allow(clippy::cast_precision_loss)] // counts and byte sizes far below 2^52
+fn record_sst_readers(readers: &[SstReader]) {
+    let metrics = crate::metrics::metrics();
+    metrics.storage_sst_files.set(readers.len() as f64);
+    metrics
+        .storage_sst_reader_bytes
+        .set(readers.iter().map(SstReader::resident_bytes).sum::<usize>() as f64);
 }
 
 /// Pending write-batch handle for the [`EmbeddedStorageEngine`] group-commit path.
@@ -693,7 +697,7 @@ impl EmbeddedStorageEngine {
         // Arc-wrap the shared state needed by both the engine and the WAL's
         // pre-rotate flush callback.
         let active_memtable = Arc::new(memtable);
-        record_sst_file_count(sst_readers.len());
+        record_sst_readers(&sst_readers);
         let sst_readers = Arc::new(EpochCell::from_pointee(sst_readers));
         let flush_lock = Arc::new(Mutex::new(()));
         let sst_counter = Arc::new(std::sync::atomic::AtomicU64::new(max_sst_num + 1));
@@ -768,7 +772,7 @@ impl EmbeddedStorageEngine {
                         &cb_block_cache,
                         cb_allow_missing_keks,
                     )?;
-                    record_sst_file_count(rebuilt.len());
+                    record_sst_readers(&rebuilt);
                     cb_sst_readers.store(Arc::new(rebuilt));
                     Ok(())
                 })?;
@@ -958,7 +962,7 @@ impl EmbeddedStorageEngine {
             // never miss a just-flushed key.
             let rebuilt_readers = self.reload_sst_readers()?;
             let live_count = rebuilt_readers.len();
-            record_sst_file_count(live_count);
+            record_sst_readers(&rebuilt_readers);
             self.sst_readers.store(Arc::new(rebuilt_readers));
 
             // Count trigger (HEA-1885): once the live SST count reaches the
@@ -1341,7 +1345,7 @@ impl EmbeddedStorageEngine {
         // correct newest-first order (new flush > merged output > nothing), so no
         // just-flushed key is dropped.
         let rebuilt = self.reload_sst_readers()?;
-        record_sst_file_count(rebuilt.len());
+        record_sst_readers(&rebuilt);
         if let Some(merged) = rebuilt.iter().find(|r| r.sst_number() == sst_num) {
             self.compaction_records_written.fetch_add(
                 u64::from(merged.entry_count()),
@@ -1555,8 +1559,7 @@ impl EmbeddedStorageEngine {
         // run was contiguous, so nothing outside it falls between the run's
         // oldest and newest members.
         let rebuilt = self.reload_sst_readers()?;
-        let live_count = rebuilt.len();
-        record_sst_file_count(live_count);
+        record_sst_readers(&rebuilt);
         // Attribute the merged output's record count to write amplification. The
         // output took `target_num`, so it is the reader now sitting at that
         // number (see the recency-ordering contract above).
@@ -6166,6 +6169,46 @@ mod tests {
 
         exit_tx.send(()).expect("reader is waiting to exit");
         reader.join().expect("reader thread");
+    }
+
+    /// `hearth_storage_sst_reader_bytes` is the heap the live SST readers
+    /// hold. Flushes and compactions set it, so it follows the reader list
+    /// (#445).
+    #[test]
+    #[allow(clippy::cast_precision_loss)] // test sizes are far below 2^52
+    fn the_sst_reader_bytes_gauge_follows_the_live_reader_list() {
+        let (_dir, engine) = engine_with_ssts(3);
+        let live = |engine: &EmbeddedStorageEngine| {
+            engine
+                .sst_readers
+                .load()
+                .iter()
+                .map(SstReader::resident_bytes)
+                .sum::<usize>() as f64
+        };
+        let gauge = || crate::metrics::metrics().storage_sst_reader_bytes.get();
+
+        let flushed = live(&engine);
+        assert!(
+            flushed > 0.0,
+            "each SST holds a Bloom filter and a block index"
+        );
+        assert!(
+            (gauge() - flushed).abs() < f64::EPSILON,
+            "after the flushes"
+        );
+
+        assert_eq!(engine.compact_ssts(2).expect("compact"), 3);
+        let compacted = live(&engine);
+        assert!(
+            (compacted - flushed).abs() > f64::EPSILON,
+            "one merged SST replaced three"
+        );
+        assert!(
+            (gauge() - compacted).abs() < f64::EPSILON,
+            "after the compaction: gauge {}, readers {compacted}",
+            gauge()
+        );
     }
 
     #[test]
