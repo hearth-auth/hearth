@@ -2087,52 +2087,63 @@ async fn run_serve(
             interval.tick().await;
             loop {
                 interval.tick().await;
-                let batch = hearth::core::MAX_PAGE_LIMIT;
-                let mut offset = 0u64;
-                loop {
-                    let page = match engine
-                        .list_realms(&hearth::core::PageRequest::new(offset, batch))
-                    {
-                        Ok(p) => p,
-                        Err(e) => {
-                            error!(error = %e, "cleanup: realm enumeration failed, retrying next tick");
-                            break;
-                        }
-                    };
-                    let n = page.items.len() as u64;
-                    for realm in &page.items {
-                        match engine.sweep_expired(realm.id()) {
-                            Ok(stats) => {
-                                if stats.total_deleted() > 0 {
-                                    info!(
+                // A sweep reads every row of the swept key spaces and deletes
+                // with durable writes, for as long as there are expired rows:
+                // blocking work, so it runs on the blocking pool and never
+                // holds a request worker (#445).
+                let engine = Arc::clone(&engine);
+                let sweep = tokio::task::spawn_blocking(move || {
+                    let batch = hearth::core::MAX_PAGE_LIMIT;
+                    let mut offset = 0u64;
+                    loop {
+                        let page = match engine
+                            .list_realms(&hearth::core::PageRequest::new(offset, batch))
+                        {
+                            Ok(p) => p,
+                            Err(e) => {
+                                error!(error = %e, "cleanup: realm enumeration failed, retrying next tick");
+                                break;
+                            }
+                        };
+                        let n = page.items.len() as u64;
+                        for realm in &page.items {
+                            match engine.sweep_expired(realm.id()) {
+                                Ok(stats) => {
+                                    if stats.total_deleted() > 0 {
+                                        info!(
+                                            realm = %realm.name(),
+                                            auth_codes = stats.auth_codes_deleted,
+                                            device_codes = stats.device_codes_deleted,
+                                            pending_tickets = stats.pending_tickets_deleted,
+                                            grant_families = stats.grant_families_deleted,
+                                            saml_states = stats.saml_states_deleted,
+                                            saml_assertions = stats.saml_assertions_deleted,
+                                            revoked_jtis = stats.revoked_jtis_deleted,
+                                            session_family_rows = stats.session_family_rows_deleted,
+                                            sessions = stats.sessions_deleted,
+                                            rate_trackers_pruned = stats.rate_trackers_pruned,
+                                            errors = stats.errors,
+                                            "cleanup: swept expired entities",
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(
                                         realm = %realm.name(),
-                                        auth_codes = stats.auth_codes_deleted,
-                                        device_codes = stats.device_codes_deleted,
-                                        pending_tickets = stats.pending_tickets_deleted,
-                                        grant_families = stats.grant_families_deleted,
-                                        saml_states = stats.saml_states_deleted,
-                                        saml_assertions = stats.saml_assertions_deleted,
-                                        revoked_jtis = stats.revoked_jtis_deleted,
-                                        session_family_rows = stats.session_family_rows_deleted,
-                                        rate_trackers_pruned = stats.rate_trackers_pruned,
-                                        errors = stats.errors,
-                                        "cleanup: swept expired entities",
+                                        error = %e,
+                                        "cleanup: sweep failed for realm",
                                     );
                                 }
                             }
-                            Err(e) => {
-                                warn!(
-                                    realm = %realm.name(),
-                                    error = %e,
-                                    "cleanup: sweep failed for realm",
-                                );
-                            }
                         }
+                        if n == 0 || offset + n >= page.total {
+                            break;
+                        }
+                        offset += n;
                     }
-                    if n == 0 || offset + n >= page.total {
-                        break;
-                    }
-                    offset += n;
+                });
+                if let Err(e) = sweep.await {
+                    error!(error = %e, "cleanup: sweep task failed, retrying next tick");
                 }
             }
         });

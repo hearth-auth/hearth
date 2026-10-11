@@ -366,6 +366,16 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   inside `assertion`, is refused instead of being read with the field dropped.
 
 ### Fixed
+- **Expired sessions are now deleted** (#445). The cleanup sweep deletes a session, with its
+  per-user index entry, one hour after the session expires. Before, only deleting the user
+  removed them: every sign-in left two sessions in storage for good. The stored data, and the
+  memory that indexes it, grew with every sign-in ever made. An expired session already failed
+  every check, so no request sees a difference.
+- **The cleanup sweep keeps up with a busy server** (#445). Each pass now deletes every
+  expired grant family and its session index entry. Before, a pass deleted at most 1,000 of
+  each every 5 minutes, which is fewer than a server signing in more than 3 users a second
+  creates, so expired families piled up without bound. The sweep now runs on the blocking
+  thread pool, so a long pass never holds a thread that serves requests.
 - **Memory no longer grows with every refreshed sign-in for the life of the process** (#445).
   The lock that serializes refresh-token rotation and revocation of a grant family stayed in
   memory after its last use: about 150–200 bytes for each grant family that was ever
