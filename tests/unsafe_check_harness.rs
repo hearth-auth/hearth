@@ -34,6 +34,11 @@ const NOT_UNDER_MIRI: &[(&str, &str)] = &[
          the data directory rather than of code",
     ),
     (
+        "src/storage/heap.rs",
+        "glibc FFI only — `malloc_trim(0)` after a flush or a compaction. Miri \
+         cannot call foreign C functions",
+    ),
+    (
         "src/main.rs",
         "glibc FFI only — `mallopt(M_ARENA_MAX)` at startup, and `open_memstream` / \
          `malloc_info` / `free` in its test. Miri cannot call foreign C functions, \

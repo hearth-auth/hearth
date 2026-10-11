@@ -9,9 +9,10 @@
 //! Compaction already writes each block to the file when it is sealed
 //! (HEA-1922).
 //!
-//! This test fills the memtable to just below its flush threshold, writes
+//! The first test fills the memtable to just below its flush threshold, writes
 //! past the threshold, and measures the highest heap the process holds above
-//! the level before the flush.
+//! the level before the flush. The second test checks that the process gives
+//! the freed memtable back to the system after the flush.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::Path;
@@ -118,18 +119,17 @@ fn sst_files(dir: &Path) -> usize {
     count
 }
 
-#[test]
-#[allow(clippy::cast_precision_loss)] // the ratio in the failure message only
-fn a_memtable_flush_holds_no_copy_of_the_sst_in_memory() {
-    let dir = tempfile::tempdir().expect("tempdir");
+fn open(dir: &tempfile::TempDir) -> EmbeddedStorageEngine {
     let mut config = StorageConfig::dev(dir.path().to_path_buf());
     config.set_memtable_flush_bytes(FLUSH_BYTES);
     config.compaction.enabled = false;
-    let engine = EmbeddedStorageEngine::open(config).expect("open engine");
-    let realm = RealmId::generate();
-    let value = vec![b'v'; VALUE_BYTES];
+    EmbeddedStorageEngine::open(config).expect("open engine")
+}
 
-    // Fill to 95% of the threshold: no flush yet.
+/// Fills the memtable to 95% of the threshold, so that nothing flushes yet.
+/// Returns the memtable's accounting of what it holds.
+fn fill_below_threshold(engine: &EmbeddedStorageEngine, realm: &RealmId, dir: &Path) -> usize {
+    let value = vec![b'v'; VALUE_BYTES];
     let mut logical = 0;
     let mut i = 0;
     while logical < FLUSH_BYTES * 95 / 100 {
@@ -137,15 +137,18 @@ fn a_memtable_flush_holds_no_copy_of_the_sst_in_memory() {
             .map(|n| (key("user", n), value.clone()))
             .collect();
         logical += batch.iter().map(|(k, _)| logical_bytes(k)).sum::<usize>();
-        engine.put_batch(&realm, &batch).expect("put_batch");
+        engine.put_batch(realm, &batch).expect("put_batch");
         i += BATCH;
     }
-    assert_eq!(sst_files(dir.path()), 0, "no flush below the threshold");
+    assert_eq!(sst_files(dir), 0, "no flush below the threshold");
+    logical
+}
 
-    // Write past the threshold until the flush has written its SST.
-    let before = reset_peak();
+/// Writes past the threshold until the flush has written its SST.
+fn write_until_flushed(engine: &EmbeddedStorageEngine, realm: &RealmId, dir: &Path) {
+    let value = vec![b'v'; VALUE_BYTES];
     let mut burst = 0;
-    while sst_files(dir.path()) == 0 {
+    while sst_files(dir) == 0 {
         assert!(
             burst < FLUSH_BYTES / logical_bytes(&key("burst", 0)),
             "no SST after writing past the flush threshold"
@@ -153,9 +156,33 @@ fn a_memtable_flush_holds_no_copy_of_the_sst_in_memory() {
         let batch: Vec<(Vec<u8>, Vec<u8>)> = (burst..burst + 100)
             .map(|n| (key("burst", n), value.clone()))
             .collect();
-        engine.put_batch(&realm, &batch).expect("put_batch");
+        engine.put_batch(realm, &batch).expect("put_batch");
         burst += 100;
     }
+}
+
+/// `RssAnon` of this process: its private memory in RAM, the heap included.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn rss_anon_bytes() -> isize {
+    let status = std::fs::read_to_string("/proc/self/status").expect("read /proc/self/status");
+    let kib: isize = status
+        .lines()
+        .find_map(|line| line.strip_prefix("RssAnon:"))
+        .and_then(|rest| rest.trim().trim_end_matches("kB").trim().parse().ok())
+        .expect("RssAnon in /proc/self/status");
+    kib * 1024
+}
+
+#[test]
+#[allow(clippy::cast_precision_loss)] // the ratio in the failure message only
+fn a_memtable_flush_holds_no_copy_of_the_sst_in_memory() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let engine = open(&dir);
+    let realm = RealmId::generate();
+
+    let logical = fill_below_threshold(&engine, &realm, dir.path());
+    let before = reset_peak();
+    write_until_flushed(&engine, &realm, dir.path());
     let transient = PEAK.load(Ordering::Relaxed) - before;
 
     // The writer holds one block, one write chunk, the block index and the
@@ -168,5 +195,36 @@ fn a_memtable_flush_holds_no_copy_of_the_sst_in_memory() {
         "the flush held {transient} bytes of extra heap for {flushed} flushed bytes \
          ({:.2}x); a copy of the SST in memory is about 1x",
         transient as f64 / flushed as f64
+    );
+}
+
+/// glibc keeps the memory a program frees in its arenas, and gives it back to
+/// the system only from the top of an arena. A flush frees the whole old
+/// memtable, below the memory allocated after it, so without `malloc_trim`
+/// the process keeps all of it (#445).
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn a_memtable_flush_gives_the_freed_memtable_back_to_the_system() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let engine = open(&dir);
+    let realm = RealmId::generate();
+
+    let empty = rss_anon_bytes();
+    let logical = fill_below_threshold(&engine, &realm, dir.path());
+    let full = rss_anon_bytes();
+    write_until_flushed(&engine, &realm, dir.path());
+    let after = rss_anon_bytes();
+
+    let memtable = full - empty;
+    assert!(
+        memtable > logical.cast_signed() / 2,
+        "the full memtable must cost a measurable amount of memory: {memtable} bytes of \
+         RssAnon for {logical} bytes of entries"
+    );
+    let kept = after - empty;
+    assert!(
+        kept < memtable / 4,
+        "after the flush the process kept {kept} of the {memtable} bytes of RssAnon that \
+         the memtable used"
     );
 }

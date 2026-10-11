@@ -722,7 +722,7 @@ impl EmbeddedStorageEngine {
                 // Atomic freeze: snapshot + SST write/register + reset all happen
                 // under the memtable write lock, so a write racing with this
                 // rotation flush is never silently dropped.
-                cb_memtable.flush_streaming(|map| {
+                let flushed = cb_memtable.flush_streaming(|map| {
                     let sst_num = cb_sst_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let sst_path = cb_data_dir.join(format!("{sst_num:06}.sst"));
                     let system_kek = cb_key_registry
@@ -776,6 +776,10 @@ impl EmbeddedStorageEngine {
                 // store above could not, rather than hold its mappings until the
                 // next flush.
                 cb_sst_readers.reclaim();
+                if flushed {
+                    // The flush freed the whole old memtable.
+                    super::heap::release_free_heap();
+                }
                 Ok(())
             });
         }
@@ -910,7 +914,7 @@ impl EmbeddedStorageEngine {
             )));
         };
 
-        self.active_memtable.flush_streaming(|map| {
+        let flushed = self.active_memtable.flush_streaming(|map| {
             // Generate sequential SST filename
             let sst_num = self
                 .sst_counter
@@ -973,6 +977,10 @@ impl EmbeddedStorageEngine {
         // memory map per SST — would otherwise wait for the next flush to be
         // released; the memtable hand-off since then has driven the epoch on.
         self.sst_readers.reclaim();
+        if flushed {
+            // The flush freed the whole old memtable.
+            super::heap::release_free_heap();
+        }
 
         Ok(())
     }
@@ -1349,6 +1357,8 @@ impl EmbeddedStorageEngine {
         // otherwise hold their disk space until the next write to the list.
         // Released after `flush_lock`, so no writer waits on the unmaps.
         self.sst_readers.reclaim();
+        // The merge's buffers and the replaced readers' indexes are freed now.
+        super::heap::release_free_heap();
 
         Ok(input_count)
     }
@@ -1563,6 +1573,8 @@ impl EmbeddedStorageEngine {
         // Release the replaced list, which maps the unlinked run members, as
         // `compact_ssts` does.
         self.sst_readers.reclaim();
+        // The merge's buffers and the replaced readers' indexes are freed now.
+        super::heap::release_free_heap();
 
         Ok(input_count)
     }
