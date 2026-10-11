@@ -378,6 +378,12 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   hot tier either, which they used to fill with rows no request reads: the grant-family check
   for each session index row promoted every grant family into the hot tier on every
   sweep. (#445)
+- **Writing the memtable to disk no longer needs about three times its size in extra
+  memory.** When the memtable reached `storage.memtable_flush_bytes` (64 MiB by default), the
+  new SST was built in memory in full, then copied once more before it was written: about
+  217 MB of extra memory for each 64 MiB flush, under load. glibc could keep that memory for
+  the process after the flush. The flush now writes each block to the file as it goes, as
+  compaction already did, and holds less than a fifth of the flushed size. (#445)
 - **Paging through `GET /admin/users` no longer costs memory for every user in the realm.**
   Each page collected every user key in the realm to compute `total` — about 100 MB per
   request at 1,000,000 users, even for a 200-row page. The total is now counted without

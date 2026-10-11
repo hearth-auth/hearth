@@ -85,6 +85,11 @@ const V3_BLOCK_TARGET_BYTES: usize = 4096;
 /// `[8B footer_offset (u64 LE)] [4B footer_ciphertext_len (u32 LE)]`.
 const V3_TRAILER_SIZE: usize = 12;
 
+/// Sealed-block bytes a [`V3BodyWriter`] collects before one write to the
+/// file. Bounds what the writer holds while it keeps write calls few: one call
+/// per ~64 blocks instead of one per block.
+const V3_WRITE_CHUNK_BYTES: usize = 256 * 1024;
+
 /// Minimum byte length of a serialized entry: type(1) + realm(16) + key_len(4)
 /// + val_len(4), with an empty key and an empty/tombstone value.
 ///
@@ -337,7 +342,9 @@ impl SstWriter {
     /// express, but a per-entry `sink` call can — the guard stays live across its
     /// own `sink` call and nothing accumulates. Previously both flush callsites
     /// materialised the entire parked map into an owned `Vec` first, duplicating
-    /// every key and value for the whole encrypt+`fsync`.
+    /// every key and value for the whole encrypt+`fsync`. The writer side holds
+    /// no copy either: [`V3BodyWriter`] writes each sealed block to the staging
+    /// file as it goes (#445).
     pub(crate) fn write_sst_with_fs<Feed>(
         path: &Path,
         feed: Feed,
@@ -361,109 +368,9 @@ impl SstWriter {
         let staging_path = staging_path_for(path);
         let mut file = fs.create(&staging_path)?;
 
-        // --- Build V3 block-structured body (HEA-1914) ---
-        //
-        // Layout written to the file:
-        //   [BASE HEADER 12B]  magic HSS3, entry_count, crc32(footer ciphertext)
-        //   [ENC HEADER  76B]  wrapped per-file DEK
-        //   [block_0 ct][block_1 ct]...[block_{n-1} ct]   each independently AEAD'd
-        //   [footer ciphertext]                            encrypted block index
-        //   [TRAILER 12B]  footer_offset (u64 LE) + footer_ct_len (u32 LE)
-        //
-        // Each block is sealed with `block_nonce(sst_number, block_index)` used
-        // as both nonce and AAD, so a block cannot be replayed at a different
-        // position or in a different file. Blocks target ~4 KiB of plaintext and
-        // never split an entry. The bloom filter is sized up front and filled in
-        // the same single pass. No full slice of the entries is materialised.
-        let mut filter = BloomFilter::empty_for(entry_count);
-        let mut blocks_buf: Vec<u8> = Vec::new();
-        let mut index: Vec<BlockIndexEntry> = Vec::new();
-        let mut cur_block: Vec<u8> = Vec::new();
-        let mut cur_first_key: Option<CompositeKey> = None;
-        let mut min_key: Option<CompositeKey> = None;
-        let mut max_key: Option<CompositeKey> = None;
-        let mut written: u32 = 0;
-
-        feed(&mut |key, value| {
-            filter.insert(key.realm_id(), key.key());
-            if cur_first_key.is_none() {
-                cur_first_key = Some(key.clone());
-            }
-            if min_key.is_none() {
-                min_key = Some(key.clone());
-            }
-            max_key = Some(key.clone());
-            Self::serialize_entry(&mut cur_block, key, value);
-            written = written.saturating_add(1);
-            if cur_block.len() >= V3_BLOCK_TARGET_BYTES {
-                Self::seal_block(
-                    &mut blocks_buf,
-                    &mut index,
-                    &mut cur_block,
-                    &mut cur_first_key,
-                    sst_number,
-                    dek,
-                )?;
-            }
-            Ok(())
-        })?;
-        // Flush the final partial block.
-        Self::seal_block(
-            &mut blocks_buf,
-            &mut index,
-            &mut cur_block,
-            &mut cur_first_key,
-            sst_number,
-            dek,
-        )?;
-
-        // --- Build and encrypt the footer index ---
-        let mut footer = Vec::new();
-        #[allow(clippy::cast_possible_truncation)]
-        footer.extend_from_slice(&(index.len() as u32).to_le_bytes());
-        for e in &index {
-            footer.extend_from_slice(&e.file_offset.to_le_bytes());
-            footer.extend_from_slice(&e.ciphertext_len.to_le_bytes());
-            footer.extend_from_slice(&e.plaintext_len.to_le_bytes());
-            write_footer_key(&mut footer, &e.first_key);
-        }
-        match (&min_key, &max_key) {
-            (Some(mn), Some(mx)) => {
-                footer.push(1);
-                write_footer_key(&mut footer, mn);
-                write_footer_key(&mut footer, mx);
-            }
-            _ => footer.push(0),
-        }
-        #[allow(clippy::cast_possible_truncation)]
-        let bloom_byte_count = filter.bits.len() as u32;
-        footer.extend_from_slice(&bloom_byte_count.to_le_bytes());
-        if bloom_byte_count > 0 {
-            footer.push(filter.k);
-            footer.extend_from_slice(&filter.bits);
-        }
-
-        let footer_nonce = block_nonce(sst_number, SST_FOOTER_BLOCK_INDEX);
-        let footer_ct = encryption::encrypt_section(&footer, dek, &footer_nonce, &footer_nonce)?;
-        let footer_offset = TOTAL_HEADER_SIZE as u64 + blocks_buf.len() as u64;
-        let footer_crc = crc32fast::hash(&footer_ct);
-
-        // --- Assemble the whole file and write it in one pass ---
-        let entry_count = written;
-        let mut out = Vec::with_capacity(
-            TOTAL_HEADER_SIZE + blocks_buf.len() + footer_ct.len() + V3_TRAILER_SIZE,
-        );
-        out.extend_from_slice(SST_MAGIC_V3);
-        out.extend_from_slice(&entry_count.to_le_bytes());
-        out.extend_from_slice(&footer_crc.to_le_bytes());
-        out.extend_from_slice(&enc_header.to_bytes());
-        out.extend_from_slice(&blocks_buf);
-        out.extend_from_slice(&footer_ct);
-        out.extend_from_slice(&footer_offset.to_le_bytes());
-        #[allow(clippy::cast_possible_truncation)]
-        out.extend_from_slice(&(footer_ct.len() as u32).to_le_bytes());
-
-        file.write_all(&out)?;
+        let mut body = V3BodyWriter::start(&mut *file, enc_header, entry_count, sst_number, dek)?;
+        feed(&mut |key, value| body.push(key, value))?;
+        let metadata = body.finish()?;
         file.sync_all()?;
         drop(file);
         // Publish: the fully-written, fsync'd body atomically takes the live
@@ -477,49 +384,7 @@ impl SstWriter {
             fs.sync_dir(parent)?;
         }
 
-        let file_size = out.len() as u64;
-
-        Ok(SstMetadata {
-            entry_count,
-            file_size,
-        })
-    }
-
-    /// Encrypts one accumulated block plaintext, appends the ciphertext to
-    /// `blocks_buf`, and records its index entry. Clears `plaintext` and takes
-    /// `first_key` so the caller can begin the next block. A no-op on an empty
-    /// block.
-    fn seal_block(
-        blocks_buf: &mut Vec<u8>,
-        index: &mut Vec<BlockIndexEntry>,
-        plaintext: &mut Vec<u8>,
-        first_key: &mut Option<CompositeKey>,
-        sst_number: u64,
-        dek: &DataEncryptionKey,
-    ) -> Result<(), StorageError> {
-        if plaintext.is_empty() {
-            return Ok(());
-        }
-        let first_key = first_key
-            .take()
-            .ok_or_else(|| StorageError::InvalidSstFormat {
-                reason: "v3 writer: non-empty block without a first key".to_string(),
-            })?;
-        #[allow(clippy::cast_possible_truncation)]
-        let block_index = index.len() as u32;
-        let nonce = block_nonce(sst_number, block_index);
-        let ct = encryption::encrypt_section(plaintext, dek, &nonce, &nonce)?;
-        let file_offset = TOTAL_HEADER_SIZE as u64 + blocks_buf.len() as u64;
-        #[allow(clippy::cast_possible_truncation)]
-        index.push(BlockIndexEntry {
-            first_key,
-            file_offset,
-            ciphertext_len: ct.len() as u32,
-            plaintext_len: plaintext.len() as u32,
-        });
-        blocks_buf.extend_from_slice(&ct);
-        plaintext.clear();
-        Ok(())
+        Ok(metadata)
     }
 
     /// Serializes a single entry into the buffer.
@@ -552,13 +417,12 @@ impl SstWriter {
         }
     }
 
-    /// Writes a v3 SST from an **ordered, streaming** iterator, flushing each
-    /// sealed block straight to the file instead of buffering the whole output
-    /// in memory (HEA-1922). Peak heap during the write is one block's plaintext
-    /// plus the footer index + Bloom filter — `O(#blocks + entries/8)`, not
-    /// `O(corpus)`. This is what lets compaction merge an arbitrarily large
-    /// corpus past a bounded working set; the eager [`Self::write_sst_with_fs`]
-    /// buffers the entire file and is reserved for the bounded memtable flush.
+    /// Writes a v3 SST from an **ordered, streaming** iterator, writing sealed
+    /// blocks to the file as it goes instead of buffering the whole output in
+    /// memory (HEA-1922). Peak heap during the write is bounded by
+    /// [`V3BodyWriter`] — `O(#blocks + entries/8)`, not `O(corpus)`. This is what
+    /// lets compaction merge an arbitrarily large corpus past a bounded working
+    /// set.
     ///
     /// `entries` MUST yield items in ascending `CompositeKey` order.
     /// `entry_count_hint` sizes the Bloom filter up front; it MAY exceed the
@@ -580,114 +444,16 @@ impl SstWriter {
         I: IntoIterator<Item = Result<(CompositeKey, MemtableValue), StorageError>>,
     {
         let mut file = fs.create(path)?;
-
-        // Reserve the base header (magic + entry_count + footer_crc) — its final
-        // values are only known once the whole body is written — then emit the
-        // already-known encryption header. Blocks begin at TOTAL_HEADER_SIZE and
-        // are written incrementally; the base header is backfilled via a seek to
-        // offset 0 at the end.
-        file.write_all(&[0u8; BASE_HEADER_SIZE])?;
-        file.write_all(&enc_header.to_bytes())?;
-        let mut file_offset: u64 = TOTAL_HEADER_SIZE as u64;
-
-        let mut filter = BloomFilter::empty_for(entry_count_hint);
-        let mut index: Vec<BlockIndexEntry> = Vec::new();
-        let mut cur_block: Vec<u8> = Vec::new();
-        let mut cur_first_key: Option<CompositeKey> = None;
-        let mut min_key: Option<CompositeKey> = None;
-        let mut max_key: Option<CompositeKey> = None;
-        let mut written: u32 = 0;
-
+        let mut body =
+            V3BodyWriter::start(&mut *file, enc_header, entry_count_hint, sst_number, dek)?;
         for item in entries {
             let (key, value) = item?;
             if drop_tombstones && matches!(value, MemtableValue::Tombstone) {
                 continue;
             }
-            filter.insert(key.realm_id(), key.key());
-            if cur_first_key.is_none() {
-                cur_first_key = Some(key.clone());
-            }
-            if min_key.is_none() {
-                min_key = Some(key.clone());
-            }
-            max_key = Some(key.clone());
-            Self::serialize_entry(&mut cur_block, &key, &value);
-            written = written.saturating_add(1);
-            if cur_block.len() >= V3_BLOCK_TARGET_BYTES {
-                Self::seal_block_streaming(
-                    &mut *file,
-                    &mut file_offset,
-                    &mut index,
-                    &mut cur_block,
-                    &mut cur_first_key,
-                    sst_number,
-                    dek,
-                )?;
-            }
+            body.push(&key, &value)?;
         }
-        // Flush the final partial block.
-        Self::seal_block_streaming(
-            &mut *file,
-            &mut file_offset,
-            &mut index,
-            &mut cur_block,
-            &mut cur_first_key,
-            sst_number,
-            dek,
-        )?;
-
-        // --- Build and encrypt the footer index (layout identical to the eager
-        // writer so both produce byte-compatible v3 files) ---
-        let mut footer = Vec::new();
-        #[allow(clippy::cast_possible_truncation)]
-        footer.extend_from_slice(&(index.len() as u32).to_le_bytes());
-        for e in &index {
-            footer.extend_from_slice(&e.file_offset.to_le_bytes());
-            footer.extend_from_slice(&e.ciphertext_len.to_le_bytes());
-            footer.extend_from_slice(&e.plaintext_len.to_le_bytes());
-            write_footer_key(&mut footer, &e.first_key);
-        }
-        match (&min_key, &max_key) {
-            (Some(mn), Some(mx)) => {
-                footer.push(1);
-                write_footer_key(&mut footer, mn);
-                write_footer_key(&mut footer, mx);
-            }
-            _ => footer.push(0),
-        }
-        #[allow(clippy::cast_possible_truncation)]
-        let bloom_byte_count = filter.bits.len() as u32;
-        footer.extend_from_slice(&bloom_byte_count.to_le_bytes());
-        if bloom_byte_count > 0 {
-            footer.push(filter.k);
-            footer.extend_from_slice(&filter.bits);
-        }
-
-        let footer_nonce = block_nonce(sst_number, SST_FOOTER_BLOCK_INDEX);
-        let footer_ct = encryption::encrypt_section(&footer, dek, &footer_nonce, &footer_nonce)?;
-        let footer_offset = file_offset;
-        let footer_crc = crc32fast::hash(&footer_ct);
-
-        file.write_all(&footer_ct)?;
-        file_offset = file_offset.saturating_add(footer_ct.len() as u64);
-
-        // Trailer: footer_offset (u64 LE) + footer_ct_len (u32 LE).
-        file.write_all(&footer_offset.to_le_bytes())?;
-        #[allow(clippy::cast_possible_truncation)]
-        let footer_ct_len_le = (footer_ct.len() as u32).to_le_bytes();
-        file.write_all(&footer_ct_len_le)?;
-        file_offset = file_offset.saturating_add(V3_TRAILER_SIZE as u64);
-        let file_size = file_offset;
-
-        // Backfill the base header now that entry_count and footer_crc are known.
-        // The encryption header written at offset BASE_HEADER_SIZE is untouched.
-        file.seek(std::io::SeekFrom::Start(0))?;
-        let mut base_header = [0u8; BASE_HEADER_SIZE];
-        base_header[0..4].copy_from_slice(SST_MAGIC_V3);
-        base_header[4..8].copy_from_slice(&written.to_le_bytes());
-        base_header[8..12].copy_from_slice(&footer_crc.to_le_bytes());
-        file.write_all(&base_header)?;
-
+        let metadata = body.finish()?;
         file.sync_all()?;
         // Fsync the parent directory so the freshly created SST's directory entry
         // is durable (HEA-1855). Compaction additionally fsyncs the dir after the
@@ -696,49 +462,195 @@ impl SstWriter {
             fs.sync_dir(parent)?;
         }
 
-        Ok(SstMetadata {
-            entry_count: written,
-            file_size,
+        Ok(metadata)
+    }
+}
+
+/// Writes the body of a v3 SST in one pass. The memtable flush
+/// ([`SstWriter::write_sst_with_fs`]) and compaction
+/// ([`SstWriter::write_sst_streaming_with_fs`]) both use it, so both produce
+/// byte-identical files.
+///
+/// Layout written to the file (HEA-1914):
+///   [BASE HEADER 12B]  magic HSS3, entry_count, crc32(footer ciphertext)
+///   [ENC HEADER  76B]  wrapped per-file DEK
+///   [block_0 ct][block_1 ct]...[block_{n-1} ct]   each independently AEAD'd
+///   [footer ciphertext]                            encrypted block index
+///   [TRAILER 12B]  footer_offset (u64 LE) + footer_ct_len (u32 LE)
+///
+/// Each block is sealed with `block_nonce(sst_number, block_index)` used as
+/// both nonce and AAD, so a block cannot be replayed at a different position
+/// or in a different file. Blocks target ~4 KiB of plaintext and never split
+/// an entry. The Bloom filter is sized up front and filled in the same pass.
+///
+/// Sealed blocks go to the file in chunks of at most
+/// [`V3_WRITE_CHUNK_BYTES`], so the writer holds one block's plaintext, one
+/// chunk, the block index and the Bloom filter — `O(#blocks + entries/8)`,
+/// never the file (HEA-1922). The memtable flush once kept every sealed block
+/// and then a copy of the whole file: about 3.4 times the flushed bytes (#445).
+/// The base header is only known at the end, so [`Self::finish`] backfills it
+/// with a seek to offset 0.
+struct V3BodyWriter<'a> {
+    file: &'a mut dyn FsFile,
+    sst_number: u64,
+    dek: &'a DataEncryptionKey,
+    /// File offset of the next sealed block, `pending` included.
+    file_offset: u64,
+    /// Sealed ciphertext not yet written to `file`.
+    pending: Vec<u8>,
+    filter: BloomFilter,
+    index: Vec<BlockIndexEntry>,
+    /// Plaintext of the block being filled.
+    block: Vec<u8>,
+    block_first_key: Option<CompositeKey>,
+    min_key: Option<CompositeKey>,
+    max_key: Option<CompositeKey>,
+    written: u32,
+}
+
+impl<'a> V3BodyWriter<'a> {
+    /// Reserves the base header and writes the encryption header.
+    /// `entry_count_hint` sizes the Bloom filter; it MAY exceed the number of
+    /// entries pushed — an over-estimate only lowers the false-positive rate.
+    fn start(
+        file: &'a mut dyn FsFile,
+        enc_header: &EncryptionHeader,
+        entry_count_hint: usize,
+        sst_number: u64,
+        dek: &'a DataEncryptionKey,
+    ) -> Result<Self, StorageError> {
+        file.write_all(&[0u8; BASE_HEADER_SIZE])?;
+        file.write_all(&enc_header.to_bytes())?;
+        Ok(Self {
+            file,
+            sst_number,
+            dek,
+            file_offset: TOTAL_HEADER_SIZE as u64,
+            pending: Vec::with_capacity(V3_WRITE_CHUNK_BYTES),
+            filter: BloomFilter::empty_for(entry_count_hint),
+            index: Vec::new(),
+            block: Vec::new(),
+            block_first_key: None,
+            min_key: None,
+            max_key: None,
+            written: 0,
         })
     }
 
-    /// Encrypts one accumulated block plaintext, writes its ciphertext straight
-    /// to `file`, and records its index entry — the streaming counterpart of
-    /// [`Self::seal_block`], which buffers into an in-memory `Vec` (HEA-1922).
-    /// Advances `file_offset`, clears `plaintext`, and takes `first_key`. A no-op
-    /// on an empty block.
-    fn seal_block_streaming(
-        file: &mut dyn FsFile,
-        file_offset: &mut u64,
-        index: &mut Vec<BlockIndexEntry>,
-        plaintext: &mut Vec<u8>,
-        first_key: &mut Option<CompositeKey>,
-        sst_number: u64,
-        dek: &DataEncryptionKey,
-    ) -> Result<(), StorageError> {
-        if plaintext.is_empty() {
+    /// Adds one entry. Entries MUST arrive in ascending `CompositeKey` order;
+    /// the writer does not re-sort.
+    fn push(&mut self, key: &CompositeKey, value: &MemtableValue) -> Result<(), StorageError> {
+        self.filter.insert(key.realm_id(), key.key());
+        if self.block_first_key.is_none() {
+            self.block_first_key = Some(key.clone());
+        }
+        if self.min_key.is_none() {
+            self.min_key = Some(key.clone());
+        }
+        self.max_key = Some(key.clone());
+        SstWriter::serialize_entry(&mut self.block, key, value);
+        self.written = self.written.saturating_add(1);
+        if self.block.len() >= V3_BLOCK_TARGET_BYTES {
+            self.seal_block()?;
+        }
+        Ok(())
+    }
+
+    /// Encrypts the block being filled, queues its ciphertext for the file and
+    /// records its index entry. A no-op on an empty block.
+    fn seal_block(&mut self) -> Result<(), StorageError> {
+        if self.block.is_empty() {
             return Ok(());
         }
-        let first_key = first_key
-            .take()
-            .ok_or_else(|| StorageError::InvalidSstFormat {
-                reason: "v3 writer: non-empty block without a first key".to_string(),
-            })?;
+        let first_key =
+            self.block_first_key
+                .take()
+                .ok_or_else(|| StorageError::InvalidSstFormat {
+                    reason: "v3 writer: non-empty block without a first key".to_string(),
+                })?;
         #[allow(clippy::cast_possible_truncation)]
-        let block_index = index.len() as u32;
-        let nonce = block_nonce(sst_number, block_index);
-        let ct = encryption::encrypt_section(plaintext, dek, &nonce, &nonce)?;
+        let block_index = self.index.len() as u32;
+        let nonce = block_nonce(self.sst_number, block_index);
+        let ct = encryption::encrypt_section(&self.block, self.dek, &nonce, &nonce)?;
         #[allow(clippy::cast_possible_truncation)]
-        index.push(BlockIndexEntry {
+        self.index.push(BlockIndexEntry {
             first_key,
-            file_offset: *file_offset,
+            file_offset: self.file_offset,
             ciphertext_len: ct.len() as u32,
-            plaintext_len: plaintext.len() as u32,
+            plaintext_len: self.block.len() as u32,
         });
-        file.write_all(&ct)?;
-        *file_offset = file_offset.saturating_add(ct.len() as u64);
-        plaintext.clear();
+        self.file_offset = self.file_offset.saturating_add(ct.len() as u64);
+        if !self.pending.is_empty() && self.pending.len() + ct.len() > V3_WRITE_CHUNK_BYTES {
+            self.file.write_all(&self.pending)?;
+            self.pending.clear();
+        }
+        self.pending.extend_from_slice(&ct);
+        self.block.clear();
         Ok(())
+    }
+
+    /// Seals the last block, writes the queued blocks, the encrypted footer
+    /// index and the trailer, and backfills the base header. Does not sync the
+    /// file: the caller syncs it before it publishes the file.
+    fn finish(mut self) -> Result<SstMetadata, StorageError> {
+        self.seal_block()?;
+        self.file.write_all(&self.pending)?;
+        self.pending = Vec::new();
+
+        let mut footer = Vec::new();
+        #[allow(clippy::cast_possible_truncation)]
+        footer.extend_from_slice(&(self.index.len() as u32).to_le_bytes());
+        for e in &self.index {
+            footer.extend_from_slice(&e.file_offset.to_le_bytes());
+            footer.extend_from_slice(&e.ciphertext_len.to_le_bytes());
+            footer.extend_from_slice(&e.plaintext_len.to_le_bytes());
+            write_footer_key(&mut footer, &e.first_key);
+        }
+        match (&self.min_key, &self.max_key) {
+            (Some(mn), Some(mx)) => {
+                footer.push(1);
+                write_footer_key(&mut footer, mn);
+                write_footer_key(&mut footer, mx);
+            }
+            _ => footer.push(0),
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let bloom_byte_count = self.filter.bits.len() as u32;
+        footer.extend_from_slice(&bloom_byte_count.to_le_bytes());
+        if bloom_byte_count > 0 {
+            footer.push(self.filter.k);
+            footer.extend_from_slice(&self.filter.bits);
+        }
+
+        let footer_nonce = block_nonce(self.sst_number, SST_FOOTER_BLOCK_INDEX);
+        let footer_ct =
+            encryption::encrypt_section(&footer, self.dek, &footer_nonce, &footer_nonce)?;
+        let footer_offset = self.file_offset;
+        let footer_crc = crc32fast::hash(&footer_ct);
+        self.file.write_all(&footer_ct)?;
+
+        // Trailer: footer_offset (u64 LE) + footer_ct_len (u32 LE).
+        self.file.write_all(&footer_offset.to_le_bytes())?;
+        #[allow(clippy::cast_possible_truncation)]
+        self.file
+            .write_all(&(footer_ct.len() as u32).to_le_bytes())?;
+        let file_size = footer_offset
+            .saturating_add(footer_ct.len() as u64)
+            .saturating_add(V3_TRAILER_SIZE as u64);
+
+        // Backfill the base header now that entry_count and footer_crc are known.
+        // The encryption header written at offset BASE_HEADER_SIZE is untouched.
+        self.file.seek(std::io::SeekFrom::Start(0))?;
+        let mut base_header = [0u8; BASE_HEADER_SIZE];
+        base_header[0..4].copy_from_slice(SST_MAGIC_V3);
+        base_header[4..8].copy_from_slice(&self.written.to_le_bytes());
+        base_header[8..12].copy_from_slice(&footer_crc.to_le_bytes());
+        self.file.write_all(&base_header)?;
+
+        Ok(SstMetadata {
+            entry_count: self.written,
+            file_size,
+        })
     }
 }
 
