@@ -420,7 +420,7 @@ pub struct EmbeddedStorageEngine {
     system_realm: RealmId,
     /// Compaction policy (periodic sweep + partial count trigger).
     compaction: CompactionConfig,
-    /// Signalled by [`Self::trigger_flush`] when the live SST count reaches
+    /// Signalled by [`Self::flush_active`] when the live SST count reaches
     /// [`CompactionConfig::max_sst_count`], so the background task can run a
     /// partial compaction off the flush path. Never awaited on the hot path.
     compaction_notify: Arc<tokio::sync::Notify>,
@@ -776,7 +776,7 @@ impl EmbeddedStorageEngine {
                     cb_sst_readers.store(Arc::new(rebuilt));
                     Ok(())
                 })?;
-                // As in `trigger_flush`: release a replaced reader list the
+                // As in `flush_active`: release a replaced reader list the
                 // store above could not, rather than hold its mappings until the
                 // next flush.
                 cb_sst_readers.reclaim();
@@ -900,6 +900,25 @@ impl EmbeddedStorageEngine {
         }
     }
 
+    /// Flushes the memtable after a write saw it at its flush threshold, unless
+    /// it is below the threshold again once `flush_lock` is held.
+    ///
+    /// Every writer checks `should_flush()` before it takes the lock, and the
+    /// writers of one WAL group commit are acknowledged together. When several
+    /// saw the same full memtable, the first flushes it. The others must not
+    /// then flush the few writes that reached the fresh memtable meanwhile: each
+    /// would become a tiny SST, and tiny SSTs between the full ones keep the
+    /// count-triggered partial compaction from finding a size tier to merge.
+    fn flush_if_full(&self) -> Result<(), StorageError> {
+        self.flush_active(true)
+    }
+
+    /// Flushes the memtable whatever its size: before a WAL rotation truncates
+    /// the segment, every record in it must be in an SST.
+    fn trigger_flush(&self) -> Result<(), StorageError> {
+        self.flush_active(false)
+    }
+
     /// Flushes the memtable to a new SST file and clears it.
     ///
     /// The in-memory swap (park the full map, install a fresh empty one) happens
@@ -911,12 +930,18 @@ impl EmbeddedStorageEngine {
     /// are no longer blocked for the SST encrypt+`fsync`. The outer `flush_lock`
     /// still serializes flushes against each other so SST numbering can't collide
     /// and only one map is ever parked for flushing at a time.
-    fn trigger_flush(&self) -> Result<(), StorageError> {
+    ///
+    /// With `only_if_full`, the flush is skipped when the memtable is below its
+    /// threshold once `flush_lock` is held (see [`Self::flush_if_full`]).
+    fn flush_active(&self, only_if_full: bool) -> Result<(), StorageError> {
         let Ok(_guard) = self.flush_lock.lock() else {
             return Err(StorageError::Io(std::io::Error::other(
                 "flush mutex poisoned",
             )));
         };
+        if only_if_full && !self.active_memtable.should_flush() {
+            return Ok(());
+        }
 
         let flushed = self.active_memtable.flush_streaming(|map| {
             // Generate sequential SST filename
@@ -1251,7 +1276,7 @@ impl EmbeddedStorageEngine {
         // Inputs in oldest-to-newest order (sst_readers is newest-first)
         let readers_oldest_first: Vec<&SstReader> = sst_readers.iter().rev().collect();
 
-        // DEK + encryption header (same pattern as trigger_flush)
+        // DEK + encryption header (same pattern as flush_active)
         let system_kek = self
             .key_registry
             .get_kek_for_realm(&self.system_realm)
@@ -1356,7 +1381,7 @@ impl EmbeddedStorageEngine {
         drop(commit_guard);
         #[cfg(test)]
         run_after_compaction_publish_hook();
-        // As in `trigger_flush`: the list just replaced maps every input this
+        // As in `flush_active`: the list just replaced maps every input this
         // commit unlinked, so a reader pinned across the store above would
         // otherwise hold their disk space until the next write to the list.
         // Released after `flush_lock`, so no writer waits on the unmaps.
@@ -1801,7 +1826,7 @@ impl StorageEngine for EmbeddedStorageEngine {
 
         // 4. Check flush threshold
         if self.active_memtable.should_flush() {
-            self.trigger_flush()?;
+            self.flush_if_full()?;
         }
 
         Ok(())
@@ -1845,7 +1870,7 @@ impl StorageEngine for EmbeddedStorageEngine {
 
         // 4. Check flush threshold
         if self.active_memtable.should_flush() {
-            self.trigger_flush()?;
+            self.flush_if_full()?;
         }
 
         Ok(())
@@ -1914,7 +1939,7 @@ impl StorageEngine for EmbeddedStorageEngine {
         // 4. Single flush check at the tail — the batch may have pushed us
         //    over the threshold, but we don't need to check per-entry.
         if self.active_memtable.should_flush() {
-            self.trigger_flush()?;
+            self.flush_if_full()?;
         }
 
         Ok(())
@@ -1987,7 +2012,7 @@ impl StorageEngine for EmbeddedStorageEngine {
             WalDurabilityHandle::Immediate => {
                 // SyncMode::None path: the record is already written.
                 if self.active_memtable.should_flush() {
-                    self.trigger_flush()?;
+                    self.flush_if_full()?;
                 }
                 Ok(StorageDurabilityHandle(
                     StorageDurabilityHandleKind::Immediate,
@@ -2031,7 +2056,7 @@ impl StorageEngine for EmbeddedStorageEngine {
         // the threshold check remains, and it runs after durability so a flush
         // is never driven by an unacknowledged write.
         if wal_result.is_ok() && self.active_memtable.should_flush() {
-            self.trigger_flush()?;
+            self.flush_if_full()?;
         }
 
         wal_result
@@ -2164,7 +2189,7 @@ impl StorageEngine for EmbeddedStorageEngine {
 
         // 5. Single flush check at the tail.
         if self.active_memtable.should_flush() {
-            self.trigger_flush()?;
+            self.flush_if_full()?;
         }
 
         Ok(())
@@ -3215,6 +3240,96 @@ mod tests {
             "{} acknowledged writes were lost during concurrent flushes (e.g. {:?})",
             lost.len(),
             &lost[..lost.len().min(5)]
+        );
+    }
+
+    /// #445 — a flush for a full memtable checks the threshold again once it
+    /// holds `flush_lock`. A writer checks `should_flush()` before it takes the
+    /// lock. When another writer's flush emptied the memtable in between, the few
+    /// writes since then stay in the memtable instead of going to a tiny SST.
+    #[test]
+    fn a_flush_for_a_full_memtable_skips_one_that_another_flush_emptied() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let realm = RealmId::generate();
+        let engine =
+            EmbeddedStorageEngine::open(StorageConfig::test_config(dir.path().to_path_buf()))
+                .expect("open");
+
+        // A write that reached the fresh memtable after the other flush.
+        engine
+            .put(&realm, b"since", b"the other flush")
+            .expect("put");
+        assert!(!engine.active_memtable.should_flush());
+
+        // The writer that saw the old memtable full now gets the lock.
+        engine.flush_if_full().expect("flush_if_full");
+
+        assert_eq!(
+            count_sst_files(dir.path()),
+            0,
+            "a memtable below the threshold was flushed"
+        );
+        assert_eq!(
+            engine.get(&realm, b"since").expect("get").as_deref(),
+            Some(&b"the other flush"[..])
+        );
+    }
+
+    /// #445 — writers that saw one full memtable flush it once. The writers of a
+    /// WAL group commit are acknowledged together, and each checks
+    /// `should_flush()` before it takes `flush_lock`. Every writer after the first
+    /// then flushed the few writes that had reached the fresh memtable, into one
+    /// tiny SST each. Tiny SSTs between the full ones break every size tier, so
+    /// the count-triggered partial compaction never found a run to merge and the
+    /// SST count grew until the periodic full compaction.
+    #[test]
+    fn concurrent_writers_never_flush_a_memtable_below_the_threshold() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let realm = RealmId::generate();
+        let config = StorageConfig::test_config(dir.path().to_path_buf());
+        let threshold = config.memtable_config.flush_threshold_bytes;
+        let engine = std::sync::Arc::new(EmbeddedStorageEngine::open(config).expect("open"));
+
+        const THREADS: u32 = 8;
+        const PER_THREAD: u32 = 500;
+        let value = [b'v'; 100];
+        let handles: Vec<_> = (0..THREADS)
+            .map(|t| {
+                let engine = std::sync::Arc::clone(&engine);
+                let realm = realm.clone();
+                std::thread::spawn(move || {
+                    for i in 0..PER_THREAD {
+                        let key = format!("t{t:02}-k{i:05}");
+                        engine.put(&realm, key.as_bytes(), &value).expect("put");
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("writer thread panicked");
+        }
+
+        // Every key is unique, and the memtable counts 16 bytes plus the key and
+        // the value for each entry, so a memtable at the threshold holds at
+        // least this many entries.
+        let entry = 16 + "t00-k00000".len() + value.len();
+        let min_entries = u32::try_from(threshold.div_ceil(entry)).expect("small");
+        let readers = engine.sst_readers.load_full();
+        assert!(
+            readers.len() > 50,
+            "expected many flushes, got {}",
+            readers.len()
+        );
+        let small: Vec<u32> = readers
+            .iter()
+            .map(SstReader::entry_count)
+            .filter(|&n| n < min_entries)
+            .collect();
+        assert!(
+            small.is_empty(),
+            "{} of {} SSTs hold fewer than {min_entries} entries: {small:?}",
+            small.len(),
+            readers.len()
         );
     }
 

@@ -366,6 +366,14 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   inside `assertion`, is refused instead of being read with the field dropped.
 
 ### Fixed
+- **Partial compaction runs under concurrent writes** (#445). When several writes filled the
+  memtable at the same moment, each of them flushed it: the first wrote the full memtable, and
+  each of the others wrote the few writes that had arrived since into a tiny SST file. Tiny
+  files between the full ones kept the partial compaction (`storage.compaction.max_sst_count`)
+  from finding files of a similar size to merge, so the SST count grew until the hourly full
+  compaction. Every read then checked more files, and at 240 sign-in journeys a second the CPU
+  ran out about 40 minutes into each hour. A write now flushes only a memtable that is still
+  full when its turn comes.
 - **Expired sessions are now deleted** (#445). The cleanup sweep deletes a session, with its
   per-user index entry, one hour after the session expires. Before, only deleting the user
   removed them: every sign-in left two sessions in storage for good. The stored data, and the
