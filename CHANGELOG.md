@@ -366,6 +366,12 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   inside `assertion`, is refused instead of being read with the field dropped.
 
 ### Fixed
+- **The block cache now holds no more memory than `storage.block_cache_bytes`** (#445). The
+  cache counted each block at its decrypted size, but it kept the block's rows as separate key
+  and value buffers, which take about 1.7 times as much for small rows. A 12-hour soak with a
+  32 MiB cache held 57.6 MB of blocks. A cached block is now its decrypted bytes plus one offset
+  per row, and the cache counts exactly that memory. A cached block also costs two allocations
+  instead of two for each row.
 - **A flush or a compaction no longer opens every SST file again** (#445). After each memtable
   flush and each compaction, the server opened every SST file again to rebuild its file list:
   it read and decrypted the block index and Bloom filter of each file, and built a new copy of
