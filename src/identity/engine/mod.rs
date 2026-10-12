@@ -954,7 +954,7 @@ pub struct EmbeddedIdentityEngine {
     ///
     /// Key: SHA-256(`token_bytes`) as `[u8; 32]`. Value: `Arc<TokenClaims>`.
     /// Eliminates `serde_json` allocation for repeated validations of the same
-    /// access token. Hot-path readers call `load()`. Bounded to
+    /// access token. Hot-path readers call `get()`. Bounded to
     /// `config.token.claims_cache_max`; a full cache evicts expired then
     /// soonest-to-expire entries rather than refusing inserts (HEA-1990).
     token_claims_cache: Arc<control::ClaimsCache>,
@@ -1515,7 +1515,7 @@ impl EmbeddedIdentityEngine {
             Arc::clone(&storage),
             Arc::clone(&clock),
         ));
-        let caches = control::ControlCaches::new();
+        let caches = control::ControlCaches::new(config.token.claims_cache_max);
         let control =
             control::ControlPlane::new(Arc::clone(&storage), Arc::clone(&clock), caches.clone());
         let mut engine = Self {
@@ -1945,7 +1945,7 @@ impl EmbeddedIdentityEngine {
             Arc::clone(&storage),
             Arc::clone(&clock),
         ));
-        let caches = control::ControlCaches::new();
+        let caches = control::ControlCaches::new(config.token.claims_cache_max);
         let control =
             control::ControlPlane::new(Arc::clone(&storage), Arc::clone(&clock), caches.clone());
         let mut engine = Self {
@@ -4816,77 +4816,33 @@ impl EmbeddedIdentityEngine {
     /// within `config.token.claims_cache_max` (HEA-1990).
     ///
     /// This runs only on a cache **miss**, which already performed the Ed25519
-    /// verify + `serde_json` parse — it is off the zero-allocation hot path, so
-    /// the O(n) rebuild and eviction scan here are acceptable. The hot-path
-    /// read (`validate_token`) is unchanged: one lock-free `EpochCell::load` plus
-    /// an `Arc` refcount bump.
+    /// verify + `serde_json` parse — it is off the zero-allocation hot path. The
+    /// cache is sharded, so the copy-on-write update and the eviction sweep cover
+    /// one shard of at most ~1,024 entries, not the whole cache (#445). The
+    /// hot-path read (`validate_token`) is unchanged: one lock-free
+    /// `EpochCell::load` plus an `Arc` refcount bump.
     ///
-    /// Eviction policy when the cache is full:
-    /// 1. Drop every entry whose access-token `exp` is at or before now (a TTL
-    ///    sweep — dead JWTs never hold a slot for the process lifetime).
-    /// 2. If still at capacity, evict the soonest-to-expire remaining entries.
-    ///    Those have the least remaining life and are the least likely to be
-    ///    re-validated, approximating a clock/LRU policy without any hot-path
-    ///    write to track recency.
-    ///
-    /// The result is that a full cache always *replaces* rather than refusing
-    /// inserts, so the steady-state hit rate no longer collapses to zero once
-    /// the first `claims_cache_max` distinct tokens have been seen.
+    /// A full shard drops expired entries first, then the soonest-to-expire
+    /// ones, so it always *replaces* rather than refusing inserts, and the
+    /// steady-state hit rate does not collapse once the first
+    /// `claims_cache_max` distinct tokens have been seen.
     fn token_claims_cache_insert(
         &self,
         key: [u8; 32],
         claims: Arc<TokenClaims>,
         gen_at_verify: u64,
     ) {
-        let max = self.config.token.claims_cache_max.max(1);
         let now_secs = self.clock.now().as_micros() / 1_000_000;
-        self.token_claims_cache.rcu(|map| {
-            // Generation guard (HEA-2097): if a flush ran after the caller
-            // captured `gen_at_verify` (before its signature verify), the token
-            // this insert carries may have been signed by a key the flush was
-            // meant to stop trusting. Drop the insert — returning a copy of the
-            // *current* map, never the pre-verify state — so the flush wins.
-            // Re-read on every rcu retry: a flush that lands mid-CAS bumps the
-            // counter before it swaps the map, so the retry observing the new
-            // map also observes the new generation.
-            if self.token_claims_cache_gen.load(Ordering::Acquire) != gen_at_verify {
-                return HashMap::clone(map);
-            }
-
-            // Fast path: room to spare, or we are updating an existing key.
-            if map.len() < max || map.contains_key(&key) {
-                let mut m = HashMap::clone(map);
-                m.insert(key, Arc::clone(&claims));
-                return m;
-            }
-
-            // Full: rebuild without expired entries (TTL sweep).
-            let mut m: HashMap<[u8; 32], Arc<TokenClaims>> = map
-                .iter()
-                .filter(|(_, v)| v.exp > now_secs)
-                .map(|(k, v)| (*k, Arc::clone(v)))
-                .collect();
-
-            // Still full after the sweep: evict the soonest-to-expire entries.
-            if m.len() >= max {
-                let overflow = m.len() - max + 1;
-                let mut exps: Vec<i64> = m.values().map(|v| v.exp).collect();
-                // `overflow <= m.len()`, so `overflow - 1` is a valid index.
-                exps.select_nth_unstable(overflow - 1);
-                let threshold = exps[overflow - 1];
-                let mut removed = 0usize;
-                m.retain(|_, v| {
-                    if removed < overflow && v.exp <= threshold {
-                        removed += 1;
-                        false
-                    } else {
-                        true
-                    }
-                });
-            }
-
-            m.insert(key, Arc::clone(&claims));
-            m
+        // Generation guard (HEA-2097): if a flush ran after the caller captured
+        // `gen_at_verify` (before its signature verify), the token this insert
+        // carries may have been signed by a key the flush was meant to stop
+        // trusting, so the insert is dropped and the flush wins. The cache
+        // re-reads it on every copy-on-write retry: a flush that lands mid-CAS
+        // bumps the counter before it swaps the shard, so the retry observing
+        // the new shard also observes the new generation.
+        let gen = &self.token_claims_cache_gen;
+        self.token_claims_cache.insert(key, claims, now_secs, || {
+            gen.load(Ordering::Acquire) == gen_at_verify
         });
     }
 
@@ -5336,7 +5292,7 @@ impl EmbeddedIdentityEngine {
         // itself instead of resurrecting a token this flush was meant to cut
         // off. See `token_claims_cache_gen`.
         self.token_claims_cache_gen.fetch_add(1, Ordering::AcqRel);
-        self.token_claims_cache.store(Arc::new(HashMap::new()));
+        self.token_claims_cache.clear();
     }
 
     /// Snapshots the token-claims-cache generation counter (HEA-2097).
@@ -9518,7 +9474,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // fields. The `Arc` is returned to the caller unchanged (HEA-1771).
         let claims: Arc<TokenClaims> = {
             let maybe_key = Self::token_cache_hash(token);
-            let cached = maybe_key.and_then(|k| self.token_claims_cache.load().get(&k).cloned());
+            let cached = maybe_key.and_then(|k| self.token_claims_cache.get(&k));
             match cached {
                 Some(arc) => arc,
                 None => {
@@ -19526,7 +19482,7 @@ mod tests {
         // The now-stale insert must be dropped: the token is not re-memoized.
         engine.token_claims_cache_insert(key, Arc::clone(&claims), gen_before);
         assert!(
-            engine.token_claims_cache.load().get(&key).is_none(),
+            engine.token_claims_cache.get(&key).is_none(),
             "an insert carrying a pre-flush generation must be discarded"
         );
 
@@ -19535,7 +19491,7 @@ mod tests {
         let gen_now = engine.token_claims_cache_generation();
         engine.token_claims_cache_insert(key, Arc::clone(&claims), gen_now);
         assert!(
-            engine.token_claims_cache.load().get(&key).is_some(),
+            engine.token_claims_cache.get(&key).is_some(),
             "an insert carrying the current generation must be applied"
         );
     }
@@ -19592,7 +19548,7 @@ mod tests {
             "expected InvalidToken after grace-0 rotation, got {err:?}"
         );
         assert!(
-            engine.token_claims_cache.load().get(&key).is_none(),
+            engine.token_claims_cache.get(&key).is_none(),
             "the stale insert must not have resurrected the token in the cache"
         );
     }
@@ -24978,7 +24934,7 @@ mod tests {
             .expect("issue tokens");
 
         assert!(
-            engine.token_claims_cache.load().is_empty(),
+            engine.token_claims_cache.is_empty(),
             "token claims cache must be empty before first validate_token"
         );
 
@@ -24988,7 +24944,7 @@ mod tests {
 
         let key = EmbeddedIdentityEngine::token_cache_hash(pair.access_token())
             .expect("token_cache_hash must succeed for a valid JWT");
-        let cache = engine.token_claims_cache.load();
+        let cache = &engine.token_claims_cache;
         assert!(
             cache.contains_key(&key),
             "token claims must be in cache after validate_token"
@@ -25024,7 +24980,7 @@ mod tests {
         let key = EmbeddedIdentityEngine::token_cache_hash(pair.access_token())
             .expect("SHA-256 must produce a 32-byte key");
         assert!(
-            engine.token_claims_cache.load().contains_key(&key),
+            engine.token_claims_cache.contains_key(&key),
             "token claims must be cached"
         );
 
@@ -25076,6 +25032,15 @@ mod tests {
         (dir, engine, clock)
     }
 
+    /// #445: the engine sizes its claims cache from `token.claims_cache_max`, so
+    /// the default cache is sharded and an insert copies one shard of it.
+    #[test]
+    fn the_engine_shards_a_default_sized_claims_cache() {
+        let (_dir, engine, _clock) = setup_engine_with_claims_cache_max(65_536);
+        assert_eq!(engine.token_claims_cache.shard_count(), 64);
+        assert_eq!(engine.token_claims_cache.shard_max(), 1_024);
+    }
+
     /// HEA-1990/AC-1: once the cache is full, further inserts must **replace**
     /// entries, not be refused. The most-recently-validated token must remain
     /// resolvable from the cache (under the pre-fix code it never landed).
@@ -25104,7 +25069,7 @@ mod tests {
 
         // The cache never exceeds its configured bound.
         assert!(
-            engine.token_claims_cache.load().len() <= MAX,
+            engine.token_claims_cache.len() <= MAX,
             "cache must stay within its configured maximum"
         );
 
@@ -25113,7 +25078,7 @@ mod tests {
         let key = EmbeddedIdentityEngine::token_cache_hash(newest)
             .expect("SHA-256 must produce a 32-byte key");
         assert!(
-            engine.token_claims_cache.load().contains_key(&key),
+            engine.token_claims_cache.contains_key(&key),
             "most-recently-validated token must be cached after eviction"
         );
     }
@@ -25142,7 +25107,7 @@ mod tests {
                 .expect("validate_token");
         }
         assert_eq!(
-            engine.token_claims_cache.load().len(),
+            engine.token_claims_cache.len(),
             MAX,
             "cache should be full before TTL expiry"
         );
@@ -25160,7 +25125,7 @@ mod tests {
 
         let key = EmbeddedIdentityEngine::token_cache_hash(fresh.access_token())
             .expect("SHA-256 must produce a 32-byte key");
-        let cache = engine.token_claims_cache.load();
+        let cache = &engine.token_claims_cache;
         assert!(
             cache.contains_key(&key),
             "fresh token must land in cache after the TTL sweep evicts dead entries"

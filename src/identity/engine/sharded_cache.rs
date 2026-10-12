@@ -23,6 +23,7 @@ use std::hash::{BuildHasher, Hash};
 use std::sync::Arc;
 
 use crate::core::EpochCell;
+use crate::identity::tokens::TokenClaims;
 
 /// Number of independent shards.
 ///
@@ -201,6 +202,168 @@ where
 {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// One [`ClaimsCache`] shard's map.
+type ClaimsMap = HashMap<[u8; 32], Arc<TokenClaims>>;
+
+/// Entries per [`ClaimsCache`] shard that the shard count aims for. An insert
+/// into a full shard sweeps and rebuilds it, so this bounds the work of one
+/// insert.
+const CLAIMS_ENTRIES_PER_SHARD: usize = 1_024;
+
+/// The verified token-claims cache: claims keyed by the SHA-256 of the raw JWT,
+/// in up to [`SHARD_COUNT`] shards.
+///
+/// Reads are lock-free (one epoch-pinned `load()` and an `Arc` reference-count
+/// bump). An insert clones the shard it changes, and a full shard is also swept
+/// for expired entries and trimmed, so an insert costs time in proportion to
+/// one shard. With one map for the whole cache, every insert into a full
+/// 65,536-entry cache copied and swept all of it, and a server that validated
+/// ~40 new tokens a second spent all its CPU there (#445).
+///
+/// The shard is the key's first byte masked by the shard count: a SHA-256 byte
+/// is uniform. The shard count is the largest power of two, at most
+/// [`SHARD_COUNT`], that gives each shard at least
+/// [`CLAIMS_ENTRIES_PER_SHARD`] entries; each shard holds `max / count`, so the
+/// cache never holds more than `max`. A cache smaller than
+/// `2 * CLAIMS_ENTRIES_PER_SHARD` is one shard and keeps the exact bound.
+pub(crate) struct ClaimsCache {
+    shards: Box<[EpochCell<ClaimsMap>]>,
+    /// The most entries one shard holds.
+    shard_max: usize,
+}
+
+impl ClaimsCache {
+    /// Creates an empty cache that holds at most `max` entries.
+    pub(crate) fn new(max: usize) -> Self {
+        let max = max.max(1);
+        let wanted = max / CLAIMS_ENTRIES_PER_SHARD;
+        let count = if wanted == 0 {
+            1
+        } else {
+            (1usize << wanted.ilog2()).min(SHARD_COUNT)
+        };
+        let shards = (0..count)
+            .map(|_| EpochCell::from_pointee(HashMap::new()))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Self {
+            shards,
+            shard_max: max / count,
+        }
+    }
+
+    #[inline]
+    fn shard(&self, key: &[u8; 32]) -> &EpochCell<ClaimsMap> {
+        // The shard count is a power of two of at most 64, so the mask of one
+        // byte is exact.
+        &self.shards[usize::from(key[0]) & (self.shards.len() - 1)]
+    }
+
+    /// Lock-free lookup: one epoch-pinned `load()` and an `Arc` reference-count
+    /// bump.
+    #[inline]
+    pub(crate) fn get(&self, key: &[u8; 32]) -> Option<Arc<TokenClaims>> {
+        self.shard(key).load().get(key).cloned()
+    }
+
+    /// Inserts `claims` under `key`, unless `still_valid` returns `false`.
+    ///
+    /// `still_valid` runs inside the copy-on-write update, again on every
+    /// retry, so a flush that lands while the update runs always wins.
+    ///
+    /// A full shard first drops every entry whose `exp` is at or before
+    /// `now_secs`. If it is still full, the entries closest to expiry go: they
+    /// have the least life left and are the least likely to be validated
+    /// again. A full shard therefore replaces entries instead of refusing new
+    /// ones.
+    pub(crate) fn insert(
+        &self,
+        key: [u8; 32],
+        claims: Arc<TokenClaims>,
+        now_secs: i64,
+        still_valid: impl Fn() -> bool,
+    ) {
+        let max = self.shard_max;
+        self.shard(&key).rcu(|map| {
+            if !still_valid() {
+                return HashMap::clone(map);
+            }
+
+            // Room to spare, or an update of an existing key.
+            if map.len() < max || map.contains_key(&key) {
+                let mut m = HashMap::clone(map);
+                m.insert(key, Arc::clone(&claims));
+                return m;
+            }
+
+            // Full: rebuild without expired entries.
+            let mut m: ClaimsMap = map
+                .iter()
+                .filter(|(_, v)| v.exp > now_secs)
+                .map(|(k, v)| (*k, Arc::clone(v)))
+                .collect();
+
+            // Still full: evict the entries closest to expiry.
+            if m.len() >= max {
+                let overflow = m.len() - max + 1;
+                let mut exps: Vec<i64> = m.values().map(|v| v.exp).collect();
+                // `overflow <= m.len()`, so `overflow - 1` is a valid index.
+                exps.select_nth_unstable(overflow - 1);
+                let threshold = exps[overflow - 1];
+                let mut removed = 0usize;
+                m.retain(|_, v| {
+                    if removed < overflow && v.exp <= threshold {
+                        removed += 1;
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
+
+            m.insert(key, Arc::clone(&claims));
+            m
+        });
+    }
+
+    /// Drops every entry.
+    pub(crate) fn clear(&self) {
+        for shard in &*self.shards {
+            shard.store(Arc::new(HashMap::new()));
+        }
+    }
+
+    /// The number of shards.
+    #[cfg(test)]
+    pub(crate) fn shard_count(&self) -> usize {
+        self.shards.len()
+    }
+
+    /// The most entries one shard holds.
+    #[cfg(test)]
+    pub(crate) fn shard_max(&self) -> usize {
+        self.shard_max
+    }
+
+    /// The number of entries in every shard together.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.shards.iter().map(|s| s.load().len()).sum()
+    }
+
+    /// Whether the cache holds no entry.
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Whether the cache holds `key`.
+    #[cfg(test)]
+    pub(crate) fn contains_key(&self, key: &[u8; 32]) -> bool {
+        self.shard(key).load().contains_key(key)
     }
 }
 
@@ -398,5 +561,133 @@ mod tests {
                 "{key}: an insert or a remove was lost"
             );
         }
+    }
+
+    fn claims_expiring_at(exp: i64) -> Arc<TokenClaims> {
+        Arc::new(TokenClaims {
+            sub: "user".to_string(),
+            iss: "hearth".to_string(),
+            aud: crate::identity::tokens::Audience::single("hearth"),
+            exp,
+            iat: 0,
+            nbf: None,
+            sid: "session".to_string(),
+            tid: "realm".to_string(),
+            oid: None,
+            token_type: "access".to_string(),
+            jti: None,
+            fid: None,
+            scope: None,
+            nonce: None,
+            azp: None,
+            cnf: None,
+            roles: Vec::new(),
+            groups: Vec::new(),
+            org_groups: Vec::new(),
+            permissions: Vec::new(),
+            custom: std::collections::BTreeMap::new(),
+            act: None,
+            amr: Vec::new(),
+            sv: None,
+        })
+    }
+
+    /// A cache key whose first byte, which picks the shard, is `first`.
+    fn claims_key(first: u8, rest: u8) -> [u8; 32] {
+        let mut key = [rest; 32];
+        key[0] = first;
+        key
+    }
+
+    fn claims_shard_ptrs(cache: &ClaimsCache) -> Vec<*const ClaimsMap> {
+        cache
+            .shards
+            .iter()
+            .map(|s| Arc::as_ptr(&s.load_full()))
+            .collect()
+    }
+
+    #[test]
+    fn a_default_claims_cache_has_64_shards_of_1024_entries() {
+        let cache = ClaimsCache::new(65_536);
+        assert_eq!((cache.shard_count(), cache.shard_max()), (64, 1_024));
+    }
+
+    #[test]
+    fn a_small_claims_cache_keeps_its_exact_bound() {
+        let cache = ClaimsCache::new(4);
+        assert_eq!((cache.shard_count(), cache.shard_max()), (1, 4));
+        let cache = ClaimsCache::new(3_000);
+        assert_eq!((cache.shard_count(), cache.shard_max()), (2, 1_500));
+        let cache = ClaimsCache::new(1_000_000);
+        assert_eq!((cache.shard_count(), cache.shard_max()), (64, 15_625));
+    }
+
+    /// #445: a full 65,536-entry cache that copied and swept the whole map on
+    /// every insert used all CPU on a server validating ~40 new tokens a
+    /// second. An insert must copy only the shard of its key.
+    #[test]
+    fn a_claims_insert_copies_only_the_shard_of_its_key() {
+        let cache = ClaimsCache::new(65_536);
+        for first in 0..=255u8 {
+            cache.insert(claims_key(first, 1), claims_expiring_at(100), 0, || true);
+        }
+        let before = claims_shard_ptrs(&cache);
+        cache.insert(claims_key(5, 2), claims_expiring_at(100), 0, || true);
+        let after = claims_shard_ptrs(&cache);
+        let changed: Vec<usize> = (0..before.len())
+            .filter(|&i| before[i] != after[i])
+            .collect();
+        assert_eq!(changed, vec![5]);
+        assert!(cache.contains_key(&claims_key(5, 2)));
+    }
+
+    #[test]
+    fn a_full_claims_shard_drops_expired_entries_first() {
+        let cache = ClaimsCache::new(4);
+        for n in 0..4u8 {
+            let exp = if n < 2 { 50 } else { 500 };
+            cache.insert(claims_key(0, n), claims_expiring_at(exp), 0, || true);
+        }
+        cache.insert(claims_key(0, 9), claims_expiring_at(500), 100, || true);
+        assert_eq!(cache.len(), 3);
+        assert!(cache.contains_key(&claims_key(0, 9)));
+        assert!(!cache.contains_key(&claims_key(0, 0)));
+        assert!(!cache.contains_key(&claims_key(0, 1)));
+    }
+
+    #[test]
+    fn a_full_claims_shard_of_live_entries_evicts_the_closest_to_expiry() {
+        let cache = ClaimsCache::new(4);
+        for n in 0..4u8 {
+            cache.insert(
+                claims_key(0, n),
+                claims_expiring_at(200 + i64::from(n)),
+                0,
+                || true,
+            );
+        }
+        cache.insert(claims_key(0, 9), claims_expiring_at(900), 100, || true);
+        assert_eq!(cache.len(), 4);
+        assert!(cache.contains_key(&claims_key(0, 9)));
+        assert!(!cache.contains_key(&claims_key(0, 0)));
+    }
+
+    #[test]
+    fn a_claims_insert_that_is_no_longer_valid_changes_nothing() {
+        let cache = ClaimsCache::new(4);
+        cache.insert(claims_key(0, 1), claims_expiring_at(100), 0, || false);
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn clearing_the_claims_cache_empties_every_shard() {
+        let cache = ClaimsCache::new(65_536);
+        for first in 0..=255u8 {
+            cache.insert(claims_key(first, 1), claims_expiring_at(100), 0, || true);
+        }
+        assert_eq!(cache.len(), 256);
+        cache.clear();
+        assert!(cache.is_empty());
     }
 }

@@ -366,6 +366,13 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   inside `assertion`, is refused instead of being read with the field dropped.
 
 ### Fixed
+- **A full token claims cache no longer uses all CPU** (#445). The cache of verified access
+  tokens (`token.claims_cache_max`, default 65,536) kept one map: each new token copied the
+  whole map, and once the map was full, each new token also swept and trimmed all of it. A
+  server that validated about 40 new tokens a second filled the cache in about half an hour
+  and then spent all its CPU there. Sign-ins timed out until clients gave up. The cache is now
+  split into up to 64 parts by token hash, so a new token copies and sweeps one part of at most
+  about 1,024 entries. A cache smaller than 2,048 entries stays one part with its exact limit.
 - **Partial compaction runs under concurrent writes** (#445). When several writes filled the
   memtable at the same moment, each of them flushed it: the first wrote the full memtable, and
   each of the others wrote the few writes that had arrived since into a tiny SST file. Tiny

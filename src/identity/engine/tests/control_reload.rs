@@ -741,7 +741,7 @@ fn parked_local_epochs_stay_bounded_without_a_reloader() {
     let plane = control::ControlPlane::new(
         storage,
         clock as Arc<dyn Clock>,
-        control::ControlCaches::new(),
+        control::ControlCaches::new(65_536),
     );
     // Every other epoch is another node's: none is contiguous with `applied`.
     for epoch in (2..20_000_u64).step_by(2) {
