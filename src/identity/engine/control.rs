@@ -94,11 +94,11 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread::{JoinHandle, Thread};
 use std::time::{Duration, Instant};
 
+pub(super) use super::sharded_cache::ClaimsCache;
 use super::sharded_cache::ShardedEpochMap;
 use crate::core::{Clock, EpochCell, RealmId, SessionId};
 use crate::identity::error::IdentityError;
 use crate::identity::keys;
-use crate::identity::tokens::TokenClaims;
 use crate::identity::types::{Realm, RealmStatus, Session};
 use crate::storage::StorageEngine;
 
@@ -148,9 +148,6 @@ const IDLE_RECHECK: Duration = Duration::from_secs(1);
 /// The in-process session cache, keyed by `(realm, session)`.
 pub(super) type SessionCache = EpochCell<HashMap<(RealmId, SessionId), Arc<Session>>>;
 
-/// The in-process token-claims cache, keyed by the SHA-256 of the raw JWT.
-pub(super) type ClaimsCache = EpochCell<HashMap<[u8; 32], Arc<TokenClaims>>>;
-
 /// One change to a control cache, as a writer applies it and as a reload
 /// replays it.
 pub(super) enum ControlOp {
@@ -199,15 +196,15 @@ pub(super) struct ControlCaches {
 }
 
 impl ControlCaches {
-    /// Empty caches.
-    pub(super) fn new() -> Self {
+    /// Empty caches; the claims cache holds at most `claims_cache_max` entries.
+    pub(super) fn new(claims_cache_max: usize) -> Self {
         Self {
             realm_status: Arc::new(EpochCell::from_pointee(HashMap::new())),
             revoked_jti: Arc::new(ShardedEpochMap::new()),
             blocked_jkt: Arc::new(ShardedEpochMap::new()),
             sessions: Arc::new(EpochCell::from_pointee(HashMap::new())),
             session_gen: Arc::new(AtomicU64::new(0)),
-            claims: Arc::new(EpochCell::from_pointee(HashMap::new())),
+            claims: Arc::new(ClaimsCache::new(claims_cache_max)),
             claims_gen: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -228,7 +225,7 @@ impl ControlCaches {
     /// generation moves before the map is cleared).
     pub(super) fn flush_claims(&self) {
         self.claims_gen.fetch_add(1, Ordering::AcqRel);
-        self.claims.store(Arc::new(HashMap::new()));
+        self.claims.clear();
     }
 }
 
