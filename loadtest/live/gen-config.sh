@@ -25,6 +25,7 @@
 #   HOT_TIER_CAPACITY   storage.hot_tier_capacity (default: auto-size from memory)
 #   BLOCK_CACHE_BYTES   storage.block_cache_bytes (default: 256 MiB)
 #   SERVER_RUST_LOG     RUST_LOG for the server (default: unset, so log_level applies)
+#   CLAIMS_CACHE_MAX    token.claims_cache_max (default: Hearth's, 65536)
 # and, for a soak whose stored data must level off (durations such as 30m, 1h, 7d):
 #   ACCESS_TOKEN_TTL    token.access_token_ttl (default: 1h, the most Hearth accepts)
 #   REFRESH_TOKEN_TTL   token.refresh_token_ttl (default: Hearth's, 7d)
@@ -71,6 +72,13 @@ for var in ACCESS_TOKEN_TTL REFRESH_TOKEN_TTL SESSION_TTL; do
 done
 token_extra=""
 [ -z "${REFRESH_TOKEN_TTL:-}" ] || token_extra=$'\n'"  refresh_token_ttl: \"$REFRESH_TOKEN_TTL\""
+if [ -n "${CLAIMS_CACHE_MAX:-}" ]; then
+  if ! [[ $CLAIMS_CACHE_MAX =~ ^[1-9][0-9]*$ ]]; then
+    echo "gen-config: CLAIMS_CACHE_MAX must be a positive integer" >&2
+    exit 2
+  fi
+  token_extra+=$'\n'"  claims_cache_max: $CLAIMS_CACHE_MAX"
+fi
 auth_section=""
 [ -z "${SESSION_TTL:-}" ] || auth_section=$'\n'"auth:"$'\n'"  session_ttl: \"$SESSION_TTL\""
 

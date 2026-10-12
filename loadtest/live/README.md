@@ -161,6 +161,7 @@ Run it with these settings, on top of the round's:
 | `K6_ENV` | `"CHAIN_REFRESHES=20 PRESENT=chain"` | each VU signs in again after 20 refreshes (new token families all the time), and userinfo presents the VU's newest token (the token cache fills) |
 | `SERVER_RUST_LOG` | `info,hearth::storage::heap=debug` | the log shows each return of free heap to the system |
 | `HOT_TIER_CAPACITY`, `BLOCK_CACHE_BYTES` | e.g. `20000`, `33554432` | optional: small caches fill in the first half hour. Leave them unset for a run with the default caches |
+| `CLAIMS_CACHE_MAX` | e.g. `4096` | optional: `token.claims_cache_max`. Before #477, a full 65,536-entry token claims cache used all CPU on a server that validated ~40 new tokens a second (the fast soak at 240 journeys/s, from about minute 35); a smaller cap kept such a soak running on builds without #477 |
 
 The sampler records RssAnon (heap and other private memory, the part a leak grows) and RssFile
 (the mapped SST files, which the kernel drops when it needs the memory). Total RSS mixes the two,
