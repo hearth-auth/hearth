@@ -283,6 +283,203 @@ fn read_footer_key(data: &[u8], pos: usize) -> Result<(CompositeKey, usize), Sto
     ))
 }
 
+// ── Entries and data blocks ───────────────────────────────────────────────────
+
+/// One serialized entry, borrowed from the plaintext it was read from.
+#[derive(Clone, Copy)]
+pub(crate) struct EntryRef<'a> {
+    realm: &'a [u8; 16],
+    key: &'a [u8],
+    /// The value, or `None` for a tombstone.
+    value: Option<&'a [u8]>,
+}
+
+impl<'a> EntryRef<'a> {
+    /// The entry's key, without its realm.
+    pub(crate) fn key(&self) -> &'a [u8] {
+        self.key
+    }
+
+    /// The entry's value, or `None` for a tombstone.
+    pub(crate) fn value(&self) -> Option<&'a [u8]> {
+        self.value
+    }
+
+    /// Orders this entry against `(realm, key)` as [`CompositeKey`] orders:
+    /// realm UUID bytes first, then key bytes.
+    fn cmp_to(&self, realm: &RealmId, key: &[u8]) -> std::cmp::Ordering {
+        self.realm
+            .cmp(realm.as_uuid().as_bytes())
+            .then_with(|| self.key.cmp(key))
+    }
+
+    /// Orders this entry against `key`, as [`CompositeKey`] orders.
+    fn cmp_composite(&self, key: &CompositeKey) -> std::cmp::Ordering {
+        self.cmp_to(key.realm_id(), key.key())
+    }
+
+    /// The entry's value as an owned [`MemtableValue`].
+    fn memtable_value(&self) -> MemtableValue {
+        self.value.map_or(MemtableValue::Tombstone, |v| {
+            MemtableValue::Data(v.to_vec())
+        })
+    }
+
+    /// The entry as an owned key and value.
+    fn into_owned(self) -> (CompositeKey, MemtableValue) {
+        (
+            CompositeKey::new(
+                RealmId::new(Uuid::from_bytes(*self.realm)),
+                self.key.to_vec(),
+            ),
+            self.memtable_value(),
+        )
+    }
+}
+
+/// A borrowed view of an owned value: `None` for a tombstone.
+fn value_view(value: &MemtableValue) -> Option<&[u8]> {
+    match value {
+        MemtableValue::Data(data) => Some(data),
+        MemtableValue::Tombstone => None,
+    }
+}
+
+/// Reads the serialized entry at `pos` in `data` and returns it with the
+/// position of the next entry. This is the one parser of the entry format
+/// that [`SstWriter::serialize_entry`] writes.
+fn read_entry(data: &[u8], pos: usize) -> Result<(EntryRef<'_>, usize), StorageError> {
+    let invalid = |reason: &str| StorageError::InvalidSstFormat {
+        reason: reason.to_string(),
+    };
+    let len_at = |at: usize| {
+        data.get(at..at.checked_add(4)?)
+            .and_then(|b| b.try_into().ok())
+            .map(|b| u32::from_le_bytes(b) as usize)
+    };
+
+    let entry_type = *data
+        .get(pos)
+        .ok_or_else(|| invalid("truncated entry: missing type byte"))?;
+    let mut p = pos + 1;
+
+    let realm: &[u8; 16] = data
+        .get(p..p + 16)
+        .and_then(|b| b.try_into().ok())
+        .ok_or_else(|| invalid("truncated entry: missing realm UUID"))?;
+    p += 16;
+
+    let key_len = len_at(p).ok_or_else(|| invalid("truncated entry: missing key length"))?;
+    p += 4;
+    let key = p
+        .checked_add(key_len)
+        .and_then(|end| data.get(p..end))
+        .ok_or_else(|| invalid("truncated entry: missing key data"))?;
+    p += key_len;
+
+    let val_len = len_at(p).ok_or_else(|| invalid("truncated entry: missing value length"))?;
+    p += 4;
+    let value = p
+        .checked_add(val_len)
+        .and_then(|end| data.get(p..end))
+        .ok_or_else(|| invalid("truncated entry: missing value data"))?;
+    p += val_len;
+
+    let value = match entry_type {
+        0x00 => Some(value),
+        0x01 => None,
+        other => {
+            return Err(StorageError::InvalidSstFormat {
+                reason: format!("unknown entry type: {other:#x}"),
+            })
+        }
+    };
+    Ok((EntryRef { realm, key, value }, p))
+}
+
+/// A decrypted v3 data block: its plaintext and the offset of each entry in it.
+///
+/// The block keeps the plaintext as it came out of the AEAD, so it costs two
+/// heap buffers whatever its entry count, and the block cache charges exactly
+/// those buffers. Decoding every entry into its own key and value buffers took
+/// about 1.7 times the plaintext for small rows, while the cache charged only
+/// the plaintext (#445).
+pub(crate) struct DataBlock {
+    plaintext: Vec<u8>,
+    /// The start of each entry in `plaintext`, ascending.
+    offsets: Vec<u32>,
+}
+
+impl DataBlock {
+    /// Validates every entry of a decrypted block and records where each one
+    /// starts.
+    fn decode(plaintext: Vec<u8>) -> Result<Self, StorageError> {
+        let mut offsets = Vec::new();
+        let mut pos = 0;
+        while pos < plaintext.len() {
+            offsets.push(
+                u32::try_from(pos).map_err(|_| StorageError::InvalidSstFormat {
+                    reason: "v3 block larger than 4 GiB".to_string(),
+                })?,
+            );
+            pos = read_entry(&plaintext, pos)?.1;
+        }
+        Ok(Self { plaintext, offsets })
+    }
+
+    /// A block holding `entries`, which MUST be sorted.
+    #[cfg(test)]
+    pub(crate) fn from_entries(entries: &[(CompositeKey, MemtableValue)]) -> Self {
+        let mut plaintext = Vec::new();
+        for (key, value) in entries {
+            SstWriter::serialize_entry(&mut plaintext, key, value);
+        }
+        Self::decode(plaintext).expect("serialized entries decode")
+    }
+
+    /// The number of entries.
+    pub(crate) fn len(&self) -> usize {
+        self.offsets.len()
+    }
+
+    /// The entry at `index`, or `None` past the last entry.
+    pub(crate) fn entry(&self, index: usize) -> Option<EntryRef<'_>> {
+        let pos = *self.offsets.get(index)? as usize;
+        read_entry(&self.plaintext, pos)
+            .ok()
+            .map(|(entry, _)| entry)
+    }
+
+    /// The entries in key order.
+    fn iter(&self) -> impl Iterator<Item = EntryRef<'_>> {
+        (0..self.len()).filter_map(|index| self.entry(index))
+    }
+
+    /// The index of the first entry at or after `(realm, key)`.
+    fn lower_bound(&self, realm: &RealmId, key: &[u8]) -> usize {
+        let (mut lo, mut hi) = (0, self.len());
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            match self.entry(mid) {
+                Some(entry) if entry.cmp_to(realm, key).is_lt() => lo = mid + 1,
+                _ => hi = mid,
+            }
+        }
+        lo
+    }
+
+    /// The entry stored under exactly `(realm, key)`.
+    fn find(&self, realm: &RealmId, key: &[u8]) -> Option<EntryRef<'_>> {
+        self.entry(self.lower_bound(realm, key))
+            .filter(|entry| entry.cmp_to(realm, key).is_eq())
+    }
+
+    /// The heap the block's two buffers hold.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.plaintext.capacity() + self.offsets.capacity() * std::mem::size_of::<u32>()
+    }
+}
+
 // ── SST metadata ──────────────────────────────────────────────────────────────
 
 /// Metadata about a written SST file.
@@ -693,10 +890,10 @@ impl BlockedKeyCursor<'_> {
             Some(entry) if entry.first_key < self.end => Some(if self.cached {
                 self.body.fetch_block(self.block_index, self.sst_number)?
             } else {
-                let entries = self
+                let block = self
                     .body
                     .decode_block_uncached(self.block_index, self.sst_number)?;
-                Arc::new(CachedBlock::new(entries, 0))
+                Arc::new(CachedBlock::new(block))
             }),
             _ => None,
         };
@@ -711,9 +908,9 @@ impl BlockedKeyCursor<'_> {
             let Some(block) = &self.block else {
                 return Ok(());
             };
-            match block.entries.get(self.pos) {
-                Some((key, _)) => {
-                    if key >= &self.end {
+            match block.block.entry(self.pos) {
+                Some(entry) => {
+                    if entry.cmp_composite(&self.end).is_ge() {
                         self.block = None;
                     }
                     return Ok(());
@@ -728,12 +925,18 @@ impl BlockedKeyCursor<'_> {
 }
 
 impl SstKeyCursor<'_> {
-    /// The entry at this position, or `None` once the window is exhausted.
-    fn entry(&self) -> Option<&(CompositeKey, MemtableValue)> {
+    /// The key and value (`None` for a tombstone) at this position, or `None`
+    /// once the window is exhausted.
+    fn entry(&self) -> Option<(&[u8], Option<&[u8]>)> {
         match self {
             Self::Done => None,
-            Self::Eager { entries } => entries.first(),
-            Self::Blocked(blocked) => blocked.block.as_ref()?.entries.get(blocked.pos),
+            Self::Eager { entries } => entries.first().map(|(k, v)| (k.key(), value_view(v))),
+            Self::Blocked(blocked) => blocked
+                .block
+                .as_ref()?
+                .block
+                .entry(blocked.pos)
+                .map(|entry| (entry.key(), entry.value())),
         }
     }
 }
@@ -741,14 +944,11 @@ impl SstKeyCursor<'_> {
 impl KeyCursor for SstKeyCursor<'_> {
     fn current(&self) -> Option<(&[u8], bool)> {
         let (key, value) = self.entry()?;
-        Some((key.key(), matches!(value, MemtableValue::Data(_))))
+        Some((key, value.is_some()))
     }
 
     fn value(&self) -> Option<&[u8]> {
-        match self.entry()? {
-            (_, MemtableValue::Data(data)) => Some(data),
-            (_, MemtableValue::Tombstone) => None,
-        }
+        self.entry()?.1
     }
 
     fn advance(&mut self) -> Result<(), StorageError> {
@@ -882,8 +1082,7 @@ impl BlockedBody {
         let nonce = block_nonce(sst_number, block_index as u32);
         let plaintext =
             encryption::decrypt_section(&self.backing[start..end], &self.dek, &nonce, &nonce)?;
-        let entries = SstReader::parse_entries(&plaintext, None)?;
-        let block = Arc::new(CachedBlock::new(entries, plaintext.len()));
+        let block = Arc::new(CachedBlock::new(DataBlock::decode(plaintext)?));
         self.cache.insert(id, Arc::clone(&block));
         Ok(block)
     }
@@ -892,13 +1091,13 @@ impl BlockedBody {
     /// cache. Compaction streams every block of every input exactly once, in
     /// order (HEA-1922); routing those one-shot reads through the bounded LRU
     /// would evict the query-path working set for no benefit. Slices the backing
-    /// and decrypts in place, returning the decoded entries directly. Surfaces
-    /// AEAD/format errors rather than a wrong or absent value.
+    /// and decrypts in place, returning the block directly. Surfaces AEAD/format
+    /// errors rather than a wrong or absent value.
     fn decode_block_uncached(
         &self,
         block_index: usize,
         sst_number: u64,
-    ) -> Result<Vec<(CompositeKey, MemtableValue)>, StorageError> {
+    ) -> Result<DataBlock, StorageError> {
         let entry = self
             .index
             .get(block_index)
@@ -916,7 +1115,7 @@ impl BlockedBody {
         let nonce = block_nonce(sst_number, block_index as u32);
         let plaintext =
             encryption::decrypt_section(&self.backing[start..end], &self.dek, &nonce, &nonce)?;
-        SstReader::parse_entries(&plaintext, None)
+        DataBlock::decode(plaintext)
     }
 }
 
@@ -1291,7 +1490,7 @@ impl SstReader {
                 let mut out = Vec::with_capacity((self.entry_count as usize).min(cap_bound));
                 for bi in 0..body.index.len() {
                     let block = body.fetch_block(bi, self.sst_number)?;
-                    out.extend(block.entries.iter().cloned());
+                    out.extend(block.block.iter().map(EntryRef::into_owned));
                 }
                 Ok(out)
             }
@@ -1367,18 +1566,16 @@ impl SstReader {
                     return Ok(None);
                 };
                 if !cached {
-                    let entries = body.decode_block_uncached(bi, self.sst_number)?;
-                    return Ok(entries
-                        .binary_search_by(cmp)
-                        .ok()
-                        .map(|idx| entries[idx].1.clone()));
+                    let block = body.decode_block_uncached(bi, self.sst_number)?;
+                    return Ok(block
+                        .find(realm_id, key)
+                        .map(|entry| entry.memtable_value()));
                 }
                 let block = body.fetch_block(bi, self.sst_number)?;
                 Ok(block
-                    .entries
-                    .binary_search_by(cmp)
-                    .ok()
-                    .map(|idx| block.entries[idx].1.clone()))
+                    .block
+                    .find(realm_id, key)
+                    .map(|entry| entry.memtable_value()))
             }
         }
     }
@@ -1392,7 +1589,11 @@ impl SstReader {
         start_key: &[u8],
         end_key: &[u8],
     ) -> Result<Vec<(Vec<u8>, MemtableValue)>, StorageError> {
-        self.range_scan_inner(realm_id, start_key, end_key, |v| v.clone())
+        self.range_scan_inner(realm_id, start_key, end_key, |v| {
+            v.map_or(MemtableValue::Tombstone, |data| {
+                MemtableValue::Data(data.to_vec())
+            })
+        })
     }
 
     /// Key-only range scan — like [`range_scan`] but returns `(key, is_alive)`
@@ -1403,19 +1604,18 @@ impl SstReader {
         start_key: &[u8],
         end_key: &[u8],
     ) -> Result<Vec<(Vec<u8>, bool)>, StorageError> {
-        self.range_scan_inner(realm_id, start_key, end_key, |v| {
-            matches!(v, MemtableValue::Data(_))
-        })
+        self.range_scan_inner(realm_id, start_key, end_key, |v| v.is_some())
     }
 
     /// Shared body of [`range_scan`]/[`range_scan_keys`]: prune, locate the
-    /// `[start, end)` window, and project each in-range value with `project`.
+    /// `[start, end)` window, and project each in-range value (`None` for a
+    /// tombstone) with `project`.
     fn range_scan_inner<T>(
         &self,
         realm_id: &RealmId,
         start_key: &[u8],
         end_key: &[u8],
-        project: impl Fn(&MemtableValue) -> T,
+        project: impl Fn(Option<&[u8]>) -> T,
     ) -> Result<Vec<(Vec<u8>, T)>, StorageError> {
         // A reversed window would index the eager body as `entries[lo..hi]`
         // with `lo > hi`, which panics and — under `panic=abort` — takes the
@@ -1437,7 +1637,7 @@ impl SstReader {
                 let hi = entries.partition_point(|(k, _)| k < &end);
                 Ok(entries[lo..hi]
                     .iter()
-                    .map(|(k, v)| (k.key().to_vec(), project(v)))
+                    .map(|(k, v)| (k.key().to_vec(), project(value_view(v))))
                     .collect())
             }
             SstBody::Blocked(body) => {
@@ -1452,9 +1652,10 @@ impl SstReader {
                         break;
                     }
                     let block = body.fetch_block(bi, self.sst_number)?;
-                    for (k, v) in &block.entries {
-                        if k >= &start && k < &end {
-                            out.push((k.key().to_vec(), project(v)));
+                    for entry in block.block.iter() {
+                        if entry.cmp_composite(&start).is_ge() && entry.cmp_composite(&end).is_lt()
+                        {
+                            out.push((entry.key().to_vec(), project(entry.value())));
                         }
                     }
                     bi += 1;
@@ -1537,7 +1738,7 @@ impl SstReader {
                 };
                 blocked.load_block()?;
                 if let Some(block) = &blocked.block {
-                    blocked.pos = block.entries.partition_point(|(k, _)| k < &start);
+                    blocked.pos = block.block.lower_bound(start.realm_id(), start.key());
                 }
                 blocked.settle()?;
                 Ok(SstKeyCursor::Blocked(blocked))
@@ -1670,85 +1871,10 @@ impl SstReader {
         let cap = (expected_count.unwrap_or(0) as usize).min(data.len() / SST_MIN_ENTRY_BYTES);
         let mut entries = Vec::with_capacity(cap);
         let mut pos = 0;
-
         while pos < data.len() {
-            if pos >= data.len() {
-                return Err(StorageError::InvalidSstFormat {
-                    reason: "truncated entry: missing type byte".to_string(),
-                });
-            }
-            let entry_type = data[pos];
-            pos += 1;
-
-            // Realm UUID (16 bytes)
-            if pos + 16 > data.len() {
-                return Err(StorageError::InvalidSstFormat {
-                    reason: "truncated entry: missing realm UUID".to_string(),
-                });
-            }
-            let uuid_bytes: [u8; 16] =
-                data[pos..pos + 16]
-                    .try_into()
-                    .map_err(|_| StorageError::InvalidSstFormat {
-                        reason: "invalid UUID bytes".to_string(),
-                    })?;
-            let realm_id = RealmId::new(Uuid::from_bytes(uuid_bytes));
-            pos += 16;
-
-            // Key length + key data
-            if pos + 4 > data.len() {
-                return Err(StorageError::InvalidSstFormat {
-                    reason: "truncated entry: missing key length".to_string(),
-                });
-            }
-            let key_len = u32::from_le_bytes(data[pos..pos + 4].try_into().map_err(|_| {
-                StorageError::InvalidSstFormat {
-                    reason: "invalid key length bytes".to_string(),
-                }
-            })?) as usize;
-            pos += 4;
-
-            if pos + key_len > data.len() {
-                return Err(StorageError::InvalidSstFormat {
-                    reason: "truncated entry: missing key data".to_string(),
-                });
-            }
-            let key = data[pos..pos + key_len].to_vec();
-            pos += key_len;
-
-            // Value length + value data
-            if pos + 4 > data.len() {
-                return Err(StorageError::InvalidSstFormat {
-                    reason: "truncated entry: missing value length".to_string(),
-                });
-            }
-            let val_len = u32::from_le_bytes(data[pos..pos + 4].try_into().map_err(|_| {
-                StorageError::InvalidSstFormat {
-                    reason: "invalid value length bytes".to_string(),
-                }
-            })?) as usize;
-            pos += 4;
-
-            if pos + val_len > data.len() {
-                return Err(StorageError::InvalidSstFormat {
-                    reason: "truncated entry: missing value data".to_string(),
-                });
-            }
-            let value_data = data[pos..pos + val_len].to_vec();
-            pos += val_len;
-
-            let composite_key = CompositeKey::new(realm_id, key);
-            let value = match entry_type {
-                0x00 => MemtableValue::Data(value_data),
-                0x01 => MemtableValue::Tombstone,
-                other => {
-                    return Err(StorageError::InvalidSstFormat {
-                        reason: format!("unknown entry type: {other:#x}"),
-                    })
-                }
-            };
-
-            entries.push((composite_key, value));
+            let (entry, next) = read_entry(data, pos)?;
+            entries.push(entry.into_owned());
+            pos = next;
         }
 
         if let Some(expected_count) = expected_count {
@@ -1808,7 +1934,7 @@ impl<'a> SstCursor<'a> {
                     let block =
                         body.decode_block_uncached(self.next_block, self.reader.sst_number)?;
                     self.next_block += 1;
-                    self.buf.extend(block);
+                    self.buf.extend(block.iter().map(EntryRef::into_owned));
                 }
             }
         }
@@ -2091,6 +2217,65 @@ mod tests {
         let kek_id = [0x42u8; encryption::KEK_ID_SIZE];
         let enc_header = encryption::wrap_dek(&dek, &kek, kek_id).expect("wrap");
         (dek, enc_header)
+    }
+
+    /// A data block searches its plaintext in place, so its entries MUST sort
+    /// exactly as `CompositeKey` sorts: realm first, then key bytes. Realms
+    /// that differ in their first or last byte, and keys that are prefixes of
+    /// each other, are the cases a wrong comparison gets wrong.
+    #[test]
+    fn data_block_entries_sort_and_search_as_composite_keys() {
+        let realms = [
+            RealmId::new(Uuid::from_bytes([0x00; 16])),
+            RealmId::new(Uuid::from_bytes([
+                0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff,
+            ])),
+            RealmId::new(Uuid::from_bytes([0x80; 16])),
+            RealmId::new(Uuid::from_bytes([0xff; 16])),
+        ];
+        let keys: [&[u8]; 5] = [b"", b"a", b"a\x00", b"ab", b"b"];
+        let mut entries: Vec<(CompositeKey, MemtableValue)> = realms
+            .iter()
+            .flat_map(|realm| {
+                keys.iter().enumerate().map(move |(i, key)| {
+                    let value = if i % 2 == 0 {
+                        MemtableValue::Data(key.to_vec())
+                    } else {
+                        MemtableValue::Tombstone
+                    };
+                    (CompositeKey::new(realm.clone(), key.to_vec()), value)
+                })
+            })
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        let block = DataBlock::from_entries(&entries);
+
+        assert_eq!(block.len(), entries.len());
+        for (i, (key, value)) in entries.iter().enumerate() {
+            let entry = block.entry(i).expect("entry");
+            assert_eq!(
+                entry.into_owned(),
+                (key.clone(), value.clone()),
+                "entry {i}"
+            );
+            for (other, _) in &entries {
+                assert_eq!(
+                    entry.cmp_composite(other),
+                    key.cmp(other),
+                    "{key:?} against {other:?}"
+                );
+            }
+            assert_eq!(block.lower_bound(key.realm_id(), key.key()), i);
+            assert_eq!(
+                block
+                    .find(key.realm_id(), key.key())
+                    .map(|e| e.memtable_value()),
+                Some(value.clone())
+            );
+        }
+        let absent = RealmId::new(Uuid::from_bytes([0x40; 16]));
+        assert!(block.find(&absent, b"a").is_none());
+        assert_eq!(block.lower_bound(&absent, b"a"), 2 * keys.len());
     }
 
     #[test]

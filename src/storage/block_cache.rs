@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::core::EpochCell;
-use crate::storage::memtable::{CompositeKey, MemtableValue};
+use crate::storage::sst::DataBlock;
 
 /// Number of independent shards. A power of two so the index mask is a cheap
 /// bitwise AND.
@@ -47,24 +47,42 @@ pub(crate) struct BlockId {
     pub block_index: u32,
 }
 
-/// A decrypted, parsed SST data block held in the cache.
+/// A decrypted SST data block held in the cache.
 pub(crate) struct CachedBlock {
-    /// Entries decoded from the block plaintext, sorted by `CompositeKey`.
-    pub entries: Vec<(CompositeKey, MemtableValue)>,
-    /// Plaintext byte weight used for cache-budget accounting.
+    /// The block's plaintext and entry offsets.
+    pub block: DataBlock,
+    /// The heap this block holds while it is cached, charged against the
+    /// budget: its buffers plus [`ENTRY_OVERHEAD`].
     pub weight: usize,
     /// CLOCK reference bit — set on every cache hit (lock-free) and cleared by
     /// the eviction sweep. Lets hits avoid taking the shard lock.
     referenced: AtomicBool,
 }
 
+/// The heap the cache holds for each block besides the block's buffers: the
+/// `Arc` allocation of the [`CachedBlock`], its slot in the shard map, and its
+/// place in the CLOCK queue.
+const ENTRY_OVERHEAD: usize = 2 * std::mem::size_of::<usize>()
+    + std::mem::size_of::<CachedBlock>()
+    + std::mem::size_of::<(BlockId, Arc<CachedBlock>)>()
+    + std::mem::size_of::<BlockId>();
+
 impl CachedBlock {
-    /// Builds a cache entry from decoded block entries, weighted by the block's
-    /// decrypted plaintext length.
-    pub(crate) fn new(entries: Vec<(CompositeKey, MemtableValue)>, plaintext_len: usize) -> Self {
+    /// Builds a cache entry, weighted by the heap the block holds (#445).
+    pub(crate) fn new(block: DataBlock) -> Self {
         Self {
-            entries,
-            weight: plaintext_len,
+            weight: block.heap_bytes() + ENTRY_OVERHEAD,
+            block,
+            referenced: AtomicBool::new(true),
+        }
+    }
+
+    /// Builds a cache entry with a chosen weight, for tests of eviction.
+    #[cfg(test)]
+    fn with_weight(block: DataBlock, weight: usize) -> Self {
+        Self {
+            block,
+            weight,
             referenced: AtomicBool::new(true),
         }
     }
@@ -87,7 +105,7 @@ struct Shard {
 struct ShardInner {
     /// CLOCK hand order of resident block ids.
     clock: VecDeque<BlockId>,
-    /// Current resident weight (sum of cached block plaintext lengths).
+    /// Current resident weight (the sum of the cached blocks' weights).
     bytes: usize,
 }
 
@@ -202,12 +220,37 @@ mod tests {
     use super::*;
     use crate::core::RealmId;
 
+    use crate::storage::memtable::{CompositeKey, MemtableValue};
+
     fn block(realm: &RealmId, key: &[u8], weight: usize) -> Arc<CachedBlock> {
         let entries = vec![(
             CompositeKey::new(realm.clone(), key.to_vec()),
             MemtableValue::Data(vec![0u8; 8]),
         )];
-        Arc::new(CachedBlock::new(entries, weight))
+        Arc::new(CachedBlock::with_weight(
+            DataBlock::from_entries(&entries),
+            weight,
+        ))
+    }
+
+    #[test]
+    fn a_block_is_charged_at_least_the_heap_of_its_buffers() {
+        let realm = RealmId::generate();
+        let entries: Vec<_> = (0..30)
+            .map(|i| {
+                (
+                    CompositeKey::new(realm.clone(), format!("key-{i:04}").into_bytes()),
+                    MemtableValue::Data(vec![b'v'; 64]),
+                )
+            })
+            .collect();
+        let block = DataBlock::from_entries(&entries);
+        let heap = block.heap_bytes();
+        assert!(
+            heap >= 30 * (25 + 8 + 64),
+            "the plaintext alone is that long"
+        );
+        assert!(CachedBlock::new(block).weight > heap);
     }
 
     #[test]
@@ -298,8 +341,8 @@ mod tests {
                             if let Some(block) = cache.get(*id) {
                                 hits += 1;
                                 assert_eq!(
-                                    block.entries[0].0.key(),
-                                    key_of(*id).as_slice(),
+                                    block.block.entry(0).map(|e| e.key().to_vec()),
+                                    Some(key_of(*id)),
                                     "a hit returned another id's block"
                                 );
                             }
@@ -337,7 +380,9 @@ mod tests {
         let last = ids[IDS - 1];
         cache.insert(last, block(&realm, &key_of(last), WEIGHT));
         assert_eq!(
-            cache.get(last).map(|b| b.entries[0].0.key().to_vec()),
+            cache
+                .get(last)
+                .and_then(|b| b.block.entry(0).map(|e| e.key().to_vec())),
             Some(key_of(last)),
             "an insert after the storm did not publish"
         );
