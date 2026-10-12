@@ -366,6 +366,16 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   inside `assertion`, is refused instead of being read with the field dropped.
 
 ### Fixed
+- **The memory of open SST files no longer grows with the stored data** (#445). Each open SST
+  file kept its whole block index and Bloom filter in memory: about 2.7 % of the stored bytes
+  for Hearth's small rows. So memory grew with every row kept, for as long as rows are kept:
+  about 21 MiB an hour at 120 sign-in journeys a second, and audit events stay for 90 days by
+  default. A v4 file keeps only its partition list in memory, about 0.01 % of its bytes. Its
+  index and filter blocks load through the block cache (`storage.block_cache_bytes`), which
+  gives them priority over data blocks. Each filter is now sized from the rows it holds: compaction sized
+  its output's filter for 25-byte rows, about six times too large. A compaction holds one
+  partition of its output's index and filter at a time, not the whole of them. The block cache
+  also has more shards for a larger budget, so a cache miss copies a smaller map.
 - **The block cache now holds no more memory than `storage.block_cache_bytes`** (#445). The
   cache counted each block at its decrypted size, but it kept the block's rows as separate key
   and value buffers, which take about 1.7 times as much for small rows. A 12-hour soak with a
@@ -561,6 +571,11 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   short form was refused as "invalid status".
 
 ### Changed
+- **New SST files use format v4** (#445). The block index and the Bloom filter of each file are
+  now stored in partitions of about 1 MiB of data, and they load through the block cache like
+  data blocks. Hearth still reads v3 files, and a compaction rewrites them as v4. A Hearth from
+  before this change refuses a v4 file at startup ("invalid magic bytes"): to roll back, restore
+  the pre-upgrade backup, as the upgrade guide's rollback procedure says.
 - **User creation answers `503` + `Retry-After` under overload** (#446). `POST /admin/users`,
   `POST /users`, `POST /admin/users/bulk` (`create`), `POST /admin/users/import`,
   `POST /scim/v2/Users`, self-registration and the admin console's create form and CSV imports
