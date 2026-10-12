@@ -1587,6 +1587,16 @@ impl SstReader {
         self.sst_number
     }
 
+    /// The id that keys this reader's blocks in the block cache; every open of
+    /// a file gets a new one. `None` for a v1/v2 reader, which has no blocks.
+    #[cfg(test)]
+    pub(crate) fn reader_id(&self) -> Option<u64> {
+        match &self.body {
+            SstBody::Eager(_) => None,
+            SstBody::Blocked(body) => Some(body.reader_id),
+        }
+    }
+
     /// Parses a V2 plaintext section: bloom filter preamble followed by entries.
     ///
     /// V2 layout:
