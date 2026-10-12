@@ -153,7 +153,7 @@ pub struct StorageConfig {
     /// startup fails if the variable is absent, and the file is never read.
     pub dev_mode: bool,
     /// Total byte budget for the process-wide decrypted-block cache shared by
-    /// all v3 SST readers (HEA-1914). Bounds decrypted cold-tier residency
+    /// all v3/v4 SST readers (HEA-1914). Bounds decrypted cold-tier residency
     /// independent of corpus size. Default 256 MiB.
     pub block_cache_bytes: usize,
 }
@@ -436,7 +436,7 @@ pub struct EmbeddedStorageEngine {
     /// internal to avoid the global-registry cross-test interference that
     /// process-wide counters suffer under parallel `nextest`.
     compaction_records_written: Arc<std::sync::atomic::AtomicU64>,
-    /// Process-wide, byte-bounded cache of decrypted v3 SST blocks, shared by
+    /// Process-wide, byte-bounded cache of decrypted v3/v4 SST blocks, shared by
     /// every reader so decrypted cold-tier residency is `O(cache_cap)`, not
     /// `O(corpus)` (HEA-1914).
     block_cache: Arc<crate::storage::block_cache::BlockCache>,
@@ -639,7 +639,7 @@ impl EmbeddedStorageEngine {
             .collect();
         sst_paths.sort_by_key(|(_, num)| std::cmp::Reverse(*num)); // newest first
 
-        // Shared, byte-bounded decrypted-block cache for all v3 SST readers.
+        // Shared, byte-bounded decrypted-block cache for all v3/v4 SST readers.
         let block_cache = Arc::new(crate::storage::block_cache::BlockCache::new(
             config.block_cache_bytes,
         ));
@@ -753,7 +753,6 @@ impl EmbeddedStorageEngine {
                             }
                             Ok(())
                         },
-                        map.len(),
                         &*cb_fs,
                         sst_num,
                         &dek,
@@ -971,8 +970,7 @@ impl EmbeddedStorageEngine {
             // crossbeam_skiplist Entry guard's key/value refs are only valid while
             // the guard is alive, so we push them into the writer's `sink` per
             // entry rather than materialising an owned Vec of the whole map first
-            // (HEA-1908). The parked map is immutable during the flush, so
-            // `map.len()` is a stable, exact bloom-filter size.
+            // (HEA-1908).
             SstWriter::write_sst_with_fs(
                 &sst_path,
                 |sink| {
@@ -981,7 +979,6 @@ impl EmbeddedStorageEngine {
                     }
                     Ok(())
                 },
-                map.len(),
                 &*self.fs,
                 sst_num,
                 &dek,

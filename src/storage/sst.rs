@@ -38,10 +38,42 @@
 //!     [M B] serialized (CompositeKey, MemtableValue) entries (same as V1)
 //! ```
 //!
-//! New SST writes always produce V2. V1 SSTs are still readable (they load
-//! without a bloom filter; `might_contain` returns `true` for every query).
+//! V1 SSTs are still readable (they load without a bloom filter;
+//! `might_contain` returns `true` for every query).
 //!
-//! Per-file DEKs are randomly generated. The data nonce is derived from
+//! ### V3 — block-structured (magic `b"HSS3"`, HEA-1914)
+//!
+//! Data blocks of ~4 KiB, each sealed on its own, then one encrypted footer
+//! that holds the whole block index and the whole Bloom filter. A reader keeps
+//! that footer on the heap while the file is open. Still readable; no longer
+//! written.
+//!
+//! ### V4 — partitioned index and filter (magic `b"HSS4"`, #445)
+//!
+//! ```text
+//! BASE HEADER (12 bytes): magic, entry_count (u32 LE), CRC32 of the footer ciphertext
+//! ENCRYPTION HEADER (76 bytes): as V2
+//! BLOCKS, for each partition in key order:
+//!   its data blocks          serialized entries, ~4 KiB of plaintext each
+//!   its filter block         [1B k][Bloom bits] for the keys of its data blocks
+//!   its index block          per data block: first key + block handle
+//! FOOTER (encrypted):
+//!   [8B]  entry_count (u64 LE), authenticated
+//!   [4B]  partition count, then per partition:
+//!         first key, index block handle, [1B has_filter], filter block handle
+//!   [1B]  has_range, then the min and max keys
+//! TRAILER (12 bytes): footer_offset (u64 LE) + footer_ciphertext_len (u32 LE)
+//! ```
+//!
+//! A block handle is `[8B file_offset][4B ciphertext_len][4B plaintext_len]
+//! [4B ordinal]`. Every block is sealed with `block_nonce(sst_number, ordinal)`
+//! as nonce and AAD, where the ordinal is the block's position in write order,
+//! so a block cannot be moved to another position or file. A reader keeps only
+//! the footer's partition list on the heap. Filter and index blocks load
+//! through the block cache like data blocks, so the heap of an open file does
+//! not grow with the rows it holds.
+//!
+//! Per-file DEKs are randomly generated. The V1/V2 data nonce is derived from
 //! the SST file number via `counter_nonce()`.
 
 use std::path::Path;
@@ -67,8 +99,13 @@ const SST_MAGIC: &[u8; 4] = b"HSST";
 const SST_MAGIC_V2: &[u8; 4] = b"HSS2";
 
 /// SST format V3 magic bytes — block-structured, per-block AEAD, encrypted
-/// footer index (HEA-1914). New SSTs are written v3; V1/V2 stay readable.
+/// footer index (HEA-1914). Still readable; no longer written.
 const SST_MAGIC_V3: &[u8; 4] = b"HSS3";
+
+/// SST format V4 magic bytes — V3's blocks, with the block index and the Bloom
+/// filter split into partitions that load through the block cache (#445). New
+/// SSTs are written v4.
+const SST_MAGIC_V4: &[u8; 4] = b"HSS4";
 
 /// Size of the base header: magic(4) + entry_count(4) + crc32(4).
 const BASE_HEADER_SIZE: usize = 12;
@@ -76,19 +113,25 @@ const BASE_HEADER_SIZE: usize = 12;
 /// Total header size: base(12) + encryption(76).
 pub(crate) const TOTAL_HEADER_SIZE: usize = BASE_HEADER_SIZE + encryption::ENCRYPTION_HEADER_SIZE;
 
-/// Target plaintext size of a v3 data block, in bytes. Blocks never split an
+/// Target plaintext size of a data block, in bytes. Blocks never split an
 /// entry, so an oversized single entry produces a larger block. ~4 KiB keeps a
 /// decrypted block's heap footprint small while amortising per-block AEAD cost.
-const V3_BLOCK_TARGET_BYTES: usize = 4096;
+const BLOCK_TARGET_BYTES: usize = 4096;
 
-/// Fixed v3 trailer written at the very end of the file:
+/// Target plaintext size of a v4 index block. One index entry is about 60
+/// bytes for Hearth's keys, so a partition covers about 270 data blocks, about
+/// 1 MiB of data. The footer keeps one entry per partition on the heap: about
+/// 0.01 % of the data, against about 2.4 % for v3's whole index and filter.
+const INDEX_PARTITION_TARGET_BYTES: usize = 16 * 1024;
+
+/// Fixed trailer written at the very end of a v3 or v4 file:
 /// `[8B footer_offset (u64 LE)] [4B footer_ciphertext_len (u32 LE)]`.
-const V3_TRAILER_SIZE: usize = 12;
+const TRAILER_SIZE: usize = 12;
 
-/// Sealed-block bytes a [`V3BodyWriter`] collects before one write to the
+/// Sealed-block bytes a [`V4BodyWriter`] collects before one write to the
 /// file. Bounds what the writer holds while it keeps write calls few: one call
 /// per ~64 blocks instead of one per block.
-const V3_WRITE_CHUNK_BYTES: usize = 256 * 1024;
+const WRITE_CHUNK_BYTES: usize = 256 * 1024;
 
 /// Minimum byte length of a serialized entry: type(1) + realm(16) + key_len(4)
 /// + val_len(4), with an empty key and an empty/tombstone value.
@@ -132,7 +175,7 @@ struct BlockIndexEntry {
 /// A false positive causes one unnecessary SST binary search — a performance
 /// cost, never a correctness error.
 #[derive(Debug)]
-struct BloomFilter {
+pub(crate) struct BloomFilter {
     /// Bit array — each position maps to one double-hash probe position.
     bits: Vec<u8>,
     /// Number of hash functions (probe positions) per key insertion / test.
@@ -175,9 +218,61 @@ impl BloomFilter {
         }
     }
 
+    /// A filter sized for exactly the keys whose [`bloom_hashes`] are
+    /// `hashes`, with every one of them inserted. A v4 writer keeps the hashes
+    /// of one partition and builds its filter when the partition is sealed, so
+    /// the filter is sized from the real row count (#445).
+    fn from_hashes(hashes: &[(u64, u64)]) -> Self {
+        let mut filter = Self::empty_for(hashes.len());
+        for &(h1, h2) in hashes {
+            filter.insert_hashes(h1, h2);
+        }
+        filter
+    }
+
+    /// A small filter, for tests of the block cache.
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self::empty_for(8)
+    }
+
+    /// The plaintext of a v4 filter block: `[1B k][bits]`.
+    fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(1 + self.bits.len());
+        out.push(self.k);
+        out.extend_from_slice(&self.bits);
+        out
+    }
+
+    /// Reads a v4 filter block's plaintext.
+    fn decode(plaintext: &[u8]) -> Result<Self, StorageError> {
+        let (&k, bits) = plaintext
+            .split_first()
+            .ok_or_else(|| StorageError::InvalidSstFormat {
+                reason: "v4 filter block is empty".to_string(),
+            })?;
+        Ok(Self {
+            bits: bits.to_vec(),
+            k,
+        })
+    }
+
+    /// The heap the filter's bits hold.
+    fn heap_bytes(&self) -> usize {
+        self.bits.capacity()
+    }
+
     /// Sets k bit positions for the given `(realm_id, key)` pair.
     fn insert(&mut self, realm_id: &RealmId, key: &[u8]) {
         let (h1, h2) = bloom_hashes(realm_id, key);
+        self.insert_hashes(h1, h2);
+    }
+
+    /// Sets the k bit positions of a key whose [`bloom_hashes`] are `(h1, h2)`.
+    fn insert_hashes(&mut self, h1: u64, h2: u64) {
+        if self.bits.is_empty() {
+            return;
+        }
         let m = (self.bits.len() * 8) as u64;
         for i in 0..u64::from(self.k) {
             let bit = h1.wrapping_add(i.wrapping_mul(h2)) % m;
@@ -480,6 +575,226 @@ impl DataBlock {
     }
 }
 
+// ── Block handles, index blocks and cached blocks (v4) ────────────────────────
+
+/// Where a sealed block sits in its file, and the ordinal it was sealed under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BlockHandle {
+    /// Byte offset of the block's ciphertext from the start of the file.
+    file_offset: u64,
+    /// Length of the block's ciphertext, the 16-byte GCM tag included.
+    ciphertext_len: u32,
+    /// Length of the block's plaintext.
+    plaintext_len: u32,
+    /// The block's position in write order. Its AEAD nonce and AAD are
+    /// `block_nonce(sst_number, ordinal)`, and it keys the block in the cache.
+    /// A v3 file's data blocks have their block index as ordinal.
+    ordinal: u32,
+}
+
+/// Serialized length of a [`BlockHandle`].
+const HANDLE_BYTES: usize = 8 + 4 + 4 + 4;
+
+impl BlockHandle {
+    fn write(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&self.file_offset.to_le_bytes());
+        buf.extend_from_slice(&self.ciphertext_len.to_le_bytes());
+        buf.extend_from_slice(&self.plaintext_len.to_le_bytes());
+        buf.extend_from_slice(&self.ordinal.to_le_bytes());
+    }
+
+    /// Reads a handle at `pos`, or `None` if `data` is too short.
+    fn read(data: &[u8], pos: usize) -> Option<Self> {
+        let bytes = data.get(pos..pos.checked_add(HANDLE_BYTES)?)?;
+        let u32_at = |at: usize| bytes[at..at + 4].try_into().ok().map(u32::from_le_bytes);
+        Some(Self {
+            file_offset: u64::from_le_bytes(bytes[0..8].try_into().ok()?),
+            ciphertext_len: u32_at(8)?,
+            plaintext_len: u32_at(12)?,
+            ordinal: u32_at(16)?,
+        })
+    }
+}
+
+/// One entry of an [`IndexBlock`]: the first key of a data block, borrowed
+/// from the index block's plaintext, and the data block's handle.
+#[derive(Clone, Copy)]
+struct IndexEntryRef<'a> {
+    realm: &'a [u8; 16],
+    key: &'a [u8],
+    handle: BlockHandle,
+}
+
+impl IndexEntryRef<'_> {
+    /// Orders this entry's first key against `(realm, key)` as
+    /// [`CompositeKey`] orders.
+    fn cmp_to(&self, realm: &RealmId, key: &[u8]) -> std::cmp::Ordering {
+        self.realm
+            .cmp(realm.as_uuid().as_bytes())
+            .then_with(|| self.key.cmp(key))
+    }
+
+    /// Orders this entry's first key against `key`.
+    fn cmp_composite(&self, key: &CompositeKey) -> std::cmp::Ordering {
+        self.cmp_to(key.realm_id(), key.key())
+    }
+}
+
+/// Reads the index entry at `pos`: a footer-encoded key, then a handle.
+fn read_index_entry(data: &[u8], pos: usize) -> Result<(IndexEntryRef<'_>, usize), StorageError> {
+    let truncated = || StorageError::InvalidSstFormat {
+        reason: "v4 index block: truncated entry".to_string(),
+    };
+    let realm: &[u8; 16] = data
+        .get(pos..pos + 16)
+        .and_then(|b| b.try_into().ok())
+        .ok_or_else(truncated)?;
+    let key_len = data
+        .get(pos + 16..pos + 20)
+        .and_then(|b| b.try_into().ok())
+        .map(|b| u32::from_le_bytes(b) as usize)
+        .ok_or_else(truncated)?;
+    let key_start = pos + 20;
+    let key_end = key_start.checked_add(key_len).ok_or_else(truncated)?;
+    let key = data.get(key_start..key_end).ok_or_else(truncated)?;
+    let handle = BlockHandle::read(data, key_end).ok_or_else(truncated)?;
+    Ok((IndexEntryRef { realm, key, handle }, key_end + HANDLE_BYTES))
+}
+
+/// A decrypted index block: for each data block of one partition, its first
+/// key and its handle. Like a [`DataBlock`], it keeps its plaintext and one
+/// offset per entry.
+pub(crate) struct IndexBlock {
+    plaintext: Vec<u8>,
+    offsets: Vec<u32>,
+}
+
+impl IndexBlock {
+    /// Validates every entry and records where each one starts.
+    fn decode(plaintext: Vec<u8>) -> Result<Self, StorageError> {
+        let mut offsets = Vec::new();
+        let mut pos = 0;
+        while pos < plaintext.len() {
+            offsets.push(
+                u32::try_from(pos).map_err(|_| StorageError::InvalidSstFormat {
+                    reason: "v4 index block larger than 4 GiB".to_string(),
+                })?,
+            );
+            pos = read_index_entry(&plaintext, pos)?.1;
+        }
+        Ok(Self { plaintext, offsets })
+    }
+
+    fn len(&self) -> usize {
+        self.offsets.len()
+    }
+
+    fn entry(&self, index: usize) -> Option<IndexEntryRef<'_>> {
+        let pos = *self.offsets.get(index)? as usize;
+        read_index_entry(&self.plaintext, pos)
+            .ok()
+            .map(|(entry, _)| entry)
+    }
+
+    /// The position of the data block that may hold `(realm, key)`: the last
+    /// one whose first key is at or before it. `None` if the key sorts before
+    /// every data block of this index.
+    fn position_for(&self, realm: &RealmId, key: &[u8]) -> Option<usize> {
+        let (mut lo, mut hi) = (0, self.len());
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            match self.entry(mid) {
+                Some(entry) if entry.cmp_to(realm, key).is_le() => lo = mid + 1,
+                _ => hi = mid,
+            }
+        }
+        lo.checked_sub(1)
+    }
+
+    fn heap_bytes(&self) -> usize {
+        self.plaintext.capacity() + self.offsets.capacity() * std::mem::size_of::<u32>()
+    }
+}
+
+/// The kind of a block in a v4 file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockKind {
+    Data,
+    Index,
+    Filter,
+}
+
+/// A decrypted block of an SST file, as the block cache holds it.
+pub(crate) enum Block {
+    /// Rows.
+    Data(DataBlock),
+    /// One partition's block index.
+    Index(IndexBlock),
+    /// One partition's Bloom filter.
+    Filter(BloomFilter),
+}
+
+impl Block {
+    /// Decodes a decrypted block of the given kind.
+    fn decode(kind: BlockKind, plaintext: Vec<u8>) -> Result<Self, StorageError> {
+        Ok(match kind {
+            BlockKind::Data => Self::Data(DataBlock::decode(plaintext)?),
+            BlockKind::Index => Self::Index(IndexBlock::decode(plaintext)?),
+            BlockKind::Filter => Self::Filter(BloomFilter::decode(&plaintext)?),
+        })
+    }
+
+    fn kind(&self) -> BlockKind {
+        match self {
+            Self::Data(_) => BlockKind::Data,
+            Self::Index(_) => BlockKind::Index,
+            Self::Filter(_) => BlockKind::Filter,
+        }
+    }
+
+    /// The heap the block holds.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        match self {
+            Self::Data(block) => block.heap_bytes(),
+            Self::Index(block) => block.heap_bytes(),
+            Self::Filter(filter) => filter.heap_bytes(),
+        }
+    }
+
+    /// Whether the block is part of an index or a filter: every lookup in its
+    /// range reads it, so the cache gives it more chances than a data block.
+    pub(crate) fn is_metadata(&self) -> bool {
+        !matches!(self, Self::Data(_))
+    }
+
+    fn wrong_kind() -> StorageError {
+        StorageError::InvalidSstFormat {
+            reason: "SST block of the wrong kind".to_string(),
+        }
+    }
+
+    pub(crate) fn data(&self) -> Result<&DataBlock, StorageError> {
+        match self {
+            Self::Data(block) => Ok(block),
+            _ => Err(Self::wrong_kind()),
+        }
+    }
+
+    fn index(&self) -> Result<&IndexBlock, StorageError> {
+        match self {
+            Self::Index(block) => Ok(block),
+            _ => Err(Self::wrong_kind()),
+        }
+    }
+
+    fn filter(&self) -> Result<&BloomFilter, StorageError> {
+        match self {
+            Self::Filter(filter) => Ok(filter),
+            _ => Err(Self::wrong_kind()),
+        }
+    }
+}
+
 // ── SST metadata ──────────────────────────────────────────────────────────────
 
 /// Metadata about a written SST file.
@@ -514,7 +829,6 @@ impl SstWriter {
                 }
                 Ok(())
             },
-            entries.len(),
             &RealFs,
             sst_number,
             dek,
@@ -526,10 +840,8 @@ impl SstWriter {
     /// using a custom filesystem implementation.
     ///
     /// `feed` is invoked once with a `sink` and MUST call `sink(key, value)` for
-    /// every entry in ascending `CompositeKey` order; `entry_count` MUST be the
-    /// number of entries it will emit (it sizes the bloom filter up front). The
-    /// bloom filter and the serialized payload are produced in a **single pass** as
-    /// entries arrive.
+    /// every entry in ascending `CompositeKey` order. The Bloom filters and the
+    /// serialized payload are produced in a **single pass** as entries arrive.
     ///
     /// Inverting control (a `sink` the caller pushes into, rather than an iterator
     /// the writer pulls) is what lets a memtable flush stream directly off its
@@ -540,12 +852,11 @@ impl SstWriter {
     /// own `sink` call and nothing accumulates. Previously both flush callsites
     /// materialised the entire parked map into an owned `Vec` first, duplicating
     /// every key and value for the whole encrypt+`fsync`. The writer side holds
-    /// no copy either: [`V3BodyWriter`] writes each sealed block to the staging
+    /// no copy either: [`V4BodyWriter`] writes each sealed block to the staging
     /// file as it goes (#445).
     pub(crate) fn write_sst_with_fs<Feed>(
         path: &Path,
         feed: Feed,
-        entry_count: usize,
         fs: &dyn Fs,
         sst_number: u64,
         dek: &DataEncryptionKey,
@@ -565,7 +876,7 @@ impl SstWriter {
         let staging_path = staging_path_for(path);
         let mut file = fs.create(&staging_path)?;
 
-        let mut body = V3BodyWriter::start(&mut *file, enc_header, entry_count, sst_number, dek)?;
+        let mut body = V4BodyWriter::start(&mut *file, enc_header, sst_number, dek)?;
         feed(&mut |key, value| body.push(key, value))?;
         let metadata = body.finish()?;
         file.sync_all()?;
@@ -614,23 +925,18 @@ impl SstWriter {
         }
     }
 
-    /// Writes a v3 SST from an **ordered, streaming** iterator, writing sealed
+    /// Writes a v4 SST from an **ordered, streaming** iterator, writing sealed
     /// blocks to the file as it goes instead of buffering the whole output in
     /// memory (HEA-1922). Peak heap during the write is bounded by
-    /// [`V3BodyWriter`] — `O(#blocks + entries/8)`, not `O(corpus)`. This is what
-    /// lets compaction merge an arbitrarily large corpus past a bounded working
-    /// set.
+    /// [`V4BodyWriter`]: one partition, not `O(corpus)`. This is what lets
+    /// compaction merge an arbitrarily large corpus past a bounded working set.
     ///
-    /// `entries` MUST yield items in ascending `CompositeKey` order.
-    /// `entry_count_hint` sizes the Bloom filter up front; it MAY exceed the
-    /// true post-merge count (e.g. before duplicate/tombstone elimination) —
-    /// an over-estimate only lowers the filter's false-positive rate. Tombstones
+    /// `entries` MUST yield items in ascending `CompositeKey` order. Tombstones
     /// are dropped when `drop_tombstones` is set. The header's `entry_count` is
     /// the *actual* number written, matching the eager writer.
     fn write_sst_streaming_with_fs<I>(
         path: &Path,
         entries: I,
-        entry_count_hint: usize,
         drop_tombstones: bool,
         fs: &dyn Fs,
         sst_number: u64,
@@ -641,8 +947,7 @@ impl SstWriter {
         I: IntoIterator<Item = Result<(CompositeKey, MemtableValue), StorageError>>,
     {
         let mut file = fs.create(path)?;
-        let mut body =
-            V3BodyWriter::start(&mut *file, enc_header, entry_count_hint, sst_number, dek)?;
+        let mut body = V4BodyWriter::start(&mut *file, enc_header, sst_number, dek)?;
         for item in entries {
             let (key, value) = item?;
             if drop_tombstones && matches!(value, MemtableValue::Tombstone) {
@@ -663,10 +968,244 @@ impl SstWriter {
     }
 }
 
-/// Writes the body of a v3 SST in one pass. The memtable flush
+/// Writes the body of a v4 SST in one pass. The memtable flush
 /// ([`SstWriter::write_sst_with_fs`]) and compaction
 /// ([`SstWriter::write_sst_streaming_with_fs`]) both use it, so both produce
-/// byte-identical files.
+/// byte-identical files. The module docs give the layout.
+///
+/// Sealed blocks go to the file in chunks of at most [`WRITE_CHUNK_BYTES`].
+/// The writer holds one data block's plaintext, one chunk, one partition's
+/// index entries and key hashes, and the footer's partition list: never the
+/// file, and never the whole block index or Bloom filter (HEA-1922, #445). A
+/// partition's filter is built from the hashes of its own keys when the
+/// partition is sealed, so each filter is sized from the real row count. The
+/// base header is only known at the end, so [`Self::finish`] backfills it with
+/// a seek to offset 0.
+struct V4BodyWriter<'a> {
+    file: &'a mut dyn FsFile,
+    sst_number: u64,
+    dek: &'a DataEncryptionKey,
+    /// File offset of the next sealed block, `pending` included.
+    file_offset: u64,
+    /// Sealed ciphertext not yet written to `file`.
+    pending: Vec<u8>,
+    /// The ordinal the next sealed block gets.
+    next_ordinal: u32,
+    /// Plaintext of the data block being filled.
+    block: Vec<u8>,
+    block_first_key: Option<CompositeKey>,
+    /// Index entries of the partition being filled.
+    partition_index: Vec<u8>,
+    partition_first_key: Option<CompositeKey>,
+    /// Bloom hashes of the keys of the partition being filled.
+    partition_hashes: Vec<(u64, u64)>,
+    /// The footer's partition entries, serialized.
+    partitions: Vec<u8>,
+    partition_count: u32,
+    min_key: Option<CompositeKey>,
+    max_key: Option<CompositeKey>,
+    written: u64,
+}
+
+impl<'a> V4BodyWriter<'a> {
+    /// Reserves the base header and writes the encryption header.
+    fn start(
+        file: &'a mut dyn FsFile,
+        enc_header: &EncryptionHeader,
+        sst_number: u64,
+        dek: &'a DataEncryptionKey,
+    ) -> Result<Self, StorageError> {
+        file.write_all(&[0u8; BASE_HEADER_SIZE])?;
+        file.write_all(&enc_header.to_bytes())?;
+        Ok(Self {
+            file,
+            sst_number,
+            dek,
+            file_offset: TOTAL_HEADER_SIZE as u64,
+            pending: Vec::with_capacity(WRITE_CHUNK_BYTES),
+            next_ordinal: 0,
+            block: Vec::new(),
+            block_first_key: None,
+            partition_index: Vec::new(),
+            partition_first_key: None,
+            partition_hashes: Vec::new(),
+            partitions: Vec::new(),
+            partition_count: 0,
+            min_key: None,
+            max_key: None,
+            written: 0,
+        })
+    }
+
+    /// Adds one entry. Entries MUST arrive in ascending `CompositeKey` order;
+    /// the writer does not re-sort.
+    fn push(&mut self, key: &CompositeKey, value: &MemtableValue) -> Result<(), StorageError> {
+        self.partition_hashes
+            .push(bloom_hashes(key.realm_id(), key.key()));
+        if self.block_first_key.is_none() {
+            self.block_first_key = Some(key.clone());
+        }
+        if self.partition_first_key.is_none() {
+            self.partition_first_key = Some(key.clone());
+        }
+        if self.min_key.is_none() {
+            self.min_key = Some(key.clone());
+        }
+        self.max_key = Some(key.clone());
+        SstWriter::serialize_entry(&mut self.block, key, value);
+        self.written = self.written.saturating_add(1);
+        if self.block.len() >= BLOCK_TARGET_BYTES {
+            self.seal_data_block()?;
+        }
+        Ok(())
+    }
+
+    /// Encrypts `plaintext` as the next block, queues its ciphertext for the
+    /// file and returns its handle.
+    fn seal(&mut self, plaintext: &[u8]) -> Result<BlockHandle, StorageError> {
+        let ordinal = self.next_ordinal;
+        if ordinal == SST_FOOTER_BLOCK_INDEX {
+            return Err(StorageError::InvalidSstFormat {
+                reason: "v4 writer: too many blocks for one file".to_string(),
+            });
+        }
+        let too_large = || StorageError::InvalidSstFormat {
+            reason: "v4 writer: block larger than 4 GiB".to_string(),
+        };
+        let nonce = block_nonce(self.sst_number, ordinal);
+        let ct = encryption::encrypt_section(plaintext, self.dek, &nonce, &nonce)?;
+        let handle = BlockHandle {
+            file_offset: self.file_offset,
+            ciphertext_len: u32::try_from(ct.len()).map_err(|_| too_large())?,
+            plaintext_len: u32::try_from(plaintext.len()).map_err(|_| too_large())?,
+            ordinal,
+        };
+        self.next_ordinal += 1;
+        self.file_offset = self.file_offset.saturating_add(ct.len() as u64);
+        if !self.pending.is_empty() && self.pending.len() + ct.len() > WRITE_CHUNK_BYTES {
+            self.file.write_all(&self.pending)?;
+            self.pending.clear();
+        }
+        self.pending.extend_from_slice(&ct);
+        Ok(handle)
+    }
+
+    /// Seals the data block being filled and adds it to the partition's
+    /// index; seals the partition once its index reaches its target size. A
+    /// no-op on an empty block.
+    fn seal_data_block(&mut self) -> Result<(), StorageError> {
+        if self.block.is_empty() {
+            return Ok(());
+        }
+        let first_key =
+            self.block_first_key
+                .take()
+                .ok_or_else(|| StorageError::InvalidSstFormat {
+                    reason: "v4 writer: non-empty block without a first key".to_string(),
+                })?;
+        let block = std::mem::take(&mut self.block);
+        let handle = self.seal(&block);
+        self.block = block;
+        self.block.clear();
+        write_footer_key(&mut self.partition_index, &first_key);
+        handle?.write(&mut self.partition_index);
+        if self.partition_index.len() >= INDEX_PARTITION_TARGET_BYTES {
+            self.seal_partition()?;
+        }
+        Ok(())
+    }
+
+    /// Seals the partition being filled: its filter block, then its index
+    /// block, then its entry in the footer. A no-op on an empty partition.
+    fn seal_partition(&mut self) -> Result<(), StorageError> {
+        if self.partition_index.is_empty() {
+            return Ok(());
+        }
+        let first_key =
+            self.partition_first_key
+                .take()
+                .ok_or_else(|| StorageError::InvalidSstFormat {
+                    reason: "v4 writer: non-empty partition without a first key".to_string(),
+                })?;
+        let filter = BloomFilter::from_hashes(&self.partition_hashes).encode();
+        self.partition_hashes.clear();
+        let filter_handle = self.seal(&filter)?;
+        let index = std::mem::take(&mut self.partition_index);
+        let index_handle = self.seal(&index);
+        self.partition_index = index;
+        self.partition_index.clear();
+        write_footer_key(&mut self.partitions, &first_key);
+        index_handle?.write(&mut self.partitions);
+        self.partitions.push(1);
+        filter_handle.write(&mut self.partitions);
+        self.partition_count =
+            self.partition_count
+                .checked_add(1)
+                .ok_or_else(|| StorageError::InvalidSstFormat {
+                    reason: "v4 writer: too many partitions for one file".to_string(),
+                })?;
+        Ok(())
+    }
+
+    /// Seals the last block and partition, writes the queued blocks, the
+    /// encrypted footer and the trailer, and backfills the base header. Does
+    /// not sync the file: the caller syncs it before it publishes the file.
+    fn finish(mut self) -> Result<SstMetadata, StorageError> {
+        self.seal_data_block()?;
+        self.seal_partition()?;
+        self.file.write_all(&self.pending)?;
+        self.pending = Vec::new();
+
+        let mut footer = Vec::with_capacity(8 + 4 + self.partitions.len() + 1);
+        footer.extend_from_slice(&self.written.to_le_bytes());
+        footer.extend_from_slice(&self.partition_count.to_le_bytes());
+        footer.extend_from_slice(&self.partitions);
+        match (&self.min_key, &self.max_key) {
+            (Some(mn), Some(mx)) => {
+                footer.push(1);
+                write_footer_key(&mut footer, mn);
+                write_footer_key(&mut footer, mx);
+            }
+            _ => footer.push(0),
+        }
+
+        let footer_nonce = block_nonce(self.sst_number, SST_FOOTER_BLOCK_INDEX);
+        let footer_ct =
+            encryption::encrypt_section(&footer, self.dek, &footer_nonce, &footer_nonce)?;
+        let footer_offset = self.file_offset;
+        let footer_crc = crc32fast::hash(&footer_ct);
+        self.file.write_all(&footer_ct)?;
+
+        // Trailer: footer_offset (u64 LE) + footer_ct_len (u32 LE).
+        self.file.write_all(&footer_offset.to_le_bytes())?;
+        let footer_len =
+            u32::try_from(footer_ct.len()).map_err(|_| StorageError::InvalidSstFormat {
+                reason: "v4 writer: footer larger than 4 GiB".to_string(),
+            })?;
+        self.file.write_all(&footer_len.to_le_bytes())?;
+        let file_size = footer_offset
+            .saturating_add(footer_ct.len() as u64)
+            .saturating_add(TRAILER_SIZE as u64);
+
+        // Backfill the base header now that entry_count and footer_crc are known.
+        // The encryption header written at offset BASE_HEADER_SIZE is untouched.
+        let entry_count = u32::try_from(self.written).unwrap_or(u32::MAX);
+        self.file.seek(std::io::SeekFrom::Start(0))?;
+        let mut base_header = [0u8; BASE_HEADER_SIZE];
+        base_header[0..4].copy_from_slice(SST_MAGIC_V4);
+        base_header[4..8].copy_from_slice(&entry_count.to_le_bytes());
+        base_header[8..12].copy_from_slice(&footer_crc.to_le_bytes());
+        self.file.write_all(&base_header)?;
+
+        Ok(SstMetadata {
+            entry_count,
+            file_size,
+        })
+    }
+}
+
+/// Writes the body of a v3 SST in one pass. Hearth writes v4 files now; tests
+/// use this writer to make the v3 files that a reader must still open.
 ///
 /// Layout written to the file (HEA-1914):
 ///   [BASE HEADER 12B]  magic HSS3, entry_count, crc32(footer ciphertext)
@@ -681,12 +1220,13 @@ impl SstWriter {
 /// an entry. The Bloom filter is sized up front and filled in the same pass.
 ///
 /// Sealed blocks go to the file in chunks of at most
-/// [`V3_WRITE_CHUNK_BYTES`], so the writer holds one block's plaintext, one
+/// [`WRITE_CHUNK_BYTES`], so the writer holds one block's plaintext, one
 /// chunk, the block index and the Bloom filter — `O(#blocks + entries/8)`,
 /// never the file (HEA-1922). The memtable flush once kept every sealed block
 /// and then a copy of the whole file: about 3.4 times the flushed bytes (#445).
 /// The base header is only known at the end, so [`Self::finish`] backfills it
 /// with a seek to offset 0.
+#[cfg(test)]
 struct V3BodyWriter<'a> {
     file: &'a mut dyn FsFile,
     sst_number: u64,
@@ -705,6 +1245,7 @@ struct V3BodyWriter<'a> {
     written: u32,
 }
 
+#[cfg(test)]
 impl<'a> V3BodyWriter<'a> {
     /// Reserves the base header and writes the encryption header.
     /// `entry_count_hint` sizes the Bloom filter; it MAY exceed the number of
@@ -723,7 +1264,7 @@ impl<'a> V3BodyWriter<'a> {
             sst_number,
             dek,
             file_offset: TOTAL_HEADER_SIZE as u64,
-            pending: Vec::with_capacity(V3_WRITE_CHUNK_BYTES),
+            pending: Vec::with_capacity(WRITE_CHUNK_BYTES),
             filter: BloomFilter::empty_for(entry_count_hint),
             index: Vec::new(),
             block: Vec::new(),
@@ -747,7 +1288,7 @@ impl<'a> V3BodyWriter<'a> {
         self.max_key = Some(key.clone());
         SstWriter::serialize_entry(&mut self.block, key, value);
         self.written = self.written.saturating_add(1);
-        if self.block.len() >= V3_BLOCK_TARGET_BYTES {
+        if self.block.len() >= BLOCK_TARGET_BYTES {
             self.seal_block()?;
         }
         Ok(())
@@ -777,7 +1318,7 @@ impl<'a> V3BodyWriter<'a> {
             plaintext_len: self.block.len() as u32,
         });
         self.file_offset = self.file_offset.saturating_add(ct.len() as u64);
-        if !self.pending.is_empty() && self.pending.len() + ct.len() > V3_WRITE_CHUNK_BYTES {
+        if !self.pending.is_empty() && self.pending.len() + ct.len() > WRITE_CHUNK_BYTES {
             self.file.write_all(&self.pending)?;
             self.pending.clear();
         }
@@ -833,7 +1374,7 @@ impl<'a> V3BodyWriter<'a> {
             .write_all(&(footer_ct.len() as u32).to_le_bytes())?;
         let file_size = footer_offset
             .saturating_add(footer_ct.len() as u64)
-            .saturating_add(V3_TRAILER_SIZE as u64);
+            .saturating_add(TRAILER_SIZE as u64);
 
         // Backfill the base header now that entry_count and footer_crc are known.
         // The encryption header written at offset BASE_HEADER_SIZE is untouched.
@@ -861,42 +1402,27 @@ pub(crate) enum SstKeyCursor<'a> {
         /// Remaining entries, all inside the window.
         entries: &'a [(CompositeKey, MemtableValue)],
     },
-    /// A V3 SST, read one block at a time.
+    /// A V3/V4 SST, read one block at a time.
     Blocked(BlockedKeyCursor<'a>),
 }
 
-/// The V3 state of an [`SstKeyCursor`].
+/// The V3/V4 state of an [`SstKeyCursor`].
 pub(crate) struct BlockedKeyCursor<'a> {
-    body: &'a BlockedBody,
-    sst_number: u64,
+    /// The data blocks still to visit.
+    walk: BlockWalk<'a>,
     /// The window's exclusive upper bound.
     end: CompositeKey,
-    /// The block `block` was fetched from.
-    block_index: usize,
-    /// The current block, or `None` once the window is exhausted.
+    /// The current data block, or `None` once the window is exhausted.
     block: Option<Arc<CachedBlock>>,
     /// The current entry's position in `block`.
     pos: usize,
-    /// Whether blocks go through the shared block cache. A one-shot walk
-    /// (see [`SstReader::uncached_cursor`]) decodes them privately instead.
-    cached: bool,
 }
 
 impl BlockedKeyCursor<'_> {
-    /// Fetches block `block_index`, or ends the walk when no such block
-    /// exists or it starts at or after the window's end.
+    /// Fetches the next data block, or ends the walk when no block is left
+    /// that starts before the window's end.
     fn load_block(&mut self) -> Result<(), StorageError> {
-        self.block = match self.body.index.get(self.block_index) {
-            Some(entry) if entry.first_key < self.end => Some(if self.cached {
-                self.body.fetch_block(self.block_index, self.sst_number)?
-            } else {
-                let block = self
-                    .body
-                    .decode_block_uncached(self.block_index, self.sst_number)?;
-                Arc::new(CachedBlock::new(block))
-            }),
-            _ => None,
-        };
+        self.block = self.walk.next_block(Some(&self.end))?;
         self.pos = 0;
         Ok(())
     }
@@ -908,17 +1434,14 @@ impl BlockedKeyCursor<'_> {
             let Some(block) = &self.block else {
                 return Ok(());
             };
-            match block.block.entry(self.pos) {
+            match block.block.data()?.entry(self.pos) {
                 Some(entry) => {
                     if entry.cmp_composite(&self.end).is_ge() {
                         self.block = None;
                     }
                     return Ok(());
                 }
-                None => {
-                    self.block_index += 1;
-                    self.load_block()?;
-                }
+                None => self.load_block()?,
             }
         }
     }
@@ -935,6 +1458,8 @@ impl SstKeyCursor<'_> {
                 .block
                 .as_ref()?
                 .block
+                .data()
+                .ok()?
                 .entry(blocked.pos)
                 .map(|entry| (entry.key(), entry.value())),
         }
@@ -970,17 +1495,18 @@ impl KeyCursor for SstKeyCursor<'_> {
 enum SstBody {
     /// V1/V2 legacy formats: all entries eagerly decrypted and resident.
     Eager(Vec<(CompositeKey, MemtableValue)>),
-    /// V3: block-structured. Only the footer index is resident; data blocks are
-    /// memory-mapped and decrypted on demand through the shared block cache
-    /// (HEA-1914). Resident RAM is `O(#blocks + cache_cap)`, not `O(corpus)`.
+    /// V3/V4: block-structured. Data blocks are memory-mapped and decrypted on
+    /// demand through the shared block cache (HEA-1914). A v4 file's index and
+    /// filter blocks load the same way, so only its partition list is resident
+    /// (#445).
     Blocked(BlockedBody),
 }
 
 /// Heap an open reader holds besides its file mapping: the entries of a v1/v2
-/// SST or the block index of a v3 SST, plus its Bloom filter and key range.
-/// Key bytes count at their length. This grows with the entries in the file,
-/// not with time, and `hearth_storage_sst_reader_bytes` reports the sum over
-/// the live readers (#445).
+/// SST, or the partition list of a v3/v4 SST with a v3 file's whole block
+/// index and Bloom filter; plus its Bloom filter and key range. Key bytes count
+/// at their length. `hearth_storage_sst_reader_bytes` reports the sum over the
+/// live readers (#445).
 fn count_resident_bytes(
     body: &SstBody,
     bloom_filter: Option<&BloomFilter>,
@@ -1001,11 +1527,15 @@ fn count_resident_bytes(
                     .sum::<usize>()
         }
         SstBody::Blocked(blocked) => {
-            blocked.index.capacity() * std::mem::size_of::<BlockIndexEntry>()
+            blocked.partitions.capacity() * std::mem::size_of::<Partition>()
                 + blocked
-                    .index
+                    .partitions
                     .iter()
-                    .map(|entry| entry.first_key.key().len())
+                    .map(|partition| {
+                        partition.first_key.key().len()
+                            + partition.index.pinned_bytes()
+                            + partition.filter.as_ref().map_or(0, Piece::pinned_bytes)
+                    })
                     .sum::<usize>()
         }
     };
@@ -1019,115 +1549,277 @@ fn count_resident_bytes(
 /// that reuses an SST file number (see [`BlockId`]).
 static NEXT_READER_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-/// Lazily-decrypted body of a v3 SST.
+/// An index or filter block of a partition.
+enum Piece {
+    /// Held on the heap for the life of the reader: a v3 file's footer holds
+    /// the whole block index and Bloom filter.
+    Pinned(Arc<CachedBlock>),
+    /// Stored in the file and read through the block cache (v4).
+    Stored(BlockHandle),
+}
+
+impl Piece {
+    /// The heap this piece holds for the life of the reader.
+    fn pinned_bytes(&self) -> usize {
+        match self {
+            Self::Pinned(block) => block.block.heap_bytes(),
+            Self::Stored(_) => 0,
+        }
+    }
+}
+
+/// One entry of a blocked file's top-level index: a run of data blocks in key
+/// order, with their index block and their Bloom filter.
+struct Partition {
+    /// The first key of the partition's first data block.
+    first_key: CompositeKey,
+    index: Piece,
+    /// `None` for a v3 file without a filter.
+    filter: Option<Piece>,
+}
+
+/// Lazily-decrypted body of a v3 or v4 SST.
 struct BlockedBody {
     /// Whole-file backing (mmap in production, heap in simulation).
     backing: FileBacking,
-    /// Footer block index, sorted by `first_key`.
-    index: Vec<BlockIndexEntry>,
+    /// The end of the blocks: every block lies in `[TOTAL_HEADER_SIZE,
+    /// blocks_end)`, before the footer.
+    blocks_end: usize,
+    /// The top-level index, sorted by first key. A v3 file has one partition
+    /// whose pieces are pinned.
+    partitions: Vec<Partition>,
     /// Per-file DEK retained for on-demand block decryption.
     dek: DataEncryptionKey,
     /// Shared, bounded cache of decrypted blocks.
     cache: Arc<BlockCache>,
     /// Unique per-open id used to key this reader's blocks in the shared cache.
     reader_id: u64,
+    /// An authenticated upper bound on the entries in the file (see
+    /// [`SstReader::authenticated_max_entries`]).
+    max_entries: usize,
 }
 
 impl BlockedBody {
-    /// Index of the block that may contain `(realm, key)`, or `None` if the key
-    /// sorts before the first block's `first_key`. Binary search over the
-    /// footer index: the candidate is the last block whose `first_key <= target`.
-    fn block_for_key(&self, realm: &RealmId, key: &[u8]) -> Option<usize> {
-        let le = |e: &BlockIndexEntry| {
-            e.first_key
+    /// The partition that may contain `(realm, key)`: the last one whose first
+    /// key is at or before it. `None` if the key sorts before every partition.
+    fn partition_for_key(&self, realm: &RealmId, key: &[u8]) -> Option<usize> {
+        let pp = self.partitions.partition_point(|p| {
+            p.first_key
                 .realm_id()
                 .cmp(realm)
-                .then_with(|| e.first_key.key().cmp(key))
+                .then_with(|| p.first_key.key().cmp(key))
                 .is_le()
-        };
-        let pp = self.index.partition_point(|e| le(e));
+        });
         pp.checked_sub(1)
     }
 
-    /// Fetches a decrypted block, from the shared cache on a hit or by slicing
-    /// the backing and decrypting on a miss. Surfaces AEAD/format errors rather
-    /// than returning a wrong or absent value.
-    fn fetch_block(
+    /// Reads one block of `kind`: through the shared cache when `cached`, or
+    /// decrypted privately. A one-shot walk (compaction, the cleanup sweep)
+    /// reads uncached, so it does not evict the query path's working set
+    /// (HEA-1922). Surfaces AEAD/format errors rather than a wrong or absent
+    /// value.
+    fn load(
         &self,
-        block_index: usize,
+        handle: BlockHandle,
+        kind: BlockKind,
         sst_number: u64,
+        cached: bool,
     ) -> Result<Arc<CachedBlock>, StorageError> {
-        #[allow(clippy::cast_possible_truncation)]
         let id = BlockId {
             reader_id: self.reader_id,
-            block_index: block_index as u32,
+            block_index: handle.ordinal,
         };
-        if let Some(block) = self.cache.get(id) {
-            return Ok(block);
+        if cached {
+            if let Some(block) = self.cache.get(id) {
+                if block.block.kind() != kind {
+                    return Err(Block::wrong_kind());
+                }
+                return Ok(block);
+            }
         }
-        let entry = self
-            .index
-            .get(block_index)
-            .ok_or_else(|| StorageError::InvalidSstFormat {
-                reason: "v3 block index out of range".to_string(),
-            })?;
-        let start = entry.file_offset as usize;
+        let start = usize::try_from(handle.file_offset).unwrap_or(usize::MAX);
         let end = start
-            .checked_add(entry.ciphertext_len as usize)
-            .filter(|end| *end <= self.backing.len())
+            .checked_add(handle.ciphertext_len as usize)
+            .filter(|end| start >= TOTAL_HEADER_SIZE && *end <= self.blocks_end)
             .ok_or_else(|| StorageError::InvalidSstFormat {
-                reason: "v3 block extends past end of file".to_string(),
+                reason: "SST block lies outside the data section".to_string(),
             })?;
-        #[allow(clippy::cast_possible_truncation)]
-        let nonce = block_nonce(sst_number, block_index as u32);
+        let nonce = block_nonce(sst_number, handle.ordinal);
         let plaintext =
             encryption::decrypt_section(&self.backing[start..end], &self.dek, &nonce, &nonce)?;
-        let block = Arc::new(CachedBlock::new(DataBlock::decode(plaintext)?));
-        self.cache.insert(id, Arc::clone(&block));
+        let block = Arc::new(CachedBlock::new(Block::decode(kind, plaintext)?));
+        if cached {
+            self.cache.insert(id, Arc::clone(&block));
+        }
         Ok(block)
     }
 
-    /// Decrypts one block **without** consulting or populating the shared block
-    /// cache. Compaction streams every block of every input exactly once, in
-    /// order (HEA-1922); routing those one-shot reads through the bounded LRU
-    /// would evict the query-path working set for no benefit. Slices the backing
-    /// and decrypts in place, returning the block directly. Surfaces AEAD/format
-    /// errors rather than a wrong or absent value.
-    fn decode_block_uncached(
+    /// Reads an index or filter piece of a partition.
+    fn piece(
         &self,
-        block_index: usize,
+        piece: &Piece,
+        kind: BlockKind,
         sst_number: u64,
-    ) -> Result<DataBlock, StorageError> {
-        let entry = self
-            .index
-            .get(block_index)
-            .ok_or_else(|| StorageError::InvalidSstFormat {
-                reason: "v3 block index out of range".to_string(),
-            })?;
-        let start = entry.file_offset as usize;
-        let end = start
-            .checked_add(entry.ciphertext_len as usize)
-            .filter(|end| *end <= self.backing.len())
-            .ok_or_else(|| StorageError::InvalidSstFormat {
-                reason: "v3 block extends past end of file".to_string(),
-            })?;
-        #[allow(clippy::cast_possible_truncation)]
-        let nonce = block_nonce(sst_number, block_index as u32);
-        let plaintext =
-            encryption::decrypt_section(&self.backing[start..end], &self.dek, &nonce, &nonce)?;
-        DataBlock::decode(plaintext)
+        cached: bool,
+    ) -> Result<Arc<CachedBlock>, StorageError> {
+        match piece {
+            Piece::Pinned(block) => Ok(Arc::clone(block)),
+            Piece::Stored(handle) => self.load(*handle, kind, sst_number, cached),
+        }
+    }
+
+    /// Point lookup: the partition, then its filter, then its index, then the
+    /// one data block that may hold the key.
+    fn get(
+        &self,
+        realm_id: &RealmId,
+        key: &[u8],
+        sst_number: u64,
+        cached: bool,
+    ) -> Result<Option<MemtableValue>, StorageError> {
+        let Some(partition) = self
+            .partition_for_key(realm_id, key)
+            .and_then(|p| self.partitions.get(p))
+        else {
+            return Ok(None);
+        };
+        if let Some(filter) = &partition.filter {
+            let filter = self.piece(filter, BlockKind::Filter, sst_number, cached)?;
+            if !filter.block.filter()?.might_contain(realm_id, key) {
+                return Ok(None);
+            }
+        }
+        let index = self.piece(&partition.index, BlockKind::Index, sst_number, cached)?;
+        let index = index.block.index()?;
+        let Some(entry) = index
+            .position_for(realm_id, key)
+            .and_then(|i| index.entry(i))
+        else {
+            return Ok(None);
+        };
+        let block = self.load(entry.handle, BlockKind::Data, sst_number, cached)?;
+        Ok(block
+            .block
+            .data()?
+            .find(realm_id, key)
+            .map(|entry| entry.memtable_value()))
+    }
+}
+
+/// A walk over a blocked file's data blocks in key order, across partitions.
+/// It holds one index block at a time.
+struct BlockWalk<'a> {
+    body: &'a BlockedBody,
+    sst_number: u64,
+    /// Whether blocks go through the shared block cache.
+    cached: bool,
+    /// The partition being walked.
+    partition: usize,
+    /// That partition's index block, once loaded.
+    index: Option<Arc<CachedBlock>>,
+    /// The next entry of `index` to visit.
+    next: usize,
+}
+
+impl<'a> BlockWalk<'a> {
+    /// A walk from the file's first data block.
+    fn from_start(body: &'a BlockedBody, sst_number: u64, cached: bool) -> Self {
+        Self {
+            body,
+            sst_number,
+            cached,
+            partition: 0,
+            index: None,
+            next: 0,
+        }
+    }
+
+    /// A walk from the data block that may hold `(realm, key)`, or from the
+    /// first data block when the key sorts before all of them.
+    fn seek(
+        body: &'a BlockedBody,
+        sst_number: u64,
+        cached: bool,
+        realm: &RealmId,
+        key: &[u8],
+    ) -> Result<Self, StorageError> {
+        let mut walk = Self::from_start(body, sst_number, cached);
+        if let Some(p) = body.partition_for_key(realm, key) {
+            walk.partition = p;
+            let index = walk.load_index()?;
+            walk.next = index.block.index()?.position_for(realm, key).unwrap_or(0);
+            walk.index = Some(index);
+        }
+        Ok(walk)
+    }
+
+    /// The index block of the partition being walked.
+    fn load_index(&self) -> Result<Arc<CachedBlock>, StorageError> {
+        let partition = self.body.partitions.get(self.partition).ok_or_else(|| {
+            StorageError::InvalidSstFormat {
+                reason: "SST partition out of range".to_string(),
+            }
+        })?;
+        self.body.piece(
+            &partition.index,
+            BlockKind::Index,
+            self.sst_number,
+            self.cached,
+        )
+    }
+
+    /// The next data block, or `None` when none is left, or when the next one
+    /// starts at or after `end`.
+    fn next_block(
+        &mut self,
+        end: Option<&CompositeKey>,
+    ) -> Result<Option<Arc<CachedBlock>>, StorageError> {
+        loop {
+            let Some(partition) = self.body.partitions.get(self.partition) else {
+                return Ok(None);
+            };
+            if self.index.is_none() {
+                if end.is_some_and(|end| partition.first_key >= *end) {
+                    return Ok(None);
+                }
+                self.index = Some(self.load_index()?);
+            }
+            let next = match &self.index {
+                Some(index) => index.block.index()?.entry(self.next).map(|entry| {
+                    let past_end = end.is_some_and(|end| entry.cmp_composite(end).is_ge());
+                    (past_end, entry.handle)
+                }),
+                None => None,
+            };
+            match next {
+                Some((true, _)) => return Ok(None),
+                Some((false, handle)) => {
+                    self.next += 1;
+                    return self
+                        .body
+                        .load(handle, BlockKind::Data, self.sst_number, self.cached)
+                        .map(Some);
+                }
+                None => {
+                    self.partition += 1;
+                    self.index = None;
+                    self.next = 0;
+                }
+            }
+        }
     }
 }
 
 /// Reads entries from an SST file on disk.
 pub(crate) struct SstReader {
-    /// Backing store: eager entries (V1/V2) or lazy blocks (V3).
+    /// Backing store: eager entries (V1/V2) or lazy blocks (V3/V4).
     body: SstBody,
     /// Number of entries as declared in the header.
     entry_count: u32,
     /// Monotonically increasing SST file number for path derivation.
     sst_number: u64,
-    /// Per-SST Bloom filter for fast key rejection (V2/V3 SSTs).
+    /// Per-SST Bloom filter for fast key rejection (V2 SSTs). A V3/V4 SST
+    /// keeps its filters in its partitions.
     ///
     /// A `None` filter is treated as "might contain everything" — V1 SSTs
     /// written before HEA-1626 are still read correctly; they just don't get
@@ -1222,7 +1914,10 @@ impl SstReader {
             })?;
         let _enc_header = EncryptionHeader::from_bytes(enc_bytes);
 
-        // --- V3: block-structured, lazy ---
+        // --- V3/V4: block-structured, lazy ---
+        if &backing[0..4] == SST_MAGIC_V4 {
+            return Self::open_v4(backing, entry_count, stored_crc, sst_number, dek, cache);
+        }
         if &backing[0..4] == SST_MAGIC_V3 {
             return Self::open_v3(backing, entry_count, stored_crc, sst_number, dek, cache);
         }
@@ -1272,33 +1967,31 @@ impl SstReader {
         })
     }
 
-    /// Parses a V3 SST: read the trailer, verify+decrypt the footer, load the
-    /// block index, and validate every block offset lies within the data
-    /// section (eager truncation detection). Block payloads stay on disk.
-    fn open_v3(
-        backing: FileBacking,
-        entry_count: u32,
+    /// Reads the trailer of a v3 or v4 file, checks the footer's CRC and
+    /// decrypts it. Returns the footer's offset, where the blocks end, and its
+    /// plaintext.
+    fn read_footer(
+        backing: &FileBacking,
         stored_crc: u32,
         sst_number: u64,
         dek: &DataEncryptionKey,
-        cache: Arc<BlockCache>,
-    ) -> Result<Self, StorageError> {
+    ) -> Result<(usize, Vec<u8>), StorageError> {
         let len = backing.len();
-        if len < TOTAL_HEADER_SIZE + V3_TRAILER_SIZE {
+        if len < TOTAL_HEADER_SIZE + TRAILER_SIZE {
             return Err(StorageError::InvalidSstFormat {
-                reason: "v3: file too small for trailer".to_string(),
+                reason: "SST file too small for its trailer".to_string(),
             });
         }
-        let trailer = &backing[len - V3_TRAILER_SIZE..];
+        let trailer = &backing[len - TRAILER_SIZE..];
         #[allow(clippy::cast_possible_truncation)]
         let footer_offset = u64::from_le_bytes(trailer[0..8].try_into().map_err(|_| {
             StorageError::InvalidSstFormat {
-                reason: "v3: invalid trailer footer offset".to_string(),
+                reason: "SST trailer: invalid footer offset".to_string(),
             }
         })?) as usize;
         let footer_len = u32::from_le_bytes(trailer[8..12].try_into().map_err(|_| {
             StorageError::InvalidSstFormat {
-                reason: "v3: invalid trailer footer length".to_string(),
+                reason: "SST trailer: invalid footer length".to_string(),
             }
         })?) as usize;
 
@@ -1306,9 +1999,9 @@ impl SstReader {
         // fails this bound instead of reading arbitrary bytes.
         let footer_end = footer_offset
             .checked_add(footer_len)
-            .filter(|end| footer_offset >= TOTAL_HEADER_SIZE && *end <= len - V3_TRAILER_SIZE)
+            .filter(|end| footer_offset >= TOTAL_HEADER_SIZE && *end <= len - TRAILER_SIZE)
             .ok_or_else(|| StorageError::InvalidSstFormat {
-                reason: "v3: footer offset/length out of range (truncated?)".to_string(),
+                reason: "SST footer offset/length out of range (truncated?)".to_string(),
             })?;
 
         let footer_ct = &backing[footer_offset..footer_end];
@@ -1320,42 +2013,206 @@ impl SstReader {
         let footer_nonce = block_nonce(sst_number, SST_FOOTER_BLOCK_INDEX);
         let footer_plain =
             encryption::decrypt_section(footer_ct, dek, &footer_nonce, &footer_nonce)?;
+        Ok((footer_offset, footer_plain))
+    }
 
-        let (index, key_range, bloom_filter) = Self::parse_v3_footer(&footer_plain)?;
-
-        // Validate every block's byte range lies within [header, footer_offset)
-        // so a truncated data section is rejected at open, not mid-read.
-        for e in &index {
-            let start = e.file_offset as usize;
-            let end = start
-                .checked_add(e.ciphertext_len as usize)
-                .ok_or_else(|| StorageError::InvalidSstFormat {
-                    reason: "v3: block length overflow".to_string(),
-                })?;
-            if start < TOTAL_HEADER_SIZE || end > footer_offset {
-                return Err(StorageError::InvalidSstFormat {
-                    reason: "v3: block range out of bounds (truncated?)".to_string(),
-                });
-            }
+    /// Checks that a block lies between the header and the footer, so a
+    /// truncated data section is rejected at open, not mid-read.
+    fn check_block_range(handle: &BlockHandle, blocks_end: usize) -> Result<(), StorageError> {
+        let start = usize::try_from(handle.file_offset).unwrap_or(usize::MAX);
+        let end = start
+            .checked_add(handle.ciphertext_len as usize)
+            .ok_or_else(|| StorageError::InvalidSstFormat {
+                reason: "SST block length overflow".to_string(),
+            })?;
+        if start < TOTAL_HEADER_SIZE || end > blocks_end || handle.ordinal == SST_FOOTER_BLOCK_INDEX
+        {
+            return Err(StorageError::InvalidSstFormat {
+                reason: "SST block range out of bounds (truncated?)".to_string(),
+            });
         }
+        Ok(())
+    }
 
+    /// Opens a v3 or v4 body over `partitions`.
+    #[allow(clippy::too_many_arguments)]
+    fn open_blocked(
+        backing: FileBacking,
+        blocks_end: usize,
+        partitions: Vec<Partition>,
+        max_entries: usize,
+        key_range: Option<(CompositeKey, CompositeKey)>,
+        entry_count: u32,
+        sst_number: u64,
+        dek: &DataEncryptionKey,
+        cache: Arc<BlockCache>,
+    ) -> Self {
         let reader_id = NEXT_READER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let body = SstBody::Blocked(BlockedBody {
             backing,
-            index,
+            blocks_end,
+            partitions,
             dek: dek.clone_key(),
             cache,
             reader_id,
+            max_entries,
         });
-        let resident_bytes = count_resident_bytes(&body, bloom_filter.as_ref(), key_range.as_ref());
-        Ok(Self {
+        let resident_bytes = count_resident_bytes(&body, None, key_range.as_ref());
+        Self {
             body,
             entry_count,
             sst_number,
-            bloom_filter,
+            bloom_filter: None,
             key_range,
             resident_bytes,
-        })
+        }
+    }
+
+    /// Parses a V3 SST: read the trailer, verify+decrypt the footer, load the
+    /// block index, and validate every block offset lies within the data
+    /// section (eager truncation detection). Block payloads stay on disk.
+    ///
+    /// The whole index and Bloom filter become the pinned pieces of one
+    /// partition, so v3 and v4 files share every read path.
+    fn open_v3(
+        backing: FileBacking,
+        entry_count: u32,
+        stored_crc: u32,
+        sst_number: u64,
+        dek: &DataEncryptionKey,
+        cache: Arc<BlockCache>,
+    ) -> Result<Self, StorageError> {
+        let (footer_offset, footer_plain) =
+            Self::read_footer(&backing, stored_crc, sst_number, dek)?;
+        let (index, key_range, bloom_filter) = Self::parse_v3_footer(&footer_plain)?;
+
+        // A v3 data block's nonce is its position in the index: its ordinal.
+        let mut index_plaintext = Vec::new();
+        for (ordinal, e) in index.iter().enumerate() {
+            let handle = BlockHandle {
+                file_offset: e.file_offset,
+                ciphertext_len: e.ciphertext_len,
+                plaintext_len: e.plaintext_len,
+                ordinal: u32::try_from(ordinal).map_err(|_| StorageError::InvalidSstFormat {
+                    reason: "v3: too many blocks".to_string(),
+                })?,
+            };
+            Self::check_block_range(&handle, footer_offset)?;
+            write_footer_key(&mut index_plaintext, &e.first_key);
+            handle.write(&mut index_plaintext);
+        }
+        let max_entries = index
+            .iter()
+            .map(|e| e.plaintext_len as usize / SST_MIN_ENTRY_BYTES)
+            .fold(0usize, usize::saturating_add);
+        let partitions = match index.first() {
+            None => Vec::new(),
+            Some(first) => vec![Partition {
+                first_key: first.first_key.clone(),
+                index: Piece::Pinned(Arc::new(CachedBlock::new(Block::Index(
+                    IndexBlock::decode(index_plaintext)?,
+                )))),
+                filter: bloom_filter
+                    .map(|filter| Piece::Pinned(Arc::new(CachedBlock::new(Block::Filter(filter))))),
+            }],
+        };
+        Ok(Self::open_blocked(
+            backing,
+            footer_offset,
+            partitions,
+            max_entries,
+            key_range,
+            entry_count,
+            sst_number,
+            dek,
+            cache,
+        ))
+    }
+
+    /// Parses a V4 SST: read the trailer, verify+decrypt the footer and load
+    /// its partition list. Index, filter and data blocks stay on disk.
+    fn open_v4(
+        backing: FileBacking,
+        entry_count: u32,
+        stored_crc: u32,
+        sst_number: u64,
+        dek: &DataEncryptionKey,
+        cache: Arc<BlockCache>,
+    ) -> Result<Self, StorageError> {
+        let (footer_offset, footer_plain) =
+            Self::read_footer(&backing, stored_crc, sst_number, dek)?;
+        let (max_entries, partitions, key_range) = Self::parse_v4_footer(&footer_plain)?;
+        for partition in &partitions {
+            for piece in std::iter::once(&partition.index).chain(&partition.filter) {
+                if let Piece::Stored(handle) = piece {
+                    Self::check_block_range(handle, footer_offset)?;
+                }
+            }
+        }
+        Ok(Self::open_blocked(
+            backing,
+            footer_offset,
+            partitions,
+            max_entries,
+            key_range,
+            entry_count,
+            sst_number,
+            dek,
+            cache,
+        ))
+    }
+
+    /// Parses a decrypted V4 footer into `(entry count, partitions, key range)`.
+    #[allow(clippy::type_complexity)]
+    fn parse_v4_footer(
+        data: &[u8],
+    ) -> Result<(usize, Vec<Partition>, Option<(CompositeKey, CompositeKey)>), StorageError> {
+        let trunc = || StorageError::InvalidSstFormat {
+            reason: "v4: truncated footer".to_string(),
+        };
+        let entry_count = data
+            .get(0..8)
+            .and_then(|b| b.try_into().ok())
+            .map(u64::from_le_bytes)
+            .ok_or_else(trunc)?;
+        let partition_count = data
+            .get(8..12)
+            .and_then(|b| b.try_into().ok())
+            .map(u32::from_le_bytes)
+            .ok_or_else(trunc)? as usize;
+        // Each partition entry takes at least a key header, two handles and a
+        // flag, so the footer's length bounds the reservation.
+        let min_entry = 20 + 2 * HANDLE_BYTES + 1;
+        let mut partitions = Vec::with_capacity(partition_count.min(data.len() / min_entry));
+        let mut pos = 12;
+        for _ in 0..partition_count {
+            let (first_key, next) = read_footer_key(data, pos)?;
+            let index = BlockHandle::read(data, next).ok_or_else(trunc)?;
+            let has_filter = *data.get(next + HANDLE_BYTES).ok_or_else(trunc)?;
+            let filter_pos = next + HANDLE_BYTES + 1;
+            let filter = BlockHandle::read(data, filter_pos).ok_or_else(trunc)?;
+            pos = filter_pos + HANDLE_BYTES;
+            partitions.push(Partition {
+                first_key,
+                index: Piece::Stored(index),
+                filter: (has_filter == 1).then_some(Piece::Stored(filter)),
+            });
+        }
+
+        let has_range = *data.get(pos).ok_or_else(trunc)?;
+        pos += 1;
+        let key_range = if has_range == 1 {
+            let (min, p1) = read_footer_key(data, pos)?;
+            let (max, _) = read_footer_key(data, p1)?;
+            Some((min, max))
+        } else {
+            None
+        };
+        Ok((
+            usize::try_from(entry_count).unwrap_or(usize::MAX),
+            partitions,
+            key_range,
+        ))
     }
 
     /// Parses a decrypted V3 footer into `(block index, key range, bloom)`.
@@ -1488,9 +2345,9 @@ impl SstReader {
                 // hold more than `plaintext_len / SST_MIN_ENTRY_BYTES` entries.
                 let cap_bound = self.authenticated_max_entries();
                 let mut out = Vec::with_capacity((self.entry_count as usize).min(cap_bound));
-                for bi in 0..body.index.len() {
-                    let block = body.fetch_block(bi, self.sst_number)?;
-                    out.extend(block.block.iter().map(EntryRef::into_owned));
+                let mut walk = BlockWalk::from_start(body, self.sst_number, true);
+                while let Some(block) = walk.next_block(None)? {
+                    out.extend(block.block.data()?.iter().map(EntryRef::into_owned));
                 }
                 Ok(out)
             }
@@ -1553,30 +2410,14 @@ impl SstReader {
                 return Ok(None);
             }
         }
-        let cmp = |(k, _): &(CompositeKey, MemtableValue)| {
-            k.realm_id().cmp(realm_id).then_with(|| k.key().cmp(key))
-        };
         match &self.body {
             SstBody::Eager(entries) => Ok(entries
-                .binary_search_by(cmp)
+                .binary_search_by(|(k, _)| {
+                    k.realm_id().cmp(realm_id).then_with(|| k.key().cmp(key))
+                })
                 .ok()
                 .map(|idx| entries[idx].1.clone())),
-            SstBody::Blocked(body) => {
-                let Some(bi) = body.block_for_key(realm_id, key) else {
-                    return Ok(None);
-                };
-                if !cached {
-                    let block = body.decode_block_uncached(bi, self.sst_number)?;
-                    return Ok(block
-                        .find(realm_id, key)
-                        .map(|entry| entry.memtable_value()));
-                }
-                let block = body.fetch_block(bi, self.sst_number)?;
-                Ok(block
-                    .block
-                    .find(realm_id, key)
-                    .map(|entry| entry.memtable_value()))
-            }
+            SstBody::Blocked(body) => body.get(realm_id, key, self.sst_number, cached),
         }
     }
 
@@ -1642,23 +2483,16 @@ impl SstReader {
             }
             SstBody::Blocked(body) => {
                 let mut out = Vec::new();
-                // Start at the block that may hold `start`; if `start` precedes
-                // the first block, begin at block 0.
-                let mut bi = body.block_for_key(realm_id, start_key).unwrap_or(0);
-                while bi < body.index.len() {
-                    // Blocks are sorted; once a block starts at/after `end`,
-                    // no later block can contribute.
-                    if body.index[bi].first_key >= end {
-                        break;
-                    }
-                    let block = body.fetch_block(bi, self.sst_number)?;
-                    for entry in block.block.iter() {
+                // Start at the block that may hold `start`; the walk ends at the
+                // first block that starts at or after `end`.
+                let mut walk = BlockWalk::seek(body, self.sst_number, true, realm_id, start_key)?;
+                while let Some(block) = walk.next_block(Some(&end))? {
+                    for entry in block.block.data()?.iter() {
                         if entry.cmp_composite(&start).is_ge() && entry.cmp_composite(&end).is_lt()
                         {
                             out.push((entry.key().to_vec(), project(entry.value())));
                         }
                     }
-                    bi += 1;
                 }
                 Ok(out)
             }
@@ -1724,21 +2558,21 @@ impl SstReader {
                 })
             }
             SstBody::Blocked(body) => {
-                // The block that may hold `start`, or block 0 when `start`
-                // precedes every block.
-                let block_index = body.block_for_key(realm_id, start_key).unwrap_or(0);
+                // The block that may hold `start`, or the first block when
+                // `start` precedes every block.
+                let walk = BlockWalk::seek(body, self.sst_number, cached, realm_id, start_key)?;
                 let mut blocked = BlockedKeyCursor {
-                    body,
-                    sst_number: self.sst_number,
+                    walk,
                     end,
-                    block_index,
                     block: None,
                     pos: 0,
-                    cached,
                 };
                 blocked.load_block()?;
                 if let Some(block) = &blocked.block {
-                    blocked.pos = block.block.lower_bound(start.realm_id(), start.key());
+                    blocked.pos = block
+                        .block
+                        .data()?
+                        .lower_bound(start.realm_id(), start.key());
                 }
                 blocked.settle()?;
                 Ok(SstKeyCursor::Blocked(blocked))
@@ -1746,9 +2580,10 @@ impl SstReader {
         }
     }
 
-    /// Heap bytes this reader holds while it is open: its block index (v3) or
-    /// entries (v1/v2), its Bloom filter and its key range. The file mapping
-    /// is not heap and is not counted.
+    /// Heap bytes this reader holds while it is open: its partition list (v4),
+    /// its block index and Bloom filter (v3), or its entries and Bloom filter
+    /// (v1/v2), and its key range. The file mapping and the blocks in the
+    /// block cache are not counted.
     pub(crate) fn resident_bytes(&self) -> usize {
         self.resident_bytes
     }
@@ -1767,19 +2602,16 @@ impl SstReader {
     /// would drive a multi-gigabyte reservation and abort the process via an
     /// uncatchable `handle_alloc_error` (HEA-1917). This bound is safe to size
     /// Bloom filters or `Vec` capacities against:
-    /// - **Blocked (v3):** the footer block index is AEAD-authenticated, and no
-    ///   block can hold more than `plaintext_len / SST_MIN_ENTRY_BYTES` entries;
-    ///   summed (saturating) over every block.
+    /// - **v4:** the entry count in the AEAD-authenticated footer.
+    /// - **v3:** the footer block index is AEAD-authenticated, and no block can
+    ///   hold more than `plaintext_len / SST_MIN_ENTRY_BYTES` entries; summed
+    ///   (saturating) over every block.
     /// - **Eager (v1/v2):** the entries are already resident and decrypted, so
     ///   their true count is known.
     pub(crate) fn authenticated_max_entries(&self) -> usize {
         match &self.body {
             SstBody::Eager(entries) => entries.len(),
-            SstBody::Blocked(body) => body
-                .index
-                .iter()
-                .map(|e| e.plaintext_len as usize / SST_MIN_ENTRY_BYTES)
-                .fold(0usize, |acc, n| acc.saturating_add(n)),
+            SstBody::Blocked(body) => body.max_entries,
         }
     }
 
@@ -1903,16 +2735,21 @@ impl SstReader {
 struct SstCursor<'a> {
     reader: &'a SstReader,
     buf: std::collections::VecDeque<(CompositeKey, MemtableValue)>,
-    next_block: usize,
+    /// The blocks of a V3/V4 input not yet decoded, read past the cache.
+    walk: Option<BlockWalk<'a>>,
     exhausted: bool,
 }
 
 impl<'a> SstCursor<'a> {
     fn new(reader: &'a SstReader) -> Self {
+        let walk = match &reader.body {
+            SstBody::Blocked(body) => Some(BlockWalk::from_start(body, reader.sst_number, false)),
+            SstBody::Eager(_) => None,
+        };
         Self {
             reader,
             buf: std::collections::VecDeque::new(),
-            next_block: 0,
+            walk,
             exhausted: false,
         }
     }
@@ -1921,21 +2758,18 @@ impl<'a> SstCursor<'a> {
     /// decoding the next block (V3) or loading the eager vector (V1/V2) as needed.
     fn fill(&mut self) -> Result<(), StorageError> {
         while self.buf.is_empty() && !self.exhausted {
-            match &self.reader.body {
-                SstBody::Eager(entries) => {
+            match (&self.reader.body, &mut self.walk) {
+                (SstBody::Blocked(_), Some(walk)) => match walk.next_block(None)? {
+                    Some(block) => self
+                        .buf
+                        .extend(block.block.data()?.iter().map(EntryRef::into_owned)),
+                    None => self.exhausted = true,
+                },
+                (SstBody::Eager(entries), _) => {
                     self.buf.extend(entries.iter().cloned());
                     self.exhausted = true;
                 }
-                SstBody::Blocked(body) => {
-                    if self.next_block >= body.index.len() {
-                        self.exhausted = true;
-                        break;
-                    }
-                    let block =
-                        body.decode_block_uncached(self.next_block, self.reader.sst_number)?;
-                    self.next_block += 1;
-                    self.buf.extend(block.iter().map(EntryRef::into_owned));
-                }
+                (SstBody::Blocked(_), None) => self.exhausted = true,
             }
         }
         Ok(())
@@ -2137,27 +2971,15 @@ pub(crate) fn compact_with_fs_opts(
     // no `BTreeMap`/`Vec` of the whole corpus is ever materialised, so peak heap
     // is `O(#inputs × block)` rather than `O(corpus)` — the flat-RAM criterion
     // the query path already met, now extended to the compaction path (HEA-1922).
-    //
-    // `entry_count_hint` is an upper bound (pre dedup/tombstone drop) that only
-    // sizes the Bloom filter; the header's real count comes from the writer's
-    // single pass. It MUST be derived from each reader's *authenticated* bound,
-    // not the raw header `entry_count` (bytes 4..8), which is covered by neither
-    // the footer AEAD nor CRC: a tampered/bit-rotted `entry_count = u32::MAX`
-    // would size `BloomFilter::empty_for` at ~10 GiB and abort via an
-    // uncatchable `handle_alloc_error` (HEA-1917 class, HEA-1933). Over-estimates
-    // are harmless — they only lower the filter's false-positive rate. `u32`
-    // sums are saturated so a corrupt count can't wrap.
-    let entry_count_hint: usize = input_ssts
-        .iter()
-        .map(|r| r.authenticated_max_entries())
-        .fold(0usize, |acc, n| acc.saturating_add(n));
-
+    // The writer sizes each partition's Bloom filter from the keys it really
+    // wrote. A v3 output sized one filter for the whole merge from the inputs'
+    // worst case of 25-byte rows, about six times too large for Hearth's rows
+    // (#445).
     let merged = KMergeIter::new(input_ssts);
 
     SstWriter::write_sst_streaming_with_fs(
         output_path,
         merged,
-        entry_count_hint,
         drop_tombstones,
         fs,
         output_sst_number,
@@ -2184,7 +3006,10 @@ pub(crate) fn read_encryption_header(
         });
     }
 
-    if &data[0..4] != SST_MAGIC && &data[0..4] != SST_MAGIC_V2 && &data[0..4] != SST_MAGIC_V3 {
+    if ![SST_MAGIC, SST_MAGIC_V2, SST_MAGIC_V3, SST_MAGIC_V4]
+        .iter()
+        .any(|magic| data[0..4] == magic[..])
+    {
         return Err(StorageError::InvalidSstFormat {
             reason: "invalid magic bytes".to_string(),
         });
@@ -2217,6 +3042,46 @@ mod tests {
         let kek_id = [0x42u8; encryption::KEK_ID_SIZE];
         let enc_header = encryption::wrap_dek(&dek, &kek, kek_id).expect("wrap");
         (dek, enc_header)
+    }
+
+    /// The data blocks of a v3/v4 reader in key order, decoded past the cache.
+    fn data_blocks(reader: &SstReader) -> Vec<Arc<CachedBlock>> {
+        let SstBody::Blocked(body) = &reader.body else {
+            panic!("expected a block-structured SST");
+        };
+        let mut walk = BlockWalk::from_start(body, reader.sst_number, false);
+        let mut blocks = Vec::new();
+        while let Some(block) = walk.next_block(None).expect("walk") {
+            blocks.push(block);
+        }
+        blocks
+    }
+
+    /// The partitions of a v3/v4 reader.
+    fn partitions(reader: &SstReader) -> &[Partition] {
+        let SstBody::Blocked(body) = &reader.body else {
+            panic!("expected a block-structured SST");
+        };
+        &body.partitions
+    }
+
+    /// Writes `entries` as a v3 file, which Hearth no longer writes but must
+    /// still read.
+    fn write_v3_for_test(
+        path: &Path,
+        entries: &[(CompositeKey, MemtableValue)],
+        sst_number: u64,
+        dek: &DataEncryptionKey,
+        enc_header: &EncryptionHeader,
+    ) {
+        let mut file = RealFs.create(path).expect("create");
+        let mut body = V3BodyWriter::start(&mut *file, enc_header, entries.len(), sst_number, dek)
+            .expect("start");
+        for (key, value) in entries {
+            body.push(key, value).expect("push");
+        }
+        body.finish().expect("finish");
+        file.sync_all().expect("sync");
     }
 
     /// A data block searches its plaintext in place, so its entries MUST sort
@@ -2298,10 +3163,10 @@ mod tests {
         assert_eq!(metadata.entry_count, 3);
         assert!(metadata.file_size > 0);
 
-        // Verify raw file structure — new SSTs use V2 magic with bloom filter
+        // Verify raw file structure — new SSTs use the V4 magic
         let raw = std::fs::read(&sst_path).expect("read file");
         assert!(raw.len() >= TOTAL_HEADER_SIZE);
-        assert_eq!(&raw[0..4], b"HSS3", "new SSTs must use V3 magic");
+        assert_eq!(&raw[0..4], b"HSS4", "new SSTs must use V4 magic");
         assert_eq!(u32::from_le_bytes(raw[4..8].try_into().expect("bytes")), 3);
     }
 
@@ -2332,50 +3197,112 @@ mod tests {
         }
     }
 
-    /// A reader reports the heap it holds while it is open: its Bloom filter
-    /// and its block index, which grow with the entries in the file (#445).
+    /// A v4 reader holds only its partition list on the heap: its block index
+    /// and Bloom filter stay in the file and load through the block cache. A
+    /// v3 reader holds both whole, so its heap grows with every row in the
+    /// file, and it reports that heap (#445).
     #[test]
-    fn a_reader_reports_the_heap_of_its_bloom_filter_and_block_index() {
+    fn a_v4_reader_holds_only_its_partition_list_on_the_heap() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (dek, enc_header) = test_encryption_context();
         let realm = RealmId::generate();
-        let entries = |n: usize| -> Vec<(CompositeKey, MemtableValue)> {
-            (0..n)
+        let entries: Vec<(CompositeKey, MemtableValue)> = (0..20_000)
+            .map(|i| {
+                (
+                    CompositeKey::new(realm.clone(), format!("key-{i:08}").into_bytes()),
+                    MemtableValue::Data(vec![b'v'; 200]),
+                )
+            })
+            .collect();
+        let v4_path = dir.path().join("v4.sst");
+        let v3_path = dir.path().join("v3.sst");
+        SstWriter::write_sst(&v4_path, &entries, 1, &dek, &enc_header).expect("write v4");
+        write_v3_for_test(&v3_path, &entries, 2, &dek, &enc_header);
+        let v4 = SstReader::open(&v4_path, 1, &dek).expect("open v4");
+        let v3 = SstReader::open(&v3_path, 2, &dek).expect("open v3");
+
+        assert!(
+            partitions(&v4).len() >= 2,
+            "precondition: 4.7 MB of rows span several partitions"
+        );
+        assert!(
+            v4.resident_bytes() < 4096,
+            "a v4 reader of 20,000 rows holds {} bytes of heap",
+            v4.resident_bytes()
+        );
+        let bloom_bytes = 20_000 * 10 / 8;
+        assert!(
+            v3.resident_bytes() > bloom_bytes,
+            "a v3 reader reports {} bytes; its Bloom filter alone is {bloom_bytes}",
+            v3.resident_bytes()
+        );
+        for (key, value) in entries.iter().step_by(997) {
+            assert_eq!(
+                v4.get(&realm, key.key()).expect("get v4").as_ref(),
+                Some(value)
+            );
+            assert_eq!(
+                v3.get(&realm, key.key()).expect("get v3").as_ref(),
+                Some(value)
+            );
+        }
+    }
+
+    /// Each v4 filter is sized from the rows of its own partition. Compaction
+    /// sized a v3 file's one filter from its inputs' worst case of 25-byte
+    /// rows: about six times too large for Hearth's rows (#445).
+    #[test]
+    fn compaction_sizes_each_filter_from_its_real_row_count() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let realm = RealmId::generate();
+        let rows = |range: std::ops::Range<usize>| -> Vec<(CompositeKey, MemtableValue)> {
+            range
                 .map(|i| {
                     (
                         CompositeKey::new(realm.clone(), format!("key-{i:08}").into_bytes()),
-                        MemtableValue::Data(vec![b'v'; 200]),
+                        MemtableValue::Data(vec![b'v'; 120]),
                     )
                 })
                 .collect()
         };
-        let small_path = dir.path().join("small.sst");
-        let large_path = dir.path().join("large.sst");
-        SstWriter::write_sst(&small_path, &entries(1_000), 1, &dek, &enc_header)
-            .expect("write small");
-        SstWriter::write_sst(&large_path, &entries(10_000), 2, &dek, &enc_header)
-            .expect("write large");
-        let small = SstReader::open(&small_path, 1, &dek).expect("open small");
-        let large = SstReader::open(&large_path, 2, &dek).expect("open large");
+        let (dek, enc) = test_encryption_context();
+        let (a_path, b_path) = (dir.path().join("a.sst"), dir.path().join("b.sst"));
+        SstWriter::write_sst(&a_path, &rows(0..10_000), 1, &dek, &enc).expect("write a");
+        SstWriter::write_sst(&b_path, &rows(5_000..15_000), 2, &dek, &enc).expect("write b");
+        let a = SstReader::open(&a_path, 1, &dek).expect("open a");
+        let b = SstReader::open(&b_path, 2, &dek).expect("open b");
+        let out_path = dir.path().join("out.sst");
+        let meta = compact(&[&a, &b], &out_path, 3, &dek, &enc).expect("compact");
+        assert_eq!(meta.entry_count, 15_000, "the inputs overlap by 5,000 rows");
 
-        let SstBody::Blocked(body) = &large.body else {
-            panic!("a new SST is block-structured (v3)");
+        let out = SstReader::open(&out_path, 3, &dek).expect("open output");
+        let SstBody::Blocked(body) = &out.body else {
+            panic!("compaction writes a blocked SST");
         };
-        let bloom_bytes = 10_000 * 10 / 8;
-        let index_bytes = body.index.len() * std::mem::size_of::<BlockIndexEntry>();
+        let filter_bytes: usize = body
+            .partitions
+            .iter()
+            .map(|p| {
+                let filter = p.filter.as_ref().expect("a v4 partition has a filter");
+                let block = body
+                    .piece(filter, BlockKind::Filter, 3, false)
+                    .expect("load filter");
+                block.block.filter().expect("filter block").bits.len()
+            })
+            .sum();
+        let exact = 15_000 * 10 / 8;
         assert!(
-            large.resident_bytes() >= bloom_bytes + index_bytes,
-            "{} bytes reported; the Bloom filter alone is {bloom_bytes} and the {} index \
-             entries {index_bytes}",
-            large.resident_bytes(),
-            body.index.len()
+            filter_bytes >= exact && filter_bytes <= exact + 8 * body.partitions.len(),
+            "15,000 rows took {filter_bytes} bytes of filter; 10 bits a row is {exact}"
         );
-        assert!(
-            large.resident_bytes() > 5 * small.resident_bytes(),
-            "10 times the entries: {} bytes against {}",
-            large.resident_bytes(),
-            small.resident_bytes()
-        );
+        for i in (0..15_000).step_by(499) {
+            assert!(
+                out.get(&realm, format!("key-{i:08}").as_bytes())
+                    .expect("get")
+                    .is_some(),
+                "row {i}"
+            );
+        }
     }
 
     #[test]
@@ -2441,7 +3368,7 @@ mod tests {
     /// materialise-everything path across **many blocks** — the merge, dedup, and
     /// tombstone drop all have to work across V3 block boundaries, not just within
     /// a single block as the small fixtures above test. Uses a corpus far larger
-    /// than `V3_BLOCK_TARGET_BYTES` so both inputs and the output span dozens of
+    /// than `BLOCK_TARGET_BYTES` so both inputs and the output span dozens of
     /// blocks, then verifies newest-wins, deletion, ordering, and point lookups.
     #[test]
     fn streaming_compaction_merges_correctly_across_many_blocks() {
@@ -2481,11 +3408,10 @@ mod tests {
         // silently degrade to the single-block case the small fixtures cover).
         let old_reader = SstReader::open(&old_path, 1, &dek_old).expect("open old");
         let new_reader = SstReader::open(&new_path, 2, &dek_new).expect("open new");
-        if let SstBody::Blocked(body) = &old_reader.body {
-            assert!(body.index.len() > 1, "corpus must span multiple blocks");
-        } else {
-            panic!("expected a v3 blocked SST");
-        }
+        assert!(
+            data_blocks(&old_reader).len() > 1,
+            "corpus must span multiple blocks"
+        );
 
         // Full compaction (oldest first) — tombstones dropped.
         let (dek_out, enc_out) = test_encryption_context();
@@ -2656,24 +3582,17 @@ mod tests {
         // many blocks — else "one block per cursor" would vacuously be the whole
         // corpus and the bound below would prove nothing.
         let max_block_entries = |reader: &SstReader| -> usize {
-            match &reader.body {
-                SstBody::Blocked(body) => {
-                    assert!(
-                        body.index.len() >= 8,
-                        "corpus must span many blocks (got {})",
-                        body.index.len()
-                    );
-                    (0..body.index.len())
-                        .map(|b| {
-                            body.decode_block_uncached(b, reader.sst_number)
-                                .expect("decode block")
-                                .len()
-                        })
-                        .max()
-                        .unwrap_or(0)
-                }
-                SstBody::Eager(_) => panic!("expected a v3 blocked SST"),
-            }
+            let blocks = data_blocks(reader);
+            assert!(
+                blocks.len() >= 8,
+                "corpus must span many blocks (got {})",
+                blocks.len()
+            );
+            blocks
+                .iter()
+                .map(|b| b.block.data().expect("data block").len())
+                .max()
+                .unwrap_or(0)
         };
         let block_cap = max_block_entries(&reader_a).max(max_block_entries(&reader_b));
 
@@ -3090,8 +4009,9 @@ mod tests {
         let reader = SstReader::open(&sst_path, 1, &dek).expect("reopen");
 
         assert!(
-            reader.bloom_filter.is_some(),
-            "bloom filter must be present in V2 SST after reopen"
+            !partitions(&reader).is_empty()
+                && partitions(&reader).iter().all(|p| p.filter.is_some()),
+            "every partition of a new SST must have its Bloom filter after reopen"
         );
 
         // Critical property: no false negatives after reopen.
@@ -3392,7 +4312,7 @@ mod tests {
     /// Decrypts and parses a v3 file's footer index from its raw bytes.
     fn read_v3_index(raw: &[u8], sst_number: u64, dek: &DataEncryptionKey) -> Vec<BlockIndexEntry> {
         let len = raw.len();
-        let trailer = &raw[len - V3_TRAILER_SIZE..];
+        let trailer = &raw[len - TRAILER_SIZE..];
         let footer_offset = u64::from_le_bytes(trailer[0..8].try_into().expect("off")) as usize;
         let footer_len = u32::from_le_bytes(trailer[8..12].try_into().expect("len")) as usize;
         let footer_ct = &raw[footer_offset..footer_offset + footer_len];
@@ -3418,7 +4338,7 @@ mod tests {
         entries.sort_by(|a, b| a.0.cmp(&b.0));
 
         let (dek, enc) = test_encryption_context();
-        SstWriter::write_sst(&sst_path, &entries, 1, &dek, &enc).expect("write");
+        write_v3_for_test(&sst_path, &entries, 1, &dek, &enc);
 
         // Multiple blocks were produced.
         let raw = std::fs::read(&sst_path).expect("read");
@@ -3455,7 +4375,7 @@ mod tests {
         let realm = RealmId::generate();
         let entries = fixed_entries(&realm, 200);
         let (dek, enc) = test_encryption_context();
-        SstWriter::write_sst(&sst_path, &entries, 1, &dek, &enc).expect("write");
+        write_v3_for_test(&sst_path, &entries, 1, &dek, &enc);
 
         let mut raw = std::fs::read(&sst_path).expect("read");
         let index = read_v3_index(&raw, 1, &dek);
@@ -3482,7 +4402,7 @@ mod tests {
         let realm = RealmId::generate();
         let entries = fixed_entries(&realm, 400);
         let (dek, enc) = test_encryption_context();
-        SstWriter::write_sst(&sst_path, &entries, 1, &dek, &enc).expect("write");
+        write_v3_for_test(&sst_path, &entries, 1, &dek, &enc);
 
         let mut raw = std::fs::read(&sst_path).expect("read");
         let index = read_v3_index(&raw, 1, &dek);
@@ -3513,52 +4433,236 @@ mod tests {
         );
     }
 
+    /// Writes `entries` with the v3 writer or the v4 writer.
+    fn write_either(
+        v3: bool,
+        path: &Path,
+        entries: &[(CompositeKey, MemtableValue)],
+        sst_number: u64,
+        dek: &DataEncryptionKey,
+        enc: &EncryptionHeader,
+    ) {
+        if v3 {
+            write_v3_for_test(path, entries, sst_number, dek, enc);
+        } else {
+            SstWriter::write_sst(path, entries, sst_number, dek, enc).expect("write v4");
+        }
+    }
+
+    /// The stored handle of a v4 piece.
+    fn stored(piece: &Piece) -> BlockHandle {
+        match piece {
+            Piece::Stored(handle) => *handle,
+            Piece::Pinned(_) => panic!("expected a v4 piece stored in the file"),
+        }
+    }
+
+    /// Enough fixed-size rows for three partitions or more.
+    const PARTITIONED_ROWS: u32 = 40_000;
+
     #[test]
-    fn v3_truncated_footer_is_clean_error() {
+    fn v4_round_trip_across_partitions() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let sst_path = dir.path().join("trunc_footer.sst");
+        let sst_path = dir.path().join("partitioned.sst");
         let realm = RealmId::generate();
-        let entries = fixed_entries(&realm, 200);
+        let mut entries = fixed_entries(&realm, PARTITIONED_ROWS);
+        for (i, (_, value)) in entries.iter_mut().enumerate() {
+            if i % 11 == 0 {
+                *value = MemtableValue::Tombstone;
+            }
+        }
         let (dek, enc) = test_encryption_context();
         SstWriter::write_sst(&sst_path, &entries, 1, &dek, &enc).expect("write");
+        let reader = SstReader::open(&sst_path, 1, &dek).expect("open");
+        let parts = partitions(&reader);
+        assert!(parts.len() >= 3, "precondition: {} partitions", parts.len());
 
-        let mut raw = std::fs::read(&sst_path).expect("read");
-        // Drop the trailer and most of the footer.
-        raw.truncate(raw.len() - (V3_TRAILER_SIZE + 8));
-        std::fs::write(&sst_path, &raw).expect("rewrite");
+        // Every partition boundary, and the rows on both sides of it.
+        let boundaries: Vec<usize> = parts
+            .iter()
+            .map(|p| {
+                entries
+                    .iter()
+                    .position(|(k, _)| k == &p.first_key)
+                    .expect("a partition starts at a stored key")
+            })
+            .collect();
+        assert_eq!(boundaries[0], 0);
+        for &b in &boundaries[1..] {
+            for (k, v) in &entries[b - 1..=b] {
+                assert_eq!(reader.get(&realm, k.key()).expect("get").as_ref(), Some(v));
+            }
+        }
+        for (k, v) in entries.iter().step_by(7) {
+            assert_eq!(reader.get(&realm, k.key()).expect("get").as_ref(), Some(v));
+        }
+        // Absent keys: before the first row, between two rows, after the last.
+        for absent in [&b"a"[..], b"k000100x", b"z"] {
+            assert_eq!(reader.get(&realm, absent).expect("get"), None, "{absent:?}");
+        }
+        assert_eq!(reader.iter_all().expect("iter_all"), entries);
 
-        let result = SstReader::open(&sst_path, 1, &dek);
-        assert!(
-            matches!(
-                result,
-                Err(StorageError::InvalidSstFormat { .. } | StorageError::ChecksumMismatch { .. })
-            ),
-            "truncated footer must be a clean format error, got {result:?}"
+        // A scan and a key walk across the second partition boundary.
+        let b = boundaries[1];
+        let (start, end) = (entries[b - 50].0.key(), entries[b + 50].0.key());
+        let scanned = reader.range_scan(&realm, start, end).expect("scan");
+        let expected: Vec<(Vec<u8>, MemtableValue)> = entries[b - 50..b + 50]
+            .iter()
+            .map(|(k, v)| (k.key().to_vec(), v.clone()))
+            .collect();
+        assert_eq!(scanned, expected);
+        let mut cursor = reader.key_cursor(&realm, start, end).expect("cursor");
+        let mut walked = Vec::new();
+        while let Some((key, alive)) = cursor.current() {
+            walked.push((key.to_vec(), alive));
+            cursor.advance().expect("advance");
+        }
+        assert_eq!(
+            walked,
+            reader
+                .range_scan_keys(&realm, start, end)
+                .expect("scan keys")
         );
     }
 
     #[test]
-    fn v3_truncated_final_block_is_clean_error() {
+    fn v4_index_and_filter_block_tamper_fails_aead_no_panic() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let sst_path = dir.path().join("trunc_block.sst");
+        let sst_path = dir.path().join("tamper_v4.sst");
         let realm = RealmId::generate();
-        let entries = fixed_entries(&realm, 200);
+        let entries = fixed_entries(&realm, PARTITIONED_ROWS);
         let (dek, enc) = test_encryption_context();
         SstWriter::write_sst(&sst_path, &entries, 1, &dek, &enc).expect("write");
+        let (index0, filter1, key0, key1) = {
+            let reader = SstReader::open(&sst_path, 1, &dek).expect("open");
+            let parts = partitions(&reader);
+            (
+                stored(&parts[0].index),
+                stored(parts[1].filter.as_ref().expect("filter")),
+                parts[0].first_key.key().to_vec(),
+                parts[1].first_key.key().to_vec(),
+            )
+        };
 
         let mut raw = std::fs::read(&sst_path).expect("read");
-        // Cut the file inside the data section (drops footer + last blocks). The
-        // trailer now reads garbage, so open must reject it — no panic.
-        raw.truncate(TOTAL_HEADER_SIZE + 100);
+        raw[index0.file_offset as usize + 3] ^= 0xFF;
+        raw[filter1.file_offset as usize + 3] ^= 0xFF;
         std::fs::write(&sst_path, &raw).expect("rewrite");
 
-        let result = SstReader::open(&sst_path, 1, &dek);
+        // The footer is intact, so the file opens; each tampered piece
+        // surfaces as an error when a lookup reads it.
+        let reader = SstReader::open(&sst_path, 1, &dek).expect("open");
+        for key in [key0, key1] {
+            let result = reader.get(&realm, &key);
+            assert!(
+                matches!(result, Err(StorageError::Crypto { .. })),
+                "a tampered piece must surface a crypto error, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn v4_filter_block_swap_forgery_fails_position_binding() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sst_path = dir.path().join("swap_v4.sst");
+        let realm = RealmId::generate();
+        let entries = fixed_entries(&realm, PARTITIONED_ROWS);
+        let (dek, enc) = test_encryption_context();
+        SstWriter::write_sst(&sst_path, &entries, 1, &dek, &enc).expect("write");
+        let (filter0, filter1, key1) = {
+            let reader = SstReader::open(&sst_path, 1, &dek).expect("open");
+            let parts = partitions(&reader);
+            (
+                stored(parts[0].filter.as_ref().expect("filter")),
+                stored(parts[1].filter.as_ref().expect("filter")),
+                parts[1].first_key.key().to_vec(),
+            )
+        };
+        assert_eq!(
+            filter0.ciphertext_len, filter1.ciphertext_len,
+            "test needs equal-length filter blocks for a clean splice"
+        );
+
+        // Splice partition 0's valid filter ciphertext over partition 1's.
+        let mut raw = std::fs::read(&sst_path).expect("read");
+        let (off0, off1) = (filter0.file_offset as usize, filter1.file_offset as usize);
+        let len = filter0.ciphertext_len as usize;
+        let block0 = raw[off0..off0 + len].to_vec();
+        raw[off1..off1 + len].copy_from_slice(&block0);
+        std::fs::write(&sst_path, &raw).expect("rewrite");
+
+        let reader = SstReader::open(&sst_path, 1, &dek).expect("open");
+        let result = reader.get(&realm, &key1);
         assert!(
-            matches!(
-                result,
-                Err(StorageError::InvalidSstFormat { .. } | StorageError::ChecksumMismatch { .. })
-            ),
-            "truncated data section must be a clean format error, got {result:?}"
+            matches!(result, Err(StorageError::Crypto { .. })),
+            "a filter block moved to another partition must fail, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn truncated_v3_and_v4_files_are_clean_errors() {
+        let realm = RealmId::generate();
+        let entries = fixed_entries(&realm, 200);
+        for v3 in [true, false] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (dek, enc) = test_encryption_context();
+            // The trailer and part of the footer gone; and a cut inside the
+            // blocks, where the trailer reads garbage.
+            for cut in [TRAILER_SIZE + 8, 0] {
+                let sst_path = dir.path().join(format!("trunc_{v3}_{cut}.sst"));
+                write_either(v3, &sst_path, &entries, 1, &dek, &enc);
+                let mut raw = std::fs::read(&sst_path).expect("read");
+                let keep = if cut == 0 {
+                    TOTAL_HEADER_SIZE + 100
+                } else {
+                    raw.len() - cut
+                };
+                raw.truncate(keep);
+                std::fs::write(&sst_path, &raw).expect("rewrite");
+                let result = SstReader::open(&sst_path, 1, &dek);
+                assert!(
+                    matches!(
+                        result,
+                        Err(StorageError::InvalidSstFormat { .. }
+                            | StorageError::ChecksumMismatch { .. })
+                    ),
+                    "v3={v3}, cut={cut}: a truncated file must be a clean error, got {result:?}"
+                );
+            }
+        }
+    }
+
+    /// Hearth must read the SST format of the previous minor version
+    /// (ARCHITECTURE §6.4). A v3 file stays readable, and a compaction
+    /// rewrites it as v4.
+    #[test]
+    fn v3_files_still_read_and_compact_into_v4() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let realm = RealmId::generate();
+        let mut entries = fixed_entries(&realm, 2_000);
+        entries[10].1 = MemtableValue::Tombstone;
+        let (dek, enc) = test_encryption_context();
+        let v3_path = dir.path().join("old.sst");
+        write_v3_for_test(&v3_path, &entries, 1, &dek, &enc);
+        assert_eq!(&std::fs::read(&v3_path).expect("read")[0..4], b"HSS3");
+        let v3 = SstReader::open(&v3_path, 1, &dek).expect("open v3");
+        for (k, v) in &entries {
+            assert_eq!(v3.get(&realm, k.key()).expect("get").as_ref(), Some(v));
+        }
+
+        let out_path = dir.path().join("new.sst");
+        compact(&[&v3], &out_path, 2, &dek, &enc).expect("compact");
+        assert_eq!(&std::fs::read(&out_path).expect("read")[0..4], b"HSS4");
+        let v4 = SstReader::open(&out_path, 2, &dek).expect("open v4");
+        let live: Vec<_> = entries
+            .iter()
+            .filter(|(_, v)| matches!(v, MemtableValue::Data(_)))
+            .cloned()
+            .collect();
+        assert_eq!(
+            v4.iter_all().expect("iter_all"),
+            live,
+            "a full merge drops tombstones"
         );
     }
 
@@ -3928,8 +5032,8 @@ mod tests {
         let blocked = SstReader::open(&blocked_path, 1, &dek).expect("open v3");
         let eager = SstReader::open(&eager_path, 2, &dek).expect("open v2");
         assert!(
-            matches!(&blocked.body, SstBody::Blocked(body) if body.index.len() > 3),
-            "precondition: a V3 SST of several blocks"
+            data_blocks(&blocked).len() > 3,
+            "precondition: a blocked SST of several blocks"
         );
         assert!(
             matches!(eager.body, SstBody::Eager(_)),

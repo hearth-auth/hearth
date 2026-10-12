@@ -1,7 +1,7 @@
-//! Bounded, sharded cache of decrypted SST data blocks (HEA-1914).
+//! Bounded, sharded cache of decrypted SST blocks (HEA-1914, #445).
 //!
-//! The v3 SST reader keeps only a small footer index resident and decrypts
-//! individual ~4 KiB data blocks on demand. Without a bound on decrypted-block
+//! An SST reader decrypts individual ~4 KiB data blocks on demand, and a v4
+//! reader also its index and filter blocks. Without a bound on decrypted-block
 //! residency the working set would still grow with the corpus, so decrypted
 //! blocks live here behind a fixed byte budget shared by every reader in the
 //! process.
@@ -15,20 +15,36 @@
 //! reference bit — no mutex. A per-shard `Mutex` is taken only on a **miss**
 //! insert / eviction, which already pays for a decrypt and is off the hot path.
 //!
-//! Eviction is CLOCK (second-chance): each cached block carries a `referenced`
-//! bit set on every hit and cleared by the eviction sweep, approximating LRU
-//! without touching the shard lock on reads.
+//! Eviction is CLOCK: each cached block carries a count of chances, reset on
+//! every hit and lowered by the eviction sweep, which evicts a block with no
+//! chance left. This approximates LRU without touching the shard lock on
+//! reads. An index or filter block gets [`METADATA_CHANCES`] chances and a data
+//! block one: every lookup in a partition's range reads its index and filter
+//! blocks, so a stream of data blocks read once must not push them out.
+//!
+//! Each insert copies its shard's map, so the shard count grows with the
+//! budget: a shard holds about [`SHARD_TARGET_BYTES`] of blocks, a few hundred
+//! of them, and an insert copies only those.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::core::EpochCell;
-use crate::storage::sst::DataBlock;
+use crate::storage::sst::Block;
 
-/// Number of independent shards. A power of two so the index mask is a cheap
-/// bitwise AND.
-const SHARD_COUNT: usize = 16;
+/// The fewest shards a cache has, whatever its budget.
+const MIN_SHARDS: usize = 16;
+
+/// The most shards a cache has.
+const MAX_SHARDS: usize = 256;
+
+/// The budget of one shard that the shard count aims at.
+const SHARD_TARGET_BYTES: usize = 1 << 20;
+
+/// The chances an index or filter block gets before eviction; a data block
+/// gets one.
+const METADATA_CHANCES: u8 = 3;
 
 /// Identifies one decrypted block: the owning reader's unique open id plus the
 /// block's ordinal position within that file.
@@ -47,16 +63,19 @@ pub(crate) struct BlockId {
     pub block_index: u32,
 }
 
-/// A decrypted SST data block held in the cache.
+/// A decrypted SST block held in the cache.
 pub(crate) struct CachedBlock {
-    /// The block's plaintext and entry offsets.
-    pub block: DataBlock,
+    /// The decoded block.
+    pub block: Block,
     /// The heap this block holds while it is cached, charged against the
     /// budget: its buffers plus [`ENTRY_OVERHEAD`].
     pub weight: usize,
-    /// CLOCK reference bit — set on every cache hit (lock-free) and cleared by
-    /// the eviction sweep. Lets hits avoid taking the shard lock.
-    referenced: AtomicBool,
+    /// The chances this block gets after a hit: [`METADATA_CHANCES`] for an
+    /// index or filter block, 1 for a data block.
+    max_chances: u8,
+    /// CLOCK chances left — reset on every cache hit (lock-free) and lowered
+    /// by the eviction sweep. Lets hits avoid taking the shard lock.
+    chances: AtomicU8,
 }
 
 /// The heap the cache holds for each block besides the block's buffers: the
@@ -69,27 +88,29 @@ const ENTRY_OVERHEAD: usize = 2 * std::mem::size_of::<usize>()
 
 impl CachedBlock {
     /// Builds a cache entry, weighted by the heap the block holds (#445).
-    pub(crate) fn new(block: DataBlock) -> Self {
-        Self {
-            weight: block.heap_bytes() + ENTRY_OVERHEAD,
-            block,
-            referenced: AtomicBool::new(true),
-        }
+    pub(crate) fn new(block: Block) -> Self {
+        let weight = block.heap_bytes() + ENTRY_OVERHEAD;
+        Self::with_weight(block, weight)
     }
 
-    /// Builds a cache entry with a chosen weight, for tests of eviction.
-    #[cfg(test)]
-    fn with_weight(block: DataBlock, weight: usize) -> Self {
+    /// Builds a cache entry with a chosen weight.
+    fn with_weight(block: Block, weight: usize) -> Self {
+        let max_chances = if block.is_metadata() {
+            METADATA_CHANCES
+        } else {
+            1
+        };
         Self {
             block,
             weight,
-            referenced: AtomicBool::new(true),
+            max_chances,
+            chances: AtomicU8::new(max_chances),
         }
     }
 
-    /// Records a hit on this block (lock-free; CLOCK reference bit).
+    /// Records a hit on this block (lock-free; resets its CLOCK chances).
     fn mark_referenced(&self) {
-        self.referenced.store(true, Ordering::Relaxed);
+        self.chances.store(self.max_chances, Ordering::Relaxed);
     }
 }
 
@@ -111,8 +132,9 @@ struct ShardInner {
 
 /// A process-wide, byte-bounded cache of decrypted SST blocks.
 pub(crate) struct BlockCache {
+    /// A power of two in `[MIN_SHARDS, MAX_SHARDS]`.
     shards: Vec<Shard>,
-    /// Per-shard byte budget (`total_budget / SHARD_COUNT`, at least one block).
+    /// Per-shard byte budget (`total_budget / shards.len()`, at least 1).
     shard_cap_bytes: usize,
 }
 
@@ -122,8 +144,11 @@ impl BlockCache {
     /// point lookups make progress (blocks are inserted then immediately
     /// eligible for eviction).
     pub(crate) fn new(total_budget_bytes: usize) -> Self {
-        let shard_cap_bytes = (total_budget_bytes / SHARD_COUNT).max(1);
-        let shards = (0..SHARD_COUNT)
+        let wanted = (total_budget_bytes / SHARD_TARGET_BYTES).clamp(MIN_SHARDS, MAX_SHARDS);
+        // The largest power of two at or below `wanted`.
+        let shard_count = 1usize << wanted.ilog2();
+        let shard_cap_bytes = (total_budget_bytes / shard_count).max(1);
+        let shards = (0..shard_count)
             .map(|_| Shard {
                 map: EpochCell::from_pointee(HashMap::new()),
                 inner: Mutex::new(ShardInner {
@@ -140,12 +165,12 @@ impl BlockCache {
 
     /// Selects the shard for a block id via a cheap integer mix.
     fn shard_idx(&self, id: BlockId) -> usize {
-        // Mix the reader id and block index; SHARD_COUNT is a power of two.
+        // Mix the reader id and block index; the shard count is a power of two.
         let h = id
             .reader_id
             .wrapping_mul(0x9e37_79b9_7f4a_7c15)
             .wrapping_add(u64::from(id.block_index).wrapping_mul(0x0000_0100_0000_01b3));
-        (h as usize) & (SHARD_COUNT - 1)
+        (h as usize) & (self.shards.len() - 1)
     }
 
     /// Looks up a cached block. Lock-free; sets the CLOCK reference bit on a hit.
@@ -176,10 +201,14 @@ impl BlockCache {
         let mut new_map = HashMap::clone(&current);
 
         // CLOCK eviction. Bound the scan so a storm of concurrent hits
-        // continually re-setting reference bits cannot spin forever; on the
-        // bound we simply admit the block slightly over budget.
+        // continually resetting chances cannot spin forever; on the bound we
+        // simply admit the block slightly over budget.
         let mut scans = 0usize;
-        let scan_limit = inner.clock.len().saturating_mul(2).saturating_add(1);
+        let scan_limit = inner
+            .clock
+            .len()
+            .saturating_mul(usize::from(METADATA_CHANCES) + 1)
+            .saturating_add(1);
         while inner.bytes + block.weight > self.shard_cap_bytes
             && !inner.clock.is_empty()
             && scans < scan_limit
@@ -191,8 +220,10 @@ impl BlockCache {
             let Some(victim_block) = new_map.get(&victim) else {
                 continue; // already gone
             };
-            if victim_block.referenced.swap(false, Ordering::Relaxed) {
-                inner.clock.push_back(victim); // second chance
+            let chances = victim_block.chances.load(Ordering::Relaxed);
+            if chances > 0 {
+                victim_block.chances.store(chances - 1, Ordering::Relaxed);
+                inner.clock.push_back(victim); // another chance
                 continue;
             }
             let freed = victim_block.weight;
@@ -221,16 +252,73 @@ mod tests {
     use crate::core::RealmId;
 
     use crate::storage::memtable::{CompositeKey, MemtableValue};
+    use crate::storage::sst::DataBlock;
+    use std::sync::atomic::AtomicBool;
 
-    fn block(realm: &RealmId, key: &[u8], weight: usize) -> Arc<CachedBlock> {
+    fn data_block(realm: &RealmId, key: &[u8]) -> Block {
         let entries = vec![(
             CompositeKey::new(realm.clone(), key.to_vec()),
             MemtableValue::Data(vec![0u8; 8]),
         )];
-        Arc::new(CachedBlock::with_weight(
-            DataBlock::from_entries(&entries),
-            weight,
-        ))
+        Block::Data(DataBlock::from_entries(&entries))
+    }
+
+    fn block(realm: &RealmId, key: &[u8], weight: usize) -> Arc<CachedBlock> {
+        Arc::new(CachedBlock::with_weight(data_block(realm, key), weight))
+    }
+
+    /// Ids of `count` blocks of reader `reader_id` that all land in one shard.
+    fn ids_in_one_shard(cache: &BlockCache, reader_id: u64, count: usize) -> Vec<BlockId> {
+        let target = cache.shard_idx(BlockId {
+            reader_id,
+            block_index: 0,
+        });
+        (0_u32..)
+            .map(|block_index| BlockId {
+                reader_id,
+                block_index,
+            })
+            .filter(|id| cache.shard_idx(*id) == target)
+            .take(count)
+            .collect()
+    }
+
+    /// Every lookup in a partition's range reads its index and filter blocks,
+    /// while a scan or a spread of cold lookups reads each data block once. An
+    /// index or filter block must outlive data blocks that arrive after it,
+    /// even if neither is read again (#445).
+    #[test]
+    fn a_metadata_block_outlives_data_blocks_inserted_after_it() {
+        const WEIGHT: usize = 64;
+        // Room for four blocks in each shard.
+        let cache = BlockCache::new(MIN_SHARDS * WEIGHT * 4);
+        let realm = RealmId::generate();
+        let ids = ids_in_one_shard(&cache, 3, 7);
+        let filter = Block::Filter(crate::storage::sst::BloomFilter::for_test());
+        cache.insert(ids[0], Arc::new(CachedBlock::with_weight(filter, WEIGHT)));
+        cache.insert(ids[1], block(&realm, b"first data", WEIGHT));
+        // Five more data blocks: a one-chance CLOCK evicts the oldest block, the
+        // filter block, at the fourth of them.
+        for id in &ids[2..] {
+            cache.insert(*id, block(&realm, b"later data", WEIGHT));
+        }
+        assert!(
+            cache.get(ids[0]).is_some(),
+            "five data blocks pushed out the filter block"
+        );
+        assert!(
+            cache.get(ids[1]).is_none(),
+            "the data block inserted after the filter block was not pushed out"
+        );
+    }
+
+    #[test]
+    fn the_shard_count_grows_with_the_budget() {
+        assert_eq!(BlockCache::new(0).shards.len(), MIN_SHARDS);
+        assert_eq!(BlockCache::new(32 << 20).shards.len(), 32);
+        assert_eq!(BlockCache::new(48 << 20).shards.len(), 32, "a power of two");
+        assert_eq!(BlockCache::new(256 << 20).shards.len(), 256);
+        assert_eq!(BlockCache::new(1 << 40).shards.len(), MAX_SHARDS);
     }
 
     #[test]
@@ -244,7 +332,7 @@ mod tests {
                 )
             })
             .collect();
-        let block = DataBlock::from_entries(&entries);
+        let block = Block::Data(DataBlock::from_entries(&entries));
         let heap = block.heap_bytes();
         assert!(
             heap >= 30 * (25 + 8 + 64),
@@ -274,7 +362,7 @@ mod tests {
     #[test]
     fn eviction_keeps_resident_bytes_bounded() {
         // Small budget; insert far more block-bytes than fit.
-        let budget = SHARD_COUNT * 4096;
+        let budget = MIN_SHARDS * 4096;
         let cache = BlockCache::new(budget);
         let realm = RealmId::generate();
         for i in 0..10_000u32 {
@@ -286,7 +374,7 @@ mod tests {
         }
         // Resident must never blow past the budget by more than one block per
         // shard of slack (the over-admit bound).
-        let slack = SHARD_COUNT * 512;
+        let slack = MIN_SHARDS * 512;
         assert!(
             cache.resident_bytes() <= budget + slack,
             "resident {} exceeds budget {} + slack {}",
@@ -312,7 +400,7 @@ mod tests {
 
         // Room for four blocks per shard, and every id below lands in the same
         // shard, so nearly every insert evicts another id's block.
-        let cache = Arc::new(BlockCache::new(SHARD_COUNT * WEIGHT * 4));
+        let cache = Arc::new(BlockCache::new(MIN_SHARDS * WEIGHT * 4));
         let target = cache.shard_idx(BlockId {
             reader_id: 9,
             block_index: 0,
@@ -341,7 +429,12 @@ mod tests {
                             if let Some(block) = cache.get(*id) {
                                 hits += 1;
                                 assert_eq!(
-                                    block.block.entry(0).map(|e| e.key().to_vec()),
+                                    block
+                                        .block
+                                        .data()
+                                        .ok()
+                                        .and_then(|b| b.entry(0))
+                                        .map(|e| e.key().to_vec()),
                                     Some(key_of(*id)),
                                     "a hit returned another id's block"
                                 );
@@ -380,9 +473,13 @@ mod tests {
         let last = ids[IDS - 1];
         cache.insert(last, block(&realm, &key_of(last), WEIGHT));
         assert_eq!(
-            cache
-                .get(last)
-                .and_then(|b| b.block.entry(0).map(|e| e.key().to_vec())),
+            cache.get(last).and_then(|b| {
+                b.block
+                    .data()
+                    .ok()
+                    .and_then(|d| d.entry(0))
+                    .map(|e| e.key().to_vec())
+            }),
             Some(key_of(last)),
             "an insert after the storm did not publish"
         );
@@ -403,6 +500,6 @@ mod tests {
         }
         // With a ~1-byte-per-shard cap every insert evicts almost immediately;
         // residency stays minuscule regardless of how many blocks pass through.
-        assert!(cache.resident_bytes() <= SHARD_COUNT * 128);
+        assert!(cache.resident_bytes() <= MIN_SHARDS * 128);
     }
 }

@@ -753,7 +753,8 @@ impl Metrics {
 
         let storage_sst_reader_bytes = Gauge::new(
             "hearth_storage_sst_reader_bytes",
-            "Heap held by the live SST readers: block indexes, Bloom filters and key ranges",
+            "Heap held by the live SST readers: v4 partition lists, v3 block indexes and Bloom \
+             filters, and key ranges",
         )
         .expect("metric descriptor is valid");
         registry

@@ -116,6 +116,10 @@ Work through this list for every upgrade, including patch releases.
   and the older binary will then refuse to start with `WAL format version N is not supported by this
   binary; upgrade Hearth or restore from backup`. See [Rollback](#rollback-procedure) for that path.
 
+  The SST format moved from v3 to v4 in #445. A newer Hearth reads v3 files and writes v4; each
+  compaction rewrites its v3 inputs as v4. A Hearth from before #445 refuses a v4 file at startup
+  with `invalid magic bytes`, so a rollback past #445 restores the pre-upgrade backup.
+
 - [ ] **Confirm single-writer invariant.** Ensure no other process is pointing at the same `storage.data_dir`:
 
   ```bash

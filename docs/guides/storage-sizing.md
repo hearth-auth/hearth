@@ -24,11 +24,15 @@ before quoting any row.
 | SST files (warm page cache) | `memmap2` read-only mmap + Bloom filter | DRAM (page cache) | < 10 µs | < 100 µs |
 | SST files (cold page fault) | `memmap2` read-only mmap + Bloom filter | NVMe | < 100 µs | < 5 ms |
 
-Each SST file embeds a per-file Bloom filter (k = 7, ~1% false-positive rate,
-~10 bits/entry). A point read probes the filter in O(k) constant time before
-performing a binary search, so absent-key reads skip the disk search on ~99%
-of SSTs. V1 SSTs (pre-HEA-1626) remain readable without a filter; `might_contain`
-returns `true` for every key on those files, falling back to the full binary search.
+Each SST file embeds Bloom filters (k = 7, ~1% false-positive rate,
+~10 bits/entry), one for each partition of about 1 MiB of data. A point read
+probes the partition's filter in O(k) constant time before it reads the
+partition's block index, so absent-key reads skip the data block on ~99% of
+SSTs. Since format v4 (#445), the filters and the block index load through the
+block cache (`storage.block_cache_bytes`), so their memory has a limit; an open
+file keeps only its partition list on the heap. V1 SSTs (pre-HEA-1626) remain
+readable without a filter; `might_contain` returns `true` for every key on those
+files, falling back to the full binary search.
 
 **Provenance — these are not the CI gate thresholds, and they are not measured figures.** An
 earlier version of this guide said the ranges above "match the CI gate thresholds"; they do not.
