@@ -76,12 +76,12 @@ use crate::storage::{
 /// Publishes the live SST readers' file count and heap
 /// (`hearth_storage_sst_files`, `hearth_storage_sst_reader_bytes`).
 #[allow(clippy::cast_precision_loss)] // counts and byte sizes far below 2^52
-fn record_sst_readers(readers: &[SstReader]) {
+fn record_sst_readers(readers: &[Arc<SstReader>]) {
     let metrics = crate::metrics::metrics();
     metrics.storage_sst_files.set(readers.len() as f64);
     metrics
         .storage_sst_reader_bytes
-        .set(readers.iter().map(SstReader::resident_bytes).sum::<usize>() as f64);
+        .set(readers.iter().map(|r| r.resident_bytes()).sum::<usize>() as f64);
 }
 
 /// Pending write-batch handle for the [`EmbeddedStorageEngine`] group-commit path.
@@ -357,7 +357,9 @@ pub struct EmbeddedStorageEngine {
     /// On-disk SST files, newest first.
     ///
     /// Wrapped in `Arc<EpochCell<...>>` for the same reason as `active_memtable`.
-    sst_readers: Arc<EpochCell<Vec<SstReader>>>,
+    /// Each reader is an `Arc` so that a rebuilt list shares the readers of the
+    /// files that did not change, instead of opening them again (#445).
+    sst_readers: Arc<EpochCell<Vec<Arc<SstReader>>>>,
     /// In-memory hot tier for frequently accessed data.
     hot_tier: HotTier,
     /// Base data directory.
@@ -689,7 +691,7 @@ impl EmbeddedStorageEngine {
                         reason: format!("SST {} failed to open reader: {}", path.display(), e),
                     })?;
             max_sst_num = max_sst_num.max(*sst_num);
-            sst_readers.push(reader);
+            sst_readers.push(Arc::new(reader));
         }
 
         let hot_tier = HotTier::new(config.tiered_config);
@@ -759,19 +761,23 @@ impl EmbeddedStorageEngine {
                     )?;
                     // Rebuild the SST reader list, inserting the new file, under
                     // the same strict policy as `reload_sst_readers`. Skipping a
-                    // file that cannot be reopened published a partial list: a
+                    // file that cannot be opened published a partial list: a
                     // hidden tombstone's value came straight back, and the next
                     // compaction over that list made it permanent (audit GA
                     // 2026-09-28 B8). An error here fails the flush — its parked
                     // map is folded back — so `rotate_locked` aborts before it
-                    // truncates the segment.
+                    // truncates the segment. A flush changes no existing file,
+                    // so every open reader is kept.
+                    let open = cb_sst_readers.load_full();
                     let rebuilt = load_sst_readers(
                         &*cb_fs,
                         &cb_data_dir,
                         &cb_key_registry,
                         &cb_block_cache,
                         cb_allow_missing_keks,
+                        &open,
                     )?;
+                    drop(open);
                     record_sst_readers(&rebuilt);
                     cb_sst_readers.store(Arc::new(rebuilt));
                     Ok(())
@@ -982,10 +988,13 @@ impl EmbeddedStorageEngine {
                 &enc_header,
             )?;
 
-            // Rebuild SST reader list from disk (re-open all files). This
-            // registers the new SST *before* the memtable is emptied, so reads
-            // never miss a just-flushed key.
-            let rebuilt_readers = self.reload_sst_readers()?;
+            // Rebuild the SST reader list from disk. This registers the new SST
+            // *before* the memtable is emptied, so reads never miss a
+            // just-flushed key. A flush changes no existing file, so every open
+            // reader is kept and only the new file is opened.
+            let open = self.sst_readers.load_full();
+            let rebuilt_readers = self.reload_sst_readers(&open)?;
+            drop(open);
             let live_count = rebuilt_readers.len();
             record_sst_readers(&rebuilt_readers);
             self.sst_readers.store(Arc::new(rebuilt_readers));
@@ -1014,8 +1023,13 @@ impl EmbeddedStorageEngine {
         Ok(())
     }
 
-    /// Re-opens every `*.sst` file in the data directory into a fresh, newest-first
-    /// reader list.
+    /// Rebuilds the newest-first reader list from every `*.sst` file in the data
+    /// directory. A file that has a reader in `unchanged` keeps that reader; every
+    /// other file is opened.
+    ///
+    /// `unchanged` MUST hold only readers whose file did not change since they
+    /// were opened. `compact_partial` writes its output under the number of an
+    /// existing file, so it leaves the readers of its run out.
     ///
     /// This is the single source of truth for materialising the in-memory reader
     /// Vec from on-disk state. Files are sorted by SST number descending so the
@@ -1039,13 +1053,17 @@ impl EmbeddedStorageEngine {
     ///
     /// Callers MUST hold `flush_lock` so the directory scan cannot race a flush
     /// writing a new file.
-    fn reload_sst_readers(&self) -> Result<Vec<SstReader>, StorageError> {
+    fn reload_sst_readers(
+        &self,
+        unchanged: &[Arc<SstReader>],
+    ) -> Result<Vec<Arc<SstReader>>, StorageError> {
         load_sst_readers(
             &*self.fs,
             &self.data_dir,
             &self.key_registry,
             &self.block_cache,
             self.allow_missing_keks,
+            unchanged,
         )
     }
 
@@ -1102,10 +1120,14 @@ impl EmbeddedStorageEngine {
     }
 }
 
-/// Opens every `*.sst` file in `data_dir` into a newest-first reader list, under
-/// the start-up policy: a missing KEK or a failed DEK unwrap is skipped only
-/// when `allow_missing_keks` is set, and an unreadable header or a failed
-/// reader open always fails.
+/// Lists every `*.sst` file in `data_dir` into a newest-first reader list. A
+/// file whose number has a reader in `unchanged` keeps that reader (#445). Every
+/// other file is opened under the start-up policy: a missing KEK or a failed DEK
+/// unwrap is skipped only when `allow_missing_keks` is set, and an unreadable
+/// header or a failed reader open always fails.
+///
+/// `unchanged` MUST hold only readers whose file did not change since they were
+/// opened: a reader is matched by file number alone.
 ///
 /// Shared by [`EmbeddedStorageEngine::reload_sst_readers`] and the WAL-rotation
 /// flush callback, so the two flush paths cannot drift apart again (audit GA
@@ -1116,7 +1138,8 @@ fn load_sst_readers(
     key_registry: &KeyRegistry,
     block_cache: &Arc<crate::storage::block_cache::BlockCache>,
     allow_missing_keks: bool,
-) -> Result<Vec<SstReader>, StorageError> {
+    unchanged: &[Arc<SstReader>],
+) -> Result<Vec<Arc<SstReader>>, StorageError> {
     let mut all_sst_paths: Vec<(PathBuf, u64)> = fs
         .read_dir(data_dir)?
         .into_iter()
@@ -1130,6 +1153,10 @@ fn load_sst_readers(
 
     let mut readers = Vec::with_capacity(all_sst_paths.len());
     for (path, sst_num) in &all_sst_paths {
+        if let Some(open) = unchanged.iter().find(|r| r.sst_number() == *sst_num) {
+            readers.push(Arc::clone(open));
+            continue;
+        }
         let (kek_id, enc_header) = sst::read_encryption_header(path, fs)?;
         let realm_for_kek = RealmId::new(uuid::Uuid::from_bytes(kek_id));
         let kek = if let Some(k) = key_registry.get_kek_for_realm(&realm_for_kek) {
@@ -1172,7 +1199,7 @@ fn load_sst_readers(
             .map_err(|e| StorageError::Crypto {
                 reason: format!("SST {} failed to open reader: {}", path.display(), e),
             })?;
-        readers.push(reader);
+        readers.push(Arc::new(reader));
     }
     Ok(readers)
 }
@@ -1274,7 +1301,8 @@ impl EmbeddedStorageEngine {
         let old_sst_nums: Vec<u64> = sst_readers.iter().map(|r| r.sst_number()).collect();
 
         // Inputs in oldest-to-newest order (sst_readers is newest-first)
-        let readers_oldest_first: Vec<&SstReader> = sst_readers.iter().rev().collect();
+        let readers_oldest_first: Vec<&SstReader> =
+            sst_readers.iter().rev().map(Arc::as_ref).collect();
 
         // DEK + encryption header (same pattern as flush_active)
         let system_kek = self
@@ -1302,8 +1330,8 @@ impl EmbeddedStorageEngine {
         )?;
 
         // Release the input-reader snapshot before the commit phase (the reload
-        // there re-reads from disk); everything needed for the commit is already
-        // captured by number.
+        // there lists the directory again); everything needed for the commit is
+        // already captured by number.
         drop(sst_readers);
 
         // --- Commit phase: hold `flush_lock` only for these metadata ops ---
@@ -1368,8 +1396,11 @@ impl EmbeddedStorageEngine {
         // output is the only live SST: a flush that landed while the merge ran
         // (off `flush_lock`) added a newer SST that MUST survive. Reload gives the
         // correct newest-first order (new flush > merged output > nothing), so no
-        // just-flushed key is dropped.
-        let rebuilt = self.reload_sst_readers()?;
+        // just-flushed key is dropped. The output has a new number and the
+        // inputs are gone, so the reload keeps the reader of every file left.
+        let open = self.sst_readers.load_full();
+        let rebuilt = self.reload_sst_readers(&open)?;
+        drop(open);
         record_sst_readers(&rebuilt);
         if let Some(merged) = rebuilt.iter().find(|r| r.sst_number() == sst_num) {
             self.compaction_records_written.fetch_add(
@@ -1483,12 +1514,12 @@ impl EmbeddedStorageEngine {
         let target_num = run[run.len() - 1].sst_number();
         let other_nums: Vec<u64> = run[..run.len() - 1]
             .iter()
-            .map(SstReader::sst_number)
+            .map(|r| r.sst_number())
             .collect();
         let input_count = run.len();
 
         // Merge inputs oldest-to-newest (newest value wins, matching read order).
-        let inputs_oldest_first: Vec<&SstReader> = run.iter().rev().collect();
+        let inputs_oldest_first: Vec<&SstReader> = run.iter().rev().map(Arc::as_ref).collect();
 
         // Tombstones may only be discarded when the oldest SST is part of the run;
         // otherwise an older, un-merged SST could resurrect a deleted key.
@@ -1582,8 +1613,17 @@ impl EmbeddedStorageEngine {
         // Rematerialise the reader list from disk (newest-first). The merged file
         // now sits at `target_num`, the run's oldest slot — correct, because the
         // run was contiguous, so nothing outside it falls between the run's
-        // oldest and newest members.
-        let rebuilt = self.reload_sst_readers()?;
+        // oldest and newest members. The file at `target_num` changed, so no
+        // reader of the run is kept: the output is opened.
+        let unchanged: Vec<Arc<SstReader>> = self
+            .sst_readers
+            .load_full()
+            .iter()
+            .filter(|r| r.sst_number() != target_num && !other_nums.contains(&r.sst_number()))
+            .cloned()
+            .collect();
+        let rebuilt = self.reload_sst_readers(&unchanged)?;
+        drop(unchanged);
         record_sst_readers(&rebuilt);
         // Attribute the merged output's record count to write amplification. The
         // output took `target_num`, so it is the reader now sitting at that
@@ -1639,7 +1679,7 @@ fn run_after_compaction_publish_hook() {
 /// merged output's number band contains no surviving SST, which the splice in
 /// [`EmbeddedStorageEngine::compact_partial`] relies on for recovery-consistent
 /// ordering.
-fn select_partial_run(readers: &[SstReader], merge_min: usize) -> Option<(usize, usize)> {
+fn select_partial_run(readers: &[Arc<SstReader>], merge_min: usize) -> Option<(usize, usize)> {
     /// Size spread (max/min entry count) tolerated within one tier. A merged SST
     /// (~`merge_min`× the entries of a flush) sits in the next tier up, so it is
     /// never re-merged with fresh flushes — this is what keeps write
@@ -3322,7 +3362,7 @@ mod tests {
         );
         let small: Vec<u32> = readers
             .iter()
-            .map(SstReader::entry_count)
+            .map(|r| r.entry_count())
             .filter(|&n| n < min_entries)
             .collect();
         assert!(
@@ -5398,8 +5438,11 @@ mod tests {
     /// permanent. The rotation flush must apply the same strict policy as
     /// `reload_sst_readers`: fail (so the rotation aborts before truncating)
     /// and leave the published reader list untouched.
+    ///
+    /// A flush keeps the readers of the files it has open (#445), so the file
+    /// it must open is the one it wrote; the open of that file fails here.
     #[test]
-    fn rotation_flush_that_cannot_reopen_an_sst_fails_and_keeps_deletes_deleted() {
+    fn rotation_flush_that_cannot_open_its_sst_fails_and_keeps_deletes_deleted() {
         let dir = tempfile::tempdir().expect("tempdir");
         let realm = RealmId::generate();
         let fs = Arc::new(SstOpenFailFs {
@@ -5419,27 +5462,27 @@ mod tests {
         engine
             .put(&realm, b"pending", b"kept")
             .expect("put pending");
-        let tombstone_sst = engine
+        let next_sst = engine
             .sst_readers
             .load_full()
             .first()
-            .map(|r| dir.path().join(format!("{:06}.sst", r.sst_number())))
+            .map(|r| dir.path().join(format!("{:06}.sst", r.sst_number() + 1)))
             .expect("the newest SST holds the tombstone");
 
-        fs.arm(tombstone_sst);
+        fs.arm(next_sst);
         let rotation = engine.wal.run_pre_rotate_fn();
         fs.disarm();
 
         assert_eq!(
             engine.get(&realm, b"doomed").expect("get"),
             None,
-            "a rotation flush that could not reopen the tombstone's SST published a reader \
-             list without it, and the deleted value came back"
+            "a rotation flush that could not open its SST published a reader list without \
+             the tombstone's SST, and the deleted value came back"
         );
         assert!(
             matches!(rotation, Err(StorageError::Io(_))),
-            "a rotation flush that cannot reopen every SST must fail, so the WAL segment is \
-             not truncated"
+            "a rotation flush that cannot open its SST must fail, so the WAL segment is not \
+             truncated"
         );
         assert_eq!(
             engine.get(&realm, b"pending").expect("get pending"),
@@ -6298,7 +6341,7 @@ mod tests {
                 .sst_readers
                 .load()
                 .iter()
-                .map(SstReader::resident_bytes)
+                .map(|r| r.resident_bytes())
                 .sum::<usize>() as f64
         };
         let gauge = || crate::metrics::metrics().storage_sst_reader_bytes.get();
@@ -6389,5 +6432,122 @@ mod tests {
     #[test]
     fn a_compact_partial_wake_releases_a_reader_list_left_retired() {
         assert_a_compaction_wake_releases_a_list_left_retired(Compaction::Partial);
+    }
+
+    // ===== Keeping the readers of files already open (#445) =====
+
+    /// `(SST number, reader id)` of each reader in the published list, newest
+    /// first. Every open of a file gets a new reader id.
+    fn open_readers(engine: &EmbeddedStorageEngine) -> Vec<(u64, Option<u64>)> {
+        engine
+            .sst_readers
+            .load_full()
+            .iter()
+            .map(|r| (r.sst_number(), r.reader_id()))
+            .collect()
+    }
+
+    /// #445: a flush rebuilt the reader list by opening every SST file again.
+    /// Each flush built a new copy of every file's block index and Bloom
+    /// filter, and the block cache lost every block it held, because blocks
+    /// are keyed by reader. A flush must keep the readers it has and open only
+    /// the file it wrote.
+    #[test]
+    fn a_flush_keeps_the_readers_of_files_already_open() {
+        let (_dir, engine) = engine_with_ssts(2);
+        let before = open_readers(&engine);
+
+        engine
+            .put(&RealmId::generate(), b"next", b"value")
+            .expect("put");
+        engine.flush_memtable().expect("flush");
+
+        let after = open_readers(&engine);
+        assert_eq!(after.len(), 3, "the flush added one SST");
+        assert_eq!(
+            after[1..],
+            before[..],
+            "a flush opened a file again that it already had open"
+        );
+    }
+
+    /// The same for the flush a WAL rotation runs, the second flush path.
+    #[test]
+    fn a_rotation_flush_keeps_the_readers_of_files_already_open() {
+        let (_dir, engine) = engine_with_ssts(2);
+        let before = open_readers(&engine);
+
+        engine
+            .put(&RealmId::generate(), b"next", b"value")
+            .expect("put");
+        engine.wal.run_pre_rotate_fn().expect("rotation flush");
+
+        let after = open_readers(&engine);
+        assert_eq!(after.len(), 3, "the rotation flush added one SST");
+        assert_eq!(
+            after[1..],
+            before[..],
+            "a rotation flush opened a file again that it already had open"
+        );
+    }
+
+    /// A partial compaction writes its output under the number of the run's
+    /// oldest member, so the file behind that number changes. It must open
+    /// that file, and keep the readers of the files outside the run.
+    #[test]
+    fn a_partial_compaction_opens_its_output_and_keeps_the_readers_outside_its_run() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = StorageConfig::test_config(dir.path().to_path_buf());
+        config.memtable_config.flush_threshold_bytes = 1 << 20;
+        config.compaction = CompactionConfig {
+            enabled: false,
+            interval_secs: 0,
+            min_sst_count: 2,
+            max_sst_count: 0,
+            merge_min: 2,
+        };
+        let engine = EmbeddedStorageEngine::open(config).expect("open");
+        let realm = RealmId::generate();
+        // The oldest SST holds 16 rows: a size tier of its own.
+        for i in 0..16 {
+            engine
+                .put(&realm, format!("big-{i:02}").as_bytes(), b"value")
+                .expect("put");
+        }
+        engine.flush_memtable().expect("flush");
+        // Two SSTs of one row each: the run that the compaction merges.
+        for key in [b"small-1", b"small-2"] {
+            engine.put(&realm, key, b"value").expect("put");
+            engine.flush_memtable().expect("flush");
+        }
+        let before = open_readers(&engine);
+
+        assert_eq!(
+            engine.compact_partial().expect("compact_partial"),
+            2,
+            "the two small SSTs form the run"
+        );
+
+        let after = open_readers(&engine);
+        assert_eq!(after.len(), 2, "the run became one SST");
+        assert_eq!(
+            after[1], before[2],
+            "a partial compaction opened a file again that is outside its run"
+        );
+        assert_eq!(
+            after[0].0, before[1].0,
+            "precondition: the output takes the number of the run's oldest member"
+        );
+        assert_ne!(
+            after[0].1, before[1].1,
+            "the compaction kept the reader of a file that it replaced"
+        );
+        let readers = engine.sst_readers.load_full();
+        for key in [b"small-1", b"small-2"] {
+            assert!(
+                readers[0].get(&realm, key).expect("get").is_some(),
+                "the reader at the output's number must read the output"
+            );
+        }
     }
 }

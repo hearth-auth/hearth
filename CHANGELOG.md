@@ -366,6 +366,13 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   inside `assertion`, is refused instead of being read with the field dropped.
 
 ### Fixed
+- **A flush or a compaction no longer opens every SST file again** (#445). After each memtable
+  flush and each compaction, the server opened every SST file again to rebuild its file list:
+  it read and decrypted the block index and Bloom filter of each file, and built a new copy of
+  them in memory. So each flush cost CPU in proportion to all stored data. The block cache also
+  lost every block it held, because it keys blocks to an open file. A flush now opens only the
+  file it wrote, and a compaction only its output. Every other file keeps its open reader and
+  its cached blocks.
 - **A full token claims cache no longer uses all CPU** (#445). The cache of verified access
   tokens (`token.claims_cache_max`, default 65,536) kept one map: each new token copied the
   whole map, and once the map was full, each new token also swept and trimmed all of it. A
