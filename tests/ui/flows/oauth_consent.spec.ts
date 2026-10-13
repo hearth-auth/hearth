@@ -156,7 +156,7 @@ test.describe.serial('OAuth consent — approve', () => {
     // navigation request: it proves the browser leaves Hearth's origin, which
     // CSP `form-action 'self'` would block after a plain redirect.
     const callbackRequestPromise = page.waitForRequest(
-      (req) => req.url().startsWith(CALLBACK_ORIGIN),
+      (req) => new URL(req.url()).origin === CALLBACK_ORIGIN,
       { timeout: 30000 },
     );
 
@@ -202,7 +202,7 @@ test.describe.serial('OAuth consent — deny', () => {
     await page.route((url) => url.href.startsWith(CALLBACK_ORIGIN), async (route) => { await route.abort(); });
 
     const callbackRequestPromise = page.waitForRequest(
-      (req) => req.url().startsWith(CALLBACK_ORIGIN),
+      (req) => new URL(req.url()).origin === CALLBACK_ORIGIN,
       { timeout: 30000 },
     );
 
