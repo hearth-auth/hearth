@@ -2580,6 +2580,10 @@ pub struct PasskeyLoginCompleteBody {
     /// abuse guards challenged (A-16).
     #[serde(default)]
     pub captcha_token: Option<String>,
+    /// The login page's `return_to`, where the sign-in ends: the same field
+    /// the password form posts, checked by the same rule (A-52).
+    #[serde(default)]
+    pub return_to: Option<String>,
 }
 
 /// `POST /ui/login/passkey-complete` — bare variant.
@@ -2743,6 +2747,10 @@ async fn passkey_login_complete_impl(
         &session_ctx,
         &headers,
         state.is_secure_request(&headers),
+        body.return_to
+            .as_deref()
+            .and_then(sanitize_return_to)
+            .as_deref(),
     )
 }
 
@@ -2769,6 +2777,7 @@ fn passkey_second_factor_gate(
     user_id: &crate::core::UserId,
     user_verified: bool,
     secure: bool,
+    return_to: Option<&str>,
 ) -> Option<Response> {
     let require_mfa_after_passkey = realm.config().passkey_requires_mfa.unwrap_or(false);
 
@@ -2823,7 +2832,7 @@ fn passkey_second_factor_gate(
             user_id,
             step,
             first,
-            None, // no return_to for passkey flow
+            return_to,
             secure,
         );
         let mut response =
@@ -2873,6 +2882,7 @@ fn passkey_complete_for_user(
     session_ctx: &SessionContext,
     headers: &HeaderMap,
     secure: bool,
+    return_to: Option<&str>,
 ) -> Response {
     let _ = user_id;
 
@@ -2918,8 +2928,9 @@ fn passkey_complete_for_user(
     // authenticator satisfy `mfa_required` outright (audit 2026-08-28 B10).
     let user_verified = auth_result.user_verified();
 
+    let user = auth_result.user_id();
     if let Some(response) =
-        passkey_second_factor_gate(state, realm, auth_result.user_id(), user_verified, secure)
+        passkey_second_factor_gate(state, realm, user, user_verified, secure, return_to)
     {
         return response;
     }
@@ -2961,7 +2972,7 @@ fn passkey_complete_for_user(
         state,
         realm.id(),
         auth_result.user_id(),
-        None,
+        return_to,
         &session_ctx,
         super::auth::FirstFactor::Credential,
         headers,
@@ -2987,7 +2998,7 @@ fn passkey_complete_for_user(
             state.set_current_realm(realm.id().clone());
 
             let mut response = axum::Json(serde_json::json!({
-                "redirect": "/ui",
+                "redirect": return_to.unwrap_or("/ui"),
             }))
             .into_response();
             append_cookie(&mut response, &session_cookie);

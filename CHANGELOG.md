@@ -370,6 +370,11 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   inside `assertion`, is refused instead of being read with the field dropped.
 
 ### Fixed
+- **A passkey sign-in returns to the application.** A passkey sign-in ended on the account page
+  (`/ui`), also during an OIDC authorization request, so the user did not get back to the
+  application. The passkey script now sends the login page's `return_to`. The sign-in ends
+  there, and so do the second factor and the required action that it still owes. A value off
+  Hearth's UI falls back to `/ui`, as for the password form.
 - **Sign-in to a client on another origin works in Chrome** (`form-action-safe-sign-in`). The
   UI sends CSP `form-action 'self'`, and Chrome applies `form-action` to every redirect that
   follows a form submission. So in production, Chrome blocked the redirect to the client's
