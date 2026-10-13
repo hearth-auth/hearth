@@ -21,7 +21,8 @@ full-stack application: Vite/React SPA (frontend) + Go + Gin API server (backend
 
 **Realm:** `demo`  
 **OAuth application:** `hearth-hub` — public client, PKCE, redirect `http://localhost:5173/callback`  
-**Backend client:** `notes-api` — confidential, used only by the Go backend to authenticate token introspection  
+**Backend client:** `notes-api` — confidential, `access_token_authorization: introspection`, used only by the Go backend to authenticate token introspection  
+**Sign-in:** password only — the demo realm sets `mfa_required: false`  
 **Roles:** `viewer` · `editor` · `admin` (mapped to `content.*` permissions)
 
 ## Prerequisites
@@ -155,7 +156,12 @@ confidential-clients-only — a caller that presents only a `client_id` gets
 client, `notes-api` in `hearth.yaml`, via `client_secret_basic`
 (`INTROSPECT_CLIENT_ID` / `INTROSPECT_CLIENT_SECRET`; the defaults match the
 demo's `hearth.yaml`, and `DEMO_API_CLIENT_SECRET` overrides the secret on both
-sides). The SPA's `hearth-hub` client is public and cannot introspect. Because a
+sides). The SPA's `hearth-hub` client is public and cannot introspect.
+Hearth answers a client's introspection only for a token bound to that client,
+and the SPA's access tokens name no API audience. So `hearth.yaml` declares
+`notes-api` a resource server, with `access_token_authorization: introspection`:
+Hearth then answers it for every user token of the realm, with the user's live
+roles and permissions. Because a
 network round-trip on every request would put Hearth on
 the request hot path, each verdict is cached for a short TTL
 (`INTROSPECT_CACHE_TTL`, default `3s`).

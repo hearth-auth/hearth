@@ -646,6 +646,14 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   `StrictMode` runs a session-restore effect twice, so an SPA that restores its session in a
   `useEffect` signed the user out on every page load in development. Calls that overlap now share
   one request and its result.
+- **The full-stack demo works end to end again.** All 10 reference-integration flows pass.
+  - The backend checks roles against the realm issuer (`HEARTH_ISSUER`, from discovery), and its
+    `notes-api` client declares `access_token_authorization: introspection`, so introspection
+    answers for the SPA's tokens.
+  - The SPA verifies tokens against the realm issuer (`VITE_HEARTH_ISSUER`), not the Vite proxy URL.
+  - The demo realm sets `mfa_required: false`, and `demo.sh` lists realms with the system token.
+  - The Admin page waits for the role check before it redirects.
+  - The backend's handler tests sign their tokens with a test key, as the SDK now verifies them.
 
 ### Changed
 - **`hearth.yaml` owns the access-token authorization mode of the applications it declares.**

@@ -171,9 +171,9 @@ fi
 echo "▸ bootstrapping…"
 BOOTSTRAP=$(curl -sf -X POST "$BASE/admin/bootstrap")
 ADMIN_TOKEN=$(echo "$BOOTSTRAP" | jq -r '.access_token')
-# NOTE: .realm_id is the DEV realm's UUID, not the reserved system realm. It is
-# fine for the global GET /admin/realms below (which lists all realms), but a
-# dev-realm token CANNOT manage other realms cross-realm (HEA-2087).
+# NOTE: .realm_id is the DEV realm's UUID, not the reserved system realm. A
+# dev-realm token sees only its own realm: GET /admin/realms with it lists
+# dev-realm alone, and it CANNOT manage other realms cross-realm (HEA-2087).
 SYS_REALM_ID=$(echo "$BOOTSTRAP" | jq -r '.realm_id')
 
 # HEA-2087: cross-realm admin credential. bootstrap also seeds a system-realm
@@ -204,14 +204,15 @@ RUNENV
 
 echo "▸ resolving demo realm…"
 
-# GET /admin/realms requires X-Realm-ID (system realm UUID) for auth context.
-# The response uses the "items" field, not "realms".
+# GET /admin/realms lists every realm only for a system-realm token (a
+# dev-realm token sees dev-realm alone), so use the system credential when the
+# binary returns one. The response uses the "items" field, not "realms".
 REALM_ID=""
 for _ in {1..20}; do
   REALM_ID=$(
     curl -sf \
-      -H "Authorization: Bearer $ADMIN_TOKEN" \
-      -H "X-Realm-ID: $SYS_REALM_ID" \
+      -H "Authorization: Bearer ${SYSTEM_ADMIN_TOKEN:-$ADMIN_TOKEN}" \
+      -H "X-Realm-ID: ${SYSTEM_REALM_ID:-$SYS_REALM_ID}" \
       "$BASE/admin/realms" \
     | jq -r '.items[] | select(.name == "demo") | .id // empty' \
     2>/dev/null || true
@@ -223,11 +224,23 @@ done
 if [[ -z "$REALM_ID" || "$REALM_ID" == "null" ]]; then
   echo "✗ could not find 'demo' realm — is hearth.yaml in $HERE?" >&2
   echo "  Raw realm list:" >&2
-  curl -sf -H "Authorization: Bearer $ADMIN_TOKEN" -H "X-Realm-ID: $SYS_REALM_ID" \
+  curl -sf -H "Authorization: Bearer ${SYSTEM_ADMIN_TOKEN:-$ADMIN_TOKEN}" \
+    -H "X-Realm-ID: ${SYSTEM_REALM_ID:-$SYS_REALM_ID}" \
     "$BASE/admin/realms" | jq . >&2 || true
   exit 1
 fi
 echo "  ✓ realm id: $REALM_ID"
+
+# The realm's issuer is the `iss` of its tokens. The SPA reaches Hearth through
+# the Vite proxy and the backend through HEARTH_URL, but a token names the
+# issuer Hearth is configured with (oidc.issuer), so both read it from
+# discovery instead of deriving it from the URL they use.
+ISSUER=$(curl -sf "$BASE/realms/demo/.well-known/openid-configuration" | jq -r '.issuer // empty')
+if [[ -z "$ISSUER" ]]; then
+  echo "✗ could not read the demo realm's issuer from discovery" >&2
+  exit 1
+fi
+echo "  ✓ issuer: $ISSUER"
 
 # ── Write env files ───────────────────────────────────────────────────────────
 
@@ -236,6 +249,7 @@ echo "▸ writing env files…"
 cat > "$HERE/frontend/.env" <<EOF
 VITE_HEARTH_URL=http://localhost:${FRONTEND_PORT}
 VITE_REALM_SLUG=demo
+VITE_HEARTH_ISSUER=${ISSUER}
 VITE_REALM_ID=${REALM_ID}
 VITE_CLIENT_ID=f7057d27-61fd-555e-b2af-ba8edd112237
 VITE_API_URL=http://localhost:${BACKEND_PORT}
@@ -244,6 +258,7 @@ echo "  ✓ frontend/.env"
 
 cat > "$HERE/backend/.env" <<EOF
 HEARTH_URL=http://localhost:${HEARTH_PORT}
+HEARTH_ISSUER=${ISSUER}
 REALM_ID=${REALM_ID}
 REALM_SLUG=demo
 PORT=${BACKEND_PORT}
