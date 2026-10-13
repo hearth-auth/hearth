@@ -1122,6 +1122,10 @@ pub(crate) fn reconcile_applications(
         // YAML is authoritative for the inline JWKS too: absent clears it.
         let cfg_jwks = app_cfg.jwks_json();
         let cfg_dpop = app_cfg.dpop_bound_access_tokens.unwrap_or(false);
+        // YAML owns the access-token authorization mode, like the DPoP flag:
+        // absent means `embedded`, so removing the key also removes the
+        // client's right to introspect the realm's user tokens.
+        let cfg_mode = app_cfg.access_token_authorization.unwrap_or_default();
 
         match engine.get_client(realm_id, &client_id) {
             Ok(Some(existing)) => {
@@ -1133,6 +1137,7 @@ pub(crate) fn reconcile_applications(
                 let consent_changed = existing.require_consent() != cfg_require_consent;
                 let logo_changed = existing.client_logo_url() != cfg_logo.as_deref();
                 let dpop_changed = existing.dpop_bound_access_tokens() != cfg_dpop;
+                let mode_changed = existing.access_token_authorization() != cfg_mode;
                 let jwks_changed = existing.jwks() != cfg_jwks.as_deref();
                 let post_logout_changed = existing.post_logout_redirect_uris() != cfg_post_logout;
                 let id_token_alg_changed =
@@ -1177,6 +1182,7 @@ pub(crate) fn reconcile_applications(
                     || consent_changed
                     || logo_changed
                     || dpop_changed
+                    || mode_changed
                     || jwks_changed
                     || post_logout_changed
                     || id_token_alg_changed
@@ -1211,6 +1217,7 @@ pub(crate) fn reconcile_applications(
                                 None
                             },
                             dpop_bound_access_tokens: dpop_changed.then_some(cfg_dpop),
+                            access_token_authorization: mode_changed.then_some(cfg_mode),
                             jwks: jwks_changed.then(|| cfg_jwks.clone()),
                             post_logout_redirect_uris: if post_logout_changed {
                                 Some(cfg_post_logout.clone())
@@ -1297,6 +1304,7 @@ pub(crate) fn reconcile_applications(
                             .then_some(cfg_require_consent),
                         client_logo_url: cfg_logo.clone(),
                         dpop_bound_access_tokens: cfg_dpop,
+                        access_token_authorization: cfg_mode,
                         jwks: cfg_jwks.clone(),
                         post_logout_redirect_uris: cfg_post_logout.clone(),
                         ..Default::default()

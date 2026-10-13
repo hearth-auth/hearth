@@ -309,7 +309,7 @@ The issued JWT carries only identity claims. When a resource server needs to aut
 
 ### Configuring a client's mode
 
-Via Admin API (`PATCH /admin/applications/{id}`):
+Via Admin API (`PATCH /admin/applications/{id}`), for a client registered at runtime:
 ```bash
 curl -X PATCH https://auth.example.com/admin/applications/<client_uuid> \
   -H "Authorization: Bearer <admin_token>" \
@@ -330,6 +330,8 @@ realms:
         grant_types: [client_credentials]
         access_token_authorization: decision
 ```
+
+`hearth.yaml` owns the mode of every application it declares. Each reconcile (at startup and on `SIGHUP`) applies the declared mode, and an omitted key sets `embedded`. So removing the key also removes the client's right to introspect the realm's user tokens. The admin API refuses a different mode for a YAML-declared application with `409`.
 
 ## Admin console
 

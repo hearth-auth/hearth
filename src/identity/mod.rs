@@ -1797,7 +1797,8 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// Only non-`None` fields in the request are applied. A change to the
     /// credentials or security profile (`jwks`, `assertion_public_key`,
-    /// `profile`) of a `hearth.yaml`-managed client is refused with
+    /// `dpop_bound_access_tokens`, a different `access_token_authorization`)
+    /// of a `hearth.yaml`-managed client is refused with
     /// [`IdentityError::YamlManagedResource`]: YAML is authoritative for those
     /// fields, so the next reconcile would silently undo it — and undoing
     /// runtime-added keys on a secretless client would make it public.

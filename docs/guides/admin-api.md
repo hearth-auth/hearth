@@ -528,7 +528,7 @@ Updates a client. All fields are optional; omitted fields are unchanged.
 | `frontchannel_logout_uri` | Front-channel logout URI; `null` clears it |
 | `post_logout_redirect_uris` | Replacement post-logout redirect list |
 | `require_consent` | Whether to show the OAuth consent screen |
-| `access_token_authorization` | `"embedded"`, `"introspection"`, or `"decision"` |
+| `access_token_authorization` | `"embedded"`, `"introspection"`, or `"decision"`. Refused with `409` for an application declared in `hearth.yaml` when the value differs from its current mode: set it in `hearth.yaml` instead. |
 | `trust_level` | `"first_party"` or `"third_party"`. `first_party` clients receive full roles, permissions, and groups claims in issued JWTs. `third_party` clients receive a minimal claim set and trigger the OAuth consent screen. |
 
 ```bash

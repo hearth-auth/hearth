@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use crate::identity::claims_config::ClaimMapping;
 use crate::identity::email::EmailBranding;
-use crate::identity::ClientTrustLevel;
+use crate::identity::{AccessTokenAuthorization, ClientTrustLevel};
 use crate::rbac::{
     Permission, PermissionDefinition, ProtectedResource, Role, RoleId, RoleScopeKind, ScopeBundle,
 };
@@ -2315,6 +2315,14 @@ pub struct ApplicationYamlConfig {
     /// request from this client must carry a `DPoP` proof. Default: `false`.
     #[serde(default)]
     pub dpop_bound_access_tokens: Option<bool>,
+    /// How this client's tokens deliver RBAC data: `embedded` (default),
+    /// `introspection` or `decision` (`rbac-token-claims`). A client in
+    /// `introspection` or `decision` mode is a declared resource server: it may
+    /// introspect every user-session token of the realm that has no `azp`.
+    /// `hearth.yaml` owns the value: absent means `embedded` on every
+    /// reconcile, and the admin API refuses to change it.
+    #[serde(default)]
+    pub access_token_authorization: Option<AccessTokenAuthorization>,
     /// The client's public JWK Set (RFC 7517), inline: a YAML mapping
     /// `{keys: [...]}` or the same object as a JSON string. Its keys verify
     /// the client's `private_key_jwt` assertions and signed request objects.

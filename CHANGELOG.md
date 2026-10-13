@@ -376,6 +376,13 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   Go resolves a v2 or later tag only for a module path that ends in `/vN`, and the path had no
   suffix, so `go get github.com/hearth-auth/hearth/sdks/go` stopped at v1.6.11. A Go SDK release
   whose major version does not match the module path now fails before it creates its tag.
+- **`hearth.yaml` accepts an application's `access_token_authorization`.** The RBAC guide showed
+  `access_token_authorization: decision` on a YAML application, but config load refused the key,
+  so only the admin API could make a client a resource server. The admin API cannot reach a
+  YAML-declared realm at first start: its token must belong to the realm in `X-Realm-ID`, and
+  `/admin/bootstrap` returns tokens for other realms. A resource server declared in `hearth.yaml`
+  therefore got `{"active": false}` for every user token it introspected. The key now takes
+  `embedded` (default), `introspection` or `decision`.
 - **RP-initiated logout signs the user out of Hearth.** Logout revoked only the session that
   the code exchange opened, which the ID token's `sid` names. The browser session that signed
   the user in stayed valid, so the next `/authorize` signed the user in again without a prompt.
@@ -625,6 +632,14 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   short form was refused as "invalid status".
 
 ### Changed
+- **`hearth.yaml` owns the access-token authorization mode of the applications it declares.**
+  Every reconcile (startup and `SIGHUP`) applies the declared `access_token_authorization`, and an
+  omitted key sets `embedded`, as for `dpop_bound_access_tokens`. `PATCH /admin/applications/{id}`
+  refuses a different mode for a YAML-declared application with `409` (a request that repeats
+  the current mode still succeeds). The admin console already refuses every edit of such an
+  application.
+  If an admin set the mode of a YAML-declared application through the admin API, declare it in
+  `hearth.yaml` before you upgrade: the first reconcile otherwise sets it back to `embedded`.
 - **`/end_session` takes the client from `id_token_hint`.** Without `client_id`, the client is
   the verified hint's `azp`, or else its `aud` when that holds one value (RP-Initiated Logout
   1.0 §3). So a relying party that sends only `id_token_hint` and a registered

@@ -6,8 +6,8 @@
 //! - a client its `aud` names,
 //! - the client its grant family was issued to, or
 //! - a declared resource server (a client whose `access_token_authorization`
-//!   is `introspection` or `decision` — an admin-registered setting; dynamic
-//!   registration always yields `embedded`).
+//!   is `introspection` or `decision` — set by an admin or in `hearth.yaml`;
+//!   dynamic registration always yields `embedded`).
 //!
 //! Any other caller gets `{"active": false}`. Tokens that do carry `azp`, and
 //! sessionless (machine) tokens, keep their existing, narrower rules.
