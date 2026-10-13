@@ -20,8 +20,8 @@
 //!
 //! `SkipMap` inserts in O(log N) with no whole-map copy, so per-put cost is
 //! independent of occupancy. It preserves the storage hot-path contract
-//! (CLAUDE.md): **reads take no lock** (`SkipMap::get`/`range` are lock-free,
-//! epoch-reclaimed) and **do not yield**. Writes still hold a `Mutex` — not to
+//! (CLAUDE.md): **reads take no lock** (`SkipMap::get`/`lower_bound` are
+//! lock-free, epoch-reclaimed) and **do not yield**. Writes still hold a `Mutex` — not to
 //! protect the map (the skiplist is internally concurrent) but to keep the
 //! read-old-size / insert / size-delta sequence atomic against other writers and
 //! to give [`flush_streaming`](Memtable::flush_streaming) a barrier so its
@@ -43,9 +43,11 @@
 //! write is dropped (the HEA-1897 no-loss property).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
+use crossbeam_skiplist::map::Entry;
 use crossbeam_skiplist::SkipMap;
 
 use crate::core::{EpochCell, EpochCellOption, RealmId};
@@ -514,7 +516,7 @@ impl Memtable {
             realm_id: realm_id.clone(),
             key: vec![],
         };
-        map.range(start..)
+        entries_from(map, &start)
             .take_while(|entry| entry.key().realm_id == *realm_id)
             .map(|entry| (entry.key().key.clone(), entry.value().clone()))
             .collect()
@@ -562,7 +564,7 @@ impl Memtable {
             realm_id: realm_id.clone(),
             key: start.to_vec(),
         };
-        map.range(start_key..)
+        entries_from(map, &start_key)
             .take_while(|entry| {
                 entry.key().realm_id == *realm_id && entry.key().key.as_slice() < end
             })
@@ -610,7 +612,7 @@ impl Memtable {
             realm_id: realm_id.clone(),
             key: start.to_vec(),
         };
-        map.range(start_key..)
+        entries_from(map, &start_key)
             .take_while(|entry| {
                 entry.key().realm_id == *realm_id && entry.key().key.as_slice() < end
             })
@@ -768,6 +770,23 @@ impl Memtable {
 /// One backing map of the memtable.
 pub(crate) type MemtableMap = SkipMap<CompositeKey, MemtableValue>;
 
+/// The entries of `map` from `start` on, in key order.
+///
+/// Every walk over a map MUST step with `Entry::next`, never with
+/// `SkipMap::range`. The range iterator of crossbeam-skiplist 0.1.3 keeps one
+/// reference on each entry it passes and never gives it back. So an entry
+/// that a walk passed was never freed when a later write replaced it: the
+/// cleanup sweep walks expiring rows and then deletes them, and the memtable
+/// leaked about 9 MB an hour under sign-in load (#445). Upstream fixed the
+/// iterator in crossbeam-rs/crossbeam#1217, which no release contains yet.
+/// An `Entry` gives its reference back when it is dropped.
+fn entries_from<'a>(
+    map: &'a MemtableMap,
+    start: &CompositeKey,
+) -> impl Iterator<Item = Entry<'a, CompositeKey, MemtableValue>> {
+    std::iter::successors(map.lower_bound(Bound::Included(start)), Entry::next)
+}
+
 /// The memtable's maps at one instant, newest first (see [`Memtable::maps`]).
 pub(crate) struct MemtableMaps {
     /// The map writes go to.
@@ -778,28 +797,25 @@ pub(crate) struct MemtableMaps {
 
 /// A position in one memtable map, restricted to a realm's `[start, end)`
 /// window. Walks the live skiplist without copying it: each step holds one
-/// entry, and no epoch pin is held between steps.
+/// entry, and no epoch pin is held between steps. It steps with `Entry::next`
+/// (see [`entries_from`]).
 pub(crate) struct MemtableKeyCursor<'a> {
-    range: crossbeam_skiplist::map::Range<
-        'a,
-        CompositeKey,
-        std::ops::Range<CompositeKey>,
-        CompositeKey,
-        MemtableValue,
-    >,
-    current: Option<crossbeam_skiplist::map::Entry<'a, CompositeKey, MemtableValue>>,
+    /// The entry at the cursor; `None` once the walk reaches `end`.
+    current: Option<Entry<'a, CompositeKey, MemtableValue>>,
+    /// The first key past the window.
+    end: CompositeKey,
 }
 
 impl<'a> MemtableKeyCursor<'a> {
     /// A cursor at the first key `>= start` of `realm_id` in `map`. The caller
     /// guarantees `start <= end`.
     pub(crate) fn new(map: &'a MemtableMap, realm_id: &RealmId, start: &[u8], end: &[u8]) -> Self {
-        let mut range = map.range(
-            CompositeKey::new(realm_id.clone(), start.to_vec())
-                ..CompositeKey::new(realm_id.clone(), end.to_vec()),
-        );
-        let current = range.next();
-        Self { range, current }
+        let start = CompositeKey::new(realm_id.clone(), start.to_vec());
+        let end = CompositeKey::new(realm_id.clone(), end.to_vec());
+        let current = map
+            .lower_bound(Bound::Included(&start))
+            .filter(|entry| *entry.key() < end);
+        Self { current, end }
     }
 }
 
@@ -821,7 +837,11 @@ impl KeyCursor for MemtableKeyCursor<'_> {
     }
 
     fn advance(&mut self) -> Result<(), StorageError> {
-        self.current = self.range.next();
+        self.current = self
+            .current
+            .take()
+            .and_then(|entry| entry.next())
+            .filter(|entry| *entry.key() < self.end);
         Ok(())
     }
 }
