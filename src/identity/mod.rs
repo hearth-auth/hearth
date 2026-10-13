@@ -887,11 +887,17 @@ pub trait IdentityEngine: Send + Sync {
     /// round 3, D-7). The exchange used to open every token session as
     /// `MfaProof::Inherited`, which every later second-factor gate read as
     /// proved.
+    ///
+    /// `session_id` is that browser session. The exchange links the token
+    /// session to it, so RP-initiated logout ends it too
+    /// (`rp-initiated-logout`). `None` when no browser session exists, as
+    /// at the end of a required-action flow.
     fn authorize_from_session(
         &self,
         realm_id: &RealmId,
         request: &AuthorizationRequest,
         mfa_proof: MfaProof,
+        session_id: Option<&SessionId>,
     ) -> Result<AuthorizationResponse, IdentityError>;
 
     /// [`Self::authorize`] for a surface that cannot show a consent screen —

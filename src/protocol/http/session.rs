@@ -195,11 +195,11 @@ async fn end_session(
             })
             .collect();
 
+        // The same target the plain redirect uses, `state` included.
         let redirect_meta = result
             .post_logout_redirect_uri
-            .as_deref()
             .map(|uri| {
-                let escaped = html_escape(uri);
+                let escaped = html_escape(&with_state(uri, result.state));
                 format!(r#"<meta http-equiv="refresh" content="2;url={escaped}">"#)
             })
             .unwrap_or_default();
@@ -228,6 +228,12 @@ async fn end_session(
             .into_response();
     }
 
+    // A browser with nowhere to go gets a page, not the JSON body.
+    if result.post_logout_redirect_uri.is_none()
+        && crate::protocol::web::signed_out_page::accepts_html(&headers)
+    {
+        return crate::protocol::web::signed_out_page::signed_out_page();
+    }
     end_session_redirect(result.post_logout_redirect_uri, result.state)
 }
 
@@ -279,6 +285,19 @@ fn deliver_backchannel_logout(uri: &str, logout_token: &str) -> Result<(), Strin
     Ok(())
 }
 
+/// The post-logout redirect target: `uri`, with `state` appended as a query
+/// parameter when present.
+fn with_state(uri: String, state: Option<String>) -> String {
+    match state {
+        None => uri,
+        Some(s) => {
+            let sep = if uri.contains('?') { '&' } else { '?' };
+            let state_enc = form_urlencoded::byte_serialize(s.as_bytes()).collect::<String>();
+            format!("{uri}{sep}state={state_enc}")
+        }
+    }
+}
+
 /// Builds the post-logout redirect response, appending `state` when present.
 fn end_session_redirect(uri: Option<String>, state: Option<String>) -> Response {
     match uri {
@@ -287,18 +306,7 @@ fn end_session_redirect(uri: Option<String>, state: Option<String>) -> Response 
             Json(serde_json::json!({"message": "logged out"})),
         )
             .into_response(),
-        Some(base_uri) => {
-            let redirect_uri = match state {
-                None => base_uri,
-                Some(s) => {
-                    let sep = if base_uri.contains('?') { '&' } else { '?' };
-                    let state_enc =
-                        form_urlencoded::byte_serialize(s.as_bytes()).collect::<String>();
-                    format!("{base_uri}{sep}state={state_enc}")
-                }
-            };
-            Redirect::to(&redirect_uri).into_response()
-        }
+        Some(base_uri) => Redirect::to(&with_state(base_uri, state)).into_response(),
     }
 }
 

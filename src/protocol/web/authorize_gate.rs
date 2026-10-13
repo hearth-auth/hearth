@@ -34,7 +34,7 @@ use std::sync::Arc;
 
 use axum::response::{IntoResponse, Redirect, Response};
 
-use crate::core::{ClientId, RealmId, Timestamp, UserId};
+use crate::core::{ClientId, RealmId, SessionId, Timestamp, UserId};
 use crate::identity::ra_token::OidcParams;
 use crate::identity::{
     canonicalize_scopes, AuthorizationRequest, CodeChallengeMethod, ConsentState, MfaProof,
@@ -88,6 +88,11 @@ pub(super) struct AuthorizeParams {
     /// opens proves exactly that (GA audit round 3, D-7). Set from the
     /// session at every entry point; `None` otherwise.
     pub mfa_proof: MfaProof,
+    /// The browser session authorizing the request. The code records it,
+    /// and RP-initiated logout ends it with the token session its exchange
+    /// opens (`rp-initiated-logout`). Set with `mfa_proof`; `None` at the
+    /// end of a required-action flow, which has no browser session.
+    pub session_id: Option<SessionId>,
 }
 
 impl AuthorizeParams {
@@ -130,6 +135,7 @@ impl AuthorizeParams {
             resource: p.resource.clone(),
             organization: p.organization.clone(),
             mfa_proof: p.mfa_proof,
+            session_id: None,
         })
     }
 }
@@ -525,10 +531,12 @@ pub(super) fn issue_code(
         response_mode: params.response_mode.clone(),
         request: None,
     };
-    match state
-        .identity
-        .authorize_from_session(realm, &request, params.mfa_proof)
-    {
+    match state.identity.authorize_from_session(
+        realm,
+        &request,
+        params.mfa_proof,
+        params.session_id.as_ref(),
+    ) {
         Ok(resp) => {
             // 22.3 (audit 2026-08-28 §4.3#5): redirect to the URI the engine
             // validated and bound the code to, never to a caller-held copy.
@@ -565,6 +573,7 @@ mod tests {
             response_mode: Some(ResponseMode::Fragment),
             resource: Some("https://api.example.com".to_string()),
             mfa_proof: MfaProof::Proved,
+            session_id: None,
         }
     }
 

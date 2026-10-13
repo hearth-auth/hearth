@@ -370,6 +370,13 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   inside `assertion`, is refused instead of being read with the field dropped.
 
 ### Fixed
+- **RP-initiated logout signs the user out of Hearth.** Logout revoked only the session that
+  the code exchange opened, which the ID token's `sid` names. The browser session that signed
+  the user in stayed valid, so the next `/authorize` signed the user in again without a prompt.
+  The code exchange now links its session to the session that authorized the code, and
+  `/end_session` ends both. The user's other browsers stay signed in.
+- **The front-channel logout page keeps `state`.** Its 2-second refresh to
+  `post_logout_redirect_uri` now carries `?state=…`, as the plain redirect does.
 - **Browsers load the new UI scripts after an upgrade.** Hearth served its embedded scripts,
   fonts and images under fixed URLs (`/ui/static/passkey.js`) with
   `Cache-Control: public, max-age=31536000, immutable`. So after an upgrade a browser kept the
@@ -612,6 +619,14 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   short form was refused as "invalid status".
 
 ### Changed
+- **`/end_session` takes the client from `id_token_hint`.** Without `client_id`, the client is
+  the verified hint's `azp`, or else its `aud` when that holds one value (RP-Initiated Logout
+  1.0 §3). So a relying party that sends only `id_token_hint` and a registered
+  `post_logout_redirect_uri`, as most libraries do, now gets its redirect. A URI that the client
+  did not register is still dropped.
+- **A browser gets a "You are signed out" page from `/end_session`.** When no redirect applies
+  and the request's `Accept` header lists `text/html`, the response is an HTML page. Other
+  callers still get `{"message":"logged out"}`.
 - **New SST files use format v4** (#445). The block index and the Bloom filter of each file are
   now stored in partitions of about 1 MiB of data, and they load through the block cache like
   data blocks. Hearth still reads v3 files, and a compaction rewrites them as v4. A Hearth from

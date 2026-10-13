@@ -301,8 +301,9 @@ async fn access_token_has_no_azp_claim() {
 /// When `end_session` receives an unknown session (no id_token_hint resolving to a live
 /// session), it MUST NOT redirect to `post_logout_redirect_uri`.
 ///
-/// The engine-layer fix: `initiate_logout_inner` now rejects `post_logout_redirect_uri`
-/// when no `client_id` is supplied (prevents unvalidated redirect).
+/// The engine-layer fix: `initiate_logout_inner` rejects `post_logout_redirect_uri`
+/// when the request names no client, by `client_id` or by a verified
+/// `id_token_hint` (prevents unvalidated redirect).
 /// The HTTP-layer fix: `SessionNotFound` returns 200 instead of redirecting.
 #[tokio::test]
 async fn rp_logout_no_redirect_without_client_id() {

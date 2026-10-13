@@ -238,8 +238,10 @@ async fn authorize_get_impl(
         Err(resp) => return resp,
     };
     // The code carries what this session proved into the token session
-    // (GA audit round 3, D-7).
+    // (GA audit round 3, D-7), and names this session, so RP-initiated
+    // logout ends it too.
     params.mfa_proof = session.mfa_proof;
+    params.session_id = Some(session.session_id.clone());
     // A client or role that demands a second factor needs a session that
     // PROVED one (GA audit B5). Fresh entry only: the interstitial resumes
     // continue a request this check already admitted.
@@ -398,6 +400,7 @@ fn plain_params(
         organization: q.organization.clone().filter(|o| !o.is_empty()),
         // Set from the session by `authorize_get_impl`.
         mfa_proof: MfaProof::None,
+        session_id: None,
     })
 }
 
@@ -466,6 +469,7 @@ fn par_params(
         organization: stored.organization,
         // Set from the session by `authorize_get_impl`.
         mfa_proof: MfaProof::None,
+        session_id: None,
     })
 }
 
@@ -768,6 +772,7 @@ pub async fn consent_submit(
                 organization: pending.organization.clone(),
                 // The approving session's proof (GA audit round 3, D-7).
                 mfa_proof: session.mfa_proof,
+                session_id: Some(session.session_id.clone()),
             };
             let mut response = issue_code(
                 &state,
@@ -1024,6 +1029,7 @@ fn jar_params(
             .filter(|o| !o.is_empty()),
         // Set from the session by `authorize_get_impl`.
         mfa_proof: MfaProof::None,
+        session_id: None,
     })
 }
 

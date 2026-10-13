@@ -116,6 +116,11 @@ pub struct CleanupStats {
     /// session is revoked. A family that merely *expires* is reclaimed by
     /// `sweep_grant_families` and used to leave its index row behind forever.
     pub session_family_rows_deleted: u64,
+    /// Token session → authorizing session links (`oauth:session_parent:`)
+    /// reclaimed once the token session row is gone. RP-initiated logout
+    /// deletes the link it follows; a token session that expires leaves its
+    /// link to this sweep.
+    pub session_parent_rows_deleted: u64,
     /// Delegation parent-index rows (`dgrant:parent:`) swept.
     ///
     /// A row links an exchange's subject token to the grant it created, so a
@@ -166,6 +171,7 @@ impl CleanupStats {
             + self.consumed_markers_deleted
             + self.revoked_jtis_deleted
             + self.session_family_rows_deleted
+            + self.session_parent_rows_deleted
             + self.delegation_parent_rows_deleted
             + self.aat_records_deleted
             + self.rate_trackers_pruned
@@ -349,6 +355,15 @@ pub(crate) fn sweep_expired(
         &mut errors,
         "expired session",
         sweep_sessions(realm_id, storage, now),
+    );
+    // Ordered after `sweep_sessions`, which deletes the session rows these
+    // links name: one tick reclaims both.
+    record(
+        realm_id,
+        &mut stats.session_parent_rows_deleted,
+        &mut errors,
+        "session parent link",
+        sweep_session_parent_links(realm_id, storage),
     );
 
     stats.errors = errors;
@@ -903,6 +918,38 @@ pub(crate) fn sweep_session_family_index(
     )
 }
 
+/// Reclaims `oauth:session_parent:` links whose token session is gone.
+///
+/// The authorization-code exchange writes a link from the token session it
+/// opens to the session that authorized the code, and RP-initiated logout
+/// follows and deletes it. A token session that expires instead is deleted
+/// by [`sweep_sessions`] and leaves its link behind.
+///
+/// A link is reclaimed only when its token session row is absent. The
+/// exchange writes the session row before the link, so "missing" can only
+/// mean "deleted", never "about to be created".
+pub(crate) fn sweep_session_parent_links(
+    realm_id: &RealmId,
+    storage: &dyn StorageEngine,
+) -> Result<u64, crate::storage::StorageError> {
+    sweep_prefix(
+        realm_id,
+        storage,
+        &keys::session_parent_scan_prefix(),
+        None,
+        // A row we cannot parse is left alone rather than guessed at.
+        |key, _| Ok(keys::decode_session_parent_key(key).map(|s| keys::encode_session_id(&s))),
+        |key, session_key| {
+            // Uncached, as in `sweep_session_family_index` (#445).
+            if storage.get_uncached(realm_id, &session_key)?.is_some() {
+                return Ok(false);
+            }
+            storage.delete(realm_id, key)?;
+            Ok(true)
+        },
+    )
+}
+
 /// How long after its expiry a session is deleted.
 ///
 /// A refresh extends a session only while it is valid, and writes it back
@@ -981,6 +1028,7 @@ mod tests {
 
         let code = StoredAuthorizationCode {
             org_id: None,
+            authorizing_session_id: None,
             code_hash: "hash1".into(),
             client_id: crate::core::ClientId::generate(),
             user_id: crate::core::UserId::generate(),
@@ -1014,6 +1062,7 @@ mod tests {
 
         let code = StoredAuthorizationCode {
             org_id: None,
+            authorizing_session_id: None,
             code_hash: "hash2".into(),
             client_id: crate::core::ClientId::generate(),
             user_id: crate::core::UserId::generate(),
@@ -1324,6 +1373,7 @@ mod tests {
         for i in 0..5 {
             let code = StoredAuthorizationCode {
                 org_id: None,
+                authorizing_session_id: None,
                 code_hash: format!("expired_hash_{i}"),
                 client_id: crate::core::ClientId::generate(),
                 user_id: crate::core::UserId::generate(),
@@ -2115,6 +2165,41 @@ mod tests {
             s.get(&realm, &live_row).expect("get").is_some(),
             "an index row for a live grant family must survive: it is what \
              cascades refresh-token revocation when the session ends"
+        );
+    }
+
+    #[test]
+    fn a_session_parent_link_goes_with_its_token_session() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+        let parent = crate::core::SessionId::generate();
+        let live = crate::core::SessionId::generate();
+        let gone = crate::core::SessionId::generate();
+        s.put(&realm, &keys::encode_session_id(&live), b"session")
+            .expect("put live session");
+        for token_session in [&live, &gone] {
+            s.put(
+                &realm,
+                &keys::encode_session_parent(token_session),
+                parent.as_uuid().to_string().as_bytes(),
+            )
+            .expect("put link");
+        }
+
+        let deleted = sweep_session_parent_links(&realm, &s).expect("sweep");
+
+        assert_eq!(deleted, 1, "only the link whose token session is gone");
+        assert!(
+            s.get(&realm, &keys::encode_session_parent(&gone))
+                .expect("get")
+                .is_none(),
+            "a link to a deleted token session must be reclaimed"
+        );
+        assert!(
+            s.get(&realm, &keys::encode_session_parent(&live))
+                .expect("get")
+                .is_some(),
+            "a live token session keeps its link: logout follows it"
         );
     }
 

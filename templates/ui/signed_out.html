@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {# The end of an RP-initiated logout with no post-logout redirect to follow
+     (see src/protocol/web/signed_out_page.rs). Standalone, like the continue
+     page: the API router serves it, without the UI's layout state. #}
+  <title>Signed out</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/ui/static/app.css">
+  <link rel="stylesheet" href="/ui/static/theme.css">
+</head>
+<body>
+  <div class="flex min-h-screen items-center justify-center bg-ht-surface-base p-4">
+    <main id="main" class="w-full max-w-md rounded-md bg-ht-surface-elevated p-8 text-center ring-1 ring-divider-subtle">
+      <h1 class="mb-2 font-display text-xl font-medium text-ht-content-primary">You are signed out</h1>
+      <p class="text-sm text-ht-content-secondary">You can close this window.</p>
+    </main>
+  </div>
+</body>
+</html>

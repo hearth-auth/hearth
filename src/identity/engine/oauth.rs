@@ -332,6 +332,10 @@ impl EmbeddedIdentityEngine {
     /// that demands a second factor — only when the token's session proved
     /// one (GA audit B5). The browser flow passes `None`: its gates
     /// (`authorize_gate::mfa_use_gate`, `consent_gate`) have already run.
+    ///
+    /// `browser_session` is the browser session behind a browser request.
+    /// The code records it, or the bearer token's session, as the session
+    /// that authorized it (`rp-initiated-logout`).
     #[allow(clippy::too_many_lines)]
     pub(super) fn authorize_inner(
         &self,
@@ -339,6 +343,7 @@ impl EmbeddedIdentityEngine {
         request: &AuthorizationRequest,
         bearer: Option<&TokenClaims>,
         browser_proof: crate::identity::MfaProof,
+        browser_session: Option<&SessionId>,
     ) -> Result<AuthorizationResponse, IdentityError> {
         use crate::identity::oidc::CodeChallengeMethod as CCM;
 
@@ -648,6 +653,19 @@ impl EmbeddedIdentityEngine {
         let ttl_micros = self.config.oidc.authorization_code_ttl_secs * 1_000_000;
         let expires_at = now.add_micros(ttl_micros);
 
+        // The session that authorized this code: the bearer token's on the
+        // non-interactive surfaces, the browser session otherwise. A browser
+        // session that is gone or is not the requesting user's is not
+        // recorded: logout must never end another user's session.
+        let authorizing_session_id = match (bearer_session, browser_session) {
+            (Some(sid), _) => Some(sid),
+            (None, Some(sid)) => self
+                .get_session(realm_id, sid)?
+                .filter(|s| s.user_id() == &request.user_id)
+                .map(|s| s.id().clone()),
+            (None, None) => None,
+        };
+
         let stored_code = StoredAuthorizationCode {
             code_hash: code_hash.clone(),
             client_id: request.client_id.clone(),
@@ -664,6 +682,7 @@ impl EmbeddedIdentityEngine {
             mfa_proof: code_proof,
             scope_narrowed: granted.scope_narrowed,
             org_id,
+            authorizing_session_id,
         };
 
         // 9. Persist the code
@@ -975,6 +994,9 @@ impl EmbeddedIdentityEngine {
         //     read as a proved factor (GA audit round 3, D-7).
         let session =
             self.create_derived_session(realm_id, &stored_code.user_id, stored_code.mfa_proof)?;
+        if let Some(authorizing) = stored_code.authorizing_session_id.as_ref() {
+            self.link_token_session(realm_id, session.id(), authorizing)?;
+        }
 
         // 11. Create grant family for refresh token rotation
         let family_id = uuid::Uuid::new_v4().to_string();
@@ -4752,13 +4774,68 @@ impl EmbeddedIdentityEngine {
         Ok(results)
     }
 
+    /// The client an `id_token_hint` names (OIDC RP-Initiated Logout 1.0
+    /// §3): its `azp`, or else its `aud` when that holds exactly one value.
+    /// A hint with several audiences and no `azp` names no client.
+    fn logout_hint_client(claims: &TokenClaims) -> Option<ClientId> {
+        let raw = match (&claims.azp, &claims.aud) {
+            (Some(azp), _) => azp.as_str(),
+            (None, Audience::Single(aud)) => aud.as_str(),
+            (None, Audience::Multi(list)) if list.len() == 1 => list[0].as_str(),
+            (None, Audience::Multi(_)) => return None,
+        };
+        parse_issued_client_id(raw)
+    }
+
+    /// Links `token_session` to the session that authorized its code, so
+    /// RP-initiated logout ends both. When `authorizing` is itself linked
+    /// (a code minted with a token session's bearer token), the link points
+    /// at that session's target: every link names the session the user
+    /// signed in with, and logout follows one hop.
+    fn link_token_session(
+        &self,
+        realm_id: &RealmId,
+        token_session: &SessionId,
+        authorizing: &SessionId,
+    ) -> Result<(), IdentityError> {
+        let root = self
+            .session_parent(realm_id, authorizing)?
+            .unwrap_or_else(|| authorizing.clone());
+        self.storage
+            .put(
+                realm_id,
+                &keys::encode_session_parent(token_session),
+                root.as_uuid().to_string().as_bytes(),
+            )
+            .map_err(Self::storage_err)
+    }
+
+    /// The session that `token_session` is linked to, if any. A link value
+    /// that does not parse is treated as no link.
+    fn session_parent(
+        &self,
+        realm_id: &RealmId,
+        token_session: &SessionId,
+    ) -> Result<Option<SessionId>, IdentityError> {
+        let bytes = self
+            .storage
+            .get(realm_id, &keys::encode_session_parent(token_session))
+            .map_err(Self::storage_err)?;
+        Ok(bytes
+            .as_deref()
+            .and_then(|b| std::str::from_utf8(b).ok())
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            .map(SessionId::new))
+    }
+
     pub(super) fn initiate_logout_inner(
         &self,
         realm_id: &RealmId,
         request: &RpLogoutRequest,
     ) -> Result<RpLogoutResult, IdentityError> {
-        // Resolve session ID and user ID from id_token_hint or explicit session_id.
-        let (session_id, user_id) = if let Some(hint) = &request.id_token_hint {
+        // Resolve the session, the user and the client the hint names from
+        // id_token_hint, or the session and user from an explicit session_id.
+        let (session_id, user_id, hint_client) = if let Some(hint) = &request.id_token_hint {
             // Verify the hint's signature against this realm's keys (retiring
             // keys included) BEFORE acting on any claim: Ed25519, or — for a
             // client that registered RS256 — the realm's RSA ID-token key
@@ -4779,12 +4856,12 @@ impl EmbeddedIdentityEngine {
             }
             let sid = Self::parse_session_id_claim(&claims)?.ok_or(IdentityError::InvalidToken)?;
             let uid = Self::parse_user_id_claim(&claims)?;
-            (sid, uid)
+            (sid, uid, Self::logout_hint_client(&claims))
         } else if let Some(sid) = &request.session_id {
             let session = self
                 .get_session(realm_id, sid)?
                 .ok_or(IdentityError::SessionNotFound)?;
-            (sid.clone(), session.user_id().clone())
+            (sid.clone(), session.user_id().clone(), None)
         } else {
             return Err(IdentityError::InvalidToken);
         };
@@ -4793,6 +4870,19 @@ impl EmbeddedIdentityEngine {
         match self.revoke_session(realm_id, &session_id) {
             Ok(()) | Err(IdentityError::SessionNotFound) => {}
             Err(e) => return Err(e),
+        }
+        // Then the session that authorized it: the browser session the user
+        // signed in with, which would otherwise sign them in again on the
+        // next `/authorize`. The link goes with it, so a repeated logout
+        // revokes nothing twice.
+        if let Some(parent) = self.session_parent(realm_id, &session_id)? {
+            match self.revoke_session(realm_id, &parent) {
+                Ok(()) | Err(IdentityError::SessionNotFound) => {}
+                Err(e) => return Err(e),
+            }
+            self.storage
+                .delete(realm_id, &keys::encode_session_parent(&session_id))
+                .map_err(Self::storage_err)?;
         }
 
         // Collect all OAuth clients that received tokens under this session.
@@ -4883,34 +4973,25 @@ impl EmbeddedIdentityEngine {
             }
         }
 
-        // Validate post_logout_redirect_uri against the registering client's list.
-        // When no client_id is provided we cannot validate the URI, so we drop it
-        // to prevent open-redirect (OIDC RP-Initiated Logout 1.0 §3).
-        let post_logout_redirect_uri = match &request.post_logout_redirect_uri {
-            None => None,
-            Some(uri) => {
-                let valid = match &request.client_id {
-                    None => false, // No client to validate against — reject unvalidated redirect.
-                    Some(cid) => {
-                        let client_key = keys::encode_oauth_client(cid);
-                        match self.storage.get(realm_id, &client_key) {
-                            Ok(Some(bytes)) => {
-                                match serde_json::from_slice::<OAuthClient>(&bytes) {
-                                    Ok(c) => c.post_logout_redirect_uris().contains(uri),
-                                    Err(_) => false,
-                                }
-                            }
-                            _ => false,
-                        }
-                    }
-                };
-                if valid {
-                    Some(uri.clone())
-                } else {
-                    None
-                }
+        // Validate post_logout_redirect_uri against the client's registered
+        // list. The client is `client_id`, else the one the verified hint
+        // names (OIDC RP-Initiated Logout 1.0 §3). With no client the URI
+        // cannot be validated, so it is dropped: no open redirect.
+        let post_logout_redirect_uri = request.post_logout_redirect_uri.as_ref().and_then(|uri| {
+            let Some(cid) = request.client_id.as_ref().or(hint_client.as_ref()) else {
+                tracing::debug!("end_session: no client named; post-logout redirect dropped");
+                return None;
+            };
+            let registered = matches!(
+                self.storage.get(realm_id, &keys::encode_oauth_client(cid)),
+                Ok(Some(bytes)) if serde_json::from_slice::<OAuthClient>(&bytes)
+                    .is_ok_and(|c| c.post_logout_redirect_uris().contains(uri))
+            );
+            if !registered {
+                tracing::debug!("end_session: post-logout redirect not registered; dropped");
             }
-        };
+            registered.then(|| uri.clone())
+        });
 
         Ok(RpLogoutResult {
             issuer: self.realm_issuer_url(realm_id),
@@ -5164,4 +5245,58 @@ fn refuse_password_grant(grant_types: &[String]) -> Result<(), IdentityError> {
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod logout_hint_tests {
+    use super::*;
+
+    /// The claims of an `id_token_hint` with this `aud` and `azp`.
+    fn hint(aud: serde_json::Value, azp: Option<&str>) -> TokenClaims {
+        let mut claims = serde_json::json!({
+            "sub": "user", "iss": "https://hearth.test", "aud": aud, "exp": 0, "iat": 0,
+            "sid": "session", "tid": "realm", "token_type": "id",
+        });
+        if let Some(azp) = azp {
+            claims["azp"] = azp.into();
+        }
+        serde_json::from_value(claims).expect("token claims")
+    }
+
+    #[test]
+    fn the_hint_names_its_client() {
+        let client = ClientId::generate();
+        let id = issued_client_id(&client);
+        assert_eq!(
+            EmbeddedIdentityEngine::logout_hint_client(&hint(id.clone().into(), Some(&id))),
+            Some(client.clone()),
+            "azp names the client"
+        );
+        assert_eq!(
+            EmbeddedIdentityEngine::logout_hint_client(&hint(id.clone().into(), None)),
+            Some(client.clone()),
+            "without azp, a single aud names the client"
+        );
+        assert_eq!(
+            EmbeddedIdentityEngine::logout_hint_client(&hint(serde_json::json!([id]), None)),
+            Some(client),
+            "a one-value aud array names the client too"
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_hint_names_no_client() {
+        let a = issued_client_id(&ClientId::generate());
+        let b = issued_client_id(&ClientId::generate());
+        assert_eq!(
+            EmbeddedIdentityEngine::logout_hint_client(&hint(serde_json::json!([a, b]), None)),
+            None,
+            "several audiences and no azp name no client"
+        );
+        assert_eq!(
+            EmbeddedIdentityEngine::logout_hint_client(&hint("hearth".into(), None)),
+            None,
+            "an aud that is not a client ID names no client"
+        );
+    }
 }
