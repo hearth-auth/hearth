@@ -1334,6 +1334,12 @@ pub(crate) struct StoredAuthorizationCode {
     /// the tokens carry it as `oid`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) org_id: Option<crate::core::OrganizationId>,
+    /// The session that authorized this code: the browser session, or the
+    /// bearer token's session on the non-interactive surfaces. The exchange
+    /// links the token session to it, so RP-initiated logout ends it too
+    /// (`rp-initiated-logout`). A code stored without it decodes as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) authorizing_session_id: Option<crate::core::SessionId>,
 }
 
 /// Context from the refresh request that binds it to its grant family.
@@ -2301,6 +2307,7 @@ mod tests {
             amr_values: Vec::new(),
             mfa_proof: crate::identity::MfaProof::None,
             scope_narrowed: false,
+            authorizing_session_id: Some(crate::core::SessionId::generate()),
         };
 
         let json = serde_json::to_string(&code).expect("serialize");
@@ -2308,6 +2315,42 @@ mod tests {
             serde_json::from_str(&json).expect("deserialize");
         assert_eq!(deserialized.code_hash, code.code_hash);
         assert_eq!(deserialized.nonce, code.nonce);
+        assert_eq!(
+            deserialized.authorizing_session_id,
+            code.authorizing_session_id
+        );
+    }
+
+    /// A code stored before the authorizing session was recorded still
+    /// decodes, with no session: its exchange links nothing.
+    #[test]
+    fn a_stored_code_without_an_authorizing_session_decodes() {
+        let code = StoredAuthorizationCode {
+            org_id: None,
+            code_hash: "abc123".to_string(),
+            client_id: ClientId::generate(),
+            user_id: crate::core::UserId::generate(),
+            redirect_uri: "https://app.example.com/callback".to_string(),
+            scope: "openid".to_string(),
+            code_challenge: None,
+            code_challenge_method: None,
+            created_at: Timestamp::from_micros(1_000_000),
+            expires_at: Timestamp::from_micros(2_000_000),
+            nonce: None,
+            resource: None,
+            amr_values: Vec::new(),
+            mfa_proof: crate::identity::MfaProof::None,
+            scope_narrowed: false,
+            authorizing_session_id: None,
+        };
+        let json = serde_json::to_string(&code).expect("serialize");
+        assert!(
+            !json.contains("authorizing_session_id"),
+            "an absent session is not written: {json}"
+        );
+        let deserialized: StoredAuthorizationCode =
+            serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(deserialized.authorizing_session_id, None);
     }
 
     #[test]

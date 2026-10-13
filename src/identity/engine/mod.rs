@@ -9830,7 +9830,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &AuthorizationRequest,
     ) -> Result<AuthorizationResponse, IdentityError> {
-        self.authorize_inner(realm_id, request, None, crate::identity::MfaProof::None)
+        self.authorize_inner(
+            realm_id,
+            request,
+            None,
+            crate::identity::MfaProof::None,
+            None,
+        )
     }
 
     fn authorization_scopes(
@@ -9850,8 +9856,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &AuthorizationRequest,
         mfa_proof: crate::identity::MfaProof,
+        session_id: Option<&SessionId>,
     ) -> Result<AuthorizationResponse, IdentityError> {
-        self.authorize_inner(realm_id, request, None, mfa_proof)
+        self.authorize_inner(realm_id, request, None, mfa_proof, session_id)
     }
 
     fn authorize_non_interactive(
@@ -9866,6 +9873,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             request,
             Some(bearer),
             crate::identity::MfaProof::None,
+            None,
         )
     }
 

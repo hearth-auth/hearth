@@ -70,6 +70,7 @@ pub mod saml;
 pub mod second_factor;
 pub mod secret_reveal;
 pub mod security;
+pub(crate) mod signed_out_page;
 pub(crate) mod templates;
 pub mod themes;
 

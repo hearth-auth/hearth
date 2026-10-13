@@ -79,6 +79,13 @@ const GRANT_FAMILY_PREFIX: &str = "oauth:family:";
 /// cascade refresh-token family invalidation.
 const SESSION_GRANT_FAMILY_PREFIX: &str = "oauth:session_fam:";
 
+/// Prefix for the token session → authorizing session link.
+///
+/// Format: `oauth:session_parent:{token_session_uuid}`; the value is the
+/// authorizing session's UUID. Written by the authorization-code exchange;
+/// read and deleted by RP-initiated logout, which ends both sessions.
+const SESSION_PARENT_PREFIX: &str = "oauth:session_parent:";
+
 /// Prefix for device authorization code storage.
 const DEVICE_CODE_PREFIX: &str = "oauth:device:";
 
@@ -1728,6 +1735,30 @@ pub(crate) fn encode_session_grant_family_prefix(session_id: &SessionId) -> Vec<
 /// 2026-08-28 §4.16#13).
 pub(crate) fn session_grant_family_scan_prefix() -> Vec<u8> {
     SESSION_GRANT_FAMILY_PREFIX.as_bytes().to_vec()
+}
+
+/// Encodes the link from a token session to the session that authorized
+/// its code.
+///
+/// Format: `oauth:session_parent:{token_session_uuid}`.
+pub(crate) fn encode_session_parent(token_session_id: &SessionId) -> Vec<u8> {
+    format!("{SESSION_PARENT_PREFIX}{}", token_session_id.as_uuid()).into_bytes()
+}
+
+/// Returns the scan prefix for every token session → authorizing session
+/// link. Used by the cleanup sweep.
+pub(crate) fn session_parent_scan_prefix() -> Vec<u8> {
+    SESSION_PARENT_PREFIX.as_bytes().to_vec()
+}
+
+/// The token session a `oauth:session_parent:{uuid}` key names.
+///
+/// `None` when `key` does not carry the prefix or the suffix is not a UUID:
+/// the sweep leaves such a row alone rather than guessing.
+pub(crate) fn decode_session_parent_key(key: &[u8]) -> Option<SessionId> {
+    let rest = key.strip_prefix(SESSION_PARENT_PREFIX.as_bytes())?;
+    let uuid = uuid::Uuid::parse_str(std::str::from_utf8(rest).ok()?).ok()?;
+    Some(SessionId::new(uuid))
 }
 
 /// Splits a `oauth:session_fam:{session_uuid}:{family_id}` key into its

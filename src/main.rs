@@ -2120,6 +2120,7 @@ async fn run_serve(
                                             saml_assertions = stats.saml_assertions_deleted,
                                             revoked_jtis = stats.revoked_jtis_deleted,
                                             session_family_rows = stats.session_family_rows_deleted,
+                                            session_parent_rows = stats.session_parent_rows_deleted,
                                             sessions = stats.sessions_deleted,
                                             rate_trackers_pruned = stats.rate_trackers_pruned,
                                             errors = stats.errors,
