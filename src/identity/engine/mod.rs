@@ -12224,12 +12224,19 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // treats `hearth.yaml` as authoritative for these fields: a key added
         // at runtime would be removed at the next restart or SIGHUP, and on a
         // secretless client that makes it public.
+        // The access-token authorization mode is part of that profile: it
+        // decides who may introspect the realm's user tokens. A REST client
+        // may send the whole application record, so only a different mode is
+        // refused.
         let touches_credentials = request.jwks.is_some()
             || request.assertion_public_key.is_some()
             || request.dpop_bound_access_tokens.is_some();
-        if touches_credentials {
+        if touches_credentials || request.access_token_authorization.is_some() {
             if let Some(client) = self.get_client(realm_id, client_id)? {
-                if client.is_yaml_managed() {
+                let changes_mode = request
+                    .access_token_authorization
+                    .is_some_and(|mode| mode != client.access_token_authorization());
+                if client.is_yaml_managed() && (touches_credentials || changes_mode) {
                     return Err(IdentityError::YamlManagedResource {
                         kind: "application",
                     });

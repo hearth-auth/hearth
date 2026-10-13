@@ -3175,8 +3175,9 @@ impl EmbeddedIdentityEngine {
     /// family was issued to, the client that obtained it by token exchange
     /// (its `act.sub`), or a declared resource server — a client whose
     /// `access_token_authorization` is `Introspection` or `Decision`, which
-    /// only an administrator can set (dynamic registration always yields
-    /// `Embedded`). An unknown or archived caller is neither.
+    /// only an administrator (admin API) or the operator (`hearth.yaml`) can
+    /// set (dynamic registration always yields `Embedded`). An unknown or
+    /// archived caller is neither.
     /// Whether `caller` is the client the resource server of a protected
     /// resource named in the token's `aud` introspects as
     /// ([`ProtectedResource::introspection_client_id`]). Hearth's own
