@@ -126,6 +126,12 @@
       if (captchaInput && captchaInput.value) {
         body.captcha_token = captchaInput.value;
       }
+      // The login form's `return_to` (for example an OIDC authorize URL):
+      // the sign-in ends there, as it does for the password form.
+      var returnToInput = document.querySelector('input[name="return_to"]');
+      if (returnToInput && returnToInput.value) {
+        body.return_to = returnToInput.value;
+      }
       return fetch(completeUrl, {
         method: 'POST',
         credentials: 'same-origin',
