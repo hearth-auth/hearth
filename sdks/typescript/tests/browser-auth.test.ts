@@ -173,3 +173,86 @@ describe("createHearthAuth — token getters live on the auth object", () => {
     expect(auth.getAccessToken()).toBe("access-2");
   });
 });
+
+/**
+ * Spec: sdk-support-contract, "Browser login flow" — scenario "Two refresh
+ * calls at the same time". Hearth rotates the refresh token on each use and
+ * revokes the token family when a rotated token comes back, so two parallel
+ * requests with one token sign the user out. React's StrictMode runs a
+ * session-restore effect twice, which made exactly that happen on each load.
+ */
+describe("createHearthAuth — one refresh at a time", () => {
+  /** A client whose refresh requests wait until the test resolves them. */
+  function gatedClient() {
+    const pending: Array<(t: TokenResponse) => void> = [];
+    const failures: Array<(e: Error) => void> = [];
+    let n = 0;
+    const client = {
+      ...stubClient(),
+      refreshTokens: vi.fn(
+        () =>
+          new Promise<TokenResponse>((resolve, reject) => {
+            pending.push(resolve);
+            failures.push(reject);
+          }),
+      ),
+    } as unknown as HearthApiClient;
+    const answer = () => {
+      n += 1;
+      pending.shift()?.({
+        ...TOKENS,
+        access_token: `access-r${n}`,
+        refresh_token: `refresh-r${n}`,
+      });
+      failures.shift();
+    };
+    const fail = (e: Error) => {
+      pending.shift();
+      failures.shift()?.(e);
+    };
+    return { client, answer, fail };
+  }
+
+  it("shares one request between calls that overlap", async () => {
+    const { client, answer } = gatedClient();
+    const auth = createHearthAuth(client, CONFIG);
+    await signIn(auth, () => sessionStorage.getItem("hearth_oauth_state"));
+
+    const first = auth.refreshAccessToken();
+    const second = auth.refreshAccessToken();
+    expect(client.refreshTokens).toHaveBeenCalledTimes(1);
+    answer();
+    await Promise.all([first, second]);
+
+    expect(client.refreshTokens).toHaveBeenCalledWith("spa", "refresh-1");
+    expect(auth.getAccessToken()).toBe("access-r1");
+    expect(auth.getRefreshToken()).toBe("refresh-r1");
+
+    // A call after the request completed sends a new one, with the rotated token.
+    const third = auth.refreshAccessToken();
+    expect(client.refreshTokens).toHaveBeenCalledTimes(2);
+    expect(client.refreshTokens).toHaveBeenLastCalledWith("spa", "refresh-r1");
+    answer();
+    await third;
+    expect(auth.getAccessToken()).toBe("access-r2");
+  });
+
+  it("rejects every caller of a failed request, and the next call tries again", async () => {
+    const { client, answer, fail } = gatedClient();
+    const auth = createHearthAuth(client, CONFIG);
+    await signIn(auth, () => sessionStorage.getItem("hearth_oauth_state"));
+
+    const first = auth.refreshAccessToken();
+    const second = auth.refreshAccessToken();
+    fail(new Error("invalid_grant"));
+    await expect(first).rejects.toThrow("invalid_grant");
+    await expect(second).rejects.toThrow("invalid_grant");
+    expect(client.refreshTokens).toHaveBeenCalledTimes(1);
+
+    const retry = auth.refreshAccessToken();
+    expect(client.refreshTokens).toHaveBeenCalledTimes(2);
+    answer();
+    await retry;
+    expect(auth.getAccessToken()).toBe("access-r1");
+  });
+});

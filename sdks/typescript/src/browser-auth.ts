@@ -162,12 +162,25 @@ export function createHearthAuth(client: HearthApiClient, config: AuthConfig): H
     }, delayMs);
   }
 
-  async function refreshAccessToken(): Promise<void> {
-    const rt = getRefreshToken();
-    if (!rt) throw new Error("No refresh token stored");
-    const tokens = await client.refreshTokens(config.clientId, rt);
-    storeTokens(tokens, rt);
-    scheduleRefresh(tokens.expires_in ?? 3600);
+  // One refresh at a time. Hearth rotates the refresh token on each use and
+  // revokes the whole token family when a rotated token comes back, so two
+  // overlapping requests with the same token would sign the user out (React's
+  // StrictMode runs a session-restore effect twice). A call while a refresh
+  // runs shares it; the promise is cleared when it settles, so a failed
+  // refresh is not cached.
+  let refreshInFlight: Promise<void> | null = null;
+
+  function refreshAccessToken(): Promise<void> {
+    refreshInFlight ??= (async () => {
+      const rt = getRefreshToken();
+      if (!rt) throw new Error("No refresh token stored");
+      const tokens = await client.refreshTokens(config.clientId, rt);
+      storeTokens(tokens, rt);
+      scheduleRefresh(tokens.expires_in ?? 3600);
+    })().finally(() => {
+      refreshInFlight = null;
+    });
+    return refreshInFlight;
   }
 
   return {
