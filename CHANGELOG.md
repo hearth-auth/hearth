@@ -370,6 +370,13 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   inside `assertion`, is refused instead of being read with the field dropped.
 
 ### Fixed
+- **Browsers load the new UI scripts after an upgrade.** Hearth served its embedded scripts,
+  fonts and images under fixed URLs (`/ui/static/passkey.js`) with
+  `Cache-Control: public, max-age=31536000, immutable`. So after an upgrade a browser kept the
+  previous release's scripts for up to a year. For example, a cached older `passkey.js` broke
+  passkey registration. Every asset is now served with `no-cache` and an `ETag`, as `app.css`
+  already was: the browser checks it on each page load and gets `304 Not Modified` when it is
+  unchanged.
 - **A passkey sign-in returns to the application.** A passkey sign-in ended on the account page
   (`/ui`), also during an OIDC authorization request, so the user did not get back to the
   application. The passkey script now sends the login page's `return_to`. The sign-in ends

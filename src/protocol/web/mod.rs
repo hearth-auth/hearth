@@ -2054,10 +2054,11 @@ const HEARTH_ICON_SVG: &[u8] = include_bytes!("assets/hearth-icon.svg");
 /// except for `custom-logo` which is loaded from disk at startup when
 /// `branding.logo_url` points to a local file.
 ///
-/// `app.css` is served with `no-cache` + an `ETag` so the browser
-/// revalidates on each soft refresh but skips re-downloading unchanged
-/// content (304 Not Modified). Other embedded assets are truly immutable
-/// for the lifetime of a binary, so they keep `immutable` caching.
+/// Every asset is served with `no-cache` + an `ETag`, so the browser
+/// revalidates it on each page load but skips re-downloading unchanged
+/// content (304 Not Modified). The URLs carry no version: an `immutable`
+/// asset would keep the previous release's script in the browser for a year
+/// after an upgrade.
 #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 async fn serve_static(
     headers: HeaderMap,
@@ -2135,7 +2136,8 @@ async fn serve_static(
             .unwrap_or_else(|_| Response::new(Body::empty()));
     }
 
-    // Other embedded assets are immutable for the life of this binary.
+    // The other embedded assets change only with the binary, but their URLs
+    // stay the same across upgrades, so they are revalidated like `app.css`.
     let embedded: Option<(&[u8], &str)> = match file.as_str() {
         "htmx.min.js" => Some((HTMX_JS, "application/javascript; charset=utf-8")),
         "admin.js" => Some((ADMIN_JS, "application/javascript; charset=utf-8")),
@@ -2174,13 +2176,20 @@ async fn serve_static(
     };
 
     if let Some((bytes, content_type)) = embedded {
+        let etag = etag_for_bytes(bytes);
+        if is_not_modified(&headers, &etag) {
+            return Response::builder()
+                .status(StatusCode::NOT_MODIFIED)
+                .header(header::ETAG, etag)
+                .header(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"))
+                .body(Body::empty())
+                .unwrap_or_else(|_| Response::new(Body::empty()));
+        }
         return Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, content_type)
-            .header(
-                header::CACHE_CONTROL,
-                HeaderValue::from_static("public, max-age=31536000, immutable"),
-            )
+            .header(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"))
+            .header(header::ETAG, etag)
             .body(Body::from(bytes))
             .unwrap_or_else(|_| Response::new(Body::empty()));
     }
