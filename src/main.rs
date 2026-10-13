@@ -4482,8 +4482,8 @@ fn oidc_config_from(config: &Config) -> OidcConfig {
 }
 
 /// The access-token settings `serve` signs with, from `token` and `oidc` in
-/// `hearth.yaml`. Both `token.issuer` and `token.audience` default to
-/// `oidc.issuer`, so operators only need one config key for the common case.
+/// `hearth.yaml`. `token.issuer` defaults to `oidc.issuer`; `token.audience`
+/// defaults to `hearth`, the audience every SDK checks by default.
 ///
 /// `hearth admin token` uses the same, so the token it mints carries the
 /// issuer and audience the server validates against.
@@ -4494,13 +4494,12 @@ fn token_config_from(config: &Config) -> TokenConfig {
     } else if let Some(issuer) = &config.oidc.issuer {
         tc.issuer.clone_from(issuer);
     }
+    // Without `token.audience` the audience stays `hearth`, also when
+    // `oidc.issuer` is set: every SDK checks `aud` against `hearth` by default
+    // (`sdk-support-contract`). An API that needs its own audience is a
+    // protected resource, and a client names it with `resource`.
     if let Some(audience) = &config.token.audience {
         tc.audience.clone_from(audience);
-    } else if let Some(issuer) = &config.oidc.issuer {
-        // RFC 7519 §4.1.3: aud identifies the intended recipient.  When the
-        // operator has not set an explicit audience, default to the issuer URL
-        // so standard OIDC clients can validate aud without extra config.
-        tc.audience.clone_from(issuer);
     }
     if let Some(ttl) = &config.token.access_token_ttl {
         if let Ok(micros) = hearth::config::parse_duration_to_micros(ttl) {
@@ -4524,24 +4523,6 @@ fn token_config_from(config: &Config) -> TokenConfig {
     if let Some(max) = config.token.claims_cache_max {
         // Clamp to at least 1 so the hot-path cache can always hold one entry.
         tc.claims_cache_max = max.max(1);
-    }
-    // Warn when the audience is still the placeholder value but oidc.issuer is a
-    // real URL.  This only triggers when token.audience is explicitly set to "hearth"
-    // in the config file while oidc.issuer is configured — the implicit default case
-    // is already resolved to oidc.issuer above.
-    if tc.audience == "hearth" {
-        if let Some(oidc_issuer) = &config.oidc.issuer {
-            if oidc_issuer != "hearth" {
-                tracing::warn!(
-                    audience = %tc.audience,
-                    oidc_issuer = %oidc_issuer,
-                    "token.audience is the placeholder \"hearth\" but oidc.issuer is \
-                     configured. OIDC clients that validate aud against their client_id \
-                     or resource server URL will reject all tokens. Set token.audience \
-                     to a meaningful value (e.g. your issuer URL or service name)."
-                );
-            }
-        }
     }
     tc
 }
@@ -6260,6 +6241,32 @@ fn print_migration_report(report: &hearth::identity::MigrationReport) {
 mod tests {
     use super::*;
     use hearth::config::{Config, EmailTransport};
+
+    // ── token audience ────────────────────────────────────────────────────
+
+    /// Without `token.audience`, the access-token `aud` is `hearth`, also when
+    /// `oidc.issuer` is set: every SDK checks `hearth` by default
+    /// (`sdk-support-contract`).
+    #[test]
+    fn the_default_audience_is_hearth_when_an_issuer_is_set() {
+        let mut config = Config::default();
+        config.oidc.issuer = Some("https://auth.example.com".to_owned());
+        let tc = token_config_from(&config);
+        assert_eq!(tc.audience, "hearth");
+        assert_eq!(tc.issuer, "https://auth.example.com");
+    }
+
+    /// `token.audience` sets the audience.
+    #[test]
+    fn a_configured_audience_is_used() {
+        let mut config = Config::default();
+        config.oidc.issuer = Some("https://auth.example.com".to_owned());
+        config.token.audience = Some("https://api.example.com".to_owned());
+        assert_eq!(
+            token_config_from(&config).audience,
+            "https://api.example.com"
+        );
+    }
 
     // ── glibc malloc arenas ───────────────────────────────────────────────
 

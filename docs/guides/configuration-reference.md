@@ -541,7 +541,7 @@ JWT issuance parameters.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `issuer` | string | `oidc.issuer` | The `iss` claim value. Defaults to `oidc.issuer` when omitted. Set this only if your token issuer differs from the OIDC issuer. |
-| `audience` | string | `oidc.issuer` | The `aud` claim value. Defaults to `oidc.issuer` when omitted. Override only if your resource server expects a different audience (e.g. a separate API gateway URL). |
+| `audience` | string | `"hearth"` | The `aud` claim of an access token when the client names no `resource`. Every SDK checks `hearth` by default. To give an API its own audience, register it as a protected resource; its clients then request tokens with `resource=<its URI>`. |
 | `access_token_ttl` | duration | `"15m"` | Access token lifetime. |
 | `refresh_token_ttl` | duration | `"7d"` | Refresh token lifetime. |
 | `signing_key_rotation_grace_period` | duration | longest refresh-token TTL in the config (`"7d"` unless overridden) | How long a **config-driven** rotation (`realms.<name>.rotate_signing_key: true`, applied at startup) keeps the outgoing Ed25519 key in JWKS and accepts tokens signed with it. Defaulting to the refresh-token lifetime stops a planned rotation invalidating refresh tokens that have not reached their own `exp`; a shorter explicit value is honoured but logs a startup warning. Maximum `30d`. Does **not** apply to `POST /admin/realms/{id}/rotate-signing-key`, whose default is `0` — a revoking rotation, the remedy for a leaked key. |
@@ -2142,7 +2142,7 @@ Every field's default value at a glance.
 | `oidc` | `enforce_nonces` | `true` |
 | `oidc` | `require_pkce_for_confidential_clients` | `true` |
 | `token` | `issuer` | same as `oidc.issuer` |
-| `token` | `audience` | same as `oidc.issuer` |
+| `token` | `audience` | `"hearth"` |
 | `token` | `access_token_ttl` | `"15m"` |
 | `token` | `refresh_token_ttl` | `"7d"` |
 | `auth` | `session_ttl` | `"24h"` |

@@ -83,9 +83,9 @@
 # │                                                                     │
 # │ [ ] email.from           — required for every real mail transport. │
 # │                                                                     │
-# │ [ ] token.audience       — defaults to oidc.issuer when omitted.   │
-# │                            Override only if your resource server     │
-# │                            expects a different audience value.       │
+# │ [ ] token.audience       — defaults to "hearth", which every SDK    │
+# │                            checks by default. Leave it unset unless │
+# │                            resource servers expect another value.   │
 # │                                                                     │
 # │ [ ] onboarding.base_url  — required for the setup URL logged at    │
 # │                            startup to be an absolute HTTPS URL.     │
@@ -122,8 +122,8 @@
 #   issuer: "https://auth.example.com"
 #
 # token:
-#   # audience defaults to oidc.issuer — omit unless your resource server
-#   # expects a different value (e.g. a separate API gateway URL).
+#   # audience defaults to "hearth", which every SDK checks by default —
+#   # omit unless your resource servers expect another value.
 #   # audience: "https://api.example.com"
 #
 # email:
@@ -321,8 +321,8 @@ oidc:
 
 # token:
 #   issuer: "https://auth.example.com"   # default: oidc.issuer (or "hearth" if unset)
-#   # audience defaults to oidc.issuer when omitted. Set only when your resource
-#   # server expects a different audience value than the issuer URL.
+#   # audience defaults to "hearth", which every SDK checks by default. Set it
+#   # only when your resource servers expect another value.
 #   # audience: "https://api.example.com"
 #   access_token_ttl: "15m"             # default: 15 minutes
 #   refresh_token_ttl: "7d"             # default: 7 days
