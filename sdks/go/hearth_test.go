@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hearth-auth/hearth/sdks/go/v3/hearth"
+	"github.com/hearth-auth/hearth/sdks/go/v4/hearth"
 )
 
 // realmBaseURL returns the base URL of the bootstrapped realm.

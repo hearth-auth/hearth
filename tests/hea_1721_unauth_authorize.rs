@@ -240,8 +240,8 @@ async fn authed_authorize_issues_code_for_token_subject() {
     let claims: serde_json::Value =
         serde_json::from_slice(&payload_bytes).expect("decode JWT claims");
 
-    // Hearth sub claims carry a "user_" prefix: "user_{uuid}".
-    let expected_sub = format!("user_{}", env.user_uuid);
+    // A user's `sub` is the bare UUID (OpenSpec change `bare-entity-ids`).
+    let expected_sub = env.user_uuid.clone();
     assert_eq!(
         claims["sub"].as_str(),
         Some(expected_sub.as_str()),

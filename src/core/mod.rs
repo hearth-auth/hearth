@@ -8,6 +8,7 @@ mod ip_range;
 mod limiter;
 pub mod pagination;
 pub mod secrets;
+mod subject;
 mod swap_cell;
 mod time;
 mod trusted_proxy;
@@ -24,6 +25,7 @@ pub use secrets::{
     ct_eq_secret, ct_eq_secret_opt, ct_eq_secret_str, random_secret_bytes, random_secret_hex,
     random_secret_uuid, FormSecret, SECRET_BYTES,
 };
+pub use subject::TokenSubject;
 pub use swap_cell::SwapCell;
 pub use time::{Clock, FakeClock, SystemClock, Timestamp};
 pub use trusted_proxy::{

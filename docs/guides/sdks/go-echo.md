@@ -17,7 +17,7 @@ This page covers the `hearthecho` adapter (`hearth/echo`), which works with Echo
 ## Install
 
 ```bash
-go get github.com/hearth-auth/hearth/sdks/go/v3
+go get github.com/hearth-auth/hearth/sdks/go/v4
 ```
 
 The Echo adapter lives inside the SDK module at `hearth/echo` — no separate `go get` is needed.
@@ -28,8 +28,8 @@ Import both the base SDK and the `hearthecho` adapter:
 
 ```go
 import (
-    hearth      "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
-    hearthecho  "github.com/hearth-auth/hearth/sdks/go/v3/hearth/echo"
+    hearth      "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
+    hearthecho  "github.com/hearth-auth/hearth/sdks/go/v4/hearth/echo"
     "github.com/labstack/echo/v4"
 )
 
@@ -87,8 +87,8 @@ Use `hearthecho.RequirePermission` as group middleware to gate a set of routes o
 import (
     "net/http"
 
-    hearth     "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
-    hearthecho "github.com/hearth-auth/hearth/sdks/go/v3/hearth/echo"
+    hearth     "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
+    hearthecho "github.com/hearth-auth/hearth/sdks/go/v4/hearth/echo"
     "github.com/labstack/echo/v4"
 )
 
@@ -171,8 +171,8 @@ package main
 import (
     "net/http"
 
-    hearth     "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
-    hearthecho "github.com/hearth-auth/hearth/sdks/go/v3/hearth/echo"
+    hearth     "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
+    hearthecho "github.com/hearth-auth/hearth/sdks/go/v4/hearth/echo"
     "github.com/labstack/echo/v4"
 )
 

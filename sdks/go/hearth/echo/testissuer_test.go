@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	hearth "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
+	hearth "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
 )
 
 // testIssuer is an httptest-backed stand-in for a Hearth deployment: it serves

@@ -9,9 +9,8 @@
 //!   bare base URL instead.
 //! * OIDC Back-Channel Logout §2.4 / §2.6: a logout token's `iss`, `sub` and
 //!   `sid` are compared with the ID tokens the RP holds for that session, so
-//!   they must be the same strings. Logout tokens carried bare UUIDs where
-//!   the ID token carries `user_<uuid>` / `session_<uuid>`, and the base
-//!   issuer. Front-Channel Logout §2 has the same rule for the `iss` / `sid`
+//!   they must be the same strings. Logout tokens carried other ID forms
+//!   than the ID token, and the base issuer. Both now carry bare UUIDs. Front-Channel Logout §2 has the same rule for the `iss` / `sid`
 //!   query parameters.
 
 mod common;
@@ -224,6 +223,17 @@ async fn logout_token_iss_sub_and_sid_match_the_id_token() {
              logout token {logout}, ID token {id}"
         );
     }
+    // Both carry the bare UUIDs (OpenSpec change `bare-entity-ids`).
+    assert_eq!(logout["sub"], env.user.as_uuid().to_string(), "{logout}");
+    let sid = logout["sid"].as_str().expect("sid");
+    assert_eq!(
+        uuid::Uuid::parse_str(sid)
+            .map(|u| u.to_string())
+            .ok()
+            .as_deref(),
+        Some(sid),
+        "the logout token's sid is a bare UUID: {logout}"
+    );
 }
 
 #[tokio::test]

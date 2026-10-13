@@ -153,7 +153,7 @@ async fn multi_realm_token_isolation() {
     let claims = identity
         .validate_token(realm_a.id(), tokens_a.access_token())
         .expect("validate in A");
-    // Token claims store the user ID with prefix ("user_{uuid}")
+    // A user's `sub` is the bare UUID, the user ID's Display.
     assert_eq!(claims.sub, user_a.id().to_string());
 
     // Token should NOT validate in realm B (different realm namespace).

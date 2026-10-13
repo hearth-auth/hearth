@@ -400,9 +400,7 @@ async fn oidc_userinfo_endpoint() {
     // First extract session from claims to revoke it
     let claims =
         decode_claims_unverified(token_response.access_token()).expect("decode access token");
-    let session_id_str = claims.sid.strip_prefix("session_").expect("session prefix");
-    let session_uuid = uuid::Uuid::parse_str(session_id_str).expect("parse session uuid");
-    let session_id = hearth::core::SessionId::new(session_uuid);
+    let session_id: hearth::core::SessionId = claims.sid.parse().expect("parse session id");
     harness
         .identity()
         .revoke_session(&realm_id, &session_id)
@@ -442,12 +440,8 @@ async fn oidc_id_token_required_claims_with_nonce() {
         .expect("realm discovery");
     assert_eq!(claims.iss, discovery.issuer, "iss must match discovery");
 
-    // sub — MUST be present and identify the user
-    assert!(
-        claims.sub.starts_with("user_"),
-        "sub must be a user identifier"
-    );
-    assert_eq!(claims.sub, user_id.to_string());
+    // sub — MUST be present and identify the user: the user's bare UUID.
+    assert_eq!(claims.sub, user_id.as_uuid().to_string());
 
     // aud — MUST contain the client_id
     assert!(

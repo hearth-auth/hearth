@@ -180,12 +180,12 @@ func bootMain() error {
 // to obtain genuinely signed access/ID tokens. Co-realm with the admin token, so
 // no browser login is required.
 func mintSystemRealmToken() error {
-	// Derive a parseable user_id UUID from the admin token's `sub` (`user_<uuid>`).
+	// A user's `sub` is the user's UUID.
 	sub, err := jwtClaimString(hAdmin, "sub")
 	if err != nil {
 		return fmt.Errorf("read admin sub: %w", err)
 	}
-	hCallerUUID = strings.TrimPrefix(sub, "user_")
+	hCallerUUID = sub
 
 	var reg struct {
 		ClientID string `json:"client_id"`

@@ -105,7 +105,7 @@ ADMIN_USER_ID=$(python3 - "$ADMIN_TOKEN" <<'PY'
 import base64, json, sys
 payload = sys.argv[1].split(".")[1]
 payload += "=" * (-len(payload) % 4)
-print(json.loads(base64.urlsafe_b64decode(payload))["sub"].removeprefix("user_"))
+print(json.loads(base64.urlsafe_b64decode(payload))["sub"])
 PY
 )
 

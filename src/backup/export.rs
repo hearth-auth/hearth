@@ -654,7 +654,7 @@ impl BackupExporter {
         }
 
         Ok(RealmManifest {
-            realm_id: format!("realm_{}", realm_id.as_uuid()),
+            realm_id: realm_id.as_uuid().to_string(),
             slug,
             record_counts: counts,
             audit_chain_included,

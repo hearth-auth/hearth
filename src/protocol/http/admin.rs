@@ -3553,15 +3553,9 @@ pub(super) async fn admin_bootstrap(
             // The new sessions carry what the Bearer token's session proved.
             let proof = claims
                 .sid
-                .strip_prefix("session_")
-                .and_then(|s| uuid::Uuid::parse_str(s).ok())
-                .and_then(|u| {
-                    state
-                        .identity
-                        .get_session(&rid, &crate::core::SessionId::new(u))
-                        .ok()
-                        .flatten()
-                })
+                .parse::<crate::core::SessionId>()
+                .ok()
+                .and_then(|sid| state.identity.get_session(&rid, &sid).ok().flatten())
                 .map_or(crate::identity::MfaProof::None, |s| s.mfa_proof());
             let mut totp_secret = String::new();
 

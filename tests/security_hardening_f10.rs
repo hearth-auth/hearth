@@ -532,11 +532,7 @@ fn forge_signature(token: &str) -> String {
 
 fn session_id_of(id_token: &str) -> hearth::core::SessionId {
     let claims = decode_claims_unverified(id_token).expect("decode id token");
-    let uuid_str = claims
-        .sid
-        .strip_prefix("session_")
-        .expect("id token sid is session-scoped");
-    hearth::core::SessionId::new(uuid_str.parse().expect("session uuid"))
+    claims.sid.parse().expect("id token sid is a session ID")
 }
 
 /// A hint whose signature does not verify must revoke no session and mint no

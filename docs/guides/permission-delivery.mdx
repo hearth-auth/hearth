@@ -47,7 +47,7 @@ Hearth resolves the user's effective roles, groups, and permissions at token iss
 **Token payload excerpt:**
 ```json
 {
-  "sub": "user_01HXYZ...",
+  "sub": "0e459c89-a973-4495-a8de-57f9d9056249",
   "permissions": ["docs.view", "docs.edit"],
   "roles": ["docs-admin"],
   "groups": ["leads"],
@@ -140,7 +140,7 @@ if (!result.permissions?.includes('docs.edit')) return res.status(403).end();
 <TabItem value="go" label="Go">
 
 ```go
-import hearth "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
+import hearth "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
 
 result, err := client.Introspect(ctx, hearth.IntrospectRequest{
     Token:        accessToken,
@@ -223,7 +223,7 @@ app.get('/docs', hearthMiddleware({
 <TabItem value="go" label="Go">
 
 ```go
-import hearth "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
+import hearth "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
 
 result, err := client.CheckPermission(ctx, accessToken, "docs.edit",
     hearth.AccessTokenAuthorizationDecision,
@@ -313,7 +313,7 @@ When a user is acting in an org context, include `org_id` in the token request t
 # Token request with org context
 curl -X POST http://127.0.0.1:8420/token \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=authorization_code&code=<code>&org_id=org_<uuid>"
+  -d "grant_type=authorization_code&code=<code>&org_id=<org uuid>"
 ```
 
 The resulting token's `permissions` claim reflects only org-scoped assignments for that organization plus any realm-scoped assignments. The `oid` claim is set to the org ID.

@@ -104,7 +104,7 @@ curl -X POST http://127.0.0.1:8420/admin/users/<user-id>/roles \
   -H "Content-Type: application/json" \
   -d '{
     "role_id": "<role-id>",
-    "org_id": "org_<uuid>"
+    "org_id": "<org uuid>"
   }'
 ```
 
@@ -121,7 +121,7 @@ await fetch('https://hearth.example.com/admin/users/<user-id>/roles', {
   },
   body: JSON.stringify({
     role_id: '<role-id>',
-    org_id: 'org_<uuid>',
+    org_id: '<org uuid>',
   }),
 });
 ```
@@ -171,7 +171,7 @@ const perms = await res.json();
 
 ```go
 perms, err := client.Permissions(ctx, accessToken,
-    hearth.WithOrgID("org_<uuid>"),
+    hearth.WithOrgID("<org uuid>"),
 )
 if err != nil {
     return err
@@ -183,7 +183,7 @@ if err != nil {
 <TabItem value="python" label="Python">
 
 ```python
-perms = client.me_permissions(access_token, org_id="org_<uuid>")
+perms = client.me_permissions(access_token, org_id="<org uuid>")
 # perms.roles, perms.groups, perms.permissions — includes org-scoped entries
 ```
 
@@ -191,7 +191,7 @@ perms = client.me_permissions(access_token, org_id="org_<uuid>")
 <TabItem value="php" label="PHP">
 
 ```php
-$perms = $hearth->mePermissions($accessToken, orgId: 'org_<uuid>');
+$perms = $hearth->mePermissions($accessToken, orgId: '<org uuid>');
 // $perms->roles, $perms->groups, $perms->permissions — includes org-scoped entries
 ```
 

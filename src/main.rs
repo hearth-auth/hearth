@@ -5027,6 +5027,14 @@ fn restore_mode(
     Ok(mode)
 }
 
+/// Whether a backup manifest's `realm_id` names the system realm (nil UUID).
+/// Archives written before 4.0 carry `realm_<uuid>`; `RealmId` parses both.
+fn names_system_realm(realm_id: &str) -> bool {
+    realm_id
+        .parse::<hearth::core::RealmId>()
+        .is_ok_and(|id| id.as_uuid().is_nil())
+}
+
 /// Runs `hearth backup restore`.
 ///
 /// Returns `Ok(true)` when some records were skipped or errored (exit code 1),
@@ -5169,11 +5177,10 @@ fn run_backup_restore(
     // The system realm (nil UUID) holds every operator-console account. Say
     // whether this restore brings it back: without it, nobody can sign in to
     // `/ui/admin` on the restored store.
-    let system_realm_id = format!("realm_{}", uuid::Uuid::nil());
     let system_slug = reader
         .realms()
         .iter()
-        .find(|r| r.realm_id == system_realm_id)
+        .find(|r| names_system_realm(&r.realm_id))
         .map(|r| r.slug.clone())
         .filter(|s| slugs.contains(s));
 

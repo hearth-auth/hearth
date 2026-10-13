@@ -13,7 +13,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/hearth-auth/hearth/sdks/go/v3/hearth"
+	"github.com/hearth-auth/hearth/sdks/go/v4/hearth"
 )
 
 type caseConfig struct {

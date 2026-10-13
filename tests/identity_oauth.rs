@@ -216,7 +216,10 @@ fn client_credentials_register_and_issue_token() {
     // Verify the access token is valid
     let claims = hearth::identity::decode_claims_unverified(response.access_token())
         .expect("decode access token");
-    assert_eq!(claims.sub, client.client_id().to_string());
+    assert_eq!(
+        claims.sub,
+        format!("client_{}", client.client_id().as_uuid())
+    );
     assert_eq!(claims.token_type, "access");
     assert_eq!(claims.scope.as_deref(), Some("read write"));
 }

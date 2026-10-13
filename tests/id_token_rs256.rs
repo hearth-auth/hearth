@@ -294,7 +294,7 @@ fn rsa_kids(jwks: &hearth::identity::JwksDocument) -> Vec<String> {
 
 fn session_of(token: &str) -> SessionId {
     let sid = jws_part(token, 1)["sid"].as_str().expect("sid").to_string();
-    SessionId::new(uuid::Uuid::parse_str(sid.strip_prefix("session_").unwrap()).unwrap())
+    sid.parse().unwrap()
 }
 
 /// An engine over its own storage with a controllable clock — for grace
@@ -926,7 +926,7 @@ async fn an_rs256_id_token_hint_ends_the_session_and_a_forged_one_does_not() {
     // Forged: same header and signature over a different subject.
     let mut parts: Vec<String> = tokens.id_token().split('.').map(str::to_string).collect();
     let mut claims = jws_part(tokens.id_token(), 1);
-    claims["sub"] = serde_json::json!("user_00000000-0000-0000-0000-000000000000");
+    claims["sub"] = serde_json::json!("00000000-0000-0000-0000-000000000000");
     parts[1] = URL_SAFE_NO_PAD.encode(claims.to_string());
     let forged = parts.join(".");
     let refused = h.identity().initiate_logout(

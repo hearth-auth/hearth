@@ -5304,7 +5304,7 @@ impl EmbeddedIdentityEngine {
         self.token_claims_cache_gen.load(Ordering::Acquire)
     }
 
-    /// Parses a `session_`-prefixed session ID claim.
+    /// Parses the session ID claim.
     ///
     /// Returns `Ok(None)` for sessionless tokens (`sid == "none"`).
     fn parse_session_id_claim(claims: &TokenClaims) -> Result<Option<SessionId>, IdentityError> {
@@ -5312,22 +5312,20 @@ impl EmbeddedIdentityEngine {
             return Ok(None);
         }
 
-        let sid_str = claims
+        // The bare UUID, or `session_<uuid>` from a token issued before 4.0.
+        claims
             .sid
-            .strip_prefix("session_")
-            .ok_or(IdentityError::InvalidToken)?;
-        let sid_uuid = uuid::Uuid::parse_str(sid_str).map_err(|_| IdentityError::InvalidToken)?;
-        Ok(Some(SessionId::new(sid_uuid)))
+            .parse::<SessionId>()
+            .map(Some)
+            .map_err(|_| IdentityError::InvalidToken)
     }
 
-    /// Parses a `user_`-prefixed subject claim.
+    /// Parses a user subject claim. A client or agent subject is not a user.
     fn parse_user_id_claim(claims: &TokenClaims) -> Result<UserId, IdentityError> {
-        let sub_str = claims
-            .sub
-            .strip_prefix("user_")
-            .ok_or(IdentityError::InvalidToken)?;
-        let sub_uuid = uuid::Uuid::parse_str(sub_str).map_err(|_| IdentityError::InvalidToken)?;
-        Ok(UserId::new(sub_uuid))
+        match crate::core::TokenSubject::parse(&claims.sub) {
+            Some(crate::core::TokenSubject::User(user_id)) => Ok(user_id),
+            _ => Err(IdentityError::InvalidToken),
+        }
     }
 }
 
@@ -9697,23 +9695,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::InvalidToken);
         }
 
-        // Parse session ID
-        let session_id_str = claims
+        // A refresh token always names a session and a user.
+        let session_id = claims
             .sid
-            .strip_prefix("session_")
-            .ok_or(IdentityError::InvalidToken)?;
-        let session_uuid =
-            uuid::Uuid::parse_str(session_id_str).map_err(|_| IdentityError::InvalidToken)?;
-        let session_id = SessionId::new(session_uuid);
-
-        // Parse user ID
-        let user_id_str = claims
-            .sub
-            .strip_prefix("user_")
-            .ok_or(IdentityError::InvalidToken)?;
-        let user_uuid =
-            uuid::Uuid::parse_str(user_id_str).map_err(|_| IdentityError::InvalidToken)?;
-        let user_id = UserId::new(user_uuid);
+            .parse::<SessionId>()
+            .map_err(|_| IdentityError::InvalidToken)?;
+        let user_id = Self::parse_user_id_claim(&claims)?;
 
         // Bind token subject to the referenced session. This prevents a
         // mismatched `sub` from minting tokens for a different principal.
@@ -17639,7 +17626,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 // F3: assert actor_token.sub == client_id — the entity presenting the delegation
                 // must own the actor_token. Without this check, any holder of a valid Hearth token
                 // for principal A could impersonate principal B in the act chain.
-                if actor_claims.sub != request.client_id.to_string() {
+                if crate::core::TokenSubject::parse(&actor_claims.sub)
+                    != Some(crate::core::TokenSubject::Client(request.client_id.clone()))
+                {
                     return Err(IdentityError::TokenExchangeRejected {
                         reason: "actor_token.sub does not match client_id".to_string(),
                         oauth_error: "invalid_grant",
@@ -19014,6 +19003,8 @@ mod tests {
     mod ga_login_hardening;
     /// An RS256 client's realm key is checked before an overwrite deletes it.
     mod import_client_rs256_key;
+    /// Tokens with the prefixed IDs of releases before 4.0 stay valid.
+    mod legacy_prefixed_ids;
     /// A PAR `request_uri` is consumed exactly once under concurrency.
     mod par_consume_race;
     /// A retiring key is checked by the kid its material produces, not its label.
@@ -27654,7 +27645,7 @@ mod tests {
         };
 
         let agent = make("revocable-agent");
-        let agent_sub = format!("{}", agent.id());
+        let agent_sub = crate::core::TokenSubject::Agent(agent.id().clone()).to_string();
 
         assert!(
             !engine
@@ -27672,7 +27663,7 @@ mod tests {
         // Suspended — the status the abuse monitor applies automatically —
         // must be flagged just like Revoked.
         let suspended = make("suspended-agent");
-        let suspended_sub = format!("{}", suspended.id());
+        let suspended_sub = crate::core::TokenSubject::Agent(suspended.id().clone()).to_string();
         engine
             .suspend_agent(&realm, suspended.id(), None)
             .expect("suspend agent");
@@ -27695,7 +27686,7 @@ mod tests {
         // A deleted agent leaves an `agt_`-shaped subject that resolves to
         // nothing; that must not read as "an unknown non-agent, allow".
         let deleted = make("deleted-agent");
-        let deleted_sub = format!("{}", deleted.id());
+        let deleted_sub = crate::core::TokenSubject::Agent(deleted.id().clone()).to_string();
         engine
             .delete_agent(&realm, deleted.id(), None)
             .expect("delete agent");

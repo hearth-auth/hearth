@@ -6,6 +6,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Changed
+- **BREAKING: entity IDs are bare UUIDs everywhere.** A user's access, refresh and ID tokens
+  carry `sub` = the user's bare UUID, the same `id` that the admin API and SCIM return. Before,
+  `sub` was `user_<uuid>`, so an application could not match a token with the user record it
+  provisioned. `sid`, `tid` and `oid` are bare UUIDs too, and so are the back-channel logout
+  token's `sub` and `sid`, the agent API's `agent_id`, audit records, the pre-token webhook
+  payload and the backup manifest's `realm_id`. A client's own token (`client_credentials`,
+  JWT-bearer) keeps `sub` = `client_<uuid>`, and an agent's token keeps `sub` = `agt_<uuid>`, so
+  `sub` still tells a user from a client or an agent. Hearth still accepts the prefixed forms
+  wherever it reads an ID, so a token issued before the upgrade stays valid until it expires.
+  Delegation grants stored before the upgrade no longer show in the user's consent list and
+  expire on their own.
+- **BREAKING (Go SDK): the module path is `github.com/hearth-auth/hearth/sdks/go/v4`.** The SDKs
+  move to 4.0 with the server, and Go installs a v4 release only from a `/v4` module path. Change
+  each import from `.../sdks/go/v3/...` to `.../sdks/go/v4/...`.
+
 ## [1.0.1 – 3.5.13] — 2026-06-23 to 2026-10-14
 
 Releases v1.0.1 to v3.5.13 shipped while every entry stayed under `[Unreleased]`, so this one

@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	hearth "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
+	hearth "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
 	"github.com/labstack/echo/v4"
 )
 

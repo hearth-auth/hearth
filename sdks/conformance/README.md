@@ -70,7 +70,7 @@ scenarios; `scripts/sdk-conformance.sh` (`make sdk-conformance`) runs them.
 case, in case order, on stdout, and nothing else on stdout:
 
 ```json
-{"id": "user-token-validates", "outcome": "ok", "claims": {"sub": "user_…", "scope": null, "permissions": ["…"]}}
+{"id": "user-token-validates", "outcome": "ok", "claims": {"sub": "<user uuid>", "scope": null, "permissions": ["…"]}}
 {"id": "alg-none-fails", "outcome": "error", "error": "TokenInvalidError"}
 ```
 

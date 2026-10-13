@@ -1365,7 +1365,7 @@ fn archive_realm_ids(bytes: &[u8]) -> Vec<String> {
 }
 
 fn nil_realm_id_string() -> String {
-    format!("realm_{}", uuid::Uuid::nil())
+    uuid::Uuid::nil().to_string()
 }
 
 #[tokio::test]
@@ -1385,7 +1385,7 @@ async fn a_system_realm_export_carries_the_system_realm_and_a_tenant_export_neve
         "a system-realm caller's full export must carry the system realm: {ids:?}"
     );
     assert!(
-        ids.contains(&format!("realm_{}", tenant.as_uuid())),
+        ids.contains(&tenant.as_uuid().to_string()),
         "and every tenant realm: {ids:?}"
     );
 
@@ -1765,7 +1765,7 @@ async fn a_tenant_restore_naming_the_system_realm_is_refused_before_any_write() 
     let ids = archive_realm_ids(&archive);
     assert_eq!(
         ids,
-        vec![format!("realm_{}", tenant.as_uuid()), nil_realm_id_string()],
+        vec![tenant.as_uuid().to_string(), nil_realm_id_string()],
         "precondition: the caller's realm comes first"
     );
 
