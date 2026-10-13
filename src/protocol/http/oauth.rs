@@ -26,11 +26,25 @@ use super::{
     proto_to_rest_json, resolve_realm_by_name, validate_user_token_with_dpop, AppState,
 };
 
+/// Adds `Access-Control-Allow-Origin: *` to a public metadata response —
+/// discovery, the JWKS and the protected-resource metadata — so a browser
+/// page on another origin can read it (`oidc-provider`, "Public metadata
+/// answers cross-origin reads"). The TypeScript SDK fetches these documents
+/// from the page to verify tokens. They are public and read without
+/// credentials, and the response never allows credentials.
+async fn allow_any_origin(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        axum::http::HeaderValue::from_static("*"),
+    );
+    response
+}
+
 /// Registers global OAuth/OIDC routes.
 pub(super) fn routes() -> axum::Router<Arc<AppState>> {
     use axum::extract::DefaultBodyLimit;
     use axum::routing::{get, post};
-    axum::Router::new()
+    let metadata = axum::Router::new()
         .route("/.well-known/openid-configuration", get(oidc_discovery))
         .route(
             "/.well-known/oauth-protected-resource",
@@ -39,6 +53,9 @@ pub(super) fn routes() -> axum::Router<Arc<AppState>> {
         .route("/jwks", get(jwks))
         .route("/certs", get(jwks))
         .route("/.well-known/jwks.json", get(jwks))
+        .route_layer(axum::middleware::map_response(allow_any_origin));
+    axum::Router::new()
+        .merge(metadata)
         .route(
             "/register",
             post(register_client_dynamic)
@@ -101,12 +118,15 @@ pub(super) fn admin_routes() -> axum::Router<Arc<AppState>> {
 pub(super) fn realm_routes() -> axum::Router<Arc<AppState>> {
     use axum::extract::DefaultBodyLimit;
     use axum::routing::{get, post};
-    axum::Router::new()
+    let metadata = axum::Router::new()
         .route(
             "/.well-known/openid-configuration",
             get(realm_oidc_discovery),
         )
         .route("/.well-known/jwks.json", get(realm_jwks))
+        .route_layer(axum::middleware::map_response(allow_any_origin));
+    axum::Router::new()
+        .merge(metadata)
         .route(
             "/authorize",
             get(realm_authorize_browser_redirect).post(realm_authorize),
