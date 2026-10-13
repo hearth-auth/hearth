@@ -115,7 +115,7 @@ replace = '''
 # ── 4. Realm isolation in the storage engine (CLAUDE.md storage rule) ────────
 #
 # "All keys are prefixed with realm ID. Scans bounded to a single realm."
-# `Memtable::scan_realm` is that bound. Replace the realm-bounded range with a
+# `Memtable::scan_realm` is that bound. Replace the realm-bounded walk with a
 # whole-map iteration and one tenant's scan returns another tenant's rows — the
 # multi-tenant failure this database exists to prevent.
 [[mutation]]
@@ -129,7 +129,7 @@ find = '''
             realm_id: realm_id.clone(),
             key: vec![],
         };
-        map.range(start..)
+        entries_from(map, &start)
             .take_while(|entry| entry.key().realm_id == *realm_id)
             .map(|entry| (entry.key().key.clone(), entry.value().clone()))
             .collect()
