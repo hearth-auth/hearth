@@ -475,22 +475,26 @@ async fn logout_with_csrf_clears_cookies_and_revokes_session() {
     );
 }
 
+/// An embedded asset keeps its URL across upgrades (`/ui/static/passkey.js`),
+/// so it must not be cached as immutable: a browser would run the old script
+/// for a year after an upgrade. It is served `no-cache` with an `ETag`, and a
+/// matching `If-None-Match` answers `304` without the body.
 #[tokio::test]
-async fn static_asset_served_with_immutable_cache_headers() {
+async fn static_asset_is_revalidated_with_an_etag() {
     let rig = build_rig();
-    let response = rig
-        .app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/ui/static/htmx.min.js")
-                .body(Body::empty())
-                .expect("build request"),
-        )
-        .await
-        .expect("oneshot");
+    let get = |if_none_match: Option<String>| {
+        let mut req = Request::builder()
+            .method("GET")
+            .uri("/ui/static/htmx.min.js");
+        if let Some(etag) = if_none_match {
+            req = req.header(header::IF_NONE_MATCH, etag);
+        }
+        rig.app
+            .clone()
+            .oneshot(req.body(Body::empty()).expect("build request"))
+    };
 
+    let response = get(None).await.expect("oneshot");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response
@@ -504,13 +508,35 @@ async fn static_asset_served_with_immutable_cache_headers() {
             .headers()
             .get(header::CACHE_CONTROL)
             .and_then(|v| v.to_str().ok()),
-        Some("public, max-age=31536000, immutable")
+        Some("no-cache"),
+        "an unversioned asset URL must be revalidated, not cached as immutable"
     );
-
+    let etag = response
+        .headers()
+        .get(header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+        .expect("an ETag");
+    assert!(
+        etag.starts_with('"') && etag.ends_with('"'),
+        "a strong, quoted ETag: {etag}"
+    );
     let body = to_bytes(response.into_body(), 1024 * 1024)
         .await
         .expect("body");
     assert!(body.len() > 1024, "htmx.min.js should be non-trivial");
+
+    let revalidated = get(Some(etag.clone())).await.expect("oneshot");
+    assert_eq!(revalidated.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(
+        revalidated
+            .headers()
+            .get(header::ETAG)
+            .and_then(|v| v.to_str().ok()),
+        Some(etag.as_str())
+    );
+    let body = to_bytes(revalidated.into_body(), 1024).await.expect("body");
+    assert!(body.is_empty(), "a 304 has no body");
 
     // Subject suppresses the unused-field warning when build_rig() returns
     // fields that individual tests don't touch.
