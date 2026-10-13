@@ -382,6 +382,13 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   32 MiB cache held 57.6 MB of blocks. A cached block is now its decrypted bytes plus one offset
   per row, and the cache counts exactly that memory. A cached block also costs two allocations
   instead of two for each row.
+- **A row that a scan passed in memory is now freed when a write replaces it** (#445). A scan,
+  a count or a list over recent writes kept a reference to each row it passed. When a later
+  write replaced or deleted that row, its memory was never freed. The cleanup sweep scans
+  expiring rows and then deletes them, so memory grew for as long as the server ran. A 12-hour
+  soak at 120 sign-in journeys a second, measured with heaptrack, leaked about 9 MB an hour
+  this way. The defect is in crossbeam-skiplist 0.1.3 (fixed upstream, not yet released);
+  Hearth no longer calls the method that leaks.
 - **A flush or a compaction no longer opens every SST file again** (#445). After each memtable
   flush and each compaction, the server opened every SST file again to rebuild its file list:
   it read and decrypted the block index and Bloom filter of each file, and built a new copy of
