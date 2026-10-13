@@ -128,10 +128,6 @@ security:
   allowed_return_to_origins:
     - "https://app.example.com"
     - "https://admin.example.com"
-  # Extra `form-action` CSP origins accepted ONLY while `--dev` is in force.
-  dev_csp_form_action_origins:
-    - "http://localhost:5173"
-    - "http://localhost:5399"
 
   # --- Realm-slug abuse controls --------------------------------------------
   # Omitting `reserved_slugs` entirely used to mean "[]" — i.e. the control off.

@@ -199,13 +199,15 @@ async fn pending_cookie(app: &axum::Router, realm_name: &str, user: &User) -> St
             .expect("build login"),
     )
     .await;
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    // A sign-in POST ends on the continue page (`form-action-safe-sign-in`):
+    // `200` with `Refresh: 0;url=…` instead of a `303` redirect.
+    assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response
             .headers()
-            .get(header::LOCATION)
+            .get(header::REFRESH)
             .and_then(|v| v.to_str().ok()),
-        Some("/ui/mfa-otp-challenge")
+        Some("0;url=/ui/mfa-otp-challenge")
     );
     find(&cookie_pairs(&response), "hearth_ui_mfa_pending").expect("pending cookie")
 }

@@ -1114,26 +1114,6 @@ pub struct SecurityYaml {
     /// no pepper (unchanged default behaviour).
     #[serde(default)]
     pub password: PasswordSecurityYaml,
-    /// Extra origins appended to the CSP `form-action` directive when the
-    /// server is running in `--dev` mode (HEA-2084).
-    ///
-    /// These origins are **only emitted under `--dev`**; production always
-    /// emits `form-action 'self'` regardless of this value.
-    ///
-    /// Default: `["http://localhost:5173", "http://localhost:5399"]` — the
-    /// Vite dev server and the companion demo-SPA service used by the
-    /// reference-integration Playwright suite.
-    ///
-    /// Set this to the actual port(s) your demo SPA runs on if you use a
-    /// different port:
-    ///
-    /// ```yaml
-    /// security:
-    ///   dev_csp_form_action_origins:
-    ///     - "http://localhost:3000"
-    /// ```
-    #[serde(default = "SecurityYaml::default_dev_csp_form_action_origins")]
-    pub dev_csp_form_action_origins: Vec<String>,
     /// A-3 distributed-attack detector (`security.distributed_attack_detector`).
     ///
     /// Documented in `openspec/specs/abuse-prevention/spec.md` since HEA-1189 and, until task
@@ -1322,7 +1302,7 @@ impl Default for AdaptiveBackoffYaml {
 /// `{:?}`-printed (HEA-1841). Presence is preserved (`Some("[REDACTED]")`)
 /// so debug output still distinguishes configured from absent.
 impl std::fmt::Debug for SecurityYaml {
-    // `dev_csp_form_action_origins` and the abuse-guard blocks are omitted
+    // The abuse-guard blocks are omitted
     // deliberately: this impl exists to redact `dpop_nonce_secret` and
     // `key_encryption_key`, and every field it prints is one an operator needs
     // when reading a startup dump. `finish_non_exhaustive` marks the omission.
@@ -1351,10 +1331,6 @@ impl std::fmt::Debug for SecurityYaml {
                 &self.key_encryption_key.as_ref().map(|_| "[REDACTED]"),
             )
             .field("password", &self.password)
-            .field(
-                "dev_csp_form_action_origins",
-                &self.dev_csp_form_action_origins,
-            )
             .finish_non_exhaustive()
     }
 }
@@ -1513,7 +1489,6 @@ impl Default for SecurityYaml {
             jwks_rps_limit: Self::default_jwks_rps_limit(),
             key_encryption_key: None,
             password: PasswordSecurityYaml::default(),
-            dev_csp_form_action_origins: Self::default_dev_csp_form_action_origins(),
             distributed_attack_detector: DistributedAttackDetectorYaml::default(),
             outbound_volume_shield: OutboundVolumeShieldYaml::default(),
             cross_realm_aggregation_cap: CrossRealmAggCapYaml::default(),
@@ -1571,14 +1546,6 @@ impl SecurityYaml {
     /// Default act-chain ceiling: `3` (A-38).
     const fn default_max_act_chain_depth() -> u8 {
         3
-    }
-
-    /// Default dev-mode CSP `form-action` extra origins (HEA-2084).
-    fn default_dev_csp_form_action_origins() -> Vec<String> {
-        vec![
-            "http://localhost:5173".to_string(),
-            "http://localhost:5399".to_string(),
-        ]
     }
 }
 

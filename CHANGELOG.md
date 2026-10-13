@@ -105,6 +105,10 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   their realms now require MFA. Add each secret to an authenticator app to sign in.
 
 ### Removed
+- **`security.dev_csp_form_action_origins`** (`form-action-safe-sign-in`). The CSP
+  `form-action` directive is exactly `'self'` in dev and in production: the sign-in continue
+  page makes extra origins unnecessary. Remove the key from `hearth.yaml`, because an unknown
+  key fails the start.
 - **BREAKING: Hearth no longer acts as a SAML Identity Provider.** The routes
   `/ui/realms/{realm}/saml/metadata`, `/saml/sso` (GET and POST), `/saml/sso/init` and
   `/saml/slo-idp` (GET and POST) are gone and answer `404`, and the
@@ -366,6 +370,17 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   inside `assertion`, is refused instead of being read with the field dropped.
 
 ### Fixed
+- **Sign-in to a client on another origin works in Chrome** (`form-action-safe-sign-in`). The
+  UI sends CSP `form-action 'self'`, and Chrome applies `form-action` to every redirect that
+  follows a form submission. So in production, Chrome blocked the redirect to the client's
+  `redirect_uri` after the sign-in, second-factor, required-action and consent forms. These
+  form POSTs now answer `200` with a continue page instead of `303`: a `Refresh: 0;url=…`
+  header, a matching `<meta http-equiv="refresh">` and a "Continue" link. The browser follows
+  it at once, and the redirects after it, including the application's own redirect after its
+  callback, are no longer form navigations. A tool that drives these forms and reads
+  `Location` must read the `Refresh` header instead.
+- **No `Permissions-Policy` console error on Hearth pages.** The header no longer names
+  `bluetooth` and `interest-cohort`, which Chrome does not recognize.
 - **The memory of open SST files no longer grows with the stored data** (#445). Each open SST
   file kept its whole block index and Bloom filter in memory: about 2.7 % of the stored bytes
   for Hearth's small rows. So memory grew with every row kept, for as long as rows are kept:

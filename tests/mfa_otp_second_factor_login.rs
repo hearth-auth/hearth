@@ -161,6 +161,16 @@ fn header_str(resp: &Response<Body>, name: header::HeaderName) -> Option<&str> {
     resp.headers().get(name).and_then(|v| v.to_str().ok())
 }
 
+/// Where the browser goes next: `Location` of a redirect, or the target of a
+/// continue page's `Refresh: 0;url=…` header (`form-action-safe-sign-in`).
+fn next_url(resp: &Response<Body>) -> Option<&str> {
+    header_str(resp, header::LOCATION).or_else(|| {
+        header_str(resp, header::REFRESH)
+            .and_then(|v| v.split_once(";url="))
+            .map(|(_, url)| url)
+    })
+}
+
 fn has_cookie(resp: &Response<Body>, name: &str) -> bool {
     resp.headers()
         .get_all(header::SET_COOKIE)
@@ -237,7 +247,7 @@ async fn login_challenges_an_email_otp_factor_instead_of_forcing_totp_enrolment(
     let rig = build_rig(/* mfa_required */ true);
     let resp = post_login(&rig).await;
     let status = resp.status();
-    let loc = header_str(&resp, header::LOCATION).map(str::to_string);
+    let loc = next_url(&resp).map(str::to_string);
     let pending = has_cookie(&resp, MFA_PENDING_COOKIE);
     let session = has_cookie(&resp, SESSION_COOKIE);
     let body = String::from_utf8_lossy(
@@ -288,7 +298,7 @@ async fn login_challenges_an_email_otp_factor_even_when_the_realm_does_not_requi
         "an enrolled OTP factor must not be skipped on the way to a session"
     );
     assert_eq!(
-        header_str(&resp, header::LOCATION),
+        next_url(&resp),
         Some("/ui/mfa-otp-challenge"),
         "the OTP challenge must run before the session is issued; status {:?}",
         status
@@ -314,7 +324,7 @@ async fn login_without_any_factor_routes_to_enrolment_not_to_the_otp_challenge()
         .expect("disable email OTP");
 
     let resp = post_login(&rig).await;
-    let location = header_str(&resp, header::LOCATION).unwrap_or_default();
+    let location = next_url(&resp).unwrap_or_default();
     assert_ne!(
         location, "/ui/mfa-otp-challenge",
         "a user with nothing enrolled must not be challenged for a factor they lack"
@@ -408,7 +418,7 @@ async fn an_unverified_user_is_told_to_verify_before_any_second_factor() {
     let resp = post_login(&rig).await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     assert!(
-        header_str(&resp, header::LOCATION).is_none(),
+        next_url(&resp).is_none(),
         "no redirect to a second-factor step"
     );
     let body = axum::body::to_bytes(resp.into_body(), 1 << 20)

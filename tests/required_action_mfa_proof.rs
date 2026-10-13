@@ -19,7 +19,7 @@ mod webauthn_helper;
 
 use std::sync::Arc;
 
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use browser::{body_text, hidden_fields, location, Browser};
 use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
 use hearth::core::{Clock, RealmId, SystemClock, UserId};
@@ -255,6 +255,30 @@ async fn submit_totp(browser: &mut Browser, code: &str) -> axum::response::Respo
     browser.post_form("/ui/mfa-challenge", &fields).await
 }
 
+/// Asserts `resp` is the continue page a sign-in form POST ends on
+/// (`form-action-safe-sign-in`): `200` with a `Refresh: 0;url=…` header and no
+/// `Location`.
+fn assert_continue_page(resp: &axum::response::Response) {
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "expected the continue page, got {}",
+        resp.status()
+    );
+    assert!(
+        resp.headers().get(header::LOCATION).is_none(),
+        "the continue page carries no Location"
+    );
+    let refresh = resp
+        .headers()
+        .get(header::REFRESH)
+        .and_then(|v| v.to_str().ok());
+    assert!(
+        refresh.is_some_and(|r| r.starts_with("0;url=")),
+        "expected `Refresh: 0;url=…`, got {refresh:?}"
+    );
+}
+
 /// The `mfa_proof` of the browser session the jar now holds.
 fn session_proof(rig: &Rig, browser: &Browser) -> MfaProof {
     let cookie = browser
@@ -394,11 +418,7 @@ async fn a_required_action_does_not_stand_in_for_the_second_factor_a_realm_requi
 
     let (browser, resp) = post_password(&rig, "i2-pw-only@example.com").await;
     let next = location(&resp);
-    assert_eq!(
-        resp.status(),
-        StatusCode::SEE_OTHER,
-        "the flow starts (redirected to {next:?})"
-    );
+    assert_continue_page(&resp);
     assert_eq!(next.as_deref(), Some("/required-action/UPDATE_PASSWORD"));
     assert!(!browser.has_cookie("hearth_ui_session"), "no session yet");
     let ra = browser.cookie("hearth_ra_session").expect("RA cookie");
@@ -827,10 +847,6 @@ async fn the_inline_totp_form_completes_the_login_on_the_first_submit() {
     );
     fields.push(("code".to_string(), totp_code(&secret, 1)));
     let resp = browser.post_form("/ui/mfa-challenge", &fields).await;
-    assert_eq!(
-        resp.status(),
-        StatusCode::SEE_OTHER,
-        "the first submit signs in"
-    );
+    assert_continue_page(&resp);
     assert!(browser.has_cookie("hearth_ui_session"));
 }

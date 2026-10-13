@@ -985,10 +985,12 @@ fn register_client(rig: &LoginRig) -> hearth::identity::OAuthClient {
         .expect("register client")
 }
 
+/// Where the browser goes next: `Location` of a redirect, or the target of a
+/// continue page's `Refresh: 0;url=…` header (`form-action-safe-sign-in`).
 fn location(resp: &Response<Body>) -> String {
-    resp.headers()
-        .get(header::LOCATION)
-        .and_then(|v| v.to_str().ok())
+    let value = |name| resp.headers().get(name).and_then(|v| v.to_str().ok());
+    value(header::LOCATION)
+        .or_else(|| value(header::REFRESH).and_then(|v| v.split_once(";url=").map(|(_, u)| u)))
         .unwrap_or_default()
         .to_string()
 }
@@ -1572,12 +1574,7 @@ async fn an_email_otp_does_not_satisfy_a_realm_that_requires_mfa() {
         !has_cookie(&resp, SESSION_COOKIE),
         "password + email OTP must not open a session on an MFA-required realm"
     );
-    let location = resp
-        .headers()
-        .get(header::LOCATION)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default()
-        .to_string();
+    let location = location(&resp);
     assert!(
         location.contains("ENROLL_MFA") || location.contains("enroll-mfa"),
         "the user is sent on to enrol a qualifying factor, got {location:?}"

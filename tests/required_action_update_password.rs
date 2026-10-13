@@ -257,11 +257,39 @@ fn urlencode(s: &str) -> String {
     out
 }
 
+/// Where the browser goes next: the `Location` of a redirect, or the target
+/// of a continue page's `Refresh: 0;url=…` header (`form-action-safe-sign-in`).
 fn location_of(resp: &axum::response::Response) -> Option<String> {
-    resp.headers()
-        .get(header::LOCATION)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string)
+    let value = |name| resp.headers().get(name).and_then(|v| v.to_str().ok());
+    value(header::LOCATION).map(str::to_string).or_else(|| {
+        value(header::REFRESH)
+            .and_then(|v| v.split_once(";url="))
+            .map(|(_, url)| url.to_string())
+    })
+}
+
+/// Asserts `resp` is the continue page a sign-in form POST ends on
+/// (`form-action-safe-sign-in`): `200` with a `Refresh: 0;url=…` header and no
+/// `Location`.
+fn assert_continue_page(resp: &axum::response::Response) {
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "expected the continue page, got {}",
+        resp.status()
+    );
+    assert!(
+        resp.headers().get(header::LOCATION).is_none(),
+        "the continue page carries no Location"
+    );
+    let refresh = resp
+        .headers()
+        .get(header::REFRESH)
+        .and_then(|v| v.to_str().ok());
+    assert!(
+        refresh.is_some_and(|r| r.starts_with("0;url=")),
+        "expected `Refresh: 0;url=…`, got {refresh:?}"
+    );
 }
 
 /// Extracts the raw `hearth_ra_session` cookie value from a response's Set-Cookie headers.
@@ -430,11 +458,7 @@ async fn post_valid_password_resumes_oidc_flow() {
         .expect("oneshot");
 
     // Should redirect to the OAuth callback with an authorization code.
-    assert!(
-        resp.status().is_redirection(),
-        "expected redirect, got: {}",
-        resp.status()
-    );
+    assert_continue_page(&resp);
     let loc = location_of(&resp).expect("Location header");
     assert!(
         loc.starts_with("https://app.example.com/cb?code="),
@@ -490,11 +514,7 @@ async fn post_valid_password_clears_required_action_from_user() {
         .await
         .expect("oneshot");
 
-    assert!(
-        resp.status().is_redirection(),
-        "expected redirect, got: {}",
-        resp.status()
-    );
+    assert_continue_page(&resp);
 
     // User record must no longer carry UPDATE_PASSWORD.
     let user = rig
@@ -671,11 +691,7 @@ async fn post_expired_ra_token_redirects_to_root() {
         .await
         .expect("oneshot");
 
-    assert!(
-        resp.status().is_redirection(),
-        "expected redirect, got: {}",
-        resp.status()
-    );
+    assert_continue_page(&resp);
     let loc = location_of(&resp).expect("Location header");
     assert_eq!(
         loc, "/",
@@ -718,11 +734,7 @@ async fn update_password_in_multi_action_flow_advances_to_next() {
         .await
         .expect("oneshot");
 
-    assert!(
-        resp.status().is_redirection(),
-        "expected redirect, got: {}",
-        resp.status()
-    );
+    assert_continue_page(&resp);
     let loc = location_of(&resp).unwrap_or_default();
     assert!(
         loc.starts_with("https://app.example.com/cb?code="),
@@ -960,11 +972,7 @@ async fn post_with_the_pages_form_token_succeeds_in_production() {
     )
     .await;
 
-    assert!(
-        resp.status().is_redirection(),
-        "a well-formed submission must complete the action, got {}",
-        resp.status()
-    );
+    assert_continue_page(&resp);
     assert!(
         password_still_matches(&rig, email, new_password),
         "the password was not actually changed"
@@ -1060,11 +1068,7 @@ async fn a_second_submission_with_the_same_ra_cookie_is_refused() {
     let second = "Second-new-password-2!";
 
     let resp = post_update_password(&rig, &ra_token, None, update_body(PASSWORD, first)).await;
-    assert!(
-        resp.status().is_redirection(),
-        "the first submission completes, got {}",
-        resp.status()
-    );
+    assert_continue_page(&resp);
 
     // A replay — even one that knows the new current password — is refused
     // and resumes nothing.
@@ -1113,10 +1117,6 @@ async fn a_refused_submission_does_not_spend_the_ra_cookie() {
         update_body(PASSWORD, "Retry-new-password-1!"),
     )
     .await;
-    assert!(
-        ok.status().is_redirection(),
-        "the corrected submission completes with the same cookie, got {}",
-        ok.status()
-    );
+    assert_continue_page(&ok);
     assert!(password_still_matches(&rig, email, "Retry-new-password-1!"));
 }

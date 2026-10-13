@@ -156,7 +156,12 @@ fn seed_source_store(dir: &Path) {
         .expect("grant realm.admin");
 }
 
-async fn admin_login(e: &Engines, data_dir: &Path, password: &str) -> StatusCode {
+/// Submits the console sign-in form; `true` when the operator is signed in.
+///
+/// A successful sign-in ends on the continue page (`form-action-safe-sign-in`):
+/// `200` with `Refresh: 0;url=…` and the session cookie. A failed one answers
+/// the form again, also `200`, without the `Refresh` header.
+async fn admin_login(e: &Engines, data_dir: &Path, password: &str) -> bool {
     let email = Arc::new(
         hearth::identity::email::EmailService::new(
             Arc::new(hearth::identity::email::LoggingEmailSender::new()),
@@ -199,8 +204,17 @@ async fn admin_login(e: &Engines, data_dir: &Path, password: &str) -> StatusCode
         )
         .await
         .expect("response");
-    let status = resp.status();
-    if status.is_redirection() {
+    let signed_in = resp
+        .headers()
+        .get(axum::http::header::REFRESH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("0;url="));
+    if signed_in {
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a successful console login answers the continue page"
+        );
         assert!(
             resp.headers()
                 .get_all("set-cookie")
@@ -209,8 +223,14 @@ async fn admin_login(e: &Engines, data_dir: &Path, password: &str) -> StatusCode
                 .any(|c| c.starts_with("hearth_ui_session=")),
             "a successful console login sets the session cookie"
         );
+    } else {
+        assert!(
+            !resp.status().is_redirection(),
+            "a console login POST must not answer a bare redirect, got {}",
+            resp.status()
+        );
     }
-    status
+    signed_in
 }
 
 #[tokio::test]
@@ -283,16 +303,12 @@ async fn cli_export_and_offline_restore_bring_back_operator_console_access() {
         "the tenant realm is restored beside the system realm"
     );
     assert!(
-        admin_login(&e, &restored, OPERATOR_PASSWORD)
-            .await
-            .is_redirection(),
+        admin_login(&e, &restored, OPERATOR_PASSWORD).await,
         "the operator must sign in to the console with the original password"
     );
     // Control: the form really checks the password.
     assert!(
-        !admin_login(&e, &restored, "wrong-password-123")
-            .await
-            .is_redirection(),
+        !admin_login(&e, &restored, "wrong-password-123").await,
         "a wrong password must not sign in"
     );
 }
@@ -338,9 +354,7 @@ async fn an_archive_without_the_system_realm_restores_and_says_so() {
     );
     let e = open(&restored);
     assert!(
-        !admin_login(&e, &restored, OPERATOR_PASSWORD)
-            .await
-            .is_redirection(),
+        !admin_login(&e, &restored, OPERATOR_PASSWORD).await,
         "no operator exists after a tenant-only restore"
     );
 }

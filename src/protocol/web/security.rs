@@ -44,35 +44,20 @@ pub struct SecurityConfig {
     pub hsts_on_forwarded_proto: bool,
     /// Emit COOP/COEP headers (A-40). Default: `true`.
     pub coop_coep_enabled: bool,
-    /// Extra origins appended to the CSP `form-action` directive beyond
-    /// `'self'`.
-    ///
-    /// MUST be empty in production so the emitted directive is byte-identical
-    /// to `form-action 'self'`. Populated only under `--dev` (HEA-2072) so the
-    /// reference-integration Playwright suite can POST to the demo SPA's Vite
-    /// dev server (`http://localhost:5173`) and companion service
-    /// (`http://localhost:5399`). Gating this behind dev mode keeps the two
-    /// plaintext-http localhost origins out of every production response.
-    pub extra_form_action_origins: Vec<String>,
 }
 
 /// Tower layer that wraps services with security header injection.
 #[derive(Clone)]
 pub struct SecurityHeadersLayer {
     config: Arc<SecurityConfig>,
-    /// Precomputed CSP header value (form-action origins are known at
-    /// construction time, so the string is built once rather than per request).
-    csp: HeaderValue,
 }
 
 impl SecurityHeadersLayer {
     /// Creates a new layer. Set `hsts_enabled` to `true` when TLS is active.
     #[must_use]
     pub fn new(config: SecurityConfig) -> Self {
-        let csp = build_csp(&config.extra_form_action_origins);
         Self {
             config: Arc::new(config),
-            csp,
         }
     }
 }
@@ -84,7 +69,6 @@ impl<S> Layer<S> for SecurityHeadersLayer {
         SecurityHeadersService {
             inner,
             config: Arc::clone(&self.config),
-            csp: self.csp.clone(),
         }
     }
 }
@@ -94,7 +78,6 @@ impl<S> Layer<S> for SecurityHeadersLayer {
 pub struct SecurityHeadersService<S> {
     inner: S,
     config: Arc<SecurityConfig>,
-    csp: HeaderValue,
 }
 
 impl<S, ReqBody, ResBody> Service<Request<ReqBody>> for SecurityHeadersService<S>
@@ -121,7 +104,6 @@ where
         let hsts_enabled = self.config.hsts_enabled
             || (self.config.hsts_on_forwarded_proto && forwarded_proto_is_https(req.headers()));
         let coop_coep_enabled = self.config.coop_coep_enabled;
-        let csp = self.csp.clone();
         let fut = self.inner.call(req);
         Box::pin(async move {
             let mut resp = fut.await?;
@@ -143,9 +125,9 @@ where
             // interactivity is vanilla JS via data-component attributes backed
             // by components.js. Fonts and scripts are self-hosted (HEA-630).
             //
-            // The value is precomputed in `build_csp`; `form-action` carries any
-            // dev-only extra origins (HEA-2072) and is byte-identical to
-            // `form-action 'self'` in production.
+            // `form-action 'self'` holds in dev and in production: the sign-in
+            // POSTs end their navigation on a continue page, so no redirect to
+            // a client follows a form submission (`form-action-safe-sign-in`).
             //
             // Inserted only when the handler did not set its own (task 21.8).
             // The blanket `script-src 'self'; form-action 'self'` policy breaks
@@ -156,7 +138,7 @@ where
             // and an unconditional `insert` here would stomp it.
             let csp_name = HeaderName::from_static("content-security-policy");
             if !headers.contains_key(&csp_name) {
-                headers.insert(csp_name, csp);
+                headers.insert(csp_name, HeaderValue::from_static(STRICT_CSP));
             }
             if hsts_enabled {
                 insert(
@@ -174,14 +156,15 @@ where
                 // that don't grant explicit permission, enabling SharedArrayBuffer
                 // isolation.
                 insert(headers, "cross-origin-embedder-policy", "require-corp");
-                // Permissions-Policy: disable all powerful/tracking features
-                // not required by an IdP UI.
+                // Permissions-Policy: disable the powerful features an IdP UI
+                // never needs. Only features Chrome recognizes: an unknown
+                // name (`bluetooth`, `interest-cohort`) logs a console error
+                // on every page.
                 insert(
                     headers,
                     "permissions-policy",
                     "camera=(), microphone=(), geolocation=(), \
-                     payment=(), usb=(), bluetooth=(), \
-                     interest-cohort=()",
+                     payment=(), usb=()",
                 );
             }
             // L8: Prevent authenticated HTML pages from being stored in shared or
@@ -223,53 +206,21 @@ fn insert(headers: &mut axum::http::HeaderMap, name: &'static str, value: &'stat
     );
 }
 
-/// Builds the `Content-Security-Policy` header value.
+/// The UI `Content-Security-Policy`, in dev and in production.
 ///
-/// With `extra_form_action_origins` empty (production), the `form-action`
-/// directive is exactly `form-action 'self'`, making the whole header
-/// byte-identical to the historical static policy. Each extra origin (dev only,
-/// HEA-2072) is appended space-separated after `'self'`.
-///
-/// If any extra origin contains bytes that are invalid in an HTTP header value,
-/// the function fails closed to the strict `'self'`-only policy rather than
-/// emitting a malformed or attacker-influenced header.
-fn build_csp(extra_form_action_origins: &[String]) -> HeaderValue {
-    /// Strict policy with `form-action 'self'` only — the production baseline
-    /// and the fail-closed fallback.
-    const STRICT_CSP: &str = "default-src 'self'; \
-         script-src 'self'; \
-         style-src 'self'; \
-         font-src 'self'; \
-         img-src 'self' data:; \
-         connect-src 'self'; \
-         object-src 'none'; \
-         form-action 'self'; \
-         frame-ancestors 'none'; \
-         base-uri 'self'";
-
-    if extra_form_action_origins.is_empty() {
-        return HeaderValue::from_static(STRICT_CSP);
-    }
-
-    let mut form_action = String::from("form-action 'self'");
-    for origin in extra_form_action_origins {
-        form_action.push(' ');
-        form_action.push_str(origin);
-    }
-    let csp = format!(
-        "default-src 'self'; \
-         script-src 'self'; \
-         style-src 'self'; \
-         font-src 'self'; \
-         img-src 'self' data:; \
-         connect-src 'self'; \
-         object-src 'none'; \
-         {form_action}; \
-         frame-ancestors 'none'; \
-         base-uri 'self'"
-    );
-    HeaderValue::from_str(&csp).unwrap_or_else(|_| HeaderValue::from_static(STRICT_CSP))
-}
+/// `form-action` is exactly `'self'`. The hosted sign-in POSTs answer a
+/// continue page instead of a redirect (`continue_page`), so no redirect to a
+/// client on another origin ever follows a form submission.
+const STRICT_CSP: &str = "default-src 'self'; \
+     script-src 'self'; \
+     style-src 'self'; \
+     font-src 'self'; \
+     img-src 'self' data:; \
+     connect-src 'self'; \
+     object-src 'none'; \
+     form-action 'self'; \
+     frame-ancestors 'none'; \
+     base-uri 'self'";
 
 /// Sets a per-response `Content-Security-Policy` on a page that carries a
 /// CAPTCHA widget: the strict policy, plus `origins` as script and frame
@@ -329,7 +280,6 @@ mod tests {
             hsts_enabled: false,
             hsts_on_forwarded_proto: false,
             coop_coep_enabled: true,
-            extra_form_action_origins: Vec::new(),
         });
         let svc = layer.layer(tower::service_fn(ok_handler));
         let resp = svc
@@ -349,17 +299,14 @@ mod tests {
         assert!(!headers.contains_key("strict-transport-security"));
     }
 
-    /// HEA-2072: the CSP `form-action` directive must NOT advertise the
-    /// plaintext-http localhost demo origins in a production (non-dev) build.
-    /// Those origins are only needed by the reference-integration Playwright
-    /// suite and must be gated behind dev mode.
+    /// `form-action-safe-sign-in`: the CSP `form-action` directive is exactly
+    /// `'self'`, with no extra origin.
     #[tokio::test]
-    async fn form_action_is_self_only_in_production() {
+    async fn form_action_is_self_only() {
         let layer = SecurityHeadersLayer::new(SecurityConfig {
             hsts_enabled: false,
             hsts_on_forwarded_proto: false,
             coop_coep_enabled: true,
-            extra_form_action_origins: Vec::new(),
         });
         let svc = layer.layer(tower::service_fn(ok_handler));
         let resp = svc
@@ -385,103 +332,12 @@ mod tests {
         );
     }
 
-    /// HEA-2072: in dev mode the demo SPA origins are appended so the
-    /// integration suite can POST to the Vite dev server.
-    #[tokio::test]
-    async fn form_action_includes_extra_origins_in_dev() {
-        let layer = SecurityHeadersLayer::new(SecurityConfig {
-            hsts_enabled: false,
-            hsts_on_forwarded_proto: false,
-            coop_coep_enabled: true,
-            extra_form_action_origins: vec![
-                "http://localhost:5173".to_string(),
-                "http://localhost:5399".to_string(),
-            ],
-        });
-        let svc = layer.layer(tower::service_fn(ok_handler));
-        let resp = svc
-            .oneshot(
-                Request::builder()
-                    .uri("/")
-                    .body(Body::empty())
-                    .expect("build request"),
-            )
-            .await
-            .expect("service call");
-
-        let csp = resp.headers()["content-security-policy"]
-            .to_str()
-            .expect("CSP header must be valid ASCII");
-        assert!(
-            csp.contains("form-action 'self' http://localhost:5173 http://localhost:5399;"),
-            "dev CSP must append the demo origins after 'self', got: {csp}"
-        );
-    }
-
-    /// HEA-2084: a custom port configured via `security.dev_csp_form_action_origins`
-    /// must appear in the dev-mode CSP but never in production.
-    #[tokio::test]
-    async fn form_action_custom_port_reaches_dev_csp() {
-        let custom = vec!["http://localhost:3000".to_string()];
-
-        // In dev mode the custom origin is emitted.
-        let dev_layer = SecurityHeadersLayer::new(SecurityConfig {
-            hsts_enabled: false,
-            hsts_on_forwarded_proto: false,
-            coop_coep_enabled: false,
-            extra_form_action_origins: custom.clone(),
-        });
-        let dev_resp = dev_layer
-            .layer(tower::service_fn(ok_handler))
-            .oneshot(
-                Request::builder()
-                    .uri("/")
-                    .body(Body::empty())
-                    .expect("build request"),
-            )
-            .await
-            .expect("service call");
-        let dev_csp = dev_resp.headers()["content-security-policy"]
-            .to_str()
-            .expect("CSP header must be valid ASCII");
-        assert!(
-            dev_csp.contains("form-action 'self' http://localhost:3000;"),
-            "dev CSP must include the custom port, got: {dev_csp}"
-        );
-
-        // In production (empty extra_form_action_origins) the custom origin is not emitted.
-        let prod_layer = SecurityHeadersLayer::new(SecurityConfig {
-            hsts_enabled: false,
-            hsts_on_forwarded_proto: false,
-            coop_coep_enabled: false,
-            extra_form_action_origins: Vec::new(),
-        });
-        let prod_resp = prod_layer
-            .layer(tower::service_fn(ok_handler))
-            .oneshot(
-                Request::builder()
-                    .uri("/")
-                    .body(Body::empty())
-                    .expect("build request"),
-            )
-            .await
-            .expect("service call");
-        let prod_csp = prod_resp.headers()["content-security-policy"]
-            .to_str()
-            .expect("CSP header must be valid ASCII");
-        assert!(
-            !prod_csp.contains("localhost"),
-            "production CSP must not contain any localhost origin, got: {prod_csp}"
-        );
-    }
-
     #[tokio::test]
     async fn hsts_emitted_when_tls_enabled() {
         let layer = SecurityHeadersLayer::new(SecurityConfig {
             hsts_enabled: true,
             hsts_on_forwarded_proto: false,
             coop_coep_enabled: false,
-            extra_form_action_origins: Vec::new(),
         });
         let svc = layer.layer(tower::service_fn(ok_handler));
         let resp = svc
@@ -513,7 +369,6 @@ mod tests {
             hsts_enabled: false,
             hsts_on_forwarded_proto,
             coop_coep_enabled: false,
-            extra_form_action_origins: Vec::new(),
         });
         let svc = layer.layer(tower::service_fn(ok_handler));
         let mut builder = Request::builder().uri("/");
@@ -591,7 +446,6 @@ mod tests {
             hsts_enabled: false,
             hsts_on_forwarded_proto: false,
             coop_coep_enabled: false,
-            extra_form_action_origins: Vec::new(),
         });
         let svc = layer.layer(tower::service_fn(html_handler));
         let resp = svc
@@ -618,7 +472,6 @@ mod tests {
             hsts_enabled: false,
             hsts_on_forwarded_proto: false,
             coop_coep_enabled: false,
-            extra_form_action_origins: Vec::new(),
         });
         let svc = layer.layer(tower::service_fn(css_handler));
         let resp = svc
@@ -649,7 +502,6 @@ mod tests {
             hsts_enabled: false,
             hsts_on_forwarded_proto: false,
             coop_coep_enabled: false,
-            extra_form_action_origins: Vec::new(),
         });
         let resp = layer
             .layer(tower::service_fn(no_referrer))

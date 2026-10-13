@@ -224,13 +224,23 @@ async fn login_from_source(server: SocketAddr, src: Ipv4Addr, realm: &str) {
         .read_to_end(&mut resp)
         .await
         .expect("read login response");
-    // Sanity: a successful browser login is a 303 redirect. If this fails the
-    // rig setup is wrong (bad realm/credentials), not the IP wiring.
-    let head = String::from_utf8_lossy(&resp);
+    // Sanity: a successful browser login ends on the continue page
+    // (`form-action-safe-sign-in`): `200` plus `Refresh: 0;url=…`. A failed
+    // one renders the form again, also `200`, so the `Refresh` header is the
+    // success signal. If this fails the rig setup is wrong (bad
+    // realm/credentials), not the IP wiring.
+    let text = String::from_utf8_lossy(&resp);
+    let head = text.split("\r\n\r\n").next().unwrap_or_default();
+    let refresh = head.lines().skip(1).find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.trim()
+            .eq_ignore_ascii_case("refresh")
+            .then(|| value.trim())
+    });
     assert!(
-        head.starts_with("HTTP/1.1 303") || head.starts_with("HTTP/1.1 302"),
-        "login did not succeed (expected 3xx redirect); response head: {:?}",
-        head.lines().next()
+        head.starts_with("HTTP/1.1 200") && refresh.is_some_and(|v| v.starts_with("0;url=")),
+        "login did not succeed (expected the continue page: 200 + Refresh: 0;url=…); \
+         response head: {head:?}"
     );
 }
 

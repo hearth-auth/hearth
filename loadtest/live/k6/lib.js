@@ -79,6 +79,16 @@ function redirectParams(location) {
   return out;
 }
 
+/**
+ * A sign-in form POST that succeeded. It answers a continue page (`200` with
+ * `Refresh: 0;url=…`), not a `303` (form-action-safe-sign-in); a refused
+ * sign-in answers `200` with the form and no `Refresh` header.
+ */
+function signedIn(res) {
+  const refresh = (res.headers && (res.headers.Refresh || res.headers.refresh)) || '';
+  return res.status === 200 && refresh.startsWith('0;url=');
+}
+
 function stepParams(jar, name, tags) {
   return {
     jar,
@@ -122,7 +132,7 @@ export function signIn(email, password, tags) {
     stepParams(jar, 'login_submit', tags),
   );
   duration += posted.timings.duration;
-  if (posted.status !== 303) return fail('login_submit', posted);
+  if (!signedIn(posted)) return fail('login_submit', posted);
 
   const { verifier, challenge } = pkce();
   const state = b64url(randomBytes(12));
@@ -229,7 +239,7 @@ function signInPass(emails, password, parallel) {
     flows.forEach((f, j) => {
       const a = authzs[j];
       const p = redirectParams(a.headers.Location || a.headers.location);
-      if (posts[j].status === 303 && a.status === 303 && p.code && p.state === f.state) {
+      if (signedIn(posts[j]) && a.status === 303 && p.code && p.state === f.state) {
         f.code = p.code;
         live.push(f);
       } else {

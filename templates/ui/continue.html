@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {# Ends a hosted form navigation on a Hearth page, so CSP `form-action
+     'self'` does not apply to the redirects after it (see
+     src/protocol/web/continue_page.rs). The response also carries a
+     `Refresh` header with the same target; a document runs only its first
+     declarative refresh. #}
+  <meta http-equiv="refresh" content="0;url={{ target }}">
+  <title>Continuing…</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/ui/static/app.css">
+  <link rel="stylesheet" href="/ui/static/theme.css">
+</head>
+<body>
+  <div class="flex min-h-screen items-center justify-center bg-ht-surface-base p-4">
+    <main id="main" class="w-full max-w-md text-center">
+      <p class="text-sm text-ht-content-secondary" role="status">Continuing…</p>
+      <p class="mt-4">
+        <a href="{{ target }}" class="text-sm font-medium text-ht-content-brand hover:text-ht-brand-deep">Continue</a>
+      </p>
+    </main>
+  </div>
+</body>
+</html>

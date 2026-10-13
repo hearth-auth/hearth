@@ -26,7 +26,7 @@ mod webauthn_helper;
 
 use std::sync::{Arc, Mutex};
 
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use browser::{body_text, hidden_fields, location, Browser};
 use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
 use hearth::core::{Clock, RealmId, SystemClock, UserId};
@@ -342,16 +342,41 @@ async fn submit_forged(
     browser.post_form(action, &fields).await
 }
 
-/// The action completed: the browser is redirected out of the
-/// required-action flow — back to the client with a code, or on to the
-/// login's remaining step.
+/// The continue page a sign-in form POST ends on (`form-action-safe-sign-in`):
+/// `200` with a `Refresh: 0;url=…` header and no `Location`. Returns the
+/// target.
+fn continue_target(resp: &axum::response::Response) -> String {
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a form POST ends on the continue page"
+    );
+    assert!(
+        resp.headers().get(header::LOCATION).is_none(),
+        "the continue page carries no Location"
+    );
+    location(resp).expect("Refresh: 0;url=")
+}
+
+/// The action completed: its form POST ends on the continue page, which sends
+/// the browser out of the required-action flow — back to the client with a
+/// code, or on to the login's remaining step.
 fn assert_flow_finished(resp: &axum::response::Response) {
+    assert_leaves_flow(&continue_target(resp));
+}
+
+/// A GET of an already-satisfied action's page redirects the browser out of
+/// the required-action flow.
+fn assert_redirected_out_of_flow(resp: &axum::response::Response) {
     assert!(
         resp.status().is_redirection(),
         "the action must complete, got {}",
         resp.status()
     );
-    let next = location(resp).expect("Location");
+    assert_leaves_flow(&location(resp).expect("Location"));
+}
+
+fn assert_leaves_flow(next: &str) {
     assert!(
         next.starts_with(CALLBACK) || next.starts_with("/ui/"),
         "completing the last action leaves the required-action flow, got {next}"
@@ -696,7 +721,7 @@ async fn a_totp_holder_with_a_pending_enrol_mfa_continues_the_login() {
     assert_eq!(page, "/required-action/enroll-mfa");
 
     let resp = get_without_self_redirect(&mut browser, &page).await;
-    assert_flow_finished(&resp);
+    assert_redirected_out_of_flow(&resp);
     assert!(
         !pending_on_account(&rig, &user).contains(&RequiredAction::EnrollMfa),
         "the satisfied action is cleared from the account"
@@ -792,7 +817,7 @@ async fn an_email_otp_holder_with_a_pending_email_otp_enrolment_continues_the_lo
     assert_eq!(page, "/required-action/ENROLL_EMAIL_OTP");
 
     let resp = get_without_self_redirect(&mut browser, &page).await;
-    assert_flow_finished(&resp);
+    assert_redirected_out_of_flow(&resp);
     assert!(!pending_on_account(&rig, &user).contains(&RequiredAction::EnrollEmailOtp));
     assert_eq!(auto_cleared_events(&rig).len(), 1);
     #[allow(clippy::unwrap_used)] // INVARIANT: test-only mutex, never poisoned.
@@ -832,7 +857,7 @@ async fn a_verified_email_with_a_pending_verification_continues_the_login() {
     assert_eq!(page, "/required-action/VERIFY_EMAIL");
 
     let resp = get_without_self_redirect(&mut browser, &page).await;
-    assert_flow_finished(&resp);
+    assert_redirected_out_of_flow(&resp);
     assert!(!pending_on_account(&rig, &user).contains(&RequiredAction::VerifyEmail));
 }
 
@@ -900,8 +925,7 @@ async fn log_in(rig: &Rig, email: &str) -> (Browser, String) {
         &[("email", email), ("password", PASSWORD)],
     )
     .await;
-    assert!(resp.status().is_redirection(), "login: {}", resp.status());
-    let next = location(&resp).expect("Location");
+    let next = continue_target(&resp);
     (browser, next)
 }
 

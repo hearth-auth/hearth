@@ -1,7 +1,7 @@
 # Content Security Policy — Design Rationale
 
 > **Status:** Migration complete (HEA-850, HEA-1049, HEA-1757).  
-> **Last reviewed:** 2026-08-06 (HEA-2084/HEA-2072 — `form-action` dev-mode extension)  
+> **Last reviewed:** 2026-10-13 (`form-action-safe-sign-in` — continue page, dev-mode extension removed)  
 > **Implemented in:** `src/protocol/web/security.rs`
 
 ## Current policy
@@ -29,26 +29,28 @@ been strict throughout all three generations.
 page submits an HTML form to Hearth's authenticated endpoints — combined with CSRF
 tokens on state-changing forms, this provides defense-in-depth.
 
-### Dev-mode `form-action` extension (HEA-2084 / HEA-2072)
+### `form-action` and the sign-in continue page
 
-When the server starts with `--dev`, extra `http://localhost:<port>` origins are
-appended to `form-action` so that the reference-integration Playwright suite can
-POST Hearth's hosted login and consent forms back to a local demo SPA. In
-production (`dev_mode == false`) the directive is always `form-action 'self'`
-regardless of configuration.
+Browsers check `form-action` against every URL of a navigation that a form
+submission starts, redirects included. The hosted sign-in, second-factor,
+required-action and consent forms post to Hearth, and the flow then
+redirects to the client's `redirect_uri`, which is usually on another origin.
+With `form-action 'self'`, Chrome blocks that redirect.
 
-The additional origins default to `http://localhost:5173` (Vite) and
-`http://localhost:5399` (companion demo-SPA service). You can override them in
-`hearth.yaml` under `security.dev_csp_form_action_origins`:
+So these POSTs never answer with a redirect. Where a handler answers
+`303 See Other`, the layer in `src/protocol/web/continue_page.rs` answers
+`200` with a continue page instead. The page carries a `Refresh: 0;url=…`
+header and a matching `<meta http-equiv="refresh">`, plus a "Continue" link.
+The form navigation ends on that page, which is on Hearth's origin. The
+refresh is a new navigation that no form starts, so `form-action` does not
+apply to it or to any redirect after it, including the application's own
+redirect after its callback.
 
-```yaml
-security:
-  dev_csp_form_action_origins:
-    - "http://localhost:3000"
-```
-
-This key is **ignored in production** — the gate is in `src/protocol/web/mod.rs`
-and passes an empty slice to the policy builder when `dev_mode` is false.
+The directive is therefore exactly `form-action 'self'`, in dev and in
+production. The `security.dev_csp_form_action_origins` key, which once added
+loopback origins under `--dev` (HEA-2072, HEA-2084), is removed. The
+requirement is in `openspec/specs/oidc-provider/spec.md` ("A hosted form
+submission never ends in a redirect off Hearth's origin").
 
 ## Prior gaps (now resolved)
 
@@ -84,7 +86,8 @@ All Alpine.js usage across ~40 templates was replaced across HEA-824 child issue
 | Layout, remaining tabs, password strength | HEA-850 | Done |
 | Hyperscript removed → vanilla JS `components.js` | HEA-1049 | Done |
 | `object-src 'none'` and `form-action 'self'` pinned | HEA-1757 | Done |
-| `form-action` dev-mode extension (`dev_csp_form_action_origins`) | HEA-2084, HEA-2072 | Done |
+| `form-action` dev-mode extension (`dev_csp_form_action_origins`) | HEA-2084, HEA-2072 | Removed: replaced by the continue page |
+| Sign-in POSTs end on a continue page; `form-action 'self'` everywhere | `form-action-safe-sign-in` | Done |
 
 ## Alternatives considered
 

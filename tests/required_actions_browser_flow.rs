@@ -238,12 +238,39 @@ fn set_cookies(resp: &axum::response::Response) -> Vec<String> {
         .collect()
 }
 
-/// Extracts the Location header from a redirect response.
+/// Where the browser goes next: the `Location` of a redirect, or the target
+/// of a continue page's `Refresh: 0;url=…` header (`form-action-safe-sign-in`).
 fn location_of(resp: &axum::response::Response) -> Option<String> {
-    resp.headers()
-        .get(header::LOCATION)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string)
+    let value = |name| resp.headers().get(name).and_then(|v| v.to_str().ok());
+    value(header::LOCATION).map(str::to_string).or_else(|| {
+        value(header::REFRESH)
+            .and_then(|v| v.split_once(";url="))
+            .map(|(_, url)| url.to_string())
+    })
+}
+
+/// Asserts `resp` is the continue page a sign-in form POST ends on
+/// (`form-action-safe-sign-in`): `200` with a `Refresh: 0;url=…` header and no
+/// `Location`.
+fn assert_continue_page(resp: &axum::response::Response) {
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "expected the continue page, got {}",
+        resp.status()
+    );
+    assert!(
+        resp.headers().get(header::LOCATION).is_none(),
+        "the continue page carries no Location"
+    );
+    let refresh = resp
+        .headers()
+        .get(header::REFRESH)
+        .and_then(|v| v.to_str().ok());
+    assert!(
+        refresh.is_some_and(|r| r.starts_with("0;url=")),
+        "expected `Refresh: 0;url=…`, got {refresh:?}"
+    );
 }
 
 /// Finds the value of a named cookie from a Set-Cookie header list.
@@ -293,12 +320,7 @@ async fn login_with_update_password_pending_redirects_to_interstitial() {
     let resp = post_login(&rig, "upw@ra-browser.test", None).await;
 
     // Must redirect to the RA action page, not to /ui.
-    assert_eq!(
-        resp.status(),
-        StatusCode::SEE_OTHER,
-        "expected 303 redirect, got {}",
-        resp.status()
-    );
+    assert_continue_page(&resp);
     assert_eq!(
         location_of(&resp).as_deref(),
         Some("/required-action/UPDATE_PASSWORD"),
@@ -327,7 +349,7 @@ async fn update_password_completion_issues_session_and_redirects_to_ui() {
 
     // 1. Login → intercepted, RA cookie set.
     let login_resp = post_login(&rig, "upw-complete@ra-browser.test", None).await;
-    assert_eq!(login_resp.status(), StatusCode::SEE_OTHER);
+    assert_continue_page(&login_resp);
     let ra_cookie_val = find_cookie(&set_cookies(&login_resp), "hearth_ra_session")
         .expect("RA session cookie must be set after login intercept");
 
@@ -353,12 +375,7 @@ async fn update_password_completion_issues_session_and_redirects_to_ui() {
         .await
         .expect("oneshot");
 
-    assert_eq!(
-        complete_resp.status(),
-        StatusCode::SEE_OTHER,
-        "expected redirect after completing UPDATE_PASSWORD, got {}",
-        complete_resp.status()
-    );
+    assert_continue_page(&complete_resp);
 
     let completion_cookies = set_cookies(&complete_resp);
 
@@ -482,7 +499,7 @@ async fn required_action_login_revokes_the_prior_session() {
         )
         .await
         .expect("oneshot");
-    assert_eq!(complete_resp.status(), StatusCode::SEE_OTHER);
+    assert_continue_page(&complete_resp);
     let new_session = find_cookie(&set_cookies(&complete_resp), SESSION_COOKIE)
         .expect("the completed flow sets a session cookie");
     assert_ne!(
@@ -507,7 +524,7 @@ async fn update_password_completion_with_return_to_redirects_to_original_dest() 
 
     // Login with a return_to that should be honored after completion.
     let login_resp = post_login(&rig, "upw-returnto@ra-browser.test", Some("/ui/account")).await;
-    assert_eq!(login_resp.status(), StatusCode::SEE_OTHER);
+    assert_continue_page(&login_resp);
     let ra_cookie_val = find_cookie(&set_cookies(&login_resp), "hearth_ra_session")
         .expect("RA session cookie must be set");
 
@@ -533,7 +550,7 @@ async fn update_password_completion_with_return_to_redirects_to_original_dest() 
         .await
         .expect("oneshot");
 
-    assert_eq!(complete_resp.status(), StatusCode::SEE_OTHER);
+    assert_continue_page(&complete_resp);
 
     // Must redirect to the original return_to, not /ui.
     assert_eq!(
@@ -560,12 +577,7 @@ async fn login_with_verify_email_pending_redirects_to_interstitial() {
 
     let resp = post_login(&rig, "ve@ra-browser.test", None).await;
 
-    assert_eq!(
-        resp.status(),
-        StatusCode::SEE_OTHER,
-        "expected 303 redirect, got {}",
-        resp.status()
-    );
+    assert_continue_page(&resp);
     assert_eq!(
         location_of(&resp).as_deref(),
         Some("/required-action/VERIFY_EMAIL"),
@@ -590,7 +602,7 @@ async fn verify_email_resend_with_ra_cookie_dispatches_transport_call() {
 
     // Login → RA intercept. The initial verify_email_page GET also sends an email.
     let login_resp = post_login(&rig, "ve-resend@ra-browser.test", None).await;
-    assert_eq!(login_resp.status(), StatusCode::SEE_OTHER);
+    assert_continue_page(&login_resp);
     let ra_cookie_val = find_cookie(&set_cookies(&login_resp), "hearth_ra_session")
         .expect("RA session cookie must be set");
 
@@ -646,12 +658,7 @@ async fn login_with_no_required_actions_issues_session_immediately() {
 
     let resp = post_login(&rig, "clean@ra-browser.test", None).await;
 
-    assert_eq!(
-        resp.status(),
-        StatusCode::SEE_OTHER,
-        "expected 303 redirect, got {}",
-        resp.status()
-    );
+    assert_continue_page(&resp);
     assert_eq!(location_of(&resp).as_deref(), Some("/ui"));
 
     let cookies = set_cookies(&resp);
