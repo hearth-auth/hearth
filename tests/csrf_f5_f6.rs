@@ -182,6 +182,34 @@ fn make_session_cookie_header(state: &WebState) -> String {
     format!("{}; {CSRF_COOKIE}={FIXED_CSRF}", session_pair)
 }
 
+/// The target of a continue page's `Refresh: 0;url=…` header, if the response
+/// is one.
+///
+/// A successful hosted sign-in POST ends on that page
+/// (`form-action-safe-sign-in`): `200` plus the `Refresh` header, where it used
+/// to answer `303`. A failed one answers the form again, also `200`, so the
+/// header is what marks success.
+fn continue_target(resp: &axum::response::Response) -> Option<&str> {
+    resp.headers()
+        .get(header::REFRESH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("0;url="))
+}
+
+/// Asserts that `resp` is the continue page of a successful sign-in step.
+fn assert_continue_page(resp: &axum::response::Response, what: &str) {
+    assert_eq!(resp.status(), StatusCode::OK, "{what}: status");
+    assert!(
+        continue_target(resp).is_some_and(|t| !t.is_empty()),
+        "{what}: must answer the continue page (Refresh: 0;url=…), got headers {:?}",
+        resp.headers().keys().collect::<Vec<_>>()
+    );
+    assert!(
+        resp.headers().get(header::LOCATION).is_none(),
+        "{what}: the continue page must not carry a Location header"
+    );
+}
+
 // ============================================================================
 // F5 — device_approve_submit CSRF
 // ============================================================================
@@ -304,9 +332,8 @@ async fn f6_login_no_csrf_cookie_prod_rejected() {
         .await
         .expect("oneshot");
 
-    assert_ne!(
-        resp.status(),
-        StatusCode::SEE_OTHER,
+    assert!(
+        continue_target(&resp).is_none(),
         "login without CSRF cookie in prod must NOT succeed"
     );
     assert_eq!(
@@ -339,11 +366,7 @@ async fn f6_login_with_csrf_token_prod_accepted() {
         .await
         .expect("oneshot");
 
-    assert_eq!(
-        resp.status(),
-        StatusCode::SEE_OTHER,
-        "valid CSRF+credentials in prod must succeed"
-    );
+    assert_continue_page(&resp, "valid CSRF+credentials in prod must succeed");
 }
 
 /// POST to `/ui/login` with no CSRF cookie in dev mode must be allowed.
@@ -368,11 +391,7 @@ async fn f6_login_no_csrf_cookie_dev_allowed() {
         .await
         .expect("oneshot");
 
-    assert_eq!(
-        resp.status(),
-        StatusCode::SEE_OTHER,
-        "dev mode must bypass CSRF check"
-    );
+    assert_continue_page(&resp, "dev mode must bypass CSRF check");
 }
 
 // ============================================================================
@@ -477,6 +496,10 @@ async fn f6_mfa_challenge_mismatched_csrf_rejected() {
         resp.status(),
         StatusCode::SEE_OTHER,
         "MFA challenge with invalid pending cookie must not succeed"
+    );
+    assert!(
+        continue_target(&resp).is_none(),
+        "MFA challenge with invalid pending cookie must not answer the continue page"
     );
 }
 

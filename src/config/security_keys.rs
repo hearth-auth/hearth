@@ -198,10 +198,6 @@ pub(crate) const SECURITY_KEYS: &[SecurityKey] = &[
         "src/abuse/captcha/mod.rs",
     ),
     key(
-        "security.dev_csp_form_action_origins",
-        "src/protocol/web/security.rs, src/protocol/web/mod.rs",
-    ),
-    key(
         "security.distributed_attack_detector.enabled",
         "src/abuse/runtime.rs (DistributedAttackDetector, A-3)",
     ),

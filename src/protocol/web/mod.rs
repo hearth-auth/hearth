@@ -54,6 +54,7 @@ pub mod admin;
 pub mod auth;
 mod authorize_gate;
 pub mod consent_delegations;
+mod continue_page;
 #[cfg(feature = "dev-endpoints")]
 mod dev_console;
 pub mod federation;
@@ -850,6 +851,10 @@ pub fn router(state: WebState) -> Router {
     // token out of the URL on the first GET, and only a POST spends it (see
     // `link_token`).
     let link = axum::middleware::from_fn_with_state(Arc::clone(&shared), link_token::stash);
+    // `form-action-safe-sign-in`: a sign-in step whose POST answers `303`
+    // answers a continue page instead, so CSP `form-action 'self'` does not
+    // block the redirects to the client after it (see `continue_page`).
+    let cont = axum::middleware::from_fn(continue_page::end_form_navigation);
     let ui_routes = Router::new()
         .route(
             "/setup",
@@ -866,7 +871,9 @@ pub fn router(state: WebState) -> Router {
         )
         .route(
             "/login",
-            axum::routing::get(handlers::login_form).post(handlers::login_submit),
+            axum::routing::get(handlers::login_form)
+                .post(handlers::login_submit)
+                .route_layer(cont.clone()),
         )
         .route(
             "/login/passkey-begin",
@@ -878,7 +885,9 @@ pub fn router(state: WebState) -> Router {
         )
         .route(
             "/mfa-challenge",
-            axum::routing::get(handlers::mfa_challenge_form).post(handlers::mfa_challenge_submit),
+            axum::routing::get(handlers::mfa_challenge_form)
+                .post(handlers::mfa_challenge_submit)
+                .route_layer(cont.clone()),
         )
         .route(
             // Email-OTP second factor for the direct browser login. The
@@ -887,7 +896,8 @@ pub fn router(state: WebState) -> Router {
             // §4.18#6).
             "/mfa-otp-challenge",
             axum::routing::get(handlers::mfa_otp_challenge_form)
-                .post(handlers::mfa_otp_challenge_submit),
+                .post(handlers::mfa_otp_challenge_submit)
+                .route_layer(cont.clone()),
         )
         .route(
             // Passkey second factor after a first factor that is not a
@@ -909,7 +919,7 @@ pub fn router(state: WebState) -> Router {
         )
         .route(
             "/mfa-enroll-required/activate",
-            axum::routing::post(handlers::mfa_enroll_required_submit),
+            axum::routing::post(handlers::mfa_enroll_required_submit).route_layer(cont.clone()),
         )
         .route(
             "/forgot-password",
@@ -952,7 +962,9 @@ pub fn router(state: WebState) -> Router {
         // to bare `/ui/*` URLs. See `realm_resolver` for the full model.
         .route(
             "/realms/{realm}/login",
-            axum::routing::get(handlers::login_form_scoped).post(handlers::login_submit_scoped),
+            axum::routing::get(handlers::login_form_scoped)
+                .post(handlers::login_submit_scoped)
+                .route_layer(cont.clone()),
         )
         .route(
             "/realms/{realm}/login/passkey-begin",
@@ -1010,7 +1022,9 @@ pub fn router(state: WebState) -> Router {
         // architecture note for details.
         .route(
             "/admin/login",
-            axum::routing::get(handlers::admin_login_form).post(handlers::admin_login_submit),
+            axum::routing::get(handlers::admin_login_form)
+                .post(handlers::admin_login_submit)
+                .route_layer(cont.clone()),
         )
         .route(
             "/admin/login/passkey-begin",
@@ -1213,7 +1227,9 @@ pub fn router(state: WebState) -> Router {
         )
         .route(
             "/oauth/consent",
-            axum::routing::get(oauth_consent::consent_page).post(oauth_consent::consent_submit),
+            axum::routing::get(oauth_consent::consent_page)
+                .post(oauth_consent::consent_submit)
+                .route_layer(cont.clone()),
         )
         // --- First-run onboarding wizard ---
         .route(
@@ -1764,26 +1780,6 @@ pub fn router(state: WebState) -> Router {
     // same attestation `WebState::is_secure_request` already uses to set the
     // `Secure` cookie attribute.
     let hsts_on_forwarded_proto = shared.trust_forwarded_proto;
-    // HEA-2072/HEA-2084: the reference-integration Playwright suite POSTs the
-    // hosted login/consent forms back to the demo SPA's dev server. Advertise
-    // those plaintext-http localhost origins in the CSP `form-action` directive
-    // ONLY under `--dev`; production always emits the strict `form-action
-    // 'self'`. The list of origins defaults to [:5173, :5399] but is
-    // configurable via `security.dev_csp_form_action_origins` in hearth.yaml.
-    let extra_form_action_origins = if shared.dev_mode {
-        shared
-            .config
-            .as_ref()
-            .map(|c| c.security.dev_csp_form_action_origins.clone())
-            .unwrap_or_else(|| {
-                vec![
-                    "http://localhost:5173".to_string(),
-                    "http://localhost:5399".to_string(),
-                ]
-            })
-    } else {
-        Vec::new()
-    };
     let web = Router::new()
         .route(
             "/ui/",
@@ -1798,7 +1794,8 @@ pub fn router(state: WebState) -> Router {
             "/required-action/VERIFY_EMAIL/confirm",
             axum::routing::get(required_action::verify_email_confirm)
                 .post(required_action::verify_email_confirm_submit)
-                .route_layer(link),
+                .route_layer(link)
+                .route_layer(cont.clone()),
         )
         .route(
             "/required-action/VERIFY_EMAIL",
@@ -1807,7 +1804,8 @@ pub fn router(state: WebState) -> Router {
         .route(
             "/required-action/UPDATE_PASSWORD",
             axum::routing::get(required_action::update_password_page)
-                .post(required_action::update_password_submit),
+                .post(required_action::update_password_submit)
+                .route_layer(cont.clone()),
         )
         .route(
             "/required-action/ENROLL_EMAIL_OTP",
@@ -1819,12 +1817,14 @@ pub fn router(state: WebState) -> Router {
         )
         .route(
             "/required-action/ENROLL_EMAIL_OTP/verify",
-            axum::routing::post(required_action::enroll_email_otp_verify_submit),
+            axum::routing::post(required_action::enroll_email_otp_verify_submit)
+                .route_layer(cont.clone()),
         )
         .route(
             "/required-action/enroll-mfa",
             axum::routing::get(required_action::enroll_mfa_page)
-                .post(required_action::enroll_mfa_submit),
+                .post(required_action::enroll_mfa_submit)
+                .route_layer(cont),
         )
         // Login-time passkey enrolment for a realm that requires a passkey.
         .route(
@@ -1858,7 +1858,6 @@ pub fn router(state: WebState) -> Router {
                 hsts_enabled: tls_enabled,
                 hsts_on_forwarded_proto,
                 coop_coep_enabled: true,
-                extra_form_action_origins,
             },
         ))
 }

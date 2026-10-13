@@ -223,8 +223,29 @@ fn build_test_acceptor(cert_path: PathBuf, key_path: PathBuf) -> tokio_rustls::T
     tokio_rustls::TlsAcceptor::from(Arc::new(server_config))
 }
 
+/// The parts of a login response the tests look at.
+struct LoginResponse {
+    /// The first line of the HTTP response (the status line).
+    status_line: String,
+    /// The value of the `Refresh` header, if any.
+    refresh: Option<String>,
+}
+
+impl LoginResponse {
+    /// A successful sign-in ends on the continue page
+    /// (`form-action-safe-sign-in`): `200` plus `Refresh: 0;url=…`, where it
+    /// used to answer `303`.
+    fn is_continue_page(&self) -> bool {
+        self.status_line.starts_with("HTTP/1.1 200")
+            && self
+                .refresh
+                .as_deref()
+                .is_some_and(|v| v.starts_with("0;url="))
+    }
+}
+
 /// Performs a browser login over a TLS connection whose TCP source address is
-/// `src_ip`. Returns the first line of the HTTP response (the status line).
+/// `src_ip`. Returns the status line and the `Refresh` header of the response.
 ///
 /// Reads the response to completion so that the handler — including session
 /// creation and `record_ip_login_attempt` — has finished before we return.
@@ -234,7 +255,7 @@ async fn tls_login_from_source(
     src_ip: Ipv4Addr,
     realm: &str,
     password: &str,
-) -> String {
+) -> LoginResponse {
     // Build a rustls client config that trusts our test CA.
     let mut root_store = rustls::RootCertStore::empty();
     for cert in rustls_pki_types::pem::PemObject::pem_slice_iter(ca_pem)
@@ -288,11 +309,20 @@ async fn tls_login_from_source(
     let mut resp = Vec::new();
     tls.read_to_end(&mut resp).await.expect("read response");
 
-    String::from_utf8_lossy(&resp)
-        .lines()
-        .next()
-        .unwrap_or("")
-        .to_string()
+    let text = String::from_utf8_lossy(&resp);
+    let head = text.split("\r\n\r\n").next().unwrap_or_default();
+    let mut lines = head.lines();
+    let status_line = lines.next().unwrap_or_default().to_string();
+    let refresh = lines.find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.trim()
+            .eq_ignore_ascii_case("refresh")
+            .then(|| value.trim().to_string())
+    });
+    LoginResponse {
+        status_line,
+        refresh,
+    }
 }
 
 // ── Test 1: session records contain the real peer IP, not FALLBACK_PEER ──────
@@ -395,12 +425,13 @@ async fn tls_peer_ip_appears_in_session_not_fallback() {
 /// With a rate limit of 1 failed attempt per window, a single failure from
 /// IP A must not block IP B. If the TLS path collapses all peers to
 /// `127.0.0.1`, A's failure fills the shared bucket and B's subsequent
-/// correct-password login is rejected with 401 instead of 303.
+/// correct-password login is rejected with 401 instead of the continue page.
 ///
 /// Test strategy:
 ///  1. IP A sends one wrong-password login → increments A's bucket to 1
 ///     (A is now at the limit for the next check).
-///  2. IP B sends a correct-password login → must succeed (303).
+///  2. IP B sends a correct-password login → must succeed (the continue
+///     page: 200 + `Refresh: 0;url=…`).
 ///     If the bug is present, B appears as 127.0.0.1, the shared bucket
 ///     already holds 1 failure, and the rate-limit check returns Err → 401.
 #[tokio::test]
@@ -447,7 +478,8 @@ async fn tls_independent_rate_limit_buckets_per_ip() {
         &rig.realm_name,
         "wrong-password",
     )
-    .await;
+    .await
+    .status_line;
     assert!(
         status_a.contains("401") || status_a.contains("302") || status_a.contains("303"),
         "IP A wrong-password must return a non-server-error response; got: {status_a}"
@@ -455,8 +487,8 @@ async fn tls_independent_rate_limit_buckets_per_ip() {
 
     // Step 2 — IP B sends a correct-password login.
     // Bug: B appears as 127.0.0.1, the shared bucket has 1 failure → 401.
-    // Fix: B has its own empty bucket → proceeds → 303.
-    let status_b = tls_login_from_source(
+    // Fix: B has its own empty bucket → proceeds → continue page.
+    let resp_b = tls_login_from_source(
         server_addr,
         &ca_pem,
         Ipv4Addr::new(127, 0, 0, 3),
@@ -465,10 +497,12 @@ async fn tls_independent_rate_limit_buckets_per_ip() {
     )
     .await;
     assert!(
-        status_b.starts_with("HTTP/1.1 303") || status_b.starts_with("HTTP/1.1 302"),
-        "IP B (a different IP from A) must succeed with a redirect despite A's \
-         failed attempt — independent rate-limit buckets are required. \
-         If this returns 401, the TLS path is still collapsing all peers to \
-         FALLBACK_PEER. Status: {status_b}"
+        resp_b.is_continue_page(),
+        "IP B (a different IP from A) must succeed (continue page: 200 + \
+         Refresh: 0;url=…) despite A's failed attempt — independent rate-limit \
+         buckets are required. If this returns 401, the TLS path is still \
+         collapsing all peers to FALLBACK_PEER. Status: {}, Refresh: {:?}",
+        resp_b.status_line,
+        resp_b.refresh
     );
 }

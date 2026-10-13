@@ -1145,7 +1145,7 @@ fn dominant_limiter(hist: &BTreeMap<String, u64>) -> Option<(&str, u64)> {
 
 /// Sends one request over an established keep-alive stream and reads the full
 /// response. Returns the HTTP status code, the shedding-limiter bucket index on
-/// a `429`, and the `location` header value on a 3xx, or an error string on
+/// a `429`, and the next URL (see [`read_response`]), or an error string on
 /// transport failure. The connection is drained (Content-Length or chunked) so
 /// it can be reused.
 fn send_one(
@@ -1158,8 +1158,10 @@ fn send_one(
 }
 
 /// Reads one HTTP/1.1 response, returns the status code, the shedding-limiter
-/// bucket index on a `429`, and the `location` header value on a 3xx. Leaves
-/// the stream at the start of the next response.
+/// bucket index on a `429`, and the next URL: the `location` header value on a
+/// 3xx, or the target of a continue page's `refresh: 0;url=…` header on a 2xx
+/// (a successful sign-in, form-action-safe-sign-in). Leaves the stream at the
+/// start of the next response.
 fn read_response(stream: &mut TcpStream) -> Result<(u16, Option<usize>, Option<String>), String> {
     let mut buf = Vec::with_capacity(1024);
     let mut tmp = [0u8; 4096];
@@ -1180,6 +1182,8 @@ fn read_response(stream: &mut TcpStream) -> Result<(u16, Option<usize>, Option<S
     let status = parse_status(head)?;
     let location = if (300..400).contains(&status) {
         parse_location(head)
+    } else if (200..300).contains(&status) {
+        parse_refresh_target(head)
     } else {
         None
     };
@@ -1262,15 +1266,26 @@ fn parse_location(head: &str) -> Option<String> {
     None
 }
 
+/// Extracts the target of a `refresh: 0;url=…` header from a raw response
+/// head, or `None`.
+fn parse_refresh_target(head: &str) -> Option<String> {
+    for line in head.lines().skip(1) {
+        if line.len() >= 8 && line[..8].eq_ignore_ascii_case("refresh:") {
+            return line[8..].trim().strip_prefix("0;url=").map(str::to_string);
+        }
+    }
+    None
+}
+
 /// Returns true when the response counts as success for the given op.
 ///
-/// Login ops treat a 303 (or 302) redirect to `/ui` as success — that is the
-/// normal post-login redirect. A redirect back to the login page is a failed
-/// login rendered as a redirect; blanket-accepting 3xx would grade a
-/// 100%-wrong-password run green. Every other op requires a 2xx.
+/// A sign-in that succeeded answers a continue page — `200` whose `refresh`
+/// target is `/ui` (form-action-safe-sign-in). A refused sign-in renders the
+/// form again (`200`, no target) or ends on the login page; accepting any 2xx
+/// would grade a 100%-wrong-password run green. Every other op requires a 2xx.
 fn is_response_success(op: &str, code: u16, location: Option<&str>) -> bool {
-    if op == "login" && matches!(code, 302 | 303) {
-        return location == Some("/ui");
+    if op == "login" {
+        return code == 200 && location == Some("/ui");
     }
     (200..300).contains(&code)
 }
@@ -1993,30 +2008,35 @@ mod tests {
         assert_eq!(dominant_limiter(&BTreeMap::new()), None);
     }
 
-    // ── login 303 scorer (HEA-2016) ─────────────────────────────────────────
+    // ── login scorer (HEA-2016, form-action-safe-sign-in) ───────────────────
 
     #[test]
-    fn login_303_to_ui_counts_as_success() {
-        // A successful browser login returns 303 to /ui. The old scorer treated
-        // every non-2xx as an error, making every login request appear to fail.
-        assert!(is_response_success("login", 303, Some("/ui")));
+    fn login_continue_page_to_ui_counts_as_success() {
+        // A successful browser login answers a continue page whose refresh
+        // target is /ui.
+        assert!(is_response_success("login", 200, Some("/ui")));
     }
 
     #[test]
-    fn login_303_back_to_login_page_counts_as_non_2xx() {
-        // A failed login is rendered as a 303 redirect back to the login page.
-        // Blanket-accepting 3xx would grade a 100%-wrong-password run green;
-        // only a redirect to /ui (the post-login target) counts as success.
+    fn refused_login_does_not_count_as_success() {
+        // A refused login renders the form again (200, no target) or ends on
+        // the login page; only a continue page to /ui is a success.
+        assert!(!is_response_success("login", 200, None));
         assert!(!is_response_success(
             "login",
-            303,
+            200,
             Some("/ui/realms/dev/login")
         ));
-        assert!(!is_response_success(
-            "login",
-            302,
-            Some("/ui/realms/dev/login")
-        ));
+        // The pre-continue-page shape no longer counts.
+        assert!(!is_response_success("login", 303, Some("/ui")));
+    }
+
+    #[test]
+    fn refresh_target_is_read_from_the_head() {
+        let head = "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\n\
+                    Refresh: 0;url=/ui\r\n\r\n";
+        assert_eq!(parse_refresh_target(head).as_deref(), Some("/ui"));
+        assert_eq!(parse_refresh_target("HTTP/1.1 200 OK\r\n\r\n"), None);
     }
 
     #[test]

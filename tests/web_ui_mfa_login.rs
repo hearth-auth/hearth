@@ -252,6 +252,18 @@ fn set_cookies(response: &axum::response::Response) -> Vec<String> {
         .collect()
 }
 
+/// Where a sign-in POST sends the browser: the target of the continue page's
+/// `Refresh: 0;url=…` header (`form-action-safe-sign-in`). The POST answers
+/// `200` with that page instead of a `303` redirect.
+fn continue_target(response: &axum::response::Response) -> Option<&str> {
+    response
+        .headers()
+        .get(header::REFRESH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split_once(";url="))
+        .map(|(_, url)| url)
+}
+
 /// Finds a cookie value in the Set-Cookie headers by name prefix.
 fn find_cookie_value<'a>(cookies: &'a [String], name: &str) -> Option<&'a str> {
     let prefix = format!("{name}=");
@@ -273,12 +285,8 @@ async fn login_without_mfa_creates_session_immediately() {
     // No TOTP enrolled — should create session directly.
     let response = post_login(rig.app, "alice@acme.test", &password(), None).await;
 
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    let location = response
-        .headers()
-        .get(header::LOCATION)
-        .and_then(|v| v.to_str().ok())
-        .expect("Location header");
+    assert_eq!(response.status(), StatusCode::OK);
+    let location = continue_target(&response).expect("continue page Refresh target");
     assert_eq!(location, "/ui");
 
     let cookies = set_cookies(&response);
@@ -421,14 +429,8 @@ async fn mfa_challenge_post_valid_totp_creates_session() {
         .await
         .expect("oneshot");
 
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    assert_eq!(
-        response
-            .headers()
-            .get(header::LOCATION)
-            .and_then(|v| v.to_str().ok()),
-        Some("/ui")
-    );
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(continue_target(&response), Some("/ui"));
 
     let resp_cookies = set_cookies(&response);
     assert!(
@@ -587,14 +589,8 @@ async fn mfa_challenge_post_recovery_code_creates_session() {
         .await
         .expect("oneshot");
 
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    assert_eq!(
-        response
-            .headers()
-            .get(header::LOCATION)
-            .and_then(|v| v.to_str().ok()),
-        Some("/ui")
-    );
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(continue_target(&response), Some("/ui"));
 
     let resp_cookies = set_cookies(&response);
     assert!(
@@ -642,12 +638,8 @@ async fn mfa_challenge_preserves_return_to() {
         .await
         .expect("oneshot");
 
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    let location = response
-        .headers()
-        .get(header::LOCATION)
-        .and_then(|v| v.to_str().ok())
-        .expect("Location header");
+    assert_eq!(response.status(), StatusCode::OK);
+    let location = continue_target(&response).expect("continue page Refresh target");
     assert_eq!(
         location, "/ui/admin/realms/acme/users",
         "MFA success should redirect to original return_to"
@@ -837,12 +829,8 @@ async fn mfa_challenge_post_with_pending_required_action_blocks_session() {
         .expect("oneshot");
 
     // Must redirect into the required-action flow, NOT to /ui.
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    let location = response
-        .headers()
-        .get(header::LOCATION)
-        .and_then(|v| v.to_str().ok())
-        .expect("Location header");
+    assert_eq!(response.status(), StatusCode::OK);
+    let location = continue_target(&response).expect("continue page Refresh target");
     assert!(
         location.starts_with("/required-action/"),
         "must redirect into required-action flow, got: {location}"

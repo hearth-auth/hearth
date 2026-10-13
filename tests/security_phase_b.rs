@@ -599,8 +599,36 @@ fn seed_admin_login_user(state: &WebState) {
         .expect("activate admin user");
 }
 
+/// The target of a continue page's `Refresh: 0;url=…` header, if the response
+/// is one.
+///
+/// A successful hosted sign-in POST ends on that page
+/// (`form-action-safe-sign-in`): `200` plus the `Refresh` header, where it used
+/// to answer `303 See Other`. A failed one answers the form again, also `200`,
+/// so the header is what marks success.
+fn continue_target(resp: &axum::response::Response) -> Option<&str> {
+    resp.headers()
+        .get(axum::http::header::REFRESH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("0;url="))
+}
+
+/// Asserts that `resp` is the continue page of a successful sign-in.
+fn assert_continue_page(resp: &axum::response::Response, what: &str) {
+    assert_eq!(resp.status(), StatusCode::OK, "{what}: status");
+    assert!(
+        continue_target(resp).is_some_and(|t| !t.is_empty()),
+        "{what}: must answer the continue page (Refresh: 0;url=…), got headers {:?}",
+        resp.headers().keys().collect::<Vec<_>>()
+    );
+    assert!(
+        resp.headers().get(axum::http::header::LOCATION).is_none(),
+        "{what}: the continue page must not carry a Location header"
+    );
+}
+
 /// Cross-origin POST to `/ui/login` with valid credentials must be rejected
-/// (must NOT return `303 See Other` to the dashboard).
+/// (must NOT sign in: no continue page to the dashboard).
 ///
 /// Fails against pre-fix code where the login succeeds regardless of Origin.
 #[tokio::test]
@@ -625,10 +653,9 @@ async fn login_csrf_cross_origin_rejected() {
         .await
         .expect("oneshot");
 
-    assert_ne!(
-        resp.status(),
-        StatusCode::SEE_OTHER,
-        "cross-origin login must NOT redirect to dashboard (CSRF rejected)"
+    assert!(
+        continue_target(&resp).is_none(),
+        "cross-origin login must NOT continue to the dashboard (CSRF rejected)"
     );
     assert_eq!(
         resp.status(),
@@ -660,15 +687,14 @@ async fn login_csrf_same_origin_no_header_accepted() {
         .await
         .expect("oneshot");
 
-    assert_eq!(
-        resp.status(),
-        StatusCode::SEE_OTHER,
-        "login without Origin header must succeed (same-site flow)"
+    assert_continue_page(
+        &resp,
+        "login without Origin header must succeed (same-site flow)",
     );
 }
 
 /// Cross-origin POST to `/ui/admin/login` with valid credentials must be
-/// rejected (must NOT return `303 See Other`).
+/// rejected (must NOT sign in: no continue page).
 ///
 /// Fails against pre-fix code where the admin login succeeds regardless of Origin.
 #[tokio::test]
@@ -696,10 +722,9 @@ async fn admin_login_csrf_cross_origin_rejected() {
         .await
         .expect("oneshot");
 
-    assert_ne!(
-        resp.status(),
-        StatusCode::SEE_OTHER,
-        "cross-origin admin login must NOT redirect (CSRF rejected)"
+    assert!(
+        continue_target(&resp).is_none(),
+        "cross-origin admin login must NOT sign in (CSRF rejected)"
     );
     assert_eq!(
         resp.status(),
@@ -742,10 +767,9 @@ async fn admin_login_mismatched_csrf_token_shows_error() {
         .await
         .expect("oneshot");
 
-    assert_ne!(
-        resp.status(),
-        StatusCode::SEE_OTHER,
-        "mismatched CSRF token must NOT redirect to the dashboard"
+    assert!(
+        continue_target(&resp).is_none(),
+        "mismatched CSRF token must NOT continue to the dashboard"
     );
     assert_eq!(
         resp.status(),
@@ -774,7 +798,7 @@ async fn admin_login_mismatched_csrf_token_shows_error() {
 }
 
 /// POST to `/ui/login` with a matching `hearth_ui_csrf` cookie + `_csrf` form
-/// field must succeed (303 redirect) — the CSRF guard must not fire for a
+/// field must succeed (the continue page) — the CSRF guard must not fire for a
 /// correct double-submit pair.
 #[tokio::test]
 async fn login_matching_csrf_token_accepted() {
@@ -803,9 +827,8 @@ async fn login_matching_csrf_token_accepted() {
         .await
         .expect("oneshot");
 
-    assert_eq!(
-        resp.status(),
-        StatusCode::SEE_OTHER,
-        "login with matching CSRF cookie+field must succeed (303)"
+    assert_continue_page(
+        &resp,
+        "login with matching CSRF cookie+field must succeed (continue page)",
     );
 }

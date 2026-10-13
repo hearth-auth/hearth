@@ -681,11 +681,27 @@ async fn admin_setup_verify_login_end_to_end() {
         )
         .await
         .expect("oneshot");
-    // 303 redirect on success.
+    // Success ends on the continue page (`form-action-safe-sign-in`): a 200
+    // that navigates on through `Refresh: 0;url=…`. A failed login also
+    // answers 200 (the form with an error), so the `Refresh` header is what
+    // tells them apart.
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "admin login must answer the continue page on success"
+    );
+    let refresh = resp
+        .headers()
+        .get(axum::http::header::REFRESH)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
     assert!(
-        resp.status().is_redirection(),
-        "admin login must redirect on success, got {}",
-        resp.status()
+        refresh.starts_with("0;url=") && refresh.len() > "0;url=".len(),
+        "admin login must navigate on through a Refresh header on success, got {refresh:?}"
+    );
+    assert!(
+        resp.headers().get(axum::http::header::LOCATION).is_none(),
+        "the continue page must not carry a Location header"
     );
     // The session cookie must carry the nil UUID for realm binding.
     let cookies: Vec<_> = resp

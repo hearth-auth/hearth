@@ -274,6 +274,17 @@ fn location_header(resp: &axum::response::Response) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Where a consent POST sends the browser: the target of the continue page's
+/// `Refresh: 0;url=…` header (`form-action-safe-sign-in`). A form POST no
+/// longer answers with a `Location` redirect.
+fn continue_target(resp: &axum::response::Response) -> Option<String> {
+    resp.headers()
+        .get(header::REFRESH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split_once(";url="))
+        .map(|(_, url)| url.to_string())
+}
+
 /// PKCE S256 challenge for the test verifier below.
 fn pkce_challenge(verifier: &str) -> String {
     use data_encoding::BASE64URL_NOPAD;
@@ -384,8 +395,12 @@ async fn first_time_flow_shows_consent_then_issues_code() {
         )
         .await
         .expect("oneshot");
-    assert!(resp.status().is_redirection());
-    let loc = location_header(&resp).expect("location");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a consent POST ends on the continue page"
+    );
+    let loc = continue_target(&resp).expect("continue page Refresh target");
     assert!(
         loc.starts_with("https://app.example.com/cb?"),
         "expected client redirect, got {loc}"
@@ -448,8 +463,12 @@ async fn partial_approval_stores_only_approved_scopes() {
         )
         .await
         .expect("oneshot");
-    assert!(resp.status().is_redirection());
-    let loc = location_header(&resp).expect("location");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a consent POST ends on the continue page"
+    );
+    let loc = continue_target(&resp).expect("continue page Refresh target");
     assert!(loc.contains("code="), "expected code in {loc}");
 
     let rec = rig
@@ -584,8 +603,12 @@ async fn deny_redirects_with_access_denied_error() {
         )
         .await
         .expect("oneshot");
-    assert!(resp.status().is_redirection());
-    let loc = location_header(&resp).expect("location");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a consent POST ends on the continue page"
+    );
+    let loc = continue_target(&resp).expect("continue page Refresh target");
     assert!(
         loc.contains("error=access_denied"),
         "RFC 6749 §4.1.2.1 requires access_denied, got {loc}"
@@ -976,7 +999,15 @@ async fn ticket_is_single_use_after_approve() {
         )
         .await
         .expect("oneshot");
-    assert!(ok.status().is_redirection());
+    assert_eq!(
+        ok.status(),
+        StatusCode::OK,
+        "the approval ends on the continue page"
+    );
+    assert!(
+        continue_target(&ok).is_some(),
+        "the approval continues to the client"
+    );
 
     // Second submission with same ticket should fail.
     let replay = rig
@@ -1900,7 +1931,7 @@ async fn access_denied_error_redirect_carries_iss() {
         )
         .await
         .expect("oneshot");
-    let loc = location_header(&resp).expect("location");
+    let loc = continue_target(&resp).expect("continue page Refresh target");
     assert_eq!(
         response_param(&loc, "error").as_deref(),
         Some("access_denied"),
@@ -2066,7 +2097,7 @@ async fn consent_given_in_an_organization_is_bound_to_it() {
         )
         .await
         .expect("oneshot");
-    let loc = location_header(&resp).expect("location");
+    let loc = continue_target(&resp).expect("continue page Refresh target");
     assert!(loc.contains("code="), "approval issues a code: {loc}");
 
     let key = |org_id| hearth::identity::ConsentKey {

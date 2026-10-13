@@ -243,6 +243,16 @@ async fn login_csrf(rig: &Rig) -> (String, String) {
     (cookie, html[start..end].to_string())
 }
 
+/// Where a sign-in POST sends the browser: the target of the continue page's
+/// `Refresh: 0;url=…` header (`form-action-safe-sign-in`).
+fn continue_target(resp: &Response<Body>) -> Option<String> {
+    resp.headers()
+        .get(header::REFRESH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split_once(";url="))
+        .map(|(_, url)| url.to_string())
+}
+
 /// Logs in with the password and returns the MFA pending cookie value.
 async fn login_to_forced_enrolment(rig: &Rig) -> String {
     let (csrf_cookie, csrf_field) = login_csrf(rig).await;
@@ -263,10 +273,14 @@ async fn login_to_forced_enrolment(rig: &Rig) -> String {
         )
         .await
         .expect("login");
+    // A sign-in POST ends on the continue page (`form-action-safe-sign-in`).
     assert_eq!(
-        resp.headers()
-            .get(header::LOCATION)
-            .and_then(|v| v.to_str().ok()),
+        resp.status(),
+        StatusCode::OK,
+        "login must end on the continue page"
+    );
+    assert_eq!(
+        continue_target(&resp).as_deref(),
         Some("/ui/mfa-enroll-required"),
         "an mfa_required realm with no enrolled factor must route to forced enrolment"
     );
@@ -356,10 +370,14 @@ async fn activation_with_csrf_and_a_valid_code_creates_a_session() {
         &compute_totp_code(&secret, now_secs()),
     )
     .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a valid activation must complete the login on the continue page"
+    );
     assert!(
-        resp.status().is_redirection(),
-        "a valid activation must complete the login, got {}",
-        resp.status()
+        continue_target(&resp).is_some(),
+        "a valid activation must continue the browser past the login"
     );
     assert!(
         set_cookie_values(&resp, hearth::protocol::web::auth::SESSION_COOKIE).is_some(),

@@ -219,11 +219,12 @@ fn has_session_cookie(cookies: &[String]) -> bool {
     cookie_pair(cookies, "hearth_ui_session").is_some()
 }
 
+/// Where the browser goes next: `Location` of a redirect, or the target of a
+/// continue page's `Refresh: 0;url=…` header (`form-action-safe-sign-in`).
 fn location(response: &axum::response::Response) -> String {
-    response
-        .headers()
-        .get(header::LOCATION)
-        .and_then(|v| v.to_str().ok())
+    let value = |name| response.headers().get(name).and_then(|v| v.to_str().ok());
+    value(header::LOCATION)
+        .or_else(|| value(header::REFRESH).and_then(|v| v.split_once(";url=").map(|(_, u)| u)))
         .unwrap_or_default()
         .to_string()
 }
@@ -636,7 +637,8 @@ async fn password_login_challenges_an_enrolled_passkey() {
 
     let response = post_login(&app, &realm_name, user.email()).await;
     let cookies = set_cookies(&response);
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    // A sign-in POST ends on the continue page (`form-action-safe-sign-in`).
+    assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(location(&response), "/ui/mfa-passkey-challenge");
     assert!(cookie_pair(&cookies, "hearth_ui_mfa_pending").is_some());
     assert!(!has_session_cookie(&cookies), "cookies: {cookies:?}");
@@ -662,7 +664,8 @@ async fn an_mfa_required_realm_never_offers_forced_enrolment_to_a_passkey_holder
 
     let response = post_login(&app, &realm_name, user.email()).await;
     let cookies = set_cookies(&response);
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    // A sign-in POST ends on the continue page (`form-action-safe-sign-in`).
+    assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         location(&response),
         "/ui/mfa-passkey-challenge",

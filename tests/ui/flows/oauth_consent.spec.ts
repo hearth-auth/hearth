@@ -151,12 +151,12 @@ test.describe.serial('OAuth consent — approve', () => {
     // Abort navigation to callback so the browser stays on a local page
     await page.route((url) => url.href.startsWith(CALLBACK_ORIGIN), async (route) => { await route.abort(); });
 
-    // Capture the redirect Location from the server's consent POST response.
-    // This fires before the browser follows the redirect, giving us the full
-    // callback URL including code and state without needing to intercept the
-    // navigation to the external domain.
-    const consentResponsePromise = page.waitForResponse(
-      (resp) => resp.url().includes('/oauth/consent') && resp.request().method() === 'POST',
+    // The consent POST answers a continue page (form-action-safe-sign-in),
+    // and the browser then navigates to the callback on its own. Capture that
+    // navigation request: it proves the browser leaves Hearth's origin, which
+    // CSP `form-action 'self'` would block after a plain redirect.
+    const callbackRequestPromise = page.waitForRequest(
+      (req) => new URL(req.url()).origin === CALLBACK_ORIGIN,
       { timeout: 30000 },
     );
 
@@ -164,10 +164,7 @@ test.describe.serial('OAuth consent — approve', () => {
     await expect(page).toHaveURL(/\/oauth\/consent/);
 
     await page.click('[data-testid="approve-button"]');
-    const consentResponse = await consentResponsePromise;
-    const location = consentResponse.headers()['location'];
-    expect(location, 'Expected redirect Location header on consent POST response').toBeTruthy();
-    const capturedCallbackUrl = new URL(location);
+    const capturedCallbackUrl = new URL((await callbackRequestPromise).url());
 
     expect(
       capturedCallbackUrl.searchParams.get('code'),
@@ -204,8 +201,8 @@ test.describe.serial('OAuth consent — deny', () => {
 
     await page.route((url) => url.href.startsWith(CALLBACK_ORIGIN), async (route) => { await route.abort(); });
 
-    const consentResponsePromise = page.waitForResponse(
-      (resp) => resp.url().includes('/oauth/consent') && resp.request().method() === 'POST',
+    const callbackRequestPromise = page.waitForRequest(
+      (req) => new URL(req.url()).origin === CALLBACK_ORIGIN,
       { timeout: 30000 },
     );
 
@@ -213,10 +210,7 @@ test.describe.serial('OAuth consent — deny', () => {
     await expect(page).toHaveURL(/\/oauth\/consent/);
 
     await page.click('[data-testid="deny-button"]');
-    const consentResponse = await consentResponsePromise;
-    const location = consentResponse.headers()['location'];
-    expect(location, 'Expected redirect Location header on consent POST response').toBeTruthy();
-    const capturedCallbackUrl = new URL(location);
+    const capturedCallbackUrl = new URL((await callbackRequestPromise).url());
 
     expect(capturedCallbackUrl.searchParams.get('error')).toBe('access_denied');
     expect(capturedCallbackUrl.searchParams.get('state')).toBe(state);

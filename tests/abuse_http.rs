@@ -147,7 +147,6 @@ async fn a40_coop_coep_headers_present() {
         hsts_enabled: false,
         hsts_on_forwarded_proto: false,
         coop_coep_enabled: true,
-        extra_form_action_origins: Vec::new(),
     });
     let svc = layer.layer(tower::service_fn(|_req: Request<Body>| async {
         Ok::<_, Infallible>(StatusCode::OK.into_response())
@@ -177,10 +176,29 @@ async fn a40_coop_coep_headers_present() {
             .expect("header value"),
         "require-corp"
     );
-    assert!(
-        h.contains_key("permissions-policy"),
-        "Permissions-Policy header missing"
-    );
+    let policy = h
+        .get("permissions-policy")
+        .expect("Permissions-Policy header missing")
+        .to_str()
+        .expect("header value");
+    // A-40: sensors and payment are denied by default.
+    for feature in [
+        "camera=()",
+        "microphone=()",
+        "geolocation=()",
+        "payment=()",
+        "usb=()",
+    ] {
+        assert!(policy.contains(feature), "{feature} not denied: {policy}");
+    }
+    // Chrome does not recognize these and logs a console error on every
+    // page that names them.
+    for unknown in ["bluetooth", "interest-cohort"] {
+        assert!(
+            !policy.contains(unknown),
+            "{unknown} must not be named: {policy}"
+        );
+    }
 }
 
 /// Adversarial: COOP/COEP absent when disabled.
@@ -198,7 +216,6 @@ async fn a40_coop_coep_absent_when_disabled() {
         hsts_enabled: false,
         hsts_on_forwarded_proto: false,
         coop_coep_enabled: false,
-        extra_form_action_origins: Vec::new(),
     });
     let svc = layer.layer(tower::service_fn(|_req: Request<Body>| async {
         Ok::<_, Infallible>(StatusCode::OK.into_response())

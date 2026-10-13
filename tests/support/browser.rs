@@ -178,12 +178,15 @@ impl Browser {
     }
 }
 
-/// The response's `Location` header.
+/// Where the browser goes next: the `Location` of a redirect, or the target
+/// of a continue page's `Refresh: 0;url=…` header (`form-action-safe-sign-in`).
 pub fn location(resp: &Response) -> Option<String> {
-    resp.headers()
-        .get(header::LOCATION)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string)
+    let value = |name| resp.headers().get(name).and_then(|v| v.to_str().ok());
+    value(header::LOCATION).map(str::to_string).or_else(|| {
+        value(header::REFRESH)
+            .and_then(|v| v.split_once(";url="))
+            .map(|(_, url)| url.to_string())
+    })
 }
 
 /// The response body as text.

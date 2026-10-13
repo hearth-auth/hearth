@@ -251,11 +251,39 @@ fn urlencode(s: &str) -> String {
     out
 }
 
+/// Where the browser goes next: the `Location` of a redirect, or the target
+/// of a continue page's `Refresh: 0;url=…` header (`form-action-safe-sign-in`).
 fn location_of(resp: &axum::response::Response) -> Option<String> {
-    resp.headers()
-        .get(header::LOCATION)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string)
+    let value = |name| resp.headers().get(name).and_then(|v| v.to_str().ok());
+    value(header::LOCATION).map(str::to_string).or_else(|| {
+        value(header::REFRESH)
+            .and_then(|v| v.split_once(";url="))
+            .map(|(_, url)| url.to_string())
+    })
+}
+
+/// Asserts `resp` is the continue page a sign-in form POST ends on
+/// (`form-action-safe-sign-in`): `200` with a `Refresh: 0;url=…` header and no
+/// `Location`.
+fn assert_continue_page(resp: &axum::response::Response) {
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "expected the continue page, got {}",
+        resp.status()
+    );
+    assert!(
+        resp.headers().get(header::LOCATION).is_none(),
+        "the continue page carries no Location"
+    );
+    let refresh = resp
+        .headers()
+        .get(header::REFRESH)
+        .and_then(|v| v.to_str().ok());
+    assert!(
+        refresh.is_some_and(|r| r.starts_with("0;url=")),
+        "expected `Refresh: 0;url=…`, got {refresh:?}"
+    );
 }
 
 fn ra_cookie_value(resp: &axum::response::Response) -> Option<String> {
@@ -330,11 +358,7 @@ async fn completing_second_action_first_does_not_skip_first_action() {
         .await
         .expect("oneshot");
 
-    assert!(
-        resp2.status().is_redirection(),
-        "expected redirect after UPDATE_PASSWORD submit, got {}",
-        resp2.status()
-    );
+    assert_continue_page(&resp2);
     let loc2 = location_of(&resp2).expect("Location after UPDATE_PASSWORD");
     assert_eq!(
         loc2, "/required-action/VERIFY_EMAIL",
