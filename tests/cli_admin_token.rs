@@ -439,9 +439,10 @@ fn admin_token_refuses_a_non_operator_and_a_long_ttl() {
 }
 
 /// The token carries the issuer and audience `serve` signs with: `iss` is
-/// `<oidc.issuer>/realms/system` and `aud` defaults to `oidc.issuer`. With the
-/// built-in defaults instead (`https://hearth.local`, `hearth`), no production
-/// server accepts it, because production config refuses a `.local` issuer.
+/// `<oidc.issuer>/realms/system`, and `aud` stays `hearth` when
+/// `token.audience` is not set. With the built-in issuer instead
+/// (`https://hearth.local`), no production server accepts it, because
+/// production config refuses a `.local` issuer.
 #[test]
 fn admin_token_signs_with_the_configured_issuer_and_audience() {
     const ISSUER: &str = "https://auth.hearth.example";
@@ -482,8 +483,8 @@ fn admin_token_signs_with_the_configured_issuer_and_audience() {
         "the token must name the configured issuer: {claims}"
     );
     assert_eq!(
-        claims["aud"], ISSUER,
-        "the audience defaults to oidc.issuer, as in serve: {claims}"
+        claims["aud"], "hearth",
+        "the audience is hearth without token.audience, as in serve: {claims}"
     );
 }
 

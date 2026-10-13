@@ -381,6 +381,13 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   `Location` must read the `Refresh` header instead.
 - **No `Permissions-Policy` console error on Hearth pages.** The header no longer names
   `bluetooth` and `interest-cohort`, which Chrome does not recognize.
+- **SDKs accept Hearth's access tokens with their default settings.** Without
+  `token.audience`, Hearth set the access-token `aud` to `oidc.issuer` whenever one was
+  configured, but every SDK checks `aud` against `hearth` by default
+  (`sdk-support-contract`). So any deployment with `oidc.issuer` rejected every token in the
+  SDKs' `verifyToken`, `hasRole` and `hasPermission`. The default audience is now `hearth`.
+  A resource server that verifies `aud` against the issuer URL must set `token.audience`, or
+  check `hearth` instead. The startup warning about the `hearth` audience is gone.
 - **The memory of open SST files no longer grows with the stored data** (#445). Each open SST
   file kept its whole block index and Bloom filter in memory: about 2.7 % of the stored bytes
   for Hearth's small rows. So memory grew with every row kept, for as long as rows are kept:

@@ -2188,9 +2188,9 @@ mod tests {
     #[test]
     fn token_config_default_values() {
         // TokenConfig::default() is a bare fallback used as a starting point before
-        // YAML overrides are applied in main.rs.  In a real deployment, both issuer
-        // and audience are overridden to oidc.issuer (or an explicit config value).
-        // The "hearth" placeholder here is the last-resort sentinel, not a production value.
+        // YAML overrides are applied in main.rs. The issuer is overridden to
+        // oidc.issuer (or token.issuer). The audience stays "hearth" unless
+        // token.audience is set: every SDK checks "hearth" by default.
         let config = TokenConfig::default();
         assert_eq!(config.issuer, "hearth");
         assert_eq!(config.audience, "hearth");
