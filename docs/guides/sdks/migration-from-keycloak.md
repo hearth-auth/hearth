@@ -228,7 +228,7 @@ userInfo, _ := client.GetRawUserInfo(ctx, token, realm)
 **After (Hearth Go SDK):**
 
 ```go
-import "github.com/hearth-auth/hearth/sdks/go/hearth"
+import "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
 
 client := hearth.NewClient("https://hearth.example.com", "<realm_id>",
     hearth.WithClientCredentials("<client_id>", ""),

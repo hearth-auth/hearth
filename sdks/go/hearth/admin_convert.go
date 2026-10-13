@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/hearth-auth/hearth/sdks/go/generated/admin"
+	"github.com/hearth-auth/hearth/sdks/go/v3/generated/admin"
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 

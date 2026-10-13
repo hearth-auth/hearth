@@ -7,22 +7,19 @@ Go client for the [Hearth](https://github.com/hearth-auth/hearth) identity API.
 ## Installation
 
 ```bash
-go get github.com/hearth-auth/hearth/sdks/go@v1.6.11
+go get github.com/hearth-auth/hearth/sdks/go/v3@latest
 ```
 
-| SDK version | Minimum Hearth server |
-|-------------|----------------------|
-| 1.0.x       | 1.0.0                |
-
-The module is versioned in lockstep with the server. `v1.6.11` is the newest version on
-`proxy.golang.org` as of 2026-09-21; the full list is
-`https://proxy.golang.org/github.com/hearth-auth/hearth/sdks/go/@v/list`. This guide previously
-pinned `v1.0.0`, which resolves but returns a 2026-06-23 build.
+The module is versioned in lockstep with the server, and its path carries the major version:
+`.../sdks/go/v3` for 3.x. Go resolves a v2 or later tag only for a module path that ends in
+`/vN`. Until 2026-10, the path had no suffix, so `go get github.com/hearth-auth/hearth/sdks/go`
+still stops at `v1.6.11`; the versions are listed at
+`https://proxy.golang.org/github.com/hearth-auth/hearth/sdks/go/v3/@v/list`.
 
 ## Quick start
 
 ```go
-import "github.com/hearth-auth/hearth/sdks/go/hearth"
+import "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
 
 client := hearth.NewClient("https://hearth.example.com", "<your-realm-id>")
 ```
@@ -61,7 +58,7 @@ import (
     "encoding/hex"
     "fmt"
 
-    "github.com/hearth-auth/hearth/sdks/go/hearth"
+    "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
 )
 
 func pkce() (verifier, challenge string) {
@@ -299,7 +296,7 @@ import (
     "errors"
     "fmt"
 
-    "github.com/hearth-auth/hearth/sdks/go/hearth"
+    "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
 )
 
 tokens, err := client.ExchangeCode(ctx, req)

@@ -4,7 +4,7 @@ go 1.26.3
 
 require (
 	github.com/gin-gonic/gin v1.12.0
-	github.com/hearth-auth/hearth/sdks/go v0.0.0
+	github.com/hearth-auth/hearth/sdks/go/v3 v3.0.0
 	github.com/lestrrat-go/jwx/v2 v2.1.6
 )
 
@@ -51,4 +51,4 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 )
 
-replace github.com/hearth-auth/hearth/sdks/go => ../../../sdks/go
+replace github.com/hearth-auth/hearth/sdks/go/v3 => ../../../sdks/go

@@ -971,7 +971,7 @@ registry yet, and the published versions lag the source tree:
 | SDK | Package | Registry status |
 |---|---|---|
 | TypeScript | `@hearth-auth/sdk` | npm, **1.6.2** |
-| Go | `github.com/hearth-auth/hearth/sdks/go` | Go module proxy, **v1.6.11** |
+| Go | `github.com/hearth-auth/hearth/sdks/go/v3` | Go module proxy, from the first release after 2026-10-13 (the old path `.../sdks/go` stops at **v1.6.11**) |
 | Python | `hearth-sdk` | PyPI, **1.6.8** |
 | PHP | `hearth-auth/php-sdk` | Packagist, **`dev-main` only** (no tagged release) |
 
@@ -985,10 +985,10 @@ import { HearthClient } from "@hearth-auth/sdk";
 const hearth = new HearthClient({ baseUrl: "https://auth.example.com", realmId });
 ```
 
-**Go** — [`sdks/go/`](sdks/go) (module `github.com/hearth-auth/hearth/sdks/go`)
+**Go** — [`sdks/go/`](sdks/go) (module `github.com/hearth-auth/hearth/sdks/go/v3`)
 
 ```go
-import "github.com/hearth-auth/hearth/sdks/go/hearth"
+import "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
 client := hearth.NewClient("https://auth.example.com", realmID)
 ```
 

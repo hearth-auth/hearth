@@ -2,7 +2,9 @@ name: SDK publish — go
 
 # CI verify on PRs and pushes to main; Go module publishing is handled
 # automatically by proxy.golang.org fetching from the VCS on tag push.
-# Module path: github.com/hearth-auth/hearth/sdks/go
+# Module path: github.com/hearth-auth/hearth/sdks/go/vN, where N is the major
+# version (Go resolves a v2+ tag only for a path that ends in /vN). The release
+# runs scripts/check-go-module-major.sh as its verifyReleaseCmd.
 # Version tags must follow the Go sub-module convention: sdks/go/vX.Y.Z
 
 on:
@@ -64,7 +66,7 @@ jobs:
         run: echo "::notice::Not a release tag — nothing to gate."
 
   verify:
-    name: go build + go vet github.com/hearth-auth/hearth/sdks/go
+    name: go build + go vet the Go SDK
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -89,6 +91,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/sdks/go/v')
         run: |
           VERSION="${GITHUB_REF_NAME#sdks/go/v}"
+          MODULE="$(awk '$1 == "module" { print $2; exit }' sdks/go/go.mod)"
           echo "Tag sdks/go/v${VERSION} pushed."
-          echo "proxy.golang.org will index github.com/hearth-auth/hearth/sdks/go@v${VERSION} automatically."
-          echo "Verify at: https://pkg.go.dev/github.com/hearth-auth/hearth/sdks/go@v${VERSION}"
+          echo "proxy.golang.org will index ${MODULE}@v${VERSION} automatically."
+          echo "Verify at: https://pkg.go.dev/${MODULE}@v${VERSION}"
