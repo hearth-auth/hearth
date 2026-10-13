@@ -3,7 +3,7 @@ package middleware
 import (
 	"net/http"
 
-	"github.com/hearth-auth/hearth/sdks/go/hearth"
+	"github.com/hearth-auth/hearth/sdks/go/v3/hearth"
 	"github.com/gin-gonic/gin"
 )
 

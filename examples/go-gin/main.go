@@ -12,7 +12,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/hearth-auth/hearth/sdks/go/hearth"
+	"github.com/hearth-auth/hearth/sdks/go/v3/hearth"
 	"github.com/gin-gonic/gin"
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jwt"

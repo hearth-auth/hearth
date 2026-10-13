@@ -249,7 +249,7 @@ See the [Next.js guide](/docs/sdks/typescript-nextjs) for Pages Router and Edge 
 <TabItem value="go" label="Go">
 
 ```bash
-go get github.com/hearth-auth/hearth/sdks/go
+go get github.com/hearth-auth/hearth/sdks/go/v3
 ```
 
 The login handler generates PKCE and redirects the browser to Hearth; the callback exchanges the code for tokens. The core `BeginLogin`/`CompleteLogin` calls are identical across all frameworks — the tabs below show how to wire them into each router's handler style.
@@ -262,7 +262,7 @@ The login handler generates PKCE and redirects the browser to Hearth; the callba
 ```go
 import (
     "net/http"
-    "github.com/hearth-auth/hearth/sdks/go/hearth"
+    "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
 )
 
 client := hearth.NewClient("http://localhost:8420", "<realm-id>",
@@ -295,8 +295,8 @@ func callbackHandler(w http.ResponseWriter, r *http.Request) {
 
 ```go
 import (
-    hearth    "github.com/hearth-auth/hearth/sdks/go/hearth"
-    hearthgin "github.com/hearth-auth/hearth/sdks/go/hearth/gin"
+    hearth    "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
+    hearthgin "github.com/hearth-auth/hearth/sdks/go/v3/hearth/gin"
     "github.com/gin-gonic/gin"
     "net/http"
 )
@@ -330,8 +330,8 @@ See the [Gin adapter guide](/docs/sdks/go-gin) for per-route and per-group permi
 
 ```go
 import (
-    hearth      "github.com/hearth-auth/hearth/sdks/go/hearth"
-    hearthecho  "github.com/hearth-auth/hearth/sdks/go/hearth/echo"
+    hearth      "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
+    hearthecho  "github.com/hearth-auth/hearth/sdks/go/v3/hearth/echo"
     "github.com/labstack/echo/v4"
     "net/http"
 )
@@ -713,7 +713,7 @@ See the [Next.js guide](/docs/sdks/typescript-nextjs) for App Router and Pages R
 import (
     "net/http"
     "strings"
-    "github.com/hearth-auth/hearth/sdks/go/hearth"
+    "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
 )
 
 client := hearth.NewClient(hearthURL, realmID)
@@ -735,8 +735,8 @@ func adminOnly(next http.Handler) http.Handler {
 
 ```go
 import (
-    hearth    "github.com/hearth-auth/hearth/sdks/go/hearth"
-    hearthgin "github.com/hearth-auth/hearth/sdks/go/hearth/gin"
+    hearth    "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
+    hearthgin "github.com/hearth-auth/hearth/sdks/go/v3/hearth/gin"
     "github.com/gin-gonic/gin"
 )
 
@@ -758,8 +758,8 @@ See the [Gin adapter guide](/docs/sdks/go-gin) for per-route and per-group patte
 
 ```go
 import (
-    hearth      "github.com/hearth-auth/hearth/sdks/go/hearth"
-    hearthecho  "github.com/hearth-auth/hearth/sdks/go/hearth/echo"
+    hearth      "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
+    hearthecho  "github.com/hearth-auth/hearth/sdks/go/v3/hearth/echo"
     "github.com/labstack/echo/v4"
 )
 

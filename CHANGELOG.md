@@ -370,6 +370,12 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   inside `assertion`, is refused instead of being read with the field dropped.
 
 ### Fixed
+- **The Go SDK installs at its current version.** Its module path is now
+  `github.com/hearth-auth/hearth/sdks/go/v3`, so update imports to
+  `github.com/hearth-auth/hearth/sdks/go/v3/hearth` (and `.../v3/hearth/gin`, `.../v3/hearth/echo`).
+  Go resolves a v2 or later tag only for a module path that ends in `/vN`, and the path had no
+  suffix, so `go get github.com/hearth-auth/hearth/sdks/go` stopped at v1.6.11. A Go SDK release
+  whose major version does not match the module path now fails before it creates its tag.
 - **RP-initiated logout signs the user out of Hearth.** Logout revoked only the session that
   the code exchange opened, which the ID token's `sid` names. The browser session that signed
   the user in stayed valid, so the next `/authorize` signed the user in again without a prompt.

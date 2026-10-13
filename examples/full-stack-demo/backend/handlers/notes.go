@@ -6,7 +6,7 @@ import (
 
 	"github.com/hearth-auth/hearth/examples/full-stack-demo/backend/middleware"
 	"github.com/hearth-auth/hearth/examples/full-stack-demo/backend/store"
-	"github.com/hearth-auth/hearth/sdks/go/hearth"
+	"github.com/hearth-auth/hearth/sdks/go/v3/hearth"
 	"github.com/gin-gonic/gin"
 )
 

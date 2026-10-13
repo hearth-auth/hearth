@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	hearth "github.com/hearth-auth/hearth/sdks/go/hearth"
+	hearth "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
 )
 
 func init() {

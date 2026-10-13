@@ -16,7 +16,7 @@ the published versions lag the source on `main` — check the registry before pi
 | Language / Runtime | Package | Install | Registry status |
 |--------------------|---------|---------|-----------------|
 | [TypeScript (browser, React, Node.js, Next.js)](./typescript.md) | `@hearth-auth/sdk` | `npm install @hearth-auth/sdk` | npm — **1.6.2** |
-| [Go](./go.mdx) | `github.com/hearth-auth/hearth/sdks/go` | `go get github.com/hearth-auth/hearth/sdks/go` | Go module proxy — **v1.6.11** |
+| [Go](./go.mdx) | `github.com/hearth-auth/hearth/sdks/go/v3` | `go get github.com/hearth-auth/hearth/sdks/go/v3` | Go module proxy, from the first release after 2026-10-13 (the old path `.../sdks/go` stops at **v1.6.11**) |
 | [Python](./python.mdx) | `hearth-sdk` | `pip install hearth-sdk` | PyPI — **1.6.8** |
 | [PHP](./php.mdx) | `hearth-auth/php-sdk` | `composer require hearth-auth/php-sdk:dev-main` | Packagist — **`dev-main` only**; no tagged release, so `^1.0` does not resolve |
 

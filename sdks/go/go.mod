@@ -1,4 +1,4 @@
-module github.com/hearth-auth/hearth/sdks/go
+module github.com/hearth-auth/hearth/sdks/go/v3
 
 go 1.26.3
 

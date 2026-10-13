@@ -140,7 +140,7 @@ if (!result.permissions?.includes('docs.edit')) return res.status(403).end();
 <TabItem value="go" label="Go">
 
 ```go
-import hearth "github.com/hearth-auth/hearth/sdks/go/hearth"
+import hearth "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
 
 result, err := client.Introspect(ctx, hearth.IntrospectRequest{
     Token:        accessToken,
@@ -223,7 +223,7 @@ app.get('/docs', hearthMiddleware({
 <TabItem value="go" label="Go">
 
 ```go
-import hearth "github.com/hearth-auth/hearth/sdks/go/hearth"
+import hearth "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
 
 result, err := client.CheckPermission(ctx, accessToken, "docs.edit",
     hearth.AccessTokenAuthorizationDecision,
