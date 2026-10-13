@@ -630,6 +630,13 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   with `400 realm_mismatch`. Both found by the conformance harness.
 - **Python SDK: `update_user(status=...)`** sends the proto enum name (`USER_STATUS_ACTIVE`); the
   short form was refused as "invalid status".
+- **TypeScript SDK: overlapping `refreshAccessToken()` calls no longer sign the user out.** Each
+  call sent its own refresh-token request, so two calls before the first completed sent the same
+  refresh token twice. Hearth rotates the refresh token on each use and treats a second use as
+  replay: it revoked the whole token family, and the new access token stopped working. React's
+  `StrictMode` runs a session-restore effect twice, so an SPA that restores its session in a
+  `useEffect` signed the user out on every page load in development. Calls that overlap now share
+  one request and its result.
 
 ### Changed
 - **`hearth.yaml` owns the access-token authorization mode of the applications it declares.**
