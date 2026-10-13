@@ -4,10 +4,10 @@ package handlers
 import (
 	"net/http"
 
+	"github.com/gin-gonic/gin"
 	"github.com/hearth-auth/hearth/examples/full-stack-demo/backend/middleware"
 	"github.com/hearth-auth/hearth/examples/full-stack-demo/backend/store"
 	"github.com/hearth-auth/hearth/sdks/go/v3/hearth"
-	"github.com/gin-gonic/gin"
 )
 
 // Notes handles CRUD operations on the in-memory note store.

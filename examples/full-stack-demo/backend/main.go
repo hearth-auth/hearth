@@ -5,6 +5,8 @@
 //
 //	HEARTH_URL  — base URL of the running Hearth server (required)
 //	REALM_ID    — realm name configured in hearth.yaml (required)
+//	HEARTH_ISSUER — the realm's issuer, the `iss` of its tokens (default:
+//	              HEARTH_URL/realms/REALM_SLUG; demo.sh reads it from discovery)
 //	PORT        — TCP port to bind (default: 8421)
 //	INTROSPECT_CLIENT_ID / INTROSPECT_CLIENT_SECRET — the backend's confidential
 //	              client for token introspection (default: the demo "notes-api"
@@ -44,7 +46,13 @@ func main() {
 
 	ctx := context.Background()
 
+	// The API client calls Hearth's root endpoints (userinfo, permissions).
+	// Role and permission checks verify the token first, and the SDK compares
+	// `iss` with its client's base URL, so they use a client rooted at the
+	// realm issuer: Hearth issues a realm's tokens as `.../realms/{slug}`.
 	client := hearth.NewClient(hearthURL, realmID)
+	issuer := getenv("HEARTH_ISSUER", fmt.Sprintf("%s/realms/%s", hearthURL, realmSlug))
+	verifier := hearth.NewClient(issuer, realmID)
 
 	// JWKS lives at /realms/{slug}/.well-known/jwks.json (slug-based OIDC routes).
 	jwksURL := fmt.Sprintf("%s/realms/%s/.well-known/jwks.json", hearthURL, realmSlug)
@@ -90,8 +98,8 @@ func main() {
 	})
 
 	auth := validator.Auth()
-	requireEditor := middleware.RequirePermission(client, "content.write")
-	requireAdmin := middleware.RequireRole(client, "admin")
+	requireEditor := middleware.RequirePermission(verifier, "content.write")
+	requireAdmin := middleware.RequireRole(verifier, "admin")
 
 	// /api/notes — content CRUD
 	notes := r.Group("/api/notes", auth)

@@ -1,18 +1,47 @@
-import { useEffect, useState } from "react";
+import { useContext, useEffect, useState } from "react";
 import { Link, Navigate } from "react-router-dom";
-import { useHasRole } from "@hearth-auth/sdk";
+import { HearthContext } from "@hearth-auth/sdk";
 import UserMenu from "../components/UserMenu.js";
 import { api, type ApiUser } from "../api.js";
 
+/**
+ * Whether the verified token carries the `admin` role: `null` while the SDK
+ * verifies it. `useHasRole` answers `false` until then, which a guard cannot
+ * tell from a denial, so a redirect on `false` would fire before the check.
+ */
+function useAdminCheck(): boolean | null {
+  const hearth = useContext(HearthContext);
+  const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (hearth === null) {
+      setIsAdmin(false);
+      return;
+    }
+    let current = true;
+    hearth.hasRole("admin").then(
+      (result) => {
+        if (current) setIsAdmin(result);
+      },
+      () => {
+        if (current) setIsAdmin(false);
+      },
+    );
+    return () => {
+      current = false;
+    };
+  }, [hearth]);
+  return isAdmin;
+}
+
 /** Admin-only page — redirects non-admins to /dashboard. */
 export default function Admin() {
-  const isAdmin = useHasRole("admin");
+  const isAdmin = useAdminCheck();
   const [users, setUsers] = useState<ApiUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!isAdmin) return;
+    if (isAdmin !== true) return;
     api
       .getUsers()
       .then(setUsers)
@@ -25,6 +54,15 @@ export default function Admin() {
       )
       .finally(() => setLoading(false));
   }, [isAdmin]);
+
+  if (isAdmin === null) {
+    return (
+      <div className="loading-screen">
+        <span className="spinner" />
+        <p>Checking access…</p>
+      </div>
+    );
+  }
 
   // Non-admins are silently redirected — they never see a 403.
   if (!isAdmin) {

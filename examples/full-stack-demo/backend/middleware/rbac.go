@@ -3,8 +3,8 @@ package middleware
 import (
 	"net/http"
 
-	"github.com/hearth-auth/hearth/sdks/go/v3/hearth"
 	"github.com/gin-gonic/gin"
+	"github.com/hearth-auth/hearth/sdks/go/v3/hearth"
 )
 
 // RequireRole returns a Gin middleware that aborts with 403 when the authenticated

@@ -101,11 +101,14 @@ export async function jwksKids(): Promise<string[]> {
   return body.keys.map((k) => k.kid);
 }
 
-/** Rotates the demo realm's Ed25519 signing key via the admin API. The old key
- *  stays valid during the config grace period; new tokens are signed with a new
- *  kid, forcing the backend's JWKS cache to miss and re-fetch (flow 5). */
+/** Rotates the demo realm's Ed25519 signing key via the admin API, as a planned
+ *  rotation: the old key stays valid for `grace_period_secs`, so the SPA's
+ *  refresh token still works. Without the parameter the admin route revokes —
+ *  the remedy for a leaked key — and every token signed with the old key,
+ *  refresh tokens included, stops working at once. New tokens are signed with a
+ *  new kid, forcing the backend's JWKS cache to miss and re-fetch (flow 5). */
 export async function rotateSigningKey(admin: AdminSession, demoRealmId: string): Promise<void> {
-  const resp = await fetch(`${HEARTH_URL}/admin/realms/${demoRealmId}/rotate-signing-key`, {
+  const resp = await fetch(`${HEARTH_URL}/admin/realms/${demoRealmId}/rotate-signing-key?grace_period_secs=3600`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${admin.token}`,

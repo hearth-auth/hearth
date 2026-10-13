@@ -2,7 +2,7 @@
  * Flow 6 — Silent refresh keeps the SPA logged in.
  *
  * The SPA holds the access token in memory only; the refresh token persists in
- * localStorage. When the access token is gone (here: dropped by a page reload,
+ * sessionStorage. When the access token is gone (here: dropped by a page reload,
  * exactly as it would be when it expires), the SDK silently exchanges the
  * refresh token for a fresh access token (App.tsx restore path) and the user
  * stays authenticated without re-entering credentials.
@@ -37,7 +37,7 @@ test.describe('Flow 6 — silent refresh at expiry', () => {
 
     // And protected navigation continues to work post-refresh. Click the real
     // nav link rather than calling page.goto: a second full load would race the
-    // SDK's localStorage write of the freshly rotated refresh token. Clicking
+    // SDK's sessionStorage write of the freshly rotated refresh token. Clicking
     // is also what a user actually does, and it exercises React Router.
     await page.getByRole('link', { name: 'Notes' }).click();
     await expect(page.getByRole('heading', { name: 'Notes' })).toBeVisible();

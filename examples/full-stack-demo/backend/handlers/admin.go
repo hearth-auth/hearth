@@ -3,9 +3,9 @@ package handlers
 import (
 	"net/http"
 
+	"github.com/gin-gonic/gin"
 	"github.com/hearth-auth/hearth/examples/full-stack-demo/backend/middleware"
 	"github.com/hearth-auth/hearth/sdks/go/v3/hearth"
-	"github.com/gin-gonic/gin"
 )
 
 // Admin handles administrative endpoints backed by the Hearth Admin API.

@@ -118,13 +118,15 @@ export async function captureTokenDuring(
 }
 
 /**
- * Reads the SDK's persisted refresh/id tokens from the SPA's localStorage.
+ * Reads the SDK's persisted refresh/id tokens from the SPA's sessionStorage,
+ * where `createHearthAuth` keeps them by default (it writes no token to
+ * localStorage).
  * The access token lives in memory only and is captured from the token
  * response instead (see {@link loginViaSpa}).
  */
 export async function readStoredTokens(page: Page): Promise<{ refresh: string | null; id: string | null }> {
   return page.evaluate(() => ({
-    refresh: window.localStorage.getItem('hearth_refresh_token'),
-    id: window.localStorage.getItem('hearth_id_token'),
+    refresh: window.sessionStorage.getItem('hearth_refresh_token'),
+    id: window.sessionStorage.getItem('hearth_id_token'),
   }));
 }

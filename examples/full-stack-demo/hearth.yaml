@@ -33,6 +33,10 @@ realms:
     auth:
       registration:
         mode: open
+      # Demo only: since 3.0.0 MFA is required unless a realm opts out. The
+      # demo users sign in with a password alone, so the walkthrough and the
+      # integration suite reach the dashboard without enrolling a factor.
+      mfa_required: false
 
     applications:
       hearth-hub:
@@ -61,6 +65,10 @@ realms:
         client_secret: "${DEMO_API_CLIENT_SECRET:-hearth-demo-api-secret-not-for-production}"
         grant_types:
           - client_credentials
+        # A declared resource server: Hearth answers its introspection of the
+        # SPA's access tokens (they name no API audience and carry no `azp`),
+        # and the answer includes the user's live roles and permissions.
+        access_token_authorization: introspection
 
     permissions:
       - name: content.read

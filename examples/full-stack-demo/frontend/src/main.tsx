@@ -12,6 +12,11 @@ import "./index.css";
 const hearthUrl = import.meta.env.VITE_HEARTH_URL as string;
 const realmSlug = import.meta.env.VITE_REALM_SLUG as string;
 const realmId = import.meta.env.VITE_REALM_ID as string;
+// The `iss` of the realm's tokens. The SPA reaches Hearth through the Vite
+// proxy, so `hearthUrl` is this page's origin, not the issuer; demo.sh reads
+// the issuer from discovery.
+const issuerUrl =
+  (import.meta.env.VITE_HEARTH_ISSUER as string | undefined) ?? `${hearthUrl}/realms/${realmSlug}`;
 
 const apiClient = new HearthApiClient({ baseUrl: `${hearthUrl}/realms/${realmSlug}`, realmId });
 
@@ -27,7 +32,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
     <HearthProvider client={createHearth({
         baseUrl: hearthUrl,
         realmId,
-        issuerUrl: `${hearthUrl}/realms/${realmSlug}`,
+        issuerUrl,
         getToken: () => hearthAuth.getAccessToken(),
       })}>
       <App />

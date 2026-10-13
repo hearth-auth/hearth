@@ -2,37 +2,20 @@ package handlers_test
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/hearth-auth/hearth/examples/full-stack-demo/backend/handlers"
 	"github.com/hearth-auth/hearth/examples/full-stack-demo/backend/middleware"
 	"github.com/hearth-auth/hearth/examples/full-stack-demo/backend/store"
-	"github.com/hearth-auth/hearth/sdks/go/v3/hearth"
-	"github.com/gin-gonic/gin"
 )
 
 func init() {
 	gin.SetMode(gin.TestMode)
-}
-
-// makeToken returns a structurally valid (but unsigned) JWT with the given
-// roles and permissions embedded in the payload.
-// hearth.Client.HasRole / HasPermission decode claims locally without verifying
-// the signature, so unsigned tokens are sufficient for RBAC testing.
-func makeToken(sub string, roles, perms []string) string {
-	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"EdDSA","typ":"JWT"}`))
-	payload, _ := json.Marshal(map[string]any{
-		"sub":         sub,
-		"roles":       roles,
-		"permissions": perms,
-	})
-	payloadB64 := base64.RawURLEncoding.EncodeToString(payload)
-	return header + "." + payloadB64 + ".test_sig"
 }
 
 // testAuthMiddleware bypasses JWKS signature verification and injects the raw
@@ -52,7 +35,7 @@ func testAuthMiddleware(c *gin.Context) {
 // the test auth shim instead of JWKS validation.
 func buildRouter(t *testing.T) *gin.Engine {
 	t.Helper()
-	client := hearth.NewClient("http://hearth.test", "demo")
+	client := hearthFake.client()
 	noteStore := store.NewNotes()
 	notesH := handlers.NewNotes(noteStore, client)
 
