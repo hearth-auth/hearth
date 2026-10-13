@@ -390,6 +390,15 @@ testing, an external pentest). Hearth is not yet production-ready until the seco
   passkey registration. Every asset is now served with `no-cache` and an `ETag`, as `app.css`
   already was: the browser checks it on each page load and gets `304 Not Modified` when it is
   unchanged.
+- **A browser page on another origin can read discovery and the JWKS.** The TypeScript SDK's
+  `createHearth({ issuerUrl })` verifies tokens in the browser: it fetches the issuer's
+  `/.well-known/openid-configuration` and its `jwks_uri`. Hearth sent no
+  `Access-Control-Allow-Origin` on those responses, so the browser withheld them from an SPA on
+  another origin, and every `hasRole`, `hasPermission` and `inGroup` check returned `false`.
+  Discovery (root and per realm), the JWKS (`/.well-known/jwks.json`, `/jwks`, `/certs` and the
+  realm JWKS) and `/.well-known/oauth-protected-resource` now answer with
+  `Access-Control-Allow-Origin: *` and no `Access-Control-Allow-Credentials`. No other route
+  changes.
 - **A passkey sign-in returns to the application.** A passkey sign-in ended on the account page
   (`/ui`), also during an OIDC authorization request, so the user did not get back to the
   application. The passkey script now sends the login page's `return_to`. The sign-in ends
