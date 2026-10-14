@@ -1,0 +1,52 @@
+name: Release PR refresh
+
+# The release PR (`chore(release): vX.Y.Z`, branch release/next) moves the
+# released CHANGELOG entries out of [Unreleased]. A CHANGELOG entry that another
+# PR merges next to them makes the release PR conflict, and it can no longer
+# auto-merge; the README pins then stay stale and fail every PR's CI.
+#
+# On each CHANGELOG.md push to main, scripts/release-pr.sh --refresh checks the
+# open release PR. When GitHub reports it CONFLICTING, the script rebuilds it on
+# the new main for the same version. A PR that merges cleanly is left alone, so
+# its CI is not restarted.
+# workflow_dispatch runs the same check by hand (`gh workflow run release-pr-refresh.yml`).
+on:
+  push:
+    branches: [main]
+    paths: ['CHANGELOG.md']
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  refresh:
+    name: Rebuild a conflicting release PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # One writer of release/next at a time (release.yml's release-pr job shares it).
+    concurrency:
+      group: release-pr
+      cancel-in-progress: false
+    # Every write uses the PAT: a branch pushed with GITHUB_TOKEN starts no CI.
+    permissions: {}
+    steps:
+      - name: Checkout main (full history for the ancestry check)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ secrets.SEMANTIC_RELEASE_PAT }}
+
+      - name: Rebuild the release PR when it conflicts
+        env:
+          GH_TOKEN: ${{ secrets.SEMANTIC_RELEASE_PAT }}
+          GH_REPO: ${{ github.repository }}
+          GIT_AUTHOR_NAME: "hearth-release-bot"
+          GIT_AUTHOR_EMAIL: "releases@hearth.example"
+          GIT_COMMITTER_NAME: "hearth-release-bot"
+          GIT_COMMITTER_EMAIL: "releases@hearth.example"
+        run: |
+          # git push authenticates through gh, which reads GH_TOKEN.
+          gh auth setup-git
+          bash scripts/release-pr.sh --refresh

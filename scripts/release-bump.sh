@@ -17,9 +17,11 @@
 #
 #   CHANGELOG.md                      The `## [Unreleased]` body moves under a new
 #                                     `## [X.Y.Z] — YYYY-MM-DD` heading. The
-#                                     `## [Unreleased]` heading stays, with an empty body.
-#                                     An empty body gets a one-line note that links
-#                                     the GitHub release, so every version has a section.
+#                                     `## [Unreleased]` heading stays. With
+#                                     RELEASE_CHANGELOG_AT_TAG, only the entries that were
+#                                     in [Unreleased] at the tag move (changelog_cut.py).
+#                                     A version with no entry gets a one-line note that
+#                                     links the GitHub release, so every version has a section.
 #   README.md                         check-readme-version.sh --fix X.Y.Z
 #   Cargo.toml                        the [package] version (stamp-version.sh)
 #   Cargo.lock, fuzz/Cargo.lock       the `hearth` package entry
@@ -31,6 +33,7 @@
 # Env:    RELEASE_ROOT      tree to edit (default: the repository that holds this script)
 #         RELEASE_DATE      date of the CHANGELOG heading (default: today, UTC)
 #         RELEASE_REPO_URL  repository URL for the note (default: https://github.com/hearth-auth/hearth)
+#         RELEASE_CHANGELOG_AT_TAG  CHANGELOG.md as it was at the release tag (optional)
 # Exit:   0 on success, 1 when a file is missing or malformed, 2 on a usage error.
 
 set -euo pipefail
@@ -60,6 +63,11 @@ SNAPSHOT_DIR="${ROOT}/deploy/helm/hearth/tests"
 for f in "$CHANGELOG" "$README" "$CARGO_TOML" "$CARGO_LOCK" "$CHART"; do
     [[ -f "$f" ]] || { echo "release-bump: ${f} not found." >&2; exit 1; }
 done
+command -v python3 >/dev/null || { echo "release-bump: python3 is required." >&2; exit 1; }
+if [[ -n "${RELEASE_CHANGELOG_AT_TAG:-}" && ! -f "$RELEASE_CHANGELOG_AT_TAG" ]]; then
+    echo "release-bump: ${RELEASE_CHANGELOG_AT_TAG} not found." >&2
+    exit 1
+fi
 if ! grep -qx '## \[Unreleased\]' "$CHANGELOG"; then
     echo "release-bump: ${CHANGELOG} has no '## [Unreleased]' heading." >&2
     exit 1
@@ -89,27 +97,11 @@ if grep -qE "^## \[${VER//./\\.}\]( |$)" "$CHANGELOG"; then
     echo "release-bump: CHANGELOG.md already has a [${VER}] section."
 else
     note="No changelog entries for this release. The [GitHub release](${REPO_URL}/releases/tag/v${VER}) lists its commits."
-    # Plain POSIX awk: the CI runner's awk is mawk.
+    # RELEASE_CHANGELOG_AT_TAG (release-pr.sh sets it): move only the entries
+    # that were in [Unreleased] at the tag; later entries stay unreleased.
     cut_changelog() {
-        awk -v ver="$VER" -v date="$DATE" -v note="$note" '
-            function flush(at_eof,   i, first, last) {
-                first = 1
-                last = n
-                while (first <= last && body[first] ~ /^[ \t]*$/) first++
-                while (last >= first && body[last] ~ /^[ \t]*$/) last--
-                print ""
-                print "## [" ver "] — " date
-                print ""
-                if (first > last) print note
-                for (i = first; i <= last; i++) print body[i]
-                if (!at_eof) print ""
-            }
-            state == 0 && $0 == "## [Unreleased]" { print; state = 1; next }
-            state == 1 && /^## / { flush(0); state = 2 }
-            state == 1 { body[++n] = $0; next }
-            { print }
-            END { if (state == 1) flush(1) }
-        '
+        python3 "${SCRIPT_DIR}/changelog_cut.py" "$VER" "$DATE" "$note" \
+            ${RELEASE_CHANGELOG_AT_TAG:+"$RELEASE_CHANGELOG_AT_TAG"}
     }
     rewrite "$CHANGELOG" cut_changelog
     echo "release-bump: CHANGELOG.md [Unreleased] → [${VER}] — ${DATE}"
