@@ -380,7 +380,7 @@ EOF
     --resolve hearth.stress.test:8443:$SERVER_PRIVATE https://hearth.stress.test:8443/admin/bootstrap")
   [ "$code" = 404 ] || die "POST /admin/bootstrap answered $code: not a production build"
 
-  log "preparing clients (resource-server mode, regenerated secret)"
+  log "preparing the api client (regenerated secret)"
   k6_on_generator "PREPARE_CLIENTS=1 PREPARE_OUT=/opt/stress/prepare.json" run -q prepare.js > /dev/null
   local secret
   secret=$(ssh_to "$GEN_PUBLIC" "python3 -c 'import json; print(json.load(open(\"/opt/stress/prepare.json\"))[\"api_secret\"])'")
