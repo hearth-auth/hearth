@@ -18,15 +18,15 @@ lacks"`, and `503` when the target's permissions cannot be resolved. A user's ad
 include those it holds only through an organization-scoped role or grant. The rule covers:
 
 - modification: `PATCH`/`DELETE /admin/users/{id}`, the `disable` operation of `POST /admin/users/bulk` (a batch naming any such user is refused
-  whole), `PATCH /admin/realms/{realm_id}/users/{user_id}/required-actions`, SCIM `/scim/v2/Users`;
+  whole), `PATCH /admin/realms/{realm_id}/users/{user_id}/required-actions`, SCIM `/Users` (under either SCIM base URL);
 - demotion: `DELETE /admin/assignments/{id}` (for a group assignment, every member of the group
   and of groups nested in it), `DELETE /admin/groups/{id}/members/{member_id}`,
   `DELETE /admin/groups/{id}`, `DELETE /admin/users/{id}/permissions/{permission}`,
   `DELETE /admin/organizations/{id}/members/{user_id}/roles/{role_name}`;
 - sign-out and consents: `DELETE /admin/sessions/{id}`, `POST /admin/sessions/{id}/sv-bump`,
   `DELETE /admin/users/{id}/consents/{client_id}`;
-- organizations: `DELETE /admin/organizations/{id}` and SCIM `DELETE /scim/v2/Groups/{id}` (every member
-  of the organization), and SCIM `PUT`/`PATCH /scim/v2/Groups/{id}` (every member the change
+- organizations: `DELETE /admin/organizations/{id}` and SCIM `DELETE /Groups/{id}` (every member
+  of the organization), and SCIM `PUT`/`PATCH /Groups/{id}` (every member the change
   removes). Leaving an organization strips the admin permissions a user holds only in it;
 - role definitions: `PATCH /admin/roles/{id}`, `DELETE /admin/roles/{id}`, when the change removes an admin permission from the role's effective set — by
   replacing its permissions or parents, by deleting it, or by renaming it (an extra organization

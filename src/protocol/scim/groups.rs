@@ -27,6 +27,7 @@ use crate::protocol::scim::auth::{authenticate, ScimAuth, ScimResource};
 use crate::protocol::scim::error::{from_ceiling_error, from_identity_error, ScimError};
 use crate::protocol::scim::etag::{check_if_match, resource_response};
 use crate::protocol::scim::filter::{self, FilterExpr};
+use crate::protocol::scim::mount::{ResourceIdPath, ScimBase};
 use crate::protocol::scim::patch_apply::apply_group_patch;
 use crate::protocol::scim::types::{
     ListResponse, Meta, PatchRequest, ScimGroup, ScimMember, GROUP_SCHEMA,
@@ -90,12 +91,21 @@ fn slugify(name: &str) -> String {
     }
 }
 
+/// The path of a group resource under the request's SCIM base, for example
+/// `/realms/acme/scim/v2/Groups/{id}`.
+fn group_location(base: &ScimBase, org: &Organization) -> String {
+    format!("{}/{}", base.collection("Groups"), org.id().as_uuid())
+}
+
+/// Converts an organization to a SCIM Group. `meta.location` is built from
+/// `base`, the base path the request was addressed to.
 fn group_to_scim(
     org: &Organization,
     members: &[ScimMember],
     external_id: Option<String>,
+    base: &ScimBase,
 ) -> ScimGroup {
-    let location = format!("/scim/v2/Groups/{}", org.id().as_uuid());
+    let location = group_location(base, org);
     let version = format!("W/\"{}\"", org.updated_at().as_micros());
     ScimGroup {
         schemas: vec![GROUP_SCHEMA.to_string()],
@@ -371,6 +381,7 @@ fn updated_group_response(
     realm_id: &RealmId,
     org_id: &OrganizationId,
     fallback: Organization,
+    base: &ScimBase,
 ) -> Response {
     let refreshed = state
         .identity
@@ -388,7 +399,7 @@ fn updated_group_response(
         Err(e) => return e.into_response(),
     };
     let version = group_version(&refreshed);
-    let scim = group_to_scim(&refreshed, &members, ext);
+    let scim = group_to_scim(&refreshed, &members, ext, base);
     resource_response(&scim, &version)
 }
 
@@ -398,6 +409,7 @@ fn updated_group_response(
 pub async fn create_group(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    base: ScimBase,
     Json(body): Json<ScimGroup>,
 ) -> Response {
     let auth = match authenticate(&headers, &state, ScimResource::Groups) {
@@ -480,13 +492,14 @@ pub async fn create_group(
         Ok(m) => m,
         Err(e) => return e.into_response(),
     };
-    let scim = group_to_scim(&org, &members, body.external_id.clone());
+    let scim = group_to_scim(&org, &members, body.external_id.clone(), &base);
     let mut resp = (StatusCode::CREATED, Json(scim.clone())).into_response();
-    resp.headers_mut().insert(
-        axum::http::header::LOCATION,
-        HeaderValue::from_str(&format!("/scim/v2/Groups/{}", org.id().as_uuid()))
-            .unwrap_or(HeaderValue::from_static("/scim/v2/Groups")),
-    );
+    // The path is built from a UUID and a realm name of ASCII letters, digits,
+    // `-` and `_`, so it is always a valid header value.
+    if let Ok(location) = HeaderValue::from_str(&group_location(&base, &org)) {
+        resp.headers_mut()
+            .insert(axum::http::header::LOCATION, location);
+    }
     if let Some(m) = &scim.meta {
         if let Ok(v) = HeaderValue::from_str(&m.version) {
             resp.headers_mut().insert(axum::http::header::ETAG, v);
@@ -503,7 +516,8 @@ pub async fn create_group(
 pub async fn get_group(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path(id): Path<String>,
+    base: ScimBase,
+    Path(ResourceIdPath { id }): Path<ResourceIdPath>,
 ) -> Response {
     let auth = match authenticate(&headers, &state, ScimResource::Groups) {
         Ok(a) => a,
@@ -525,7 +539,7 @@ pub async fn get_group(
                 Err(e) => return e.into_response(),
             };
             let version = group_version(&org);
-            let scim = group_to_scim(&org, &members, ext);
+            let scim = group_to_scim(&org, &members, ext, &base);
             resource_response(&scim, &version)
         }
         Ok(None) => ScimError::not_found("group not found").into_response(),
@@ -547,6 +561,7 @@ pub struct ListQuery {
 pub async fn list_groups(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    base: ScimBase,
     Query(q): Query<ListQuery>,
 ) -> Response {
     let auth = match authenticate(&headers, &state, ScimResource::Groups) {
@@ -593,7 +608,7 @@ pub async fn list_groups(
             .get_scim_group_external_id(&auth.realm_id, org.id())
             .ok()
             .flatten();
-        let scim = group_to_scim(org, &[], ext);
+        let scim = group_to_scim(org, &[], ext, &base);
         if filter_expr
             .as_ref()
             .map_or(true, |e| filter::matches_group(e, &scim))
@@ -611,7 +626,7 @@ pub async fn list_groups(
             Ok(m) => m,
             Err(e) => return e.into_response(),
         };
-        slice.push(group_to_scim(org, &members, scim.external_id));
+        slice.push(group_to_scim(org, &members, scim.external_id, &base));
     }
     Json(ListResponse::new(total, start, slice)).into_response()
 }
@@ -620,7 +635,8 @@ pub async fn list_groups(
 pub async fn replace_group(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path(id): Path<String>,
+    base: ScimBase,
+    Path(ResourceIdPath { id }): Path<ResourceIdPath>,
     Json(body): Json<ScimGroup>,
 ) -> Response {
     let auth = match authenticate(&headers, &state, ScimResource::Groups) {
@@ -693,14 +709,15 @@ pub async fn replace_group(
         body.external_id.as_deref(),
     );
 
-    updated_group_response(&state, &auth.realm_id, &org_id, existing)
+    updated_group_response(&state, &auth.realm_id, &org_id, existing, &base)
 }
 
 /// `PATCH /scim/v2/Groups/{id}`
 pub async fn patch_group(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path(id): Path<String>,
+    base: ScimBase,
+    Path(ResourceIdPath { id }): Path<ResourceIdPath>,
     Json(body): Json<PatchRequest>,
 ) -> Response {
     let auth = match authenticate(&headers, &state, ScimResource::Groups) {
@@ -744,7 +761,7 @@ pub async fn patch_group(
         Ok(m) => m,
         Err(e) => return e.into_response(),
     };
-    let mut scim = group_to_scim(&existing, &members, current_ext.clone());
+    let mut scim = group_to_scim(&existing, &members, current_ext.clone(), &base);
     if let Err(e) = apply_group_patch(&mut scim, &body.operations) {
         return e.into_response();
     }
@@ -803,14 +820,14 @@ pub async fn patch_group(
         scim.external_id.as_deref(),
     );
 
-    updated_group_response(&state, &auth.realm_id, &org_id, existing)
+    updated_group_response(&state, &auth.realm_id, &org_id, existing, &base)
 }
 
 /// `DELETE /scim/v2/Groups/{id}`
 pub async fn delete_group(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path(id): Path<String>,
+    Path(ResourceIdPath { id }): Path<ResourceIdPath>,
 ) -> Response {
     let auth = match authenticate(&headers, &state, ScimResource::Groups) {
         Ok(a) => a,

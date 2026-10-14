@@ -191,7 +191,7 @@ realms:
   sessions, and OAuth clients. Cross-realm SSO is not automatic — users must log in to each
   realm separately.
 - `scim.bearer_token` enables the SCIM 2.0 provisioning endpoint at
-  `/scim/v2/realms/<realm-slug>/`. Tokens are hashed with Argon2id before storage; the
+  `/realms/<realm-name>/scim/v2`. Tokens are hashed with SHA-256 before storage; the
   plaintext value is never persisted.
 - `realms.<name>.web.product_name` scopes the UI title and email subjects to that realm's
   branding without affecting the global `branding.product_name`.

@@ -3145,6 +3145,293 @@
         }
       }
     },
+    "/realms/{realm_name}/scim/v2/Groups": {
+      "parameters": [
+        {
+          "name": "realm_name",
+          "in": "path",
+          "required": true,
+          "description": "The name of the realm to provision into. It selects the realm; no `X-Realm-ID` header is needed.",
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "SCIM list groups (realm path)",
+        "operationId": "scimRealmListGroups",
+        "tags": [
+          "SCIM"
+        ],
+        "responses": {
+          "200": {
+            "description": "SCIM ListResponse"
+          }
+        }
+      },
+      "post": {
+        "summary": "SCIM create group (realm path)",
+        "operationId": "scimRealmCreateGroup",
+        "tags": [
+          "SCIM"
+        ],
+        "responses": {
+          "201": {
+            "description": "SCIM Group created"
+          }
+        }
+      }
+    },
+    "/realms/{realm_name}/scim/v2/Groups/{id}": {
+      "parameters": [
+        {
+          "name": "realm_name",
+          "in": "path",
+          "required": true,
+          "description": "The name of the realm to provision into. It selects the realm; no `X-Realm-ID` header is needed.",
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "SCIM get group (realm path)",
+        "operationId": "scimRealmGetGroup",
+        "tags": [
+          "SCIM"
+        ],
+        "responses": {
+          "200": {
+            "description": "SCIM Group"
+          }
+        }
+      },
+      "put": {
+        "summary": "SCIM replace group (realm path)",
+        "operationId": "scimRealmReplaceGroup",
+        "tags": [
+          "SCIM"
+        ],
+        "responses": {
+          "200": {
+            "description": "SCIM Group replaced"
+          }
+        }
+      },
+      "patch": {
+        "summary": "SCIM patch group (realm path)",
+        "operationId": "scimRealmPatchGroup",
+        "tags": [
+          "SCIM"
+        ],
+        "responses": {
+          "200": {
+            "description": "SCIM Group patched"
+          }
+        }
+      },
+      "delete": {
+        "summary": "SCIM delete group (realm path)",
+        "operationId": "scimRealmDeleteGroup",
+        "tags": [
+          "SCIM"
+        ],
+        "responses": {
+          "204": {
+            "description": "SCIM Group deleted"
+          }
+        }
+      }
+    },
+    "/realms/{realm_name}/scim/v2/ResourceTypes": {
+      "parameters": [
+        {
+          "name": "realm_name",
+          "in": "path",
+          "required": true,
+          "description": "The name of the realm to provision into. It selects the realm; no `X-Realm-ID` header is needed.",
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "SCIM ResourceTypes (realm path)",
+        "operationId": "scimRealmResourceTypes",
+        "tags": [
+          "SCIM"
+        ],
+        "responses": {
+          "200": {
+            "description": "SCIM resource types"
+          }
+        }
+      }
+    },
+    "/realms/{realm_name}/scim/v2/Schemas": {
+      "parameters": [
+        {
+          "name": "realm_name",
+          "in": "path",
+          "required": true,
+          "description": "The name of the realm to provision into. It selects the realm; no `X-Realm-ID` header is needed.",
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "SCIM Schemas (realm path)",
+        "operationId": "scimRealmSchemas",
+        "tags": [
+          "SCIM"
+        ],
+        "responses": {
+          "200": {
+            "description": "SCIM schema definitions"
+          }
+        }
+      }
+    },
+    "/realms/{realm_name}/scim/v2/ServiceProviderConfig": {
+      "parameters": [
+        {
+          "name": "realm_name",
+          "in": "path",
+          "required": true,
+          "description": "The name of the realm to provision into. It selects the realm; no `X-Realm-ID` header is needed.",
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "SCIM ServiceProviderConfig (realm path)",
+        "operationId": "scimRealmServiceProviderConfig",
+        "tags": [
+          "SCIM"
+        ],
+        "responses": {
+          "200": {
+            "description": "SCIM configuration"
+          }
+        }
+      }
+    },
+    "/realms/{realm_name}/scim/v2/Users": {
+      "parameters": [
+        {
+          "name": "realm_name",
+          "in": "path",
+          "required": true,
+          "description": "The name of the realm to provision into. It selects the realm; no `X-Realm-ID` header is needed.",
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "SCIM list users (realm path)",
+        "operationId": "scimRealmListUsers",
+        "tags": [
+          "SCIM"
+        ],
+        "responses": {
+          "200": {
+            "description": "SCIM ListResponse"
+          }
+        }
+      },
+      "post": {
+        "summary": "SCIM create user (realm path)",
+        "operationId": "scimRealmCreateUser",
+        "tags": [
+          "SCIM"
+        ],
+        "responses": {
+          "201": {
+            "description": "SCIM User created"
+          }
+        }
+      }
+    },
+    "/realms/{realm_name}/scim/v2/Users/{id}": {
+      "parameters": [
+        {
+          "name": "realm_name",
+          "in": "path",
+          "required": true,
+          "description": "The name of the realm to provision into. It selects the realm; no `X-Realm-ID` header is needed.",
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "SCIM get user (realm path)",
+        "operationId": "scimRealmGetUser",
+        "tags": [
+          "SCIM"
+        ],
+        "responses": {
+          "200": {
+            "description": "SCIM User"
+          }
+        }
+      },
+      "put": {
+        "summary": "SCIM replace user (realm path)",
+        "operationId": "scimRealmReplaceUser",
+        "tags": [
+          "SCIM"
+        ],
+        "responses": {
+          "200": {
+            "description": "SCIM User replaced"
+          }
+        }
+      },
+      "patch": {
+        "summary": "SCIM patch user (realm path)",
+        "operationId": "scimRealmPatchUser",
+        "tags": [
+          "SCIM"
+        ],
+        "responses": {
+          "200": {
+            "description": "SCIM User patched"
+          }
+        }
+      },
+      "delete": {
+        "summary": "SCIM delete user (realm path)",
+        "operationId": "scimRealmDeleteUser",
+        "tags": [
+          "SCIM"
+        ],
+        "responses": {
+          "204": {
+            "description": "SCIM User deleted"
+          }
+        }
+      }
+    },
     "/register": {
       "post": {
         "operationId": "OAuthService_RegisterClient",

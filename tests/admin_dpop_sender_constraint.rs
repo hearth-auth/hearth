@@ -390,6 +390,65 @@ async fn scim_rejects_bound_token_replayed_as_plain_bearer() {
     assert_dpop_rejected(resp, "GET /scim/v2/Users").await;
 }
 
+/// The URL name of the fixture realm, for the `/realms/{realm_name}` mounts.
+fn realm_name(f: &Fixture) -> String {
+    f.harness
+        .identity()
+        .get_realm(&f.realm)
+        .expect("realm lookup")
+        .expect("fixture realm")
+        .name()
+        .to_string()
+}
+
+/// A realm-path SCIM request names its realm in the path and sends no
+/// `X-Realm-ID`. The DPoP layer reads the realm from that header, so the realm
+/// path must set it before the layer runs. Otherwise the layer would find no
+/// realm, pass the request through, and a bound token would replay as a
+/// plain Bearer.
+fn realm_path_get(uri: &str, token: &str, proof: Option<&str>) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header("authorization", format!("Bearer {token}"));
+    if let Some(proof) = proof {
+        builder = builder.header("dpop", proof);
+    }
+    builder.body(Body::empty()).unwrap()
+}
+
+#[tokio::test]
+async fn scim_realm_path_rejects_bound_token_replayed_as_plain_bearer() {
+    let f = setup().await;
+    let uri = format!("/realms/{}/scim/v2/Users", realm_name(&f));
+    let resp = app(&f)
+        .oneshot(realm_path_get(&uri, &f.bound_token, None))
+        .await
+        .unwrap();
+    assert_dpop_rejected(resp, "GET /realms/{name}/scim/v2/Users").await;
+}
+
+#[tokio::test]
+async fn scim_realm_path_accepts_bound_token_with_a_valid_proof() {
+    let f = setup().await;
+    let uri = format!("/realms/{}/scim/v2/Users", realm_name(&f));
+    // The proof signs the path the client used, realm prefix included.
+    let htu = format!("{}{uri}", f.issuer);
+    let proof = make_resource_dpop_proof(&f.dpop_key, "GET", &htu, &f.bound_token);
+    let resp = app(&f)
+        .oneshot(realm_path_get(&uri, &f.bound_token, Some(&proof)))
+        .await
+        .unwrap();
+
+    // The subject holds no admin permission, so SCIM's admin-token fallback
+    // answers 403: the request got past the sender-constraint layer.
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "the proof was accepted, so the outcome must come from the permission gate"
+    );
+}
+
 // ── Task 25.17 — the admin surface outside the `/admin` and `/scim/v2` nests ──
 //
 // 18.18 mounted `enforce_admin_dpop` with `route_layer` on exactly two routers:
