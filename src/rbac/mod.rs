@@ -49,7 +49,8 @@ use crate::core::{ImportOutcome, OrganizationId, PageRequest, PagedResult, Realm
 /// Defined here (in the `rbac` crate) and implemented by the identity
 /// engine to avoid a circular import: `identity` already imports `rbac`,
 /// so the implementation direction is safe. The RBAC engine holds an
-/// `OnceLock<Arc<dyn SvBumper>>` injected at startup.
+/// `OnceLock<Weak<dyn SvBumper>>` injected at startup: weak, because the
+/// identity engine holds the RBAC engine.
 ///
 /// All implementations are best-effort: bump failures are logged but
 /// must not abort the RBAC write.
