@@ -247,6 +247,61 @@ check "empty [Unreleased] gets the version heading and a one-line note" \
     '[[ "$rc" -eq 0 && "$got" == "$EXPECTED_HEAD" ]]' \
     || diff <(printf '%s\n' "$EXPECTED_HEAD") <(printf '%s\n' "$got") | sed 's/^/    /'
 
+# With the tag's CHANGELOG (RELEASE_CHANGELOG_AT_TAG), only the entries that
+# were already in [Unreleased] at the tag move. An entry merged after the tag
+# stays under [Unreleased], in its category, so the release PR can start from
+# main and still name the release correctly.
+make_tree "$TMP/e"
+cp "$TMP/e/CHANGELOG.md" "$TMP/e-at-tag.md"
+python3 - "$TMP/e/CHANGELOG.md" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+s = s.replace("### Added\n\n- **New thing**",
+              "### Added\n\n- **Later thing** — merged after the tag.\n\n- **New thing**", 1)
+s = s.replace("- **Bug** — fixed.\n",
+              "- **Bug** — fixed.\n\n### Security\n\n- **Hardening** — after the tag.\n", 1)
+open(p, "w").write(s)
+PY
+RELEASE_CHANGELOG_AT_TAG="$TMP/e-at-tag.md" bump "$TMP/e" 9.9.9 >/dev/null 2>&1
+rc=$?
+EXPECTED_SPLIT='# Changelog
+
+Intro text.
+
+## [Unreleased]
+
+### Added
+
+- **Later thing** — merged after the tag.
+
+### Security
+
+- **Hardening** — after the tag.
+
+## [9.9.9] — 2026-10-14
+
+<!-- branch note -->
+
+### Added
+
+- **New thing** — it does a thing.
+  Second line of the entry.
+
+### Fixed
+
+- **Bug** — fixed.
+
+## [1.0.0] — 2026-06-21
+
+### Added
+
+- First release.'
+got="$(cat "$TMP/e/CHANGELOG.md")"
+check "an entry merged after the tag stays under [Unreleased]" \
+    '[[ "$rc" -eq 0 && "$got" == "$EXPECTED_SPLIT" ]]' \
+    || diff <(printf '%s\n' "$EXPECTED_SPLIT") <(printf '%s\n' "$got") | sed 's/^/    /'
+
 # Bad input fails and leaves the tree untouched.
 make_tree "$TMP/c"
 before="$(tree_sum "$TMP/c")"
@@ -287,7 +342,7 @@ git init --quiet --bare --initial-branch=main "$REMOTE"
 git init --quiet --initial-branch=main "$WORK"
 make_tree "$WORK"
 mkdir -p "$WORK/scripts"
-cp "$SCRIPT_DIR/release-pr.sh" "$SCRIPT_DIR/release-bump.sh" \
+cp "$SCRIPT_DIR/release-pr.sh" "$SCRIPT_DIR/release-bump.sh" "$SCRIPT_DIR/changelog_cut.py" \
     "$SCRIPT_DIR/check-readme-version.sh" "$SCRIPT_DIR/stamp-version.sh" "$WORK/scripts/" \
     2>/dev/null
 git -C "$WORK" add -A
@@ -295,6 +350,21 @@ git -C "$WORK" commit --quiet -m "feat: a release"
 git -C "$WORK" tag v9.9.9
 git -C "$WORK" remote add origin "$REMOTE"
 git -C "$WORK" push --quiet origin main v9.9.9
+
+# Main moves on after the tag: another PR adds a CHANGELOG entry right next to
+# the released ones. A release PR built on the tag conflicts with this.
+add_entry() {
+    python3 - "$WORK/CHANGELOG.md" "$1" <<'PY'
+import sys
+p, entry = sys.argv[1], sys.argv[2]
+s = open(p).read()
+s = s.replace("### Added\n\n", "### Added\n\n- **" + entry + "** — after the tag.\n\n", 1)
+open(p, "w").write(s)
+PY
+    git -C "$WORK" commit --quiet -am "feat: ${1}"
+    git -C "$WORK" push --quiet origin main
+}
+add_entry "Later thing"
 
 # Fake gh: logs every call. `release list` names the published release in
 # $GH_RELEASE; `pr list` prints the open PR number kept in $GH_STATE.
@@ -304,7 +374,13 @@ cat > "$FAKEBIN/gh" <<'EOF'
 echo "$*" >> "$GH_LOG"
 case "$1 $2" in
     "release list") printf '%s\tLatest\t%s\t2026-10-14T00:00:00Z\n' "$GH_RELEASE" "$GH_RELEASE" ;;
-    "pr list")      cat "$GH_STATE" 2>/dev/null || true ;;
+    "pr list")
+        if [[ "$*" == *number,title* ]]; then
+            [[ -s "$GH_STATE" ]] && echo "$(cat "$GH_STATE") chore(release): v9.9.9"
+        else
+            cat "$GH_STATE" 2>/dev/null || true
+        fi ;;
+    "pr view")      echo "${GH_MERGEABLE:-MERGEABLE}" ;;
     "pr create")    echo 7 > "$GH_STATE"; echo "https://github.com/hearth-auth/hearth/pull/7" ;;
     "pr edit")      ;;
     "pr merge")     [[ -n "${GH_MERGE_FAILS:-}" ]] && { echo "auto-merge is not allowed" >&2; exit 1; } ;;
@@ -317,7 +393,7 @@ export GH_LOG GH_STATE
 # run_pr <tag> — run release-pr.sh in the work tree with the fake gh.
 run_pr() {
     (cd "$WORK" && PATH="$FAKEBIN:$PATH" GH_RELEASE="${GH_RELEASE:-v9.9.9}" \
-        RELEASE_DATE=2026-10-14 bash scripts/release-pr.sh "$1")
+        RELEASE_DATE=2026-10-14 RELEASE_POLL_SECONDS=0 bash scripts/release-pr.sh "$1")
 }
 
 out="$(run_pr v9.9.9 2>&1)"
@@ -326,8 +402,13 @@ check "release-pr exits 0" '[[ "$rc" -eq 0 ]]' || echo "$out" | sed 's/^/    /'
 
 branch_sha="$(git -C "$REMOTE" rev-parse -q --verify refs/heads/release/next 2>/dev/null)"
 check "release/next is pushed" '[[ -n "$branch_sha" ]]'
-check "release/next sits on the release tag" \
-    '[[ "$(git -C "$REMOTE" rev-parse "${branch_sha}^")" == "$(git -C "$REMOTE" rev-parse "v9.9.9^{commit}")" ]]'
+check "release/next sits on main, not on the release tag" \
+    '[[ "$(git -C "$REMOTE" rev-parse "${branch_sha}^")" == "$(git -C "$REMOTE" rev-parse refs/heads/main)" ]]'
+release_changelog="$(git -C "$REMOTE" show "${branch_sha}:CHANGELOG.md")"
+check "the entry merged after the tag stays under [Unreleased]" \
+    '[[ "$(sed -n "/^## \[Unreleased\]/,/^## \[9\.9\.9\]/p" <<<"$release_changelog")" == *"Later thing"* \
+       && "$(sed -n "/^## \[9\.9\.9\]/,/^## \[1\.0\.0\]/p" <<<"$release_changelog")" != *"Later thing"* \
+       && "$(sed -n "/^## \[9\.9\.9\]/,/^## \[1\.0\.0\]/p" <<<"$release_changelog")" == *"New thing"* ]]'
 check "the commit title is chore(release): v9.9.9" \
     '[[ "$(git -C "$REMOTE" log -1 --format=%s "$branch_sha")" == "chore(release): v9.9.9" ]]'
 EXPECTED_FILES='CHANGELOG.md
@@ -385,6 +466,43 @@ rc=$?
 check "a tag not on main exits 0 and opens no PR" \
     '[[ "$rc" -eq 0 && "$(git -C "$REMOTE" rev-parse refs/heads/release/next)" == "$branch_sha" ]] \
      && ! grep -q "^pr " "$GH_LOG"' || echo "$out" | sed 's/^/    /'
+
+# ── Part C: --refresh (release-pr-refresh.yml, on each CHANGELOG push) ─────
+
+git -C "$WORK" checkout --quiet main
+git -C "$WORK" pull --quiet origin main
+before_refresh="$(git -C "$REMOTE" rev-parse refs/heads/release/next)"
+
+# A release PR that still merges cleanly is left alone.
+: > "$GH_LOG"
+out="$(GH_MERGEABLE=MERGEABLE run_pr --refresh 2>&1)"
+rc=$?
+check "--refresh leaves a release PR that merges cleanly" \
+    '[[ "$rc" -eq 0 && "$(git -C "$REMOTE" rev-parse refs/heads/release/next)" == "$before_refresh" ]] \
+     && ! grep -q "^pr edit" "$GH_LOG"' || echo "$out" | sed 's/^/    /'
+
+# Main gets another entry next to the released ones, and the PR conflicts:
+# --refresh rebuilds release/next on the new main, for the PR's version.
+add_entry "Even later thing"
+: > "$GH_LOG"
+out="$(GH_MERGEABLE=CONFLICTING run_pr --refresh 2>&1)"
+rc=$?
+refreshed="$(git -C "$REMOTE" rev-parse refs/heads/release/next)"
+refreshed_changelog="$(git -C "$REMOTE" show "${refreshed}:CHANGELOG.md")"
+check "--refresh rebuilds a conflicting release PR on the new main" \
+    '[[ "$rc" -eq 0 && "$(git -C "$REMOTE" rev-parse "${refreshed}^")" == "$(git -C "$REMOTE" rev-parse refs/heads/main)" ]] \
+     && grep -q "^pr edit 7 --title chore(release): v9.9.9" "$GH_LOG" \
+     && [[ "$(sed -n "/^## \[Unreleased\]/,/^## \[9\.9\.9\]/p" <<<"$refreshed_changelog")" == *"Even later thing"* ]]' \
+    || echo "$out" | sed 's/^/    /'
+
+# No open release PR: nothing to do.
+rm -f "$GH_STATE"
+: > "$GH_LOG"
+out="$(run_pr --refresh 2>&1)"
+rc=$?
+check "--refresh without an open release PR does nothing" \
+    '[[ "$rc" -eq 0 && "$(git -C "$REMOTE" rev-parse refs/heads/release/next)" == "$refreshed" ]] \
+     && ! grep -q "^pr \(edit\|create\|merge\|view\)" "$GH_LOG"' || echo "$out" | sed 's/^/    /'
 
 echo ""
 if [[ "$failures" -ne 0 ]]; then

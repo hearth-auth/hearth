@@ -180,9 +180,14 @@ Releases are automatic. Do not tag by hand.
 - When the GitHub Release is published, the `Open the release PR` job of `release.yml` runs
   `scripts/release-pr.sh`. It opens the PR `chore(release): vX.Y.Z` from the branch
   `release/next`, with auto-merge (squash) on. The PR moves the `CHANGELOG.md` `## [Unreleased]`
-  entries under `## [X.Y.Z] — date`, pins the README install docs, and sets the `Cargo.toml`,
-  `Cargo.lock` and `Chart.yaml` versions. Its title cuts no release. A later release replaces an
-  unmerged release PR.
+  entries of that release under `## [X.Y.Z] — date`, pins the README install docs, and sets the
+  `Cargo.toml`, `Cargo.lock` and `Chart.yaml` versions. Its title cuts no release. A later release
+  replaces an unmerged release PR.
+- `release/next` starts from the current `main`. Only the entries that were under
+  `## [Unreleased]` at the tag move (`scripts/changelog_cut.py`); an entry merged after the tag
+  stays there. When a later `CHANGELOG.md` change on `main` makes the release PR conflict,
+  `release-pr-refresh.yml` runs `scripts/release-pr.sh --refresh`, which rebuilds the PR on the
+  new `main`.
 - Until the release PR merges, `scripts/check-readme-version.sh` fails every other PR, because the
   README pins still name the previous release. If the release PR is missing, re-run that job.
   `scripts/release-bump.sh vX.Y.Z` makes the same file edits in your work tree.

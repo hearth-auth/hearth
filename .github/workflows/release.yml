@@ -621,12 +621,22 @@ jobs:
   # releases (HEA-2199). A PR opened at tag time would fail its own CI, and if
   # validation then failed, it would pin a release that never shipped.
   #
+  # release/next starts from main, not from the tag, and the CHANGELOG cut moves
+  # only the entries that were in [Unreleased] at the tag. A branch built on the
+  # tag conflicted with every CHANGELOG entry merged after it, so it could never
+  # auto-merge. release-pr-refresh.yml rebuilds the PR if a later CHANGELOG
+  # change conflicts with it.
+  #
   # SEMANTIC_RELEASE_PAT does the checkout, the push and the gh calls. A branch
   # pushed or a PR opened with GITHUB_TOKEN starts no CI run, so the PR could
   # never go green and merge.
   release-pr:
     name: Open the release PR
     needs: [release]
+    # One writer of release/next at a time (release-pr-refresh.yml shares it).
+    concurrency:
+      group: release-pr
+      cancel-in-progress: false
     # Release tags only: a pre-release tag (v1.2.3-rc.1) is not a README pin,
     # and a workflow_dispatch run has no tag. release-pr.sh skips a tag that is
     # not on main (a 1.x / 2.x maintenance release).
@@ -636,9 +646,12 @@ jobs:
     # Every write uses the PAT, so the job needs no GITHUB_TOKEN permission.
     permissions: {}
     steps:
-      - name: Checkout the release tag (full history for the ancestry check)
+      # main, not the tag: release/next starts from main, and the scripts are
+      # main's newest. release-pr.sh fetches the tag itself.
+      - name: Checkout main (full history for the ancestry check)
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          ref: main
           fetch-depth: 0
           persist-credentials: false
           token: ${{ secrets.SEMANTIC_RELEASE_PAT }}
