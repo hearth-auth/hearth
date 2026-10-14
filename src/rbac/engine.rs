@@ -10,7 +10,7 @@
 //! in case storage was corrupted out-of-band).
 
 use std::collections::{BTreeSet, HashSet};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 
 use crate::core::{Clock, ImportOutcome, OrganizationId, RealmId, Uri, UserId};
 use crate::storage::{StorageEngine, StorageError};
@@ -36,7 +36,9 @@ pub struct EmbeddedRbacEngine {
     clock: Arc<dyn Clock>,
     /// Injected at startup via [`Self::init_sv_bumper`]. Absent until the
     /// identity engine is fully constructed (avoids construction-order coupling).
-    sv_bumper: OnceLock<Arc<dyn SvBumper>>,
+    /// Weak: the bumper (the identity engine) holds this engine, and a strong
+    /// reference back made a cycle that kept both engines alive forever.
+    sv_bumper: OnceLock<Weak<dyn SvBumper>>,
     /// Serializes concurrent role-assignment writes to prevent duplicate assignments
     /// (A-28: same user+role+scope pair from two concurrent requests).
     assign_write_lock: std::sync::Mutex<()>,
@@ -226,14 +228,15 @@ impl EmbeddedRbacEngine {
 
     /// Injects the [`SvBumper`] implementation. Called once at startup after
     /// the identity engine is fully constructed. Subsequent calls are silently
-    /// ignored (OnceLock semantics).
+    /// ignored (OnceLock semantics). The engine keeps only a weak reference:
+    /// the caller keeps `bumper` alive.
     pub fn init_sv_bumper(&self, bumper: Arc<dyn SvBumper>) {
-        let _ = self.sv_bumper.set(bumper);
+        let _ = self.sv_bumper.set(Arc::downgrade(&bumper));
     }
 
     /// Best-effort sv bump for a single user. Logs on failure.
     fn bump_sv_for_user(&self, realm_id: &RealmId, user_id: &UserId) {
-        if let Some(b) = self.sv_bumper.get() {
+        if let Some(b) = self.sv_bumper.get().and_then(Weak::upgrade) {
             b.bump_user_sessions(realm_id, user_id);
         }
     }
@@ -3448,5 +3451,46 @@ mod tests {
                 .expect("list"),
             [] as [crate::core::UserId; 0]
         );
+    }
+
+    /// An [`SvBumper`] that holds the RBAC engine it is given to, as the
+    /// identity engine does in the server.
+    struct HoldsTheRbacEngine {
+        _engine: Arc<EmbeddedRbacEngine>,
+    }
+    impl SvBumper for HoldsTheRbacEngine {
+        fn bump_user_sessions(&self, _realm_id: &RealmId, _user_id: &UserId) {}
+    }
+
+    #[test]
+    fn the_sv_bumper_does_not_keep_the_engines_alive() {
+        let (engine, _realm) = mk_engine();
+        let engine = Arc::new(engine);
+        let bumper = Arc::new(HoldsTheRbacEngine {
+            _engine: Arc::clone(&engine),
+        });
+        engine.init_sv_bumper(Arc::clone(&bumper) as Arc<dyn SvBumper>);
+        let rbac = Arc::downgrade(&engine);
+        drop(engine);
+        drop(bumper);
+        assert!(
+            rbac.upgrade().is_none(),
+            "the bumper and the RBAC engine hold each other, so neither is ever freed"
+        );
+    }
+
+    #[test]
+    fn a_bump_reaches_the_bumper_while_it_lives() {
+        struct Counts(std::sync::atomic::AtomicUsize);
+        impl SvBumper for Counts {
+            fn bump_user_sessions(&self, _realm_id: &RealmId, _user_id: &UserId) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        let (engine, realm) = mk_engine();
+        let counts = Arc::new(Counts(std::sync::atomic::AtomicUsize::new(0)));
+        engine.init_sv_bumper(Arc::clone(&counts) as Arc<dyn SvBumper>);
+        engine.bump_sv_for_user(&realm, &UserId::generate());
+        assert_eq!(counts.0.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 }
