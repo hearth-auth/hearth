@@ -191,6 +191,27 @@ func (e V1ClientTrustLevel) Valid() bool {
 	}
 }
 
+// Defines values for V1PasswordEmailKind.
+const (
+	PASSWORDEMAILKINDRESET       V1PasswordEmailKind = "PASSWORD_EMAIL_KIND_RESET"
+	PASSWORDEMAILKINDSETUP       V1PasswordEmailKind = "PASSWORD_EMAIL_KIND_SETUP"
+	PASSWORDEMAILKINDUNSPECIFIED V1PasswordEmailKind = "PASSWORD_EMAIL_KIND_UNSPECIFIED"
+)
+
+// Valid indicates whether the value is a known member of the V1PasswordEmailKind enum.
+func (e V1PasswordEmailKind) Valid() bool {
+	switch e {
+	case PASSWORDEMAILKINDRESET:
+		return true
+	case PASSWORDEMAILKINDSETUP:
+		return true
+	case PASSWORDEMAILKINDUNSPECIFIED:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for V1RealmStatus.
 const (
 	REALMSTATUSACTIVE      V1RealmStatus = "REALM_STATUS_ACTIVE"
@@ -612,6 +633,12 @@ type V1OAuthClientPage struct {
 	NextCursor *string          `json:"next_cursor,omitempty"`
 }
 
+// V1PasswordEmailKind Which password email Hearth sent.
+//
+//   - PASSWORD_EMAIL_KIND_SETUP: The user has no password: the welcome email with a set-password link.
+//   - PASSWORD_EMAIL_KIND_RESET: The user has a password: the password-reset email.
+type V1PasswordEmailKind string
+
 // V1Realm A realm record.
 type V1Realm struct {
 	// Config Per-realm configuration overrides.
@@ -706,6 +733,15 @@ type V1ResolveEffectivePermissionsResponse struct {
 
 // V1RevokeConsentResponse defines model for v1RevokeConsentResponse.
 type V1RevokeConsentResponse = map[string]interface{}
+
+// V1SendPasswordEmailResponse The password email Hearth sent.
+type V1SendPasswordEmailResponse struct {
+	// Kind Which password email Hearth sent.
+	//
+	//  - PASSWORD_EMAIL_KIND_SETUP: The user has no password: the welcome email with a set-password link.
+	//  - PASSWORD_EMAIL_KIND_RESET: The user has a password: the password-reset email.
+	Kind *V1PasswordEmailKind `json:"kind,omitempty"`
+}
 
 // V1UpdateClientRequest Request to update an existing OAuth 2.0 client.
 type V1UpdateClientRequest struct {
@@ -1610,6 +1646,13 @@ type ClientInterface interface {
 	// IdentityAdminServiceUpdateUser performs a PATCH /admin/users/{id} (the `IdentityAdminServiceUpdateUser` operationId) request.
 	// Takes a body of the `application/json` content type.
 	IdentityAdminServiceUpdateUser(ctx context.Context, id string, body IdentityAdminServiceUpdateUserJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// IdentityAdminServiceSendPasswordEmail Emails the user a single-use link to choose a password: the welcome
+	// email with a set-password link when the user has no password, the reset
+	// email when the user has one. It counts against the user's reset limit.
+	//
+	// Corresponds with POST /admin/users/{id}/password-email (the `IdentityAdminServiceSendPasswordEmail` operationId).
+	IdentityAdminServiceSendPasswordEmail(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// AdminListUserPermissions List a user's direct permission grants
 	//
@@ -3008,6 +3051,23 @@ func (c *Client) IdentityAdminServiceUpdateUserWithBody(ctx context.Context, id 
 // Takes a body of the `application/json` content type.
 func (c *Client) IdentityAdminServiceUpdateUser(ctx context.Context, id string, body IdentityAdminServiceUpdateUserJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewIdentityAdminServiceUpdateUserRequest(c.Server, id, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// IdentityAdminServiceSendPasswordEmail Emails the user a single-use link to choose a password: the welcome
+// email with a set-password link when the user has no password, the reset
+// email when the user has one. It counts against the user's reset limit.
+//
+// Corresponds with POST /admin/users/{id}/password-email (the `IdentityAdminServiceSendPasswordEmail` operationId).
+func (c *Client) IdentityAdminServiceSendPasswordEmail(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewIdentityAdminServiceSendPasswordEmailRequest(c.Server, id)
 	if err != nil {
 		return nil, err
 	}
@@ -6039,6 +6099,40 @@ func NewIdentityAdminServiceUpdateUserRequestWithBody(server string, id string, 
 	return req, nil
 }
 
+// NewIdentityAdminServiceSendPasswordEmailRequest constructs an http.Request for the IdentityAdminServiceSendPasswordEmail method
+func NewIdentityAdminServiceSendPasswordEmailRequest(server string, id string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/users/%s/password-email", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewAdminListUserPermissionsRequest constructs an http.Request for the AdminListUserPermissions method
 func NewAdminListUserPermissionsRequest(server string, id string) (*http.Request, error) {
 	var err error
@@ -7318,6 +7412,15 @@ type ClientWithResponsesInterface interface {
 	// IdentityAdminServiceUpdateUserWithResponse performs a PATCH /admin/users/{id} (the `IdentityAdminServiceUpdateUser` operationId) request.
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	IdentityAdminServiceUpdateUserWithResponse(ctx context.Context, id string, body IdentityAdminServiceUpdateUserJSONRequestBody, reqEditors ...RequestEditorFn) (*IdentityAdminServiceUpdateUserResponse, error)
+
+	// IdentityAdminServiceSendPasswordEmailWithResponse Emails the user a single-use link to choose a password: the welcome
+	// email with a set-password link when the user has no password, the reset
+	// email when the user has one. It counts against the user's reset limit.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /admin/users/{id}/password-email (the `IdentityAdminServiceSendPasswordEmail` operationId).
+	IdentityAdminServiceSendPasswordEmailWithResponse(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*IdentityAdminServiceSendPasswordEmailResponse, error)
 
 	// AdminListUserPermissionsWithResponse List a user's direct permission grants
 	//
@@ -9976,6 +10079,54 @@ func (r IdentityAdminServiceUpdateUserResponse) ContentType() string {
 	return ""
 }
 
+type IdentityAdminServiceSendPasswordEmailResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *V1SendPasswordEmailResponse
+	// JSONDefault the response for an HTTP default `application/json` response
+	JSONDefault *RpcStatus
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r IdentityAdminServiceSendPasswordEmailResponse) GetJSON200() *V1SendPasswordEmailResponse {
+	return r.JSON200
+}
+
+// GetJSONDefault returns the response for an HTTP default `application/json` response
+func (r IdentityAdminServiceSendPasswordEmailResponse) GetJSONDefault() *RpcStatus {
+	return r.JSONDefault
+}
+
+// GetBody returns the raw response body bytes
+func (r IdentityAdminServiceSendPasswordEmailResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r IdentityAdminServiceSendPasswordEmailResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r IdentityAdminServiceSendPasswordEmailResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r IdentityAdminServiceSendPasswordEmailResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type AdminListUserPermissionsResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -11581,6 +11732,21 @@ func (c *ClientWithResponses) IdentityAdminServiceUpdateUserWithResponse(ctx con
 		return nil, err
 	}
 	return ParseIdentityAdminServiceUpdateUserResponse(rsp)
+}
+
+// IdentityAdminServiceSendPasswordEmailWithResponse Emails the user a single-use link to choose a password: the welcome
+// email with a set-password link when the user has no password, the reset
+// email when the user has one. It counts against the user's reset limit.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /admin/users/{id}/password-email (the `IdentityAdminServiceSendPasswordEmail` operationId).
+func (c *ClientWithResponses) IdentityAdminServiceSendPasswordEmailWithResponse(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*IdentityAdminServiceSendPasswordEmailResponse, error) {
+	rsp, err := c.IdentityAdminServiceSendPasswordEmail(ctx, id, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseIdentityAdminServiceSendPasswordEmailResponse(rsp)
 }
 
 // AdminListUserPermissionsWithResponse List a user's direct permission grants
@@ -13324,6 +13490,39 @@ func ParseIdentityAdminServiceUpdateUserResponse(rsp *http.Response) (*IdentityA
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest V1User
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest RpcStatus
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseIdentityAdminServiceSendPasswordEmailResponse parses an HTTP response from a IdentityAdminServiceSendPasswordEmailWithResponse call
+func ParseIdentityAdminServiceSendPasswordEmailResponse(rsp *http.Response) (*IdentityAdminServiceSendPasswordEmailResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &IdentityAdminServiceSendPasswordEmailResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest V1SendPasswordEmailResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

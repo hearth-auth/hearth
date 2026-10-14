@@ -21,7 +21,9 @@ fn html_escape(value: &str) -> String {
     out
 }
 
-/// Mints a password-reset token for `email` in `realm` **and delivers it**.
+/// Sends `user_id` the password email **and reports whether it left**: the
+/// `welcome` email for a user with no password, the reset email otherwise
+/// (OpenSpec `password-email`).
 ///
 /// The admin "send reset" actions used to mint a token, drop it on the floor
 /// and still report "Reset email sent" (audit 2026-08-28 §4.24#10). Every
@@ -30,39 +32,12 @@ fn html_escape(value: &str) -> String {
 /// success.
 ///
 /// `reason` is operator-facing text only — it never carries the token.
-fn deliver_password_reset(
+fn deliver_password_email(
     state: &WebState,
     realm_id: &crate::core::RealmId,
-    email: &str,
-) -> Result<(), String> {
-    let Some(email_service) = state.email.as_ref() else {
-        return Err(
-            "No email transport is configured, so no reset link could be sent.".to_string(),
-        );
-    };
-
-    let realm = match state.identity.get_realm(realm_id) {
-        Ok(Some(r)) => r,
-        Ok(None) => return Err("Realm not found.".to_string()),
-        Err(e) => {
-            tracing::warn!(error = %e, "deliver_password_reset: realm lookup failed");
-            return Err("Could not load the realm.".to_string());
-        }
-    };
-
-    let token = match state.identity.request_password_reset(realm_id, email) {
-        Ok(Some(token)) => token,
-        Ok(None) => {
-            // The address is not registered in this realm. The caller only
-            // ever passes an address it just read off a user record, so this
-            // is a genuine inconsistency, not enumeration resistance.
-            return Err("No account with that address exists in this realm.".to_string());
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "deliver_password_reset: request_password_reset failed");
-            return Err(format!("Could not create a reset link: {e}"));
-        }
-    };
+    user_id: &crate::core::UserId,
+) -> Result<crate::identity::PasswordEmailKind, String> {
+    use crate::protocol::password_email::{send_password_email, PasswordEmailError};
 
     let base = state
         .config
@@ -72,23 +47,35 @@ fn deliver_password_reset(
             || state.fallback_base_url(),
             |b| b.trim_end_matches('/').to_string(),
         );
-    let reset_url = format!(
-        "{base}/ui/realms/{}/reset-password?token={token}",
-        form_urlencoded::byte_serialize(realm.name().as_bytes()).collect::<String>()
-    );
-
-    let branding = realm.config().email_branding.clone();
-    let stored = realm
-        .config()
-        .email_templates
-        .get("password_reset")
-        .cloned();
-    email_service
-        .send_password_reset_email(email, &reset_url, branding.as_ref(), stored.as_ref(), None)
-        .map_err(|e| {
-            tracing::warn!(error = %e, "deliver_password_reset: transport rejected the message");
-            format!("The reset email could not be delivered: {e}")
-        })
+    send_password_email(
+        state.identity.as_ref(),
+        state.email.as_deref(),
+        &state.abuse_guards,
+        &base,
+        realm_id,
+        user_id,
+    )
+    .map_err(|e| {
+        tracing::warn!(
+            error = %crate::protocol::redact::sanitize_log_text(&e.to_string()),
+            "deliver_password_email: no email sent"
+        );
+        match e {
+            PasswordEmailError::NoTransport => {
+                "No email transport is configured, so no email could be sent.".to_string()
+            }
+            PasswordEmailError::OutboundCap => {
+                "The outbound email limit is reached. Try again later.".to_string()
+            }
+            PasswordEmailError::Identity(crate::identity::IdentityError::RateLimited) => {
+                "Too many password emails for this address. Try again later.".to_string()
+            }
+            PasswordEmailError::Identity(
+                crate::identity::IdentityError::AuthMethodNotAllowed { .. },
+            ) => "This realm does not allow password sign-in.".to_string(),
+            other => format!("The email could not be sent: {other}"),
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -912,9 +899,9 @@ pub async fn admin_user_detail(
 
     // Map flash query param to human-readable message
     let flash_message = params.flash.as_deref().map(|f| match f {
-        "reset_sent" => "Password reset email sent.".to_string(),
+        "reset_sent" => "Password email sent.".to_string(),
         "reset_send_failed" => {
-            "Password reset email could NOT be sent — check the email transport configuration \
+            "Password email could NOT be sent — check the email transport configuration \
              and the server log."
                 .to_string()
         }
@@ -1082,11 +1069,11 @@ pub async fn admin_user_send_reset(
     };
 
     let user_email = user.email().to_string();
-    // The action reports "Reset email sent" — so it must actually send one,
-    // and say so plainly when it cannot (audit 2026-08-28 §4.24#10).
-    let delivery = deliver_password_reset(&state, target.id(), &user_email);
+    // The action reports "email sent" — so it must actually send one, and
+    // say so plainly when it cannot (audit 2026-08-28 §4.24#10).
+    let delivery = deliver_password_email(&state, target.id(), &uid);
     match &delivery {
-        Ok(()) => {
+        Ok(_) => {
             tracing::info!(user_id = %uid, admin = %crate::identity::email::mask_email_address(&session.user_email), "admin triggered password reset");
         }
         Err(reason) => {
@@ -1096,17 +1083,21 @@ pub async fn admin_user_send_reset(
 
     if htmx.0 {
         let fragment = match &delivery {
-            Ok(()) => format!(
+            Ok(kind) => format!(
                 r#"<span class="inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-sm font-medium bg-success/[0.12] text-success-fg">
               <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
-              Reset email sent to {}
+              {} sent to {}
             </span>"#,
+                match kind {
+                    crate::identity::PasswordEmailKind::Setup => "Set-password email",
+                    crate::identity::PasswordEmailKind::Reset => "Reset email",
+                },
                 html_escape(&user_email)
             ),
             Err(reason) => format!(
                 r#"<span class="inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-sm font-medium bg-danger/[0.12] text-danger-fg">
               <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-              Reset email NOT sent — {}
+              Email NOT sent — {}
             </span>"#,
                 html_escape(reason)
             ),
@@ -2845,8 +2836,7 @@ pub async fn admin_users_bulk_action(
             for uid in &user_ids {
                 match state.identity.get_user(target.id(), uid) {
                     Ok(Some(user)) => {
-                        if let Err(reason) =
-                            deliver_password_reset(&state, target.id(), user.email())
+                        if let Err(reason) = deliver_password_email(&state, target.id(), user.id())
                         {
                             failed += 1;
                             tracing::warn!(reason = %reason, user_id = %uid.as_uuid(), "bulk send_invite failed");

@@ -55,6 +55,10 @@ pub(super) fn admin_api_routes() -> axum::Router<Arc<AppState>> {
                 .patch(admin_update_user)
                 .delete(admin_delete_user),
         )
+        .route(
+            "/users/{id}/password-email",
+            post(admin_send_password_email),
+        )
         .route("/realms", get(admin_list_realms).post(admin_create_realm))
         .route(
             "/realms/{id}",
@@ -1155,6 +1159,78 @@ async fn admin_update_user(
 }
 
 /// Admin: delete user by ID.
+/// `POST /admin/users/{id}/password-email` — `SendPasswordEmail` (OpenSpec
+/// `password-email`): the welcome email with a set-password link for a user
+/// with no password, the reset email for a user with one.
+async fn admin_send_password_email(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    use crate::protocol::password_email::{send_password_email, PasswordEmailError};
+
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+    if let Err(e) = require_admin_permission(&auth, "hearth.users.admin") {
+        return e.into_response();
+    }
+    let Ok(user_uuid) = id.parse::<uuid::Uuid>() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid user ID"})),
+        )
+            .into_response();
+    };
+    let uid = UserId::new(user_uuid);
+    if let Err(e) = require_user_admin_ceiling(&state, &auth, &auth.realm_id, &uid) {
+        return e.into_response();
+    }
+
+    let refused = |status: StatusCode, error: &str| {
+        (status, Json(serde_json::json!({ "error": error }))).into_response()
+    };
+    match send_password_email(
+        state.identity.as_ref(),
+        state.email.as_deref(),
+        &state.abuse_guards,
+        &state.public_base_url,
+        &auth.realm_id,
+        &uid,
+    ) {
+        Ok(kind) => {
+            let kind = match kind {
+                crate::identity::PasswordEmailKind::Setup => pb::PasswordEmailKind::Setup,
+                crate::identity::PasswordEmailKind::Reset => pb::PasswordEmailKind::Reset,
+            };
+            Json(pb::SendPasswordEmailResponse { kind: kind.into() }).into_response()
+        }
+        Err(PasswordEmailError::NoTransport) => refused(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no email transport is configured",
+        ),
+        Err(PasswordEmailError::OutboundCap) => refused(
+            StatusCode::TOO_MANY_REQUESTS,
+            "outbound email limit reached",
+        ),
+        Err(PasswordEmailError::Identity(
+            crate::identity::IdentityError::AuthMethodNotAllowed { .. },
+        )) => refused(
+            StatusCode::CONFLICT,
+            "password sign-in is disabled in this realm",
+        ),
+        Err(PasswordEmailError::Identity(e)) => identity_error_to_response(&e).into_response(),
+        Err(e) => {
+            tracing::warn!(
+                error = %crate::protocol::redact::sanitize_log_text(&e.to_string()),
+                "admin password email not delivered"
+            );
+            refused(StatusCode::BAD_GATEWAY, "the email could not be delivered")
+        }
+    }
+}
+
 async fn admin_delete_user(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

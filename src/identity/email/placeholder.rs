@@ -11,7 +11,7 @@
 //! |--------------------|-----------------------------------------------------|
 //! | `verification`     | `{{verification_url}}`                              |
 //! | `password_reset`   | `{{reset_url}}`                                     |
-//! | `welcome`          | `{{user_email}}`                                    |
+//! | `welcome`          | `{{user_email}}`, `{{set_password_url}}`            |
 //! | `invitation`       | `{{accept_url}}`, `{{org_name}}`, `{{inviter_email}}`|
 //!
 //! Common to all: `{{product_name}}`, `{{support_email}}`, `{{custom_footer_text}}`
@@ -32,7 +32,7 @@ pub fn allowed_placeholders(kind: &str) -> Option<Vec<&'static str>> {
     let extra: &[&str] = match kind {
         "verification" => &["{{verification_url}}"],
         "password_reset" => &["{{reset_url}}"],
-        "welcome" => &["{{user_email}}"],
+        "welcome" => &["{{user_email}}", "{{set_password_url}}"],
         "invitation" => &["{{accept_url}}", "{{org_name}}", "{{inviter_email}}"],
         _ => return None,
     };

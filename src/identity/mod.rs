@@ -129,12 +129,13 @@ pub use types::{
     DemoSeedOutcome, DemoSeedSpec, FederationLinkExport, ImportClientRequest, ImportUserRequest,
     InvitationStatus, MfaFactorExport, MfaProof, MigrationReport, Organization, OrganizationConfig,
     OrganizationInvitation, OrganizationMembership, OrganizationRole, OrganizationStatus, Page,
-    PasswordPolicy, PendingAuthorizationRequest, PreTokenWebhookConfig, PreTokenWebhookErrorPolicy,
-    RawCredential, Realm, RealmConfig, RealmQuotaConfig, RealmStatus, RegisterUserRequest,
-    RegisterUserResponse, RegistrationPolicy, RequiredAction, ScimMappingExport, ScimMappingKind,
-    Session, SessionContext, SessionLimitPolicy, SessionVersionConfig, UpdateOrganizationRequest,
-    UpdateRealmRequest, UpdateUserRequest, UpdateWebhookRequest, User, UserStatus,
-    VerificationOrigin, WebAuthnAttestationPolicy, Webhook,
+    PasswordEmail, PasswordEmailKind, PasswordPolicy, PendingAuthorizationRequest,
+    PreTokenWebhookConfig, PreTokenWebhookErrorPolicy, RawCredential, Realm, RealmConfig,
+    RealmQuotaConfig, RealmStatus, RegisterUserRequest, RegisterUserResponse, RegistrationPolicy,
+    RequiredAction, ScimMappingExport, ScimMappingKind, Session, SessionContext,
+    SessionLimitPolicy, SessionVersionConfig, UpdateOrganizationRequest, UpdateRealmRequest,
+    UpdateUserRequest, UpdateWebhookRequest, User, UserStatus, VerificationOrigin,
+    WebAuthnAttestationPolicy, Webhook,
 };
 pub use types::{
     AatClaims, AatResponse, AatToolPermission, Agent, AgentCredential, AgentCredentialKind,
@@ -1581,6 +1582,32 @@ pub trait IdentityEngine: Send + Sync {
         token: &str,
         new_password: &CleartextPassword,
     ) -> Result<UserId, IdentityError>;
+
+    /// Issues the password email an administrator sends a user (OpenSpec
+    /// `password-email`): a set-password link for a user with no password,
+    /// a reset link for a user with one.
+    ///
+    /// The token is redeemed by `reset_password_with_token`. The request
+    /// counts against the per-address reset limit, and it supersedes every
+    /// earlier link for the user.
+    ///
+    /// # Errors
+    ///
+    /// `UserNotFound` for an unknown user, `AuthMethodNotAllowed` when the
+    /// realm does not allow password sign-in, `RateLimited` past the limit.
+    fn request_password_email(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<PasswordEmail, IdentityError>;
+
+    /// The kind of a live password link, without spending it. `None` when
+    /// the token is unknown, used, superseded or expired.
+    fn password_link_kind(
+        &self,
+        realm_id: &RealmId,
+        token: &str,
+    ) -> Result<Option<PasswordEmailKind>, IdentityError>;
 
     // ===== Email verification (onboarding) =====
 

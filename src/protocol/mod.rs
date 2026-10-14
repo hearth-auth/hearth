@@ -14,6 +14,7 @@ pub mod convert;
 pub(crate) mod dev_accounts;
 pub mod error_codes;
 pub mod http;
+pub(crate) mod password_email;
 pub mod proto;
 pub mod redact;
 pub(crate) mod role_ceiling;

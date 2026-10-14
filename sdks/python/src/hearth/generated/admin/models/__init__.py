@@ -60,6 +60,7 @@ from .v1_create_user_request import V1CreateUserRequest
 from .v1_create_user_request_attributes import V1CreateUserRequestAttributes
 from .v1_empty import V1Empty
 from .v1_list_user_consents_response import V1ListUserConsentsResponse
+from .v1_password_email_kind import V1PasswordEmailKind
 from .v1_realm import V1Realm
 from .v1_realm_config import V1RealmConfig
 from .v1_realm_page import V1RealmPage
@@ -72,6 +73,7 @@ from .v1_resolve_effective_permissions_response import (
     V1ResolveEffectivePermissionsResponse,
 )
 from .v1_revoke_consent_response import V1RevokeConsentResponse
+from .v1_send_password_email_response import V1SendPasswordEmailResponse
 from .v1_update_client_request import V1UpdateClientRequest
 from .v1_update_user_request import V1UpdateUserRequest
 from .v1_update_user_request_attributes import V1UpdateUserRequestAttributes
@@ -138,6 +140,7 @@ __all__ = (
     "V1ListUserConsentsResponse",
     "V1OAuthClient",
     "V1OAuthClientPage",
+    "V1PasswordEmailKind",
     "V1Realm",
     "V1RealmConfig",
     "V1RealmPage",
@@ -146,6 +149,7 @@ __all__ = (
     "V1RegisterClientRequestTokenEndpointAuthMethod",
     "V1ResolveEffectivePermissionsResponse",
     "V1RevokeConsentResponse",
+    "V1SendPasswordEmailResponse",
     "V1UpdateClientRequest",
     "V1UpdateUserRequest",
     "V1UpdateUserRequestAttributes",

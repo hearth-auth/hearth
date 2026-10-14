@@ -190,6 +190,41 @@ Permanently deletes the user and cascades to their sessions, credentials, organi
 
 ---
 
+### Send a password email
+
+`POST /admin/users/{id}/password-email`
+
+Emails the user a single-use link to choose a password. Use it after you create a user without a password, for example through `POST /admin/users` or SCIM. It needs `hearth.users.admin`, and the caller must outrank the user (the same ceiling as `PATCH`). The request has no body.
+
+- A user with no password gets the `welcome` email. Its set-password link lives for the realm's `auth.token.set_password_token_ttl` (default `72h`).
+- A user with a password gets the password reset email. Its link lives for `auth.token.password_reset_token_ttl` (default `30m`).
+
+The link opens the realm's reset page, `/ui/realms/{realm}/reset-password`, under `onboarding.base_url` (or the server's public URL). A new link replaces the user's earlier one. The request counts against the per-address reset limit, which self-service "forgot password" also uses: 3 links per 15 minutes.
+
+**Response (200 OK):**
+
+```json
+{ "kind": "PASSWORD_EMAIL_KIND_SETUP" }
+```
+
+`kind` is `PASSWORD_EMAIL_KIND_SETUP` (the welcome email) or `PASSWORD_EMAIL_KIND_RESET` (the reset email).
+
+**Error responses:**
+
+| Status | Cause |
+|---|---|
+| `400` | The ID is not a UUID |
+| `403` | The caller lacks `hearth.users.admin`, or the user outranks the caller |
+| `404` | No such user in the realm |
+| `409` | The realm does not allow password sign-in (`realms.<name>.auth.allowed_auth_methods`) |
+| `429` | The per-address reset limit, or an outbound email cap (A-4, A-50) |
+| `502` | The email transport refused the message |
+| `503` | No email transport is configured |
+
+SDKs: `sendPasswordEmail` (TypeScript, PHP), `SendPasswordEmail` (Go), `send_password_email` (Python). The console's **Send reset email** and bulk **Send invite** actions send the same emails.
+
+---
+
 ### Bulk import
 
 `POST /admin/users/import`

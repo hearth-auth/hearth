@@ -15,6 +15,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   (`realm_mismatch`); an unknown realm name is `404`. `meta.location` and the `Location` header
   use the base URL the request used. `/scim/v2` with `X-Realm-ID` still works. The SCIM guide now
   recommends the realm path.
+- **`POST /admin/users/{id}/password-email`: let a user choose a password.** An application that
+  creates users through the admin API or SCIM can now email the user a single-use link. A user
+  with no password gets the `welcome` email with a set-password link; a user with a password gets
+  the reset email. The response names the kind (`PASSWORD_EMAIL_KIND_SETUP` or
+  `PASSWORD_EMAIL_KIND_RESET`). It needs `hearth.users.admin` and the admin ceiling, and shares the
+  reset limit (3 per address per 15 minutes) and the outbound email caps. The SDKs add
+  `sendPasswordEmail` (TypeScript, PHP), `SendPasswordEmail` (Go) and `send_password_email`
+  (Python).
+- **`realms.<name>.auth.token.set_password_token_ttl`** (default `72h`, capped at `7d` unless
+  `allow_unsafe_ttl: true`): the lifetime of the set-password link. A reset link keeps
+  `password_reset_token_ttl` (default `30m`).
+- **A built-in `welcome` email template** with the `{{set_password_url}}` and `{{user_email}}`
+  placeholders. The `welcome` kind of `email_templates` existed, but Hearth never sent it.
 
 ### Changed
 - **BREAKING: entity IDs are bare UUIDs everywhere.** A user's access, refresh and ID tokens
@@ -31,6 +44,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 - **BREAKING (Go SDK): the module path is `github.com/hearth-auth/hearth/sdks/go/v4`.** The SDKs
   move to 4.0 with the server, and Go installs a v4 release only from a `/v4` module path. Change
   each import from `.../sdks/go/v3/...` to `.../sdks/go/v4/...`.
+- **The console's "Send reset email" and bulk "Send invite" actions send the welcome email to a
+  user with no password**, with the 72-hour set-password link, instead of a 30-minute reset link.
+  They now also apply the outbound email caps (A-4, A-50). The reset page says "Set your password"
+  for a set-password link.
 
 ## [1.0.1 – 3.5.13] — 2026-06-23 to 2026-10-14
 

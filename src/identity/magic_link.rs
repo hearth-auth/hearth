@@ -23,6 +23,10 @@ pub(crate) const MAGIC_LINK_EXPIRY_MICROS: i64 = 15 * 60 * 1_000_000;
 /// Password reset token expiry: 30 minutes in microseconds.
 pub(crate) const PASSWORD_RESET_EXPIRY_MICROS: i64 = 30 * 60 * 1_000_000;
 
+/// Set-password link expiry: 72 hours in microseconds (the `welcome` email an
+/// administrator sends a user with no password).
+pub(crate) const SET_PASSWORD_EXPIRY_MICROS: i64 = 72 * 3_600 * 1_000_000;
+
 /// Number of random bytes for a magic link token.
 pub(crate) const MAGIC_LINK_TOKEN_BYTES: usize = 32;
 
@@ -57,6 +61,20 @@ pub(crate) struct StoredPasswordReset {
     pub created_at_micros: i64,
     /// Whether this token has already been used.
     pub used: bool,
+    /// Why the link exists. Records written before the field read as a reset.
+    #[serde(default)]
+    pub purpose: PasswordLinkPurpose,
+}
+
+/// Why a password link exists; it selects the link's lifetime.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PasswordLinkPurpose {
+    /// A reset of an existing password.
+    #[default]
+    Reset,
+    /// A first password for a user who has none.
+    Setup,
 }
 
 /// Zeroize-on-drop wrapper for a magic link token plaintext.

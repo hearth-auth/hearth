@@ -401,6 +401,20 @@ async fn admin_send_reset_actually_delivers_email() {
         "the reset email must carry a reset link; body was: {}",
         rig.inbox.last_body()
     );
+
+    // A user with a password gets a page that says "Reset your password".
+    let body = rig.inbox.last_body();
+    let token: String = body
+        .split("reset-password?token=")
+        .nth(1)
+        .map(|rest| {
+            rest.chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                .collect()
+        })
+        .expect("a reset link");
+    let page = reset_page(&rig.app, "/ui/realms/acme/reset-password", &token).await;
+    assert!(page.contains("Reset your password"), "{page}");
 }
 
 #[tokio::test]
@@ -434,6 +448,99 @@ async fn admin_bulk_send_invite_actually_delivers_email() {
         vec!["one@acme.test".to_string(), "two@acme.test".to_string()],
         "bulk send_invite reports 'invited' — it must actually send (audit §4.24#10)"
     );
+}
+
+/// A user with no password gets the `welcome` email with a set-password link
+/// from the bulk "Send invite" action, not a reset email for a password the
+/// user never had (OpenSpec change `admin-password-email`).
+#[tokio::test]
+async fn admin_bulk_send_invite_welcomes_a_user_without_a_password() {
+    let rig = build_rig(None);
+    let user = rig
+        .identity
+        .create_user(
+            &rig.realm_id,
+            &CreateUserRequest {
+                email: "newcomer@acme.test".to_string(),
+                display_name: "Newcomer".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("create user");
+    let cookie = admin_cookie(&rig, "csrf-admin");
+
+    let body = format!(
+        "_csrf=csrf-admin&bulk_action=send_invite&ids={}",
+        user.id().as_uuid()
+    );
+    let (status, _) = post_form_authed(
+        &rig.app,
+        "/ui/admin/realms/acme/users/bulk-action",
+        &cookie,
+        &body,
+    )
+    .await;
+    assert!(
+        status.is_success() || status.is_redirection(),
+        "got {status}"
+    );
+
+    assert_eq!(
+        rig.inbox.recipients(),
+        vec!["newcomer@acme.test".to_string()]
+    );
+    let sent = rig.inbox.last_body();
+    assert!(
+        sent.contains("reset-password?token="),
+        "the welcome email carries the set-password link: {sent}"
+    );
+    #[allow(clippy::unwrap_used)]
+    let subject = rig
+        .inbox
+        .messages
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .subject
+        .clone();
+    assert!(
+        subject.to_lowercase().contains("welcome"),
+        "the welcome email, not the reset email: subject {subject:?}"
+    );
+
+    // The link opens a page that says "Set your password", not "Reset".
+    let token = sent
+        .split("reset-password?token=")
+        .nth(1)
+        .map(|rest| {
+            rest.chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                .collect::<String>()
+        })
+        .expect("a set-password link");
+    let page = reset_page(&rig.app, "/ui/realms/acme/reset-password", &token).await;
+    assert!(page.contains("Set your password"), "{page}");
+    assert!(!page.contains("Reset your password"), "{page}");
+}
+
+/// The reset page a browser gets after the link's first GET moved `token`
+/// into the link-token cookie.
+async fn reset_page(app: &axum::Router, uri: &str, token: &str) -> String {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header(header::COOKIE, link_cookie(token))
+                .body(Body::empty())
+                .expect("build GET"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.expect("body");
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 // ── §4.24#7 — the admin reset link must point at a live route ────────────────

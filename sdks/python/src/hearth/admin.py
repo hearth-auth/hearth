@@ -64,6 +64,7 @@ from .generated.admin.api.identity_admin_service import (
     identity_admin_service_get_user,
     identity_admin_service_list_realms,
     identity_admin_service_list_users,
+    identity_admin_service_send_password_email,
     identity_admin_service_update_user,
 )
 from .generated.admin.client import Client as _GeneratedClient
@@ -169,6 +170,18 @@ class AdminClient:
     def delete_user(self, user_id: str) -> None:
         """Delete a user."""
         self._send(identity_admin_service_delete_user, _NO_CONTENT, id=user_id)
+
+    def send_password_email(self, user_id: str) -> str:
+        """Email the user a single-use link to choose a password.
+
+        ``POST /admin/users/{id}/password-email``: the welcome email for a user
+        with no password, the reset email for a user with one. Returns the kind
+        the server sent, ``PASSWORD_EMAIL_KIND_SETUP`` or
+        ``PASSWORD_EMAIL_KIND_RESET``.
+        """
+        resp = self._send(identity_admin_service_send_password_email, _OK, id=user_id)
+        body = self._decode(_gen.V1SendPasswordEmailResponse, resp)
+        return str(body.get("kind", "PASSWORD_EMAIL_KIND_UNSPECIFIED"))
 
     # ------------------------------------------------------------------
     # Realms

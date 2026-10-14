@@ -4129,6 +4129,9 @@ impl ForgotPasswordSentTemplate {
 struct ResetPasswordTemplate {
     /// [`link_token::link_binding`] of the stashed reset token.
     link_binding: String,
+    /// The link sets a first password (the `welcome` email), so the page
+    /// says "Set your password", not "Reset your password".
+    setup: bool,
     error: Option<String>,
     form_action: String,
     chrome: bool,
@@ -4154,6 +4157,7 @@ impl ResetPasswordTemplate {
     ) -> Self {
         Self {
             link_binding,
+            setup: false,
             error,
             form_action: format!("{action_prefix}/reset-password"),
             chrome: false,
@@ -4518,6 +4522,7 @@ fn reset_password_form_impl(
                 &state,
                 &realm,
                 &action_prefix,
+                Some(&token),
                 binding,
                 None,
             ))
@@ -4527,6 +4532,7 @@ fn reset_password_form_impl(
                 &state,
                 &realm,
                 &action_prefix,
+                None,
                 String::new(),
                 Some("Missing or invalid reset link.".to_string()),
             ),
@@ -4540,6 +4546,7 @@ fn reset_template(
     state: &WebState,
     realm: &Realm,
     action_prefix: &str,
+    token: Option<&str>,
     link_binding: String,
     error: Option<String>,
 ) -> ResetPasswordTemplate {
@@ -4550,6 +4557,13 @@ fn reset_template(
         state.product_name.clone(),
         state.logo_url.clone(),
     );
+    // The lookup does not spend the link; a failed lookup keeps the reset title.
+    tmpl.setup = token.is_some_and(|t| {
+        matches!(
+            state.identity.password_link_kind(realm.id(), t),
+            Ok(Some(crate::identity::PasswordEmailKind::Setup))
+        )
+    });
     tmpl.realm_theme_url = state.realm_theme_url_for(realm.id());
     tmpl.inline_theme_css = state.inline_theme_css();
     tmpl
@@ -4631,6 +4645,7 @@ fn reset_prepare(
                 state,
                 &realm,
                 &action_prefix,
+                None,
                 String::new(),
                 Some(RESET_LINK_INVALID.to_string()),
             ),
@@ -4642,6 +4657,7 @@ fn reset_prepare(
             state,
             &realm,
             &action_prefix,
+            Some(&token),
             form.link_binding.clone(),
             Some(msg),
         ))
@@ -4744,6 +4760,7 @@ fn reset_password_submit_impl(
             &state,
             &realm,
             &action_prefix,
+            Some(&token),
             binding,
             Some(msg),
         ))

@@ -1,0 +1,10 @@
+{% extends "email/base.html" %}
+{% block title %}Welcome to {{ product_name }}{% endblock %}
+{% block content %}
+<p>An account for {{ user_email }} is ready. Click the button below to set your password.</p>
+<div class="btn-wrapper">
+  <a href="{{ set_password_url }}" class="btn">Set your password</a>
+</div>
+<p class="url-fallback">If the button doesn't work, copy and paste this URL into your browser:<br>{{ set_password_url }}</p>
+<p>The link works once. If you did not expect this account, you can ignore this message.</p>
+{% endblock %}

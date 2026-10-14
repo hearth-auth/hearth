@@ -294,6 +294,8 @@ realms:
         access_token_ttl: "30m"
         refresh_token_ttl: "14d"
         password_reset_token_ttl: "1h"
+        # The set-password link in the welcome email (default 72h, cap 7d).
+        set_password_token_ttl: "72h"
       rate_limit:
         max_failed_logins: 5
         lockout_duration: "15m"

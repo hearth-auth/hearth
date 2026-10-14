@@ -238,3 +238,35 @@ pub struct MigrationReport {
     /// Non-fatal issues encountered during the import.
     pub warnings: Vec<String>,
 }
+
+/// Which password email an administrator's request sends (OpenSpec
+/// `password-email`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PasswordEmailKind {
+    /// The user has no password: the `welcome` email with a set-password link.
+    Setup,
+    /// The user has a password: the password-reset email.
+    Reset,
+}
+
+/// A password email ready to send: its kind, the address, and the one-time
+/// link token. `Debug` does not show the token.
+pub struct PasswordEmail {
+    /// Which email to send.
+    pub kind: PasswordEmailKind,
+    /// The user's address.
+    pub email: String,
+    /// The link token, shown once.
+    pub token: String,
+}
+
+impl std::fmt::Debug for PasswordEmail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PasswordEmail")
+            .field("kind", &self.kind)
+            .field("email", &"<redacted>")
+            .field("token", &"<redacted>")
+            .finish()
+    }
+}

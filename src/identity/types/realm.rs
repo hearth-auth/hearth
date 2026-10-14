@@ -372,6 +372,13 @@ pub struct RealmConfig {
     /// 30 minutes unless `allow_unsafe_ttl` is also set in the realm's YAML.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub magic_link_ttl_micros: Option<i64>,
+    /// Per-realm set-password link TTL in microseconds, for the `welcome`
+    /// email an administrator sends a user with no password.
+    ///
+    /// `None` falls back to the compiled default (72 hours). Hard-capped at
+    /// 7 days unless `allow_unsafe_ttl` is also set in the realm's YAML.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set_password_token_ttl_micros: Option<i64>,
     /// Per-realm device authorization code TTL in seconds (HSEC-008).
     ///
     /// `None` falls back to the compiled default (600 seconds / 10 minutes).

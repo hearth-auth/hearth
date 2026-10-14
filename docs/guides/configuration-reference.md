@@ -1254,8 +1254,9 @@ Per-realm authentication policy. These are policy declarations stored in `RealmC
 | `refresh_token_ttl` | duration | inherits `token.refresh_token_ttl` | Per-realm refresh token lifetime. |
 | `password_reset_token_ttl` | duration | `"30m"` | Per-realm password reset token lifetime. Hard-capped at `1h` unless `allow_unsafe_ttl: true`. |
 | `magic_link_ttl` | duration | `"15m"` | Per-realm magic link token lifetime. Hard-capped at `30m` unless `allow_unsafe_ttl: true`. |
+| `set_password_token_ttl` | duration | `"72h"` | Lifetime of the set-password link in the `welcome` email, which `POST /admin/users/{id}/password-email` sends to a user with no password. Hard-capped at `7d` unless `allow_unsafe_ttl: true`. A user with a password gets the reset email, which uses `password_reset_token_ttl`. |
 | `device_code_ttl` | duration | `"10m"` | Per-realm device authorization code TTL (RFC 8628 / HSEC-008). Hard-capped at `30m` unless `allow_unsafe_ttl: true`. Only applies to clients with `device_code` in their `grant_types`. |
-| `allow_unsafe_ttl` | bool | `false` | Lift the A-14/HSEC-008 TTL hard caps for this realm. When `true`, `password_reset_token_ttl` may exceed 1 hour, `magic_link_ttl` may exceed 30 minutes, and `device_code_ttl` may exceed 30 minutes. Operators accept the additional token-theft window by enabling this flag. Never enable without a documented operational justification. |
+| `allow_unsafe_ttl` | bool | `false` | Lift the A-14/HSEC-008 TTL hard caps for this realm. When `true`, `password_reset_token_ttl` may exceed 1 hour, `magic_link_ttl` may exceed 30 minutes, `set_password_token_ttl` may exceed 7 days, and `device_code_ttl` may exceed 30 minutes. Operators accept the additional token-theft window by enabling this flag. Never enable without a documented operational justification. |
 
 #### `realms.<name>.auth.rate_limit`
 
@@ -2165,6 +2166,7 @@ Every field's default value at a glance.
 | `realms.<name>.breach_check` | `timeout_ms` | `3000` |
 | `realms.<name>.auth.token` | `password_reset_token_ttl` | `"30m"` |
 | `realms.<name>.auth.token` | `magic_link_ttl` | `"15m"` |
+| `realms.<name>.auth.token` | `set_password_token_ttl` | `"72h"` |
 | `realms.<name>.auth.token` | `device_code_ttl` | `"10m"` |
 | `realms.<name>.auth.token` | `allow_unsafe_ttl` | `false` |
 | `realms.<name>.federation.providers.<idp>` | `leeway_seconds` | `60` |

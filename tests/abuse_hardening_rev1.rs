@@ -458,6 +458,46 @@ fn a14_valid_ttls_are_parsed_correctly() {
     );
 }
 
+fn realm_yaml_with_set_password_ttl(ttl: &str, allow_unsafe_ttl: bool) -> RealmYamlConfig {
+    RealmYamlConfig {
+        auth: Some(RealmAuthYaml {
+            token: Some(RealmTokenYaml {
+                set_password_token_ttl: Some(ttl.to_string()),
+                allow_unsafe_ttl,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// `set_password_token_ttl` parses to µs, and 7 days is the A-14 cap
+/// (OpenSpec change `admin-password-email`).
+#[test]
+fn a14_set_password_ttl_is_parsed_and_capped_at_7_days() {
+    let cfg = realm_yaml_with_set_password_ttl("7d", false)
+        .to_realm_config("test", &AuthConfig::default(), None)
+        .expect("7d is at the cap");
+    assert_eq!(
+        cfg.set_password_token_ttl_micros,
+        Some(7 * 24 * 3_600 * 1_000_000)
+    );
+
+    let errs = realm_yaml_with_set_password_ttl("8d", false)
+        .to_realm_config("test", &AuthConfig::default(), None)
+        .expect_err("8d without allow_unsafe_ttl");
+    assert!(
+        errs.iter()
+            .any(|e| format!("{e:?}").contains("set_password_token_ttl")),
+        "error must identify the field: {errs:?}"
+    );
+
+    realm_yaml_with_set_password_ttl("30d", true)
+        .to_realm_config("test", &AuthConfig::default(), None)
+        .expect("allow_unsafe_ttl lifts the cap");
+}
+
 /// Retires `realm_id` so `delete_realm` will accept it.
 ///
 /// The archival gate lives in `delete_realm` rather than in each protocol

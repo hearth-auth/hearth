@@ -102,6 +102,29 @@ struct PasswordResetText<'a> {
 }
 
 #[derive(Template)]
+#[template(path = "email/welcome.html")]
+struct WelcomeHtml<'a> {
+    set_password_url: &'a str,
+    user_email: &'a str,
+    product_name: &'a str,
+    logo_url: &'a Option<String>,
+    logo_svg_inline: &'a Option<String>,
+    accent_color: &'a str,
+    support_email: &'a Option<String>,
+    custom_footer_text: &'a Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "email/welcome.txt")]
+struct WelcomeText<'a> {
+    set_password_url: &'a str,
+    user_email: &'a str,
+    product_name: &'a str,
+    support_email: &'a Option<String>,
+    custom_footer_text: &'a Option<String>,
+}
+
+#[derive(Template)]
 #[template(path = "email/test.html")]
 struct TestHtml<'a> {
     product_name: &'a str,
@@ -302,6 +325,52 @@ pub(crate) fn render_password_reset(
         })?;
         let text_str = text.render().map_err(|e| EmailError::Template {
             reason: format!("askama render password_reset.txt failed: {e}"),
+        })?;
+        (html_str, text_str)
+    };
+
+    Ok(EmailMessage {
+        to: String::new(), // Caller sets this
+        subject,
+        text_body,
+        html_body,
+    })
+}
+
+/// Renders the `welcome` email: the account is ready, set a password.
+pub(crate) fn render_welcome(
+    url: &str,
+    user_email: &str,
+    branding: &ResolvedBranding,
+    custom: Option<&tera::Tera>,
+) -> Result<EmailMessage, EmailError> {
+    let subject = format!("Welcome to {}", branding.product_name);
+
+    let (html_body, text_body) = if let Some(tera) = custom {
+        render_tera_pair(tera, "welcome", url, "set_password_url", branding)?
+    } else {
+        let html = WelcomeHtml {
+            set_password_url: url,
+            user_email,
+            product_name: &branding.product_name,
+            logo_url: &branding.logo_url,
+            logo_svg_inline: &branding.logo_svg_inline,
+            accent_color: &branding.accent_color,
+            support_email: &branding.support_email,
+            custom_footer_text: &branding.custom_footer_text,
+        };
+        let text = WelcomeText {
+            set_password_url: url,
+            user_email,
+            product_name: &branding.product_name,
+            support_email: &branding.support_email,
+            custom_footer_text: &branding.custom_footer_text,
+        };
+        let html_str = html.render().map_err(|e| EmailError::Template {
+            reason: format!("askama render welcome.html failed: {e}"),
+        })?;
+        let text_str = text.render().map_err(|e| EmailError::Template {
+            reason: format!("askama render welcome.txt failed: {e}"),
         })?;
         (html_str, text_str)
     };

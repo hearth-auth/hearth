@@ -115,6 +115,19 @@ export class AdminClient {
     await unwrap(this.api.DELETE("/admin/users/{id}", { params: { path: { id: userId } } }));
   }
 
+  /**
+   * POST /admin/users/:id/password-email — email the user a single-use link
+   * to choose a password: the welcome email for a user with no password, the
+   * reset email for a user with one. Returns the kind the server sent,
+   * `PASSWORD_EMAIL_KIND_SETUP` or `PASSWORD_EMAIL_KIND_RESET`.
+   */
+  async sendPasswordEmail(userId: string): Promise<string> {
+    const res = await unwrap(
+      this.api.POST("/admin/users/{id}/password-email", { params: { path: { id: userId } } }),
+    );
+    return res.kind ?? "PASSWORD_EMAIL_KIND_UNSPECIFIED";
+  }
+
   // === Realms ===
   //
   // Realms are provisioned via hearth.yaml, not the admin API. There is no

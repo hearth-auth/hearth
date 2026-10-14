@@ -2138,6 +2138,11 @@ pub struct RealmTokenYaml {
     /// Defaults to 15 minutes when absent. Hard-capped at 30 minutes (A-14).
     #[serde(default)]
     pub magic_link_ttl: Option<String>,
+    /// Set-password link TTL as a duration string (e.g. `"72h"`), for the
+    /// `welcome` email an administrator sends a user with no password.
+    /// Defaults to 72 hours when absent. Hard-capped at 7 days (A-14).
+    #[serde(default)]
+    pub set_password_token_ttl: Option<String>,
     /// Lift A-14 TTL hard caps for this realm.
     ///
     /// When `true`, `password_reset_token_ttl` may exceed 1 hour and
@@ -3294,6 +3299,11 @@ impl RealmYamlConfig {
             .and_then(|t| t.magic_link_ttl.as_deref())
             .and_then(|s| parse_duration_to_micros(s).ok());
 
+        let set_password_token_ttl_micros = auth
+            .and_then(|a| a.token.as_ref())
+            .and_then(|t| t.set_password_token_ttl.as_deref())
+            .and_then(|s| parse_duration_to_micros(s).ok());
+
         let device_code_ttl_secs_parsed = auth
             .and_then(|a| a.token.as_ref())
             .and_then(|t| t.device_code_ttl.as_deref())
@@ -3333,6 +3343,7 @@ impl RealmYamlConfig {
         // --- A-14: TTL hard caps (fail-closed unless allow_unsafe_ttl) -----
         const PASSWORD_RESET_TTL_CAP_MICROS: i64 = 3_600 * 1_000_000; // 1 hour
         const MAGIC_LINK_TTL_CAP_MICROS: i64 = 1_800 * 1_000_000; // 30 minutes
+        const SET_PASSWORD_TTL_CAP_MICROS: i64 = 7 * 24 * 3_600 * 1_000_000; // 7 days
 
         if let Some(pr_ttl) = password_reset_token_ttl_micros {
             if pr_ttl > PASSWORD_RESET_TTL_CAP_MICROS && !allow_unsafe_ttl {
@@ -3340,6 +3351,16 @@ impl RealmYamlConfig {
                     field: "auth.token.password_reset_token_ttl".to_string(),
                     value: format!("{pr_ttl}µs"),
                     reason: "exceeds 1h hard cap (A-14); set auth.token.allow_unsafe_ttl: true to override"
+                        .to_string(),
+                });
+            }
+        }
+        if let Some(sp_ttl) = set_password_token_ttl_micros {
+            if sp_ttl > SET_PASSWORD_TTL_CAP_MICROS && !allow_unsafe_ttl {
+                errors.push(RegistryError::InvalidRealmConfigField {
+                    field: "auth.token.set_password_token_ttl".to_string(),
+                    value: format!("{sp_ttl}µs"),
+                    reason: "exceeds 7d hard cap (A-14); set auth.token.allow_unsafe_ttl: true to override"
                         .to_string(),
                 });
             }
@@ -3671,6 +3692,7 @@ impl RealmYamlConfig {
             refresh_token_ttl_micros,
             password_reset_token_ttl_micros,
             magic_link_ttl_micros: magic_link_ttl_micros_parsed,
+            set_password_token_ttl_micros,
             device_code_ttl_secs: device_code_ttl_secs_parsed,
             max_failed_logins,
             lockout_duration_micros,

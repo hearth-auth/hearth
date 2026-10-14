@@ -106,8 +106,8 @@ fn validate_agent_capabilities(caps: &[String]) -> Result<(), crate::identity::I
 }
 
 use crate::identity::magic_link::{
-    self, MagicLinkResponse, StoredMagicLink, StoredPasswordReset, MAGIC_LINK_EXPIRY_MICROS,
-    PASSWORD_RESET_EXPIRY_MICROS,
+    self, MagicLinkResponse, PasswordLinkPurpose, StoredMagicLink, StoredPasswordReset,
+    MAGIC_LINK_EXPIRY_MICROS, PASSWORD_RESET_EXPIRY_MICROS, SET_PASSWORD_EXPIRY_MICROS,
 };
 
 /// Enforces token size caps per openspec/specs/rbac-model/spec.md.
@@ -3116,6 +3116,86 @@ impl EmbeddedIdentityEngine {
                 tracing::warn!(error = %e, "failed to persist rate-limit tracker");
             }
         }
+    }
+
+    /// Issues a password link for `user_id`, stores it, and records the
+    /// request against the address's reset limit. Issuing a link supersedes
+    /// every earlier one: the watermark is written first, and only a token
+    /// stamped at or after it is redeemable (audit 2026-08-28 §4.24#1).
+    /// Returns the plaintext token, shown once.
+    fn issue_password_link(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        normalized_email: &str,
+        purpose: PasswordLinkPurpose,
+    ) -> Result<String, IdentityError> {
+        let token = magic_link::generate_magic_link_token()?;
+        let token_hash = Self::sha256_hex(token.as_str().as_bytes());
+
+        let now = self.clock.now().as_micros();
+        self.set_password_reset_watermark(realm_id, user_id, now)?;
+        let stored = StoredPasswordReset {
+            email: normalized_email.to_string(),
+            user_id: user_id.as_uuid().to_string(),
+            created_at_micros: now,
+            used: false,
+            purpose,
+        };
+        let stored_bytes =
+            serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        let key = keys::encode_password_reset_token(&token_hash);
+        self.storage
+            .put(realm_id, &key, &stored_bytes)
+            .map_err(Self::storage_err)?;
+
+        self.record_password_reset_request(realm_id, normalized_email);
+        Ok(token.as_str().to_string())
+    }
+
+    /// The lifetime of a password link: the realm's TTL for its purpose,
+    /// else 30 minutes for a reset and 72 hours for a set-password link.
+    fn password_link_ttl_micros(&self, realm_id: &RealmId, purpose: PasswordLinkPurpose) -> i64 {
+        let realm = self.get_realm(realm_id).ok().flatten();
+        let config = realm.as_ref().map(crate::identity::Realm::config);
+        match purpose {
+            PasswordLinkPurpose::Reset => config
+                .and_then(|c| c.password_reset_token_ttl_micros)
+                .unwrap_or(PASSWORD_RESET_EXPIRY_MICROS),
+            PasswordLinkPurpose::Setup => config
+                .and_then(|c| c.set_password_token_ttl_micros)
+                .unwrap_or(SET_PASSWORD_EXPIRY_MICROS),
+        }
+    }
+
+    /// Whether a stored password link would redeem now: unused, not
+    /// superseded, issued for the user's current address, and not expired.
+    /// It reads only; redemption repeats every check under its lock.
+    fn password_link_is_live(
+        &self,
+        realm_id: &RealmId,
+        stored: &StoredPasswordReset,
+    ) -> Result<bool, IdentityError> {
+        if stored.used {
+            return Ok(false);
+        }
+        let Ok(uuid) = uuid::Uuid::parse_str(&stored.user_id) else {
+            return Ok(false);
+        };
+        let user_id = UserId::new(uuid);
+        if stored.created_at_micros < self.password_reset_watermark(realm_id, &user_id)? {
+            return Ok(false);
+        }
+        let Some(user) = self.get_user(realm_id, &user_id)? else {
+            return Ok(false);
+        };
+        if !user.email().eq_ignore_ascii_case(&stored.email) {
+            return Ok(false);
+        }
+        let age = self.clock.now().as_micros() - stored.created_at_micros;
+        Ok(age <= self.password_link_ttl_micros(realm_id, stored.purpose))
     }
 
     // ===== Self-service registration rate limiting helpers =====
@@ -11351,37 +11431,77 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Ok(None);
         };
 
-        // 4. Generate random token (reuse magic link token generator)
-        let token = magic_link::generate_magic_link_token()?;
-
-        // 5. SHA-256 hash the token
-        let token_hash = Self::sha256_hex(token.as_str().as_bytes());
-
-        // 6. Store the password reset record. Issuing a link supersedes every
-        //    earlier one: the watermark is written first, and only a token
-        //    stamped at or after it is redeemable (audit 2026-08-28 §4.24#1).
-        let now = self.clock.now().as_micros();
-        self.set_password_reset_watermark(realm_id, user.id(), now)?;
-        let stored = StoredPasswordReset {
-            email: normalized.clone(),
-            user_id: user.id().as_uuid().to_string(),
-            created_at_micros: now,
-            used: false,
-        };
-        let stored_bytes =
-            serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
-                reason: e.to_string(),
-            })?;
-        let key = keys::encode_password_reset_token(&token_hash);
-        self.storage
-            .put(realm_id, &key, &stored_bytes)
-            .map_err(Self::storage_err)?;
-
-        // 7. Record rate limit event
-        self.record_password_reset_request(realm_id, &normalized);
+        // 4-7. Issue and store the link, and record the request.
+        let token =
+            self.issue_password_link(realm_id, user.id(), &normalized, PasswordLinkPurpose::Reset)?;
 
         // 8. Return plaintext token (shown once)
-        Ok(Some(token.as_str().to_string()))
+        Ok(Some(token))
+    }
+
+    fn request_password_email(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<crate::identity::PasswordEmail, IdentityError> {
+        use crate::identity::{PasswordEmail, PasswordEmailKind};
+
+        self.require_active_realm(realm_id)?;
+        let user = self
+            .get_user(realm_id, user_id)?
+            .ok_or(IdentityError::UserNotFound)?;
+        // A link to a password the realm refuses to accept leads nowhere.
+        self.check_allowed_auth_method(realm_id, "password")?;
+        let normalized = validation::validate_email(user.email())?;
+        // The same per-address limit as self-service reset.
+        self.check_password_reset_rate_limit(realm_id, &normalized)?;
+
+        // The stored credential itself: `has_password_credential` also
+        // consults the realm's allowed methods, checked above.
+        let has_password = self
+            .storage
+            .get(realm_id, &keys::encode_credential_key(user_id))
+            .map_err(Self::storage_err)?
+            .is_some();
+        let (kind, purpose) = if has_password {
+            (PasswordEmailKind::Reset, PasswordLinkPurpose::Reset)
+        } else {
+            (PasswordEmailKind::Setup, PasswordLinkPurpose::Setup)
+        };
+        let token = self.issue_password_link(realm_id, user_id, &normalized, purpose)?;
+        Ok(PasswordEmail {
+            kind,
+            email: user.email().to_string(),
+            token,
+        })
+    }
+
+    fn password_link_kind(
+        &self,
+        realm_id: &RealmId,
+        token: &str,
+    ) -> Result<Option<crate::identity::PasswordEmailKind>, IdentityError> {
+        use crate::identity::PasswordEmailKind;
+
+        let key = keys::encode_password_reset_token(&Self::sha256_hex(token.as_bytes()));
+        let Some(bytes) = self
+            .storage
+            .get(realm_id, &key)
+            .map_err(Self::storage_err)?
+        else {
+            return Ok(None);
+        };
+        let stored: StoredPasswordReset =
+            serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        if !self.password_link_is_live(realm_id, &stored)? {
+            return Ok(None);
+        }
+        Ok(Some(match stored.purpose {
+            PasswordLinkPurpose::Reset => PasswordEmailKind::Reset,
+            PasswordLinkPurpose::Setup => PasswordEmailKind::Setup,
+        }))
     }
 
     fn reset_password_with_token(
@@ -11441,13 +11561,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::PasswordResetTokenInvalid);
         }
 
-        // 4. Check expiry — use realm-specific TTL when configured, else default (30 minutes).
-        let expiry_micros = self
-            .get_realm(realm_id)
-            .ok()
-            .flatten()
-            .and_then(|r| r.config().password_reset_token_ttl_micros)
-            .unwrap_or(PASSWORD_RESET_EXPIRY_MICROS);
+        // 4. Check expiry: the realm's TTL for the link's purpose, else the
+        //    default (30 minutes for a reset, 72 hours for a set-password link).
+        let expiry_micros = self.password_link_ttl_micros(realm_id, stored.purpose);
         let now = self.clock.now().as_micros();
         if now - stored.created_at_micros > expiry_micros {
             // Clean up stale record
@@ -19007,6 +19123,8 @@ mod tests {
     mod legacy_prefixed_ids;
     /// A PAR `request_uri` is consumed exactly once under concurrency.
     mod par_consume_race;
+    /// The admin password email: set-password and reset links.
+    mod password_email;
     /// A retiring key is checked by the kid its material produces, not its label.
     mod retiring_key_import_kid;
     /// Concurrent revocations survive a racing control-cache reload.

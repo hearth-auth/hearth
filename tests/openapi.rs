@@ -144,6 +144,7 @@ fn proto_derived_routes_present_in_merged_spec() {
     let proto_paths = [
         "/admin/users",
         "/admin/users/{id}",
+        "/admin/users/{id}/password-email",
         "/admin/realms",
         "/admin/realms/{id}",
         "/admin/applications",
