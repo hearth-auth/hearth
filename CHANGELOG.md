@@ -7,14 +7,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 ## [Unreleased]
 
 ### Added
-- **SCIM 2.0 under the realm path, `/realms/{realm_name}/scim/v2`** (OpenSpec `scim-realm-path`):
-  the path selects the realm, so an IdP needs only this base URL and a bearer token. Okta and
-  Entra ID can now provision without a custom `X-Realm-ID` header or a proxy that adds one. The
-  realm path takes the realm's SCIM provisioning token or an admin token of the realm, and keeps
-  the DPoP sender constraint. An `X-Realm-ID` that names another realm is `400`
-  (`realm_mismatch`); an unknown realm name is `404`. `meta.location` and the `Location` header
-  use the base URL the request used. `/scim/v2` with `X-Realm-ID` still works. The SCIM guide now
-  recommends the realm path.
 - **`POST /admin/users/{id}/password-email`: let a user choose a password.** An application that
   creates users through the admin API or SCIM can now email the user a single-use link. A user
   with no password gets the `welcome` email with a set-password link; a user with a password gets
@@ -34,6 +26,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   user with no password**, with the 72-hour set-password link, instead of a 30-minute reset link.
   They now also apply the outbound email caps (A-4, A-50). The reset page says "Set your password"
   for a set-password link.
+
+## [4.1.0] — 2026-10-14
+
+### Added
+- **SCIM 2.0 under the realm path, `/realms/{realm_name}/scim/v2`** (OpenSpec `scim-realm-path`):
+  the path selects the realm, so an IdP needs only this base URL and a bearer token. Okta and
+  Entra ID can now provision without a custom `X-Realm-ID` header or a proxy that adds one. The
+  realm path takes the realm's SCIM provisioning token or an admin token of the realm, and keeps
+  the DPoP sender constraint. An `X-Realm-ID` that names another realm is `400`
+  (`realm_mismatch`); an unknown realm name is `404`. `meta.location` and the `Location` header
+  use the base URL the request used. `/scim/v2` with `X-Realm-ID` still works. The SCIM guide now
+  recommends the realm path.
 
 ## [4.0.0] — 2026-10-14
 
