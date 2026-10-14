@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [1.0.1 – 3.5.13] — 2026-06-23 to 2026-10-14
+
+Releases v1.0.1 to v3.5.13 shipped while every entry stayed under `[Unreleased]`, so this one
+section covers all of them. The entries are not split by version. The
+[GitHub releases](https://github.com/hearth-auth/hearth/releases) page lists the changes in each
+published binary release (from v1.5.0), and the [tags](https://github.com/hearth-auth/hearth/tags)
+page lists every version.
+
 <!-- Scope trim to a trusted core, 2026-10 (branch feature/bloat-removal, OpenSpec
      scope-trim-trusted-core). Ships as 3.0.0; removals have no deprecation window because
      Hearth has no production users yet (see VERSIONING.md). -->

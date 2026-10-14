@@ -7,7 +7,8 @@ name: Semantic Release
 # multi-semantic-release, which hardcodes `${name}@${version}` tags that match
 # neither the sdk-<lang>-v* triggers nor Go's module-version scheme.
 # The tags trigger the downstream publish workflows:
-#   v*             → release.yml (binaries), helm.yml (Helm OCI)
+#   v*             → release.yml (binaries, then the chore(release) PR that
+#                    records the release on main), helm.yml (Helm OCI)
 #   sdk-ts-v*      → sdk-publish-typescript.yml
 #   sdks/go/v*     → sdk-publish-go.yml
 #   sdk-python-v*  → sdk-publish-python.yml

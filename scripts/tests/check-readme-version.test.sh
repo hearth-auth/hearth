@@ -111,6 +111,107 @@ Released 1.4.2 on 2026-01-01; see CHANGELOG for 1.0.0 history.' \
     unset _fake_gh_dir _out _ec
 }
 
+# ── --fix VERSION: rewrite every pin the guard checks ───────────────────────
+#
+# The release PR (scripts/release-bump.sh) calls --fix, so the rewrite must use
+# the guard's own pattern list: a pin the guard checks but --fix misses would
+# leave the release PR red. Fix mode verifies against VERSION and never calls gh.
+
+# run_fix <name> <version-arg> <readme-body> <expected-readme-body>
+run_fix() {
+    local name="$1" ver="$2" body="$3" want="$4"
+    printf '%s\n' "$body" > "$TMP/README.md"
+    local out rc=0
+    out="$(README_PATH="$TMP/README.md" bash "$CHECK" --fix "$ver" 2>&1)" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        echo "FAIL: ${name} — expected exit 0, got ${rc}"
+        echo "$out" | sed 's/^/    /'
+        failures=$((failures + 1))
+        return
+    fi
+    local got
+    got="$(cat "$TMP/README.md")"
+    if [[ "$got" != "$want" ]]; then
+        echo "FAIL: ${name} — rewritten README differs from the expected text"
+        diff <(printf '%s\n' "$want") <(printf '%s\n' "$got") | sed 's/^/    /'
+        failures=$((failures + 1))
+        return
+    fi
+    # A second run must change nothing.
+    README_PATH="$TMP/README.md" bash "$CHECK" --fix "$ver" >/dev/null 2>&1 || rc=$?
+    if [[ "$rc" -ne 0 || "$(cat "$TMP/README.md")" != "$want" ]]; then
+        echo "FAIL: ${name} — second --fix run changed the README or failed (exit ${rc})"
+        failures=$((failures + 1))
+        return
+    fi
+    echo "ok: ${name}"
+}
+
+# F1 — a wholly stale README becomes the current one, pin for pin.
+run_fix "--fix rewrites a wholly stale README" 1.6.6 "${CURRENT//1.6.6/1.0.0}" "$CURRENT"
+
+# F2 — the rewritten README passes the normal check.
+printf '%s\n' "${CURRENT//1.6.6/1.0.0}" > "$TMP/README.md"
+README_PATH="$TMP/README.md" bash "$CHECK" --fix 1.6.6 >/dev/null 2>&1
+run_case "README after --fix passes the guard" 0 "$(cat "$TMP/README.md")" "OK: all"
+
+# F3 — half-updated lines are completed; the fresh pin stays as it is.
+run_fix "--fix completes half-updated lines" 1.6.6 \
+    '![v1.6.6](https://img.shields.io/badge/status-v1.0.0-brightgreen)
+Download pre-built v1.6.6 artifacts from the [Releases page](https://github.com/hearth-auth/hearth/releases/tag/v1.0.0).' \
+    '![v1.6.6](https://img.shields.io/badge/status-v1.6.6-brightgreen)
+Download pre-built v1.6.6 artifacts from the [Releases page](https://github.com/hearth-auth/hearth/releases/tag/v1.6.6).'
+
+# F4 — version mentions the guard does not check are left alone.
+run_fix "--fix leaves unchecked version mentions alone" 2.0.0 \
+    '- **Rust 1.88.0+** (see Cargo.toml rust-version)
+Released 1.4.2 on 2026-01-01; see CHANGELOG for 1.0.0 history.
+  --version 1.5.0 \' \
+    '- **Rust 1.88.0+** (see Cargo.toml rust-version)
+Released 1.4.2 on 2026-01-01; see CHANGELOG for 1.0.0 history.
+  --version 2.0.0 \'
+
+# F5 — a v-prefixed argument is the same version; prose without a v keeps none.
+run_fix "--fix accepts vX.Y.Z and keeps the prose form" v3.0.1 \
+    'Download pre-built 1.0.0 artifacts. Pull ghcr.io/hearth-auth/hearth:v1.0.0' \
+    'Download pre-built 3.0.1 artifacts. Pull ghcr.io/hearth-auth/hearth:v3.0.1'
+
+# F6 — fix mode verifies against VERSION and never asks gh. A failing gh on PATH
+#      must not matter, and README_LATEST_TAG must not override VERSION.
+{
+    _fake_gh_dir="$(mktemp -d)"
+    printf '#!/usr/bin/env bash\necho "gh: must not be called in --fix mode" >&2\nexit 1\n' \
+        > "$_fake_gh_dir/gh"
+    chmod +x "$_fake_gh_dir/gh"
+    printf '%s\n' "${CURRENT//1.6.6/1.0.0}" > "$TMP/README.md"
+    _ec=0
+    _out="$(README_PATH="$TMP/README.md" PATH="$_fake_gh_dir:$PATH" README_LATEST_TAG=v9.9.9 \
+        bash "$CHECK" --fix 1.6.6 2>&1)" || _ec=$?
+    rm -rf "$_fake_gh_dir"
+    if [[ "$_ec" -ne 0 || "$(cat "$TMP/README.md")" != "$CURRENT" ]]; then
+        echo "FAIL: --fix must not resolve the release through gh (exit ${_ec})"
+        echo "$_out" | sed 's/^/    /'
+        failures=$((failures + 1))
+    else
+        echo "ok: --fix verifies against VERSION without gh"
+    fi
+    unset _fake_gh_dir _out _ec
+}
+
+# F7 — a missing or malformed VERSION is a usage error and leaves the file alone.
+for _bad in "" "main" "1.6" "v1.6.6-rc.1"; do
+    printf '%s\n' "${CURRENT//1.6.6/1.0.0}" > "$TMP/README.md"
+    _ec=0
+    README_PATH="$TMP/README.md" bash "$CHECK" --fix ${_bad:+"$_bad"} >/dev/null 2>&1 || _ec=$?
+    if [[ "$_ec" -eq 0 || "$(cat "$TMP/README.md")" != "${CURRENT//1.6.6/1.0.0}" ]]; then
+        echo "FAIL: --fix '${_bad}' — expected a usage error and an untouched README (exit ${_ec})"
+        failures=$((failures + 1))
+    else
+        echo "ok: --fix '${_bad}' is rejected"
+    fi
+done
+unset _bad _ec
+
 echo ""
 if [[ "$failures" -ne 0 ]]; then
     echo "${failures} test case(s) failed."

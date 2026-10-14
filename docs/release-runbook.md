@@ -121,7 +121,7 @@ After these anchor tags exist, the first merge to `main` triggers semantic-relea
 | Python SDK | `sdk-python-v0.1.1` | `sdk-python-v*` |
 | PHP SDK | `sdk-php-v0.0.1` | `sdk-php-v*` |
 
-The `Cargo.toml` `version` field is bumped automatically by `@semantic-release/exec` on each server release; the in-binary version is set from the tag via `HEARTH_RELEASE_VERSION` in `build.rs`.
+After each published server release, the release PR (`chore(release): vX.Y.Z`, opened by `scripts/release-pr.sh` in `release.yml`) sets the `Cargo.toml` and `Chart.yaml` versions on `main`, pins the README and cuts the `CHANGELOG.md` `[Unreleased]` section. The in-binary version is set from the tag via `HEARTH_RELEASE_VERSION` in `build.rs`.
 
 ## Dry-run verification
 
