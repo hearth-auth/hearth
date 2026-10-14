@@ -118,6 +118,31 @@ func (a *AdminClient) DeleteUser(ctx context.Context, userID string) error {
 	return decodeResponse(resp, err, nil)
 }
 
+// The kinds of password email SendPasswordEmail reports.
+const (
+	// PasswordEmailSetup is the welcome email with a set-password link, sent
+	// to a user with no password.
+	PasswordEmailSetup = string(admin.PASSWORDEMAILKINDSETUP)
+	// PasswordEmailReset is the password reset email, sent to a user with a
+	// password.
+	PasswordEmailReset = string(admin.PASSWORDEMAILKINDRESET)
+)
+
+// SendPasswordEmail emails the user a single-use link to choose a password
+// (POST /admin/users/{id}/password-email): the welcome email for a user with
+// no password, the reset email for a user with one. It returns the kind the
+// server sent, PasswordEmailSetup or PasswordEmailReset.
+func (a *AdminClient) SendPasswordEmail(ctx context.Context, userID string) (string, error) {
+	resp, err := a.api().IdentityAdminServiceSendPasswordEmail(ctx, userID)
+	kind, err := decodeMapped(resp, err, func(r admin.V1SendPasswordEmailResponse) string {
+		return string(deref(r.Kind))
+	})
+	if err != nil {
+		return "", err
+	}
+	return *kind, nil
+}
+
 // ListUsers lists users with optional cursor-based pagination (spec §12).
 func (a *AdminClient) ListUsers(ctx context.Context, opts ListOptions) (*PageResponse[User], error) {
 	cursor, limit := listParams(opts)

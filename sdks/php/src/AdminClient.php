@@ -163,6 +163,21 @@ final class AdminClient
     }
 
     /**
+     * Emails the user a single-use link to choose a password
+     * (`POST /admin/users/{id}/password-email`): the welcome email for a user
+     * with no password, the reset email for a user with one.
+     *
+     * @return string The kind the server sent: `PASSWORD_EMAIL_KIND_SETUP` or
+     *                `PASSWORD_EMAIL_KIND_RESET`
+     */
+    public function sendPasswordEmail(string $id): string
+    {
+        $body = $this->call(new Endpoint\IdentityAdminServiceSendPasswordEmail($id));
+
+        return (string) ($body['kind'] ?? 'PASSWORD_EMAIL_KIND_UNSPECIFIED');
+    }
+
+    /**
      * Lists users with optional cursor-based pagination.
      *
      * @param int|null    $limit  Maximum items per page

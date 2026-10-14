@@ -1,0 +1,11 @@
+{{ product_name }} — Welcome
+
+An account for {{ user_email }} is ready. Click the link below to set your password:
+
+{{ set_password_url }}
+
+The link works once. If you did not expect this account, you can ignore this message.
+{% if support_email.is_some() %}
+Need help? Contact {{ support_email.as_deref().unwrap_or_default() }}
+{% endif %}
+{% if custom_footer_text.is_some() %}{{ custom_footer_text.as_deref().unwrap_or_default() }}{% endif %}

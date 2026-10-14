@@ -252,6 +252,47 @@ impl EmailService {
         self.sender.send(&msg)
     }
 
+    /// Sends the `welcome` email: the account is ready, set a password at
+    /// `url`. When `stored` is `Some`, the stored template is tried first.
+    pub fn send_welcome_email(
+        &self,
+        to: &str,
+        url: &str,
+        realm_branding: Option<&EmailBranding>,
+        stored: Option<&LocalizedEmailTemplate>,
+        locale: Option<&str>,
+    ) -> Result<(), EmailError> {
+        let branding = self.resolve_branding(realm_branding);
+        let vars = [
+            ("set_password_url", url),
+            ("user_email", to),
+            ("product_name", branding.product_name.as_str()),
+            (
+                "support_email",
+                branding.support_email.as_deref().unwrap_or(""),
+            ),
+            (
+                "custom_footer_text",
+                branding.custom_footer_text.as_deref().unwrap_or(""),
+            ),
+        ];
+        let mut msg = if let Some(tmpl) = stored {
+            let body = tmpl.resolve(locale);
+            render_stored_or_fallback(
+                body,
+                &vars,
+                "welcome",
+                || templates::render_welcome(url, to, &branding, self.custom_templates.as_ref()),
+                || templates::render_welcome(url, to, &branding, None),
+            )?
+        } else {
+            templates::render_welcome(url, to, &branding, self.custom_templates.as_ref())
+                .or_else(|_| templates::render_welcome(url, to, &branding, None))?
+        };
+        msg.to = to.to_string();
+        self.sender.send(&msg)
+    }
+
     /// Sends an organization invitation email.
     ///
     /// Contains an acceptance URL and context about who sent the invitation.

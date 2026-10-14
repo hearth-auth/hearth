@@ -105,6 +105,16 @@ final class AdminClientTest extends TestCase
         self::assertSame('new-secret', $result['client_secret']);
     }
 
+    public function testSendPasswordEmailPostsAndReturnsTheKind(): void
+    {
+        $this->http->body = '{"kind":"PASSWORD_EMAIL_KIND_SETUP"}';
+
+        $kind = $this->client->sendPasswordEmail('u1');
+
+        $this->assertSent('POST', '/admin/users/u1/password-email');
+        self::assertSame('PASSWORD_EMAIL_KIND_SETUP', $kind);
+    }
+
     public function testUpdateClientSendsPatchToApplications(): void
     {
         $this->client->updateClient('c1', ['client_name' => 'New']);

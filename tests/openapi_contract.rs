@@ -24,6 +24,7 @@ use std::sync::Arc;
 use axum::body::{to_bytes, Body};
 use axum::http::Request;
 use hearth::core::{OrganizationId, RealmId, UserId};
+use hearth::identity::email::{EmailBranding, EmailService, LoggingEmailSender};
 use hearth::identity::{CreateRealmRequest, CreateUserRequest, OrganizationRole, SessionContext};
 use hearth::protocol::http::{router, AppState};
 use hearth::protocol::web::openapi::MERGED_SPEC_JSON;
@@ -258,11 +259,20 @@ impl Fixture {
     async fn new() -> Self {
         let h = common::TestHarness::in_process().await.expect("harness");
         h.rbac().seed_realm(&system_realm()).expect("seed system");
-        let app = router(Arc::new(AppState::new(
-            h.identity_arc(),
-            h.rbac_arc(),
-            h.audit_arc(),
-        )));
+        // A log-only transport, so the password-email route can answer 200.
+        let email = EmailService::new(
+            Arc::new(LoggingEmailSender::new()),
+            "Hearth".to_string(),
+            None,
+            EmailBranding::default(),
+            String::new(),
+            None,
+        )
+        .expect("email service");
+        let app = router(Arc::new(
+            AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc())
+                .with_email(Some(Arc::new(email))),
+        ));
         Self {
             h,
             app,
@@ -439,6 +449,9 @@ async fn users_and_applications_match_the_spec() {
     // pbjson decodes this body: enums take their proto names.
     let patch = json!({"display_name": "Renamed", "status": "USER_STATUS_ACTIVE"});
     f.patch(&format!("/admin/users/{uid}"), patch).await;
+    let password_email = format!("/admin/users/{uid}/password-email");
+    let sent = f.call("POST", &password_email, None, 200).await;
+    assert_eq!(sent["kind"], "PASSWORD_EMAIL_KIND_SETUP", "{sent}");
 
     let client = f
         .post(

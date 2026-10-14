@@ -802,6 +802,27 @@ export interface paths {
         patch: operations["IdentityAdminService_UpdateUser"];
         trace?: never;
     };
+    "/admin/users/{id}/password-email": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Emails the user a single-use link to choose a password: the welcome
+         *     email with a set-password link when the user has no password, the reset
+         *     email when the user has one. It counts against the user's reset limit.
+         */
+        post: operations["IdentityAdminService_SendPasswordEmail"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/users/{id}/permissions": {
         parameters: {
             query?: never;
@@ -1297,6 +1318,15 @@ export interface components {
             items?: components["schemas"]["v1OAuthClient"][];
             next_cursor?: string;
         };
+        /**
+         * @description Which password email Hearth sent.
+         *
+         *      - PASSWORD_EMAIL_KIND_SETUP: The user has no password: the welcome email with a set-password link.
+         *      - PASSWORD_EMAIL_KIND_RESET: The user has a password: the password-reset email.
+         * @default PASSWORD_EMAIL_KIND_UNSPECIFIED
+         * @enum {string}
+         */
+        v1PasswordEmailKind: "PASSWORD_EMAIL_KIND_UNSPECIFIED" | "PASSWORD_EMAIL_KIND_SETUP" | "PASSWORD_EMAIL_KIND_RESET";
         /** @description A realm record. */
         v1Realm: {
             id?: string;
@@ -1372,6 +1402,10 @@ export interface components {
             permissions?: string[];
         };
         v1RevokeConsentResponse: Record<string, never>;
+        /** @description The password email Hearth sent. */
+        v1SendPasswordEmailResponse: {
+            kind?: components["schemas"]["v1PasswordEmailKind"];
+        };
         /** @description Request to update an existing OAuth 2.0 client. */
         v1UpdateClientRequest: {
             client_name?: string;
@@ -3254,6 +3288,38 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["v1User"];
+                };
+            };
+            /** @description An unexpected error response. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["rpcStatus"];
+                };
+            };
+        };
+    };
+    IdentityAdminService_SendPasswordEmail: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The user's ID. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A successful response. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["v1SendPasswordEmailResponse"];
                 };
             };
             /** @description An unexpected error response. */

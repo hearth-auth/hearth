@@ -740,6 +740,16 @@ class Client extends \Hearth\Generated\Admin\Runtime\Client\Client
         return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\IdentityAdminServiceUpdateUser($id, $requestBody), $fetch);
     }
     /**
+     * @param string $id The user's ID.
+     * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
+     *
+     * @return ($fetch is 'object' ? null|\Hearth\Generated\Admin\Model\V1SendPasswordEmailResponse|\Hearth\Generated\Admin\Model\RpcStatus : \Psr\Http\Message\ResponseInterface)
+     */
+    public function identityAdminServiceSendPasswordEmail(string $id, string $fetch = self::FETCH_OBJECT)
+    {
+        return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\IdentityAdminServiceSendPasswordEmail($id), $fetch);
+    }
+    /**
      * @param string $id
      * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
      *

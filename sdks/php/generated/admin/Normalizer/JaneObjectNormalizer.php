@@ -90,6 +90,8 @@ class JaneObjectNormalizer implements DenormalizerInterface, NormalizerInterface
         
         \Hearth\Generated\Admin\Model\V1ResolveEffectivePermissionsResponse::class => \Hearth\Generated\Admin\Normalizer\V1ResolveEffectivePermissionsResponseNormalizer::class,
         
+        \Hearth\Generated\Admin\Model\V1SendPasswordEmailResponse::class => \Hearth\Generated\Admin\Normalizer\V1SendPasswordEmailResponseNormalizer::class,
+        
         \Hearth\Generated\Admin\Model\V1UpdateClientRequest::class => \Hearth\Generated\Admin\Normalizer\V1UpdateClientRequestNormalizer::class,
         
         \Hearth\Generated\Admin\Model\V1UpdateUserRequest::class => \Hearth\Generated\Admin\Normalizer\V1UpdateUserRequestNormalizer::class,

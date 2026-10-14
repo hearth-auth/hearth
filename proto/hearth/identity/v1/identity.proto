@@ -190,6 +190,26 @@ message DeleteUserRequest {
   string id = 1;
 }
 
+// Request to email a user a password link.
+message SendPasswordEmailRequest {
+  // The user's ID.
+  string id = 1;
+}
+
+// Which password email Hearth sent.
+enum PasswordEmailKind {
+  PASSWORD_EMAIL_KIND_UNSPECIFIED = 0;
+  // The user has no password: the welcome email with a set-password link.
+  PASSWORD_EMAIL_KIND_SETUP = 1;
+  // The user has a password: the password-reset email.
+  PASSWORD_EMAIL_KIND_RESET = 2;
+}
+
+// The password email Hearth sent.
+message SendPasswordEmailResponse {
+  PasswordEmailKind kind = 1;
+}
+
 // Request to list users with optional pagination.
 message ListUsersRequest {
   optional string cursor = 1;
@@ -417,6 +437,12 @@ service IdentityAdminService {
   }
   rpc DeleteUser(DeleteUserRequest) returns (Empty) {
     option (google.api.http) = {delete: "/admin/users/{id}"};
+  }
+  // Emails the user a single-use link to choose a password: the welcome
+  // email with a set-password link when the user has no password, the reset
+  // email when the user has one. It counts against the user's reset limit.
+  rpc SendPasswordEmail(SendPasswordEmailRequest) returns (SendPasswordEmailResponse) {
+    option (google.api.http) = {post: "/admin/users/{id}/password-email"};
   }
 
   // Realms — operate against the system realm (mutations require admin in

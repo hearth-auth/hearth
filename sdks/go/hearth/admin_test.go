@@ -209,6 +209,27 @@ func TestAdminRegenerateClientSecret(t *testing.T) {
 	}
 }
 
+func TestAdminSendPasswordEmail(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/admin/users/u1/password-email" || r.Method != "POST" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"kind":"PASSWORD_EMAIL_KIND_SETUP"}`))
+	}))
+	defer srv.Close()
+
+	admin := newTestAdminClient(srv)
+	kind, err := admin.SendPasswordEmail(context.Background(), "u1")
+	if err != nil {
+		t.Fatalf("SendPasswordEmail: %v", err)
+	}
+	if kind != PasswordEmailSetup {
+		t.Fatalf("kind = %q, want %q", kind, PasswordEmailSetup)
+	}
+}
+
 func TestAdminListClients(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/admin/applications" {

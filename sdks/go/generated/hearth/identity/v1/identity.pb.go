@@ -175,6 +175,58 @@ func (OrganizationStatus) EnumDescriptor() ([]byte, []int) {
 	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{2}
 }
 
+// Which password email Hearth sent.
+type PasswordEmailKind int32
+
+const (
+	PasswordEmailKind_PASSWORD_EMAIL_KIND_UNSPECIFIED PasswordEmailKind = 0
+	// The user has no password: the welcome email with a set-password link.
+	PasswordEmailKind_PASSWORD_EMAIL_KIND_SETUP PasswordEmailKind = 1
+	// The user has a password: the password-reset email.
+	PasswordEmailKind_PASSWORD_EMAIL_KIND_RESET PasswordEmailKind = 2
+)
+
+// Enum value maps for PasswordEmailKind.
+var (
+	PasswordEmailKind_name = map[int32]string{
+		0: "PASSWORD_EMAIL_KIND_UNSPECIFIED",
+		1: "PASSWORD_EMAIL_KIND_SETUP",
+		2: "PASSWORD_EMAIL_KIND_RESET",
+	}
+	PasswordEmailKind_value = map[string]int32{
+		"PASSWORD_EMAIL_KIND_UNSPECIFIED": 0,
+		"PASSWORD_EMAIL_KIND_SETUP":       1,
+		"PASSWORD_EMAIL_KIND_RESET":       2,
+	}
+)
+
+func (x PasswordEmailKind) Enum() *PasswordEmailKind {
+	p := new(PasswordEmailKind)
+	*p = x
+	return p
+}
+
+func (x PasswordEmailKind) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (PasswordEmailKind) Descriptor() protoreflect.EnumDescriptor {
+	return file_hearth_identity_v1_identity_proto_enumTypes[3].Descriptor()
+}
+
+func (PasswordEmailKind) Type() protoreflect.EnumType {
+	return &file_hearth_identity_v1_identity_proto_enumTypes[3]
+}
+
+func (x PasswordEmailKind) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use PasswordEmailKind.Descriptor instead.
+func (PasswordEmailKind) EnumDescriptor() ([]byte, []int) {
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{3}
+}
+
 // Lifecycle status of an agent.
 type AgentStatus int32
 
@@ -212,11 +264,11 @@ func (x AgentStatus) String() string {
 }
 
 func (AgentStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_hearth_identity_v1_identity_proto_enumTypes[3].Descriptor()
+	return file_hearth_identity_v1_identity_proto_enumTypes[4].Descriptor()
 }
 
 func (AgentStatus) Type() protoreflect.EnumType {
-	return &file_hearth_identity_v1_identity_proto_enumTypes[3]
+	return &file_hearth_identity_v1_identity_proto_enumTypes[4]
 }
 
 func (x AgentStatus) Number() protoreflect.EnumNumber {
@@ -225,7 +277,7 @@ func (x AgentStatus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use AgentStatus.Descriptor instead.
 func (AgentStatus) EnumDescriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{3}
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{4}
 }
 
 // Discriminates the type of credential stored for an agent.
@@ -265,11 +317,11 @@ func (x AgentCredentialKind) String() string {
 }
 
 func (AgentCredentialKind) Descriptor() protoreflect.EnumDescriptor {
-	return file_hearth_identity_v1_identity_proto_enumTypes[4].Descriptor()
+	return file_hearth_identity_v1_identity_proto_enumTypes[5].Descriptor()
 }
 
 func (AgentCredentialKind) Type() protoreflect.EnumType {
-	return &file_hearth_identity_v1_identity_proto_enumTypes[4]
+	return &file_hearth_identity_v1_identity_proto_enumTypes[5]
 }
 
 func (x AgentCredentialKind) Number() protoreflect.EnumNumber {
@@ -278,7 +330,7 @@ func (x AgentCredentialKind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use AgentCredentialKind.Descriptor instead.
 func (AgentCredentialKind) EnumDescriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{4}
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{5}
 }
 
 // A user record within a realm.
@@ -1533,6 +1585,97 @@ func (x *DeleteUserRequest) GetId() string {
 	return ""
 }
 
+// Request to email a user a password link.
+type SendPasswordEmailRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The user's ID.
+	Id            string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SendPasswordEmailRequest) Reset() {
+	*x = SendPasswordEmailRequest{}
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SendPasswordEmailRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SendPasswordEmailRequest) ProtoMessage() {}
+
+func (x *SendPasswordEmailRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SendPasswordEmailRequest.ProtoReflect.Descriptor instead.
+func (*SendPasswordEmailRequest) Descriptor() ([]byte, []int) {
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *SendPasswordEmailRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+// The password email Hearth sent.
+type SendPasswordEmailResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Kind          PasswordEmailKind      `protobuf:"varint,1,opt,name=kind,proto3,enum=hearth.identity.v1.PasswordEmailKind" json:"kind,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SendPasswordEmailResponse) Reset() {
+	*x = SendPasswordEmailResponse{}
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SendPasswordEmailResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SendPasswordEmailResponse) ProtoMessage() {}
+
+func (x *SendPasswordEmailResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SendPasswordEmailResponse.ProtoReflect.Descriptor instead.
+func (*SendPasswordEmailResponse) Descriptor() ([]byte, []int) {
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *SendPasswordEmailResponse) GetKind() PasswordEmailKind {
+	if x != nil {
+		return x.Kind
+	}
+	return PasswordEmailKind_PASSWORD_EMAIL_KIND_UNSPECIFIED
+}
+
 // Request to list users with optional pagination.
 type ListUsersRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1544,7 +1687,7 @@ type ListUsersRequest struct {
 
 func (x *ListUsersRequest) Reset() {
 	*x = ListUsersRequest{}
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[18]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1556,7 +1699,7 @@ func (x *ListUsersRequest) String() string {
 func (*ListUsersRequest) ProtoMessage() {}
 
 func (x *ListUsersRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[18]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1569,7 +1712,7 @@ func (x *ListUsersRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListUsersRequest.ProtoReflect.Descriptor instead.
 func (*ListUsersRequest) Descriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{18}
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *ListUsersRequest) GetCursor() string {
@@ -1597,7 +1740,7 @@ type UpdateUserCall struct {
 
 func (x *UpdateUserCall) Reset() {
 	*x = UpdateUserCall{}
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[19]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1609,7 +1752,7 @@ func (x *UpdateUserCall) String() string {
 func (*UpdateUserCall) ProtoMessage() {}
 
 func (x *UpdateUserCall) ProtoReflect() protoreflect.Message {
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[19]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1622,7 +1765,7 @@ func (x *UpdateUserCall) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateUserCall.ProtoReflect.Descriptor instead.
 func (*UpdateUserCall) Descriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{19}
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *UpdateUserCall) GetId() string {
@@ -1650,7 +1793,7 @@ type ListRealmsRequest struct {
 
 func (x *ListRealmsRequest) Reset() {
 	*x = ListRealmsRequest{}
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[20]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1662,7 +1805,7 @@ func (x *ListRealmsRequest) String() string {
 func (*ListRealmsRequest) ProtoMessage() {}
 
 func (x *ListRealmsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[20]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1675,7 +1818,7 @@ func (x *ListRealmsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListRealmsRequest.ProtoReflect.Descriptor instead.
 func (*ListRealmsRequest) Descriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{20}
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *ListRealmsRequest) GetCursor() string {
@@ -1702,7 +1845,7 @@ type GetRealmRequest struct {
 
 func (x *GetRealmRequest) Reset() {
 	*x = GetRealmRequest{}
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[21]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1714,7 +1857,7 @@ func (x *GetRealmRequest) String() string {
 func (*GetRealmRequest) ProtoMessage() {}
 
 func (x *GetRealmRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[21]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1727,7 +1870,7 @@ func (x *GetRealmRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetRealmRequest.ProtoReflect.Descriptor instead.
 func (*GetRealmRequest) Descriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{21}
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *GetRealmRequest) GetId() string {
@@ -1747,7 +1890,7 @@ type DeleteRealmRequest struct {
 
 func (x *DeleteRealmRequest) Reset() {
 	*x = DeleteRealmRequest{}
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[22]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1759,7 +1902,7 @@ func (x *DeleteRealmRequest) String() string {
 func (*DeleteRealmRequest) ProtoMessage() {}
 
 func (x *DeleteRealmRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[22]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1772,7 +1915,7 @@ func (x *DeleteRealmRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteRealmRequest.ProtoReflect.Descriptor instead.
 func (*DeleteRealmRequest) Descriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{22}
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *DeleteRealmRequest) GetId() string {
@@ -1792,7 +1935,7 @@ type SuspendRealmRequest struct {
 
 func (x *SuspendRealmRequest) Reset() {
 	*x = SuspendRealmRequest{}
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[23]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1804,7 +1947,7 @@ func (x *SuspendRealmRequest) String() string {
 func (*SuspendRealmRequest) ProtoMessage() {}
 
 func (x *SuspendRealmRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[23]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1817,7 +1960,7 @@ func (x *SuspendRealmRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SuspendRealmRequest.ProtoReflect.Descriptor instead.
 func (*SuspendRealmRequest) Descriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{23}
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *SuspendRealmRequest) GetId() string {
@@ -1837,7 +1980,7 @@ type UnsuspendRealmRequest struct {
 
 func (x *UnsuspendRealmRequest) Reset() {
 	*x = UnsuspendRealmRequest{}
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[24]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1849,7 +1992,7 @@ func (x *UnsuspendRealmRequest) String() string {
 func (*UnsuspendRealmRequest) ProtoMessage() {}
 
 func (x *UnsuspendRealmRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[24]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1862,7 +2005,7 @@ func (x *UnsuspendRealmRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnsuspendRealmRequest.ProtoReflect.Descriptor instead.
 func (*UnsuspendRealmRequest) Descriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{24}
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *UnsuspendRealmRequest) GetId() string {
@@ -1883,7 +2026,7 @@ type UpdateRealmCall struct {
 
 func (x *UpdateRealmCall) Reset() {
 	*x = UpdateRealmCall{}
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[25]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1895,7 +2038,7 @@ func (x *UpdateRealmCall) String() string {
 func (*UpdateRealmCall) ProtoMessage() {}
 
 func (x *UpdateRealmCall) ProtoReflect() protoreflect.Message {
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[25]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1908,7 +2051,7 @@ func (x *UpdateRealmCall) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateRealmCall.ProtoReflect.Descriptor instead.
 func (*UpdateRealmCall) Descriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{25}
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *UpdateRealmCall) GetId() string {
@@ -1936,7 +2079,7 @@ type ListOrganizationsRequest struct {
 
 func (x *ListOrganizationsRequest) Reset() {
 	*x = ListOrganizationsRequest{}
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[26]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1948,7 +2091,7 @@ func (x *ListOrganizationsRequest) String() string {
 func (*ListOrganizationsRequest) ProtoMessage() {}
 
 func (x *ListOrganizationsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[26]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1961,7 +2104,7 @@ func (x *ListOrganizationsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListOrganizationsRequest.ProtoReflect.Descriptor instead.
 func (*ListOrganizationsRequest) Descriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{26}
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *ListOrganizationsRequest) GetCursor() string {
@@ -1988,7 +2131,7 @@ type GetOrganizationRequest struct {
 
 func (x *GetOrganizationRequest) Reset() {
 	*x = GetOrganizationRequest{}
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[27]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2000,7 +2143,7 @@ func (x *GetOrganizationRequest) String() string {
 func (*GetOrganizationRequest) ProtoMessage() {}
 
 func (x *GetOrganizationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[27]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2013,7 +2156,7 @@ func (x *GetOrganizationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetOrganizationRequest.ProtoReflect.Descriptor instead.
 func (*GetOrganizationRequest) Descriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{27}
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *GetOrganizationRequest) GetId() string {
@@ -2033,7 +2176,7 @@ type DeleteOrganizationRequest struct {
 
 func (x *DeleteOrganizationRequest) Reset() {
 	*x = DeleteOrganizationRequest{}
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[28]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2045,7 +2188,7 @@ func (x *DeleteOrganizationRequest) String() string {
 func (*DeleteOrganizationRequest) ProtoMessage() {}
 
 func (x *DeleteOrganizationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[28]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2058,7 +2201,7 @@ func (x *DeleteOrganizationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteOrganizationRequest.ProtoReflect.Descriptor instead.
 func (*DeleteOrganizationRequest) Descriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{28}
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *DeleteOrganizationRequest) GetId() string {
@@ -2079,7 +2222,7 @@ type UpdateOrganizationCall struct {
 
 func (x *UpdateOrganizationCall) Reset() {
 	*x = UpdateOrganizationCall{}
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[29]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2091,7 +2234,7 @@ func (x *UpdateOrganizationCall) String() string {
 func (*UpdateOrganizationCall) ProtoMessage() {}
 
 func (x *UpdateOrganizationCall) ProtoReflect() protoreflect.Message {
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[29]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2104,7 +2247,7 @@ func (x *UpdateOrganizationCall) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateOrganizationCall.ProtoReflect.Descriptor instead.
 func (*UpdateOrganizationCall) Descriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{29}
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *UpdateOrganizationCall) GetId() string {
@@ -2130,7 +2273,7 @@ type Empty struct {
 
 func (x *Empty) Reset() {
 	*x = Empty{}
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[30]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2142,7 +2285,7 @@ func (x *Empty) String() string {
 func (*Empty) ProtoMessage() {}
 
 func (x *Empty) ProtoReflect() protoreflect.Message {
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[30]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2155,7 +2298,7 @@ func (x *Empty) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Empty.ProtoReflect.Descriptor instead.
 func (*Empty) Descriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{30}
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{32}
 }
 
 // An autonomous agent registered within a realm.
@@ -2180,7 +2323,7 @@ type Agent struct {
 
 func (x *Agent) Reset() {
 	*x = Agent{}
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[31]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2192,7 +2335,7 @@ func (x *Agent) String() string {
 func (*Agent) ProtoMessage() {}
 
 func (x *Agent) ProtoReflect() protoreflect.Message {
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[31]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2205,7 +2348,7 @@ func (x *Agent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Agent.ProtoReflect.Descriptor instead.
 func (*Agent) Descriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{31}
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *Agent) GetId() string {
@@ -2300,7 +2443,7 @@ type AgentCredential struct {
 
 func (x *AgentCredential) Reset() {
 	*x = AgentCredential{}
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[32]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2312,7 +2455,7 @@ func (x *AgentCredential) String() string {
 func (*AgentCredential) ProtoMessage() {}
 
 func (x *AgentCredential) ProtoReflect() protoreflect.Message {
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[32]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2325,7 +2468,7 @@ func (x *AgentCredential) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentCredential.ProtoReflect.Descriptor instead.
 func (*AgentCredential) Descriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{32}
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *AgentCredential) GetId() string {
@@ -2381,7 +2524,7 @@ type AgentPage struct {
 
 func (x *AgentPage) Reset() {
 	*x = AgentPage{}
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[33]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2393,7 +2536,7 @@ func (x *AgentPage) String() string {
 func (*AgentPage) ProtoMessage() {}
 
 func (x *AgentPage) ProtoReflect() protoreflect.Message {
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[33]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2406,7 +2549,7 @@ func (x *AgentPage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentPage.ProtoReflect.Descriptor instead.
 func (*AgentPage) Descriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{33}
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *AgentPage) GetItems() []*Agent {
@@ -2433,7 +2576,7 @@ type AgentCredentialPage struct {
 
 func (x *AgentCredentialPage) Reset() {
 	*x = AgentCredentialPage{}
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[34]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2445,7 +2588,7 @@ func (x *AgentCredentialPage) String() string {
 func (*AgentCredentialPage) ProtoMessage() {}
 
 func (x *AgentCredentialPage) ProtoReflect() protoreflect.Message {
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[34]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2458,7 +2601,7 @@ func (x *AgentCredentialPage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentCredentialPage.ProtoReflect.Descriptor instead.
 func (*AgentCredentialPage) Descriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{34}
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *AgentCredentialPage) GetItems() []*AgentCredential {
@@ -2482,7 +2625,7 @@ type ListAgentsRequest struct {
 
 func (x *ListAgentsRequest) Reset() {
 	*x = ListAgentsRequest{}
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[35]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2494,7 +2637,7 @@ func (x *ListAgentsRequest) String() string {
 func (*ListAgentsRequest) ProtoMessage() {}
 
 func (x *ListAgentsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[35]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2507,7 +2650,7 @@ func (x *ListAgentsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListAgentsRequest.ProtoReflect.Descriptor instead.
 func (*ListAgentsRequest) Descriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{35}
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *ListAgentsRequest) GetOwnerId() string {
@@ -2555,7 +2698,7 @@ type GetAgentRequest struct {
 
 func (x *GetAgentRequest) Reset() {
 	*x = GetAgentRequest{}
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[36]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2567,7 +2710,7 @@ func (x *GetAgentRequest) String() string {
 func (*GetAgentRequest) ProtoMessage() {}
 
 func (x *GetAgentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[36]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2580,7 +2723,7 @@ func (x *GetAgentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetAgentRequest.ProtoReflect.Descriptor instead.
 func (*GetAgentRequest) Descriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{36}
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *GetAgentRequest) GetId() string {
@@ -2608,7 +2751,7 @@ type CreateAgentRequest struct {
 
 func (x *CreateAgentRequest) Reset() {
 	*x = CreateAgentRequest{}
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[37]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2620,7 +2763,7 @@ func (x *CreateAgentRequest) String() string {
 func (*CreateAgentRequest) ProtoMessage() {}
 
 func (x *CreateAgentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[37]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2633,7 +2776,7 @@ func (x *CreateAgentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateAgentRequest.ProtoReflect.Descriptor instead.
 func (*CreateAgentRequest) Descriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{37}
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *CreateAgentRequest) GetDisplayName() string {
@@ -2691,7 +2834,7 @@ type UpdateAgentRequest struct {
 
 func (x *UpdateAgentRequest) Reset() {
 	*x = UpdateAgentRequest{}
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[38]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2703,7 +2846,7 @@ func (x *UpdateAgentRequest) String() string {
 func (*UpdateAgentRequest) ProtoMessage() {}
 
 func (x *UpdateAgentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[38]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2716,7 +2859,7 @@ func (x *UpdateAgentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateAgentRequest.ProtoReflect.Descriptor instead.
 func (*UpdateAgentRequest) Descriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{38}
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *UpdateAgentRequest) GetDisplayName() string {
@@ -2758,7 +2901,7 @@ type UpdateAgentCall struct {
 
 func (x *UpdateAgentCall) Reset() {
 	*x = UpdateAgentCall{}
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[39]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2770,7 +2913,7 @@ func (x *UpdateAgentCall) String() string {
 func (*UpdateAgentCall) ProtoMessage() {}
 
 func (x *UpdateAgentCall) ProtoReflect() protoreflect.Message {
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[39]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2783,7 +2926,7 @@ func (x *UpdateAgentCall) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateAgentCall.ProtoReflect.Descriptor instead.
 func (*UpdateAgentCall) Descriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{39}
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *UpdateAgentCall) GetId() string {
@@ -2810,7 +2953,7 @@ type DeleteAgentRequest struct {
 
 func (x *DeleteAgentRequest) Reset() {
 	*x = DeleteAgentRequest{}
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[40]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2822,7 +2965,7 @@ func (x *DeleteAgentRequest) String() string {
 func (*DeleteAgentRequest) ProtoMessage() {}
 
 func (x *DeleteAgentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[40]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2835,7 +2978,7 @@ func (x *DeleteAgentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteAgentRequest.ProtoReflect.Descriptor instead.
 func (*DeleteAgentRequest) Descriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{40}
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *DeleteAgentRequest) GetId() string {
@@ -2856,7 +2999,7 @@ type CreateAgentApiKeyRequest struct {
 
 func (x *CreateAgentApiKeyRequest) Reset() {
 	*x = CreateAgentApiKeyRequest{}
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[41]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2868,7 +3011,7 @@ func (x *CreateAgentApiKeyRequest) String() string {
 func (*CreateAgentApiKeyRequest) ProtoMessage() {}
 
 func (x *CreateAgentApiKeyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[41]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2881,7 +3024,7 @@ func (x *CreateAgentApiKeyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateAgentApiKeyRequest.ProtoReflect.Descriptor instead.
 func (*CreateAgentApiKeyRequest) Descriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{41}
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *CreateAgentApiKeyRequest) GetAgentId() string {
@@ -2911,7 +3054,7 @@ type CreateAgentApiKeyResponse struct {
 
 func (x *CreateAgentApiKeyResponse) Reset() {
 	*x = CreateAgentApiKeyResponse{}
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[42]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2923,7 +3066,7 @@ func (x *CreateAgentApiKeyResponse) String() string {
 func (*CreateAgentApiKeyResponse) ProtoMessage() {}
 
 func (x *CreateAgentApiKeyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[42]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2936,7 +3079,7 @@ func (x *CreateAgentApiKeyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateAgentApiKeyResponse.ProtoReflect.Descriptor instead.
 func (*CreateAgentApiKeyResponse) Descriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{42}
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *CreateAgentApiKeyResponse) GetCredential() *AgentCredential {
@@ -2963,7 +3106,7 @@ type ListAgentCredentialsRequest struct {
 
 func (x *ListAgentCredentialsRequest) Reset() {
 	*x = ListAgentCredentialsRequest{}
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[43]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2975,7 +3118,7 @@ func (x *ListAgentCredentialsRequest) String() string {
 func (*ListAgentCredentialsRequest) ProtoMessage() {}
 
 func (x *ListAgentCredentialsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[43]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2988,7 +3131,7 @@ func (x *ListAgentCredentialsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListAgentCredentialsRequest.ProtoReflect.Descriptor instead.
 func (*ListAgentCredentialsRequest) Descriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{43}
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *ListAgentCredentialsRequest) GetAgentId() string {
@@ -3009,7 +3152,7 @@ type RevokeAgentCredentialRequest struct {
 
 func (x *RevokeAgentCredentialRequest) Reset() {
 	*x = RevokeAgentCredentialRequest{}
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[44]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3021,7 +3164,7 @@ func (x *RevokeAgentCredentialRequest) String() string {
 func (*RevokeAgentCredentialRequest) ProtoMessage() {}
 
 func (x *RevokeAgentCredentialRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_hearth_identity_v1_identity_proto_msgTypes[44]
+	mi := &file_hearth_identity_v1_identity_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3034,7 +3177,7 @@ func (x *RevokeAgentCredentialRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RevokeAgentCredentialRequest.ProtoReflect.Descriptor instead.
 func (*RevokeAgentCredentialRequest) Descriptor() ([]byte, []int) {
-	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{44}
+	return file_hearth_identity_v1_identity_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *RevokeAgentCredentialRequest) GetAgentId() string {
@@ -3209,7 +3352,11 @@ const file_hearth_identity_v1_identity_proto_rawDesc = "" +
 	"\x0eGetUserRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\"#\n" +
 	"\x11DeleteUserRequest\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\"_\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\"*\n" +
+	"\x18SendPasswordEmailRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\"V\n" +
+	"\x19SendPasswordEmailResponse\x129\n" +
+	"\x04kind\x18\x01 \x01(\x0e2%.hearth.identity.v1.PasswordEmailKindR\x04kind\"_\n" +
 	"\x10ListUsersRequest\x12\x1b\n" +
 	"\x06cursor\x18\x01 \x01(\tH\x00R\x06cursor\x88\x01\x01\x12\x19\n" +
 	"\x05limit\x18\x02 \x01(\rH\x01R\x05limit\x88\x01\x01B\t\n" +
@@ -3343,7 +3490,11 @@ const file_hearth_identity_v1_identity_proto_rawDesc = "" +
 	"\x12OrganizationStatus\x12#\n" +
 	"\x1fORGANIZATION_STATUS_UNSPECIFIED\x10\x00\x12\x1e\n" +
 	"\x1aORGANIZATION_STATUS_ACTIVE\x10\x01\x12!\n" +
-	"\x1dORGANIZATION_STATUS_SUSPENDED\x10\x02*z\n" +
+	"\x1dORGANIZATION_STATUS_SUSPENDED\x10\x02*v\n" +
+	"\x11PasswordEmailKind\x12#\n" +
+	"\x1fPASSWORD_EMAIL_KIND_UNSPECIFIED\x10\x00\x12\x1d\n" +
+	"\x19PASSWORD_EMAIL_KIND_SETUP\x10\x01\x12\x1d\n" +
+	"\x19PASSWORD_EMAIL_KIND_RESET\x10\x02*z\n" +
 	"\vAgentStatus\x12\x1c\n" +
 	"\x18AGENT_STATUS_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13AGENT_STATUS_ACTIVE\x10\x01\x12\x1a\n" +
@@ -3353,7 +3504,7 @@ const file_hearth_identity_v1_identity_proto_rawDesc = "" +
 	"!AGENT_CREDENTIAL_KIND_UNSPECIFIED\x10\x00\x12!\n" +
 	"\x1dAGENT_CREDENTIAL_KIND_API_KEY\x10\x01\x12,\n" +
 	"(AGENT_CREDENTIAL_KIND_ED25519_PUBLIC_KEY\x10\x02\x12#\n" +
-	"\x1fAGENT_CREDENTIAL_KIND_MTLS_CERT\x10\x032\x9f\x16\n" +
+	"\x1fAGENT_CREDENTIAL_KIND_MTLS_CERT\x10\x032\xbc\x17\n" +
 	"\x14IdentityAdminService\x12e\n" +
 	"\tListUsers\x12$.hearth.identity.v1.ListUsersRequest\x1a\x1c.hearth.identity.v1.UserPage\"\x14\x82\xd3\xe4\x93\x02\x0e\x12\f/admin/users\x12b\n" +
 	"\aGetUser\x12\".hearth.identity.v1.GetUserRequest\x1a\x18.hearth.identity.v1.User\"\x19\x82\xd3\xe4\x93\x02\x13\x12\x11/admin/users/{id}\x12f\n" +
@@ -3362,7 +3513,8 @@ const file_hearth_identity_v1_identity_proto_rawDesc = "" +
 	"\n" +
 	"UpdateUser\x12\".hearth.identity.v1.UpdateUserCall\x1a\x18.hearth.identity.v1.User\"\x1f\x82\xd3\xe4\x93\x02\x19:\x04body2\x11/admin/users/{id}\x12i\n" +
 	"\n" +
-	"DeleteUser\x12%.hearth.identity.v1.DeleteUserRequest\x1a\x19.hearth.identity.v1.Empty\"\x19\x82\xd3\xe4\x93\x02\x13*\x11/admin/users/{id}\x12i\n" +
+	"DeleteUser\x12%.hearth.identity.v1.DeleteUserRequest\x1a\x19.hearth.identity.v1.Empty\"\x19\x82\xd3\xe4\x93\x02\x13*\x11/admin/users/{id}\x12\x9a\x01\n" +
+	"\x11SendPasswordEmail\x12,.hearth.identity.v1.SendPasswordEmailRequest\x1a-.hearth.identity.v1.SendPasswordEmailResponse\"(\x82\xd3\xe4\x93\x02\"\" /admin/users/{id}/password-email\x12i\n" +
 	"\n" +
 	"ListRealms\x12%.hearth.identity.v1.ListRealmsRequest\x1a\x1d.hearth.identity.v1.RealmPage\"\x15\x82\xd3\xe4\x93\x02\x0f\x12\r/admin/realms\x12f\n" +
 	"\bGetRealm\x12#.hearth.identity.v1.GetRealmRequest\x1a\x19.hearth.identity.v1.Realm\"\x1a\x82\xd3\xe4\x93\x02\x14\x12\x12/admin/realms/{id}\x12j\n" +
@@ -3400,150 +3552,156 @@ func file_hearth_identity_v1_identity_proto_rawDescGZIP() []byte {
 	return file_hearth_identity_v1_identity_proto_rawDescData
 }
 
-var file_hearth_identity_v1_identity_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
-var file_hearth_identity_v1_identity_proto_msgTypes = make([]protoimpl.MessageInfo, 50)
+var file_hearth_identity_v1_identity_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
+var file_hearth_identity_v1_identity_proto_msgTypes = make([]protoimpl.MessageInfo, 52)
 var file_hearth_identity_v1_identity_proto_goTypes = []any{
 	(UserStatus)(0),                      // 0: hearth.identity.v1.UserStatus
 	(RealmStatus)(0),                     // 1: hearth.identity.v1.RealmStatus
 	(OrganizationStatus)(0),              // 2: hearth.identity.v1.OrganizationStatus
-	(AgentStatus)(0),                     // 3: hearth.identity.v1.AgentStatus
-	(AgentCredentialKind)(0),             // 4: hearth.identity.v1.AgentCredentialKind
-	(*User)(nil),                         // 5: hearth.identity.v1.User
-	(*Session)(nil),                      // 6: hearth.identity.v1.Session
-	(*RealmConfig)(nil),                  // 7: hearth.identity.v1.RealmConfig
-	(*Realm)(nil),                        // 8: hearth.identity.v1.Realm
-	(*CreateUserRequest)(nil),            // 9: hearth.identity.v1.CreateUserRequest
-	(*UpdateUserRequest)(nil),            // 10: hearth.identity.v1.UpdateUserRequest
-	(*CreateRealmRequest)(nil),           // 11: hearth.identity.v1.CreateRealmRequest
-	(*UpdateRealmRequest)(nil),           // 12: hearth.identity.v1.UpdateRealmRequest
-	(*UserPage)(nil),                     // 13: hearth.identity.v1.UserPage
-	(*RealmPage)(nil),                    // 14: hearth.identity.v1.RealmPage
-	(*BulkResultEntry)(nil),              // 15: hearth.identity.v1.BulkResultEntry
-	(*BulkResult)(nil),                   // 16: hearth.identity.v1.BulkResult
-	(*Organization)(nil),                 // 17: hearth.identity.v1.Organization
-	(*CreateOrganizationRequest)(nil),    // 18: hearth.identity.v1.CreateOrganizationRequest
-	(*UpdateOrganizationRequest)(nil),    // 19: hearth.identity.v1.UpdateOrganizationRequest
-	(*OrganizationPage)(nil),             // 20: hearth.identity.v1.OrganizationPage
-	(*GetUserRequest)(nil),               // 21: hearth.identity.v1.GetUserRequest
-	(*DeleteUserRequest)(nil),            // 22: hearth.identity.v1.DeleteUserRequest
-	(*ListUsersRequest)(nil),             // 23: hearth.identity.v1.ListUsersRequest
-	(*UpdateUserCall)(nil),               // 24: hearth.identity.v1.UpdateUserCall
-	(*ListRealmsRequest)(nil),            // 25: hearth.identity.v1.ListRealmsRequest
-	(*GetRealmRequest)(nil),              // 26: hearth.identity.v1.GetRealmRequest
-	(*DeleteRealmRequest)(nil),           // 27: hearth.identity.v1.DeleteRealmRequest
-	(*SuspendRealmRequest)(nil),          // 28: hearth.identity.v1.SuspendRealmRequest
-	(*UnsuspendRealmRequest)(nil),        // 29: hearth.identity.v1.UnsuspendRealmRequest
-	(*UpdateRealmCall)(nil),              // 30: hearth.identity.v1.UpdateRealmCall
-	(*ListOrganizationsRequest)(nil),     // 31: hearth.identity.v1.ListOrganizationsRequest
-	(*GetOrganizationRequest)(nil),       // 32: hearth.identity.v1.GetOrganizationRequest
-	(*DeleteOrganizationRequest)(nil),    // 33: hearth.identity.v1.DeleteOrganizationRequest
-	(*UpdateOrganizationCall)(nil),       // 34: hearth.identity.v1.UpdateOrganizationCall
-	(*Empty)(nil),                        // 35: hearth.identity.v1.Empty
-	(*Agent)(nil),                        // 36: hearth.identity.v1.Agent
-	(*AgentCredential)(nil),              // 37: hearth.identity.v1.AgentCredential
-	(*AgentPage)(nil),                    // 38: hearth.identity.v1.AgentPage
-	(*AgentCredentialPage)(nil),          // 39: hearth.identity.v1.AgentCredentialPage
-	(*ListAgentsRequest)(nil),            // 40: hearth.identity.v1.ListAgentsRequest
-	(*GetAgentRequest)(nil),              // 41: hearth.identity.v1.GetAgentRequest
-	(*CreateAgentRequest)(nil),           // 42: hearth.identity.v1.CreateAgentRequest
-	(*UpdateAgentRequest)(nil),           // 43: hearth.identity.v1.UpdateAgentRequest
-	(*UpdateAgentCall)(nil),              // 44: hearth.identity.v1.UpdateAgentCall
-	(*DeleteAgentRequest)(nil),           // 45: hearth.identity.v1.DeleteAgentRequest
-	(*CreateAgentApiKeyRequest)(nil),     // 46: hearth.identity.v1.CreateAgentApiKeyRequest
-	(*CreateAgentApiKeyResponse)(nil),    // 47: hearth.identity.v1.CreateAgentApiKeyResponse
-	(*ListAgentCredentialsRequest)(nil),  // 48: hearth.identity.v1.ListAgentCredentialsRequest
-	(*RevokeAgentCredentialRequest)(nil), // 49: hearth.identity.v1.RevokeAgentCredentialRequest
-	nil,                                  // 50: hearth.identity.v1.CreateUserRequest.AttributesEntry
-	nil,                                  // 51: hearth.identity.v1.UpdateUserRequest.AttributesEntry
-	nil,                                  // 52: hearth.identity.v1.Organization.AttributesEntry
-	nil,                                  // 53: hearth.identity.v1.CreateOrganizationRequest.AttributesEntry
-	nil,                                  // 54: hearth.identity.v1.UpdateOrganizationRequest.AttributesEntry
+	(PasswordEmailKind)(0),               // 3: hearth.identity.v1.PasswordEmailKind
+	(AgentStatus)(0),                     // 4: hearth.identity.v1.AgentStatus
+	(AgentCredentialKind)(0),             // 5: hearth.identity.v1.AgentCredentialKind
+	(*User)(nil),                         // 6: hearth.identity.v1.User
+	(*Session)(nil),                      // 7: hearth.identity.v1.Session
+	(*RealmConfig)(nil),                  // 8: hearth.identity.v1.RealmConfig
+	(*Realm)(nil),                        // 9: hearth.identity.v1.Realm
+	(*CreateUserRequest)(nil),            // 10: hearth.identity.v1.CreateUserRequest
+	(*UpdateUserRequest)(nil),            // 11: hearth.identity.v1.UpdateUserRequest
+	(*CreateRealmRequest)(nil),           // 12: hearth.identity.v1.CreateRealmRequest
+	(*UpdateRealmRequest)(nil),           // 13: hearth.identity.v1.UpdateRealmRequest
+	(*UserPage)(nil),                     // 14: hearth.identity.v1.UserPage
+	(*RealmPage)(nil),                    // 15: hearth.identity.v1.RealmPage
+	(*BulkResultEntry)(nil),              // 16: hearth.identity.v1.BulkResultEntry
+	(*BulkResult)(nil),                   // 17: hearth.identity.v1.BulkResult
+	(*Organization)(nil),                 // 18: hearth.identity.v1.Organization
+	(*CreateOrganizationRequest)(nil),    // 19: hearth.identity.v1.CreateOrganizationRequest
+	(*UpdateOrganizationRequest)(nil),    // 20: hearth.identity.v1.UpdateOrganizationRequest
+	(*OrganizationPage)(nil),             // 21: hearth.identity.v1.OrganizationPage
+	(*GetUserRequest)(nil),               // 22: hearth.identity.v1.GetUserRequest
+	(*DeleteUserRequest)(nil),            // 23: hearth.identity.v1.DeleteUserRequest
+	(*SendPasswordEmailRequest)(nil),     // 24: hearth.identity.v1.SendPasswordEmailRequest
+	(*SendPasswordEmailResponse)(nil),    // 25: hearth.identity.v1.SendPasswordEmailResponse
+	(*ListUsersRequest)(nil),             // 26: hearth.identity.v1.ListUsersRequest
+	(*UpdateUserCall)(nil),               // 27: hearth.identity.v1.UpdateUserCall
+	(*ListRealmsRequest)(nil),            // 28: hearth.identity.v1.ListRealmsRequest
+	(*GetRealmRequest)(nil),              // 29: hearth.identity.v1.GetRealmRequest
+	(*DeleteRealmRequest)(nil),           // 30: hearth.identity.v1.DeleteRealmRequest
+	(*SuspendRealmRequest)(nil),          // 31: hearth.identity.v1.SuspendRealmRequest
+	(*UnsuspendRealmRequest)(nil),        // 32: hearth.identity.v1.UnsuspendRealmRequest
+	(*UpdateRealmCall)(nil),              // 33: hearth.identity.v1.UpdateRealmCall
+	(*ListOrganizationsRequest)(nil),     // 34: hearth.identity.v1.ListOrganizationsRequest
+	(*GetOrganizationRequest)(nil),       // 35: hearth.identity.v1.GetOrganizationRequest
+	(*DeleteOrganizationRequest)(nil),    // 36: hearth.identity.v1.DeleteOrganizationRequest
+	(*UpdateOrganizationCall)(nil),       // 37: hearth.identity.v1.UpdateOrganizationCall
+	(*Empty)(nil),                        // 38: hearth.identity.v1.Empty
+	(*Agent)(nil),                        // 39: hearth.identity.v1.Agent
+	(*AgentCredential)(nil),              // 40: hearth.identity.v1.AgentCredential
+	(*AgentPage)(nil),                    // 41: hearth.identity.v1.AgentPage
+	(*AgentCredentialPage)(nil),          // 42: hearth.identity.v1.AgentCredentialPage
+	(*ListAgentsRequest)(nil),            // 43: hearth.identity.v1.ListAgentsRequest
+	(*GetAgentRequest)(nil),              // 44: hearth.identity.v1.GetAgentRequest
+	(*CreateAgentRequest)(nil),           // 45: hearth.identity.v1.CreateAgentRequest
+	(*UpdateAgentRequest)(nil),           // 46: hearth.identity.v1.UpdateAgentRequest
+	(*UpdateAgentCall)(nil),              // 47: hearth.identity.v1.UpdateAgentCall
+	(*DeleteAgentRequest)(nil),           // 48: hearth.identity.v1.DeleteAgentRequest
+	(*CreateAgentApiKeyRequest)(nil),     // 49: hearth.identity.v1.CreateAgentApiKeyRequest
+	(*CreateAgentApiKeyResponse)(nil),    // 50: hearth.identity.v1.CreateAgentApiKeyResponse
+	(*ListAgentCredentialsRequest)(nil),  // 51: hearth.identity.v1.ListAgentCredentialsRequest
+	(*RevokeAgentCredentialRequest)(nil), // 52: hearth.identity.v1.RevokeAgentCredentialRequest
+	nil,                                  // 53: hearth.identity.v1.CreateUserRequest.AttributesEntry
+	nil,                                  // 54: hearth.identity.v1.UpdateUserRequest.AttributesEntry
+	nil,                                  // 55: hearth.identity.v1.Organization.AttributesEntry
+	nil,                                  // 56: hearth.identity.v1.CreateOrganizationRequest.AttributesEntry
+	nil,                                  // 57: hearth.identity.v1.UpdateOrganizationRequest.AttributesEntry
 }
 var file_hearth_identity_v1_identity_proto_depIdxs = []int32{
 	0,  // 0: hearth.identity.v1.User.status:type_name -> hearth.identity.v1.UserStatus
 	1,  // 1: hearth.identity.v1.Realm.status:type_name -> hearth.identity.v1.RealmStatus
-	7,  // 2: hearth.identity.v1.Realm.config:type_name -> hearth.identity.v1.RealmConfig
-	50, // 3: hearth.identity.v1.CreateUserRequest.attributes:type_name -> hearth.identity.v1.CreateUserRequest.AttributesEntry
+	8,  // 2: hearth.identity.v1.Realm.config:type_name -> hearth.identity.v1.RealmConfig
+	53, // 3: hearth.identity.v1.CreateUserRequest.attributes:type_name -> hearth.identity.v1.CreateUserRequest.AttributesEntry
 	0,  // 4: hearth.identity.v1.UpdateUserRequest.status:type_name -> hearth.identity.v1.UserStatus
-	51, // 5: hearth.identity.v1.UpdateUserRequest.attributes:type_name -> hearth.identity.v1.UpdateUserRequest.AttributesEntry
-	7,  // 6: hearth.identity.v1.CreateRealmRequest.config:type_name -> hearth.identity.v1.RealmConfig
+	54, // 5: hearth.identity.v1.UpdateUserRequest.attributes:type_name -> hearth.identity.v1.UpdateUserRequest.AttributesEntry
+	8,  // 6: hearth.identity.v1.CreateRealmRequest.config:type_name -> hearth.identity.v1.RealmConfig
 	1,  // 7: hearth.identity.v1.UpdateRealmRequest.status:type_name -> hearth.identity.v1.RealmStatus
-	7,  // 8: hearth.identity.v1.UpdateRealmRequest.config:type_name -> hearth.identity.v1.RealmConfig
-	5,  // 9: hearth.identity.v1.UserPage.items:type_name -> hearth.identity.v1.User
-	8,  // 10: hearth.identity.v1.RealmPage.items:type_name -> hearth.identity.v1.Realm
-	5,  // 11: hearth.identity.v1.BulkResultEntry.user:type_name -> hearth.identity.v1.User
-	15, // 12: hearth.identity.v1.BulkResult.results:type_name -> hearth.identity.v1.BulkResultEntry
+	8,  // 8: hearth.identity.v1.UpdateRealmRequest.config:type_name -> hearth.identity.v1.RealmConfig
+	6,  // 9: hearth.identity.v1.UserPage.items:type_name -> hearth.identity.v1.User
+	9,  // 10: hearth.identity.v1.RealmPage.items:type_name -> hearth.identity.v1.Realm
+	6,  // 11: hearth.identity.v1.BulkResultEntry.user:type_name -> hearth.identity.v1.User
+	16, // 12: hearth.identity.v1.BulkResult.results:type_name -> hearth.identity.v1.BulkResultEntry
 	2,  // 13: hearth.identity.v1.Organization.status:type_name -> hearth.identity.v1.OrganizationStatus
-	52, // 14: hearth.identity.v1.Organization.attributes:type_name -> hearth.identity.v1.Organization.AttributesEntry
-	53, // 15: hearth.identity.v1.CreateOrganizationRequest.attributes:type_name -> hearth.identity.v1.CreateOrganizationRequest.AttributesEntry
+	55, // 14: hearth.identity.v1.Organization.attributes:type_name -> hearth.identity.v1.Organization.AttributesEntry
+	56, // 15: hearth.identity.v1.CreateOrganizationRequest.attributes:type_name -> hearth.identity.v1.CreateOrganizationRequest.AttributesEntry
 	2,  // 16: hearth.identity.v1.UpdateOrganizationRequest.status:type_name -> hearth.identity.v1.OrganizationStatus
-	54, // 17: hearth.identity.v1.UpdateOrganizationRequest.attributes:type_name -> hearth.identity.v1.UpdateOrganizationRequest.AttributesEntry
-	17, // 18: hearth.identity.v1.OrganizationPage.items:type_name -> hearth.identity.v1.Organization
-	10, // 19: hearth.identity.v1.UpdateUserCall.body:type_name -> hearth.identity.v1.UpdateUserRequest
-	12, // 20: hearth.identity.v1.UpdateRealmCall.body:type_name -> hearth.identity.v1.UpdateRealmRequest
-	19, // 21: hearth.identity.v1.UpdateOrganizationCall.body:type_name -> hearth.identity.v1.UpdateOrganizationRequest
-	3,  // 22: hearth.identity.v1.Agent.status:type_name -> hearth.identity.v1.AgentStatus
-	4,  // 23: hearth.identity.v1.AgentCredential.kind:type_name -> hearth.identity.v1.AgentCredentialKind
-	36, // 24: hearth.identity.v1.AgentPage.items:type_name -> hearth.identity.v1.Agent
-	37, // 25: hearth.identity.v1.AgentCredentialPage.items:type_name -> hearth.identity.v1.AgentCredential
-	3,  // 26: hearth.identity.v1.ListAgentsRequest.status:type_name -> hearth.identity.v1.AgentStatus
-	43, // 27: hearth.identity.v1.UpdateAgentCall.body:type_name -> hearth.identity.v1.UpdateAgentRequest
-	37, // 28: hearth.identity.v1.CreateAgentApiKeyResponse.credential:type_name -> hearth.identity.v1.AgentCredential
-	23, // 29: hearth.identity.v1.IdentityAdminService.ListUsers:input_type -> hearth.identity.v1.ListUsersRequest
-	21, // 30: hearth.identity.v1.IdentityAdminService.GetUser:input_type -> hearth.identity.v1.GetUserRequest
-	9,  // 31: hearth.identity.v1.IdentityAdminService.CreateUser:input_type -> hearth.identity.v1.CreateUserRequest
-	24, // 32: hearth.identity.v1.IdentityAdminService.UpdateUser:input_type -> hearth.identity.v1.UpdateUserCall
-	22, // 33: hearth.identity.v1.IdentityAdminService.DeleteUser:input_type -> hearth.identity.v1.DeleteUserRequest
-	25, // 34: hearth.identity.v1.IdentityAdminService.ListRealms:input_type -> hearth.identity.v1.ListRealmsRequest
-	26, // 35: hearth.identity.v1.IdentityAdminService.GetRealm:input_type -> hearth.identity.v1.GetRealmRequest
-	11, // 36: hearth.identity.v1.IdentityAdminService.CreateRealm:input_type -> hearth.identity.v1.CreateRealmRequest
-	30, // 37: hearth.identity.v1.IdentityAdminService.UpdateRealm:input_type -> hearth.identity.v1.UpdateRealmCall
-	27, // 38: hearth.identity.v1.IdentityAdminService.DeleteRealm:input_type -> hearth.identity.v1.DeleteRealmRequest
-	28, // 39: hearth.identity.v1.IdentityAdminService.SuspendRealm:input_type -> hearth.identity.v1.SuspendRealmRequest
-	29, // 40: hearth.identity.v1.IdentityAdminService.UnsuspendRealm:input_type -> hearth.identity.v1.UnsuspendRealmRequest
-	31, // 41: hearth.identity.v1.IdentityAdminService.ListOrganizations:input_type -> hearth.identity.v1.ListOrganizationsRequest
-	32, // 42: hearth.identity.v1.IdentityAdminService.GetOrganization:input_type -> hearth.identity.v1.GetOrganizationRequest
-	18, // 43: hearth.identity.v1.IdentityAdminService.CreateOrganization:input_type -> hearth.identity.v1.CreateOrganizationRequest
-	34, // 44: hearth.identity.v1.IdentityAdminService.UpdateOrganization:input_type -> hearth.identity.v1.UpdateOrganizationCall
-	33, // 45: hearth.identity.v1.IdentityAdminService.DeleteOrganization:input_type -> hearth.identity.v1.DeleteOrganizationRequest
-	40, // 46: hearth.identity.v1.IdentityAdminService.ListAgents:input_type -> hearth.identity.v1.ListAgentsRequest
-	41, // 47: hearth.identity.v1.IdentityAdminService.GetAgent:input_type -> hearth.identity.v1.GetAgentRequest
-	42, // 48: hearth.identity.v1.IdentityAdminService.CreateAgent:input_type -> hearth.identity.v1.CreateAgentRequest
-	44, // 49: hearth.identity.v1.IdentityAdminService.UpdateAgent:input_type -> hearth.identity.v1.UpdateAgentCall
-	45, // 50: hearth.identity.v1.IdentityAdminService.DeleteAgent:input_type -> hearth.identity.v1.DeleteAgentRequest
-	46, // 51: hearth.identity.v1.IdentityAdminService.CreateAgentApiKey:input_type -> hearth.identity.v1.CreateAgentApiKeyRequest
-	48, // 52: hearth.identity.v1.IdentityAdminService.ListAgentCredentials:input_type -> hearth.identity.v1.ListAgentCredentialsRequest
-	49, // 53: hearth.identity.v1.IdentityAdminService.RevokeAgentCredential:input_type -> hearth.identity.v1.RevokeAgentCredentialRequest
-	13, // 54: hearth.identity.v1.IdentityAdminService.ListUsers:output_type -> hearth.identity.v1.UserPage
-	5,  // 55: hearth.identity.v1.IdentityAdminService.GetUser:output_type -> hearth.identity.v1.User
-	5,  // 56: hearth.identity.v1.IdentityAdminService.CreateUser:output_type -> hearth.identity.v1.User
-	5,  // 57: hearth.identity.v1.IdentityAdminService.UpdateUser:output_type -> hearth.identity.v1.User
-	35, // 58: hearth.identity.v1.IdentityAdminService.DeleteUser:output_type -> hearth.identity.v1.Empty
-	14, // 59: hearth.identity.v1.IdentityAdminService.ListRealms:output_type -> hearth.identity.v1.RealmPage
-	8,  // 60: hearth.identity.v1.IdentityAdminService.GetRealm:output_type -> hearth.identity.v1.Realm
-	8,  // 61: hearth.identity.v1.IdentityAdminService.CreateRealm:output_type -> hearth.identity.v1.Realm
-	8,  // 62: hearth.identity.v1.IdentityAdminService.UpdateRealm:output_type -> hearth.identity.v1.Realm
-	35, // 63: hearth.identity.v1.IdentityAdminService.DeleteRealm:output_type -> hearth.identity.v1.Empty
-	8,  // 64: hearth.identity.v1.IdentityAdminService.SuspendRealm:output_type -> hearth.identity.v1.Realm
-	8,  // 65: hearth.identity.v1.IdentityAdminService.UnsuspendRealm:output_type -> hearth.identity.v1.Realm
-	20, // 66: hearth.identity.v1.IdentityAdminService.ListOrganizations:output_type -> hearth.identity.v1.OrganizationPage
-	17, // 67: hearth.identity.v1.IdentityAdminService.GetOrganization:output_type -> hearth.identity.v1.Organization
-	17, // 68: hearth.identity.v1.IdentityAdminService.CreateOrganization:output_type -> hearth.identity.v1.Organization
-	17, // 69: hearth.identity.v1.IdentityAdminService.UpdateOrganization:output_type -> hearth.identity.v1.Organization
-	35, // 70: hearth.identity.v1.IdentityAdminService.DeleteOrganization:output_type -> hearth.identity.v1.Empty
-	38, // 71: hearth.identity.v1.IdentityAdminService.ListAgents:output_type -> hearth.identity.v1.AgentPage
-	36, // 72: hearth.identity.v1.IdentityAdminService.GetAgent:output_type -> hearth.identity.v1.Agent
-	36, // 73: hearth.identity.v1.IdentityAdminService.CreateAgent:output_type -> hearth.identity.v1.Agent
-	36, // 74: hearth.identity.v1.IdentityAdminService.UpdateAgent:output_type -> hearth.identity.v1.Agent
-	35, // 75: hearth.identity.v1.IdentityAdminService.DeleteAgent:output_type -> hearth.identity.v1.Empty
-	47, // 76: hearth.identity.v1.IdentityAdminService.CreateAgentApiKey:output_type -> hearth.identity.v1.CreateAgentApiKeyResponse
-	39, // 77: hearth.identity.v1.IdentityAdminService.ListAgentCredentials:output_type -> hearth.identity.v1.AgentCredentialPage
-	35, // 78: hearth.identity.v1.IdentityAdminService.RevokeAgentCredential:output_type -> hearth.identity.v1.Empty
-	54, // [54:79] is the sub-list for method output_type
-	29, // [29:54] is the sub-list for method input_type
-	29, // [29:29] is the sub-list for extension type_name
-	29, // [29:29] is the sub-list for extension extendee
-	0,  // [0:29] is the sub-list for field type_name
+	57, // 17: hearth.identity.v1.UpdateOrganizationRequest.attributes:type_name -> hearth.identity.v1.UpdateOrganizationRequest.AttributesEntry
+	18, // 18: hearth.identity.v1.OrganizationPage.items:type_name -> hearth.identity.v1.Organization
+	3,  // 19: hearth.identity.v1.SendPasswordEmailResponse.kind:type_name -> hearth.identity.v1.PasswordEmailKind
+	11, // 20: hearth.identity.v1.UpdateUserCall.body:type_name -> hearth.identity.v1.UpdateUserRequest
+	13, // 21: hearth.identity.v1.UpdateRealmCall.body:type_name -> hearth.identity.v1.UpdateRealmRequest
+	20, // 22: hearth.identity.v1.UpdateOrganizationCall.body:type_name -> hearth.identity.v1.UpdateOrganizationRequest
+	4,  // 23: hearth.identity.v1.Agent.status:type_name -> hearth.identity.v1.AgentStatus
+	5,  // 24: hearth.identity.v1.AgentCredential.kind:type_name -> hearth.identity.v1.AgentCredentialKind
+	39, // 25: hearth.identity.v1.AgentPage.items:type_name -> hearth.identity.v1.Agent
+	40, // 26: hearth.identity.v1.AgentCredentialPage.items:type_name -> hearth.identity.v1.AgentCredential
+	4,  // 27: hearth.identity.v1.ListAgentsRequest.status:type_name -> hearth.identity.v1.AgentStatus
+	46, // 28: hearth.identity.v1.UpdateAgentCall.body:type_name -> hearth.identity.v1.UpdateAgentRequest
+	40, // 29: hearth.identity.v1.CreateAgentApiKeyResponse.credential:type_name -> hearth.identity.v1.AgentCredential
+	26, // 30: hearth.identity.v1.IdentityAdminService.ListUsers:input_type -> hearth.identity.v1.ListUsersRequest
+	22, // 31: hearth.identity.v1.IdentityAdminService.GetUser:input_type -> hearth.identity.v1.GetUserRequest
+	10, // 32: hearth.identity.v1.IdentityAdminService.CreateUser:input_type -> hearth.identity.v1.CreateUserRequest
+	27, // 33: hearth.identity.v1.IdentityAdminService.UpdateUser:input_type -> hearth.identity.v1.UpdateUserCall
+	23, // 34: hearth.identity.v1.IdentityAdminService.DeleteUser:input_type -> hearth.identity.v1.DeleteUserRequest
+	24, // 35: hearth.identity.v1.IdentityAdminService.SendPasswordEmail:input_type -> hearth.identity.v1.SendPasswordEmailRequest
+	28, // 36: hearth.identity.v1.IdentityAdminService.ListRealms:input_type -> hearth.identity.v1.ListRealmsRequest
+	29, // 37: hearth.identity.v1.IdentityAdminService.GetRealm:input_type -> hearth.identity.v1.GetRealmRequest
+	12, // 38: hearth.identity.v1.IdentityAdminService.CreateRealm:input_type -> hearth.identity.v1.CreateRealmRequest
+	33, // 39: hearth.identity.v1.IdentityAdminService.UpdateRealm:input_type -> hearth.identity.v1.UpdateRealmCall
+	30, // 40: hearth.identity.v1.IdentityAdminService.DeleteRealm:input_type -> hearth.identity.v1.DeleteRealmRequest
+	31, // 41: hearth.identity.v1.IdentityAdminService.SuspendRealm:input_type -> hearth.identity.v1.SuspendRealmRequest
+	32, // 42: hearth.identity.v1.IdentityAdminService.UnsuspendRealm:input_type -> hearth.identity.v1.UnsuspendRealmRequest
+	34, // 43: hearth.identity.v1.IdentityAdminService.ListOrganizations:input_type -> hearth.identity.v1.ListOrganizationsRequest
+	35, // 44: hearth.identity.v1.IdentityAdminService.GetOrganization:input_type -> hearth.identity.v1.GetOrganizationRequest
+	19, // 45: hearth.identity.v1.IdentityAdminService.CreateOrganization:input_type -> hearth.identity.v1.CreateOrganizationRequest
+	37, // 46: hearth.identity.v1.IdentityAdminService.UpdateOrganization:input_type -> hearth.identity.v1.UpdateOrganizationCall
+	36, // 47: hearth.identity.v1.IdentityAdminService.DeleteOrganization:input_type -> hearth.identity.v1.DeleteOrganizationRequest
+	43, // 48: hearth.identity.v1.IdentityAdminService.ListAgents:input_type -> hearth.identity.v1.ListAgentsRequest
+	44, // 49: hearth.identity.v1.IdentityAdminService.GetAgent:input_type -> hearth.identity.v1.GetAgentRequest
+	45, // 50: hearth.identity.v1.IdentityAdminService.CreateAgent:input_type -> hearth.identity.v1.CreateAgentRequest
+	47, // 51: hearth.identity.v1.IdentityAdminService.UpdateAgent:input_type -> hearth.identity.v1.UpdateAgentCall
+	48, // 52: hearth.identity.v1.IdentityAdminService.DeleteAgent:input_type -> hearth.identity.v1.DeleteAgentRequest
+	49, // 53: hearth.identity.v1.IdentityAdminService.CreateAgentApiKey:input_type -> hearth.identity.v1.CreateAgentApiKeyRequest
+	51, // 54: hearth.identity.v1.IdentityAdminService.ListAgentCredentials:input_type -> hearth.identity.v1.ListAgentCredentialsRequest
+	52, // 55: hearth.identity.v1.IdentityAdminService.RevokeAgentCredential:input_type -> hearth.identity.v1.RevokeAgentCredentialRequest
+	14, // 56: hearth.identity.v1.IdentityAdminService.ListUsers:output_type -> hearth.identity.v1.UserPage
+	6,  // 57: hearth.identity.v1.IdentityAdminService.GetUser:output_type -> hearth.identity.v1.User
+	6,  // 58: hearth.identity.v1.IdentityAdminService.CreateUser:output_type -> hearth.identity.v1.User
+	6,  // 59: hearth.identity.v1.IdentityAdminService.UpdateUser:output_type -> hearth.identity.v1.User
+	38, // 60: hearth.identity.v1.IdentityAdminService.DeleteUser:output_type -> hearth.identity.v1.Empty
+	25, // 61: hearth.identity.v1.IdentityAdminService.SendPasswordEmail:output_type -> hearth.identity.v1.SendPasswordEmailResponse
+	15, // 62: hearth.identity.v1.IdentityAdminService.ListRealms:output_type -> hearth.identity.v1.RealmPage
+	9,  // 63: hearth.identity.v1.IdentityAdminService.GetRealm:output_type -> hearth.identity.v1.Realm
+	9,  // 64: hearth.identity.v1.IdentityAdminService.CreateRealm:output_type -> hearth.identity.v1.Realm
+	9,  // 65: hearth.identity.v1.IdentityAdminService.UpdateRealm:output_type -> hearth.identity.v1.Realm
+	38, // 66: hearth.identity.v1.IdentityAdminService.DeleteRealm:output_type -> hearth.identity.v1.Empty
+	9,  // 67: hearth.identity.v1.IdentityAdminService.SuspendRealm:output_type -> hearth.identity.v1.Realm
+	9,  // 68: hearth.identity.v1.IdentityAdminService.UnsuspendRealm:output_type -> hearth.identity.v1.Realm
+	21, // 69: hearth.identity.v1.IdentityAdminService.ListOrganizations:output_type -> hearth.identity.v1.OrganizationPage
+	18, // 70: hearth.identity.v1.IdentityAdminService.GetOrganization:output_type -> hearth.identity.v1.Organization
+	18, // 71: hearth.identity.v1.IdentityAdminService.CreateOrganization:output_type -> hearth.identity.v1.Organization
+	18, // 72: hearth.identity.v1.IdentityAdminService.UpdateOrganization:output_type -> hearth.identity.v1.Organization
+	38, // 73: hearth.identity.v1.IdentityAdminService.DeleteOrganization:output_type -> hearth.identity.v1.Empty
+	41, // 74: hearth.identity.v1.IdentityAdminService.ListAgents:output_type -> hearth.identity.v1.AgentPage
+	39, // 75: hearth.identity.v1.IdentityAdminService.GetAgent:output_type -> hearth.identity.v1.Agent
+	39, // 76: hearth.identity.v1.IdentityAdminService.CreateAgent:output_type -> hearth.identity.v1.Agent
+	39, // 77: hearth.identity.v1.IdentityAdminService.UpdateAgent:output_type -> hearth.identity.v1.Agent
+	38, // 78: hearth.identity.v1.IdentityAdminService.DeleteAgent:output_type -> hearth.identity.v1.Empty
+	50, // 79: hearth.identity.v1.IdentityAdminService.CreateAgentApiKey:output_type -> hearth.identity.v1.CreateAgentApiKeyResponse
+	42, // 80: hearth.identity.v1.IdentityAdminService.ListAgentCredentials:output_type -> hearth.identity.v1.AgentCredentialPage
+	38, // 81: hearth.identity.v1.IdentityAdminService.RevokeAgentCredential:output_type -> hearth.identity.v1.Empty
+	56, // [56:82] is the sub-list for method output_type
+	30, // [30:56] is the sub-list for method input_type
+	30, // [30:30] is the sub-list for extension type_name
+	30, // [30:30] is the sub-list for extension extendee
+	0,  // [0:30] is the sub-list for field type_name
 }
 
 func init() { file_hearth_identity_v1_identity_proto_init() }
@@ -3562,21 +3720,21 @@ func file_hearth_identity_v1_identity_proto_init() {
 	file_hearth_identity_v1_identity_proto_msgTypes[13].OneofWrappers = []any{}
 	file_hearth_identity_v1_identity_proto_msgTypes[14].OneofWrappers = []any{}
 	file_hearth_identity_v1_identity_proto_msgTypes[15].OneofWrappers = []any{}
-	file_hearth_identity_v1_identity_proto_msgTypes[18].OneofWrappers = []any{}
 	file_hearth_identity_v1_identity_proto_msgTypes[20].OneofWrappers = []any{}
-	file_hearth_identity_v1_identity_proto_msgTypes[26].OneofWrappers = []any{}
-	file_hearth_identity_v1_identity_proto_msgTypes[32].OneofWrappers = []any{}
-	file_hearth_identity_v1_identity_proto_msgTypes[33].OneofWrappers = []any{}
+	file_hearth_identity_v1_identity_proto_msgTypes[22].OneofWrappers = []any{}
+	file_hearth_identity_v1_identity_proto_msgTypes[28].OneofWrappers = []any{}
+	file_hearth_identity_v1_identity_proto_msgTypes[34].OneofWrappers = []any{}
 	file_hearth_identity_v1_identity_proto_msgTypes[35].OneofWrappers = []any{}
 	file_hearth_identity_v1_identity_proto_msgTypes[37].OneofWrappers = []any{}
-	file_hearth_identity_v1_identity_proto_msgTypes[38].OneofWrappers = []any{}
+	file_hearth_identity_v1_identity_proto_msgTypes[39].OneofWrappers = []any{}
+	file_hearth_identity_v1_identity_proto_msgTypes[40].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_hearth_identity_v1_identity_proto_rawDesc), len(file_hearth_identity_v1_identity_proto_rawDesc)),
-			NumEnums:      5,
-			NumMessages:   50,
+			NumEnums:      6,
+			NumMessages:   52,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

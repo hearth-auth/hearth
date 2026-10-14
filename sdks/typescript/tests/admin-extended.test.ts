@@ -28,6 +28,19 @@ function mockNoContent() {
 beforeEach(() => vi.stubGlobal("fetch", vi.fn()));
 afterEach(() => vi.unstubAllGlobals());
 
+// ── Users ──────────────────────────────────────────────────────────────────
+
+describe("AdminClient — Users", () => {
+  it("sendPasswordEmail POSTs /admin/users/:id/password-email and returns the kind", async () => {
+    vi.mocked(fetch).mockResolvedValue(mockOk({ kind: "PASSWORD_EMAIL_KIND_SETUP" }));
+    const kind = await makeAdmin().sendPasswordEmail("u1");
+    const [url, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(`${BASE}/admin/users/u1/password-email`);
+    expect(init.method).toBe("POST");
+    expect(kind).toBe("PASSWORD_EMAIL_KIND_SETUP");
+  });
+});
+
 // ── OAuth Clients ──────────────────────────────────────────────────────────
 
 describe("AdminClient — OAuth Clients CRUD", () => {

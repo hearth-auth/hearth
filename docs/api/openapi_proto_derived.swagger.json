@@ -1339,6 +1339,38 @@
         ]
       }
     },
+    "/admin/users/{id}/password-email": {
+      "post": {
+        "summary": "Emails the user a single-use link to choose a password: the welcome\nemail with a set-password link when the user has no password, the reset\nemail when the user has one. It counts against the user's reset limit.",
+        "operationId": "IdentityAdminService_SendPasswordEmail",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1SendPasswordEmailResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "description": "The user's ID.",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "IdentityAdminService"
+        ]
+      }
+    },
     "/admin/users/{user_id}/consents": {
       "get": {
         "summary": "List all active consents for a user.",
@@ -3251,6 +3283,16 @@
       "default": "ORGANIZATION_STATUS_UNSPECIFIED",
       "description": "The lifecycle status of an organization."
     },
+    "v1PasswordEmailKind": {
+      "type": "string",
+      "enum": [
+        "PASSWORD_EMAIL_KIND_UNSPECIFIED",
+        "PASSWORD_EMAIL_KIND_SETUP",
+        "PASSWORD_EMAIL_KIND_RESET"
+      ],
+      "default": "PASSWORD_EMAIL_KIND_UNSPECIFIED",
+      "description": "Which password email Hearth sent.\n\n - PASSWORD_EMAIL_KIND_SETUP: The user has no password: the welcome email with a set-password link.\n - PASSWORD_EMAIL_KIND_RESET: The user has a password: the password-reset email."
+    },
     "v1PermissionEntry": {
       "type": "object",
       "properties": {
@@ -3532,6 +3574,15 @@
           "$ref": "#/definitions/v1OrgScope"
         }
       }
+    },
+    "v1SendPasswordEmailResponse": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/definitions/v1PasswordEmailKind"
+        }
+      },
+      "description": "The password email Hearth sent."
     },
     "v1TokenDecisionRequest": {
       "type": "object",
