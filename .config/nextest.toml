@@ -39,3 +39,13 @@ test-group = 'three-node-cluster'
 [[profile.default.overrides]]
 filter = 'binary(cluster_peer_message_size)'
 slow-timeout = { period = "30s", terminate-after = 5 }
+
+# The journey heap gate (#445) sends 36,000 journeys through the router in a
+# debug build: about 60 s alone on a 12-core host, about 100 s with five
+# copies in parallel. It gets 300 s (60 s x 5) for a 4-core runner that also
+# runs the rest of the suite. Its four worker threads stay busy for the whole
+# run, so it takes four of nextest's test slots.
+[[profile.default.overrides]]
+filter = 'binary(journey_heap)'
+slow-timeout = { period = "60s", terminate-after = 5 }
+threads-required = 4
