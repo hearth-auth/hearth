@@ -13,7 +13,7 @@ BUF := buf
 ## with `--workspace`.
 DEV_FEATURES ?= --features hearth/dev-endpoints
 
-.PHONY: setup build test test-detached test-no-dev-endpoints clippy fmt miri asan heap-check unsafe-check loadtest loadtest-check loadtest-smoke seed check coverage css css-check css-watch tailwind-install openapi openapi-check sdk-admin-gen sdk-admin-check sdk-conformance proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test sdk-lint test-quality abuse-check auth-discard-check mfa-resolver-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke jepsen jepsen-binary jepsen-up jepsen-down ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template scratch-prune scratch-prune-dry-run scratch-timer-install
+.PHONY: setup build test test-detached test-no-dev-endpoints clippy fmt miri asan heap-check unsafe-check leak-check loadtest loadtest-check loadtest-smoke seed check coverage css css-check css-watch tailwind-install openapi openapi-check sdk-admin-gen sdk-admin-check sdk-conformance proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test sdk-lint test-quality abuse-check auth-discard-check mfa-resolver-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke jepsen jepsen-binary jepsen-up jepsen-down ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template scratch-prune scratch-prune-dry-run scratch-timer-install
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -300,6 +300,27 @@ unsafe-check: ## Run Miri, AddressSanitizer and heap checking over the unsafe co
 	  exit 1; \
 	fi; \
 	echo "make unsafe-check: all gates passed"
+
+# ── Leaks (#445) ───────────────────────────────────────────────────────────
+
+## The whole suite under LeakSanitizer. LSan checks each test process at exit
+## and fails it (exit 23) for any heap block that no pointer reaches: a
+## reference cycle, a forgotten value, or memory a data structure lost track
+## of (the crossbeam-skiplist `range` leak of #445). tests/graceful_shutdown.rs
+## stops the LSan-built server binary with SIGTERM and expects exit 0, so the
+## server's clean shutdown is checked too. On the nightly that
+## unsafe-check/rust-toolchain.toml pins: -Zsanitizer exists only there.
+##
+## No debug info: about 22 GiB for every test binary instead of about 80, and
+## the symbol table still names each frame (decode with `addr2line -f -C`).
+## LSAN_FILTER leaves out the tests that measure glibc's allocator, which
+## LSan replaces.
+LSAN_TOOLCHAIN = $(shell sed -n 's/^channel = "\(.*\)"/\1/p' unsafe-check/rust-toolchain.toml)
+LSAN_FILTER ?= not (binary(memtable_flush_memory) | (binary_id(hearth::bin/hearth) & test(capped_malloc_arenas)))
+leak-check: ## Run the whole suite under LeakSanitizer
+	RUSTFLAGS="-Zsanitizer=leak" CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
+	  PROTOC=$(PROTOC) cargo +$(LSAN_TOOLCHAIN) nextest run --workspace --target $(HOST_TRIPLE) \
+	  $(DEV_FEATURES) --profile lsan --no-fail-fast $(CARGO_FLAGS) -E '$(LSAN_FILTER)'
 
 ## §3.41 adversarial test-quality gate: every A-N row in the abuse-prevention
 ## plan (openspec/specs/abuse-prevention/spec.md) must have at least one
