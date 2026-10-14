@@ -30,6 +30,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   placeholders. The `welcome` kind of `email_templates` existed, but Hearth never sent it.
 
 ### Changed
+- **The console's "Send reset email" and bulk "Send invite" actions send the welcome email to a
+  user with no password**, with the 72-hour set-password link, instead of a 30-minute reset link.
+  They now also apply the outbound email caps (A-4, A-50). The reset page says "Set your password"
+  for a set-password link.
+
+## [4.0.0] — 2026-10-14
+
+### Changed
 - **BREAKING: entity IDs are bare UUIDs everywhere.** A user's access, refresh and ID tokens
   carry `sub` = the user's bare UUID, the same `id` that the admin API and SCIM return. Before,
   `sub` was `user_<uuid>`, so an application could not match a token with the user record it
@@ -44,10 +52,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 - **BREAKING (Go SDK): the module path is `github.com/hearth-auth/hearth/sdks/go/v4`.** The SDKs
   move to 4.0 with the server, and Go installs a v4 release only from a `/v4` module path. Change
   each import from `.../sdks/go/v3/...` to `.../sdks/go/v4/...`.
-- **The console's "Send reset email" and bulk "Send invite" actions send the welcome email to a
-  user with no password**, with the 72-hour set-password link, instead of a 30-minute reset link.
-  They now also apply the outbound email caps (A-4, A-50). The reset page says "Set your password"
-  for a set-password link.
 
 ## [1.0.1 – 3.5.13] — 2026-06-23 to 2026-10-14
 
