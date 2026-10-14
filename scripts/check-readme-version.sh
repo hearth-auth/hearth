@@ -21,14 +21,34 @@
 # preventing the trap where obeying the guard would publish 404 install docs (HEA-2199).
 #
 # Usage: scripts/check-readme-version.sh
+#        scripts/check-readme-version.sh --fix <vX.Y.Z | X.Y.Z>
+#
+# --fix rewrites every pin the patterns below match so it names VERSION, then
+# runs the check against VERSION. It does not call gh: the caller states the
+# version. scripts/release-bump.sh uses it for the release PR, so the rewrite and
+# the check share one pattern list.
+#
 # Env (test hooks only — unset in CI):
 #   README_PATH        path to the file to check               (default: README.md)
 #   README_LATEST_TAG  override the resolved release tag  (default: latest published binary release)
-# Exit:  0 if all references match the latest published release, 1 otherwise.
+# Exit:  0 if all references match the latest published release (or VERSION with
+#        --fix), 1 otherwise, 2 on a usage error.
 
 set -euo pipefail
 
 README="${README_PATH:-README.md}"
+
+usage() {
+    echo "usage: check-readme-version.sh [--fix <vX.Y.Z | X.Y.Z>]" >&2
+    exit 2
+}
+
+FIX_VERSION=""
+if [[ $# -gt 0 ]]; then
+    [[ "$1" == "--fix" && $# -eq 2 ]] || usage
+    [[ "$2" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]] || usage
+    FIX_VERSION="${2#v}"
+fi
 
 if [[ ! -f "$README" ]]; then
     echo "ERROR: ${README} not found (run from the repository root)."
@@ -42,7 +62,9 @@ fi
 # GH_TOKEN must be set in CI so `gh` can authenticate. An unauthenticated call fails
 # loudly here — no exit-0 skip branch; an unresolvable release is always a hard error
 # (HEA-2203).
-if [[ -n "${README_LATEST_TAG:-}" ]]; then
+if [[ -n "$FIX_VERSION" ]]; then
+    LATEST_TAG="v${FIX_VERSION}"
+elif [[ -n "${README_LATEST_TAG:-}" ]]; then
     LATEST_TAG="$README_LATEST_TAG"
 else
     _gh_err="$(mktemp)"
@@ -66,7 +88,11 @@ fi
 # Bare version string without the leading 'v' (e.g. 1.6.6).
 LATEST_BARE="${LATEST_TAG#v}"
 
-echo "Latest published binary release: ${LATEST_TAG}  (bare: ${LATEST_BARE})"
+if [[ -n "$FIX_VERSION" ]]; then
+    echo "Pinning ${README} to ${LATEST_TAG}  (bare: ${LATEST_BARE})"
+else
+    echo "Latest published binary release: ${LATEST_TAG}  (bare: ${LATEST_BARE})"
+fi
 
 # ── Patterns to check ────────────────────────────────────────────────────────
 #
@@ -89,6 +115,28 @@ declare -a PATTERNS=(
     "Stable-release prose"           "Stable [0-9]+\.[0-9]+\.[0-9]+:"
     "Install prose"                  "pre-built v?[0-9]+\.[0-9]+\.[0-9]+ artifacts"
 )
+
+# Every pattern holds exactly one version, VERSION_RE. --fix splits each pattern
+# around it and keeps the text on both sides, so `v`-prefixed pins stay
+# `v`-prefixed and the prose form keeps its own spelling.
+VERSION_RE='[0-9]+\.[0-9]+\.[0-9]+'
+
+if [[ -n "$FIX_VERSION" ]]; then
+    sed_args=()
+    for (( i=0; i<${#PATTERNS[@]}; i+=2 )); do
+        pat="${PATTERNS[$i+1]}"
+        prefix="${pat%%"$VERSION_RE"*}"
+        suffix="${pat#*"$VERSION_RE"}"
+        if [[ -n "$suffix" ]]; then
+            sed_args+=(-e "s#(${prefix})${VERSION_RE}(${suffix})#\\1${FIX_VERSION}\\2#g")
+        else
+            sed_args+=(-e "s#(${prefix})${VERSION_RE}#\\1${FIX_VERSION}#g")
+        fi
+    done
+    # Write a temp file and move it: `sed -i` differs between GNU and BSD sed.
+    sed -E "${sed_args[@]}" "$README" > "${README}.fix"
+    mv "${README}.fix" "$README"
+fi
 
 stale=0
 
@@ -113,8 +161,8 @@ if [[ "$stale" -eq 1 ]]; then
     echo "ERROR: ${README} contains install-instruction version references that do not match the"
     echo "       latest published binary release (${LATEST_TAG})."
     echo ""
-    echo "  Update each STALE pin listed above so it references ${LATEST_TAG} / ${LATEST_BARE}."
-    echo "  Do NOT edit Cargo.toml version — semantic-release owns that field."
+    echo "  The release PR (chore(release): ${LATEST_TAG}, opened by release.yml) updates these pins."
+    echo "  If it is missing, run: bash scripts/check-readme-version.sh --fix ${LATEST_TAG}"
     echo "  Note: the guard keys off published binary releases, not git tags."
     exit 1
 fi

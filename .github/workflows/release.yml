@@ -608,3 +608,51 @@ jobs:
 
           # Publish only after every asset is confirmed uploaded.
           gh release edit "$TAG" --draft=false --repo "$REPO"
+
+  # ── 8. Release PR: record the published release on main ──────────────────
+  # After a release, main still names the previous version: the README install
+  # pins (check-readme-version.sh then fails every PR), the CHANGELOG
+  # [Unreleased] section, and the Cargo.toml / Cargo.lock / Chart.yaml versions.
+  # scripts/release-pr.sh commits all of them on release/next and opens the PR
+  # `chore(release): vX.Y.Z` with auto-merge (squash). That title cuts no release.
+  #
+  # The job runs here, after the release is published, and not in
+  # semantic-release.yml at tag time. The README guard keys off PUBLISHED
+  # releases (HEA-2199). A PR opened at tag time would fail its own CI, and if
+  # validation then failed, it would pin a release that never shipped.
+  #
+  # SEMANTIC_RELEASE_PAT does the checkout, the push and the gh calls. A branch
+  # pushed or a PR opened with GITHUB_TOKEN starts no CI run, so the PR could
+  # never go green and merge.
+  release-pr:
+    name: Open the release PR
+    needs: [release]
+    # Release tags only: a pre-release tag (v1.2.3-rc.1) is not a README pin,
+    # and a workflow_dispatch run has no tag. release-pr.sh skips a tag that is
+    # not on main (a 1.x / 2.x maintenance release).
+    if: github.event_name == 'push' && github.ref_type == 'tag' && !contains(github.ref_name, '-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Every write uses the PAT, so the job needs no GITHUB_TOKEN permission.
+    permissions: {}
+    steps:
+      - name: Checkout the release tag (full history for the ancestry check)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ secrets.SEMANTIC_RELEASE_PAT }}
+
+      - name: Open or update the release PR
+        env:
+          GH_TOKEN: ${{ secrets.SEMANTIC_RELEASE_PAT }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          GIT_AUTHOR_NAME: "hearth-release-bot"
+          GIT_AUTHOR_EMAIL: "releases@hearth.example"
+          GIT_COMMITTER_NAME: "hearth-release-bot"
+          GIT_COMMITTER_EMAIL: "releases@hearth.example"
+        run: |
+          # git push authenticates through gh, which reads GH_TOKEN.
+          gh auth setup-git
+          bash scripts/release-pr.sh "$TAG"

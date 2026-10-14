@@ -322,6 +322,13 @@ jobs:
       - name: README version drift — guard self-test
         run: bash scripts/tests/check-readme-version.test.sh
 
+      # release.yml runs scripts/release-pr.sh after each published release: it
+      # pins the README, cuts the CHANGELOG, sets the in-repo versions and opens
+      # the `chore(release)` PR. Offline proof of the file edits and of the git/gh
+      # flow (a local bare remote and a fake gh). Pure bash, no Rust build.
+      - name: Release PR — self-test
+        run: bash scripts/tests/release-pr.test.sh
+
       # Audit §4.8#12: the verification guide told the reader to run two
       # commands that cannot execute (`cosign triangulate` on a detached blob
       # signature, and `brew install slsa-verifier`, which has no formula), and

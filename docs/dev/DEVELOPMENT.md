@@ -177,7 +177,15 @@ Releases are automatic. Do not tag by hand.
 - The `v*` tag triggers `release.yml` (signed binaries, SBOM, provenance), `docker.yml` and
   `helm.yml`. The SDK tags (`sdk-ts-v*`, `sdks/go/v*`, `sdk-python-v*`, `sdk-php-v*`) trigger
   their publish workflows.
-- After a new binary release is published, `scripts/check-readme-version.sh` fails every PR until
-  the README's install pins name it. Update them in a `docs:` PR.
+- When the GitHub Release is published, the `Open the release PR` job of `release.yml` runs
+  `scripts/release-pr.sh`. It opens the PR `chore(release): vX.Y.Z` from the branch
+  `release/next`, with auto-merge (squash) on. The PR moves the `CHANGELOG.md` `## [Unreleased]`
+  entries under `## [X.Y.Z] — date`, pins the README install docs, and sets the `Cargo.toml`,
+  `Cargo.lock` and `Chart.yaml` versions. Its title cuts no release. A later release replaces an
+  unmerged release PR.
+- Until the release PR merges, `scripts/check-readme-version.sh` fails every other PR, because the
+  README pins still name the previous release. If the release PR is missing, re-run that job.
+  `scripts/release-bump.sh vX.Y.Z` makes the same file edits in your work tree.
 
-`CHANGELOG.md` entries stay under `## [Unreleased]`, written with each PR (see `CLAUDE.md`).
+Write `CHANGELOG.md` entries under `## [Unreleased]` with each PR (see `CLAUDE.md`). Do not add
+version headings by hand: the release PR adds them.
