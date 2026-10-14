@@ -127,7 +127,7 @@ curl -X POST http://127.0.0.1:8420/admin/users/<user-id>/roles \
   -H "Content-Type: application/json" \
   -d '{
     "role_id": "<role-id>",
-    "org_id": "org_<uuid>"
+    "org_id": "<org uuid>"
   }'
 ```
 
@@ -183,7 +183,7 @@ if (!claims.hasPermission('docs.edit')) {
 <TabItem value="go" label="Go">
 
 ```go
-import "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
+import "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
 
 client := hearth.NewClient(hearthURL, realmID)
 
@@ -289,7 +289,7 @@ Response (RFC 7662 + Hearth RBAC extensions):
 ```json
 {
   "active": true,
-  "sub": "user_01HXYZ...",
+  "sub": "0e459c89-a973-4495-a8de-57f9d9056249",
   "permissions": ["docs.view", "docs.edit"],
   "roles": ["docs-admin"],
   "groups": ["leads"],

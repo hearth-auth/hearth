@@ -294,7 +294,7 @@ async fn jwt_bearer_grant_accepts_only_the_client_id_as_issued() {
         serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap();
     assert_eq!(
         claims["sub"],
-        env.client.to_string(),
+        format!("client_{}", env.client.as_uuid()),
         "the minted token keeps Hearth's client subject form, as client_credentials does"
     );
     for (label, iss, sub) in env.other_forms() {

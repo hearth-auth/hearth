@@ -7,19 +7,19 @@ Go client for the [Hearth](https://github.com/hearth-auth/hearth) identity API.
 ## Installation
 
 ```bash
-go get github.com/hearth-auth/hearth/sdks/go/v3@latest
+go get github.com/hearth-auth/hearth/sdks/go/v4@latest
 ```
 
 The module is versioned in lockstep with the server, and its path carries the major version:
-`.../sdks/go/v3` for 3.x. Go resolves a v2 or later tag only for a module path that ends in
+`.../sdks/go/v4` for 4.x (`.../sdks/go/v3` for 3.x). Go resolves a v2 or later tag only for a module path that ends in
 `/vN`. Until 2026-10, the path had no suffix, so `go get github.com/hearth-auth/hearth/sdks/go`
 still stops at `v1.6.11`; the versions are listed at
-`https://proxy.golang.org/github.com/hearth-auth/hearth/sdks/go/v3/@v/list`.
+`https://proxy.golang.org/github.com/hearth-auth/hearth/sdks/go/v4/@v/list`.
 
 ## Quick start
 
 ```go
-import "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
+import "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
 
 client := hearth.NewClient("https://hearth.example.com", "<your-realm-id>")
 ```
@@ -58,7 +58,7 @@ import (
     "encoding/hex"
     "fmt"
 
-    "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
+    "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
 )
 
 func pkce() (verifier, challenge string) {
@@ -163,7 +163,7 @@ if client.InGroup(r.Context(), accessToken, "engineering") {
 Returns `true` iff the token verifies and its `oid` claim equals the given org ID.
 
 ```go
-if client.InOrg(r.Context(), accessToken, "org_acme") {
+if client.InOrg(r.Context(), accessToken, "6f1d0c1e-3b9a-4c2e-9d7f-1a2b3c4d5e6f") // the org's id {
     renderAcmeContent()
 }
 ```
@@ -296,7 +296,7 @@ import (
     "errors"
     "fmt"
 
-    "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
+    "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
 )
 
 tokens, err := client.ExchangeCode(ctx, req)
@@ -497,7 +497,7 @@ You can also call the decision endpoint directly:
 ```go
 resp, err := client.CheckPermission(ctx, accessToken, hearth.CheckPermissionRequest{
     Permission:     "docs.edit",
-    OrganizationID: "org_123", // optional: scope to an org
+    OrganizationID: "6f1d0c1e-3b9a-4c2e-9d7f-1a2b3c4d5e6f", // optional: scope to an org (its id)
 })
 if err == nil && resp.Allowed {
     // authorized

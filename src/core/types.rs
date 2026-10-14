@@ -1,6 +1,8 @@
 //! Entity ID newtypes for type-safe identification.
 //!
-//! Each ID type wraps a UUID and provides a prefixed Display format.
+//! Each ID type wraps a UUID and shows as the bare UUID. Parsing also
+//! accepts the kind prefix (`user_`, `realm_`, ...) that releases before 4.0
+//! wrote, so older tokens and stored values still parse.
 //! No `Deref` to inner type — access via `.as_uuid()` only.
 
 use serde::{Deserialize, Serialize};
@@ -28,7 +30,7 @@ pub enum ImportOutcome {
 /// Each generated type gets:
 /// - `new(Uuid)` and `generate()` constructors
 /// - `as_uuid()` accessor (no `Deref`)
-/// - Prefixed `Display` implementation
+/// - `Display` as the bare UUID, and `FromStr` that also accepts `$prefix`
 /// - Standard derives: `Clone`, `Debug`, `PartialEq`, `Eq`, `Hash`, `Serialize`, `Deserialize`
 macro_rules! define_id_type {
     (
@@ -56,15 +58,18 @@ macro_rules! define_id_type {
             }
         }
 
+        /// The bare UUID, the same text serde writes.
         impl fmt::Display for $name {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "{}{}", $prefix, self.0)
+                fmt::Display::fmt(&self.0, f)
             }
         }
 
         impl FromStr for $name {
             type Err = uuid::Error;
 
+            /// Parses the bare UUID, or the prefixed form that releases
+            /// before 4.0 wrote.
             fn from_str(s: &str) -> Result<Self, Self::Err> {
                 let uuid_part = s.strip_prefix($prefix).unwrap_or(s);
                 Uuid::parse_str(uuid_part).map(Self)
@@ -298,10 +303,52 @@ mod tests {
     }
 
     #[test]
-    fn realm_id_display_shows_prefix() {
+    fn realm_id_display_is_the_bare_uuid() {
         let id = RealmId::generate();
-        let display = format!("{id}");
-        assert!(display.starts_with("realm_"), "got: {display}");
+        assert_eq!(format!("{id}"), id.as_uuid().to_string());
+    }
+
+    /// Every entity ID shows as its bare UUID, the same text serde writes,
+    /// and parses from the bare form and from the prefixed form that
+    /// releases before 4.0 issued.
+    #[test]
+    fn every_id_displays_bare_and_parses_both_forms() {
+        fn check<T>(make: fn(Uuid) -> T, legacy_prefix: &str)
+        where
+            T: fmt::Display + FromStr + PartialEq + fmt::Debug + Serialize,
+        {
+            let uuid = Uuid::new_v4();
+            let id = make(uuid);
+            let bare = uuid.to_string();
+            assert_eq!(id.to_string(), bare, "{legacy_prefix} Display");
+            assert_eq!(
+                serde_json::to_string(&id).expect("serialize"),
+                format!("\"{bare}\""),
+                "{legacy_prefix} serde"
+            );
+            assert!(
+                T::from_str(&bare).ok() == Some(make(uuid)),
+                "{legacy_prefix} bare"
+            );
+            assert!(
+                T::from_str(&format!("{legacy_prefix}{bare}")).ok() == Some(make(uuid)),
+                "{legacy_prefix} prefixed"
+            );
+            assert!(T::from_str("not-a-uuid").is_err(), "{legacy_prefix} junk");
+        }
+        check(RealmId::new, "realm_");
+        check(UserId::new, "user_");
+        check(SessionId::new, "session_");
+        check(ClientId::new, "client_");
+        check(AuditEventId::new, "audit_");
+        check(OrganizationId::new, "org_");
+        check(InvitationId::new, "inv_");
+        check(IdpId::new, "idp_");
+        check(WebhookId::new, "wh_");
+        check(AgentId::new, "agt_");
+        check(AgentCredentialId::new, "acred_");
+        check(WebhookDeliveryId::new, "whd_");
+        check(ResourceServerId::new, "rs_");
     }
 
     #[test]
@@ -319,7 +366,7 @@ mod tests {
         assert_eq!(*id.as_uuid(), uuid);
 
         let display = format!("{id}");
-        assert!(display.starts_with("user_"), "got: {display}");
+        assert_eq!(display, uuid.to_string());
 
         let json = serde_json::to_string(&id).expect("serialize");
         let deserialized: UserId = serde_json::from_str(&json).expect("deserialize");
@@ -333,7 +380,7 @@ mod tests {
         assert_eq!(*id.as_uuid(), uuid);
 
         let display = format!("{id}");
-        assert!(display.starts_with("session_"), "got: {display}");
+        assert_eq!(display, uuid.to_string());
 
         let json = serde_json::to_string(&id).expect("serialize");
         let deserialized: SessionId = serde_json::from_str(&json).expect("deserialize");
@@ -347,7 +394,7 @@ mod tests {
         assert_eq!(*id.as_uuid(), uuid);
 
         let display = format!("{id}");
-        assert!(display.starts_with("org_"), "got: {display}");
+        assert_eq!(display, uuid.to_string());
 
         let json = serde_json::to_string(&id).expect("serialize");
         let deserialized: OrganizationId = serde_json::from_str(&json).expect("deserialize");
@@ -361,7 +408,7 @@ mod tests {
         assert_eq!(*id.as_uuid(), uuid);
 
         let display = format!("{id}");
-        assert!(display.starts_with("inv_"), "got: {display}");
+        assert_eq!(display, uuid.to_string());
 
         let json = serde_json::to_string(&id).expect("serialize");
         let deserialized: InvitationId = serde_json::from_str(&json).expect("deserialize");
@@ -375,7 +422,7 @@ mod tests {
         assert_eq!(*id.as_uuid(), uuid);
 
         let display = format!("{id}");
-        assert!(display.starts_with("idp_"), "got: {display}");
+        assert_eq!(display, uuid.to_string());
 
         let json = serde_json::to_string(&id).expect("serialize");
         let deserialized: IdpId = serde_json::from_str(&json).expect("deserialize");

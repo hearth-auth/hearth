@@ -121,7 +121,7 @@ export const config = { matcher: ['/api/:path*'] };
 // ── Go ────────────────────────────────────────────────────────────────────────
 
 const GO_SNIPPET = `\
-import "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
+import "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
 
 client := hearth.NewClient("http://localhost:8420", "<realm-id>")
 pkce, _ := hearth.GeneratePKCE()
@@ -141,8 +141,8 @@ tokens, _ := client.ExchangeCode(ctx, hearth.TokenRequest{
 
 const GO_GIN_SNIPPET = `\
 import (
-    hearth    "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
-    hearthgin "github.com/hearth-auth/hearth/sdks/go/v3/hearth/gin"
+    hearth    "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
+    hearthgin "github.com/hearth-auth/hearth/sdks/go/v4/hearth/gin"
     "github.com/gin-gonic/gin"
 )
 
@@ -160,8 +160,8 @@ admin.GET("/data", func(c *gin.Context) {
 
 const GO_ECHO_SNIPPET = `\
 import (
-    hearth      "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
-    hearthecho  "github.com/hearth-auth/hearth/sdks/go/v3/hearth/echo"
+    hearth      "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
+    hearthecho  "github.com/hearth-auth/hearth/sdks/go/v4/hearth/echo"
     "github.com/labstack/echo/v4"
 )
 

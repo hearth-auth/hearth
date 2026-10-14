@@ -3,7 +3,7 @@
 //! See `openspec/specs/rbac-model/spec.md` and § 6.3 for the normative model.
 //!
 //! Identifier newtypes introduced here (`RoleId`, `GroupId`, `AssignmentId`)
-//! follow the same wrap-a-UUID, prefixed-display pattern as the global
+//! follow the same wrap-a-UUID, bare-display pattern as the global
 //! IDs in `src/core/types.rs`. They live in the RBAC module rather than
 //! `core/` to keep cross-layer surface minimal.
 
@@ -25,7 +25,7 @@ pub const RESERVED_PREFIX: &str = "hearth.";
 // ---------------------------------------------------------------------------
 
 macro_rules! define_rbac_id {
-    ($(#[$meta:meta])* $name:ident, $prefix:literal) => {
+    ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
         #[derive(
             Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
@@ -49,9 +49,10 @@ macro_rules! define_rbac_id {
             }
         }
 
+        /// The bare UUID, the same text serde writes.
         impl fmt::Display for $name {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "{}{}", $prefix, self.0)
+                fmt::Display::fmt(&self.0, f)
             }
         }
     };
@@ -59,17 +60,17 @@ macro_rules! define_rbac_id {
 
 define_rbac_id!(
     /// Unique identifier for a role within a realm.
-    RoleId, "role_"
+    RoleId
 );
 
 define_rbac_id!(
     /// Unique identifier for a group within a realm.
-    GroupId, "group_"
+    GroupId
 );
 
 define_rbac_id!(
     /// Unique identifier for a single role assignment (user→role or group→role).
-    AssignmentId, "assign_"
+    AssignmentId
 );
 
 // ---------------------------------------------------------------------------
@@ -856,21 +857,21 @@ mod tests {
     // ===== ID newtypes =====
 
     #[test]
-    fn role_id_prefixed_display() {
+    fn role_id_display_is_the_bare_uuid() {
         let id = RoleId::generate();
-        assert!(format!("{id}").starts_with("role_"));
+        assert_eq!(format!("{id}"), id.as_uuid().to_string());
     }
 
     #[test]
-    fn group_id_prefixed_display() {
+    fn group_id_display_is_the_bare_uuid() {
         let id = GroupId::generate();
-        assert!(format!("{id}").starts_with("group_"));
+        assert_eq!(format!("{id}"), id.as_uuid().to_string());
     }
 
     #[test]
-    fn assignment_id_prefixed_display() {
+    fn assignment_id_display_is_the_bare_uuid() {
         let id = AssignmentId::generate();
-        assert!(format!("{id}").starts_with("assign_"));
+        assert_eq!(format!("{id}"), id.as_uuid().to_string());
     }
 
     #[test]

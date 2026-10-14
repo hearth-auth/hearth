@@ -3,8 +3,8 @@
 // Quick start:
 //
 //	import (
-//	    hearth      "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
-//	    hearthecho  "github.com/hearth-auth/hearth/sdks/go/v3/hearth/echo"
+//	    hearth      "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
+//	    hearthecho  "github.com/hearth-auth/hearth/sdks/go/v4/hearth/echo"
 //	)
 //
 //	client := hearth.NewClient("https://hearth.example.com", "<realm-id>")
@@ -25,7 +25,7 @@ package hearthecho
 import (
 	"net/http"
 
-	hearth "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
+	hearth "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
 	"github.com/labstack/echo/v4"
 )
 

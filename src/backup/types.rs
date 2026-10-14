@@ -96,7 +96,8 @@ pub struct RecordCounts {
 /// Per-realm entry in the backup manifest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RealmManifest {
-    /// Prefixed realm identifier (e.g. `realm_<uuid>`).
+    /// The realm ID, a bare UUID. Archives written before 4.0 carry
+    /// `realm_<uuid>`; parse it with `RealmId::from_str`, which accepts both.
     pub realm_id: String,
     /// Realm slug — used as the directory name inside the archive.
     pub slug: String,

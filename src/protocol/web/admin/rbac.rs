@@ -243,7 +243,7 @@ pub async fn admin_rbac_token_preview(
                         .map(|p| p.into_string())
                         .collect();
                     let v = json!({
-                        "sub": format!("user_{u}"),
+                        "sub": u.to_string(),
                         "oid": null,
                         "realm": target.id().as_uuid().to_string(),
                         "roles": resolved.roles,

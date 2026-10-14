@@ -14,7 +14,7 @@ Get your first protected HTTP endpoint in under 5 minutes using the Hearth Go SD
 ## Install
 
 ```bash
-go get github.com/hearth-auth/hearth/sdks/go/v3
+go get github.com/hearth-auth/hearth/sdks/go/v4
 ```
 
 ## Start Hearth locally
@@ -31,7 +31,7 @@ curl -X POST http://127.0.0.1:8420/admin/bootstrap
 ## Initialize the client
 
 ```go
-import "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
+import "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
 
 client := hearth.NewClient("http://127.0.0.1:8420", "<realm_id>")
 ```
@@ -52,7 +52,7 @@ import (
     "fmt"
     "net/http"
 
-    "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
+    "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
 )
 
 client := hearth.NewClient("http://127.0.0.1:8420", "<realm_id>",
@@ -100,8 +100,8 @@ func callbackHandler(w http.ResponseWriter, r *http.Request) {
 import (
     "net/http"
 
-    hearth    "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
-    hearthgin "github.com/hearth-auth/hearth/sdks/go/v3/hearth/gin"
+    hearth    "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
+    hearthgin "github.com/hearth-auth/hearth/sdks/go/v4/hearth/gin"
     "github.com/gin-gonic/gin"
 )
 
@@ -144,8 +144,8 @@ See the [Gin adapter guide](./go-gin.md) for per-route and per-group middleware 
 import (
     "net/http"
 
-    hearth      "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
-    hearthecho  "github.com/hearth-auth/hearth/sdks/go/v3/hearth/echo"
+    hearth      "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
+    hearthecho  "github.com/hearth-auth/hearth/sdks/go/v4/hearth/echo"
     "github.com/labstack/echo/v4"
 )
 
@@ -197,7 +197,7 @@ import (
     "errors"
     "fmt"
 
-    "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
+    "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
 )
 
 func main() {
@@ -353,7 +353,7 @@ if client.InGroup(ctx, accessToken, "engineering") {
 }
 
 // Returns true if the token verifies and its oid claim equals this org ID.
-if client.InOrg(ctx, accessToken, "org_acme") {
+if client.InOrg(ctx, accessToken, "6f1d0c1e-3b9a-4c2e-9d7f-1a2b3c4d5e6f") // the org's id {
     renderAcmeContent()
 }
 ```
@@ -388,7 +388,7 @@ Use `hearth.RequirePermission` with standard `http.Handler` middleware chains. T
 import (
     "net/http"
 
-    hearth "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
+    hearth "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
 )
 
 client := hearth.NewClient("https://hearth.example.com", "<realm-id>")
@@ -433,8 +433,8 @@ Use `hearthgin.HearthMiddleware` globally and `hearthgin.RequirePermission` on i
 
 ```go
 import (
-    hearth    "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
-    hearthgin "github.com/hearth-auth/hearth/sdks/go/v3/hearth/gin"
+    hearth    "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
+    hearthgin "github.com/hearth-auth/hearth/sdks/go/v4/hearth/gin"
     "github.com/gin-gonic/gin"
 )
 
@@ -461,8 +461,8 @@ Use `hearthecho.HearthMiddleware` globally and `hearthecho.RequirePermission` on
 
 ```go
 import (
-    hearth      "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
-    hearthecho  "github.com/hearth-auth/hearth/sdks/go/v3/hearth/echo"
+    hearth      "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
+    hearthecho  "github.com/hearth-auth/hearth/sdks/go/v4/hearth/echo"
     "github.com/labstack/echo/v4"
 )
 
@@ -494,7 +494,7 @@ import (
     "errors"
     "fmt"
 
-    "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
+    "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
 )
 
 tokens, err := client.ExchangeCode(ctx, req)

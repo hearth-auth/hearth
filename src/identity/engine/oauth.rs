@@ -1342,7 +1342,7 @@ impl EmbeddedIdentityEngine {
             .as_ref()
             .map(|_| granted.granted_scopes.join(" "));
         let access_claims = TokenClaims {
-            sub: request.client_id.to_string(),
+            sub: crate::core::TokenSubject::Client(request.client_id.clone()).to_string(),
             iss: self.realm_issuer_url(realm_id),
             aud: cc_resource.as_ref().map_or_else(
                 || Audience::single(self.config.token.audience.clone()),
@@ -1533,7 +1533,7 @@ impl EmbeddedIdentityEngine {
             // Hearth's own subject form for a client, as client_credentials
             // mints it — not the assertion's `sub`, which is the issued
             // client_id (the bare UUID).
-            sub: request.client_id.to_string(),
+            sub: crate::core::TokenSubject::Client(request.client_id.clone()).to_string(),
             iss: self.realm_issuer_url(realm_id),
             aud: Audience::single(self.config.token.audience.clone()),
             exp: iat + self.config.token.access_token_ttl_secs,
@@ -2799,7 +2799,8 @@ impl EmbeddedIdentityEngine {
         if claims.sid == "none" {
             // A sessionless client token's `sub` is Hearth's `client_<uuid>`
             // subject form.
-            return Ok(claims.sub == client.to_string());
+            return Ok(crate::core::TokenSubject::parse(&claims.sub)
+                == Some(crate::core::TokenSubject::Client(client.clone())));
         }
         Ok(false)
     }
@@ -3025,7 +3026,7 @@ impl EmbeddedIdentityEngine {
         //   audience member, the client the token's grant family was issued
         //   to, or a declared resource server (GA audit L11 — it used to be
         //   any authenticated client, which then received live RBAC data).
-        if let Some(ref cid) = request
+        if let Some(cid) = request
             .introspecting_client_id
             .as_ref()
             .filter(|_| !caller_is_resource_server)
@@ -3040,7 +3041,9 @@ impl EmbeddedIdentityEngine {
             } else if claims.sid == "none" {
                 // M2M token: only the issuing client or an explicit audience member
                 // may introspect it.
-                if claims.sub != cid.to_string() && !claims.aud.contains(issued.as_str()) {
+                let own = crate::core::TokenSubject::parse(&claims.sub)
+                    == Some(crate::core::TokenSubject::Client(cid.clone()));
+                if !own && !claims.aud.contains(issued.as_str()) {
                     return Ok(IntrospectionResponse::inactive());
                 }
             } else if !claims.aud.contains(issued.as_str())
@@ -3596,13 +3599,7 @@ impl EmbeddedIdentityEngine {
         }
 
         // 3. Parse user_id from sub claim
-        let user_id_str = claims
-            .sub
-            .strip_prefix("user_")
-            .ok_or(IdentityError::InvalidToken)?;
-        let user_uuid =
-            uuid::Uuid::parse_str(user_id_str).map_err(|_| IdentityError::InvalidToken)?;
-        let user_id = crate::core::UserId::new(user_uuid);
+        let user_id = Self::parse_user_id_claim(&claims)?;
 
         // 4. Look up the user
         let user = self

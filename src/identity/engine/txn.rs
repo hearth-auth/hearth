@@ -58,8 +58,8 @@ impl EmbeddedIdentityEngine {
             .map(|d| d.issuer)
             .unwrap_or_else(|_| format!("hearth:{}", realm_id.as_uuid()));
 
-        let sub = format!("agt_{}", request.requesting_agent_id.as_uuid());
-        let aud = format!("agt_{}", request.target_agent_id.as_uuid());
+        let sub = crate::core::TokenSubject::Agent(request.requesting_agent_id.clone()).to_string();
+        let aud = crate::core::TokenSubject::Agent(request.target_agent_id.clone()).to_string();
 
         let claims = TransactionTokenClaims {
             jti: jti.clone(),

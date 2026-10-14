@@ -17,7 +17,7 @@ This page covers the `hearthgin` adapter (`hearth/gin`), which works with Gin's 
 ## Install
 
 ```bash
-go get github.com/hearth-auth/hearth/sdks/go/v3
+go get github.com/hearth-auth/hearth/sdks/go/v4
 ```
 
 The Gin adapter lives inside the SDK module at `hearth/gin` — no separate `go get` is needed.
@@ -28,8 +28,8 @@ Import both the base SDK and the `hearthgin` adapter:
 
 ```go
 import (
-    hearth    "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
-    hearthgin "github.com/hearth-auth/hearth/sdks/go/v3/hearth/gin"
+    hearth    "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
+    hearthgin "github.com/hearth-auth/hearth/sdks/go/v4/hearth/gin"
     "github.com/gin-gonic/gin"
 )
 
@@ -84,8 +84,8 @@ Use `hearthgin.RequirePermission` as group middleware to gate a set of routes on
 import (
     "net/http"
 
-    hearth    "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
-    hearthgin "github.com/hearth-auth/hearth/sdks/go/v3/hearth/gin"
+    hearth    "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
+    hearthgin "github.com/hearth-auth/hearth/sdks/go/v4/hearth/gin"
     "github.com/gin-gonic/gin"
 )
 
@@ -167,8 +167,8 @@ package main
 import (
     "net/http"
 
-    hearth    "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
-    hearthgin "github.com/hearth-auth/hearth/sdks/go/v3/hearth/gin"
+    hearth    "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
+    hearthgin "github.com/hearth-auth/hearth/sdks/go/v4/hearth/gin"
     "github.com/gin-gonic/gin"
 )
 

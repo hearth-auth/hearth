@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hearth-auth/hearth/sdks/go/v3/hearth"
+	"github.com/hearth-auth/hearth/sdks/go/v4/hearth"
 )
 
 // fakeHearth stands in for a Hearth realm. It serves an OIDC discovery

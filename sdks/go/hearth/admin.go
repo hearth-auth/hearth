@@ -4,7 +4,7 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/hearth-auth/hearth/sdks/go/v3/generated/admin"
+	"github.com/hearth-auth/hearth/sdks/go/v4/generated/admin"
 )
 
 // AdminClient provides access to the Hearth admin API.

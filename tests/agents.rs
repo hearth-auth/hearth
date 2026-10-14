@@ -77,11 +77,16 @@ fn create_agent(
 // Unit: AgentId newtype
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// An agent ID shows as its bare UUID; only an agent's token `sub` carries
+/// `agt_` (OpenSpec change `bare-entity-ids`). The prefixed form still parses.
 #[test]
-fn agent_id_display_has_agt_prefix() {
+fn agent_id_display_is_the_bare_uuid() {
     let id = AgentId::generate();
-    let s = format!("{id}");
-    assert!(s.starts_with("agt_"), "expected agt_ prefix, got: {s}");
+    assert_eq!(format!("{id}"), id.as_uuid().to_string());
+    let legacy: AgentId = format!("agt_{}", id.as_uuid())
+        .parse()
+        .expect("parse the agt_ form");
+    assert_eq!(legacy, id);
 }
 
 #[test]
@@ -113,7 +118,7 @@ async fn agent_create_and_get() {
 
     let agent = create_agent(identity, &realm_id, &user_id, "My Test Agent");
 
-    assert!(format!("{}", agent.id()).starts_with("agt_"));
+    assert_eq!(format!("{}", agent.id()), agent.id().as_uuid().to_string());
     assert_eq!(agent.display_name(), "My Test Agent");
     assert_eq!(agent.description(), "Test agent: My Test Agent");
     assert_eq!(agent.status(), AgentStatus::Active);
@@ -1421,7 +1426,10 @@ async fn agent_rest_crud_positive_http() {
     );
     let created: serde_json::Value = create_resp.json().await.expect("create json");
     let agent_id = created["id"].as_str().expect("agent id").to_string();
-    assert!(agent_id.starts_with("agt_"), "agent id must be prefixed");
+    assert!(
+        uuid::Uuid::parse_str(&agent_id).is_ok_and(|u| u.to_string() == agent_id),
+        "the agent id is a bare UUID: {agent_id}"
+    );
     assert_eq!(created["display_name"], "Rest CRUD Agent");
     assert_eq!(created["status"], "active");
     assert_eq!(created["owner"]["type"], "user");

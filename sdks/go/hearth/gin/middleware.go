@@ -3,8 +3,8 @@
 // Quick start:
 //
 //	import (
-//	    hearth     "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
-//	    hearthgin  "github.com/hearth-auth/hearth/sdks/go/v3/hearth/gin"
+//	    hearth     "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
+//	    hearthgin  "github.com/hearth-auth/hearth/sdks/go/v4/hearth/gin"
 //	)
 //
 //	client := hearth.NewClient("https://hearth.example.com", "<realm-id>")
@@ -26,7 +26,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	hearth "github.com/hearth-auth/hearth/sdks/go/v3/hearth"
+	hearth "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
 )
 
 const (

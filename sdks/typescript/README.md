@@ -186,7 +186,7 @@ if (await hearth.inGroup("engineering")) {
 Resolves `true` iff the token verifies and its `oid` claim equals the given org ID.
 
 ```typescript
-if (await hearth.inOrg("org_acme")) {
+if (await hearth.inOrg("6f1d0c1e-3b9a-4c2e-9d7f-1a2b3c4d5e6f") /* the org's id */) {
   renderAcmeContent();
 }
 ```
@@ -239,7 +239,7 @@ function NavBar() {
   const canEdit   = useHasPermission("docs.write");
   const isAdmin   = useHasRole("admin");
   const inEng     = useInGroup("engineering");
-  const isAcme    = useInOrg("org_acme");
+  const isAcme    = useInOrg("6f1d0c1e-3b9a-4c2e-9d7f-1a2b3c4d5e6f");
 
   return (
     <nav>
