@@ -1,17 +1,16 @@
 // One-off preparation of a fresh server, as the realm admin:
 //
-//   1. The `api` client becomes a resource server: access_token_authorization
-//      = introspection (an admin-API-only setting), so it may introspect the
-//      app's user tokens.
-//   2. Its secret is regenerated. A secret declared in hearth.yaml is stored
-//      as an Argon2id hash, which every introspection would pay for; a
-//      regenerated secret is checked with one SHA-256.
-//   3. Password-less users are imported through POST /admin/users/import, in
+//   1. The `api` client's secret is regenerated. A secret declared in
+//      hearth.yaml is stored as an Argon2id hash, which every introspection
+//      would pay for; a regenerated secret is checked with one SHA-256. Its
+//      mode (access_token_authorization: introspection) is declared in
+//      hearth.yaml: Hearth refuses to change it at runtime (409).
+//   2. Password-less users are imported through POST /admin/users/import, in
 //      batches, to grow the store: emails bulk<index>@<host> for index in
 //      [IMPORT_FROM, IMPORT_TO). Re-importing an existing email fails that
 //      entry and changes nothing, so a range can be re-run.
 //
-// Steps 1 and 2 run when PREPARE_CLIENTS=1. The new secret is written to
+// Step 1 runs when PREPARE_CLIENTS=1. The new secret is written to
 // $PREPARE_OUT (JSON). Import progress goes to the summary.
 //
 // Env: lib.js variables, plus IMPORT_FROM (0), IMPORT_TO (0 = no import),
@@ -55,14 +54,6 @@ export function setup() {
   const params = { headers: adminHeaders(admin.access, realmId), timeout: '60s' };
   let apiSecret = null;
   if (__ENV.PREPARE_CLIENTS === '1') {
-    const mode = http.patch(
-      `${env.base}/admin/applications/${env.apiClientId}`,
-      JSON.stringify({ access_token_authorization: 'introspection' }),
-      params,
-    );
-    if (mode.status !== 200) {
-      throw new Error(`PATCH api client answered ${mode.status}: ${mode.body}`);
-    }
     const regen = http.post(
       `${env.base}/admin/applications/${env.apiClientId}/regenerate-secret`,
       null,

@@ -175,6 +175,7 @@ realms:
         grant_types: [authorization_code, refresh_token]
         require_consent: false
       # Confidential client for token introspection (a resource server).
+      # hearth.yaml owns its access_token_authorization mode (#513).
       # prepare.js regenerates its secret so each request checks a SHA-256
       # digest, not an Argon2id hash: the way an operator runs a busy API.
       api:
@@ -182,6 +183,7 @@ realms:
         confidential: true
         client_secret: "\${STRESS_API_SECRET}"
         grant_types: [client_credentials]
+        access_token_authorization: introspection
     seed_users:
       - email: "admin@$host"
         display_name: "Stress admin"
