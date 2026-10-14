@@ -672,7 +672,8 @@ mod tests {
 
     fn sample_builder() -> ResponseBuilder<'static> {
         static AUD: &str = "https://sp.example";
-        let attrs: &'static BTreeMap<String, Vec<String>> = Box::leak(Box::default());
+        static ATTRS: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let attrs: &'static BTreeMap<String, Vec<String>> = &ATTRS;
         ResponseBuilder {
             response_id: "_r1",
             in_response_to: Some("_req1"),

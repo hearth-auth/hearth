@@ -421,7 +421,7 @@ mod tests {
         let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1))) as Arc<dyn Clock>;
         let realm_id = RealmId::generate();
         // Leak tmp so it outlives the test since storage holds a file handle.
-        std::mem::forget(tmp);
+        let _ = tmp.keep(); // not mem::forget: LeakSanitizer reports the path
         (storage, clock, realm_id)
     }
 

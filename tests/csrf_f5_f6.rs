@@ -49,7 +49,7 @@ fn null_email() -> Arc<EmailService> {
 fn make_prod_state() -> WebState {
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().to_path_buf();
-    std::mem::forget(temp);
+    let _ = temp.keep();
 
     let storage = Arc::new(
         EmbeddedStorageEngine::open(StorageConfig::dev(data_dir.clone())).expect("storage"),
@@ -514,7 +514,7 @@ fn web_state_new_dev_mode_defaults_to_false() {
     use hearth::storage::StorageEngine;
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().to_path_buf();
-    std::mem::forget(temp);
+    let _ = temp.keep();
 
     let storage = Arc::new(
         EmbeddedStorageEngine::open(StorageConfig::dev(data_dir.clone())).expect("storage"),

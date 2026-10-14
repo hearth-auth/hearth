@@ -2458,7 +2458,7 @@ mod tests {
                 .expect("storage"),
         ) as Arc<dyn StorageEngine>;
         let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1))) as Arc<dyn Clock>;
-        std::mem::forget(tmp);
+        let _ = tmp.keep(); // not mem::forget: LeakSanitizer reports the path
         (EmbeddedRbacEngine::new(storage, clock), RealmId::generate())
     }
 
@@ -2540,7 +2540,7 @@ mod tests {
             EmbeddedStorageEngine::open(StorageConfig::dev(tmp.path().to_path_buf()))
                 .expect("storage"),
         ) as Arc<dyn StorageEngine>;
-        std::mem::forget(tmp);
+        let _ = tmp.keep(); // not mem::forget: LeakSanitizer reports the path
         let counting = Arc::new(CountingStorage {
             inner,
             reads: std::sync::atomic::AtomicUsize::new(0),

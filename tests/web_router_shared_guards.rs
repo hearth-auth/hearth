@@ -58,7 +58,7 @@ fn app(tune: impl FnOnce(AppState) -> AppState) -> axum::Router {
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().to_path_buf();
     // Held for the lifetime of the test process.
-    std::mem::forget(temp);
+    let _ = temp.keep();
 
     let storage = Arc::new(
         EmbeddedStorageEngine::open(StorageConfig::dev(data_dir.clone())).expect("storage"),

@@ -542,7 +542,7 @@ async fn tampered_signature_rejected() {
     let mut sig = URL_SAFE_NO_PAD.decode(parts[2]).expect("decode sig");
     sig[0] ^= 0xff;
     let bad_sig = URL_SAFE_NO_PAD.encode(&sig);
-    parts[2] = Box::leak(bad_sig.into_boxed_str());
+    parts[2] = &bad_sig;
     let tampered = parts.join(".");
 
     let err = env

@@ -323,7 +323,7 @@ fn build_web(h: &crate::common::TestHarness, guards: Arc<AbuseGuards>) -> axum::
 
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().to_path_buf();
-    std::mem::forget(temp);
+    let _ = temp.keep();
     let email = Arc::new(
         EmailService::new(
             Arc::new(LoggingEmailSender::new()),

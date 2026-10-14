@@ -32,8 +32,8 @@ fn open() -> (Arc<dyn RbacEngine>, RealmId) {
     let rbac =
         Arc::new(EmbeddedRbacEngine::new(Arc::clone(&storage), clock)) as Arc<dyn RbacEngine>;
     let realm = RealmId::generate();
-    // Leak tempdir so storage handles stay valid beyond the caller.
-    std::mem::forget(dir);
+    // Keep the tempdir so storage handles stay valid beyond the caller.
+    let _ = dir.keep();
     (rbac, realm)
 }
 

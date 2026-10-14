@@ -36,7 +36,7 @@ const VECTORS: &str = include_str!("fixtures/rfc9728/conformance_vectors.json");
 fn make_app_state() -> Arc<AppState> {
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().to_path_buf();
-    std::mem::forget(temp);
+    let _ = temp.keep();
 
     let storage =
         Arc::new(EmbeddedStorageEngine::open(StorageConfig::dev(data_dir)).expect("storage"));

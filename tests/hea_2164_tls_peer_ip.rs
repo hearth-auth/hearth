@@ -87,7 +87,7 @@ fn build_tls_login_rig(identity_config: IdentityConfig) -> TlsLoginRig {
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().to_path_buf();
     // The storage engine mmaps files for the test's lifetime; forget the guard.
-    std::mem::forget(temp);
+    let _ = temp.keep();
 
     let storage = Arc::new(
         EmbeddedStorageEngine::open(StorageConfig::dev(data_dir.clone())).expect("open storage"),

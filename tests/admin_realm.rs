@@ -250,7 +250,7 @@ realms:
 async fn complete_setup_targets_system_realm() {
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().to_path_buf();
-    std::mem::forget(temp);
+    let _ = temp.keep();
 
     let storage = std::sync::Arc::new(
         hearth::storage::EmbeddedStorageEngine::open(hearth::storage::StorageConfig::dev(
@@ -353,7 +353,7 @@ async fn admin_login_route_renders_form() {
 
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().to_path_buf();
-    std::mem::forget(temp);
+    let _ = temp.keep();
     let storage = std::sync::Arc::new(
         hearth::storage::EmbeddedStorageEngine::open(hearth::storage::StorageConfig::dev(
             data_dir.clone(),
@@ -455,7 +455,7 @@ async fn admin_setup_verify_login_end_to_end() {
 
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().to_path_buf();
-    std::mem::forget(temp);
+    let _ = temp.keep();
     let storage = std::sync::Arc::new(
         hearth::storage::EmbeddedStorageEngine::open(hearth::storage::StorageConfig::dev(
             data_dir.clone(),
