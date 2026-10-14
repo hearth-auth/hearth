@@ -218,8 +218,9 @@ mod tests {
     fn make_engine() -> EmbeddedWebhookEngine {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let config = crate::storage::StorageConfig::dev(temp_dir.path().to_path_buf());
-        // Leak the temp_dir so the storage files outlive this function.
-        std::mem::forget(temp_dir);
+        // Keep the directory so the storage files outlive this function.
+        // `keep`, not `mem::forget`: LeakSanitizer reports a forgotten path.
+        let _ = temp_dir.keep();
         let storage = Arc::new(EmbeddedStorageEngine::open(config).expect("storage"));
         let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
         EmbeddedWebhookEngine::new(storage, clock)

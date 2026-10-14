@@ -55,7 +55,7 @@ fn build_rig(with_realm: bool) -> Rig {
 fn build_rig_with(with_realm: bool, tls: bool) -> Rig {
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().to_path_buf();
-    std::mem::forget(temp);
+    let _ = temp.keep();
 
     let storage = Arc::new(
         EmbeddedStorageEngine::open(StorageConfig::dev(data_dir.clone())).expect("open storage"),

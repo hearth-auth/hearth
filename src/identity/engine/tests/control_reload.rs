@@ -710,10 +710,13 @@ fn a_node_does_not_reload_for_its_own_control() {
     }
     // The observer's signal lands first; the writer then takes 50 ms — ten
     // settle delays — to record the epoch its bump produced.
+    // Weak: the storage holds this hook, and the plane holds the storage.
     {
-        let plane = Arc::clone(&engine.control);
+        let plane = Arc::downgrade(&engine.control);
         *fault.on_increment.lock().expect("hook lock") = Some(Arc::new(move |epoch| {
-            plane.signal(epoch);
+            if let Some(plane) = plane.upgrade() {
+                plane.signal(epoch);
+            }
             std::thread::sleep(Duration::from_millis(50));
         }));
     }

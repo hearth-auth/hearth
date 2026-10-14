@@ -7,6 +7,27 @@ fail-fast = true
 retries = 2
 fail-fast = false
 
+# `make leak-check` (LeakSanitizer, #445). No retries: a leak that shows in
+# one run of three is still a leak. LSan's allocator is slower than glibc's,
+# so the property tests and the long storage tests need more than 60 s.
+[profile.lsan]
+retries = 0
+fail-fast = false
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+# The backup tests' default 90 s kill (below) is too short under LSan.
+[[profile.lsan.overrides]]
+filter = 'binary(backup_http) | binary(backup_system_realm) | binary(backup) | (binary(abuse_export_hardening) & test(=backup_endpoint_rate_limits_after_quota))'
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+# The snapshot case writes 5,200 Raft entries and must reach quorum within
+# its own 10 s per write; under LSan and a full parallel run it missed that.
+# It runs alone.
+[[profile.lsan.overrides]]
+filter = 'binary(cluster_peer_message_size)'
+slow-timeout = { period = "60s", terminate-after = 5 }
+threads-required = 'num-test-threads'
+
 # Backup and restore tests drive real exports/restores through the engine or
 # the server. Every archive wraps its key with Argon2id, which takes seconds in
 # a debug build, so these tests take 25-60 s alone and crossed the default

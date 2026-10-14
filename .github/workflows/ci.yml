@@ -1430,6 +1430,47 @@ jobs:
         if: ${{ !cancelled() }}
         run: make asan
 
+  # ── LeakSanitizer over the whole suite (#445) ────────────────────────────────
+  #
+  # `make leak-check` builds every test binary, and the server binary that
+  # tests/graceful_shutdown.rs stops with SIGTERM, with -Zsanitizer=leak on the
+  # nightly unsafe-check/rust-toolchain.toml pins, and runs the suite once.
+  # LeakSanitizer fails each test process (exit 23) that leaves a heap block
+  # that no pointer reaches: a reference cycle, a forgotten value, or a node a
+  # data structure lost (the crossbeam-skiplist `range` leak of #445). A
+  # 12-hour soak cannot see a leak below about 2 MiB/h; this sees one block.
+  # The first run found the RBAC/identity engine reference cycle (#523).
+  # Without debug info the test binaries take about 22 GiB.
+  leak-check:
+    name: leak-check (LeakSanitizer, whole suite)
+    needs: filter
+    if: (needs.filter.result == 'success' && needs.filter.outputs.rust == 'true') || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Free disk space (the LSan test binaries need ~26 GB)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h
+      - name: Setup Rust toolchain (protoc, cargo cache)
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: stable
+          cache-key-suffix: lsan
+      - name: Install the pinned nightly (unsafe-check/rust-toolchain.toml)
+        working-directory: unsafe-check
+        run: rustup toolchain install
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2.77.7
+        with:
+          tool: cargo-nextest
+      - name: make leak-check
+        run: PROTOC=protoc make leak-check
+
   # ── Required-summary gate (HEA-693) ──────────────────────────────────────────
   #
   # Branch protection requires ONLY this job for the CI workflow. It always runs
@@ -1525,7 +1566,7 @@ jobs:
   required-summary:
     name: required-summary
     if: always()
-    needs: [filter, quality, proto-freshness, ui, sdk-python, sdk-php, sdk-go, sdk-typescript, sdk-conformance, sdk-admin-freshness, abuse-coverage, cluster-chaos, no-dev-endpoints, cargo-deny, msrv, unsafe-code, commit-lint, proto-governance, sdk-smoke, security, loadtest-smoke]
+    needs: [filter, quality, proto-freshness, ui, sdk-python, sdk-php, sdk-go, sdk-typescript, sdk-conformance, sdk-admin-freshness, abuse-coverage, cluster-chaos, no-dev-endpoints, cargo-deny, msrv, unsafe-code, leak-check, commit-lint, proto-governance, sdk-smoke, security, loadtest-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 1
 
@@ -1548,20 +1589,21 @@ jobs:
           CARGO_DENY: ${{ needs.cargo-deny.result }}
           MSRV: ${{ needs.msrv.result }}
           UNSAFE_CODE: ${{ needs.unsafe-code.result }}
+          LEAK_CHECK: ${{ needs.leak-check.result }}
           COMMIT_LINT: ${{ needs.commit-lint.result }}
           PROTO_GOVERNANCE: ${{ needs.proto-governance.result }}
           SDK_SMOKE: ${{ needs.sdk-smoke.result }}
           SECURITY: ${{ needs.security.result }}
           LOADTEST_SMOKE: ${{ needs.loadtest-smoke.result }}
         run: |
-          echo "filter=$FILTER quality=$QUALITY proto-freshness=$PROTO_FRESHNESS ui=$UI sdk-python=$SDK_PYTHON sdk-php=$SDK_PHP sdk-go=$SDK_GO sdk-typescript=$SDK_TYPESCRIPT sdk-conformance=$SDK_CONFORMANCE sdk-admin-freshness=$SDK_ADMIN_FRESHNESS abuse-coverage=$ABUSE_COVERAGE cluster-chaos=$CLUSTER_CHAOS no-dev-endpoints=$NO_DEV_ENDPOINTS cargo-deny=$CARGO_DENY msrv=$MSRV unsafe-code=$UNSAFE_CODE commit-lint=$COMMIT_LINT proto-governance=$PROTO_GOVERNANCE sdk-smoke=$SDK_SMOKE security=$SECURITY loadtest-smoke=$LOADTEST_SMOKE"
+          echo "filter=$FILTER quality=$QUALITY proto-freshness=$PROTO_FRESHNESS ui=$UI sdk-python=$SDK_PYTHON sdk-php=$SDK_PHP sdk-go=$SDK_GO sdk-typescript=$SDK_TYPESCRIPT sdk-conformance=$SDK_CONFORMANCE sdk-admin-freshness=$SDK_ADMIN_FRESHNESS abuse-coverage=$ABUSE_COVERAGE cluster-chaos=$CLUSTER_CHAOS no-dev-endpoints=$NO_DEV_ENDPOINTS cargo-deny=$CARGO_DENY msrv=$MSRV unsafe-code=$UNSAFE_CODE leak-check=$LEAK_CHECK commit-lint=$COMMIT_LINT proto-governance=$PROTO_GOVERNANCE sdk-smoke=$SDK_SMOKE security=$SECURITY loadtest-smoke=$LOADTEST_SMOKE"
           # ALLOWLIST, not a denylist (production-readiness task 24.4). This
           # loop used to fail only on "failure" or "cancelled". That is
           # fail-open by construction: any result GitHub adds, and any empty
           # string from an expression that did not evaluate, would have been
           # read as "fine". `success` and `skipped` are the only two results
           # that may pass; everything else — including "" — blocks the merge.
-          for result in "$FILTER" "$QUALITY" "$PROTO_FRESHNESS" "$UI" "$SDK_PYTHON" "$SDK_PHP" "$SDK_GO" "$SDK_TYPESCRIPT" "$SDK_CONFORMANCE" "$SDK_ADMIN_FRESHNESS" "$ABUSE_COVERAGE" "$CLUSTER_CHAOS" "$NO_DEV_ENDPOINTS" "$CARGO_DENY" "$MSRV" "$UNSAFE_CODE" "$COMMIT_LINT" "$PROTO_GOVERNANCE" "$SDK_SMOKE" "$SECURITY" "$LOADTEST_SMOKE"; do
+          for result in "$FILTER" "$QUALITY" "$PROTO_FRESHNESS" "$UI" "$SDK_PYTHON" "$SDK_PHP" "$SDK_GO" "$SDK_TYPESCRIPT" "$SDK_CONFORMANCE" "$SDK_ADMIN_FRESHNESS" "$ABUSE_COVERAGE" "$CLUSTER_CHAOS" "$NO_DEV_ENDPOINTS" "$CARGO_DENY" "$MSRV" "$UNSAFE_CODE" "$LEAK_CHECK" "$COMMIT_LINT" "$PROTO_GOVERNANCE" "$SDK_SMOKE" "$SECURITY" "$LOADTEST_SMOKE"; do
             case "$result" in
               success|skipped) ;;
               *)

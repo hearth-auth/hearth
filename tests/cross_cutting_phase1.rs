@@ -277,7 +277,7 @@ async fn phase1_sensitive_types_zero_on_drop() {
 fn build_router() -> axum::Router {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let config = StorageConfig::dev(temp_dir.path().to_path_buf());
-    std::mem::forget(temp_dir);
+    let _ = temp_dir.keep();
 
     let engine = Arc::new(EmbeddedStorageEngine::open(config).expect("open storage"));
     let clock = Arc::new(SystemClock) as Arc<dyn Clock>;

@@ -65,7 +65,7 @@ fn null_email_service() -> Arc<EmailService> {
 fn build_rig() -> Rig {
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().to_path_buf();
-    std::mem::forget(temp);
+    let _ = temp.keep();
 
     let storage = Arc::new(
         EmbeddedStorageEngine::open(StorageConfig::dev(data_dir.clone())).expect("storage"),
@@ -229,7 +229,7 @@ fn header_routes(rig: &Rig) -> Vec<String> {
     ]
 }
 
-async fn post_form(rig: &Rig, uri: &str, body: &'static str) -> StatusCode {
+async fn post_form(rig: &Rig, uri: &str, body: impl Into<String>) -> StatusCode {
     rig.app
         .clone()
         .oneshot(
@@ -238,7 +238,7 @@ async fn post_form(rig: &Rig, uri: &str, body: &'static str) -> StatusCode {
                 .uri(uri)
                 .header(header::COOKIE, admin_cookie(rig))
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(Body::from(body))
+                .body(Body::from(body.into()))
                 .expect("test invariant"),
         )
         .await
@@ -298,8 +298,7 @@ async fn form_mutations_with_wrong_csrf_field_are_forbidden() {
 async fn form_mutations_with_matching_csrf_field_pass_the_guard() {
     let rig = build_rig();
     for uri in form_routes(&rig) {
-        let body: &'static str = Box::leak(format!("_csrf={CSRF}&yaml=").into_boxed_str());
-        let status = post_form(&rig, &uri, body).await;
+        let status = post_form(&rig, &uri, format!("_csrf={CSRF}&yaml=")).await;
         assert_ne!(
             status,
             StatusCode::FORBIDDEN,

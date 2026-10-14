@@ -55,7 +55,7 @@ fn build_rig(realm_names: &[&str], default_realm: Option<&str>) -> Rig {
     let data_dir = temp.path().to_path_buf();
     // Keep the tempdir alive for the lifetime of the process — tests
     // are short and independent.
-    std::mem::forget(temp);
+    let _ = temp.keep();
 
     let storage = Arc::new(
         EmbeddedStorageEngine::open(StorageConfig::dev(data_dir.clone())).expect("open storage"),

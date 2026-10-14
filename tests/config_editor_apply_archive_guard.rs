@@ -55,7 +55,7 @@ fn null_email_service() -> Arc<EmailService> {
 fn build_rig() -> Rig {
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().to_path_buf();
-    std::mem::forget(temp);
+    let _ = temp.keep();
 
     let config_path = data_dir.join("hearth.yaml");
     std::fs::write(&config_path, "# original\nserver:\n  port: 8420\n").expect("seed config");

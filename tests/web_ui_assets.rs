@@ -43,7 +43,7 @@ fn null_email_service() -> Arc<EmailService> {
 fn minimal_web_state() -> WebState {
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().to_path_buf();
-    std::mem::forget(temp);
+    let _ = temp.keep();
 
     let storage = Arc::new(
         EmbeddedStorageEngine::open(StorageConfig::dev(data_dir.clone())).expect("storage"),

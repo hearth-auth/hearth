@@ -67,7 +67,7 @@ fn build_rig() -> TestRig {
     let data_dir = temp.path().to_path_buf();
     // Leak the tempdir — the storage engine mmaps files inside it for the
     // duration of the test process.
-    std::mem::forget(temp);
+    let _ = temp.keep();
 
     let storage = Arc::new(
         EmbeddedStorageEngine::open(StorageConfig::dev(data_dir.clone())).expect("open storage"),
