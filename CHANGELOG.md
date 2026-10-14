@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Added
+- **SCIM 2.0 under the realm path, `/realms/{realm_name}/scim/v2`** (OpenSpec `scim-realm-path`):
+  the path selects the realm, so an IdP needs only this base URL and a bearer token. Okta and
+  Entra ID can now provision without a custom `X-Realm-ID` header or a proxy that adds one. The
+  realm path takes the realm's SCIM provisioning token or an admin token of the realm, and keeps
+  the DPoP sender constraint. An `X-Realm-ID` that names another realm is `400`
+  (`realm_mismatch`); an unknown realm name is `404`. `meta.location` and the `Location` header
+  use the base URL the request used. `/scim/v2` with `X-Realm-ID` still works. The SCIM guide now
+  recommends the realm path.
+
 ### Changed
 - **BREAKING: entity IDs are bare UUIDs everywhere.** A user's access, refresh and ID tokens
   carry `sub` = the user's bare UUID, the same `id` that the admin API and SCIM return. Before,

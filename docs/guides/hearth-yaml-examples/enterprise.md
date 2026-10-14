@@ -28,15 +28,15 @@ email:
 realms:
   enterprise:
     scim:
-      bearer_token: "${SCIM_TOKEN}"    # static token; Argon2id-hashed before storage
+      bearer_token: "${SCIM_TOKEN}"    # static token; SHA-256-hashed before storage
     auth:
       registration:
         mode: invite_only              # SCIM is the only provisioning path
 ```
 
-- The SCIM endpoint is available at `/scim/v2/realms/enterprise/` once `bearer_token` is set.
-  Configure this URL and the hashed token in your IdP's SCIM provisioning settings.
-- `bearer_token` is stored as an Argon2id hash; the plaintext value is never persisted.
+- The SCIM base URL is `/realms/enterprise/scim/v2` once `bearer_token` is set.
+  Configure this URL and the plaintext token in your IdP's SCIM provisioning settings.
+- `bearer_token` is stored as a SHA-256 hash; the plaintext value is never persisted.
   Rotate it by updating the env var and restarting (or via the Admin API).
 - Set `registration.mode: invite_only` (or `disabled`) so users cannot self-register and
   bypass the SCIM-controlled user lifecycle.

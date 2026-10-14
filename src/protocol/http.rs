@@ -641,12 +641,26 @@ fn is_shaper_exempt(req: &Request) -> bool {
 /// * Header present and equal to the path realm's id — unchanged behaviour.
 /// * Header present and different, or not a UUID — `400 realm_mismatch`.
 /// * Path realm unknown — passed through so the handler still answers `404`.
+///
+/// The realm is read by parameter name: a nested route such as
+/// `/realms/{realm_name}/scim/v2/Users/{id}` has a second path parameter, and
+/// a `Path<String>` extractor would refuse it.
 async fn realm_path_header_agreement(
     State(state): State<Arc<AppState>>,
-    axum::extract::Path(realm_name): axum::extract::Path<String>,
+    path_params: RawPathParams,
     req: Request,
     next: Next,
 ) -> Response {
+    let Some(realm_name) = path_params
+        .iter()
+        .find_map(|(name, value)| (name == "realm_name").then_some(value))
+    else {
+        // The `/realms/{realm_name}` nest always captures the parameter, so
+        // this is a wiring bug. Fail closed rather than skip the guard.
+        tracing::error!("realm-path route has no realm_name parameter");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+
     // Parsed eagerly into an owned value so the borrow of `req` ends here and
     // `req` can still be handed to `next`. The outer `Option` is header
     // presence; the inner one is "parsed as a UUID".
@@ -660,7 +674,7 @@ async fn realm_path_header_agreement(
 
     // The path realm is authoritative. If it does not resolve we let the
     // handler produce its own 404 rather than masking it with a 400.
-    let Ok(Some(realm)) = state.identity.get_realm_by_name(&realm_name) else {
+    let Ok(Some(realm)) = state.identity.get_realm_by_name(realm_name) else {
         return next.run(req).await;
     };
 
@@ -736,11 +750,23 @@ pub fn router_with(state: Arc<AppState>, extra: Router) -> Router {
         || axum::middleware::from_fn_with_state(Arc::clone(&state), auth::enforce_admin_dpop);
     let admin_routes = admin::admin_api_routes().route_layer(admin_dpop());
     let scim_routes = crate::protocol::scim::router().route_layer(admin_dpop());
+    // SCIM under the realm path (`/realms/{realm_name}/scim/v2`), for IdPs
+    // that cannot send `X-Realm-ID`. `bind_path_realm` is the outer layer, so
+    // it sets `X-Realm-ID` from the path before the DPoP layer reads it; the
+    // other order would let a DPoP-bound token replay as a plain Bearer.
+    let realm_scim_routes = crate::protocol::scim::router()
+        .route_layer(admin_dpop())
+        .route_layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            crate::protocol::scim::mount::bind_path_realm,
+        ));
     // Every route nested under `/realms/{realm_name}` gets the agreement guard
     // via `route_layer`, so it runs only on a matched realm route and leaves
-    // 404s untouched (audit §4.16#12).
+    // 404s untouched (audit §4.16#12). It runs before `bind_path_realm`, so a
+    // SCIM request whose header names another realm is refused, not rebound.
     let realm_routes = oauth::realm_routes()
         .merge(session::realm_routes())
+        .nest("/scim/v2", realm_scim_routes)
         .route_layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),
             realm_path_header_agreement,

@@ -1,7 +1,9 @@
 //! SCIM 2.0 provisioning endpoint (RFC 7643 + RFC 7644).
 //!
-//! Mounted at `/scim/v2/*`. Auth is a realm-scoped bearer token plus
-//! `X-Realm-ID`, with rate limiting shared with the admin surface.
+//! Mounted twice (see [`mount`]): at `/realms/{realm_name}/scim/v2/*`, where
+//! the path selects the realm, and at `/scim/v2/*`, where `X-Realm-ID` does.
+//! Auth is a realm-scoped bearer token, with rate limiting shared with the
+//! admin surface.
 //!
 //! # Phase 1 scope
 //!
@@ -42,6 +44,7 @@ pub mod error;
 pub mod etag;
 pub mod filter;
 pub mod groups;
+pub mod mount;
 pub mod patch_apply;
 pub mod types;
 pub mod users;

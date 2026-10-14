@@ -945,18 +945,18 @@ For the full feature spec see [`docs/dev/ARCHITECTURE.md`](docs/dev/ARCHITECTURE
 | WebAuthn | `POST` | `/webauthn/auth/complete` | Complete passkey authentication |
 | WebAuthn | `GET` | `/webauthn/credentials` | List the caller's registered credentials |
 | WebAuthn | `DELETE` | `/webauthn/credentials/{credential_id}` | Remove a passkey credential |
-| SCIM 2.0 | `GET` | `/scim/v2/ServiceProviderConfig` | SCIM capability advertisement |
-| SCIM 2.0 | `GET` | `/scim/v2/ResourceTypes` | Supported SCIM resource types |
-| SCIM 2.0 | `GET` | `/scim/v2/Schemas` | SCIM schema definitions |
-| SCIM 2.0 | `GET`/`POST` | `/scim/v2/Users` | List / provision users |
-| SCIM 2.0 | `GET`/`PUT`/`PATCH`/`DELETE` | `/scim/v2/Users/{id}` | CRUD / partial update a SCIM user |
-| SCIM 2.0 | `GET`/`POST` | `/scim/v2/Groups` | List / provision groups |
-| SCIM 2.0 | `GET`/`PUT`/`PATCH`/`DELETE` | `/scim/v2/Groups/{id}` | CRUD / partial update a SCIM group |
+| SCIM 2.0 | `GET` | `/realms/{realm_name}/scim/v2/ServiceProviderConfig` | SCIM capability advertisement |
+| SCIM 2.0 | `GET` | `/realms/{realm_name}/scim/v2/ResourceTypes` | Supported SCIM resource types |
+| SCIM 2.0 | `GET` | `/realms/{realm_name}/scim/v2/Schemas` | SCIM schema definitions |
+| SCIM 2.0 | `GET`/`POST` | `/realms/{realm_name}/scim/v2/Users` | List / provision users |
+| SCIM 2.0 | `GET`/`PUT`/`PATCH`/`DELETE` | `/realms/{realm_name}/scim/v2/Users/{id}` | CRUD / partial update a SCIM user |
+| SCIM 2.0 | `GET`/`POST` | `/realms/{realm_name}/scim/v2/Groups` | List / provision groups |
+| SCIM 2.0 | `GET`/`PUT`/`PATCH`/`DELETE` | `/realms/{realm_name}/scim/v2/Groups/{id}` | CRUD / partial update a SCIM group |
 | Observability | `GET` | `/healthz` | Kubernetes liveness probe |
 | Observability | `GET` | `/readyz` | Kubernetes readiness probe (storage + engine checks) |
 | Observability | `GET` | `/metrics` | Prometheus-compatible metrics |
 
-All `/admin/*` routes require a bearer token whose `permissions` claim contains `hearth.admin` for the target realm (typically via the seed `realm.admin` role). SCIM routes use a realm-scoped bearer token.
+All `/admin/*` routes require a bearer token whose `permissions` claim contains `hearth.admin` for the target realm (typically via the seed `realm.admin` role). SCIM routes use a realm-scoped bearer token. The path names the realm, so an IdP needs only the base URL `/realms/{realm_name}/scim/v2` and the token. The same SCIM routes are also served under `/scim/v2`, where the `X-Realm-ID` header selects the realm (see the [SCIM Provisioning guide](docs/guides/scim-provisioning.md)).
 
 Per-realm variants of the core OAuth/OIDC endpoints are available at `/realms/{realm_name}/{endpoint}` for multi-realm deployments where callers cannot send `X-Realm-ID`.
 

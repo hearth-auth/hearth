@@ -2,13 +2,13 @@
 
 **Audience:** operators integrating an external identity provider (Okta, Azure AD / Entra ID, Google Workspace, JumpCloud) for automated user provisioning and deprovisioning.
 
-Hearth implements SCIM 2.0 (RFC 7643 + RFC 7644) at `/scim/v2/`. When you configure your IdP to point at this endpoint, it can push user and group changes to Hearth automatically — creating accounts, updating profiles, suspending leavers, and syncing group memberships.
+Hearth implements SCIM 2.0 (RFC 7643 + RFC 7644) for each realm at `/realms/<realm-name>/scim/v2`. When you configure your IdP to point at this endpoint, it can push user and group changes to Hearth automatically — creating accounts, updating profiles, suspending leavers, and syncing group memberships.
 
 ## Prerequisites
 
 - A running Hearth instance (see [Quick Start](../../README.md#quick-start)).
 - An admin token or access to `hearth.yaml` to configure the SCIM bearer token.
-- The realm UUID you want to provision into.
+- The name of the realm you want to provision into.
 
 ## Enabling SCIM for a realm
 
@@ -35,61 +35,77 @@ A realm with no SCIM bearer token accepts an admin access token for the same rea
 
 | Resource | Required permission | Same rule as |
 |----------|---------------------|--------------|
-| `/scim/v2/Users` (every method, reads included) | `hearth.users.admin` | REST `/admin/users*` |
-| `/scim/v2/Groups` (every method, reads included) | `hearth.realm.admin` | REST `/admin/organizations*` |
+| `/Users` (every method, reads included) | `hearth.users.admin` | REST `/admin/users*` |
+| `/Groups` (every method, reads included) | `hearth.realm.admin` | REST `/admin/organizations*` |
 
 Any other admin permission (`hearth.clients.admin`, `hearth.agents.admin`, or the wrong one of the two above) is refused with `403 Forbidden`.
 
-The discovery endpoints (`/scim/v2/ServiceProviderConfig`, `/scim/v2/Schemas`, `/scim/v2/ResourceTypes`) accept the realm's SCIM bearer token as well as any admin token for the realm, on both kinds of realm.
+The discovery endpoints (`/ServiceProviderConfig`, `/Schemas`, `/ResourceTypes`) accept the realm's SCIM bearer token as well as any admin token for the realm, on both kinds of realm.
 
-## Authentication
+## Base URL
 
-Every SCIM request must include two headers:
+Use the realm's own base URL. The path names the realm, so the IdP needs only this URL and the bearer token:
+
+```
+http://<host>:<port>/realms/<realm-name>/scim/v2
+```
+
+In production with TLS: `https://<host>/realms/<realm-name>/scim/v2`
+
+Use the realm **name** (for example `acme`), not its UUID. An unknown realm name answers `404`.
+
+The URLs that Hearth writes in responses (`meta.location` and the `Location` header of a create) start with the base URL that the request used.
+
+A request to the realm base URL does not need `X-Realm-ID`. If it sends the header, the header must name the same realm as the path. Otherwise Hearth answers `400` with the error `realm_mismatch`.
+
+### Header-based base URL
+
+Hearth also serves SCIM at `/scim/v2`. There, the `X-Realm-ID` header selects the realm, and every request must send it:
 
 | Header | Value |
 |--------|-------|
 | `Authorization` | `Bearer <your-token>` |
 | `X-Realm-ID` | The realm UUID (not the realm name) |
 
+Use this base only for a client that can send a custom header. The two bases accept the same credentials and serve the same endpoints.
+
+## Authentication
+
+Every SCIM request sends the token in the `Authorization` header:
+
 ```bash
 SCIM_TOKEN="your-provisioning-token"
-REALM_ID="<realm-uuid>"
+SCIM_BASE="http://127.0.0.1:8420/realms/my-realm/scim/v2"
 
-curl -X GET "http://127.0.0.1:8420/scim/v2/Users" \
-  -H "Authorization: Bearer $SCIM_TOKEN" \
-  -H "X-Realm-ID: $REALM_ID"
+curl -X GET "$SCIM_BASE/Users" \
+  -H "Authorization: Bearer $SCIM_TOKEN"
 ```
+
+A token of one realm does not work on another realm's base URL (`401`).
 
 Rate limit: 100 requests per minute per realm, applied to both the SCIM bearer-token path and the admin-JWT fallback path.
 
-## Base URL
-
-```
-http://<host>:<port>/scim/v2/
-```
-
-In production with TLS: `https://<host>/scim/v2/`
-
 ## Endpoints
+
+All paths are relative to the base URL.
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `GET` | `/scim/v2/ServiceProviderConfig` | Capability advertisement (RFC 7643 §5) |
-| `GET` | `/scim/v2/ResourceTypes` | Supported resource types |
-| `GET` | `/scim/v2/Schemas` | Schema definitions |
-| `GET` `POST` | `/scim/v2/Users` | List / create users |
-| `GET` `PUT` `PATCH` `DELETE` | `/scim/v2/Users/{id}` | Read / replace / update / delete a user |
-| `GET` `POST` | `/scim/v2/Groups` | List / create groups |
-| `GET` `PUT` `PATCH` `DELETE` | `/scim/v2/Groups/{id}` | Read / replace / update / delete a group |
+| `GET` | `/ServiceProviderConfig` | Capability advertisement (RFC 7643 §5) |
+| `GET` | `/ResourceTypes` | Supported resource types |
+| `GET` | `/Schemas` | Schema definitions |
+| `GET` `POST` | `/Users` | List / create users |
+| `GET` `PUT` `PATCH` `DELETE` | `/Users/{id}` | Read / replace / update / delete a user |
+| `GET` `POST` | `/Groups` | List / create groups |
+| `GET` `PUT` `PATCH` `DELETE` | `/Groups/{id}` | Read / replace / update / delete a group |
 
 ## User provisioning
 
 ### Create a user
 
 ```bash
-curl -X POST "http://127.0.0.1:8420/scim/v2/Users" \
+curl -X POST "$SCIM_BASE/Users" \
   -H "Authorization: Bearer $SCIM_TOKEN" \
-  -H "X-Realm-ID: $REALM_ID" \
   -H "Content-Type: application/scim+json" \
   -d '{
     "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
@@ -118,9 +134,8 @@ Hearth supports PATCH operations on these paths:
 | `emails` | Email list (primary address persisted) |
 
 ```bash
-curl -X PATCH "http://127.0.0.1:8420/scim/v2/Users/<id>" \
+curl -X PATCH "$SCIM_BASE/Users/<id>" \
   -H "Authorization: Bearer $SCIM_TOKEN" \
-  -H "X-Realm-ID: $REALM_ID" \
   -H "Content-Type: application/scim+json" \
   -d '{
     "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
@@ -137,9 +152,8 @@ A single PATCH request may contain at most **1,000 operations**. Requests with m
 ### Deprovision a user
 
 ```bash
-curl -X DELETE "http://127.0.0.1:8420/scim/v2/Users/<id>" \
-  -H "Authorization: Bearer $SCIM_TOKEN" \
-  -H "X-Realm-ID: $REALM_ID"
+curl -X DELETE "$SCIM_BASE/Users/<id>" \
+  -H "Authorization: Bearer $SCIM_TOKEN"
 ```
 
 This permanently removes the user and all associated sessions, credentials, and indexes within the realm.
@@ -150,7 +164,7 @@ SCIM provisioning tokens (bearer-token auth) cannot modify or delete admin princ
 
 Requests authenticated with an admin JWT (the fallback path above) are subject to the same privilege ceiling as the REST admin API: the caller may not modify or delete a user who holds an admin permission the caller lacks. `hearth.admin` outranks everyone; a `hearth.users.admin` sub-admin may act only on users whose admin permissions it holds itself.
 
-The same rule covers Groups: `PUT` or `PATCH /scim/v2/Groups/{id}` that removes a member holding an admin permission the caller lacks (organization-scoped admin permissions included), and `DELETE /scim/v2/Groups/{id}` of an organization with such a member, answer `403` before anything is written. The provisioning token holds no admin permission, so it may not remove an admin principal from a group or delete a group that has one as a member.
+The same rule covers Groups: `PUT` or `PATCH /Groups/{id}` that removes a member holding an admin permission the caller lacks (organization-scoped admin permissions included), and `DELETE /Groups/{id}` of an organization with such a member, answer `403` before anything is written. The provisioning token holds no admin permission, so it may not remove an admin principal from a group or delete a group that has one as a member.
 
 If you need to deprovision or demote an admin user via SCIM:
 1. Remove the admin role from the user through the Admin API or Admin UI first.
@@ -158,23 +172,22 @@ If you need to deprovision or demote an admin user via SCIM:
 
 ## Group provisioning
 
-SCIM Groups are Hearth organizations. An organization created through SCIM (`POST /scim/v2/Groups`) carries a durable "provisioned by SCIM" marker; no request field sets or clears it, and backups carry it. The realm's SCIM **bearer token** may read every organization but may replace, patch or delete **only** the ones SCIM created — an organization created through the admin API, the console or `hearth.yaml` answers `403` to the token's `PUT`, `PATCH` and `DELETE`. Admin-token callers on the fallback path keep their rights (they need `hearth.realm.admin`, see above).
+SCIM Groups are Hearth organizations. An organization created through SCIM (`POST /Groups`) carries a durable "provisioned by SCIM" marker; no request field sets or clears it, and backups carry it. The realm's SCIM **bearer token** may read every organization but may replace, patch or delete **only** the ones SCIM created — an organization created through the admin API, the console or `hearth.yaml` answers `403` to the token's `PUT`, `PATCH` and `DELETE`. Admin-token callers on the fallback path keep their rights (they need `hearth.realm.admin`, see above).
 
 A group's `members` is always its full membership: `GET` lists every member, and `PUT` / `PATCH` reconcile against every member, however large the organization. A membership change is checked before anything is written — a member id that is not a user of the realm answers `400 invalidValue`, and removing an out-ranking member answers `403` — and a write that still fails part-way fails the request (`500`, or the underlying error's status) with a `detail` naming the failed step and how many additions and removals were applied; it is never reported as success.
 
 ### Create a group
 
 ```bash
-curl -X POST "http://127.0.0.1:8420/scim/v2/Groups" \
+curl -X POST "$SCIM_BASE/Groups" \
   -H "Authorization: Bearer $SCIM_TOKEN" \
-  -H "X-Realm-ID: $REALM_ID" \
   -H "Content-Type: application/scim+json" \
   -d '{
     "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
     "displayName": "Engineering",
     "externalId": "okta-group-eng",
     "members": [
-      {"value": "<hearth-user-id>", "$ref": "/scim/v2/Users/<hearth-user-id>", "display": "Alice Smith"}
+      {"value": "<hearth-user-id>", "$ref": "/realms/my-realm/scim/v2/Users/<hearth-user-id>", "display": "Alice Smith"}
     ]
   }'
 ```
@@ -206,8 +219,8 @@ The `filter` query parameter supports these operators on User and Group resource
 `eq`, `ne`, `co` (contains), `sw` (starts-with), `ew` (ends-with), `pr` (present), combined with `and` / `or`.
 
 ```
-GET /scim/v2/Users?filter=userName eq "alice@example.com"
-GET /scim/v2/Users?filter=active eq true
+GET /realms/my-realm/scim/v2/Users?filter=userName eq "alice@example.com"
+GET /realms/my-realm/scim/v2/Users?filter=active eq true
 ```
 
 ## Pagination
@@ -215,7 +228,7 @@ GET /scim/v2/Users?filter=active eq true
 Use `startIndex` (1-based) and `count` for page navigation:
 
 ```
-GET /scim/v2/Users?startIndex=1&count=25
+GET /realms/my-realm/scim/v2/Users?startIndex=1&count=25
 ```
 
 Response wraps results in a `ListResponse`:
@@ -235,19 +248,19 @@ Maximum scan per request: 1 000 records. For large realms, iterate with `startIn
 ## Configuring Okta
 
 1. In your Okta Admin console go to **Applications → Your App → Provisioning → Integration**.
-2. Set **SCIM connector base URL** to `https://<your-hearth-host>/scim/v2`.
+2. Set **SCIM connector base URL** to `https://<your-hearth-host>/realms/<realm-name>/scim/v2`.
 3. Set **Unique identifier field for users** to `userName`.
 4. Set **Authentication Mode** to **HTTP Header** with your bearer token.
-5. Add a custom HTTP header `X-Realm-ID` with your realm UUID.
-6. Enable: **Import Users**, **Create Users**, **Update User Attributes**, **Deactivate Users**.
+5. Enable: **Import Users**, **Create Users**, **Update User Attributes**, **Deactivate Users**.
 
 ## Configuring Azure AD / Entra ID
 
 1. Open your Enterprise Application → **Provisioning**.
 2. Set **Provisioning Mode** to **Automatic**.
-3. Set **Tenant URL** to `https://<your-hearth-host>/scim/v2`.
+3. Set **Tenant URL** to `https://<your-hearth-host>/realms/<realm-name>/scim/v2`.
 4. Set **Secret Token** to your SCIM bearer token.
-5. Entra ID does not support custom headers natively for SCIM. Use an API gateway or reverse proxy to inject `X-Realm-ID: <realm-uuid>` before requests reach Hearth.
+
+Entra ID cannot send a custom header for SCIM. The realm base URL names the realm, so Entra ID needs no header and no proxy.
 
 ## Optimistic concurrency (ETag / `If-Match`)
 
@@ -261,15 +274,13 @@ The value is the resource's last-modified timestamp in microseconds. Store it on
 
 ```bash
 # 1. Read a user and capture the ETag
-RESP=$(curl -s -D - "http://127.0.0.1:8420/scim/v2/Users/$USER_ID" \
-  -H "Authorization: Bearer $SCIM_TOKEN" \
-  -H "X-Realm-ID: $REALM_ID")
+RESP=$(curl -s -D - "$SCIM_BASE/Users/$USER_ID" \
+  -H "Authorization: Bearer $SCIM_TOKEN")
 ETAG=$(echo "$RESP" | grep -i '^etag:' | awk '{print $2}' | tr -d '\r')
 
 # 2. Update the user, supplying the captured ETag
-curl -X PATCH "http://127.0.0.1:8420/scim/v2/Users/$USER_ID" \
+curl -X PATCH "$SCIM_BASE/Users/$USER_ID" \
   -H "Authorization: Bearer $SCIM_TOKEN" \
-  -H "X-Realm-ID: $REALM_ID" \
   -H "If-Match: $ETAG" \
   -H "Content-Type: application/scim+json" \
   -d '{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[{"op":"replace","path":"displayName","value":"Alice Johnson"}]}'
@@ -291,11 +302,13 @@ The following SCIM features are deferred to a future hardening release:
 
 | Symptom | Likely cause |
 |---------|-------------|
-| `403 Forbidden` on auth | Wrong realm UUID in `X-Realm-ID`, realm not active, or — on the admin-JWT fallback — the token lacks `hearth.users.admin` (`/Users`) / `hearth.realm.admin` (`/Groups`) and `hearth.admin`. |
+| `403 Forbidden` on auth | Wrong realm UUID in `X-Realm-ID` (header base URL), realm not active, or — on the admin-JWT fallback — the token lacks `hearth.users.admin` (`/Users`) / `hearth.realm.admin` (`/Groups`) and `hearth.admin`. |
 | `403 Forbidden` on PATCH / PUT / DELETE | Target user holds an admin permission (`hearth.admin` or any `hearth.*.admin`) the caller lacks. SCIM bearer tokens cannot mutate admin principals at all. Remove the admin role first, or use an admin JWT that outranks the target. |
 | `403 Forbidden` on `PUT` / `PATCH` / `DELETE /Groups/{id}` with the bearer token | The organization was not created through SCIM; the provisioning token may modify only organizations it created. |
-| `401 Unauthorized` | Bearer token mismatch. |
-| `400 Bad Request` / `invalidValue` | Missing `X-Realm-ID` header, or non-UUID value. |
+| `401 Unauthorized` | Bearer token mismatch, or the token belongs to another realm than the base URL names. |
+| `400 Bad Request` / `invalidValue` | Header base URL (`/scim/v2`) only: missing `X-Realm-ID` header, or non-UUID value. Use the realm base URL instead. |
+| `400 Bad Request` / `realm_mismatch` | Realm base URL: the request sent an `X-Realm-ID` that names another realm. Remove the header. |
+| `404 Not Found` on every request | Realm base URL: no realm has that name. Use the realm name, not its UUID. |
 | `412 Precondition Failed` | Stale `If-Match` validator — the resource was modified after your last read. Re-fetch the resource, capture the new `ETag`, and retry. |
 | `429 Too Many Requests` | Rate limit exceeded (100 req/min per realm). Back off and retry. |
 | User created but cannot log in | `active` was `false` on provisioning. Send a PATCH to set `active: true`. |

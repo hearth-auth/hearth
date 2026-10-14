@@ -19,15 +19,22 @@ use crate::protocol::scim::auth::{authenticate, ScimAuth, ScimResource};
 use crate::protocol::scim::error::{from_ceiling_error, from_identity_error, ScimError};
 use crate::protocol::scim::etag::{check_if_match, resource_response};
 use crate::protocol::scim::filter::{self, FilterExpr};
+use crate::protocol::scim::mount::{ResourceIdPath, ScimBase};
 use crate::protocol::scim::patch_apply::apply_user_patch;
 use crate::protocol::scim::types::{
     ListResponse, Meta, PatchRequest, ScimEmail, ScimName, ScimUser, USER_SCHEMA,
 };
 
-/// Converts a stored `User` to a SCIM wire resource. `base_path` is the
-/// absolute request path prefix up to `/scim/v2/Users`.
-fn user_to_scim(user: &User, external_id: Option<String>, base_path: &str) -> ScimUser {
-    let location = format!("{base_path}/{}", user.id().as_uuid());
+/// The path of a user resource under the request's SCIM base, for example
+/// `/realms/acme/scim/v2/Users/{id}`.
+fn user_location(base: &ScimBase, user: &User) -> String {
+    format!("{}/{}", base.collection("Users"), user.id().as_uuid())
+}
+
+/// Converts a stored `User` to a SCIM wire resource. `meta.location` is built
+/// from `base`, the base path the request was addressed to.
+fn user_to_scim(user: &User, external_id: Option<String>, base: &ScimBase) -> ScimUser {
+    let location = user_location(base, user);
     let version = format!("W/\"{}\"", user.updated_at().as_micros());
     let name = if user.first_name().is_empty() && user.last_name().is_empty() {
         None
@@ -189,6 +196,7 @@ fn admin_principal_guard(
 pub async fn create_user(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    base: ScimBase,
     Json(body): Json<ScimUser>,
 ) -> Response {
     let auth = match authenticate(&headers, &state, ScimResource::Users) {
@@ -199,7 +207,7 @@ pub async fn create_user(
     // permit and runs on the blocking pool (#446). Past the queue wait it is
     // shed with `503` + `Retry-After`, which SCIM clients retry.
     match crate::identity::user_create_gate()
-        .run(move || create_user_admitted(&state, &auth, &body))
+        .run(move || create_user_admitted(&state, &auth, &base, &body))
         .await
     {
         Ok(resp) => resp,
@@ -223,7 +231,12 @@ pub async fn create_user(
 }
 
 /// The blocking body of `POST /scim/v2/Users`, run under a user-create permit.
-fn create_user_admitted(state: &AppState, auth: &ScimAuth, body: &ScimUser) -> Response {
+fn create_user_admitted(
+    state: &AppState,
+    auth: &ScimAuth,
+    base: &ScimBase,
+    body: &ScimUser,
+) -> Response {
     let _span = tracing::info_span!(
         "hearth.scim.users.create",
         "hearth.realm_id" = %auth.realm_id,
@@ -305,13 +318,14 @@ fn create_user_admitted(state: &AppState, auth: &ScimAuth, body: &ScimUser) -> R
         body.external_id.as_deref(),
     );
 
-    let scim = user_to_scim(&refreshed, body.external_id.clone(), "/scim/v2/Users");
+    let scim = user_to_scim(&refreshed, body.external_id.clone(), base);
     let mut resp = (StatusCode::CREATED, Json(scim.clone())).into_response();
-    resp.headers_mut().insert(
-        axum::http::header::LOCATION,
-        HeaderValue::from_str(&format!("/scim/v2/Users/{}", refreshed.id().as_uuid()))
-            .unwrap_or(HeaderValue::from_static("/scim/v2/Users")),
-    );
+    // The path is built from a UUID and a realm name of ASCII letters, digits,
+    // `-` and `_`, so it is always a valid header value.
+    if let Ok(location) = HeaderValue::from_str(&user_location(base, &refreshed)) {
+        resp.headers_mut()
+            .insert(axum::http::header::LOCATION, location);
+    }
     if let Some(m) = &scim.meta {
         if let Ok(v) = HeaderValue::from_str(&m.version) {
             resp.headers_mut().insert(axum::http::header::ETAG, v);
@@ -328,7 +342,8 @@ fn create_user_admitted(state: &AppState, auth: &ScimAuth, body: &ScimUser) -> R
 pub async fn get_user(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path(id): Path<String>,
+    base: ScimBase,
+    Path(ResourceIdPath { id }): Path<ResourceIdPath>,
 ) -> Response {
     let auth = match authenticate(&headers, &state, ScimResource::Users) {
         Ok(a) => a,
@@ -353,7 +368,7 @@ pub async fn get_user(
                 .ok()
                 .flatten();
             let version = user_version(&user);
-            let scim = user_to_scim(&user, ext, "/scim/v2/Users");
+            let scim = user_to_scim(&user, ext, &base);
             resource_response(&scim, &version)
         }
         Ok(None) => ScimError::not_found("user not found").into_response(),
@@ -375,6 +390,7 @@ pub struct ListQuery {
 pub async fn list_users(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    base: ScimBase,
     Query(q): Query<ListQuery>,
 ) -> Response {
     let auth = match authenticate(&headers, &state, ScimResource::Users) {
@@ -423,7 +439,7 @@ pub async fn list_users(
             .get_scim_external_id(&auth.realm_id, user.id())
             .ok()
             .flatten();
-        let scim = user_to_scim(user, ext, "/scim/v2/Users");
+        let scim = user_to_scim(user, ext, &base);
         if filter_expr
             .as_ref()
             .map_or(true, |e| filter::matches_user(e, &scim))
@@ -445,7 +461,8 @@ pub async fn list_users(
 pub async fn replace_user(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path(id): Path<String>,
+    base: ScimBase,
+    Path(ResourceIdPath { id }): Path<ResourceIdPath>,
     Json(body): Json<ScimUser>,
 ) -> Response {
     let auth = match authenticate(&headers, &state, ScimResource::Users) {
@@ -547,7 +564,7 @@ pub async fn replace_user(
         .ok()
         .flatten();
     let version = user_version(&refreshed);
-    let scim = user_to_scim(&refreshed, ext, "/scim/v2/Users");
+    let scim = user_to_scim(&refreshed, ext, &base);
     resource_response(&scim, &version)
 }
 
@@ -556,7 +573,8 @@ pub async fn replace_user(
 pub async fn patch_user(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path(id): Path<String>,
+    base: ScimBase,
+    Path(ResourceIdPath { id }): Path<ResourceIdPath>,
     Json(body): Json<PatchRequest>,
 ) -> Response {
     let auth = match authenticate(&headers, &state, ScimResource::Users) {
@@ -605,7 +623,7 @@ pub async fn patch_user(
         .ok()
         .flatten();
 
-    let mut scim = user_to_scim(&existing, current_ext.clone(), "/scim/v2/Users");
+    let mut scim = user_to_scim(&existing, current_ext.clone(), &base);
     if let Err(e) = apply_user_patch(&mut scim, &body.operations) {
         return e.into_response();
     }
@@ -704,7 +722,7 @@ pub async fn patch_user(
         .ok()
         .flatten();
     let version = user_version(&refreshed);
-    let scim = user_to_scim(&refreshed, ext, "/scim/v2/Users");
+    let scim = user_to_scim(&refreshed, ext, &base);
     resource_response(&scim, &version)
 }
 
@@ -712,7 +730,7 @@ pub async fn patch_user(
 pub async fn delete_user(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path(id): Path<String>,
+    Path(ResourceIdPath { id }): Path<ResourceIdPath>,
 ) -> Response {
     let auth = match authenticate(&headers, &state, ScimResource::Users) {
         Ok(a) => a,
