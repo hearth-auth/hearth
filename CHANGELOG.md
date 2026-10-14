@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.2.0] — 2026-10-14
+
 ### Added
 - **`POST /admin/users/{id}/password-email`: let a user choose a password.** An application that
   creates users through the admin API or SCIM can now email the user a single-use link. A user
