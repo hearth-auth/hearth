@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.2.1] — 2026-10-15
+
 ### Security
 - **rustls 0.23.46** fixes four advisories in the TLS library: RUSTSEC-2026-0346 (`Debug` output of
   client session values showed TLS secrets), RUSTSEC-2026-0347 (application data after an ECH
