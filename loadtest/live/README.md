@@ -192,12 +192,15 @@ site, and `round.sh` fetches the trace as `heaptrack.zst`. Compare a 2-hour run 
 run (`plans/2026-10-12-c7i-large-445-heaptrack-*.txt`): a call site whose live heap grows
 between them, and is not a capped cache or the SST readers, is a leak.
 
-heaptrack needs a binary with symbols. Build the image from a modified copy of the Dockerfile,
-outside the repository:
+heaptrack needs a binary with symbols, and a binary that allocates through glibc's `malloc`:
+heaptrack hooks only that, and the release binary allocates through jemalloc (#445).
+`--cfg hearth_system_allocator` keeps the system allocator. The live heap by call site does not
+depend on the allocator, but RSS does, so judge flatness on a run of the release image. Build
+the image from a modified copy of the Dockerfile, outside the repository:
 
 ```bash
 sed -e '/&& strip target\/release\/hearth/d' \
-    -e 's/&& cargo build --release/\&\& CARGO_PROFILE_RELEASE_STRIP=none CARGO_PROFILE_RELEASE_DEBUG=line-tables-only cargo build --release/' \
+    -e 's/&& cargo build --release/\&\& CARGO_PROFILE_RELEASE_STRIP=none CARGO_PROFILE_RELEASE_DEBUG=line-tables-only RUSTFLAGS="--cfg hearth_system_allocator" cargo build --release/' \
     Dockerfile > /tmp/Dockerfile.symbols
 docker build -f /tmp/Dockerfile.symbols -t hearth-stress:<tag>-symbols \
   --build-arg BUILD_REVISION=$(git rev-parse HEAD) .

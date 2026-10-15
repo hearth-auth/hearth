@@ -53,6 +53,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Rebuild when the checked-out tag or HEAD changes so `git describe` stays current.
     emit_git_rerun_markers();
 
+    emit_sanitizer_cfg();
+
     compile_tailwind_if_available();
 
     // When SKIP_PROTO_BUILD is set, skip protoc and pbjson.  The generated
@@ -207,6 +209,35 @@ fn emit_git_rerun_markers() {
         if std::path::Path::new(path).exists() {
             println!("cargo:rerun-if-changed={path}");
         }
+    }
+}
+
+/// Sets `cfg(hearth_sanitizer)` and `cfg(hearth_system_allocator)` when the
+/// crate is built with a sanitizer (`-Zsanitizer=...`, as `make leak-check`
+/// does).
+///
+/// With `hearth_system_allocator`, the binary keeps the system allocator
+/// instead of jemalloc (#445). LeakSanitizer tracks only the blocks its own
+/// allocator hands out, and it does not scan jemalloc's memory for pointers:
+/// with jemalloc, the leak check would not see the server binary's Rust
+/// allocations at all. A heaptrack build sets the cfg itself with
+/// `RUSTFLAGS="--cfg hearth_system_allocator"` (loadtest/live/README.md).
+fn emit_sanitizer_cfg() {
+    println!("cargo:rustc-check-cfg=cfg(hearth_sanitizer)");
+    println!("cargo:rustc-check-cfg=cfg(hearth_system_allocator)");
+    println!("cargo:rerun-if-env-changed=RUSTFLAGS");
+    println!("cargo:rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS");
+    // Cargo passes the target's flags separated by 0x1f. `-Z sanitizer=leak`
+    // can also come as two flags.
+    let flags = std::env::var("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default();
+    let flags: Vec<&str> = flags.split('\x1f').collect();
+    let sanitized = flags.iter().enumerate().any(|(i, flag)| {
+        let next = flags.get(i + 1).copied().unwrap_or_default();
+        flag.starts_with("-Zsanitizer=") || (*flag == "-Z" && next.starts_with("sanitizer="))
+    });
+    if sanitized {
+        println!("cargo:rustc-cfg=hearth_sanitizer");
+        println!("cargo:rustc-cfg=hearth_system_allocator");
     }
 }
 

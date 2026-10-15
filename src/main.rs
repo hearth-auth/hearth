@@ -559,8 +559,11 @@ enum AppAction {
 /// those pages back. jemalloc packs allocations by size class, and its
 /// background thread returns freed pages to the system a few seconds later.
 /// jemalloc does not support MSVC, so the Windows binary keeps the system
-/// allocator.
-#[cfg(not(target_env = "msvc"))]
+/// allocator. A build with `cfg(hearth_system_allocator)` keeps it too:
+/// build.rs sets the cfg for a sanitizer build, so that LeakSanitizer sees
+/// every allocation, and a heaptrack build passes it in `RUSTFLAGS`, because
+/// heaptrack hooks only glibc's `malloc`.
+#[cfg(not(any(target_env = "msvc", hearth_system_allocator)))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
@@ -6294,7 +6297,7 @@ mod tests {
 
     /// Bytes that glibc's malloc holds for the program: chunks in use in its
     /// heaps, and the chunks it mapped on their own.
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(all(target_os = "linux", target_env = "gnu", not(hearth_system_allocator)))]
     fn glibc_allocated_bytes() -> usize {
         // SAFETY: `mallinfo2` takes no arguments and returns a plain struct.
         let info = unsafe { libc::mallinfo2() };
@@ -6305,8 +6308,9 @@ mod tests {
     /// (#445). glibc keeps freed memory in its arenas, and under sustained
     /// load the pages that live objects pinned there made RSS creep while the
     /// live heap stayed bounded. With the system allocator, glibc would hold
-    /// this 8 MiB block.
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    /// this 8 MiB block. Not with `cfg(hearth_system_allocator)`, which keeps
+    /// the system allocator on purpose (sanitizer and heaptrack builds).
+    #[cfg(all(target_os = "linux", target_env = "gnu", not(hearth_system_allocator)))]
     #[test]
     fn rust_allocations_do_not_reach_glibc() {
         const BLOCK: usize = 8 << 20;
@@ -6318,6 +6322,30 @@ mod tests {
             after < before + BLOCK,
             "glibc holds {} more bytes while an {BLOCK}-byte Vec is live",
             after.saturating_sub(before)
+        );
+    }
+
+    /// In a sanitizer build (`make leak-check`), the binary's Rust allocations
+    /// go to the sanitizer's allocator, not to jemalloc. LeakSanitizer finds
+    /// leaks only among the blocks its own allocator hands out, so with
+    /// jemalloc it would not check the server binary at all.
+    #[cfg(hearth_sanitizer)]
+    #[test]
+    fn sanitizer_builds_allocate_through_the_sanitizer() {
+        extern "C" {
+            /// The sanitizer runtime's allocator interface: 1 if the pointer
+            /// is a block its allocator handed out, 0 if not.
+            fn __sanitizer_get_ownership(ptr: *const std::ffi::c_void) -> std::ffi::c_int;
+        }
+        let block = std::hint::black_box(vec![1_u8; 4096]);
+        // SAFETY: a `-Zsanitizer` build links the sanitizer runtime, which
+        // exports this function. It only reads the allocator's metadata for
+        // the pointer, which stays live until `block` drops.
+        let owned = unsafe { __sanitizer_get_ownership(block.as_ptr().cast()) };
+        assert_eq!(
+            owned, 1,
+            "a Vec's block does not belong to the sanitizer's allocator, so the \
+             leak check cannot see the binary's Rust allocations"
         );
     }
 
