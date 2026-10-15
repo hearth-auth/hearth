@@ -4740,7 +4740,7 @@ Used by:
   - rusticata-macros 4.1.0
   - rustix 0.38.44
   - rustix 1.1.4
-  - rustls 0.23.45
+  - rustls 0.23.46
   - rusty-fork 0.3.1
   - scopeguard 1.2.0
   - signal-hook-registry 1.4.8
