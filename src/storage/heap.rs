@@ -9,6 +9,11 @@
 //! in use stayed near 300 MB while the arenas' free memory grew from 165 MB to
 //! 336 MB: the whole RSS trend. `malloc_trim(0)` gives the free pages of every
 //! arena back with `madvise(MADV_DONTNEED)`.
+//!
+//! The `hearth` binary allocates through jemalloc, which returns freed pages
+//! by itself, so there the trim covers only glibc's share: the C libraries,
+//! such as zstd. A program that links this library with the system allocator,
+//! such as the test suites, still gets the whole effect.
 
 /// Gives the heap memory the allocator keeps but does not use back to the
 /// system. Call it after an operation that frees a large amount of memory, off

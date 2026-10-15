@@ -9,3 +9,9 @@ pre-build = [
   "apt-get update -qq && apt-get install -y curl unzip ca-certificates",
   "curl -sSfL https://github.com/protocolbuffers/protobuf/releases/download/v25.3/protoc-25.3-linux-x86_64.zip -o /tmp/protoc.zip && unzip -qo /tmp/protoc.zip bin/protoc include/* -d /usr/local/protoc-25 && ln -sf /usr/local/protoc-25/bin/protoc /usr/local/bin/protoc && rm /tmp/protoc.zip",
 ]
+
+# jemalloc, the binary's allocator, fixes its page size at build time, and a
+# jemalloc built for 4 KiB pages does not start on an arm64 kernel with 64 KiB
+# pages. Built for 64 KiB, it runs on both (#445).
+[target.aarch64-unknown-linux-gnu.env]
+passthrough = ["JEMALLOC_SYS_WITH_LG_PAGE=16"]

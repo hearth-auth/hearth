@@ -551,6 +551,19 @@ enum AppAction {
     },
 }
 
+/// The allocator of every Rust allocation in the binary (#445).
+///
+/// glibc's malloc keeps the memory a program frees in its arenas. Under
+/// sustained load the pages that live objects pinned there made RSS creep for
+/// hours while the live heap stayed bounded, and `malloc_trim` could not give
+/// those pages back. jemalloc packs allocations by size class, and its
+/// background thread returns freed pages to the system a few seconds later.
+/// jemalloc does not support MSVC, so the Windows binary keeps the system
+/// allocator.
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 /// What [`cap_malloc_arenas`] did. Kept for the startup log, because tracing
 /// does not exist yet when it runs. Unset on platforms without glibc.
 static MALLOC_ARENA_CAP: std::sync::OnceLock<ArenaCap> = std::sync::OnceLock::new();
@@ -572,7 +585,8 @@ enum ArenaCap {
 /// glibc's default is 8 arenas per core. Each keeps the memory its threads
 /// free, so a 2-vCPU server under steady load held ~3.1 GB for ~0.6 GB of
 /// live heap until the kernel killed it. Two arenas held 575 MB under the
-/// same load, with no slower logins (2026-10-08 soak).
+/// same load, with no slower logins (2026-10-08 soak). Since [`GLOBAL`],
+/// glibc serves only the C libraries Hearth links, such as zstd's contexts.
 fn malloc_arena_limit(cores: usize) -> usize {
     cores.max(2)
 }
@@ -6276,6 +6290,37 @@ mod tests {
         );
     }
 
+    // ── allocator ─────────────────────────────────────────────────────────
+
+    /// Bytes that glibc's malloc holds for the program: chunks in use in its
+    /// heaps, and the chunks it mapped on their own.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    fn glibc_allocated_bytes() -> usize {
+        // SAFETY: `mallinfo2` takes no arguments and returns a plain struct.
+        let info = unsafe { libc::mallinfo2() };
+        info.uordblks + info.hblkhd
+    }
+
+    /// The binary's Rust allocations go to jemalloc, not to glibc's malloc
+    /// (#445). glibc keeps freed memory in its arenas, and under sustained
+    /// load the pages that live objects pinned there made RSS creep while the
+    /// live heap stayed bounded. With the system allocator, glibc would hold
+    /// this 8 MiB block.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[test]
+    fn rust_allocations_do_not_reach_glibc() {
+        const BLOCK: usize = 8 << 20;
+        let before = glibc_allocated_bytes();
+        let block = std::hint::black_box(vec![1_u8; BLOCK]);
+        let after = glibc_allocated_bytes();
+        drop(block);
+        assert!(
+            after < before + BLOCK,
+            "glibc holds {} more bytes while an {BLOCK}-byte Vec is live",
+            after.saturating_sub(before)
+        );
+    }
+
     // ── glibc malloc arenas ───────────────────────────────────────────────
 
     /// One arena per core, never fewer than two: a 2-vCPU host gets 2, not
@@ -6333,8 +6378,9 @@ mod tests {
 
     /// With the cap in place, eight threads that allocate at the same time
     /// share at most two heaps. Without it glibc gives each thread its own.
-    /// (nextest runs every test in its own process, so the process-wide cap
-    /// cannot leak into another test.)
+    /// The blocks come from glibc's `malloc` itself: the binary's Rust
+    /// allocations go to jemalloc ([`GLOBAL`]). (nextest runs every test in its
+    /// own process, so the process-wide cap cannot leak into another test.)
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     #[test]
     fn capped_malloc_arenas_bound_the_heaps_threads_allocate_from() {
@@ -6343,17 +6389,32 @@ mod tests {
             limit_malloc_arenas(2),
             "mallopt(M_ARENA_MAX) refused the cap"
         );
+        // An arena taken before the cap stays: jemalloc's background threads
+        // start before this test runs, and glibc gives each its own.
+        let existing = malloc_heap_count();
         let barrier = Arc::new(std::sync::Barrier::new(THREADS));
         let threads: Vec<_> = (0..THREADS)
             .map(|_| {
                 let barrier = Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     barrier.wait();
-                    let blocks: Vec<Vec<u8>> = (0..256).map(|_| vec![1_u8; 4096]).collect();
+                    let blocks: Vec<*mut libc::c_void> = (0..256)
+                        .map(|_| {
+                            // SAFETY: `malloc` takes no pointers; every block
+                            // is freed once, below.
+                            unsafe { libc::malloc(4096) }
+                        })
+                        .collect();
                     // Every thread holds its blocks at once, so none can
                     // borrow a heap another thread has left idle.
                     barrier.wait();
-                    blocks.len()
+                    let held = blocks.iter().filter(|block| !block.is_null()).count();
+                    for block in blocks {
+                        // SAFETY: `block` came from `malloc` above and is
+                        // freed once (`free` accepts null).
+                        unsafe { libc::free(block) };
+                    }
+                    held
                 })
             })
             .collect();
@@ -6361,7 +6422,11 @@ mod tests {
             assert_eq!(thread.join().expect("allocating thread panicked"), 256);
         }
         let heaps = malloc_heap_count();
-        assert!(heaps <= 2, "glibc used {heaps} heaps; the cap is 2");
+        let bound = existing.max(2);
+        assert!(
+            heaps <= bound,
+            "glibc used {heaps} heaps; the cap is 2 and {existing} existed before it"
+        );
     }
 
     // ── `serve --dev` on a binary built without `dev-endpoints` ───────────
