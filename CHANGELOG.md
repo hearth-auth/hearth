@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.2.2] — 2026-10-16
+
 ### Changed
 - **The Linux and macOS binaries allocate through jemalloc (#445).** Under sustained load, glibc's
   malloc kept the pages that live objects pinned in its arenas, and Hearth's resident memory crept
