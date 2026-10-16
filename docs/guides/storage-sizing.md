@@ -111,21 +111,34 @@ storage:
   hot_tier_capacity: 500000   # explicit override; 0 = auto-size
 ```
 
-## Allocator arenas (Linux, glibc)
+## Allocator
 
-glibc keeps the memory a thread frees in that thread's allocator arena, and by
-default it creates up to 8 arenas per core. Under steady load this made a
-2-vCPU Hearth hold about 3.1 GB of memory for about 0.6 GB of live data.
+The Linux and macOS binaries allocate through jemalloc. The Windows binary uses
+the system allocator.
+
+glibc's malloc keeps the memory a program frees in its arenas. Under sustained
+load, the pages that live objects pinned there made Hearth's resident memory
+creep for hours while its live data stayed bounded, and `malloc_trim` could not
+give those pages back (#445). jemalloc packs allocations by size class, and a
+background thread returns freed pages to the system a few seconds after they
+are freed. So resident memory follows the live data more closely, also after
+a load peak.
+
+### glibc arenas (Linux)
+
+glibc still serves the C libraries that Hearth links, such as zstd. glibc keeps
+the memory a thread frees in that thread's allocator arena, and by default it
+creates up to 8 arenas per core. Before jemalloc, this made a 2-vCPU Hearth
+hold about 3.1 GB of memory for about 0.6 GB of live data under steady load.
 
 Hearth therefore caps glibc at one arena per core, with a minimum of two,
 before it starts any thread. The startup log shows the cap
-(`glibc malloc arenas capped arenas=2`). With the cap, the same load held
-575 MB, and sign-ins were no slower.
+(`glibc malloc arenas capped arenas=2`).
 
 To choose your own limit, set `MALLOC_ARENA_MAX` (or the
 `glibc.malloc.arena_max` tunable in `GLIBC_TUNABLES`) in Hearth's environment.
-Hearth then leaves the allocator alone and logs that it did so. Other
-platforms and C libraries are not affected.
+Hearth then leaves glibc's allocator alone and logs that it did so. These
+settings do not change jemalloc.
 
 ## Working-set vs dataset size
 

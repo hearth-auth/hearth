@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Changed
+- **The Linux and macOS binaries allocate through jemalloc (#445).** Under sustained load, glibc's
+  malloc kept the pages that live objects pinned in its arenas, and Hearth's resident memory crept
+  up for hours while its live data stayed bounded. jemalloc returns freed pages to the system a
+  few seconds after they are freed. The Windows binary keeps the system allocator.
+  `MALLOC_ARENA_MAX` and the glibc arena cap now apply only to the C libraries that Hearth links,
+  such as zstd. In the arm64 Linux binary and image, jemalloc is built for 64 KiB pages, so it
+  runs on arm64 kernels with 4 KiB or 64 KiB pages.
+
 ## [4.2.1] — 2026-10-15
 
 ### Security

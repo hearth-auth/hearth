@@ -58,6 +58,8 @@ FROM rust:1.89-slim-bookworm@sha256:d7fc7de78bb8c1469933aeecbf801314d30d7d6e9f05
 #     already in this image, so no system crypto package is needed.
 #   - ca-certificates: so cargo can fetch from crates.io over HTTPS.
 #   - git: a handful of crates pull git metadata during `build.rs`.
+#   - make: `tikv-jemalloc-sys` builds jemalloc, the binary's allocator, from
+#     its C source with `configure` and `make`.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         protobuf-compiler \
@@ -65,6 +67,7 @@ RUN apt-get update \
         pkg-config \
         ca-certificates \
         git \
+        make \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -101,6 +104,10 @@ COPY vendor ./vendor
 # BUILD_VERSION=<git tag>; a non-release value (the `dev` default, `pr-N`)
 # deliberately leaves HEARTH_RELEASE_VERSION unset, and build.rs warns loudly.
 ARG BUILD_VERSION=dev
+# jemalloc fixes its page size at build time, and a jemalloc built for 4 KiB
+# pages does not start on an arm64 kernel with 64 KiB pages. Built for 64 KiB,
+# it runs on both. BuildKit sets TARGETARCH.
+ARG TARGETARCH
 # `dev-endpoints` is not a default feature, so `/admin/bootstrap`, the `/dev/seed-*`
 # family and the hard-coded `admin@hearth.test` password are not compiled into the
 # shipped binary at all (audit §4.7#2, task 20.1). `--no-default-features` is kept
@@ -115,6 +122,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         [0-9]*)  export HEARTH_RELEASE_VERSION="$BUILD_VERSION" ;; \
         *)       echo "BUILD_VERSION='$BUILD_VERSION' is not a release version;" \
                       "the binary will report the Cargo.toml fallback" ;; \
+    esac \
+    && case "$TARGETARCH" in \
+        arm64) export JEMALLOC_SYS_WITH_LG_PAGE=16 ;; \
     esac \
     && cargo build --release --no-default-features --bin hearth \
     && strip target/release/hearth \
