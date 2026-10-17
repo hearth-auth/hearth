@@ -6,6 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Fixed
+- **The expiry sweep keeps up under sustained sign-in load (#536).** It deleted expired rows one
+  at a time, and each delete waited for its own fsync. On a cloud disk that capped it at about a
+  hundred deletes a second, fewer than a busy server expires. Expired grant families, sessions and
+  single-use markers then built up on disk, and in the hot tier, without a limit. The sweep now
+  deletes each chunk of up to 512 expired rows in one durable write. Its log line also reports the
+  single-use markers and the total.
+- **`POST /admin/users/import` no longer times out on large requests (#536).** Each user waited
+  for two fsyncs, so a request with 10,000 users (the documented maximum) ran past the 30-second
+  request timeout on a cloud disk. The client got a `504` while the server went on importing, and
+  a retry failed with "email exists". Each user's rows and audit event are now one write, and the
+  writes of up to 64 users share one fsync.
+
 ## [4.2.2] — 2026-10-16
 
 ### Changed

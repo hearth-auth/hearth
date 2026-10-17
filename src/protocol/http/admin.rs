@@ -842,31 +842,30 @@ async fn admin_import_users(
 
 /// The blocking body of `POST /admin/users/import`: imports each entry and
 /// reports per-entry results. Runs under a user-create permit.
+///
+/// The entries go to the engine in one call, so they share fsyncs: one by one,
+/// each user waited for two, and a 10,000-user request ran past the request
+/// timeout (#536).
 fn import_users_blocking(
     identity: &dyn crate::identity::IdentityEngine,
     realm_id: &RealmId,
     users: &[ImportUserEntry],
 ) -> Response {
-    let mut imported = 0u32;
-    let mut failed = 0u32;
-    let mut results = Vec::new();
-
+    // An entry with an unknown status is not imported: `Some(reason)`.
+    let mut status_errors: Vec<Option<String>> = Vec::with_capacity(users.len());
+    let mut requests = Vec::with_capacity(users.len());
     for entry in users {
         let status = match entry.status.as_deref().unwrap_or("active") {
             "active" => crate::identity::UserStatus::Active,
             "disabled" => crate::identity::UserStatus::Disabled,
             "pending_verification" => crate::identity::UserStatus::PendingVerification,
             other => {
-                failed += 1;
-                results.push(serde_json::json!({
-                    "email": entry.email,
-                    "error": format!("unknown status: {other}")
-                }));
+                status_errors.push(Some(format!("unknown status: {other}")));
                 continue;
             }
         };
-
-        let req = crate::identity::ImportUserRequest {
+        status_errors.push(None);
+        requests.push(crate::identity::ImportUserRequest {
             id: None,
             email: entry.email.clone(),
             display_name: entry.display_name.clone(),
@@ -875,22 +874,36 @@ fn import_users_blocking(
             status,
             credential: None,
             attributes: entry.attributes.clone(),
-        };
+        });
+    }
 
-        match identity.import_user(realm_id, &req) {
-            Ok(u) => {
+    let mut outcomes = identity.import_users(realm_id, &requests).into_iter();
+    let mut imported = 0u32;
+    let mut failed = 0u32;
+    let mut results = Vec::with_capacity(users.len());
+    for (entry, status_error) in users.iter().zip(status_errors) {
+        let outcome = match status_error {
+            Some(reason) => Err(reason),
+            None => match outcomes.next() {
+                Some(Ok(user)) => Ok(user),
+                Some(Err(e)) => Err(e.to_string()),
+                None => Err("no import result".to_string()),
+            },
+        };
+        match outcome {
+            Ok(user) => {
                 imported += 1;
                 results.push(serde_json::json!({
                     "email": entry.email,
-                    "id": u.id().as_uuid().to_string(),
+                    "id": user.id().as_uuid().to_string(),
                     "error": null
                 }));
             }
-            Err(e) => {
+            Err(reason) => {
                 failed += 1;
                 results.push(serde_json::json!({
                     "email": entry.email,
-                    "error": e.to_string()
+                    "error": reason
                 }));
             }
         }
