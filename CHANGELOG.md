@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.2.3] — 2026-10-17
+
 ### Fixed
 - **The expiry sweep keeps up under sustained sign-in load (#536).** It deleted expired rows one
   at a time, and each delete waited for its own fsync. On a cloud disk that capped it at about a
