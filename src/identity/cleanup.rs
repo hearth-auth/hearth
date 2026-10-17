@@ -387,18 +387,26 @@ const SWEEP_CHUNK: usize = 512;
 ///
 /// `select` reads one row and returns what `delete` needs to remove it, or
 /// `None` to keep it; an error stops the sweep after the rows already picked
-/// are deleted, as the row-by-row loops this replaces did. `delete` returns
-/// whether it removed the row. Deletes never run inside a walk: a pass picks
-/// up to [`SWEEP_CHUNK`] rows, deletes them, and the next pass resumes after
-/// the last row picked.
-fn sweep_prefix<T>(
+/// are deleted, as the row-by-row loops this replaces did. `delete` adds the
+/// keys that remove one picked row to the chunk's batch, and returns whether
+/// the row is to be removed. Deletes never run inside a walk: a pass picks up
+/// to [`SWEEP_CHUNK`] rows, deletes them in ONE durable write, and the next
+/// pass resumes after the last row picked.
+///
+/// One durable write per row capped a sweep at about a hundred deletes a
+/// second on a cloud disk: fewer than a server under sign-in load expires, so
+/// the expired rows piled up without bound (#536).
+fn sweep_prefix<T, D>(
     realm_id: &RealmId,
     storage: &dyn StorageEngine,
     prefix: &[u8],
     limit: Option<usize>,
     mut select: impl FnMut(&[u8], &[u8]) -> Result<Option<T>, crate::storage::StorageError>,
-    mut delete: impl FnMut(&[u8], T) -> Result<bool, crate::storage::StorageError>,
-) -> Result<u64, crate::storage::StorageError> {
+    mut delete: D,
+) -> Result<u64, crate::storage::StorageError>
+where
+    D: FnMut(&[u8], T, &mut Vec<Vec<u8>>) -> Result<bool, crate::storage::StorageError>,
+{
     let end = keys::prefix_end(prefix);
     let mut start = prefix.to_vec();
     let mut deleted: u64 = 0;
@@ -440,11 +448,24 @@ fn sweep_prefix<T>(
             next.push(0);
             next
         });
+        let mut batch: Vec<Vec<u8>> = Vec::with_capacity(picked.len());
+        let mut removed: u64 = 0;
         for (key, item) in picked {
-            if delete(&key, item)? {
-                deleted += 1;
+            match delete(&key, item, &mut batch) {
+                Ok(true) => removed += 1,
+                Ok(false) => {}
+                Err(e) => {
+                    // An error of the walk came first: it is the one reported.
+                    failure = failure.or(Some(e));
+                    break;
+                }
             }
         }
+        // The rows planned before an error still go, as they did one by one.
+        if !batch.is_empty() {
+            storage.write_batch(realm_id, &[], &batch)?;
+        }
+        deleted += removed;
         if let Some(e) = failure {
             return Err(e);
         }
@@ -455,14 +476,10 @@ fn sweep_prefix<T>(
     }
 }
 
-/// Deletes one row for [`sweep_prefix`].
-fn delete_row(
-    storage: &dyn StorageEngine,
-    realm_id: &RealmId,
-    key: &[u8],
-) -> Result<bool, crate::storage::StorageError> {
-    storage.delete(realm_id, key)?;
-    Ok(true)
+/// Adds one row to the batch that [`sweep_prefix`] deletes.
+fn delete_row(key: &[u8], batch: &mut Vec<Vec<u8>>) -> bool {
+    batch.push(key.to_vec());
+    true
 }
 
 /// Sweeps a prefix whose rows each hold an 8-byte little-endian `i64` expiry
@@ -485,7 +502,7 @@ fn sweep_le_expiring(
                 .filter(|bytes| i64::from_le_bytes(*bytes) <= now_secs)
                 .map(|_| ()))
         },
-        |key, ()| delete_row(storage, realm_id, key),
+        |key, (), batch| Ok(delete_row(key, batch)),
     )
 }
 
@@ -515,7 +532,7 @@ fn sweep_auth_codes(
             })?;
             Ok((now >= exp.expires_at).then_some(()))
         },
-        |key, ()| delete_row(storage, realm_id, key),
+        |key, (), batch| Ok(delete_row(key, batch)),
     )
 }
 
@@ -538,20 +555,11 @@ fn sweep_device_codes(
             })?;
             Ok((now >= stored.expires_at).then_some(stored.user_code))
         },
-        |key, user_code| {
-            storage.delete(realm_id, key)?;
-            // Also clean up the user_code → device_code index.
-            // An orphaned index is benign garbage, but we make a
-            // best-effort attempt to remove it.
-            let uc_key = keys::encode_user_code(&user_code);
-            if let Err(e) = storage.delete(realm_id, &uc_key) {
-                tracing::warn!(
-                    realm = %realm_id,
-                    user_code = %user_code,
-                    error = %e,
-                    "cleanup: failed to delete user_code index for expired device code",
-                );
-            }
+        |key, user_code, batch| {
+            batch.push(key.to_vec());
+            // Also clean up the user_code → device_code index, in the same
+            // write as the device code.
+            batch.push(keys::encode_user_code(&user_code));
             Ok(true)
         },
     )
@@ -577,7 +585,7 @@ fn sweep_pending_tickets(
                 })?;
             Ok((now >= ticket.expires_at).then_some(()))
         },
-        |key, ()| delete_row(storage, realm_id, key),
+        |key, (), batch| Ok(delete_row(key, batch)),
     )
 }
 
@@ -599,11 +607,11 @@ fn sweep_grant_families(
             })?;
             Ok((now >= family.expires_at).then_some(family.family_id))
         },
-        |key, family_id| {
-            storage.delete(realm_id, key)?;
+        |key, family_id, batch| {
+            batch.push(key.to_vec());
             // The revocation tombstone lives exactly as long as the row it
             // guards; nothing else removes it (G6).
-            storage.delete(realm_id, &keys::encode_grant_family_revoked(&family_id))?;
+            batch.push(keys::encode_grant_family_revoked(&family_id));
             Ok(true)
         },
     )
@@ -629,7 +637,7 @@ fn sweep_par_requests(
                 })?;
             Ok((now >= par.expires_at).then_some(()))
         },
-        |key, ()| delete_row(storage, realm_id, key),
+        |key, (), batch| Ok(delete_row(key, batch)),
     )
 }
 
@@ -715,7 +723,7 @@ pub(crate) fn sweep_aat_records(
                 .filter(|Expiry { exp }| *exp <= now_secs)
                 .map(|_| ()))
         },
-        |key, ()| delete_row(storage, realm_id, key),
+        |key, (), batch| Ok(delete_row(key, batch)),
     )
 }
 
@@ -774,7 +782,7 @@ pub(crate) fn sweep_saml_states(
             let created_secs = bag.created_at.as_micros() / 1_000_000;
             Ok((now_secs.saturating_sub(created_secs) > SAML_STATE_TTL_SECS).then_some(()))
         },
-        |key, ()| delete_row(storage, realm_id, key),
+        |key, (), batch| Ok(delete_row(key, batch)),
     )
 }
 
@@ -847,7 +855,7 @@ pub(crate) fn sweep_consumed_markers(
             };
             Ok((i64::from_le_bytes(bytes) <= now_secs).then_some(()))
         },
-        |key, ()| delete_row(storage, realm_id, key),
+        |key, (), batch| Ok(delete_row(key, batch)),
     )
 }
 
@@ -905,15 +913,14 @@ pub(crate) fn sweep_session_family_index(
         None,
         // A row we cannot parse is left alone rather than guessed at.
         |key, _| Ok(keys::decode_session_grant_family_id(key).map(keys::encode_grant_family)),
-        |key, family_key| {
+        |key, family_key, batch| {
             // An uncached read: this check runs for every index row on every
             // sweep, and caching the families would fill the hot tier and the
             // block cache with rows no request reads (#445).
             if storage.get_uncached(realm_id, &family_key)?.is_some() {
                 return Ok(false);
             }
-            storage.delete(realm_id, key)?;
-            Ok(true)
+            Ok(delete_row(key, batch))
         },
     )
 }
@@ -939,13 +946,12 @@ pub(crate) fn sweep_session_parent_links(
         None,
         // A row we cannot parse is left alone rather than guessed at.
         |key, _| Ok(keys::decode_session_parent_key(key).map(|s| keys::encode_session_id(&s))),
-        |key, session_key| {
+        |key, session_key, batch| {
             // Uncached, as in `sweep_session_family_index` (#445).
             if storage.get_uncached(realm_id, &session_key)?.is_some() {
                 return Ok(false);
             }
-            storage.delete(realm_id, key)?;
-            Ok(true)
+            Ok(delete_row(key, batch))
         },
     )
 }
@@ -985,8 +991,9 @@ fn sweep_sessions(
             Ok((now.as_micros() >= deadline)
                 .then(|| keys::encode_user_session(session.user_id(), session.id())))
         },
-        |key, index_key| {
-            storage.write_batch(realm_id, &[], &[key.to_vec(), index_key])?;
+        |key, index_key, batch| {
+            batch.push(key.to_vec());
+            batch.push(index_key);
             Ok(true)
         },
     )
@@ -1407,6 +1414,16 @@ mod tests {
     /// An expired grant family with its revocation tombstone, as a sign-in
     /// leaves it once its refresh token lifetime has passed.
     fn seed_expired_family(s: &EmbeddedStorageEngine, realm: &RealmId, id: &str) {
+        s.put(
+            realm,
+            &keys::encode_grant_family(id),
+            &expired_family_bytes(realm, id),
+        )
+        .expect("put family");
+    }
+
+    /// The stored row of a grant family that expired at `T0 + ONE_HOUR`.
+    fn expired_family_bytes(realm: &RealmId, id: &str) -> Vec<u8> {
         let family = StoredGrantFamily {
             family_id: id.into(),
             current_refresh_hash: "h".into(),
@@ -1421,12 +1438,7 @@ mod tests {
             bound_jkt: None,
             scope_narrowed: false,
         };
-        s.put(
-            realm,
-            &keys::encode_grant_family(id),
-            &serde_json::to_vec(&family).expect("serialize"),
-        )
-        .expect("put family");
+        serde_json::to_vec(&family).expect("serialize")
     }
 
     /// Every sign-in creates a grant family. A sweep capped at `max_per_type`
@@ -1478,6 +1490,72 @@ mod tests {
         for row in &rows {
             assert!(s.get(&realm, row).expect("get").is_none());
         }
+    }
+
+    /// Storage that fsyncs every write, as in production: its WAL sync count
+    /// is the number of durable writes.
+    fn durable_storage() -> (EmbeddedStorageEngine, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = crate::storage::StorageConfig::dev(dir.path().to_path_buf());
+        config.wal_config.sync_mode = crate::storage::wal::SyncMode::EveryWrite;
+        let engine = EmbeddedStorageEngine::open(config).expect("open storage");
+        (engine, dir)
+    }
+
+    /// A sweep that waited for one fsync per deleted row made about 100
+    /// deletes a second. A server under sign-in load expires more rows than
+    /// that, so the expired rows piled up without bound (#536). Each chunk of
+    /// rows now goes in one durable write.
+    #[test]
+    fn a_sweep_deletes_each_chunk_of_expired_rows_in_one_durable_write() {
+        let (s, _dir) = durable_storage();
+        let realm = RealmId::generate();
+        let n = 2 * SWEEP_CHUNK + 76;
+        let session_id = crate::core::SessionId::generate();
+        let marker_expiry = (T0 / 1_000_000).to_le_bytes().to_vec();
+        let mut rows = Vec::with_capacity(4 * n);
+        for i in 0..n {
+            let family = format!("fam-{i}");
+            rows.push((
+                keys::encode_grant_family(&family),
+                expired_family_bytes(&realm, &family),
+            ));
+            rows.push((keys::encode_grant_family_revoked(&family), Vec::new()));
+            rows.push((
+                keys::encode_session_grant_family(&session_id, &family),
+                Vec::new(),
+            ));
+            rows.push((
+                keys::encode_consumed_refresh(&format!("rt-{i}")),
+                marker_expiry.clone(),
+            ));
+        }
+        s.put_batch(&realm, &rows).expect("seed");
+        let before = s.wal_sync_count();
+
+        let stats = sweep_expired(
+            &realm,
+            &s,
+            &fake_clock(T0 + 2 * ONE_HOUR),
+            &CleanupConfig::default(),
+        );
+
+        let n_rows = n as u64;
+        assert_eq!(stats.grant_families_deleted, n_rows);
+        assert_eq!(stats.session_family_rows_deleted, n_rows);
+        assert_eq!(stats.consumed_markers_deleted, n_rows);
+        for (key, _) in &rows {
+            assert!(s.get(&realm, key).expect("get").is_none());
+        }
+        // Three sweeps have rows to delete: the families (with their
+        // tombstones), the orphaned index rows and the markers.
+        let chunks = 3 * n.div_ceil(SWEEP_CHUNK) as u64;
+        let syncs = s.wal_sync_count() - before;
+        assert!(
+            syncs <= chunks,
+            "{syncs} durable writes to delete {} rows in {chunks} chunks",
+            rows.len()
+        );
     }
 
     #[test]

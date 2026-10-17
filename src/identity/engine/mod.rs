@@ -271,6 +271,25 @@ fn realm_epoch_window(realm_id: &RealmId) -> usize {
 /// Maximum entries in the in-process session cache (S12-F1).
 const SESSION_CACHE_MAX: usize = 4096;
 
+/// Most users a bulk import enqueues before it waits for their fsync (#536).
+///
+/// The first enqueue can make the importing thread the group-commit leader,
+/// and the other writers wait for it until it waits too: a small chunk keeps
+/// that wait short, and one fsync still covers the whole chunk.
+const IMPORT_PIPELINE_DEPTH: usize = 64;
+
+/// The rows that store one imported user, as `(key, value)` pairs.
+type ImportRows = Vec<(Vec<u8>, Vec<u8>)>;
+
+/// One request of a bulk import chunk: its result, or the user whose write is
+/// enqueued and not yet durable.
+enum ImportSlot {
+    /// The request failed, or its write is durable.
+    Done(Result<User, IdentityError>),
+    /// The user and its pending write (rows and `UserCreated` event).
+    Pending(User, crate::audit::AuditPendingWrite),
+}
+
 /// Persisted state for a pending email-verification token.
 ///
 /// Stored under `email:verify:{sha256_hex_of_token}`. The plaintext
@@ -5030,6 +5049,30 @@ impl EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &ImportUserRequest,
     ) -> Result<User, IdentityError> {
+        let (user, entries) = self.prepare_import(realm_id, request)?;
+        self.storage
+            .put_batch(realm_id, &entries)
+            .map_err(Self::storage_err)?;
+
+        self.record_audit(
+            realm_id,
+            None,
+            AuditAction::UserCreated,
+            "user",
+            &user.id().as_uuid().to_string(),
+        )?;
+
+        Ok(user)
+    }
+
+    /// Validates one import request and builds the rows that store it: the
+    /// user and its email index, and the credential when one is supplied.
+    /// Writes nothing.
+    fn prepare_import(
+        &self,
+        realm_id: &RealmId,
+        request: &ImportUserRequest,
+    ) -> Result<(User, ImportRows), IdentityError> {
         // 1. Validate and normalize input (same invariants as create_user)
         let email = validation::validate_email(&request.email)?;
         let first_name = validation::validate_name_part(&request.first_name, "First name")?;
@@ -5121,19 +5164,89 @@ impl EmbeddedIdentityEngine {
             entries.push((cred_key, cred_bytes));
         }
 
-        self.storage
-            .put_batch(realm_id, &entries)
-            .map_err(Self::storage_err)?;
+        Ok((user, entries))
+    }
 
-        self.record_audit(
-            realm_id,
-            None,
-            AuditAction::UserCreated,
-            "user",
-            &user_id.as_uuid().to_string(),
-        )?;
+    /// Imports up to [`IMPORT_PIPELINE_DEPTH`] users with shared fsyncs and
+    /// appends one result per request to `results`, in order (#536).
+    ///
+    /// Each user's rows and its `UserCreated` event go in ONE WAL record, as
+    /// a sign-in writes its session (HEA-1954). Every record of the chunk is
+    /// enqueued before the first durability wait, so one group commit covers
+    /// many users. One by one, each user waited for two fsyncs.
+    ///
+    /// The first enqueue can make this thread the group-commit leader, and
+    /// the other writers then wait until it waits for durability itself. So
+    /// the chunk stays small, and every pending write is settled before
+    /// anything that can itself wait for a commit.
+    fn import_user_chunk(
+        &self,
+        realm_id: &RealmId,
+        chunk: &[ImportUserRequest],
+        results: &mut Vec<Result<User, IdentityError>>,
+    ) {
+        let mut slots: Vec<ImportSlot> = Vec::with_capacity(chunk.len());
+        for request in chunk {
+            // An earlier record of this chunk is already in the memtable, so
+            // a repeated email or id fails here as it would one by one.
+            let (user, entries) = match self.prepare_import(realm_id, request) {
+                Ok(prepared) => prepared,
+                Err(e) => {
+                    slots.push(ImportSlot::Done(Err(e)));
+                    continue;
+                }
+            };
+            let event = CreateAuditEvent {
+                realm_id: realm_id.clone(),
+                actor: "system".to_string(),
+                action: AuditAction::UserCreated,
+                resource_type: "user".to_string(),
+                resource_id: user.id().as_uuid().to_string(),
+                metadata: None,
+            };
+            let storage = Arc::clone(&self.storage);
+            let realm = realm_id.clone();
+            let merged = self.audit.with_pending_append(
+                &event,
+                Box::new(move |audit_kvs| {
+                    let mut combined = entries;
+                    combined.extend_from_slice(audit_kvs);
+                    storage.enqueue_batch(&realm, &combined)
+                }),
+            );
+            match merged {
+                Ok(pending) => slots.push(ImportSlot::Pending(user, pending)),
+                // No merged write (an audit engine without one, or an audit
+                // error before the enqueue): nothing of this user is written.
+                // Its own writes wait for a commit, so settle the others
+                // first, then import it as `import_user` does.
+                Err(_) => {
+                    slots = slots
+                        .into_iter()
+                        .map(|slot| ImportSlot::Done(self.settle_import(slot)))
+                        .collect();
+                    slots.push(ImportSlot::Done(self.import_user_record(realm_id, request)));
+                }
+            }
+        }
+        // In enqueue order: the first wait leads the commit of them all.
+        results.extend(slots.into_iter().map(|slot| self.settle_import(slot)));
+    }
 
-        Ok(user)
+    /// Waits until a pending import is durable, and returns its result.
+    fn settle_import(&self, slot: ImportSlot) -> Result<User, IdentityError> {
+        match slot {
+            ImportSlot::Done(result) => result,
+            ImportSlot::Pending(user, pending) => {
+                let durable = self.storage.await_batch_durable(pending.handle);
+                if durable.is_err() {
+                    (pending.on_failure)();
+                } else {
+                    (pending.on_success)();
+                }
+                durable.map(|()| user).map_err(Self::storage_err)
+            }
+        }
     }
 
     /// Verifies a JWT signature against the realm-specific signing key, falling
@@ -12678,6 +12791,28 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.import_user_record(realm_id, request)
     }
 
+    fn import_users(
+        &self,
+        realm_id: &RealmId,
+        requests: &[ImportUserRequest],
+    ) -> Vec<Result<User, IdentityError>> {
+        if keys::is_system_realm(realm_id) {
+            return requests
+                .iter()
+                .map(|_| {
+                    Err(IdentityError::SystemRealmProtected {
+                        operation: "import_user",
+                    })
+                })
+                .collect();
+        }
+        let mut results = Vec::with_capacity(requests.len());
+        for chunk in requests.chunks(IMPORT_PIPELINE_DEPTH) {
+            self.import_user_chunk(realm_id, chunk, &mut results);
+        }
+        results
+    }
+
     fn import_admin_user(&self, request: &ImportUserRequest) -> Result<User, IdentityError> {
         // Bypasses the `import_user` system-realm guard deliberately, exactly
         // as `create_admin_user` bypasses `create_user`'s. Every validation
@@ -19102,6 +19237,8 @@ mod tests {
 
     /// Every spelling of a resource reads the one consent record (G6).
     mod authorize_resource_consent;
+    /// A bulk import shares each fsync among many users (#536).
+    mod bulk_import;
     /// A client assertion's `aud` must name the realm's issuer.
     mod client_assertion_audience;
     /// `private_key_jwt` assertion-JTI replay markers carry an expiry and are swept.

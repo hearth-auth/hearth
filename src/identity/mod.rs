@@ -2370,6 +2370,18 @@ pub trait IdentityEngine: Send + Sync {
         request: &ImportUserRequest,
     ) -> Result<User, IdentityError>;
 
+    /// Imports a list of users, as [`import_user`](Self::import_user) imports
+    /// one: the same validation, and one result per request, in order.
+    ///
+    /// A request whose email is already stored fails with
+    /// [`IdentityError::DuplicateEmail`], also when an earlier request in the
+    /// same list holds that email. One failed request does not stop the others.
+    fn import_users(
+        &self,
+        realm_id: &RealmId,
+        requests: &[ImportUserRequest],
+    ) -> Vec<Result<User, IdentityError>>;
+
     /// Imports a user into the reserved system realm — the restore twin of
     /// [`create_admin_user`](Self::create_admin_user).
     ///

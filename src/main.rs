@@ -2139,6 +2139,8 @@ async fn run_serve(
                                             session_family_rows = stats.session_family_rows_deleted,
                                             session_parent_rows = stats.session_parent_rows_deleted,
                                             sessions = stats.sessions_deleted,
+                                            consumed_markers = stats.consumed_markers_deleted,
+                                            total = stats.total_deleted(),
                                             rate_trackers_pruned = stats.rate_trackers_pruned,
                                             errors = stats.errors,
                                             "cleanup: swept expired entities",
