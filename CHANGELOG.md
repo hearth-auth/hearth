@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Fixed
+- **`POST /admin/users/import` no longer stops every write when several imports run at the
+  same time (#536).** In 4.2.3 an import could wait for a write that only its own fsync makes
+  durable. It then waited for ever, every other write of the server waited for it, and the
+  server did not stop on `SIGTERM`. Eight concurrent 10,000-user requests caused this in less than
+  30 seconds. One import on a server with other write load can also cause it: upgrade from 4.2.3
+  before you import users.
+
 ## [4.2.3] — 2026-10-17
 
 ### Fixed

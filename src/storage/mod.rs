@@ -88,6 +88,19 @@ pub fn decode_u64_counter(raw: Option<&[u8]>) -> Result<u64, StorageError> {
 /// implementation-specific.
 pub struct StorageDurabilityHandle(pub(crate) StorageDurabilityHandleKind);
 
+impl StorageDurabilityHandle {
+    /// Whether the enqueue that returned this handle made the caller the
+    /// leader of the WAL group commit.
+    ///
+    /// The WAL commits no more records until the leader awaits this handle.
+    /// A caller that holds more than one handle awaits this one first: an
+    /// earlier handle can still be queued, and only this caller's commit
+    /// makes it durable.
+    pub(crate) fn leads_commit(&self) -> bool {
+        matches!(&self.0, StorageDurabilityHandleKind::Pending(pending) if pending.am_leader)
+    }
+}
+
 /// Inner representation of a [`StorageDurabilityHandle`].
 pub(crate) enum StorageDurabilityHandleKind {
     /// Batch already written synchronously. `await_batch_durable` is a no-op.
@@ -215,6 +228,13 @@ pub trait StorageEngine: Send + Sync {
     /// `enqueue_batch` calls appear in the WAL in call order. Callers that need
     /// cross-writer ordering must hold an external serialising lock *across the
     /// enqueue call* (not across the fsync wait).
+    ///
+    /// **Several pending batches**: the first enqueue after a commit can make
+    /// the caller the group-commit leader, and other writers then wait until
+    /// the caller awaits. A caller that enqueues more than one batch before it
+    /// awaits them awaits the handle that
+    /// [`leads_commit`](StorageDurabilityHandle::leads_commit) first, before any
+    /// other wait or write. Its earlier batches can still be queued behind it.
     ///
     /// The default implementation calls [`put_batch`] synchronously and returns
     /// an `Immediate` handle (correct for non-group-commit implementations).
