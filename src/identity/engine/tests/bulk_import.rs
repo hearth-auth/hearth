@@ -101,6 +101,48 @@ fn a_bulk_import_commits_many_users_with_each_fsync() {
     );
 }
 
+/// Imports that run at the same time all finish.
+///
+/// A group-commit leader steps down after a number of batches, with writers
+/// still in the queue. An import that then enqueues its next user becomes the
+/// leader, while an earlier user of its chunk is still queued. In v4.2.3 the
+/// import waited for its users in enqueue order: it waited for that earlier
+/// user, which only its own commit makes durable, so it waited for ever, and
+/// so did every other write. Eight 10,000-user requests stopped a server in
+/// less than 30 seconds.
+#[test]
+fn concurrent_bulk_imports_all_finish() {
+    let (_dir, engine, _storage, _audit) = durable_engine();
+    let engine = Arc::new(engine);
+    let realm = create_test_realm(&engine);
+    let threads = 8;
+    let per_thread = 20 * IMPORT_PIPELINE_DEPTH;
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    for t in 0..threads {
+        let engine = Arc::clone(&engine);
+        let realm = realm.clone();
+        let done = done_tx.clone();
+        std::thread::spawn(move || {
+            let requests: Vec<ImportUserRequest> = (0..per_thread)
+                .map(|i| import_request(&format!("t{t}-{i:05}@example.com")))
+                .collect();
+            let results = engine.import_users(&realm, &requests);
+            let imported = results.iter().filter(|result| result.is_ok()).count();
+            done.send(imported).expect("send");
+        });
+    }
+    drop(done_tx);
+    // A thread that waits for itself never sends: the bound makes that a failure.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    for _ in 0..threads {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let imported = done_rx
+            .recv_timeout(left)
+            .expect("an import did not finish in 30 s: the imports wait for each other");
+        assert_eq!(imported, per_thread, "every user of the import is imported");
+    }
+}
+
 /// The embedded audit engine, except that it refuses the merged write of
 /// every third event, as an audit engine without one does.
 struct SometimesUnmerged {

@@ -273,9 +273,9 @@ const SESSION_CACHE_MAX: usize = 4096;
 
 /// Most users a bulk import enqueues before it waits for their fsync (#536).
 ///
-/// The first enqueue can make the importing thread the group-commit leader,
-/// and the other writers wait for it until it waits too: a small chunk keeps
-/// that wait short, and one fsync still covers the whole chunk.
+/// An enqueue can make the importing thread the group-commit leader, and the
+/// other writers wait for it until it waits too: a small chunk keeps that wait
+/// short, and one fsync still covers the whole chunk.
 const IMPORT_PIPELINE_DEPTH: usize = 64;
 
 /// The rows that store one imported user, as `(key, value)` pairs.
@@ -288,6 +288,14 @@ enum ImportSlot {
     Done(Result<User, IdentityError>),
     /// The user and its pending write (rows and `UserCreated` event).
     Pending(User, crate::audit::AuditPendingWrite),
+}
+
+impl ImportSlot {
+    /// Whether the enqueue of this write made the importing thread the
+    /// group-commit leader.
+    fn leads_commit(&self) -> bool {
+        matches!(self, Self::Pending(_, pending) if pending.handle.leads_commit())
+    }
 }
 
 /// Persisted state for a pending email-verification token.
@@ -5175,10 +5183,11 @@ impl EmbeddedIdentityEngine {
     /// enqueued before the first durability wait, so one group commit covers
     /// many users. One by one, each user waited for two fsyncs.
     ///
-    /// The first enqueue can make this thread the group-commit leader, and
-    /// the other writers then wait until it waits for durability itself. So
-    /// the chunk stays small, and every pending write is settled before
-    /// anything that can itself wait for a commit.
+    /// An enqueue can make this thread the group-commit leader, and the other
+    /// writers then wait until it waits for durability itself. So the chunk
+    /// stays small, and every pending write is settled, by
+    /// [`settle_imports`](Self::settle_imports), before anything that can
+    /// itself wait for a commit.
     fn import_user_chunk(
         &self,
         realm_id: &RealmId,
@@ -5221,16 +5230,36 @@ impl EmbeddedIdentityEngine {
                 // Its own writes wait for a commit, so settle the others
                 // first, then import it as `import_user` does.
                 Err(_) => {
-                    slots = slots
+                    slots = self
+                        .settle_imports(slots)
                         .into_iter()
-                        .map(|slot| ImportSlot::Done(self.settle_import(slot)))
+                        .map(ImportSlot::Done)
                         .collect();
                     slots.push(ImportSlot::Done(self.import_user_record(realm_id, request)));
                 }
             }
         }
-        // In enqueue order: the first wait leads the commit of them all.
-        results.extend(slots.into_iter().map(|slot| self.settle_import(slot)));
+        results.extend(self.settle_imports(slots));
+    }
+
+    /// Waits until the pending imports of a chunk are durable, and returns
+    /// their results in order.
+    ///
+    /// The import whose enqueue made this thread the group-commit leader is
+    /// settled first: its wait commits every write of the chunk. A leader
+    /// steps down after a number of batches, with writers still queued, and
+    /// this thread can lead from a later user of the chunk while an earlier
+    /// one is still queued. A wait for that earlier user first never ends, and
+    /// every other write of the server waits too (#536).
+    fn settle_imports(&self, mut slots: Vec<ImportSlot>) -> Vec<Result<User, IdentityError>> {
+        if let Some(i) = slots.iter().position(ImportSlot::leads_commit) {
+            let settled = self.settle_import(slots.remove(i));
+            slots.insert(i, ImportSlot::Done(settled));
+        }
+        slots
+            .into_iter()
+            .map(|slot| self.settle_import(slot))
+            .collect()
     }
 
     /// Waits until a pending import is durable, and returns its result.
