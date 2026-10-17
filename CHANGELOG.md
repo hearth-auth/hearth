@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.2.4] — 2026-10-17
+
 ### Fixed
 - **`POST /admin/users/import` no longer stops every write when several imports run at the
   same time (#536).** In 4.2.3 an import could wait for a write that only its own fsync makes
