@@ -175,9 +175,19 @@ so do not judge a soak by it.
   old. The SST readers hold a block index and a Bloom filter for every file, so their heap grows
   with the data. `hearth_storage_sst_reader_bytes` reports it, and the test subtracts it from the
   floor.
+- The test also subtracts the caches' memory: `hearth_storage_hot_tier_bytes` (the hot tier's
+  tables, keys and values) and `hearth_storage_block_cache_bytes` (the block cache's charged
+  bytes). Each cache stops at its capacity, but the default hot tier does not fill in a day. On
+  a 4 GiB server it sizes itself to about 1.36 million entries. In the v4.2.4 run with the
+  default caches (2026-10-17) it held about 150,000 entries after 2 hours and still gained about
+  4,000 an hour at 24 hours. At hour 18.6 the floor stepped up 20 MiB, when the entry count
+  passed the point where all 1,024 shard tables double. A cache that fills is not a leak, but
+  without the gauges the test counts it as one. This rule was fixed on 2026-10-18, after that
+  run and before the next one. A run without the cache gauges subtracts the SST readers only, so
+  earlier verdicts do not change.
 - After the warm-up (`--warmup-min`, 120), the test fits a line to the bin means
-  (`--bin-min`, 60) of floor minus SST reader heap. The 95 % upper bound of its slope uses
-  Student's t over the bin means, because one-second samples are not independent.
+  (`--bin-min`, 60) of floor minus SST reader heap minus caches. The 95 % upper bound of its
+  slope uses Student's t over the bin means, because one-second samples are not independent.
 - **PASS** when that upper bound is below `--max-slope` (2 MiB/h). Two 12-hour runs must pass:
   one with small caches, one with the default caches.
 

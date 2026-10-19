@@ -28,7 +28,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::core::EpochCell;
 use crate::storage::sst::Block;
@@ -199,6 +199,7 @@ impl BlockCache {
             return;
         }
         let mut new_map = HashMap::clone(&current);
+        let bytes_before = inner.bytes;
 
         // CLOCK eviction. Bound the scan so a storm of concurrent hits
         // continually resetting chances cannot spin forever; on the bound we
@@ -234,6 +235,7 @@ impl BlockCache {
         new_map.insert(id, Arc::clone(&block));
         inner.bytes += block.weight;
         inner.clock.push_back(id);
+        publish_bytes(bytes_before, inner.bytes);
         shard.map.store(Arc::new(new_map));
     }
 
@@ -243,6 +245,34 @@ impl BlockCache {
             .iter()
             .filter_map(|s| s.inner.lock().ok().map(|i| i.bytes))
             .sum()
+    }
+}
+
+impl Drop for BlockCache {
+    /// Takes this cache's bytes out of `hearth_storage_block_cache_bytes`.
+    fn drop(&mut self) {
+        for shard in &mut self.shards {
+            let inner = shard
+                .inner
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner);
+            publish_bytes(inner.bytes, 0);
+        }
+    }
+}
+
+/// Adds the change in one shard's charged bytes to
+/// `hearth_storage_block_cache_bytes` (#445). Called under the shard lock, so
+/// updates are ordered with the inserts and evictions that cause them, and the
+/// gauge is the exact sum over shards (and over caches, when a process holds
+/// several). Never called on a cache hit.
+fn publish_bytes(before: usize, after: usize) {
+    #[allow(clippy::cast_precision_loss)] // exact below 2^53
+    let delta = after as f64 - before as f64;
+    if delta != 0.0 {
+        crate::metrics::metrics()
+            .storage_block_cache_bytes
+            .add(delta);
     }
 }
 

@@ -18,7 +18,10 @@ Per run it prints:
 4. The flatness test. The "floor" is the lowest RssAnon between two memtable flushes: just
    after a flush, when the memtable is empty and the freed heap was just returned. From it
    the test subtracts the SST readers' own heap (hearth_storage_sst_reader_bytes: block
-   indexes and Bloom filters, which grow with the stored data, not with time). After the
+   indexes and Bloom filters, which grow with the stored data, not with time), and the
+   caches' memory (hearth_storage_hot_tier_bytes and hearth_storage_block_cache_bytes: each
+   cache stops at its capacity, but the default caches do not fill in a day). A run without
+   the cache gauges (releases before them) subtracts the SST readers only. After the
    warm-up, it fits a least-squares line to the means of that value per bin (default one
    hour). One-second samples are not independent; bin means nearly are, so the 95 % upper
    bound of the slope uses Student's t over the bin means. PASS: the upper bound is below
@@ -41,6 +44,8 @@ GAUGES = {
     "hearth_storage_sst_files": "sst_files",
     "hearth_storage_hot_tier_evictions_total": "hot_tier_evictions",
     "hearth_storage_sst_reader_bytes": "sst_reader_bytes",
+    "hearth_storage_hot_tier_bytes": "hot_tier_bytes",
+    "hearth_storage_block_cache_bytes": "block_cache_bytes",
 }
 # Two-sided 95 % Student's t, by degrees of freedom; 1.96 above 30.
 T95 = (None, 12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228,
@@ -189,7 +194,7 @@ def run(d, warmup, bin_min, max_slope):
     if gauges:
         gm = sorted(gauges)
         print("minute | RSS MiB | hot-tier entries | memtable MiB | SST files | hot-tier evictions"
-              " | SST reader MiB")
+              " | SST reader MiB | hot-tier MiB | block-cache MiB")
         for m in (minutes if long_run else SHORT_GAUGE_MINUTES):
             g = gauges[min(gm, key=lambda t: abs(t - m))]
             print(
@@ -197,6 +202,8 @@ def run(d, warmup, bin_min, max_slope):
                 f" | {g.get('memtable_bytes', 0) / MIB:.0f} | {g.get('sst_files', math.nan):.0f}"
                 f" | {g.get('hot_tier_evictions', math.nan):.0f}"
                 f" | {g.get('sst_reader_bytes', math.nan) / MIB:.1f}"
+                f" | {g.get('hot_tier_bytes', math.nan) / MIB:.1f}"
+                f" | {g.get('block_cache_bytes', math.nan) / MIB:.1f}"
             )
 
     mi = malloc_info(d)
@@ -217,17 +224,26 @@ def flat_test(pts, gauges, end, has_anon, warmup, bin_min, max_slope):
     fl = [f for f in floors(pts, cuts) if f[0] >= warmup]
     gm = sorted(gauges)
     have_sst = any("sst_reader_bytes" in g for g in gauges.values())
+    have_caches = any("hot_tier_bytes" in g or "block_cache_bytes" in g for g in gauges.values())
+
+    def near(m):
+        return gauges[min(gm, key=lambda t: abs(t - m))]
 
     def sst(m):
-        g = gauges[min(gm, key=lambda t: abs(t - m))]
-        return g.get("sst_reader_bytes", 0) / MIB
+        return near(m).get("sst_reader_bytes", 0) / MIB if have_sst else 0.0
+
+    def caches(m):
+        if not have_caches:
+            return 0.0
+        g = near(m)
+        return (g.get("hot_tier_bytes", 0) + g.get("block_cache_bytes", 0)) / MIB
 
     bins = {}
     for m, v in fl:
         k = int((m - warmup) // bin_min)
         # Whole bins only; the last sample may come up to a minute before the end.
         if warmup + (k + 1) * bin_min <= end + 1:
-            bins.setdefault(k, []).append((m, v, sst(m) if have_sst else 0.0))
+            bins.setdefault(k, []).append((m, v, sst(m), caches(m)))
     what = "RssAnon" if has_anon else "RSS (no RssAnon column)"
     print(f"Flatness test: floor of {what} after minute {warmup:g}, {how}, "
           f"{len(bins)} bins of {bin_min:g} min")
@@ -236,23 +252,37 @@ def flat_test(pts, gauges, end, has_anon, warmup, bin_min, max_slope):
         return
     # Each bin sits at the mean time of its floors, which need not be its middle.
     rows = [
-        (statistics.mean(m for m, _, _ in b) / 60, statistics.mean(v for _, v, _ in b),
-         statistics.mean(s for _, _, s in b))
+        (statistics.mean(r[0] for r in b) / 60, statistics.mean(r[1] for r in b),
+         statistics.mean(r[2] for r in b), statistics.mean(r[3] for r in b))
         for b in (bins[k] for k in sorted(bins))
     ]
-    print("  hour | floor MiB | SST reader MiB | floor - SST reader MiB")
-    for x, v, s in rows:
-        print(f"  {x:.2f} | {v:,.1f} | {s:,.1f} | {v - s:,.1f}")
-    for label, pick in (("floor", lambda r: r[1]), ("SST reader heap", lambda r: r[2]),
-                        ("floor - SST reader heap", lambda r: r[1] - r[2])):
-        if not have_sst and label != "floor":
-            continue
+    judged = "floor - SST reader heap - caches" if have_caches else "floor - SST reader heap"
+    print("  hour | floor MiB | SST reader MiB"
+          + (" | caches MiB | floor - SST reader - caches MiB" if have_caches
+             else " | floor - SST reader MiB"))
+    for x, v, s, c in rows:
+        print(f"  {x:.2f} | {v:,.1f} | {s:,.1f}"
+              + (f" | {c:,.1f}" if have_caches else "") + f" | {v - s - c:,.1f}")
+    series = [("floor", lambda r: r[1])]
+    if have_sst:
+        series.append(("SST reader heap", lambda r: r[2]))
+    if have_caches:
+        series.append(("caches", lambda r: r[3]))
+    if have_sst or have_caches:
+        series.append((judged, lambda r: r[1] - r[2] - r[3]))
+    for label, pick in series:
         slope, half = fit([(r[0], pick(r)) for r in rows])
         print(f"  {label}: {slope:+.2f} MiB/h (95 % bound {slope - half:+.2f} .. {slope + half:+.2f})")
-    slope, half = fit([(r[0], r[1] - r[2]) for r in rows])
+    slope, half = fit([(r[0], r[1] - r[2] - r[3]) for r in rows])
     verdict = "PASS" if slope + half < max_slope else "FAIL"
+    if not have_sst and not have_caches:
+        note = " (no SST reader gauge: the floor itself)"
+    elif not have_caches:
+        note = " (no cache gauges: the caches are judged with the rest)"
+    else:
+        note = ""
     print(f"  {verdict}: upper bound {slope + half:+.2f} MiB/h against {max_slope:g} MiB/h"
-          + ("" if have_sst else " (no SST reader gauge: the floor itself)"))
+          + note)
 
 
 def main(argv=None):
