@@ -564,7 +564,7 @@ mod tests {
         cache.insert(ids[9], block(&realm, b"k", WEIGHT));
         assert_eq!(gauge() - base, (4 * WEIGHT) as f64, "a repeat insert");
 
-        let other_shard = (0_u32..)
+        let other_shard = (0_u32..1024)
             .map(|block_index| BlockId {
                 reader_id: 6,
                 block_index,
