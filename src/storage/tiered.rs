@@ -186,9 +186,9 @@ struct Shard {
     /// The shard's cached data, swapped atomically on mutations.
     data: EpochCell<HashMap<HotKey, HotEntry>>,
     /// Serializes this shard's write operations (promote, invalidate, evict).
-    /// Guards the shard's entry count as last added to
-    /// `hearth_storage_hot_tier_entries` (see [`publish_len`]).
-    write_lock: Mutex<usize>,
+    /// Guards what the shard last added to the hot-tier gauges (see
+    /// [`publish`]).
+    write_lock: Mutex<ShardGauges>,
     /// Clock hand position for sweeps over this shard.
     clock_hand: AtomicUsize,
     /// Monotonic count of invalidations that touched this shard. `promote`
@@ -196,6 +196,20 @@ struct Shard {
     /// which proves no delete or update landed between the caller's
     /// authoritative read and the fill (audit 2026-08-28 §4.21#3).
     invalidation_epoch: AtomicU64,
+}
+
+/// What one shard last added to the hot-tier gauges, and the heap of its
+/// cached keys and values. Guarded by the shard's write lock.
+#[derive(Default)]
+struct ShardGauges {
+    /// The shard's entry count, as last added to
+    /// `hearth_storage_hot_tier_entries`.
+    entries: usize,
+    /// The shard's heap, as last added to `hearth_storage_hot_tier_bytes`.
+    bytes: usize,
+    /// The heap of the `Arc` allocations of the shard's cached keys and
+    /// values ([`entry_bytes`] summed over the current map).
+    content_bytes: usize,
 }
 
 /// Lock-free read, per-shard serialized-write hot tier with clock-based LRU
@@ -240,7 +254,7 @@ impl HotTier {
                 // maps hash identically — `get` computes one hash for both
                 // shard selection and the in-map `raw_entry` lookup.
                 data: EpochCell::from_pointee(HashMap::with_hasher(hash_builder.clone())),
-                write_lock: Mutex::new(0),
+                write_lock: Mutex::new(ShardGauges::default()),
                 clock_hand: AtomicUsize::new(0),
                 invalidation_epoch: AtomicU64::new(0),
             })
@@ -353,7 +367,7 @@ impl HotTier {
         let shard = &self.shards[shard_idx];
         let composite = HotKey::new(realm_id.clone(), key);
 
-        let Ok(mut published) = shard.write_lock.lock() else {
+        let Ok(mut gauges) = shard.write_lock.lock() else {
             return; // Poisoned mutex — silently skip promotion
         };
 
@@ -385,19 +399,28 @@ impl HotTier {
         // If already present, just update the value and set ref bit
         if current.contains_key(&composite) {
             let mut new_map = (*current).clone();
-            new_map.insert(composite, HotEntry::new(Arc::from(value)));
+            // The map keeps its own key, so only the value changes size.
+            if let Some(old) = new_map.insert(composite, HotEntry::new(Arc::from(value))) {
+                gauges.content_bytes = gauges
+                    .content_bytes
+                    .saturating_sub(arc_bytes(old.value.len()))
+                    + arc_bytes(value.len());
+            }
+            publish(&mut gauges, &new_map);
             shard.data.store(Arc::new(new_map));
-            return; // An update: the entry count is unchanged.
+            return;
         }
 
         // Evict if the shard is at its share of the capacity
         let mut new_map = (*current).clone();
         if new_map.len() >= self.shard_capacity {
-            evict_locked(shard, &mut new_map, self.config.per_realm_metrics);
+            let freed = evict_locked(shard, &mut new_map, self.config.per_realm_metrics);
+            gauges.content_bytes = gauges.content_bytes.saturating_sub(freed);
         }
 
+        gauges.content_bytes += arc_bytes(key.len()) + arc_bytes(value.len());
         new_map.insert(composite, HotEntry::new(Arc::from(value)));
-        publish_len(&mut published, new_map.len());
+        publish(&mut gauges, &new_map);
         shard.data.store(Arc::new(new_map));
     }
 
@@ -417,7 +440,7 @@ impl HotTier {
 
         let composite = HotKey::new(realm_id.clone(), key);
 
-        let Ok(mut published) = shard.write_lock.lock() else {
+        let Ok(mut gauges) = shard.write_lock.lock() else {
             return;
         };
 
@@ -427,8 +450,12 @@ impl HotTier {
         }
 
         let mut new_map = (*current).clone();
-        new_map.remove(&composite);
-        publish_len(&mut published, new_map.len());
+        if let Some(entry) = new_map.remove(&composite) {
+            gauges.content_bytes = gauges
+                .content_bytes
+                .saturating_sub(entry_bytes(&composite, &entry));
+        }
+        publish(&mut gauges, &new_map);
         shard.data.store(Arc::new(new_map));
     }
 
@@ -449,7 +476,7 @@ impl HotTier {
         let shard =
             &self.shards[self.sweep_cursor.fetch_add(1, Ordering::Relaxed) % self.shards.len()];
 
-        let Ok(mut published) = shard.write_lock.lock() else {
+        let Ok(mut gauges) = shard.write_lock.lock() else {
             return None;
         };
 
@@ -480,8 +507,12 @@ impl HotTier {
 
         let evicted_key = victim?;
         let mut new_map = (*current).clone();
-        new_map.remove(&evicted_key);
-        publish_len(&mut published, new_map.len());
+        if let Some(entry) = new_map.remove(&evicted_key) {
+            gauges.content_bytes = gauges
+                .content_bytes
+                .saturating_sub(entry_bytes(&evicted_key, &entry));
+        }
+        publish(&mut gauges, &new_map);
         shard.data.store(Arc::new(new_map));
         crate::metrics::metrics()
             .storage_hot_tier_evictions_total
@@ -570,10 +601,17 @@ impl HotTier {
 ///
 /// `per_realm_metrics` carries [`TieredConfig::per_realm_metrics`] in, because
 /// this is a free function with no handle on the tier's config.
-fn evict_locked(shard: &Shard, map: &mut HashMap<HotKey, HotEntry>, per_realm_metrics: bool) {
+///
+/// Returns the heap of the evicted key and value ([`entry_bytes`]), 0 when
+/// nothing was evicted.
+fn evict_locked(
+    shard: &Shard,
+    map: &mut HashMap<HotKey, HotEntry>,
+    per_realm_metrics: bool,
+) -> usize {
     let len = map.len();
     if len == 0 {
-        return;
+        return 0;
     }
 
     // Up to two passes from the hand, in the map's own order: the first
@@ -597,9 +635,11 @@ fn evict_locked(shard: &Shard, map: &mut HashMap<HotKey, HotEntry>, per_realm_me
     // `map` is this write's private clone, so no reader can set a bit again
     // between the passes; the fallback only guarantees progress.
     let Some(evicted) = victim.or_else(|| map.keys().nth(start).cloned()) else {
-        return;
+        return 0;
     };
-    map.remove(&evicted);
+    let freed = map
+        .remove(&evicted)
+        .map_or(0, |entry| entry_bytes(&evicted, &entry));
     crate::metrics::metrics()
         .storage_hot_tier_evictions_total
         .inc();
@@ -609,36 +649,67 @@ fn evict_locked(shard: &Shard, map: &mut HashMap<HotKey, HotEntry>, per_realm_me
             evicted.realm_id(),
         );
     }
+    freed
+}
+
+/// The heap of an `Arc<[u8]>` of `len` bytes: two reference counts, then the
+/// bytes, padded to the counts' alignment.
+fn arc_bytes(len: usize) -> usize {
+    (2 * std::mem::size_of::<AtomicUsize>() + len)
+        .next_multiple_of(std::mem::align_of::<AtomicUsize>())
+}
+
+/// The heap a cached entry holds outside its slot in the shard map: the `Arc`
+/// allocations of its key and value bytes.
+fn entry_bytes(key: &HotKey, entry: &HotEntry) -> usize {
+    arc_bytes(key.key().len()) + arc_bytes(entry.value.len())
 }
 
 /// Adds the change in one shard's entry count to
-/// `hearth_storage_hot_tier_entries` (#450).
+/// `hearth_storage_hot_tier_entries` (#450), and the change in its heap to
+/// `hearth_storage_hot_tier_bytes` (#445). The heap is the map's table plus
+/// `gauges.content_bytes`.
 ///
-/// `published` is the count this shard last added, held inside the shard's
-/// write lock: updates are ordered with the writes that cause them, and each
-/// shard adds only its own difference, so the gauge is the exact sum over
-/// shards (and over tiers, when a process holds several). Off the read path —
-/// called only by writers, after they have cloned the shard's map.
-fn publish_len(published: &mut usize, len: usize) {
+/// `gauges` holds what this shard last added, inside the shard's write lock:
+/// updates are ordered with the writes that cause them, and each shard adds
+/// only its own difference, so each gauge is the exact sum over shards (and
+/// over tiers, when a process holds several). Off the read path — called only
+/// by writers, after they have cloned the shard's map.
+fn publish(gauges: &mut ShardGauges, map: &HashMap<HotKey, HotEntry>) {
+    let metrics = crate::metrics::metrics();
+    add_change(
+        &metrics.storage_hot_tier_entries,
+        &mut gauges.entries,
+        map.len(),
+    );
+    add_change(
+        &metrics.storage_hot_tier_bytes,
+        &mut gauges.bytes,
+        map.allocation_size() + gauges.content_bytes,
+    );
+}
+
+/// Adds `now - *published` to `gauge`, then records `now` as published.
+fn add_change(gauge: &prometheus::Gauge, published: &mut usize, now: usize) {
     #[allow(clippy::cast_precision_loss)] // exact below 2^53
-    let delta = len as f64 - *published as f64;
+    let delta = now as f64 - *published as f64;
     if delta != 0.0 {
-        crate::metrics::metrics()
-            .storage_hot_tier_entries
-            .add(delta);
+        gauge.add(delta);
     }
-    *published = len;
+    *published = now;
 }
 
 impl Drop for HotTier {
-    /// Takes this tier's entries out of `hearth_storage_hot_tier_entries`.
+    /// Takes this tier's entries and heap out of the hot-tier gauges.
     fn drop(&mut self) {
+        let metrics = crate::metrics::metrics();
         for shard in &mut self.shards {
-            let published = shard
+            let gauges = shard
                 .write_lock
                 .get_mut()
                 .unwrap_or_else(PoisonError::into_inner);
-            publish_len(published, 0);
+            add_change(&metrics.storage_hot_tier_entries, &mut gauges.entries, 0);
+            add_change(&metrics.storage_hot_tier_bytes, &mut gauges.bytes, 0);
         }
     }
 }
@@ -1616,6 +1687,122 @@ mod tests {
         assert_eq!(entries_gauge_since(base), as_gauge(150));
         drop(tier);
         assert_eq!(entries_gauge_since(base), 0.0);
+    }
+
+    // ===== #445: hot-tier heap gauge =====
+
+    /// `hearth_storage_hot_tier_bytes` minus `base`.
+    fn bytes_gauge_since(base: f64) -> f64 {
+        crate::metrics::metrics().storage_hot_tier_bytes.get() - base
+    }
+
+    /// The heap of the tier's current shard maps, counted entry by entry:
+    /// each map's table, plus the `Arc` allocation of each key and value.
+    fn heap_of(tier: &HotTier) -> f64 {
+        let arc = |len: usize| {
+            std::alloc::Layout::new::<[AtomicUsize; 2]>()
+                .extend(std::alloc::Layout::array::<u8>(len).expect("layout"))
+                .expect("layout")
+                .0
+                .pad_to_align()
+                .size()
+        };
+        as_gauge(
+            tier.shards
+                .iter()
+                .map(|shard| {
+                    let map = shard.data.load();
+                    map.allocation_size()
+                        + map
+                            .iter()
+                            .map(|(k, e)| arc(k.key().len()) + arc(e.value.len()))
+                            .sum::<usize>()
+                })
+                .sum(),
+        )
+    }
+
+    // #445: the heap gauge follows every promote, update, capacity eviction,
+    // invalidation and clock-sweep eviction, and a dropped tier takes its
+    // bytes out of it.
+    #[test]
+    fn bytes_gauge_follows_promotes_invalidations_and_evictions() {
+        let base = crate::metrics::metrics().storage_hot_tier_bytes.get();
+        let tier = HotTier::new(TieredConfig {
+            hot_tier_capacity: 2,
+            eviction_batch_size: 10,
+            promote_sample_rate: 1,
+            per_realm_metrics: false,
+        });
+        let realm = RealmId::generate();
+
+        tier.promote_now(&realm, b"k1", b"v1");
+        tier.promote_now(&realm, b"key-2", &[7; 300]);
+        let two = bytes_gauge_since(base);
+        assert_eq!(two, heap_of(&tier));
+        assert!(two > 300.0, "the 300-byte value is counted: {two}");
+
+        tier.promote_now(&realm, b"k1", &[1; 1000]);
+        assert_eq!(bytes_gauge_since(base), heap_of(&tier), "a longer value");
+        assert!(bytes_gauge_since(base) > two + 900.0);
+
+        tier.promote_now(&realm, b"k3", b"v3");
+        assert_eq!(tier.len(), 2, "capacity eviction made room for k3");
+        assert_eq!(bytes_gauge_since(base), heap_of(&tier));
+
+        tier.invalidate(&realm, b"k3");
+        assert_eq!(bytes_gauge_since(base), heap_of(&tier));
+        tier.invalidate(&realm, b"never-cached");
+        assert_eq!(bytes_gauge_since(base), heap_of(&tier));
+
+        for _ in 0..4 {
+            let _ = tier.clock_sweep_step();
+            assert_eq!(bytes_gauge_since(base), heap_of(&tier));
+        }
+        assert_eq!(tier.len(), 0, "two sweeps clear the bit, then evict");
+
+        tier.promote_now(&realm, b"k4", b"v4");
+        assert_eq!(bytes_gauge_since(base), heap_of(&tier));
+        drop(tier);
+        assert_eq!(bytes_gauge_since(base), 0.0);
+    }
+
+    // #445: a sharded tier's heap gauge is the sum over its shards, and it
+    // counts each table, which grows in steps as its shard fills.
+    #[test]
+    fn bytes_gauge_sums_every_shard_and_counts_table_growth() {
+        let base = crate::metrics::metrics().storage_hot_tier_bytes.get();
+        let tier = HotTier::new(TieredConfig {
+            hot_tier_capacity: 4 * MIN_SHARD_CAPACITY,
+            eviction_batch_size: 10,
+            promote_sample_rate: 1,
+            per_realm_metrics: false,
+        });
+        assert!(tier.shard_count() > 1);
+        let realm = RealmId::generate();
+
+        let mut table_steps = 0;
+        for i in 0u32..2000 {
+            let before = bytes_gauge_since(base);
+            let value = vec![0; (i % 64) as usize];
+            tier.promote_now(&realm, &i.to_be_bytes(), &value);
+            let after = bytes_gauge_since(base);
+            assert_eq!(after, heap_of(&tier), "after promote {i}");
+            if after - before > 1024.0 {
+                table_steps += 1;
+            }
+        }
+        assert!(
+            table_steps >= tier.shard_count(),
+            "each shard's table grew at least once: {table_steps} steps"
+        );
+
+        for i in 0u32..500 {
+            tier.invalidate(&realm, &i.to_be_bytes());
+        }
+        assert_eq!(bytes_gauge_since(base), heap_of(&tier));
+        drop(tier);
+        assert_eq!(bytes_gauge_since(base), 0.0);
     }
 
     // ===== Phase C: Simulation tests — see simulation/ crate =====

@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Added
+- **`hearth_storage_hot_tier_bytes` and `hearth_storage_block_cache_bytes` on `/metrics`**
+  (#445): the memory the two storage caches hold. The hot tier's figure is its tables plus its
+  cached keys and values; the block cache's is the bytes it charges against
+  `storage.block_cache_bytes`. Both caches stop at their capacity, but the default hot tier can
+  take days to fill, and its tables grow in steps. With these gauges, memory that a filling
+  cache holds is told apart from a leak.
+
 ## [4.2.4] — 2026-10-17
 
 ### Fixed

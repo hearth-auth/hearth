@@ -21,12 +21,15 @@ FLUSH_EVERY_S = 360
 MEMTABLE_PEAK = 64 * MIB
 
 
-def soak(d, hours, leak_mib_h, sst_mib_h, anon=True, gauge=True, seed=1):
+def soak(d, hours, leak_mib_h, sst_mib_h, anon=True, gauge=True, seed=1, cache_mib_h=0,
+         cache_step_h=None, cache_gauges=True):
     """Writes a soak's sampler.csv and metrics.txt to d.
 
     The memtable fills for FLUSH_EVERY_S, then a flush empties it. RssAnon is a base, plus
     1.5 times the memtable, plus the SST readers' heap (10 MiB + sst_mib_h per hour), plus
-    a leak of leak_mib_h per hour, plus noise.
+    the caches, plus a leak of leak_mib_h per hour, plus noise. The caches fill by
+    cache_mib_h per hour, three quarters in the hot tier and one quarter in the block cache;
+    from hour cache_step_h on, the hot tier holds 20 MiB more (a table that doubled).
     """
     rnd = random.Random(seed)
 
@@ -36,13 +39,21 @@ def soak(d, hours, leak_mib_h, sst_mib_h, anon=True, gauge=True, seed=1):
     def sst(t):
         return 10 * MIB + sst_mib_h * MIB * t / 3600
 
+    def hot(t):
+        step = 20 * MIB if cache_step_h is not None and t >= cache_step_h * 3600 else 0
+        return 0.75 * cache_mib_h * MIB * t / 3600 + step
+
+    def block(t):
+        return 0.25 * cache_mib_h * MIB * t / 3600
+
     end = int(hours * 3600)
     with open(f"{d}/sampler.csv", "w", newline="") as f:
         w = csv.writer(f)
         cols = ["ts", "alive", "rss_kb", "mem_available_kb"]
         w.writerow(cols + (["rss_anon_kb", "rss_file_kb"] if anon else []))
         for t in range(0, end, 10):
-            a = 400 * MIB + 1.5 * memtable(t) + sst(t) + leak_mib_h * MIB * t / 3600
+            a = 400 * MIB + 1.5 * memtable(t) + sst(t) + hot(t) + block(t)
+            a += leak_mib_h * MIB * t / 3600
             a += rnd.uniform(-3, 3) * MIB
             file = 100 * MIB + 50 * MIB * t / 3600
             row = [T0 + t, 1, int((a + file) / 1024), 3_000_000]
@@ -52,6 +63,9 @@ def soak(d, hours, leak_mib_h, sst_mib_h, anon=True, gauge=True, seed=1):
             f.write(f'{T0 + t} hearth_storage_memtable_bytes{{state="active"}} {memtable(t):.0f}\n')
             if gauge:
                 f.write(f"{T0 + t} hearth_storage_sst_reader_bytes {sst(t):.0f}\n")
+            if cache_gauges:
+                f.write(f"{T0 + t} hearth_storage_hot_tier_bytes {hot(t):.0f}\n")
+                f.write(f"{T0 + t} hearth_storage_block_cache_bytes {block(t):.0f}\n")
 
 
 def report(d, *flags):
@@ -106,7 +120,7 @@ class FlatnessTest(unittest.TestCase):
             text = report(d)
         self.assertAlmostEqual(slope_of(text, "floor"), 6, delta=0.5)
         self.assertAlmostEqual(slope_of(text, "SST reader heap"), 6, delta=0.01)
-        self.assertAlmostEqual(slope_of(text, "floor - SST reader heap"), 0, delta=0.5)
+        self.assertAlmostEqual(slope_of(text, "floor - SST reader heap - caches"), 0, delta=0.5)
         self.assertIn("PASS", text)
         self.assertIn("6 bins of 60 min", text)
 
@@ -114,7 +128,7 @@ class FlatnessTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             soak(d, hours=8, leak_mib_h=5, sst_mib_h=6)
             text = report(d)
-        self.assertAlmostEqual(slope_of(text, "floor - SST reader heap"), 5, delta=0.5)
+        self.assertAlmostEqual(slope_of(text, "floor - SST reader heap - caches"), 5, delta=0.5)
         self.assertIn("FAIL", text)
 
     def test_the_floor_is_the_memory_after_a_flush(self):
@@ -129,9 +143,34 @@ class FlatnessTest(unittest.TestCase):
         # 410 MiB at a flush, +-3 of noise; never the 96 MiB of a full memtable on top.
         self.assertAlmostEqual(floor, 410, delta=3)
 
+    def test_caches_that_fill_pass_when_their_gauges_are_subtracted(self):
+        with tempfile.TemporaryDirectory() as d:
+            soak(d, hours=8, leak_mib_h=0, sst_mib_h=6, cache_mib_h=4, cache_step_h=5)
+            text = report(d)
+        # 4 MiB/h, plus the 20 MiB step at hour 5 (about 5 MiB/h over these six bins).
+        self.assertGreater(slope_of(text, "caches"), 8)
+        self.assertAlmostEqual(slope_of(text, "floor - SST reader heap - caches"), 0, delta=0.5)
+        self.assertIn("PASS", text)
+
+    def test_a_leak_beside_caches_that_fill_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            soak(d, hours=8, leak_mib_h=5, sst_mib_h=6, cache_mib_h=4, cache_step_h=5)
+            text = report(d)
+        self.assertAlmostEqual(slope_of(text, "floor - SST reader heap - caches"), 5, delta=0.5)
+        self.assertIn("FAIL", text)
+
+    def test_without_cache_gauges_the_caches_are_judged_with_the_rest(self):
+        # Runs of releases before the cache gauges (#445) keep the verdict they had.
+        with tempfile.TemporaryDirectory() as d:
+            soak(d, hours=8, leak_mib_h=0, sst_mib_h=6, cache_mib_h=4, cache_gauges=False)
+            text = report(d)
+        self.assertAlmostEqual(slope_of(text, "floor - SST reader heap"), 4, delta=0.5)
+        self.assertIn("FAIL", text)
+        self.assertIn("no cache gauges", text)
+
     def test_without_the_gauge_the_floor_itself_is_judged(self):
         with tempfile.TemporaryDirectory() as d:
-            soak(d, hours=8, leak_mib_h=0, sst_mib_h=6, gauge=False)
+            soak(d, hours=8, leak_mib_h=0, sst_mib_h=6, gauge=False, cache_gauges=False)
             text = report(d)
         self.assertIn("FAIL", text)
         self.assertIn("no SST reader gauge", text)

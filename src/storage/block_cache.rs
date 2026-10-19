@@ -28,7 +28,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::core::EpochCell;
 use crate::storage::sst::Block;
@@ -199,6 +199,7 @@ impl BlockCache {
             return;
         }
         let mut new_map = HashMap::clone(&current);
+        let bytes_before = inner.bytes;
 
         // CLOCK eviction. Bound the scan so a storm of concurrent hits
         // continually resetting chances cannot spin forever; on the bound we
@@ -234,6 +235,7 @@ impl BlockCache {
         new_map.insert(id, Arc::clone(&block));
         inner.bytes += block.weight;
         inner.clock.push_back(id);
+        publish_bytes(bytes_before, inner.bytes);
         shard.map.store(Arc::new(new_map));
     }
 
@@ -243,6 +245,34 @@ impl BlockCache {
             .iter()
             .filter_map(|s| s.inner.lock().ok().map(|i| i.bytes))
             .sum()
+    }
+}
+
+impl Drop for BlockCache {
+    /// Takes this cache's bytes out of `hearth_storage_block_cache_bytes`.
+    fn drop(&mut self) {
+        for shard in &mut self.shards {
+            let inner = shard
+                .inner
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner);
+            publish_bytes(inner.bytes, 0);
+        }
+    }
+}
+
+/// Adds the change in one shard's charged bytes to
+/// `hearth_storage_block_cache_bytes` (#445). Called under the shard lock, so
+/// updates are ordered with the inserts and evictions that cause them, and the
+/// gauge is the exact sum over shards (and over caches, when a process holds
+/// several). Never called on a cache hit.
+fn publish_bytes(before: usize, after: usize) {
+    #[allow(clippy::cast_precision_loss)] // exact below 2^53
+    let delta = after as f64 - before as f64;
+    if delta != 0.0 {
+        crate::metrics::metrics()
+            .storage_block_cache_bytes
+            .add(delta);
     }
 }
 
@@ -501,5 +531,51 @@ mod tests {
         // With a ~1-byte-per-shard cap every insert evicts almost immediately;
         // residency stays minuscule regardless of how many blocks pass through.
         assert!(cache.resident_bytes() <= MIN_SHARDS * 128);
+    }
+
+    /// `hearth_storage_block_cache_bytes` is the bytes the cache charges
+    /// against its budget. It follows inserts and evictions, and a dropped
+    /// cache takes its bytes out of it (#445).
+    #[test]
+    #[allow(clippy::cast_precision_loss)] // test sizes are far below 2^52
+    fn the_bytes_gauge_follows_inserts_and_evictions() {
+        const WEIGHT: usize = 100;
+        let gauge = || crate::metrics::metrics().storage_block_cache_bytes.get();
+        let base = gauge();
+        // Room for four blocks in each shard.
+        let cache = BlockCache::new(MIN_SHARDS * WEIGHT * 4);
+        let realm = RealmId::generate();
+        let ids = ids_in_one_shard(&cache, 5, 10);
+
+        for (n, id) in ids.iter().enumerate() {
+            cache.insert(*id, block(&realm, b"k", WEIGHT));
+            assert_eq!(
+                gauge() - base,
+                cache.resident_bytes() as f64,
+                "after insert {n}"
+            );
+        }
+        assert_eq!(
+            cache.resident_bytes(),
+            4 * WEIGHT,
+            "evictions kept the shard at its budget"
+        );
+
+        cache.insert(ids[9], block(&realm, b"k", WEIGHT));
+        assert_eq!(gauge() - base, (4 * WEIGHT) as f64, "a repeat insert");
+
+        let other_shard = (0_u32..1024)
+            .map(|block_index| BlockId {
+                reader_id: 6,
+                block_index,
+            })
+            .find(|id| cache.shard_idx(*id) != cache.shard_idx(ids[0]))
+            .expect("the cache has more than one shard");
+        cache.insert(other_shard, block(&realm, b"k", 3 * WEIGHT));
+        assert_eq!(gauge() - base, cache.resident_bytes() as f64);
+        assert_eq!(cache.resident_bytes(), 7 * WEIGHT, "a second shard");
+
+        drop(cache);
+        assert_eq!(gauge() - base, 0.0);
     }
 }
