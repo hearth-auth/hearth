@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.3.0] — 2026-10-19
+
 ### Added
 - **`hearth_storage_hot_tier_bytes` and `hearth_storage_block_cache_bytes` on `/metrics`**
   (#445): the memory the two storage caches hold. The hot tier's figure is its tables plus its
