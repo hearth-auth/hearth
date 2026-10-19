@@ -305,6 +305,24 @@ pub struct Metrics {
     /// hot-tier hit. Summed over the process's storage engines (a server runs one).
     pub storage_hot_tier_entries: Gauge,
 
+    /// Heap held by the hot tier's current shard maps: each map's table, plus
+    /// the `Arc` allocations of its cached keys and values. The memory a
+    /// memory soak subtracts while the tier fills toward its capacity (#445).
+    /// A map that a write replaced is not counted; it is freed when its last
+    /// reader is done.
+    ///
+    /// Updated with `storage_hot_tier_entries`: off the hot path, under the
+    /// shard write lock, never on a hot-tier hit.
+    pub storage_hot_tier_bytes: Gauge,
+
+    /// Bytes the block cache charges against `storage.block_cache_bytes`: the
+    /// heap of each cached decrypted block plus a fixed per-entry overhead
+    /// (#445).
+    ///
+    /// Updated off the hot path, under the shard lock, on each insert and
+    /// eviction, never on a cache hit.
+    pub storage_block_cache_bytes: Gauge,
+
     // ── KDF admission control (HEA-1887 / R1) ───────────────────────────────
     /// Argon2id operations currently executing on the **shared** blocking pool
     /// (holding a shared-gate permit). Bounded above by `hearth_kdf_permits`; if
@@ -799,6 +817,24 @@ impl Metrics {
             .register(Box::new(storage_hot_tier_entries.clone()))
             .expect("metric registration succeeds on a fresh registry");
 
+        let storage_hot_tier_bytes = Gauge::new(
+            "hearth_storage_hot_tier_bytes",
+            "Heap held by the hot tier's shard maps: tables plus cached keys and values",
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(storage_hot_tier_bytes.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
+        let storage_block_cache_bytes = Gauge::new(
+            "hearth_storage_block_cache_bytes",
+            "Bytes the block cache charges against storage.block_cache_bytes",
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(storage_block_cache_bytes.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
         let kdf_in_flight = Gauge::new(
             "hearth_kdf_in_flight",
             "Argon2id operations currently executing (holding an admission permit)",
@@ -982,6 +1018,8 @@ impl Metrics {
             memtable_entries_by_state,
             memtable_bytes_by_state,
             storage_hot_tier_entries,
+            storage_hot_tier_bytes,
+            storage_block_cache_bytes,
             kdf_in_flight,
             kdf_admin_in_flight,
             kdf_permits,
@@ -1177,10 +1215,16 @@ mod tests {
                 );
             }
         }
-        assert!(
-            rendered.contains("\nhearth_storage_hot_tier_entries 0"),
-            "missing hearth_storage_hot_tier_entries in:\n{rendered}"
-        );
+        for gauge in [
+            "hearth_storage_hot_tier_entries",
+            "hearth_storage_hot_tier_bytes",
+            "hearth_storage_block_cache_bytes",
+        ] {
+            assert!(
+                rendered.contains(&format!("\n{gauge} 0")),
+                "missing {gauge} in:\n{rendered}"
+            );
+        }
 
         metrics.adjust_memtable_size(MemtableStateLabel::Flushing, 3.0, 120.0);
         metrics.adjust_memtable_size(MemtableStateLabel::Flushing, -1.0, -40.0);

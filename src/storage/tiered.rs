@@ -1618,6 +1618,122 @@ mod tests {
         assert_eq!(entries_gauge_since(base), 0.0);
     }
 
+    // ===== #445: hot-tier heap gauge =====
+
+    /// `hearth_storage_hot_tier_bytes` minus `base`.
+    fn bytes_gauge_since(base: f64) -> f64 {
+        crate::metrics::metrics().storage_hot_tier_bytes.get() - base
+    }
+
+    /// The heap of the tier's current shard maps, counted entry by entry:
+    /// each map's table, plus the `Arc` allocation of each key and value.
+    fn heap_of(tier: &HotTier) -> f64 {
+        let arc = |len: usize| {
+            std::alloc::Layout::new::<[AtomicUsize; 2]>()
+                .extend(std::alloc::Layout::array::<u8>(len).expect("layout"))
+                .expect("layout")
+                .0
+                .pad_to_align()
+                .size()
+        };
+        as_gauge(
+            tier.shards
+                .iter()
+                .map(|shard| {
+                    let map = shard.data.load();
+                    map.allocation_size()
+                        + map
+                            .iter()
+                            .map(|(k, e)| arc(k.key().len()) + arc(e.value.len()))
+                            .sum::<usize>()
+                })
+                .sum(),
+        )
+    }
+
+    // #445: the heap gauge follows every promote, update, capacity eviction,
+    // invalidation and clock-sweep eviction, and a dropped tier takes its
+    // bytes out of it.
+    #[test]
+    fn bytes_gauge_follows_promotes_invalidations_and_evictions() {
+        let base = crate::metrics::metrics().storage_hot_tier_bytes.get();
+        let tier = HotTier::new(TieredConfig {
+            hot_tier_capacity: 2,
+            eviction_batch_size: 10,
+            promote_sample_rate: 1,
+            per_realm_metrics: false,
+        });
+        let realm = RealmId::generate();
+
+        tier.promote_now(&realm, b"k1", b"v1");
+        tier.promote_now(&realm, b"key-2", &[7; 300]);
+        let two = bytes_gauge_since(base);
+        assert_eq!(two, heap_of(&tier));
+        assert!(two > 300.0, "the 300-byte value is counted: {two}");
+
+        tier.promote_now(&realm, b"k1", &[1; 1000]);
+        assert_eq!(bytes_gauge_since(base), heap_of(&tier), "a longer value");
+        assert!(bytes_gauge_since(base) > two + 900.0);
+
+        tier.promote_now(&realm, b"k3", b"v3");
+        assert_eq!(tier.len(), 2, "capacity eviction made room for k3");
+        assert_eq!(bytes_gauge_since(base), heap_of(&tier));
+
+        tier.invalidate(&realm, b"k3");
+        assert_eq!(bytes_gauge_since(base), heap_of(&tier));
+        tier.invalidate(&realm, b"never-cached");
+        assert_eq!(bytes_gauge_since(base), heap_of(&tier));
+
+        for _ in 0..4 {
+            let _ = tier.clock_sweep_step();
+            assert_eq!(bytes_gauge_since(base), heap_of(&tier));
+        }
+        assert_eq!(tier.len(), 0, "two sweeps clear the bit, then evict");
+
+        tier.promote_now(&realm, b"k4", b"v4");
+        assert_eq!(bytes_gauge_since(base), heap_of(&tier));
+        drop(tier);
+        assert_eq!(bytes_gauge_since(base), 0.0);
+    }
+
+    // #445: a sharded tier's heap gauge is the sum over its shards, and it
+    // counts each table, which grows in steps as its shard fills.
+    #[test]
+    fn bytes_gauge_sums_every_shard_and_counts_table_growth() {
+        let base = crate::metrics::metrics().storage_hot_tier_bytes.get();
+        let tier = HotTier::new(TieredConfig {
+            hot_tier_capacity: 4 * MIN_SHARD_CAPACITY,
+            eviction_batch_size: 10,
+            promote_sample_rate: 1,
+            per_realm_metrics: false,
+        });
+        assert!(tier.shard_count() > 1);
+        let realm = RealmId::generate();
+
+        let mut table_steps = 0;
+        for i in 0u32..2000 {
+            let before = bytes_gauge_since(base);
+            let value = vec![0; (i % 64) as usize];
+            tier.promote_now(&realm, &i.to_be_bytes(), &value);
+            let after = bytes_gauge_since(base);
+            assert_eq!(after, heap_of(&tier), "after promote {i}");
+            if after - before > 1024.0 {
+                table_steps += 1;
+            }
+        }
+        assert!(
+            table_steps >= tier.shard_count(),
+            "each shard's table grew at least once: {table_steps} steps"
+        );
+
+        for i in 0u32..500 {
+            tier.invalidate(&realm, &i.to_be_bytes());
+        }
+        assert_eq!(bytes_gauge_since(base), heap_of(&tier));
+        drop(tier);
+        assert_eq!(bytes_gauge_since(base), 0.0);
+    }
+
     // ===== Phase C: Simulation tests — see simulation/ crate =====
     // ===== Phase D: Benchmarks — see benches/tiered_storage.rs =====
 }
