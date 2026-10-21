@@ -114,6 +114,15 @@
      :error  (or (:error result) (get-in result [:body "error_code"])
                  (get-in result [:body "error"]))}))
 
+(defn redirected?
+  "True when a form POST answered with a redirect: a 303, or the 200 continue
+  page a sign-in step answers in its place, which names the target in a
+  Refresh header (src/protocol/web/continue_page.rs)."
+  [result]
+  (or (= 303 (:status result))
+      (and (= 200 (:status result))
+           (some? (first (get-in result [:headers "refresh"]))))))
+
 (defn sign-in!
   "Signs `email` in to realm `hdb/realm` on `node`. Returns {:access token
   :refresh token :session-id id}, or {:error {:step ...}} naming the step
@@ -135,7 +144,7 @@
         jar      (merge jar (cookies (:headers posted)))
         verifier (pkce-verifier)
         state    (str (random-uuid))
-        authz    (when (= 303 (:status posted))
+        authz    (when (redirected? posted)
                    (http/request!
                      http
                      (str base "/ui/realms/" realm "/oauth/authorize?"
@@ -161,7 +170,7 @@
                                             :client_id     cid
                                             :code_verifier verifier}}))]
     (if-let [anomaly (or (step :login-page 200 page)
-                         (step :login 303 posted)
+                         (when-not (redirected? posted) (step :login 303 posted))
                          (step :authorize 303 authz)
                          (when-not (:code params)
                            {:step :authorize :location location})

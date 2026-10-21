@@ -54,13 +54,14 @@ fi
 
 jar=$(mktemp)
 page=$(mktemp)
+headers=$(mktemp)
 server_pid=
 cleanup() {
   if [ -n "$server_pid" ] && kill -0 "$server_pid" 2> /dev/null; then
     kill "$server_pid" 2> /dev/null || true
     wait "$server_pid" 2> /dev/null || true
   fi
-  rm -f "$jar" "$page"
+  rm -f "$jar" "$page" "$headers"
 }
 trap cleanup EXIT
 
@@ -89,14 +90,26 @@ totp() {
 }
 
 # post <path> <expected-status> [curl --data-urlencode args...]: POSTs a form
-# with the page's _csrf and sets $location to the redirect target.
+# with the page's _csrf and sets $location to the redirect target. A sign-in
+# step answers a 200 continue page in place of its 303, with the target in a
+# `Refresh: 0;url=<target>` header (src/protocol/web/continue_page.rs); post
+# counts that page as the 303.
 post() {
-  local path=$1 want=$2 got
+  local path=$1 want=$2 got status refresh
   shift 2
-  got=$(http -o "$page" -w '%{http_code} %{redirect_url}' -X POST "$SEED_URL$path" \
-    --data-urlencode "_csrf=$(hidden _csrf)" "$@")
+  got=$(http -o "$page" -D "$headers" -w '%{http_code} %{redirect_url}' -X POST \
+    "$SEED_URL$path" --data-urlencode "_csrf=$(hidden _csrf)" "$@")
+  status=${got%% *}
   location=${got#* }
-  [ "${got%% *}" = "$want" ] || die "POST $path answered ${got%% *}, expected $want"
+  refresh=$(tr -d '\r' < "$headers" | sed -n 's/^[Rr]efresh:[[:space:]]*0;url=//p' | head -n 1)
+  if [ "$want" = 303 ] && [ "$status" = 200 ] && [ -n "$refresh" ]; then
+    status=303
+    case "$refresh" in
+      /*) location=$SEED_URL$refresh ;;
+      *) location=$refresh ;;
+    esac
+  fi
+  [ "$status" = "$want" ] || die "POST $path answered $status, expected $want"
 }
 
 log "starting the seed server ($SEED_URL)"
