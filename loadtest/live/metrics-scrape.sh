@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Scrapes Hearth's /metrics every 5 seconds until killed, keeping only the
-# storage, WAL, KDF, connection and process series. Runs on the server.
+# storage, allocator, WAL, KDF, connection and process series. Runs on the
+# server.
 # Each output line is "<epoch seconds> <metric line>".
 #
 # Usage: metrics-scrape.sh <out.txt>
@@ -11,7 +12,7 @@ set -euo pipefail
 out=${1:?usage: metrics-scrape.sh <out.txt>}
 token=$(sed -n 's/^STRESS_METRICS_TOKEN=//p' /opt/hearth/hearth.env | tr -d '"')
 [ -n "$token" ] || { echo "no STRESS_METRICS_TOKEN in /opt/hearth/hearth.env" >&2; exit 1; }
-keep='^(hearth_(storage|wal|kdf|connection|http_connections|active_connections|requests_in_flight)|process_)'
+keep='^(hearth_(storage|allocator|wal|kdf|connection|http_connections|active_connections|requests_in_flight)|process_)'
 
 : > "$out"
 while true; do
