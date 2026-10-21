@@ -101,7 +101,7 @@ gh workflow run jepsen.yml -f test=staleness -f time_limit=60     # one test
 | `scripts/gen-configs.sh` | One bundle per node for `/opt/hearth`: `hearth.yaml`, seed config, master key, TLS files |
 | `scripts/seed-store.sh` | Seeds one store with an operator and mints a system-realm token into it |
 | `scripts/spike-cold-cluster.sh` | The task 0.2 spike: the same seeding path on 3 host processes |
-| `project.clj`, `src/`, `test/` | The Jepsen project; `lein test` runs its unit tests |
+| `project.clj`, `src/`, `test/` | The Jepsen project; `make jepsen-unit` runs its unit tests (`lein test`) in the control container, and the Jepsen workflow runs them before the suite |
 | `expectations.edn` | `:pass` or `{:xfail "G<n>"}` for each test in the suite |
 
 ## How a node is set up

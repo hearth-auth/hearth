@@ -65,6 +65,8 @@ jobs:
             done' > "$RUNNER_TEMP/runner-usage.txt" 2>&1 &
           echo $! > "$RUNNER_TEMP/sampler.pid"
 
+      - name: Unit tests
+        run: make jepsen-unit
       - name: Run the suite
         env:
           TEST: ${{ inputs.test }}
