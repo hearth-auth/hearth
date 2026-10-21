@@ -23,11 +23,13 @@ RATE = 120.0
 
 
 def run(d, minutes=215, leak=0.0, overhead=0.0, fill_min=40, ok_rate=0.999, rate_frac=1.0,
-        wobble_mib=0.0, seed=1):
+        wobble_mib=0.0, block_top=1.0, block_fill_min=None, seed=1):
     """Writes a run's metrics.txt and k6-summary.json to d.
 
     Scrapes every 5 s from T0, where the load starts. The hot tier and the block cache fill
     linearly until fill_min, then stay at their limits, and the hot tier evicts from then on.
+    The block cache stops at block_top of its limit (a store too small to fill it), and
+    fills until block_fill_min (default fill_min).
     The SST readers grow with the stored data, and the memtable fills and flushes every
     200 s, so a 10-minute bin holds whole cycles. `allocated` is a base plus all of these (the memtable at 1.5 times its gauge),
     plus `leak` bytes per journey, plus noise. `resident` is `allocated` plus a fixed
@@ -44,7 +46,7 @@ def run(d, minutes=215, leak=0.0, overhead=0.0, fill_min=40, ok_rate=0.999, rate
         entries = CAP * full
         evictions = max(0.0, (m - fill_min) * 60 * 100)
         hot = entries * 300
-        block = BLOCK * full
+        block = BLOCK * block_top * min(1.0, m / (block_fill_min or fill_min))
         sst = MIB + 0.2 * MIB * m / 60
         memtable = 8 * MIB * ((t % 200) / 200)
         wobble = 0.0
@@ -129,6 +131,18 @@ class SteadyHeapTest(unittest.TestCase):
         code, out = judge(self.d)
         self.assertEqual(code, 1, out)
         self.assertIn("VERDICT: INCONCLUSIVE", out)
+        self.assertIn("no steady state by minute 120", out)
+
+    def test_a_block_cache_that_stops_below_its_limit_is_steady(self):
+        run(self.d, block_top=0.5)
+        code, out = judge(self.d)
+        self.assertEqual(code, 0, out)
+        self.assertIn("steady from minute 80", out)
+
+    def test_a_block_cache_still_growing_is_not_steady(self):
+        run(self.d, block_fill_min=150)
+        code, out = judge(self.d)
+        self.assertEqual(code, 1, out)
         self.assertIn("no steady state by minute 120", out)
 
     def test_a_late_steady_state_starts_the_window_later(self):
