@@ -567,6 +567,12 @@ enum AppAction {
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+/// Reads jemalloc's memory figures for `/metrics` (#445).
+#[cfg(not(any(target_env = "msvc", hearth_system_allocator)))]
+fn jemalloc_stats() -> Option<hearth::metrics::AllocatorStats> {
+    None
+}
+
 /// What [`cap_malloc_arenas`] did. Kept for the startup log, because tracing
 /// does not exist yet when it runs. Unset on platforms without glibc.
 static MALLOC_ARENA_CAP: std::sync::OnceLock<ArenaCap> = std::sync::OnceLock::new();
@@ -1266,6 +1272,11 @@ async fn run_serve(
             );
         }
         None => {}
+    }
+    // #445: jemalloc's memory figures on `/metrics`, read at each scrape.
+    #[cfg(not(any(target_env = "msvc", hearth_system_allocator)))]
+    if let Err(e) = hearth::metrics::metrics().export_allocator_stats(jemalloc_stats) {
+        warn!(error = %e, "the allocator's memory figures are not on /metrics");
     }
 
     if config.dev_mode {
@@ -6325,6 +6336,46 @@ mod tests {
             "glibc holds {} more bytes while an {BLOCK}-byte Vec is live",
             after.saturating_sub(before)
         );
+    }
+
+    /// #445: jemalloc's figures follow a live allocation up and down. A build
+    /// without jemalloc's `stats` feature refuses every statistics read, and
+    /// `/metrics` then exports no allocator gauges.
+    #[cfg(not(any(target_env = "msvc", hearth_system_allocator)))]
+    #[test]
+    fn jemalloc_stats_follow_a_live_allocation() {
+        const BLOCK: u64 = 64 << 20;
+        // The small blocks that jemalloc's thread cache takes or gives back
+        // between two reads move `allocated` by far less than this.
+        const SLACK: u64 = 1 << 20;
+        let read = || {
+            jemalloc_stats()
+                .expect("jemalloc refused a statistics read: is its `stats` feature on?")
+        };
+        let before = read();
+        let block = std::hint::black_box(vec![1_u8; usize::try_from(BLOCK).expect("fits")]);
+        let during = read();
+        drop(block);
+        let after = read();
+        assert!(
+            during.allocated + SLACK >= before.allocated + BLOCK,
+            "allocated {} -> {} while a {BLOCK}-byte Vec is live",
+            before.allocated,
+            during.allocated
+        );
+        assert!(
+            after.allocated + BLOCK <= during.allocated + SLACK,
+            "allocated {} -> {} after the Vec dropped",
+            during.allocated,
+            after.allocated
+        );
+        // jemalloc's own order: pages that hold allocations are a subset of
+        // the resident pages, which also hold freed pages and metadata.
+        assert!(
+            during.allocated <= during.active && during.active < during.resident,
+            "{during:?}"
+        );
+        assert!(during.metadata > 0, "{during:?}");
     }
 
     /// In a sanitizer build (`make leak-check`), the binary's Rust allocations

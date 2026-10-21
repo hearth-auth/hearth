@@ -150,6 +150,59 @@ async fn serve_dev_exposes_jwks() {
     assert!(body.get("keys").is_some(), "JWKS should have keys array");
 }
 
+/// The value of the unlabelled series `name` in a Prometheus text scrape.
+#[cfg(not(any(target_env = "msvc", hearth_system_allocator)))]
+fn scraped_value(body: &str, name: &str) -> Option<f64> {
+    body.lines()
+        .find_map(|line| line.strip_prefix(name)?.strip_prefix(' ')?.parse().ok())
+}
+
+/// #445: a running server exports its allocator's memory on `/metrics`, so a
+/// memory soak can tell live heap apart from memory the allocator keeps.
+#[cfg(not(any(target_env = "msvc", hearth_system_allocator)))]
+#[tokio::test]
+async fn serve_dev_exports_the_allocator_memory_on_metrics() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = dir.path().join("hearth.yaml");
+    std::fs::write(&config, "metrics:\n  enabled: true\n").expect("write config");
+    let port = find_available_port();
+    let child = Command::new(hearth_bin())
+        .args(["serve", "--dev", "--port", &port.to_string(), "--config"])
+        .arg(&config)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn hearth server");
+    let _guard = ServerGuard { child };
+
+    assert!(
+        wait_for_server(port, Duration::from_secs(10)),
+        "server should accept TCP connections within 10s"
+    );
+
+    let resp = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{port}/metrics"))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .expect("metrics request");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.expect("metrics body");
+
+    let read = |name: &str| {
+        scraped_value(&body, name).unwrap_or_else(|| panic!("no {name} series in:\n{body}"))
+    };
+    let allocated = read("hearth_allocator_allocated_bytes");
+    let active = read("hearth_allocator_active_bytes");
+    let resident = read("hearth_allocator_resident_bytes");
+    let metadata = read("hearth_allocator_metadata_bytes");
+    read("hearth_allocator_retained_bytes");
+    assert!(
+        allocated > 0.0 && allocated <= active && active < resident && metadata > 0.0,
+        "allocated {allocated}, active {active}, resident {resident}, metadata {metadata}"
+    );
+}
+
 // === TEST_SCENARIOS: CLI exits with appropriate non-zero error codes ===
 
 #[test]

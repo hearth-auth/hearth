@@ -1155,6 +1155,41 @@ impl Metrics {
     }
 }
 
+/// Memory the process's allocator reports, in bytes (#445).
+///
+/// Next to the process's resident memory, these figures tell live heap apart
+/// from memory that the allocator keeps after the program frees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AllocatorStats {
+    /// Bytes in the allocations that the program holds.
+    pub allocated: u64,
+    /// Bytes in the pages that hold those allocations: `allocated` plus the
+    /// free space in the same pages.
+    pub active: u64,
+    /// Bytes of the allocator's pages in physical memory: `active`, freed
+    /// pages not yet returned to the system, and `metadata`.
+    pub resident: u64,
+    /// Bytes of the allocator's own bookkeeping.
+    pub metadata: u64,
+    /// Bytes of address space that the allocator returned to the system but
+    /// keeps mapped for reuse. Not in physical memory.
+    pub retained: u64,
+}
+
+impl Metrics {
+    /// Exports the process's allocator memory on every scrape (#445).
+    ///
+    /// # Errors
+    ///
+    /// Fails if the gauges are already exported.
+    pub fn export_allocator_stats(
+        &self,
+        _source: fn() -> Option<AllocatorStats>,
+    ) -> prometheus::Result<()> {
+        Ok(())
+    }
+}
+
 /// Process-global [`Metrics`] singleton backing storage.
 static INSTANCE: OnceLock<Metrics> = OnceLock::new();
 
@@ -1167,7 +1202,7 @@ pub fn metrics() -> &'static Metrics {
 
 #[cfg(test)]
 mod tests {
-    use super::{ForwardedWriteOutcomeLabel, MemtableStateLabel, Metrics};
+    use super::{AllocatorStats, ForwardedWriteOutcomeLabel, MemtableStateLabel, Metrics};
 
     /// Every forwarded-write outcome is scraped from the start (at 0), and
     /// recording one moves only its own series.
@@ -1241,6 +1276,55 @@ mod tests {
                 metrics.memtable_bytes(MemtableStateLabel::Active),
             ),
             (0.0, 0.0)
+        );
+    }
+
+    /// #445: the allocator gauges are absent until a reader is installed, then
+    /// carry what the reader returns on each scrape. A reader that fails
+    /// exports nothing, because a 0 would read as an empty heap.
+    #[test]
+    fn allocator_gauges_report_the_installed_reader() {
+        const GAUGES: [&str; 5] = [
+            "hearth_allocator_allocated_bytes",
+            "hearth_allocator_active_bytes",
+            "hearth_allocator_resident_bytes",
+            "hearth_allocator_metadata_bytes",
+            "hearth_allocator_retained_bytes",
+        ];
+        let metrics = Metrics::new();
+        let before = metrics.render();
+        assert!(
+            !before.contains("hearth_allocator_"),
+            "allocator gauges before a reader is installed:\n{before}"
+        );
+
+        metrics
+            .export_allocator_stats(|| {
+                Some(AllocatorStats {
+                    allocated: 11,
+                    active: 22,
+                    resident: 33,
+                    metadata: 44,
+                    retained: 55,
+                })
+            })
+            .expect("first install");
+        let rendered = metrics.render();
+        for (gauge, value) in GAUGES.into_iter().zip([11, 22, 33, 44, 55]) {
+            assert!(
+                rendered.contains(&format!("\n{gauge} {value}\n")),
+                "missing {gauge} {value} in:\n{rendered}"
+            );
+        }
+
+        let failing = Metrics::new();
+        failing
+            .export_allocator_stats(|| None)
+            .expect("first install");
+        let rendered = failing.render();
+        assert!(
+            !rendered.contains("hearth_allocator_"),
+            "allocator gauges from a reader that failed:\n{rendered}"
         );
     }
 
