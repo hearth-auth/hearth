@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.5.1] — 2026-10-21
+
+No changelog entries for this release. The [GitHub release](https://github.com/hearth-auth/hearth/releases/tag/v4.5.1) lists its commits.
+
 ## [4.5.0] — 2026-10-21
 
 ### Added
