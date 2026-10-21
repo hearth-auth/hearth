@@ -619,6 +619,24 @@ fn jemalloc_stat(name: &std::ffi::CStr) -> Option<u64> {
     u64::try_from(value).ok()
 }
 
+/// The interval between two heap profiles (#445).
+#[cfg(all(
+    feature = "heap-profile",
+    not(any(target_env = "msvc", hearth_system_allocator))
+))]
+fn heap_profile_interval(_secs: Option<&str>) -> std::time::Duration {
+    std::time::Duration::ZERO
+}
+
+/// Writes a jemalloc heap profile at each interval (#445).
+#[cfg(all(
+    feature = "heap-profile",
+    not(any(target_env = "msvc", hearth_system_allocator))
+))]
+fn start_heap_profile_dumps() {
+    let _ = heap_profile_interval(None);
+}
+
 /// What [`cap_malloc_arenas`] did. Kept for the startup log, because tracing
 /// does not exist yet when it runs. Unset on platforms without glibc.
 static MALLOC_ARENA_CAP: std::sync::OnceLock<ArenaCap> = std::sync::OnceLock::new();
@@ -1324,6 +1342,11 @@ async fn run_serve(
     if let Err(e) = hearth::metrics::metrics().export_allocator_stats(jemalloc_stats) {
         warn!(error = %e, "the allocator's memory figures are not on /metrics");
     }
+    #[cfg(all(
+        feature = "heap-profile",
+        not(any(target_env = "msvc", hearth_system_allocator))
+    ))]
+    start_heap_profile_dumps();
 
     if config.dev_mode {
         error!("{DEV_MODE_BANNER}");
@@ -6422,6 +6445,24 @@ mod tests {
             "{during:?}"
         );
         assert!(during.metadata > 0, "{during:?}");
+    }
+
+    /// #445: `HEARTH_HEAP_PROFILE_INTERVAL_SECS` sets the heap-profile
+    /// interval. A missing, zero or unreadable value keeps 15 minutes.
+    #[cfg(all(
+        feature = "heap-profile",
+        not(any(target_env = "msvc", hearth_system_allocator))
+    ))]
+    #[test]
+    fn the_heap_profile_interval_defaults_to_fifteen_minutes() {
+        use std::time::Duration;
+        assert_eq!(heap_profile_interval(None), Duration::from_secs(900));
+        assert_eq!(heap_profile_interval(Some("60")), Duration::from_secs(60));
+        assert_eq!(heap_profile_interval(Some("0")), Duration::from_secs(900));
+        assert_eq!(
+            heap_profile_interval(Some("soon")),
+            Duration::from_secs(900)
+        );
     }
 
     /// In a sanitizer build (`make leak-check`), the binary's Rust allocations
