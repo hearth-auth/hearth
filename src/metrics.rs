@@ -21,6 +21,8 @@
 
 use std::sync::OnceLock;
 
+use prometheus::core::{Collector, Desc};
+use prometheus::proto::MetricFamily;
 use prometheus::{
     Counter, CounterVec, Gauge, GaugeVec, Histogram, HistogramOpts, HistogramVec, Opts, Registry,
 };
@@ -1177,16 +1179,106 @@ pub struct AllocatorStats {
 }
 
 impl Metrics {
-    /// Exports the process's allocator memory on every scrape (#445).
+    /// Exports the process's allocator memory on every scrape (#445): the
+    /// `hearth_allocator_{allocated,active,resident,metadata,retained}_bytes`
+    /// gauges, read from `source` each time.
+    ///
+    /// The binary installs its allocator's reader at startup. Until then, and
+    /// at each scrape where `source` returns `None`, the gauges are absent: a
+    /// process on an allocator without statistics exports none of them.
     ///
     /// # Errors
     ///
     /// Fails if the gauges are already exported.
     pub fn export_allocator_stats(
         &self,
-        _source: fn() -> Option<AllocatorStats>,
+        source: fn() -> Option<AllocatorStats>,
     ) -> prometheus::Result<()> {
-        Ok(())
+        self.registry
+            .register(Box::new(AllocatorCollector::new(source)))
+    }
+}
+
+/// The `hearth_allocator_*_bytes` gauges, set from `source` at each scrape.
+struct AllocatorCollector {
+    source: fn() -> Option<AllocatorStats>,
+    allocated: Gauge,
+    active: Gauge,
+    resident: Gauge,
+    metadata: Gauge,
+    retained: Gauge,
+}
+
+impl AllocatorCollector {
+    fn new(source: fn() -> Option<AllocatorStats>) -> Self {
+        let gauge =
+            |name: &str, help: &str| Gauge::new(name, help).expect("metric descriptor is valid");
+        Self {
+            source,
+            allocated: gauge(
+                "hearth_allocator_allocated_bytes",
+                "Bytes in the allocations the process holds, as its allocator reports",
+            ),
+            active: gauge(
+                "hearth_allocator_active_bytes",
+                "Bytes in the allocator's pages that hold live allocations",
+            ),
+            resident: gauge(
+                "hearth_allocator_resident_bytes",
+                "Bytes of the allocator's pages in physical memory, freed pages not yet \
+                 returned to the system included",
+            ),
+            metadata: gauge(
+                "hearth_allocator_metadata_bytes",
+                "Bytes of the allocator's own bookkeeping",
+            ),
+            retained: gauge(
+                "hearth_allocator_retained_bytes",
+                "Bytes of address space the allocator returned to the system and keeps \
+                 mapped for reuse",
+            ),
+        }
+    }
+
+    fn gauges(&self) -> [&Gauge; 5] {
+        [
+            &self.allocated,
+            &self.active,
+            &self.resident,
+            &self.metadata,
+            &self.retained,
+        ]
+    }
+}
+
+impl Collector for AllocatorCollector {
+    fn desc(&self) -> Vec<&Desc> {
+        self.gauges()
+            .into_iter()
+            .flat_map(Collector::desc)
+            .collect()
+    }
+
+    fn collect(&self) -> Vec<MetricFamily> {
+        // A failed read exports nothing: a 0 would read as an empty heap.
+        let Some(stats) = (self.source)() else {
+            return Vec::new();
+        };
+        let values = [
+            stats.allocated,
+            stats.active,
+            stats.resident,
+            stats.metadata,
+            stats.retained,
+        ];
+        for (gauge, bytes) in self.gauges().into_iter().zip(values) {
+            #[allow(clippy::cast_precision_loss)] // exact below 2^53 bytes
+            gauge.set(bytes as f64);
+        }
+        self.gauges()
+            .into_iter()
+            .flat_map(Collector::collect)
+            .collect()
     }
 }
 

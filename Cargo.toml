@@ -157,9 +157,11 @@ secrecy = { version = "0.8", features = ["alloc"] }
 
 # The binary's allocator (#445). jemalloc does not support MSVC; the Windows
 # binary keeps the system allocator. `background_threads` lets jemalloc purge
-# freed pages while the server is idle too.
+# freed pages while the server is idle too. `stats` turns on jemalloc's
+# statistics, which `mallctl` reads for `/metrics`.
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = { version = "0.7", features = ["background_threads"] }
+tikv-jemalloc-sys = { version = "0.7", features = ["stats"] }
 
 [features]
 # Empty on purpose. `dev-endpoints` compiles in `/admin/bootstrap`, the

@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Added
+- **`hearth_allocator_*_bytes` on `/metrics`** (#445): the memory figures of the server's
+  allocator (jemalloc), read at each scrape: `allocated`, `active`, `resident`, `metadata` and
+  `retained`. Next to the process RSS, they tell live heap apart from memory the allocator keeps
+  after the server frees it. The gauges are absent on Windows, where the server keeps the
+  system allocator.
+
 ## [4.3.0] — 2026-10-19
 
 ### Added

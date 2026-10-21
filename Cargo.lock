@@ -1326,6 +1326,7 @@ dependencies = [
  "tempfile",
  "tera",
  "thiserror 2.0.20",
+ "tikv-jemalloc-sys",
  "tikv-jemallocator",
  "time",
  "tokio",

@@ -567,10 +567,56 @@ enum AppAction {
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-/// Reads jemalloc's memory figures for `/metrics` (#445).
+/// Reads jemalloc's memory figures for `/metrics` (#445). `None` if jemalloc
+/// refuses a read, as it does when it is built without its `stats` feature.
 #[cfg(not(any(target_env = "msvc", hearth_system_allocator)))]
 fn jemalloc_stats() -> Option<hearth::metrics::AllocatorStats> {
-    None
+    // jemalloc caches its statistics; a write to `epoch` refreshes them.
+    let mut epoch: u64 = 1;
+    // SAFETY: `epoch` is a `uint64_t` control and the new value points at a
+    // live `u64` of that size. No old value is read (null pointers).
+    let refreshed = unsafe {
+        tikv_jemalloc_sys::mallctl(
+            c"epoch".as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            (&raw mut epoch).cast(),
+            std::mem::size_of::<u64>(),
+        )
+    };
+    if refreshed != 0 {
+        return None;
+    }
+    Some(hearth::metrics::AllocatorStats {
+        allocated: jemalloc_stat(c"stats.allocated")?,
+        active: jemalloc_stat(c"stats.active")?,
+        resident: jemalloc_stat(c"stats.resident")?,
+        metadata: jemalloc_stat(c"stats.metadata")?,
+        retained: jemalloc_stat(c"stats.retained")?,
+    })
+}
+
+/// One of jemalloc's `size_t` statistics, by its `mallctl` name.
+#[cfg(not(any(target_env = "msvc", hearth_system_allocator)))]
+fn jemalloc_stat(name: &std::ffi::CStr) -> Option<u64> {
+    let mut value: usize = 0;
+    let mut len = std::mem::size_of::<usize>();
+    // SAFETY: `name` is NUL-terminated and names a `size_t` statistic. `value`
+    // and `len` are live and writable, and `len` holds `value`'s size. No new
+    // value is written (null pointer, length 0).
+    let read = unsafe {
+        tikv_jemalloc_sys::mallctl(
+            name.as_ptr(),
+            (&raw mut value).cast(),
+            &raw mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if read != 0 {
+        return None;
+    }
+    u64::try_from(value).ok()
 }
 
 /// What [`cap_malloc_arenas`] did. Kept for the startup log, because tracing
