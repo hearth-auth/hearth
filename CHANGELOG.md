@@ -17,6 +17,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `HEARTH_HEAP_PROFILE_INTERVAL_SECS` (default 900). Release builds and images do not include
   it.
 
+## [4.3.1] — 2026-10-21
+
 ### Security
 - **TLS certificate checks reject the distrusted emSign intermediates** (RUSTSEC-2026-0381,
   RUSTSEC-2026-0382). The private keys of these intermediate certificates are public, so a
