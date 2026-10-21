@@ -221,6 +221,35 @@ docker build -f /tmp/Dockerfile.symbols -t hearth-stress:<tag>-symbols \
 heaptrack slows every allocation, so run at 60 journeys/s on c7i.large. Read a trace with
 `heaptrack_print --print-leaks 1 -s 400 heaptrack.zst` (the default `-s 5` cuts the stacks).
 
+**jemalloc heap profiles.** heaptrack cannot run at a soak's load. A build with
+`--features heap-profile` has jemalloc's own profiler, which records the call stack of a sample
+of the allocations: on average one per 512 KiB allocated (`lg_prof_sample:19`). Its cost is
+small, so it can run at a soak's load; this is not yet measured on Hearth. `JEPROF=1` turns it
+on for each plan line:
+
+- Hearth writes a heap profile every 15 minutes (`HEARTH_HEAP_PROFILE_INTERVAL_SECS`) to
+  `/opt/hearth/out/jeprof/`.
+- At the end of a soak, `round.sh` fetches the profiles as `jeprof.tar.gz`.
+- Compare the last profile before a step in the floor with the first profile after it. A call
+  stack whose live heap grew holds the memory of the step.
+
+The binary needs symbols and unwind tables. Build the image outside the repository:
+
+```bash
+sed -e '/&& strip target\/release\/hearth/d' \
+    -e 's/&& cargo build --release/\&\& CARGO_PROFILE_RELEASE_STRIP=none CARGO_PROFILE_RELEASE_DEBUG=line-tables-only RUSTFLAGS="-C force-unwind-tables" cargo build --release/' \
+    -e 's/--bin hearth/--features heap-profile --bin hearth/' \
+    Dockerfile > /tmp/Dockerfile.jeprof
+docker build -f /tmp/Dockerfile.jeprof -t hearth-stress:<tag>-jeprof \
+  --build-arg BUILD_REVISION=$(git rev-parse HEAD) .
+```
+
+Read two profiles with `jeprof` (Debian and Ubuntu: package `libjemalloc-dev`) and the binary
+from the image: `jeprof --text --cum --base=<before>.heap hearth <after>.heap`. Use the
+cumulative column: jeprof skips jemalloc's own frames only by their unprefixed names, so the
+flat column puts every sample on `prof_backtrace_impl`. Judge flatness on a run of the release
+image, not of this build.
+
 ## Method rules
 
 - **Units.** k6 counts journeys. A login journey is 4 HTTP requests; the other journeys are 1.

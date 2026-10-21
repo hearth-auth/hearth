@@ -6448,7 +6448,6 @@ Used by:
   - asn1-rs-impl 0.2.0
   - async-trait 0.1.89
   - aws-lc-sys 0.41.0
-  - basic-toml 0.1.10
   - chrono-tz-build 0.3.0
   - chrono-tz 0.9.0
   - dunce 1.0.5
@@ -6989,7 +6988,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 --------------------------------------------------------------------------------
 License: Community Data License Agreement Permissive 2.0 (CDLA-Permissive-2.0)
 Used by:
-  - webpki-roots 1.0.7
+  - webpki-roots 1.0.10
 
 # Community Data License Agreement - Permissive - Version 2.0
 
@@ -7094,7 +7093,7 @@ CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 --------------------------------------------------------------------------------
 License: ISC License (ISC)
 Used by:
-  - rustls-webpki 0.103.15
+  - rustls-webpki 0.103.16
 
 Except as otherwise noted, this project is licensed under the following
 (ISC-style) terms:

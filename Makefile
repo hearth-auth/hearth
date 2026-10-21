@@ -13,7 +13,7 @@ BUF := buf
 ## with `--workspace`.
 DEV_FEATURES ?= --features hearth/dev-endpoints
 
-.PHONY: setup build test test-detached test-no-dev-endpoints clippy fmt miri asan heap-check unsafe-check leak-check loadtest loadtest-check loadtest-smoke seed check coverage css css-check css-watch tailwind-install openapi openapi-check sdk-admin-gen sdk-admin-check sdk-conformance proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test sdk-lint test-quality abuse-check auth-discard-check mfa-resolver-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke jepsen jepsen-binary jepsen-up jepsen-down ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template scratch-prune scratch-prune-dry-run scratch-timer-install
+.PHONY: setup build test test-detached test-no-dev-endpoints test-heap-profile clippy fmt miri asan heap-check unsafe-check leak-check loadtest loadtest-check loadtest-smoke seed check coverage css css-check css-watch tailwind-install openapi openapi-check sdk-admin-gen sdk-admin-check sdk-conformance proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test sdk-lint test-quality abuse-check auth-discard-check mfa-resolver-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke jepsen jepsen-binary jepsen-up jepsen-down ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template scratch-prune scratch-prune-dry-run scratch-timer-install
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -96,6 +96,14 @@ NO_DEV_TEST_FILES := $(sort tests/default_feature_set.rs $(shell grep -l 'cfg(no
 test-no-dev-endpoints:
 	PROTOC=$(PROTOC) cargo nextest run --package hearth --no-fail-fast --no-tests=fail \
 		$(foreach f,$(NO_DEV_TEST_FILES),--test $(basename $(notdir $(f)))) $(CARGO_FLAGS)
+
+## Run the tests of the `heap-profile` build (#445): jemalloc's heap profiler, for
+## memory soaks. Release builds do not carry the feature, so no other target
+## compiles these tests. CI runs this in the `no-dev-endpoints` job.
+test-heap-profile:
+	PROTOC=$(PROTOC) cargo nextest run --package hearth --no-fail-fast --no-tests=fail \
+		--features heap-profile --bin hearth --test heap_profile -E 'test(heap_profile)' \
+		$(CARGO_FLAGS)
 
 ## Lint both feature sets: the production one (no `dev-endpoints`, what a plain
 ## `cargo build` ships) and the dev one the test suite compiles under. Each

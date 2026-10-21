@@ -8,7 +8,7 @@ exclude = ["loadtest"]
 
 [package]
 name = "hearth"
-version = "4.3.0"
+version = "4.5.0"
 edition = "2021"
 description = "Purpose-built identity database: authentication, authorization, and session management"
 license = "Apache-2.0"
@@ -23,7 +23,10 @@ name = "hearth"
 path = "src/main.rs"
 
 [dependencies]
-askama = "0.12"
+# No default features: `config` reads an askama.toml (Hearth has none) through the
+# unmaintained basic-toml (RUSTSEC-2026-0374), and the templates use no filter of
+# `humansize`, `num-traits` or `urlencode`.
+askama = { version = "0.12", default-features = false }
 hashbrown = "0.17"
 pbjson = "0.9"
 pbjson-types = "0.9"
@@ -157,9 +160,11 @@ secrecy = { version = "0.8", features = ["alloc"] }
 
 # The binary's allocator (#445). jemalloc does not support MSVC; the Windows
 # binary keeps the system allocator. `background_threads` lets jemalloc purge
-# freed pages while the server is idle too.
+# freed pages while the server is idle too. `stats` turns on jemalloc's
+# statistics, which `mallctl` reads for `/metrics`.
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = { version = "0.7", features = ["background_threads"] }
+tikv-jemalloc-sys = { version = "0.7", features = ["stats"] }
 
 [features]
 # Empty on purpose. `dev-endpoints` compiles in `/admin/bootstrap`, the
@@ -176,6 +181,12 @@ dev-endpoints = []
 
 # Exposes internal test probes for use by the simulation crate. Never enable in production.
 test-hooks = []
+
+# jemalloc's heap profiler, for memory soaks (#445). The profiler stays off
+# unless `_RJEM_MALLOC_CONF` sets `prof:true` at start; the server then writes
+# a heap profile every `HEARTH_HEAP_PROFILE_INTERVAL_SECS` (default 900).
+# Never enable for a release build. loadtest/live/README.md, "Heap accounting".
+heap-profile = ["tikv-jemalloc-sys/profiling"]
 
 [build-dependencies]
 pbjson-build = "0.9"

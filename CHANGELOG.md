@@ -6,6 +6,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.5.0] — 2026-10-21
+
+### Added
+- **`heap-profile` cargo feature** (#445): a build with jemalloc's heap profiler, for memory
+  soaks. With `prof:true` in `_RJEM_MALLOC_CONF`, the server writes a heap profile every
+  `HEARTH_HEAP_PROFILE_INTERVAL_SECS` (default 900). Release builds and images do not include
+  it.
+
+## [4.4.0] — 2026-10-21
+
+### Added
+- **`hearth_allocator_*_bytes` on `/metrics`** (#445): the memory figures of the server's
+  allocator (jemalloc), read at each scrape: `allocated`, `active`, `resident`, `metadata` and
+  `retained`. Next to the process RSS, they tell live heap apart from memory the allocator keeps
+  after the server frees it. The gauges are absent on Windows, where the server keeps the
+  system allocator.
+
+## [4.3.1] — 2026-10-21
+
+### Security
+- **TLS certificate checks reject the distrusted emSign intermediates** (RUSTSEC-2026-0381,
+  RUSTSEC-2026-0382). The private keys of these intermediate certificates are public, so a
+  certificate path through them proves nothing. `rustls-webpki` 0.103.16 rejects such paths.
+  `webpki-roots` 1.0.10 removes the `emSign ECC Root CA - G3` root from the trust store of
+  Hearth's outbound HTTPS and SMTP connections (federation, webhooks, email, OTLP export).
+
 ## [4.3.0] — 2026-10-19
 
 ### Added
