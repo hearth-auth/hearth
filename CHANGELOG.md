@@ -13,6 +13,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   after the server frees it. The gauges are absent on Windows, where the server keeps the
   system allocator.
 
+## [4.3.1] — 2026-10-21
+
 ### Security
 - **TLS certificate checks reject the distrusted emSign intermediates** (RUSTSEC-2026-0381,
   RUSTSEC-2026-0382). The private keys of these intermediate certificates are public, so a
