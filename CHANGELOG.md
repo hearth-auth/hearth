@@ -13,6 +13,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   after the server frees it. The gauges are absent on Windows, where the server keeps the
   system allocator.
 
+### Security
+- **TLS certificate checks reject the distrusted emSign intermediates** (RUSTSEC-2026-0381,
+  RUSTSEC-2026-0382). The private keys of these intermediate certificates are public, so a
+  certificate path through them proves nothing. `rustls-webpki` 0.103.16 rejects such paths.
+  `webpki-roots` 1.0.10 removes the `emSign ECC Root CA - G3` root from the trust store of
+  Hearth's outbound HTTPS and SMTP connections (federation, webhooks, email, OTLP export).
+
 ## [4.3.0] — 2026-10-19
 
 ### Added

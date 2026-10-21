@@ -23,7 +23,10 @@ name = "hearth"
 path = "src/main.rs"
 
 [dependencies]
-askama = "0.12"
+# No default features: `config` reads an askama.toml (Hearth has none) through the
+# unmaintained basic-toml (RUSTSEC-2026-0374), and the templates use no filter of
+# `humansize`, `num-traits` or `urlencode`.
+askama = { version = "0.12", default-features = false }
 hashbrown = "0.17"
 pbjson = "0.9"
 pbjson-types = "0.9"
