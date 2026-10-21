@@ -39,12 +39,6 @@
 # GHSA-g7r4-m6w7-qqqr suppressed `esbuild`, which is not installed in any
 # scanned lockfile. A suppression that matches nothing is coverage on paper.
 
-# One entry covers the advisory in Cargo.lock and fuzz/Cargo.lock.
-# guard: package=basic-toml lockfile=Cargo.lock
-[[IgnoredVulns]]
-id = "RUSTSEC-2026-0374"
-reason = "basic-toml 0.1.10 is unmaintained (repository archived 2025-03-02); no fixed release exists. Only askama_derive uses it, to read an askama.toml while the template macro expands, and Hearth has no askama.toml. It is a build-time dependency of a proc macro: not linked into the server binary, never fed request data. Every askama_derive release checked (0.12.5, 0.13.1, 0.14.0, 0.15.0; checked 2026-10-21) depends on it. deny.toml and .cargo/audit.toml carry the same ignore. Revisit when askama stops using basic-toml."
-
 # guard: package=golang.org/x/crypto lockfile=sdks/go/go.mod
 [[IgnoredVulns]]
 id = "GO-2026-5932"

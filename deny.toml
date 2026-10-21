@@ -1,13 +1,5 @@
 [advisories]
-ignore = [
-    # RUSTSEC-2026-0374: `basic-toml` is unmaintained (archived 2025-03-02) and
-    # has no fixed release. Only `askama_derive` uses it, to read an
-    # `askama.toml` while the template macro expands; Hearth has no such file.
-    # It is a build-time dependency of a proc macro, so it is not in the server
-    # binary and never reads request data. Every askama release up to 0.15
-    # still depends on it. Remove this entry when askama stops using it.
-    { id = "RUSTSEC-2026-0374", reason = "basic-toml: build-time only, used by askama_derive; no askama release without it" },
-]
+ignore = []
 
 [licenses]
 # cargo-deny 0.14+ uses a pure allowlist model: any license (or no license) not
