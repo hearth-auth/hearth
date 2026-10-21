@@ -180,11 +180,13 @@ so do not judge a soak by it.
   bytes). Each cache stops at its capacity, but the default hot tier does not fill in a day. On
   a 4 GiB server it sizes itself to about 1.36 million entries. In the v4.2.4 run with the
   default caches (2026-10-17) it held about 150,000 entries after 2 hours and still gained about
-  4,000 an hour at 24 hours. At hour 18.6 the floor stepped up 20 MiB, when the entry count
-  passed the point where all 1,024 shard tables double. A cache that fills is not a leak, but
-  without the gauges the test counts it as one. This rule was fixed on 2026-10-18, after that
-  run and before the next one. A run without the cache gauges subtracts the SST readers only, so
-  earlier verdicts do not change.
+  4,000 an hour at 24 hours. A cache that fills is not a leak, but without the gauges the test
+  counts it as one. This rule was fixed on 2026-10-18, after that run and before the next one. A
+  run without the cache gauges subtracts the SST readers only, so earlier verdicts do not change.
+- Both 24-hour runs with the default caches had one late step in the floor: about 20 MiB at hour
+  18.6 on v4.2.4, and a similar step at hour 19.9 on v4.3.0 (2026-10-19). The cache gauges do
+  not hold it. In the v4.3.0 run the hot tier's tables grew in hours 4 to 9, and its gauge did
+  not move at the step. The cause of the step is not known (#445).
 - After the warm-up (`--warmup-min`, 120), the test fits a line to the bin means
   (`--bin-min`, 60) of floor minus SST reader heap minus caches. The 95 % upper bound of its
   slope uses Student's t over the bin means, because one-second samples are not independent.
