@@ -16,4 +16,7 @@ ignore = [
     # with the lock at 1.43.0 rkyv no longer appears in Cargo.lock at all (it
     # was never compiled in — `cargo tree -i rkyv` printed nothing — but
     # cargo-audit and osv-scanner read the lockfile, not the build graph).
+
+    # basic-toml unmaintained: build-time only (askama_derive); rationale in deny.toml.
+    "RUSTSEC-2026-0374",
 ]
