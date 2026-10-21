@@ -13,7 +13,7 @@ BUF := buf
 ## with `--workspace`.
 DEV_FEATURES ?= --features hearth/dev-endpoints
 
-.PHONY: setup build test test-detached test-no-dev-endpoints test-heap-profile clippy fmt miri asan heap-check unsafe-check leak-check loadtest loadtest-check loadtest-smoke seed check coverage css css-check css-watch tailwind-install openapi openapi-check sdk-admin-gen sdk-admin-check sdk-conformance proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test sdk-lint test-quality abuse-check auth-discard-check mfa-resolver-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke jepsen jepsen-binary jepsen-up jepsen-down ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template scratch-prune scratch-prune-dry-run scratch-timer-install
+.PHONY: setup build test test-detached test-no-dev-endpoints test-heap-profile clippy fmt miri asan heap-check unsafe-check leak-check loadtest loadtest-check loadtest-smoke seed check coverage css css-check css-watch tailwind-install openapi openapi-check sdk-admin-gen sdk-admin-check sdk-conformance proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test sdk-lint test-quality abuse-check auth-discard-check mfa-resolver-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke jepsen jepsen-binary jepsen-up jepsen-down jepsen-unit ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template scratch-prune scratch-prune-dry-run scratch-timer-install
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -675,6 +675,11 @@ jepsen-up:
 
 jepsen-down:
 	$(JEPSEN_COMPOSE) down -v --remove-orphans
+
+## `jepsen-unit` runs the Jepsen project's unit tests (`lein test`) in the
+## control container. The Jepsen workflow runs it before the suite.
+jepsen-unit: jepsen-up
+	$(JEPSEN_COMPOSE) exec -T control jepsen-run unit
 
 ## `make jepsen` runs the whole suite; `make jepsen TEST=<name>` runs one
 ## catalog test (comma-separate several). TIME_LIMIT is each test's fault

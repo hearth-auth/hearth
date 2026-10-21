@@ -33,6 +33,15 @@
          (select-keys (auth/redirect-params "https://h/cb?error=access_denied&state=s")
                       [:error]))))
 
+(deftest a-sign-in-redirect-can-come-as-a-continue-page
+  ; A sign-in POST answers a 200 page with a Refresh header in place of its
+  ; 303, so CSP form-action does not block the redirect after it
+  ; (src/protocol/web/continue_page.rs).
+  (is (true? (auth/redirected? {:status 303 :headers {"location" ["/ui/account"]}})))
+  (is (true? (auth/redirected? {:status 200 :headers {"refresh" ["0;url=/ui/account"]}})))
+  (is (false? (auth/redirected? {:status 200 :headers {}})))
+  (is (false? (auth/redirected? {:status 400 :headers {"refresh" ["0;url=/ui/account"]}}))))
+
 (deftest the-hidden-csrf-field-comes-from-the-form
   (is (= "tok-1" (auth/hidden-field "<input type=\"hidden\" name=\"_csrf\" value=\"tok-1\">"
                                     "_csrf")))
