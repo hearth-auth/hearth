@@ -619,22 +619,79 @@ fn jemalloc_stat(name: &std::ffi::CStr) -> Option<u64> {
     u64::try_from(value).ok()
 }
 
-/// The interval between two heap profiles (#445).
+/// The interval between two heap profiles (#445): the value of
+/// `HEARTH_HEAP_PROFILE_INTERVAL_SECS`, or 15 minutes when it is missing,
+/// zero or not a number.
 #[cfg(all(
     feature = "heap-profile",
     not(any(target_env = "msvc", hearth_system_allocator))
 ))]
-fn heap_profile_interval(_secs: Option<&str>) -> std::time::Duration {
-    std::time::Duration::ZERO
+fn heap_profile_interval(secs: Option<&str>) -> std::time::Duration {
+    const DEFAULT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+    secs.and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .map_or(DEFAULT, std::time::Duration::from_secs)
 }
 
-/// Writes a jemalloc heap profile at each interval (#445).
+/// Writes a jemalloc heap profile at each [`heap_profile_interval`] (#445),
+/// in a `heap-profile` build started with `prof:true` in `_RJEM_MALLOC_CONF`.
+/// jemalloc names each file from `opt.prof_prefix`. A memory soak compares the
+/// profiles from before and after a step in its floor.
 #[cfg(all(
     feature = "heap-profile",
     not(any(target_env = "msvc", hearth_system_allocator))
 ))]
 fn start_heap_profile_dumps() {
-    let _ = heap_profile_interval(None);
+    let mut on = false;
+    let mut len = std::mem::size_of::<bool>();
+    // SAFETY: `opt.prof` is a `bool` option. `on` and `len` are live and
+    // writable, and `len` holds `on`'s size. No new value is written.
+    let read = unsafe {
+        tikv_jemalloc_sys::mallctl(
+            c"opt.prof".as_ptr(),
+            (&raw mut on).cast(),
+            &raw mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if read != 0 || !on {
+        warn!(
+            "heap-profile build, but jemalloc's profiler is off: set _RJEM_MALLOC_CONF=prof:true"
+        );
+        return;
+    }
+    let interval = heap_profile_interval(
+        std::env::var("HEARTH_HEAP_PROFILE_INTERVAL_SECS")
+            .ok()
+            .as_deref(),
+    );
+    info!(
+        interval_secs = interval.as_secs(),
+        "writing a jemalloc heap profile at each interval"
+    );
+    let spawned = std::thread::Builder::new()
+        .name("heap-profile".to_owned())
+        .spawn(move || loop {
+            std::thread::sleep(interval);
+            // SAFETY: `prof.dump` reads no old value, and with no new value
+            // (null pointer, length 0) jemalloc names the file itself.
+            let dumped = unsafe {
+                tikv_jemalloc_sys::mallctl(
+                    c"prof.dump".as_ptr(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    0,
+                )
+            };
+            if dumped != 0 {
+                warn!(errno = dumped, "jemalloc could not write a heap profile");
+            }
+        });
+    if let Err(e) = spawned {
+        warn!(error = %e, "the heap-profile thread did not start");
+    }
 }
 
 /// What [`cap_malloc_arenas`] did. Kept for the startup log, because tracing
