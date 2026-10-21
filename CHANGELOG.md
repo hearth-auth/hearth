@@ -12,6 +12,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `retained`. Next to the process RSS, they tell live heap apart from memory the allocator keeps
   after the server frees it. The gauges are absent on Windows, where the server keeps the
   system allocator.
+- **`heap-profile` cargo feature** (#445): a build with jemalloc's heap profiler, for memory
+  soaks. With `prof:true` in `_RJEM_MALLOC_CONF`, the server writes a heap profile every
+  `HEARTH_HEAP_PROFILE_INTERVAL_SECS` (default 900). Release builds and images do not include
+  it.
 
 ### Security
 - **TLS certificate checks reject the distrusted emSign intermediates** (RUSTSEC-2026-0381,

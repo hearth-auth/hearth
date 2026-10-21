@@ -22,10 +22,13 @@
 #   HEAPTRACK=1  run each plan line's Hearth under heaptrack, and end each soak
 #                with kill -9, so the trace's "leaked" memory is the live heap
 #                (needs an image with symbols: README, "Heap accounting")
+#   JEPROF=1     turn on jemalloc's heap profiler in each plan line's Hearth: a
+#                heap profile every 15 minutes (needs an image built with
+#                --features heap-profile: README, "Heap accounting")
 #
 # Results: results/<run>/<name>/ as cloud.sh writes them, plus variant.txt,
 # vmstat-gen<i>-<name>.txt and, for a soak, m<minute>.malloc_info.xml and, with
-# HEAPTRACK=1, heaptrack.zst.
+# HEAPTRACK=1, heaptrack.zst, and with JEPROF=1, jeprof.tar.gz.
 set -uo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -95,6 +98,9 @@ prepare() {
     sync; echo 3 > /proc/sys/vm/drop_caches" || { note "$name: remote restore failed"; return 1; }
   if [ "${HEAPTRACK:-}" = 1 ]; then
     heaptrack_setup || { note "$name: heaptrack setup FAILED"; return 1; }
+  fi
+  if [ "${JEPROF:-}" = 1 ]; then
+    jeprof_setup || { note "$name: jeprof setup FAILED"; return 1; }
   fi
   "$c" restart || return 1
   code=$(s "curl -sk -o /dev/null -w '%{http_code}' -X POST https://127.0.0.1:8443/admin/bootstrap")
@@ -172,6 +178,34 @@ heaptrack_collect() {
   note "$name: heaptrack trace $(du -h "$out/heaptrack.${f##*.}" | cut -f1)"
 }
 
+# Turns on jemalloc's heap profiler from Hearth's next start: a profile every
+# 15 minutes in /opt/hearth/out/jeprof, emptied for each plan line. The image
+# must be a `--features heap-profile` build, or Hearth logs that the profiler
+# is off and writes nothing.
+jeprof_setup() {
+  s "set -e
+    rm -rf /opt/hearth/out/jeprof
+    install -d -o hearth -g hearth /opt/hearth/out/jeprof
+    mkdir -p /etc/systemd/system/hearth.service.d
+    cat > /etc/systemd/system/hearth.service.d/jeprof.conf << 'EOF'
+[Service]
+Environment=_RJEM_MALLOC_CONF=prof:true,lg_prof_sample:19,prof_prefix:/opt/hearth/out/jeprof/hearth
+Environment=HEARTH_HEAP_PROFILE_INTERVAL_SECS=900
+EOF
+    systemctl daemon-reload"
+}
+
+# Fetches the soak's heap profiles as jeprof.tar.gz.
+jeprof_collect() {
+  local name=$1 out=$2 n
+  n=$(s "ls /opt/hearth/out/jeprof/*.heap 2> /dev/null | wc -l")
+  [ "${n:-0}" -gt 0 ] || { note "$name: no heap profiles"; return; }
+  s "tar -C /opt/hearth/out -czf /opt/hearth/out/jeprof-$name.tar.gz jeprof" \
+    && sp "root@$SERVER_PUBLIC:/opt/hearth/out/jeprof-$name.tar.gz" "$out/jeprof.tar.gz" \
+    || { note "$name: fetching the heap profiles FAILED"; return; }
+  note "$name: $n heap profiles, $(du -h "$out/jeprof.tar.gz" | cut -f1)"
+}
+
 soak() {
   local name=$1 journey=$2 rate=$3 secs=$4 minutes=${5:-} out=$results/$1 start_at m f
   prepare "$name" || { note "$name: prepare FAILED"; return; }
@@ -196,6 +230,7 @@ soak() {
     done
   done
   if [ "${HEAPTRACK:-}" = 1 ]; then heaptrack_collect "$name" "$out"; fi
+  if [ "${JEPROF:-}" = 1 ]; then jeprof_collect "$name" "$out"; fi
 }
 
 # The plan is read on fd 3: ssh inside the loop would read stdin and eat it.

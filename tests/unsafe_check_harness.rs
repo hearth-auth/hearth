@@ -41,7 +41,8 @@ const NOT_UNDER_MIRI: &[(&str, &str)] = &[
     (
         "src/main.rs",
         "allocator FFI only — glibc's `mallopt(M_ARENA_MAX)` at startup, jemalloc's \
-         `mallctl` statistics reads for `/metrics`, and `open_memstream` / \
+         `mallctl` (statistics reads for `/metrics`, and heap-profile dumps in a \
+         `heap-profile` build), and `open_memstream` / \
          `malloc_info` / `free` in its test. Miri cannot call foreign C functions, \
          and the binary's entry point does not build as a standalone harness file",
     ),

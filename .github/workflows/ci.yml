@@ -1295,6 +1295,13 @@ jobs:
           NEXTEST_PROFILE: ci
         run: PROTOC=protoc make test-no-dev-endpoints
 
+      # #445: the `heap-profile` build (jemalloc's heap profiler, for memory
+      # soaks) is in no release, so only this step compiles its tests.
+      - name: make test-heap-profile (jemalloc heap profiles of a --features heap-profile build)
+        env:
+          NEXTEST_PROFILE: ci
+        run: PROTOC=protoc make test-heap-profile
+
   # ── Dependency advisory gate (HEA-1652, audit 2026-08-28 §4.8#7, §4.12#3) ───
   #
   # Dedicated job so advisory/license/ban violations appear as their own named
