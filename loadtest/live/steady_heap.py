@@ -12,8 +12,9 @@ ok_rate, and started_at in milliseconds, the start of the load).
    (journeys / --duration-s) at least --min-rate-frac of --target-rate. Else INVALID.
 2. Steady state. The first scrape after --min-warmup-min from the start of the load where
    the hot tier holds 95 % of --hot-tier-capacity and evicted entries in the 10 minutes
-   before, and the block cache holds 90 % of --block-cache-bytes. None by
-   --max-warmup-min: INCONCLUSIVE.
+   before, and the block cache holds 90 % of --block-cache-bytes or grew less than 1 MiB
+   in those 10 minutes (a small store may never fill it). None by --max-warmup-min:
+   INCONCLUSIVE.
 3. The measurement window is the --measure-min after the steady state. A run that ends
    before the window ends: INCONCLUSIVE.
 4. Two values per scrape:
@@ -77,9 +78,13 @@ def steady_start(scrapes, t0, args):
         if ts < lo or ts > hi:
             continue
         before = bisect.bisect_right(times, ts - 600) - 1
-        evicting = before >= 0 and m[EVICTIONS] > scrapes[before][1][EVICTIONS]
-        if (m[ENTRIES] >= 0.95 * args.hot_tier_capacity and evicting
-                and m[BLOCK_CACHE] >= 0.9 * args.block_cache_bytes):
+        if before < 0:
+            continue
+        then = scrapes[before][1]
+        evicting = m[EVICTIONS] > then[EVICTIONS]
+        block_done = (m[BLOCK_CACHE] >= 0.9 * args.block_cache_bytes
+                      or m[BLOCK_CACHE] - then[BLOCK_CACHE] < MIB)
+        if m[ENTRIES] >= 0.95 * args.hot_tier_capacity and evicting and block_done:
             return ts
     return None
 
@@ -123,7 +128,7 @@ def run(d, args):
     m = dict(scrapes)[start]
     print(f"steady from minute {(start - t0) / 60:.0f} (hot tier {m[ENTRIES]:,.0f} of "
           f"{args.hot_tier_capacity:,} entries, evicting; block cache "
-          f"{m[BLOCK_CACHE] / MIB:.1f} of {args.block_cache_bytes / MIB:.1f} MiB)")
+          f"{m[BLOCK_CACHE] / MIB:.1f} of {args.block_cache_bytes / MIB:.1f} MiB, full or flat)")
     end = start + args.measure_min * 60
     if scrapes[-1][0] < end:
         print(f"the run ends before the measurement window: minute "
