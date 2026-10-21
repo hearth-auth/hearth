@@ -1,0 +1,118 @@
+# The steady-state memory test (#445): a release build of Hearth under the soak's k6
+# mix, with small cache limits and short lifetimes, so every cache reaches its limit
+# and the stored data levels off within the run. steady_heap.py then checks that the
+# live heap stops growing. About 4 hours with the build; a GitHub-hosted runner of a
+# public repository costs nothing. See loadtest/live/README.md, "Steady-state memory
+# test".
+name: Steady-state memory
+
+on:
+  schedule:
+    # Sundays, 04:00 UTC.
+    - cron: "0 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      load_min:
+        description: "Minutes of load (210: the latest steady start, 120, plus the 90-minute window)"
+        required: false
+        default: "210"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  steady-memory:
+    name: Steady-state memory
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Check the inputs
+        env:
+          LOAD_MIN: ${{ inputs.load_min }}
+        run: |
+          [[ "${LOAD_MIN:-210}" =~ ^[1-9][0-9]*$ ]] || { echo "load_min: whole minutes"; exit 1; }
+
+      - name: Analysis tests (steady_heap.py)
+        run: python3 loadtest/live/test_steady_heap.py
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-steady-memory-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-steady-memory-
+
+      - name: Install protoc
+        run: |
+          sudo apt-get install -y protobuf-compiler
+          protoc --version
+
+      # The shipped feature set: no dev-endpoints, jemalloc, release profile.
+      - name: Build hearth
+        env:
+          PROTOC: protoc
+        run: cargo build --release --locked --bin hearth
+
+      - name: Install k6
+        env:
+          K6_VERSION: 2.0.0
+          K6_SHA256: 2ae87d976f6cdba17185bdd980d8819a3a98e9092c6f0638cd58272ecefc8b90
+        run: |
+          cd "$RUNNER_TEMP"
+          tarball="k6-v$K6_VERSION-linux-amd64.tar.gz"
+          curl -fsSLO "https://github.com/grafana/k6/releases/download/v$K6_VERSION/$tarball"
+          echo "$K6_SHA256  $tarball" | sha256sum -c -
+          tar -xzf "$tarball"
+          sudo install -m 0755 "k6-v$K6_VERSION-linux-amd64/k6" /usr/local/bin/k6
+          k6 version
+
+      - name: Run the test
+        env:
+          LOAD_MIN: ${{ inputs.load_min }}
+        run: |
+          export LOAD_MIN="${LOAD_MIN:-210}"
+          bash loadtest/live/steady-memory.sh target/release/hearth "$RUNNER_TEMP/steady-memory"
+
+      - name: Summary
+        if: always()
+        run: |
+          f="$RUNNER_TEMP/steady-memory/verdict.txt"
+          if [ -f "$f" ]; then
+            { echo '```'; cat "$f"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No verdict: the test did not finish. See the log and the artifact." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Pack the results
+        if: always()
+        run: |
+          [ -d "$RUNNER_TEMP/steady-memory" ] || exit 0
+          tar -czf "$RUNNER_TEMP/steady-memory.tar.gz" -C "$RUNNER_TEMP" steady-memory
+
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: steady-memory-${{ github.run_id }}
+          path: ${{ runner.temp }}/steady-memory.tar.gz
+          retention-days: 30
+          if-no-files-found: warn

@@ -149,6 +149,52 @@ soaks on the same servers. A round on AWS takes 2–3 hours and costs a few doll
    admin session, run `loadtest/live/aws-iam.sh down`.
 7. **Publish** the results as one file, `docs/perf/<date>-<server>.md` (see "Report format").
 
+## Steady-state memory test (weekly, #445)
+
+The memory soaks below take a day and AWS servers. The steady-state memory test answers the same
+question in about 4 hours on a GitHub-hosted runner, which costs nothing for a public repository.
+`.github/workflows/steady-memory.yml` runs it every Sunday and on demand, on the commit it checks
+out. `steady-memory.sh <hearth binary> <out dir>` runs it on any Linux host with passwordless sudo.
+
+- **One host.** The server and k6 share the runner. The server is a release build without
+  `dev-endpoints`, in production mode, with TLS on 127.0.0.1 and the config from `gen-config.sh`.
+- **Small limits and short lifetimes.** Every cache reaches its limit, and the cleanup sweep
+  deletes rows as fast as the load creates them, before the measurement starts:
+
+  | Setting | Value |
+  |---------|-------|
+  | `storage.hot_tier_capacity` | 20,000 entries |
+  | `storage.block_cache_bytes` | 32 MiB |
+  | `storage.memtable_flush_bytes` | 8 MiB |
+  | `storage.compaction.interval_secs` | 600 |
+  | access token, refresh token and session lifetimes | 5 min, 10 min, 10 min |
+
+  The sweep deletes an expired session 1 hour after it expires (`SESSION_DELETE_GRACE_MICROS`, fixed
+  in the code), so the stored sessions level off after about 75 minutes.
+- **The load is the soak's:** k6 `mix` (refresh 65, login 15, userinfo 15, admin lookup 5) at 120
+  journeys/s, 500 VUs, `CHAIN_REFRESHES=20 PRESENT=chain`, 1,000 login users, for 210 minutes.
+- **The judgement** (`steady_heap.py`, tested by `test_steady_heap.py`) uses jemalloc's figures
+  (`hearth_allocator_*_bytes`), not RSS:
+  1. **Steady state:** the first scrape after minute 80 where the hot tier holds 95 % of its
+     limit and evicted entries in the 10 minutes before, and the block cache holds 90 % of its
+     limit or grew less than 1 MiB in those 10 minutes. None by minute 120: INCONCLUSIVE.
+  2. **Window:** the 90 minutes from there, in 10-minute bins.
+  3. **Two values:** the *unexplained live heap* (`allocated` minus the heap that the storage
+     gauges report: hot tier, block cache, SST readers, memtables) and the *allocator overhead*
+     (`resident` minus `allocated`). A least-squares line through the bin means gives each
+     slope and its 95 % bound (Student's t), per journey.
+  4. **Mark:** each value grows by less than 3 bytes per journey at the 95 % upper bound (about
+     1.2 MiB/h at 120 journeys/s), the same limit as the in-process gate `tests/journey_heap.rs`.
+  5. **Verdicts:** PASS when both bounds are below the mark; FAIL when a slope itself reaches it;
+     INCONCLUSIVE when a bound is too wide or the window is incomplete; INVALID when fewer than
+     99 % of the journeys succeed or the rate is below 95 % of the target. Every verdict except
+     PASS fails the workflow.
+- **What a PASS does not show:** how much memory the default limits use when they are full, and
+  anything that runs on a daily timer (the audit prune, for example).
+
+The artifact `steady-memory-<run id>` holds `metrics.txt`, `k6-summary.json`, `server.log` and
+`verdict.txt`.
+
 ## Memory soaks (#445)
 
 A memory soak answers one question: does Hearth's memory stop growing once its caches are full?

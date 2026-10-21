@@ -24,6 +24,8 @@
 # Environment (optional), for a soak that must fill every cache within the run:
 #   HOT_TIER_CAPACITY   storage.hot_tier_capacity (default: auto-size from memory)
 #   BLOCK_CACHE_BYTES   storage.block_cache_bytes (default: 256 MiB)
+#   MEMTABLE_FLUSH_BYTES     storage.memtable_flush_bytes (default: 64 MiB)
+#   COMPACTION_INTERVAL_SECS storage.compaction.interval_secs (default: 3600)
 #   SERVER_RUST_LOG     RUST_LOG for the server (default: unset, so log_level applies)
 #   CLAIMS_CACHE_MAX    token.claims_cache_max (default: Hearth's, 65536)
 # and, for a soak whose stored data must level off (durations such as 30m, 1h, 7d):
@@ -51,7 +53,8 @@ if ! [[ $login_users =~ ^[0-9]+$ ]] || [ "$login_users" -lt 1 ]; then
 fi
 
 storage_extra=""
-for setting in HOT_TIER_CAPACITY:hot_tier_capacity BLOCK_CACHE_BYTES:block_cache_bytes; do
+for setting in HOT_TIER_CAPACITY:hot_tier_capacity BLOCK_CACHE_BYTES:block_cache_bytes \
+  MEMTABLE_FLUSH_BYTES:memtable_flush_bytes; do
   var=${setting%%:*}
   value=${!var:-}
   [ -n "$value" ] || continue
@@ -61,6 +64,13 @@ for setting in HOT_TIER_CAPACITY:hot_tier_capacity BLOCK_CACHE_BYTES:block_cache
   fi
   storage_extra+=$'\n'"  ${setting#*:}: $value"
 done
+if [ -n "${COMPACTION_INTERVAL_SECS:-}" ]; then
+  if ! [[ $COMPACTION_INTERVAL_SECS =~ ^[1-9][0-9]*$ ]]; then
+    echo "gen-config: COMPACTION_INTERVAL_SECS must be a positive integer" >&2
+    exit 2
+  fi
+  storage_extra+=$'\n'"  compaction:"$'\n'"    interval_secs: $COMPACTION_INTERVAL_SECS"
+fi
 
 # Durations: a whole number and one unit.
 for var in ACCESS_TOKEN_TTL REFRESH_TOKEN_TTL SESSION_TTL; do
