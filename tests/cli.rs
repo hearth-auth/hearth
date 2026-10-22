@@ -197,9 +197,15 @@ async fn serve_dev_exports_the_allocator_memory_on_metrics() {
     let resident = read("hearth_allocator_resident_bytes");
     let metadata = read("hearth_allocator_metadata_bytes");
     read("hearth_allocator_retained_bytes");
+    // jemalloc counts the bytes in its thread caches as allocated.
+    let tcache = read("hearth_allocator_tcache_bytes");
     assert!(
         allocated > 0.0 && allocated <= active && active < resident && metadata > 0.0,
         "allocated {allocated}, active {active}, resident {resident}, metadata {metadata}"
+    );
+    assert!(
+        tcache <= allocated,
+        "tcache {tcache} above allocated {allocated}"
     );
 }
 

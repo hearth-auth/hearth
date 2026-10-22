@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Added
+- **`hearth_allocator_tcache_bytes` on `/metrics`** (#445): the bytes of freed allocations that
+  the allocator's thread caches keep for reuse. jemalloc counts them in
+  `hearth_allocator_allocated_bytes`, so `allocated` minus this gauge is closer to the live heap.
+  Absent where the other allocator gauges are absent (Windows).
+
 ## [4.5.1] — 2026-10-21
 
 No changelog entries for this release. The [GitHub release](https://github.com/hearth-auth/hearth/releases/tag/v4.5.1) lists its commits.

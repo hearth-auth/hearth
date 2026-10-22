@@ -1176,11 +1176,15 @@ pub struct AllocatorStats {
     /// Bytes of address space that the allocator returned to the system but
     /// keeps mapped for reuse. Not in physical memory.
     pub retained: u64,
+    /// Bytes of freed allocations that the threads' caches keep for reuse.
+    /// The allocator counts them in `allocated`, so `allocated` minus this
+    /// figure is closer to the live heap.
+    pub tcache: u64,
 }
 
 impl Metrics {
     /// Exports the process's allocator memory on every scrape (#445): the
-    /// `hearth_allocator_{allocated,active,resident,metadata,retained}_bytes`
+    /// `hearth_allocator_{allocated,active,resident,metadata,retained,tcache}_bytes`
     /// gauges, read from `source` each time.
     ///
     /// The binary installs its allocator's reader at startup. Until then, and
@@ -1207,6 +1211,7 @@ struct AllocatorCollector {
     resident: Gauge,
     metadata: Gauge,
     retained: Gauge,
+    tcache: Gauge,
 }
 
 impl AllocatorCollector {
@@ -1237,16 +1242,22 @@ impl AllocatorCollector {
                 "Bytes of address space the allocator returned to the system and keeps \
                  mapped for reuse",
             ),
+            tcache: gauge(
+                "hearth_allocator_tcache_bytes",
+                "Bytes of freed allocations that the allocator's thread caches keep for \
+                 reuse, counted in hearth_allocator_allocated_bytes",
+            ),
         }
     }
 
-    fn gauges(&self) -> [&Gauge; 5] {
+    fn gauges(&self) -> [&Gauge; 6] {
         [
             &self.allocated,
             &self.active,
             &self.resident,
             &self.metadata,
             &self.retained,
+            &self.tcache,
         ]
     }
 }
@@ -1270,6 +1281,7 @@ impl Collector for AllocatorCollector {
             stats.resident,
             stats.metadata,
             stats.retained,
+            stats.tcache,
         ];
         for (gauge, bytes) in self.gauges().into_iter().zip(values) {
             #[allow(clippy::cast_precision_loss)] // exact below 2^53 bytes
@@ -1376,12 +1388,13 @@ mod tests {
     /// exports nothing, because a 0 would read as an empty heap.
     #[test]
     fn allocator_gauges_report_the_installed_reader() {
-        const GAUGES: [&str; 5] = [
+        const GAUGES: [&str; 6] = [
             "hearth_allocator_allocated_bytes",
             "hearth_allocator_active_bytes",
             "hearth_allocator_resident_bytes",
             "hearth_allocator_metadata_bytes",
             "hearth_allocator_retained_bytes",
+            "hearth_allocator_tcache_bytes",
         ];
         let metrics = Metrics::new();
         let before = metrics.render();
@@ -1398,11 +1411,12 @@ mod tests {
                     resident: 33,
                     metadata: 44,
                     retained: 55,
+                    tcache: 66,
                 })
             })
             .expect("first install");
         let rendered = metrics.render();
-        for (gauge, value) in GAUGES.into_iter().zip([11, 22, 33, 44, 55]) {
+        for (gauge, value) in GAUGES.into_iter().zip([11, 22, 33, 44, 55, 66]) {
             assert!(
                 rendered.contains(&format!("\n{gauge} {value}\n")),
                 "missing {gauge} {value} in:\n{rendered}"

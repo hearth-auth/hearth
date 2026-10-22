@@ -593,6 +593,8 @@ fn jemalloc_stats() -> Option<hearth::metrics::AllocatorStats> {
         resident: jemalloc_stat(c"stats.resident")?,
         metadata: jemalloc_stat(c"stats.metadata")?,
         retained: jemalloc_stat(c"stats.retained")?,
+        // Arena 4096 is MALLCTL_ARENAS_ALL: the sum over every arena.
+        tcache: jemalloc_stat(c"stats.arenas.4096.tcache_bytes")?,
     })
 }
 
