@@ -26,9 +26,14 @@ ok_rate, and started_at in milliseconds, the start of the load).
    Each value is averaged per --bin-min bin. A least-squares line through the bin means
    gives the slope and its 95 % half-width (memory.fit, Student's t). Divided by the
    achieved rate, the slope is in bytes per journey.
-5. Per value: PASS when slope + half-width < --max-bytes-per-journey, FAIL when the slope
-   itself is at or above it, else INCONCLUSIVE. The run gets the worst verdict, in the
-   order INVALID, FAIL, INCONCLUSIVE, PASS. The exit status is 0 on PASS, else 1.
+5. The budget: the mean of the bins in the first --budget-base-min of the window is the
+   start, and no bin may be more than --budget-frac above it. The budget catches a jump
+   that the slope misses, and it follows the test's config, because the start does.
+6. Per value: PASS when the slope is below --max-bytes-per-journey and every bin is
+   within the budget, else FAIL. The 95 % bound is printed, but it does not block a PASS:
+   the 19 MiB Argon2 buffers make it wider than the mark even for a heap that does not
+   grow (#445). The run gets the worst verdict, in the order INVALID, FAIL, INCONCLUSIVE,
+   PASS. The exit status is 0 on PASS, else 1.
 """
 import argparse
 import bisect
@@ -98,9 +103,14 @@ def judge(name, points, start, rate, args):
     slope, half = fit(means)
     per_j, half_j = slope / rate, half / rate
     mark = args.max_bytes_per_journey
-    verdict = "PASS" if per_j + half_j < mark else "FAIL" if per_j >= mark else "INCONCLUSIVE"
+    base = statistics.mean(y for x, y in means if x < args.budget_base_min * 60)
+    limit = base * (1 + args.budget_frac)
+    highest = max(y for _, y in means)
+    verdict = "PASS" if per_j < mark and highest <= limit else "FAIL"
     print(f"{name}: {per_j:+.1f} B/journey ({slope * 3600 / MIB:+.2f} MiB/h; 95 % bound "
-          f"{per_j + half_j:+.1f}; mark < {mark:g}) {verdict}")
+          f"{per_j + half_j:+.1f}; mark < {mark:g}); highest bin {highest / MIB:.1f} MiB, "
+          f"limit {limit / MIB:.1f} MiB (start {base / MIB:.1f} MiB + "
+          f"{args.budget_frac * 100:g} %) {verdict}")
     return verdict
 
 
@@ -154,9 +164,11 @@ def main(argv=None):
     p.add_argument("--min-ok-rate", type=float, default=0.99)
     p.add_argument("--min-warmup-min", type=float, default=80)
     p.add_argument("--max-warmup-min", type=float, default=120)
-    p.add_argument("--measure-min", type=float, default=90)
+    p.add_argument("--measure-min", type=float, default=180)
     p.add_argument("--bin-min", type=float, default=10)
     p.add_argument("--max-bytes-per-journey", type=float, default=3.0)
+    p.add_argument("--budget-base-min", type=float, default=30)
+    p.add_argument("--budget-frac", type=float, default=0.30)
     p.add_argument("run_dir")
     args = p.parse_args(argv)
     verdict = run(args.run_dir, args)

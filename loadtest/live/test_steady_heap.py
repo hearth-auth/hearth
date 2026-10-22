@@ -22,8 +22,9 @@ BLOCK = 32 * MIB
 RATE = 120.0
 
 
-def run(d, minutes=215, leak=0.0, overhead=0.0, fill_min=40, ok_rate=0.999, rate_frac=1.0,
-        wobble_mib=0.0, block_top=1.0, block_fill_min=None, seed=1):
+def run(d, minutes=305, leak=0.0, overhead=0.0, fill_min=40, ok_rate=0.999, rate_frac=1.0,
+        wobble_mib=0.0, block_top=1.0, block_fill_min=None, spike_mib=0.0, spike_at=170,
+        seed=1):
     """Writes a run's metrics.txt and k6-summary.json to d.
 
     Scrapes every 5 s from T0, where the load starts. The hot tier and the block cache fill
@@ -35,6 +36,7 @@ def run(d, minutes=215, leak=0.0, overhead=0.0, fill_min=40, ok_rate=0.999, rate
     plus `leak` bytes per journey, plus noise. `resident` is `allocated` plus a fixed
     overhead, plus `overhead` bytes per journey. wobble_mib adds a square wave with a
     20-minute period from minute 80, which leaves the slope near zero and the bound wide.
+    spike_mib adds that much to `allocated` for the 10 minutes from minute spike_at.
     """
     rng = random.Random(seed)
     rate = RATE * rate_frac
@@ -52,8 +54,9 @@ def run(d, minutes=215, leak=0.0, overhead=0.0, fill_min=40, ok_rate=0.999, rate
         wobble = 0.0
         if wobble_mib and m >= 80:
             wobble = wobble_mib * MIB * (1 if int((m - 80) // 10) % 2 == 0 else -1)
+        spike = spike_mib * MIB if spike_at <= m < spike_at + 10 else 0.0
         allocated = (60 * MIB + hot + block + sst + 1.5 * memtable + leak * rate * t
-                     + wobble + rng.gauss(0, 0.5 * MIB))
+                     + wobble + spike + rng.gauss(0, 0.5 * MIB))
         resident = allocated + 20 * MIB + overhead * rate * t + rng.gauss(0, 0.5 * MIB)
         ts = T0 + t
         for name, value in (
@@ -81,7 +84,7 @@ def judge(d, *extra):
     with contextlib.redirect_stdout(out):
         code = steady_heap.main([
             "--hot-tier-capacity", str(CAP), "--block-cache-bytes", str(BLOCK),
-            "--duration-s", str(215 * 60), "--target-rate", str(RATE), *extra, d])
+            "--duration-s", str(305 * 60), "--target-rate", str(RATE), *extra, d])
     return code, out.getvalue()
 
 
@@ -99,6 +102,9 @@ class SteadyHeapTest(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("VERDICT: PASS", out)
         self.assertIn("steady from minute 80", out)
+        self.assertIn("window: minutes 80-260, 18 bins of 10 min", out)
+        self.assertRegex(out, r"unexplained live heap: .*highest bin [\d.]+ MiB, limit [\d.]+ MiB "
+                              r"\(start [\d.]+ MiB \+ 30 %\) PASS")
 
     def test_a_live_heap_leak_fails(self):
         run(self.d, leak=10.0)
@@ -120,11 +126,32 @@ class SteadyHeapTest(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("VERDICT: PASS", out)
 
-    def test_a_wide_bound_is_inconclusive(self):
+    def test_a_wide_bound_does_not_block_a_pass(self):
+        # The square wave widens the bound past the mark, but the slope stays near zero
+        # and every bin stays within 30 % of the start.
         run(self.d, wobble_mib=10.0)
         code, out = judge(self.d)
+        self.assertEqual(code, 0, out)
+        self.assertIn("VERDICT: PASS", out)
+        bound = float(out.split("unexplained live heap:")[1].split("95 % bound ")[1].split(";")[0])
+        self.assertGreater(bound, 3.0, out)
+
+    def test_a_jump_above_the_budget_fails(self):
+        # One bin in the middle of the window is 30 MiB (about 45 %) above the start. The
+        # slope stays below the mark, so only the budget fails the run.
+        run(self.d, spike_mib=30.0)
+        code, out = judge(self.d)
         self.assertEqual(code, 1, out)
-        self.assertIn("VERDICT: INCONCLUSIVE", out)
+        self.assertIn("VERDICT: FAIL", out)
+        self.assertRegex(out, r"unexplained live heap: [+-][0-2]\.\d B/journey")
+        self.assertRegex(out, r"unexplained live heap: .*limit [\d.]+ MiB .* FAIL")
+
+    def test_a_step_within_the_budget_and_below_the_mark_passes(self):
+        # Like the jump, but 5 MiB (about 8 %): within the budget.
+        run(self.d, spike_mib=5.0)
+        code, out = judge(self.d)
+        self.assertEqual(code, 0, out)
+        self.assertIn("VERDICT: PASS", out)
 
     def test_caches_that_never_fill_are_inconclusive(self):
         run(self.d, fill_min=150)
@@ -152,8 +179,8 @@ class SteadyHeapTest(unittest.TestCase):
         self.assertRegex(out, r"steady from minute 10[0-9]")
 
     def test_a_run_shorter_than_the_window_is_inconclusive(self):
-        run(self.d, minutes=150)
-        code, out = judge(self.d, "--duration-s", str(150 * 60))
+        run(self.d, minutes=250)
+        code, out = judge(self.d, "--duration-s", str(250 * 60))
         self.assertEqual(code, 1, out)
         self.assertIn("VERDICT: INCONCLUSIVE", out)
         self.assertIn("ends before the measurement window", out)

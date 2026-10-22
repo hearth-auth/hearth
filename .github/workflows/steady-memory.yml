@@ -1,7 +1,7 @@
 # The steady-state memory test (#445): a release build of Hearth under the soak's k6
 # mix, with small cache limits and short lifetimes, so every cache reaches its limit
 # and the stored data levels off within the run. steady_heap.py then checks that the
-# live heap stops growing. About 4 hours with the build; a GitHub-hosted runner of a
+# live heap stops growing. About 5.5 hours with the build; a GitHub-hosted runner of a
 # public repository costs nothing. See loadtest/live/README.md, "Steady-state memory
 # test". A dispatch with heap_profile runs the same test with jemalloc's heap profiler,
 # to find what holds the memory after a FAIL.
@@ -14,9 +14,9 @@ on:
   workflow_dispatch:
     inputs:
       load_min:
-        description: "Minutes of load (210: the latest steady start, 120, plus the 90-minute window)"
+        description: "Minutes of load (300: the latest steady start, 120, plus the 180-minute window)"
         required: false
-        default: "210"
+        default: "300"
       heap_profile:
         description: "A heap-profile build that writes a jemalloc heap profile every 5 minutes (its verdict does not count)"
         type: boolean
@@ -34,7 +34,8 @@ jobs:
   steady-memory:
     name: Steady-state memory
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    # 300 minutes of load, the build and the start-up; GitHub's limit is 360.
+    timeout-minutes: 345
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -45,7 +46,7 @@ jobs:
         env:
           LOAD_MIN: ${{ inputs.load_min }}
         run: |
-          [[ "${LOAD_MIN:-210}" =~ ^[1-9][0-9]*$ ]] || { echo "load_min: whole minutes"; exit 1; }
+          [[ "${LOAD_MIN:-300}" =~ ^[1-9][0-9]*$ ]] || { echo "load_min: whole minutes"; exit 1; }
 
       - name: Analysis tests (steady_heap.py)
         run: python3 loadtest/live/test_steady_heap.py
@@ -107,7 +108,7 @@ jobs:
           LOAD_MIN: ${{ inputs.load_min }}
           HEAP_PROFILE: ${{ inputs.heap_profile && '1' || '0' }}
         run: |
-          export LOAD_MIN="${LOAD_MIN:-210}"
+          export LOAD_MIN="${LOAD_MIN:-300}"
           bash loadtest/live/steady-memory.sh target/release/hearth "$RUNNER_TEMP/steady-memory"
 
       - name: Summary
