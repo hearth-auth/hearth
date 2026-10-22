@@ -22,6 +22,7 @@
 #   BLOCK_CACHE_BYTES         storage.block_cache_bytes (33554432)
 #   MEMTABLE_FLUSH_BYTES      storage.memtable_flush_bytes (8388608)
 #   COMPACTION_INTERVAL_SECS  storage.compaction.interval_secs (600)
+#   CLAIMS_CACHE_MAX          token.claims_cache_max (2048)
 #   ACCESS_TOKEN_TTL, REFRESH_TOKEN_TTL, SESSION_TTL  (5m, 10m, 10m)
 #   HEAP_PROFILE              1: a heap-profile run (0). The binary must be a
 #                             --features heap-profile build. The server writes a
@@ -50,6 +51,7 @@ export HOT_TIER_CAPACITY=${HOT_TIER_CAPACITY:-20000}
 export BLOCK_CACHE_BYTES=${BLOCK_CACHE_BYTES:-33554432}
 export MEMTABLE_FLUSH_BYTES=${MEMTABLE_FLUSH_BYTES:-8388608}
 export COMPACTION_INTERVAL_SECS=${COMPACTION_INTERVAL_SECS:-600}
+export CLAIMS_CACHE_MAX=${CLAIMS_CACHE_MAX:-2048}
 export ACCESS_TOKEN_TTL=${ACCESS_TOKEN_TTL:-5m}
 export REFRESH_TOKEN_TTL=${REFRESH_TOKEN_TTL:-10m}
 export SESSION_TTL=${SESSION_TTL:-10m}

@@ -167,10 +167,18 @@ out. `steady-memory.sh <hearth binary> <out dir>` runs it on any Linux host with
   | `storage.block_cache_bytes` | 32 MiB |
   | `storage.memtable_flush_bytes` | 8 MiB |
   | `storage.compaction.interval_secs` | 600 |
+  | `token.claims_cache_max` | 2,048 entries |
   | access token, refresh token and session lifetimes | 5 min, 10 min, 10 min |
 
   The sweep deletes an expired session 1 hour after it expires (`SESSION_DELETE_GRACE_MICROS`, fixed
   in the code), so the stored sessions level off after about 75 minutes.
+
+  The token claims cache removes expired claims only when it is full. The `userinfo` journeys
+  validate about 17 new access tokens a second, so about 5,000 are valid at one time, and a
+  2,048-entry cache stays full of valid claims. With the default 65,536 entries, the cache
+  filled with expired claims for about an hour (about 100 MiB), then removed them within a few
+  minutes. This 62-minute cycle failed the judgement of run 39621109569, and heap-profile run
+  39703430574 found its cause.
 - **The load is the soak's:** k6 `mix` (refresh 65, login 15, userinfo 15, admin lookup 5) at 120
   journeys/s, 500 VUs, `CHAIN_REFRESHES=20 PRESENT=chain`, 1,000 login users, for 210 minutes.
 - **The judgement** (`steady_heap.py`, tested by `test_steady_heap.py`) uses jemalloc's figures
@@ -206,11 +214,13 @@ The artifact `steady-memory-<run id>` holds `metrics.txt`, `k6-summary.json`, `s
   binary only when that path is the program path on its command line, so first change the path
   in the unpacked artifact:
   `sed -i "s|/home/runner/work/hearth/hearth/target/release/hearth|$PWD/hearth|" jeprof/*.heap`.
-- Read two profiles as in "Heap accounting" below:
-  `jeprof --text --cum --base=<before>.heap $PWD/hearth <after>.heap`. Pick the two profiles
-  from the unexplained live heap in `metrics.txt`, for example the low point and the peak of a
-  cycle. jeprof removes the `<...>` parts of Rust names, but Hearth's own functions keep their
-  paths.
+- Compare two profiles with
+  `jeprof --collapsed --base=<before>.heap $PWD/hearth <after>.heap`. Each output line is one
+  call stack with its change in bytes, and the names are complete: group the lines by their
+  innermost `hearth::` frame. Pick the two profiles from the unexplained live heap in
+  `metrics.txt`, for example the low point and the peak of a cycle. The `--text` view of
+  "Heap accounting" below is less useful here: it charges most bytes to jemalloc's own frame,
+  `_rjem_je_prof_backtrace`, and it removes the `<...>` parts of Rust names.
 - The profiler changes the heap, so the verdict of a heap-profile run does not count. The
   workflow passes when the server wrote profiles.
 
