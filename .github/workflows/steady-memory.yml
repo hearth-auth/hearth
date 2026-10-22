@@ -3,7 +3,8 @@
 # and the stored data levels off within the run. steady_heap.py then checks that the
 # live heap stops growing. About 4 hours with the build; a GitHub-hosted runner of a
 # public repository costs nothing. See loadtest/live/README.md, "Steady-state memory
-# test".
+# test". A dispatch with heap_profile runs the same test with jemalloc's heap profiler,
+# to find what holds the memory after a FAIL.
 name: Steady-state memory
 
 on:
@@ -16,6 +17,11 @@ on:
         description: "Minutes of load (210: the latest steady start, 120, plus the 90-minute window)"
         required: false
         default: "210"
+      heap_profile:
+        description: "A heap-profile build that writes a jemalloc heap profile every 5 minutes (its verdict does not count)"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -57,20 +63,31 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: ${{ runner.os }}-steady-memory-${{ hashFiles('**/Cargo.lock') }}
+          # The heap-profile build has other features and flags: its own target cache.
+          key: ${{ runner.os }}-${{ inputs.heap_profile && 'steady-heap-profile' || 'steady-memory' }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-steady-memory-
+            ${{ runner.os }}-${{ inputs.heap_profile && 'steady-heap-profile' || 'steady-memory' }}-
 
       - name: Install protoc
         run: |
           sudo apt-get install -y protobuf-compiler
           protoc --version
 
-      # The shipped feature set: no dev-endpoints, jemalloc, release profile.
+      # The shipped feature set: no dev-endpoints, jemalloc, release profile. A heap-profile
+      # run adds the profiler, and keeps the symbols and unwind tables that jeprof needs
+      # (loadtest/live/README.md, "Heap accounting").
       - name: Build hearth
         env:
           PROTOC: protoc
-        run: cargo build --release --locked --bin hearth
+          HEAP_PROFILE: ${{ inputs.heap_profile }}
+        run: |
+          if [ "$HEAP_PROFILE" = true ]; then
+            export CARGO_PROFILE_RELEASE_STRIP=none CARGO_PROFILE_RELEASE_DEBUG=line-tables-only
+            export RUSTFLAGS="-C force-unwind-tables"
+            cargo build --release --locked --features heap-profile --bin hearth
+          else
+            cargo build --release --locked --bin hearth
+          fi
 
       - name: Install k6
         env:
@@ -88,6 +105,7 @@ jobs:
       - name: Run the test
         env:
           LOAD_MIN: ${{ inputs.load_min }}
+          HEAP_PROFILE: ${{ inputs.heap_profile && '1' || '0' }}
         run: |
           export LOAD_MIN="${LOAD_MIN:-210}"
           bash loadtest/live/steady-memory.sh target/release/hearth "$RUNNER_TEMP/steady-memory"
@@ -104,8 +122,14 @@ jobs:
 
       - name: Pack the results
         if: always()
+        env:
+          HEAP_PROFILE: ${{ inputs.heap_profile }}
         run: |
           [ -d "$RUNNER_TEMP/steady-memory" ] || exit 0
+          # jeprof reads the profiles with the binary that wrote them.
+          if [ "$HEAP_PROFILE" = true ] && [ -f target/release/hearth ]; then
+            cp target/release/hearth "$RUNNER_TEMP/steady-memory/hearth"
+          fi
           tar -czf "$RUNNER_TEMP/steady-memory.tar.gz" -C "$RUNNER_TEMP" steady-memory
 
       - name: Upload the results

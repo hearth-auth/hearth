@@ -195,6 +195,19 @@ out. `steady-memory.sh <hearth binary> <out dir>` runs it on any Linux host with
 The artifact `steady-memory-<run id>` holds `metrics.txt`, `k6-summary.json`, `server.log` and
 `verdict.txt`.
 
+**A heap-profile run** finds what holds the memory after a FAIL. Dispatch it with
+`gh workflow run steady-memory.yml -f heap_profile=true`. It runs the same test with a
+`--features heap-profile` build that keeps its symbols and unwind tables (`HEAP_PROFILE=1` for
+`steady-memory.sh`):
+
+- The server writes a jemalloc heap profile every 5 minutes (`HEAP_PROFILE_INTERVAL_SECS`) to
+  `jeprof/` in the out dir. The artifact also holds the binary, `hearth`.
+- Read two profiles as in "Heap accounting" below:
+  `jeprof --text --cum --base=<before>.heap hearth <after>.heap`. Pick the two profiles from
+  the unexplained live heap in `metrics.txt`, for example the low point and the peak of a cycle.
+- The profiler changes the heap, so the verdict of a heap-profile run does not count. The
+  workflow passes when the server wrote profiles.
+
 ## Memory soaks (#445)
 
 A memory soak answers one question: does Hearth's memory stop growing once its caches are full?

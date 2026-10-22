@@ -23,10 +23,16 @@
 #   MEMTABLE_FLUSH_BYTES      storage.memtable_flush_bytes (8388608)
 #   COMPACTION_INTERVAL_SECS  storage.compaction.interval_secs (600)
 #   ACCESS_TOKEN_TTL, REFRESH_TOKEN_TTL, SESSION_TTL  (5m, 10m, 10m)
+#   HEAP_PROFILE              1: a heap-profile run (0). The binary must be a
+#                             --features heap-profile build. The server writes a
+#                             jemalloc heap profile to <out dir>/jeprof at each
+#                             HEAP_PROFILE_INTERVAL_SECS (300)
 #
 # The out dir receives server.log, metrics.txt, k6-summary.json, k6.txt and
 # verdict.txt. The exit status is steady_heap.py's (0 on PASS), or 2 when the
-# test could not run.
+# test could not run. The profiler changes the heap, so the verdict of a
+# heap-profile run does not count: its exit status is 0 when the server wrote
+# profiles.
 set -euo pipefail
 
 usage="usage: steady-memory.sh <hearth binary> <out dir>"
@@ -47,6 +53,8 @@ export COMPACTION_INTERVAL_SECS=${COMPACTION_INTERVAL_SECS:-600}
 export ACCESS_TOKEN_TTL=${ACCESS_TOKEN_TTL:-5m}
 export REFRESH_TOKEN_TTL=${REFRESH_TOKEN_TTL:-10m}
 export SESSION_TTL=${SESSION_TTL:-10m}
+HEAP_PROFILE=${HEAP_PROFILE:-0}
+HEAP_PROFILE_INTERVAL_SECS=${HEAP_PROFILE_INTERVAL_SECS:-300}
 
 log() { printf 'steady-memory: %s\n' "$*" >&2; }
 die() {
@@ -77,11 +85,22 @@ cp "$work/bundle/ca.crt" /opt/hearth/ca.crt
 cat "$work/bundle/ca.crt" /etc/ssl/certs/ca-certificates.crt > "$work/trust.pem"
 cp "$work/bundle/generator.env" "$work/generator.env"
 
+profile_conf=
+if [ "$HEAP_PROFILE" = 1 ]; then
+  mkdir -p "$out/jeprof"
+  # README, "Heap accounting": one sampled call stack per 512 KiB allocated.
+  profile_conf="prof:true,lg_prof_sample:19,prof_prefix:$out/jeprof/hearth"
+fi
+
 log "starting hearth ($hearth)"
 (
   set -a
   # shellcheck disable=SC1091
   . /opt/hearth/hearth.env
+  if [ -n "$profile_conf" ]; then
+    _RJEM_MALLOC_CONF=$profile_conf
+    HEARTH_HEAP_PROFILE_INTERVAL_SECS=$HEAP_PROFILE_INTERVAL_SECS
+  fi
   set +a
   exec "$hearth" serve --config /opt/hearth/hearth.yaml
 ) > "$out/server.log" 2>&1 &
@@ -102,6 +121,11 @@ for _ in $(seq 1 600); do
   sleep 1
 done
 ready || die "hearth is not ready after 600 s"
+if [ "$HEAP_PROFILE" = 1 ]; then
+  # The start-up log of a heap-profile build with the profiler on (src/main.rs).
+  grep -q 'writing a jemalloc heap profile at each interval' "$out/server.log" \
+    || die "the server writes no heap profiles: is $hearth a --features heap-profile build?"
+fi
 
 k6_env() {
   cd "$here/k6"
@@ -136,7 +160,20 @@ cleanup
 trap - EXIT
 
 set +e
+if [ "$HEAP_PROFILE" = 1 ]; then
+  echo "heap-profile run: the profiler is on, so this verdict does not count" \
+    | tee "$out/verdict.txt"
+else
+  : > "$out/verdict.txt"
+fi
 python3 "$here/steady_heap.py" --hot-tier-capacity "$HOT_TIER_CAPACITY" \
   --block-cache-bytes "$BLOCK_CACHE_BYTES" --duration-s $((LOAD_MIN * 60)) \
-  --target-rate "$RATE" "$out" | tee "$out/verdict.txt"
-exit "${PIPESTATUS[0]}"
+  --target-rate "$RATE" "$out" | tee -a "$out/verdict.txt"
+status=${PIPESTATUS[0]}
+if [ "$HEAP_PROFILE" = 1 ]; then
+  profiles=$(find "$out/jeprof" -name '*.heap' | wc -l)
+  log "$profiles heap profiles in $out/jeprof"
+  [ "$profiles" -gt 0 ] || die "the server wrote no heap profiles"
+  status=0
+fi
+exit "$status"
