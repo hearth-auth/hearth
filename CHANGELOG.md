@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.6.0] — 2026-10-22
+
 ### Added
 - **`hearth_allocator_tcache_bytes` on `/metrics`** (#445): the bytes of freed allocations that
   the allocator's thread caches keep for reuse. jemalloc counts them in
