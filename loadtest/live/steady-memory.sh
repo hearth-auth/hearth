@@ -15,8 +15,8 @@
 #   K6                        the k6 binary (k6)
 #   RATE                      journeys per second (120)
 #   VUS                       k6 VUs (500)
-#   LOAD_MIN                  minutes of load (210): the latest steady start, 120,
-#                             plus the 90-minute window
+#   LOAD_MIN                  minutes of load (300): the latest steady start, 120,
+#                             plus the 180-minute window
 #   LOGIN_USERS               users with a password (1000)
 #   HOT_TIER_CAPACITY         storage.hot_tier_capacity (20000)
 #   BLOCK_CACHE_BYTES         storage.block_cache_bytes (33554432)
@@ -45,7 +45,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 K6=${K6:-k6}
 RATE=${RATE:-120}
 VUS=${VUS:-500}
-LOAD_MIN=${LOAD_MIN:-210}
+LOAD_MIN=${LOAD_MIN:-300}
 LOGIN_USERS=${LOGIN_USERS:-1000}
 export HOT_TIER_CAPACITY=${HOT_TIER_CAPACITY:-20000}
 export BLOCK_CACHE_BYTES=${BLOCK_CACHE_BYTES:-33554432}
