@@ -331,6 +331,7 @@ The `/metrics` endpoint returns metrics in Prometheus text exposition format (`t
 | `hearth_allocator_resident_bytes` | gauge | — | Bytes of the allocator's pages in physical memory: `active`, freed pages not yet returned to the system, and `metadata`. The process RSS minus this figure is memory outside the allocator, such as thread stacks, file mappings and the heap of the C libraries the server links (#445) |
 | `hearth_allocator_metadata_bytes` | gauge | — | Bytes of the allocator's own bookkeeping (#445) |
 | `hearth_allocator_retained_bytes` | gauge | — | Bytes of address space the allocator returned to the system and keeps mapped for reuse. Not in physical memory, so not in RSS (#445) |
+| `hearth_allocator_tcache_bytes` | gauge | — | Bytes of freed allocations that the allocator's thread caches keep for reuse. jemalloc counts them in `hearth_allocator_allocated_bytes`, so `allocated` minus this figure is closer to the live heap. Each thread's cache has a fixed limit, so the figure grows with the number of threads, not with the stored data (#445) |
 | `hearth_kdf_in_flight` | gauge | — | Argon2id operations currently executing (holding an admission permit) |
 | `hearth_kdf_permits` | gauge | — | Configured max concurrent Argon2id operations (`security.password.kdf.max_in_flight`) |
 | `hearth_kdf_admin_permits` | gauge | — | Configured max concurrent Argon2id operations reserved for admin login (`security.password.kdf.admin_max_in_flight`) |

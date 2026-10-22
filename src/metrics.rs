@@ -1176,11 +1176,15 @@ pub struct AllocatorStats {
     /// Bytes of address space that the allocator returned to the system but
     /// keeps mapped for reuse. Not in physical memory.
     pub retained: u64,
+    /// Bytes of freed allocations that the threads' caches keep for reuse.
+    /// The allocator counts them in `allocated`, so `allocated` minus this
+    /// figure is closer to the live heap.
+    pub tcache: u64,
 }
 
 impl Metrics {
     /// Exports the process's allocator memory on every scrape (#445): the
-    /// `hearth_allocator_{allocated,active,resident,metadata,retained}_bytes`
+    /// `hearth_allocator_{allocated,active,resident,metadata,retained,tcache}_bytes`
     /// gauges, read from `source` each time.
     ///
     /// The binary installs its allocator's reader at startup. Until then, and
@@ -1207,6 +1211,7 @@ struct AllocatorCollector {
     resident: Gauge,
     metadata: Gauge,
     retained: Gauge,
+    tcache: Gauge,
 }
 
 impl AllocatorCollector {
@@ -1237,16 +1242,22 @@ impl AllocatorCollector {
                 "Bytes of address space the allocator returned to the system and keeps \
                  mapped for reuse",
             ),
+            tcache: gauge(
+                "hearth_allocator_tcache_bytes",
+                "Bytes of freed allocations that the allocator's thread caches keep for \
+                 reuse, counted in hearth_allocator_allocated_bytes",
+            ),
         }
     }
 
-    fn gauges(&self) -> [&Gauge; 5] {
+    fn gauges(&self) -> [&Gauge; 6] {
         [
             &self.allocated,
             &self.active,
             &self.resident,
             &self.metadata,
             &self.retained,
+            &self.tcache,
         ]
     }
 }
@@ -1270,6 +1281,7 @@ impl Collector for AllocatorCollector {
             stats.resident,
             stats.metadata,
             stats.retained,
+            stats.tcache,
         ];
         for (gauge, bytes) in self.gauges().into_iter().zip(values) {
             #[allow(clippy::cast_precision_loss)] // exact below 2^53 bytes
