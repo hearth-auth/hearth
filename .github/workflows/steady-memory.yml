@@ -70,7 +70,7 @@ jobs:
 
       - name: Install protoc
         run: |
-          sudo apt-get install -y protobuf-compiler
+          sudo apt-get update -qq && sudo apt-get install -y protobuf-compiler
           protoc --version
 
       # The shipped feature set: no dev-endpoints, jemalloc, release profile. A heap-profile
