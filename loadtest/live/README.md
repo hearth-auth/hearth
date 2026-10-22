@@ -202,9 +202,15 @@ The artifact `steady-memory-<run id>` holds `metrics.txt`, `k6-summary.json`, `s
 
 - The server writes a jemalloc heap profile every 5 minutes (`HEAP_PROFILE_INTERVAL_SECS`) to
   `jeprof/` in the out dir. The artifact also holds the binary, `hearth`.
+- The profiles name the binary by its path on the runner. jeprof finds the functions of the
+  binary only when that path is the program path on its command line, so first change the path
+  in the unpacked artifact:
+  `sed -i "s|/home/runner/work/hearth/hearth/target/release/hearth|$PWD/hearth|" jeprof/*.heap`.
 - Read two profiles as in "Heap accounting" below:
-  `jeprof --text --cum --base=<before>.heap hearth <after>.heap`. Pick the two profiles from
-  the unexplained live heap in `metrics.txt`, for example the low point and the peak of a cycle.
+  `jeprof --text --cum --base=<before>.heap $PWD/hearth <after>.heap`. Pick the two profiles
+  from the unexplained live heap in `metrics.txt`, for example the low point and the peak of a
+  cycle. jeprof removes the `<...>` parts of Rust names, but Hearth's own functions keep their
+  paths.
 - The profiler changes the heap, so the verdict of a heap-profile run does not count. The
   workflow passes when the server wrote profiles.
 
