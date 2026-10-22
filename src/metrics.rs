@@ -1376,12 +1376,13 @@ mod tests {
     /// exports nothing, because a 0 would read as an empty heap.
     #[test]
     fn allocator_gauges_report_the_installed_reader() {
-        const GAUGES: [&str; 5] = [
+        const GAUGES: [&str; 6] = [
             "hearth_allocator_allocated_bytes",
             "hearth_allocator_active_bytes",
             "hearth_allocator_resident_bytes",
             "hearth_allocator_metadata_bytes",
             "hearth_allocator_retained_bytes",
+            "hearth_allocator_tcache_bytes",
         ];
         let metrics = Metrics::new();
         let before = metrics.render();
@@ -1398,11 +1399,12 @@ mod tests {
                     resident: 33,
                     metadata: 44,
                     retained: 55,
+                    tcache: 66,
                 })
             })
             .expect("first install");
         let rendered = metrics.render();
-        for (gauge, value) in GAUGES.into_iter().zip([11, 22, 33, 44, 55]) {
+        for (gauge, value) in GAUGES.into_iter().zip([11, 22, 33, 44, 55, 66]) {
             assert!(
                 rendered.contains(&format!("\n{gauge} {value}\n")),
                 "missing {gauge} {value} in:\n{rendered}"
