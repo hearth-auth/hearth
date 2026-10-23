@@ -210,8 +210,9 @@ out. `steady-memory.sh <hearth binary> <out dir>` runs it on any Linux host with
   the number of different users, sessions or IP addresses. The test has 1,000 login users and
   one client IP, so a map keyed by user or by IP without a limit looks flat here.
 
-The artifact `steady-memory-<run id>` holds `metrics.txt`, `k6-summary.json`, `server.log` and
-`verdict.txt`.
+The artifact `steady-memory-<run id>` holds `metrics.txt`, `sampler.csv`, `k6-summary.json`,
+`server.log` and `verdict.txt`. `sampler.csv` (`sampler.sh`) gives the server's thread count, RSS
+and CPU once a second.
 
 **A heap-profile run** finds what holds the memory after a FAIL. Dispatch it with
 `gh workflow run steady-memory.yml -f heap_profile=true`. It runs the same test with a

@@ -29,8 +29,8 @@
 #                             jemalloc heap profile to <out dir>/jeprof at each
 #                             HEAP_PROFILE_INTERVAL_SECS (300)
 #
-# The out dir receives server.log, metrics.txt, k6-summary.json, k6.txt and
-# verdict.txt. The exit status is steady_heap.py's (0 on PASS), or 2 when the
+# The out dir receives server.log, metrics.txt, sampler.csv, k6-summary.json,
+# k6.txt and verdict.txt. The exit status is steady_heap.py's (0 on PASS), or 2 when the
 # test could not run. The profiler changes the heap, so the verdict of a
 # heap-profile run does not count: its exit status is 0 when the server wrote
 # profiles.
@@ -108,6 +108,9 @@ log "starting hearth ($hearth)"
 ) > "$out/server.log" 2>&1 &
 server=$!
 pids+=("$server")
+# Hearth's thread count, RSS and CPU, once a second.
+bash "$here/sampler.sh" "$out/sampler.csv" "" "$(basename "$hearth")" &
+pids+=("$!")
 
 ready() {
   curl -fsS -o /dev/null --max-time 4 --cacert /opt/hearth/ca.crt \
