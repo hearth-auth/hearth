@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Fixed
+- **Writes no longer stall at the end of each compaction** (#445): the SST writer syncs the
+  file every 4 MiB while it writes it, not only once at the end. One sync at the end sent a
+  whole compaction output (up to ~1 GB in the steady-state memory test) to the disk at once,
+  and writes waited behind it for up to seconds. Each waiting write kept a thread, so the
+  server's thread count and memory grew at compactions and never went down.
+
 ## [4.6.0] — 2026-10-22
 
 ### Added
