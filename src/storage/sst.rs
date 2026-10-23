@@ -133,6 +133,15 @@ const TRAILER_SIZE: usize = 12;
 /// per ~64 blocks instead of one per block.
 const WRITE_CHUNK_BYTES: usize = 256 * 1024;
 
+/// Bytes a [`V4BodyWriter`] writes to the file between two syncs of its data
+/// (#445). A compaction rewrites the whole store: up to ~1 GB in the
+/// steady-state memory test. With one sync at the end, the kernel sent all of
+/// it to the disk at once, and the WAL's syncs waited behind it, so writes
+/// stalled for up to seconds. Each stalled write kept a blocking-pool thread,
+/// and the pool never shrank. With a sync every 4 MiB, a WAL sync waits behind
+/// about 4 MiB at most.
+const SYNC_EVERY_BYTES: usize = 4 * 1024 * 1024;
+
 /// Minimum byte length of a serialized entry: type(1) + realm(16) + key_len(4)
 /// + val_len(4), with an empty key and an empty/tombstone value.
 ///
@@ -973,7 +982,8 @@ impl SstWriter {
 /// ([`SstWriter::write_sst_streaming_with_fs`]) both use it, so both produce
 /// byte-identical files. The module docs give the layout.
 ///
-/// Sealed blocks go to the file in chunks of at most [`WRITE_CHUNK_BYTES`].
+/// Sealed blocks go to the file in chunks of at most [`WRITE_CHUNK_BYTES`], and
+/// the writer syncs the file's data every [`SYNC_EVERY_BYTES`].
 /// The writer holds one data block's plaintext, one chunk, one partition's
 /// index entries and key hashes, and the footer's partition list: never the
 /// file, and never the whole block index or Bloom filter (HEA-1922, #445). A
@@ -989,6 +999,8 @@ struct V4BodyWriter<'a> {
     file_offset: u64,
     /// Sealed ciphertext not yet written to `file`.
     pending: Vec<u8>,
+    /// Bytes written to `file` since its data was last synced.
+    unsynced: usize,
     /// The ordinal the next sealed block gets.
     next_ordinal: u32,
     /// Plaintext of the data block being filled.
@@ -1023,6 +1035,7 @@ impl<'a> V4BodyWriter<'a> {
             dek,
             file_offset: TOTAL_HEADER_SIZE as u64,
             pending: Vec::with_capacity(WRITE_CHUNK_BYTES),
+            unsynced: 0,
             next_ordinal: 0,
             block: Vec::new(),
             block_first_key: None,
@@ -1084,7 +1097,12 @@ impl<'a> V4BodyWriter<'a> {
         self.file_offset = self.file_offset.saturating_add(ct.len() as u64);
         if !self.pending.is_empty() && self.pending.len() + ct.len() > WRITE_CHUNK_BYTES {
             self.file.write_all(&self.pending)?;
+            self.unsynced += self.pending.len();
             self.pending.clear();
+            if self.unsynced >= SYNC_EVERY_BYTES {
+                self.file.sync_data()?;
+                self.unsynced = 0;
+            }
         }
         self.pending.extend_from_slice(&ct);
         Ok(handle)
