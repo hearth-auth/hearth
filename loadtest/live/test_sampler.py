@@ -35,7 +35,7 @@ class SamplerTest(unittest.TestCase):
                 path = os.path.join(bin_dir, name)
                 with open(path, "w") as f:
                     f.write(f"#!/bin/sh\n{body}\n")
-                os.chmod(path, 0o755)
+                os.chmod(path, 0o700)
             # A process with a name that no other process has.
             name = "samplertest"
             followed = subprocess.Popen([sys.executable, "-c", (
