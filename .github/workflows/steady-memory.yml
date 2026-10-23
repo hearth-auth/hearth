@@ -48,8 +48,10 @@ jobs:
         run: |
           [[ "${LOAD_MIN:-300}" =~ ^[1-9][0-9]*$ ]] || { echo "load_min: whole minutes"; exit 1; }
 
-      - name: Analysis tests (steady_heap.py)
-        run: python3 loadtest/live/test_steady_heap.py
+      - name: Analysis tests (steady_heap.py, sampler.sh)
+        run: |
+          python3 loadtest/live/test_steady_heap.py
+          python3 loadtest/live/test_sampler.py
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable

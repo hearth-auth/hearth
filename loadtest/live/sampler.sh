@@ -31,7 +31,8 @@ dev=${2:-}
 proc=${3:-hearth}
 if [ -z "$dev" ]; then
   src=$(findmnt -no SOURCE --target /var/lib/hearth 2> /dev/null || findmnt -no SOURCE /)
-  dev=$(lsblk -no PKNAME "$src" 2> /dev/null | head -n 1)
+  # lsblk fails on a device it does not know, such as /dev/root on GitHub's runners.
+  dev=$(lsblk -no PKNAME "$src" 2> /dev/null | head -n 1 || true)
   [ -n "$dev" ] || dev=$(basename "$src")
 fi
 clk=$(getconf CLK_TCK)
@@ -57,7 +58,8 @@ while true; do
     fi
   fi
   mem=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
-  read -r writes sectors < <(awk -v d="$dev" '$3 == d {print $8, $10}' /proc/diskstats)
+  # No line for a device that /proc/diskstats does not list: the columns are 0.
+  read -r writes sectors < <(awk -v d="$dev" '$3 == d {print $8, $10}' /proc/diskstats) || true
   load=$(cut -d' ' -f1 /proc/loadavg)
   echo "$ts,$alive,$pid,$ticks,$clk,$rss,$threads,$fds,$mem,${writes:-0},${sectors:-0},$load,$anon,$file" >> "$out"
   sleep 1
