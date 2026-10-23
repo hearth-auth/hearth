@@ -5067,4 +5067,184 @@ mod tests {
             ));
         }
     }
+
+    /// Records the most bytes written to any file it creates between two syncs.
+    struct SyncGapFs {
+        inner: RealFs,
+        max_gap: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl SyncGapFs {
+        fn new() -> Self {
+            Self {
+                inner: RealFs,
+                max_gap: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+
+        fn max_gap(&self) -> usize {
+            self.max_gap.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    /// A file that [`SyncGapFs`] created.
+    struct SyncGapFile {
+        inner: Box<dyn FsFile>,
+        unsynced: std::sync::atomic::AtomicUsize,
+        max_gap: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl FsFile for SyncGapFile {
+        fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+            self.inner.write_all(buf)?;
+            let unsynced = self.unsynced.get_mut();
+            *unsynced += buf.len();
+            self.max_gap
+                .fetch_max(*unsynced, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+        fn read_to_end(&mut self, buf: &mut Vec<u8>) -> std::io::Result<usize> {
+            self.inner.read_to_end(buf)
+        }
+        fn sync_all(&self) -> std::io::Result<()> {
+            self.inner.sync_all()?;
+            self.unsynced.store(0, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+        fn sync_data(&self) -> std::io::Result<()> {
+            self.inner.sync_data()?;
+            self.unsynced.store(0, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+        fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(pos)
+        }
+        fn set_len(&self, size: u64) -> std::io::Result<()> {
+            self.inner.set_len(size)
+        }
+    }
+
+    impl Fs for SyncGapFs {
+        fn open_append(&self, path: &Path) -> std::io::Result<Box<dyn FsFile>> {
+            self.inner.open_append(path)
+        }
+        fn create(&self, path: &Path) -> std::io::Result<Box<dyn FsFile>> {
+            Ok(Box::new(SyncGapFile {
+                inner: self.inner.create(path)?,
+                unsynced: std::sync::atomic::AtomicUsize::new(0),
+                max_gap: Arc::clone(&self.max_gap),
+            }))
+        }
+        fn open_read(&self, path: &Path) -> std::io::Result<Box<dyn FsFile>> {
+            self.inner.open_read(path)
+        }
+        fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+            self.inner.read(path)
+        }
+        fn read_prefix(&self, path: &Path, len: usize) -> std::io::Result<Vec<u8>> {
+            self.inner.read_prefix(path, len)
+        }
+        fn write(&self, path: &Path, data: &[u8]) -> std::io::Result<()> {
+            self.inner.write(path, data)
+        }
+        fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
+            self.inner.create_dir_all(path)
+        }
+        fn read_dir(&self, path: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+            self.inner.read_dir(path)
+        }
+        fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+            self.inner.remove_file(path)
+        }
+        fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+            self.inner.rename(from, to)
+        }
+        fn sync_dir(&self, dir: &Path) -> std::io::Result<()> {
+            self.inner.sync_dir(dir)
+        }
+    }
+
+    /// Entries in key order that make an SST four times [`SYNC_EVERY_BYTES`].
+    fn four_sync_intervals_of_entries() -> Vec<(CompositeKey, MemtableValue)> {
+        let realm = RealmId::generate();
+        let value = vec![b'v'; 4096];
+        (0..4 * SYNC_EVERY_BYTES / value.len())
+            .map(|i| {
+                (
+                    CompositeKey::new(realm.clone(), format!("key{i:06}").into_bytes()),
+                    MemtableValue::Data(value.clone()),
+                )
+            })
+            .collect()
+    }
+
+    /// Asserts that the SST at `path` is large enough for the test, and that at
+    /// most one sync interval plus two write chunks went to it between two
+    /// syncs: the last chunk of the body, and the footer and headers that
+    /// `finish` writes before the caller's final sync.
+    fn assert_synced_as_written(path: &Path, fs: &SyncGapFs) {
+        let len = std::fs::metadata(path).expect("metadata").len();
+        assert!(
+            len >= 4 * SYNC_EVERY_BYTES as u64,
+            "the fixture must span several sync intervals, got {len} bytes"
+        );
+        let gap = fs.max_gap();
+        assert!(
+            gap <= SYNC_EVERY_BYTES + 2 * WRITE_CHUNK_BYTES,
+            "{gap} bytes went to the file between two syncs"
+        );
+    }
+
+    /// #445 — a compaction syncs its output as it writes it. With one sync at
+    /// the end, the kernel sent the whole output, up to ~1 GB in the
+    /// steady-state memory test, to the disk at once, and the WAL's syncs waited
+    /// behind it: writes stalled for up to seconds at the end of each compaction.
+    #[test]
+    fn the_compaction_writer_syncs_as_it_writes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("000001.sst");
+        let fs = SyncGapFs::new();
+        let (dek, enc_header) = test_encryption_context();
+        let entries = four_sync_intervals_of_entries();
+
+        SstWriter::write_sst_streaming_with_fs(
+            &path,
+            entries.into_iter().map(Ok),
+            false,
+            &fs,
+            1,
+            &dek,
+            &enc_header,
+        )
+        .expect("write");
+
+        assert_synced_as_written(&path, &fs);
+    }
+
+    /// #445 — a memtable flush syncs its SST as it writes it, like a compaction.
+    #[test]
+    fn the_flush_writer_syncs_as_it_writes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("000001.sst");
+        let fs = SyncGapFs::new();
+        let (dek, enc_header) = test_encryption_context();
+        let entries = four_sync_intervals_of_entries();
+
+        SstWriter::write_sst_with_fs(
+            &path,
+            |push| {
+                for (key, value) in &entries {
+                    push(key, value)?;
+                }
+                Ok(())
+            },
+            &fs,
+            1,
+            &dek,
+            &enc_header,
+        )
+        .expect("write");
+
+        assert_synced_as_written(&path, &fs);
+    }
 }
