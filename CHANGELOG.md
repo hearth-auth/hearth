@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.6.1] — 2026-10-23
+
 ### Fixed
 - **Writes no longer stall at the end of each compaction** (#445): the SST writer syncs the
   file every 4 MiB while it writes it, not only once at the end. One sync at the end sent a
