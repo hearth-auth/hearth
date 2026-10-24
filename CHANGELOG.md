@@ -27,6 +27,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   with no new wrong code, as it does after a correct code. Old counts also leave memory. Before,
   each count stayed until the user's next correct code. Lockouts and their escalation do not
   change.
+- **A failure count below the lockout threshold is forgotten after 24 hours** (#581): a
+  per-account count of wrong passwords or wrong MFA codes that has not reached the lockout
+  threshold, with no new failure for 24 hours, is cleared in memory and in storage, as a
+  successful sign-in clears it. Before, it stayed until the user's next successful sign-in, so
+  memory grew with every account that ever had a wrong password. A count at the threshold does
+  not change: after the lockout ends, the next wrong password locks the account again.
 
 ## [4.6.1] — 2026-10-23
 

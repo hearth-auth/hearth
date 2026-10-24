@@ -641,6 +641,47 @@ fn remaining_lockout(
 ///
 /// Called from `EmbeddedIdentityEngine::sweep_expired` after the storage
 /// sweep to bound memory growth in the five in-memory rate-tracker maps.
+/// How long a per-account failure count below the lockout threshold is kept
+/// with no new failure (#581). After that the account starts again from zero,
+/// as it does after a successful sign-in. A count at or above the threshold is
+/// kept: after the lockout ends, the next wrong password locks it again.
+const FAILURE_MEMORY_MICROS: i64 = 24 * 60 * 60 * 1_000_000;
+
+/// Reads one stored tracker blob: `(failed_count, last_failure_micros)`.
+fn parse_blob(value: &[u8]) -> Option<(u32, i64)> {
+    let blob = serde_json::from_slice::<serde_json::Value>(value).ok()?;
+    let failed_count = blob["failed_count"].as_u64().map(|v| v as u32)?;
+    let last_failure_micros = blob["last_failure_micros"].as_i64()?;
+    Some((failed_count, last_failure_micros))
+}
+
+/// Whether `tracker` is a count below `max_attempts` whose last failure is at
+/// least [`FAILURE_MEMORY_MICROS`] before `now_micros`.
+fn failure_count_is_forgotten(
+    tracker: &AttemptTracker,
+    max_attempts: u32,
+    now_micros: i64,
+) -> bool {
+    tracker.failed_count < max_attempts
+        && now_micros.saturating_sub(tracker.last_failure_micros) >= FAILURE_MEMORY_MICROS
+}
+
+/// Removes the entries of `map` whose key starts with `prefix` and whose count
+/// is forgotten (see [`failure_count_is_forgotten`]). Returns how many it
+/// removed.
+fn forget_failure_counts(
+    map: &mut HashMap<String, AttemptTracker>,
+    prefix: &str,
+    max_attempts: u32,
+    now_micros: i64,
+) -> u64 {
+    let before = map.len() as u64;
+    map.retain(|key, t| {
+        !(key.starts_with(prefix) && failure_count_is_forgotten(t, max_attempts, now_micros))
+    });
+    before.saturating_sub(map.len() as u64)
+}
+
 fn prune_rate_tracker(map: &mut HashMap<String, AttemptTracker>, cutoff_micros: i64) -> u64 {
     let before = map.len() as u64;
     map.retain(|_, t| t.last_failure_micros >= cutoff_micros);
@@ -1650,14 +1691,6 @@ impl EmbeddedIdentityEngine {
             .map_err(Self::storage_err)?;
 
         let now = self.clock.now().as_micros();
-
-        // Helper: read one JSON blob entry and return (failed_count, last_failure_micros).
-        fn parse_blob(value: &[u8]) -> Option<(u32, i64)> {
-            let blob = serde_json::from_slice::<serde_json::Value>(value).ok()?;
-            let failed_count = blob["failed_count"].as_u64().map(|v| v as u32)?;
-            let last_failure_micros = blob["last_failure_micros"].as_i64()?;
-            Some((failed_count, last_failure_micros))
-        }
 
         for realm_entry in &realm_entries {
             let realm: Realm = match serde_json::from_slice(&realm_entry.value) {
@@ -16730,6 +16763,53 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             }
         }
 
+        // #581: forget this realm's per-account failure counts below the
+        // lockout threshold after FAILURE_MEMORY_MICROS with no new failure.
+        // The password counts are stored node-local and loaded at startup, so
+        // their rows go too. The MFA rows are already pruned above.
+        let (max_attempts, _) = self.effective_rate_limit(realm_id);
+        stats.rate_trackers_pruned += forget_failure_counts(
+            &mut self.attempt_trackers.lock().expect("tracker lock"),
+            &format!("{}:", realm_id.as_uuid()),
+            max_attempts,
+            now,
+        );
+        stats.rate_trackers_pruned += forget_failure_counts(
+            &mut self.mfa_attempt_trackers.lock().expect("mfa tracker lock"),
+            &format!("mfa:{}:", realm_id.as_uuid()),
+            Self::MFA_MAX_ATTEMPTS,
+            now,
+        );
+        let prefix = keys::attempt_tracker_scan_prefix();
+        match self
+            .storage
+            .scan(realm_id, &prefix, &keys::prefix_end(&prefix))
+        {
+            Ok(entries) => {
+                for entry in entries {
+                    let Some((failed_count, last_failure_micros)) = parse_blob(&entry.value) else {
+                        continue;
+                    };
+                    let tracker = AttemptTracker {
+                        failed_count,
+                        last_failure_micros,
+                    };
+                    if !failure_count_is_forgotten(&tracker, max_attempts, now) {
+                        continue;
+                    }
+                    // Node-local, like the write in `record_failed_attempt`.
+                    if self
+                        .storage
+                        .delete_node_local(realm_id, &entry.key)
+                        .is_err()
+                    {
+                        stats.errors += 1;
+                    }
+                }
+            }
+            Err(_) => stats.errors += 1,
+        }
+
         // C-5: evict A-18 idle/absolute-timeout sessions. Policy-expired
         // sessions are rejected fail-closed on the read path with zero storage
         // writes; the deferred eviction (revoke + audit + SV bump) happens here
@@ -27630,6 +27710,94 @@ mod tests {
                 Err(IdentityError::InvalidPushedAuthorizationRequest)
             ),
             "malformed request_uri must return InvalidPushedAuthorizationRequest"
+        );
+    }
+
+    // ===== Failure-count memory (#581) =====
+
+    #[test]
+    fn sweep_expired_forgets_a_below_threshold_failure_count_after_a_day() {
+        // A count below the lockout threshold with no new failure for a day
+        // is forgotten, in memory and in storage, as a successful sign-in
+        // forgets it. Before, it stayed until the user's next success, so the
+        // maps grew with every account that ever had a wrong password.
+        let (_dir, engine, clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+        engine.record_failed_attempt(&realm, user.id());
+        engine.record_mfa_failed_attempt(&realm, user.id());
+
+        clock.advance(FAILURE_MEMORY_MICROS);
+        engine.sweep_expired(&realm).expect("sweep");
+
+        assert!(
+            engine.attempt_trackers.lock().expect("lock").is_empty(),
+            "a day-old password failure count below the threshold must be forgotten"
+        );
+        assert!(
+            engine.mfa_attempt_trackers.lock().expect("lock").is_empty(),
+            "a day-old MFA failure count below the threshold must be forgotten"
+        );
+        assert!(
+            engine
+                .storage
+                .get(&realm, &keys::encode_attempt_tracker(user.id()))
+                .expect("storage get")
+                .is_none(),
+            "the stored count must go too, or a restart loads it again"
+        );
+    }
+
+    #[test]
+    fn sweep_expired_keeps_a_failure_count_younger_than_a_day() {
+        let (_dir, engine, clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+        engine.record_failed_attempt(&realm, user.id());
+        engine.record_mfa_failed_attempt(&realm, user.id());
+
+        clock.advance(FAILURE_MEMORY_MICROS - 1_000_000);
+        engine.sweep_expired(&realm).expect("sweep");
+
+        assert_eq!(engine.attempt_trackers.lock().expect("lock").len(), 1);
+        assert_eq!(engine.mfa_attempt_trackers.lock().expect("lock").len(), 1);
+        assert!(
+            engine
+                .storage
+                .get(&realm, &keys::encode_attempt_tracker(user.id()))
+                .expect("storage get")
+                .is_some(),
+            "a recent stored count must stay"
+        );
+    }
+
+    #[test]
+    fn sweep_expired_keeps_a_failure_count_at_the_lockout_threshold() {
+        // A locked account keeps its count however old it is: after the
+        // lockout ends, the next wrong password locks the account again.
+        let (_dir, engine, clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+        let (max_attempts, _) = engine.effective_rate_limit(&realm);
+        for _ in 0..max_attempts {
+            engine.record_failed_attempt(&realm, user.id());
+        }
+        for _ in 0..EmbeddedIdentityEngine::MFA_MAX_ATTEMPTS {
+            engine.record_mfa_failed_attempt(&realm, user.id());
+        }
+
+        clock.advance(2 * FAILURE_MEMORY_MICROS);
+        engine.sweep_expired(&realm).expect("sweep");
+
+        assert_eq!(
+            engine.attempt_trackers.lock().expect("lock").len(),
+            1,
+            "a password failure count at the threshold must stay"
+        );
+        assert_eq!(
+            engine.mfa_attempt_trackers.lock().expect("lock").len(),
+            1,
+            "an MFA failure count at the threshold must stay"
         );
     }
 
