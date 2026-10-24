@@ -5,10 +5,10 @@ kind: PodDisruptionBudget
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-4.6.2
+    helm.sh/chart: hearth-4.6.3
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "4.6.2"
+    app.kubernetes.io/version: "4.6.3"
     app.kubernetes.io/managed-by: Helm
 spec:
   maxUnavailable: 1
@@ -23,10 +23,10 @@ kind: ServiceAccount
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-4.6.2
+    helm.sh/chart: hearth-4.6.3
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "4.6.2"
+    app.kubernetes.io/version: "4.6.3"
     app.kubernetes.io/managed-by: Helm
 ---
 # Source: hearth/templates/configmap.yaml
@@ -35,10 +35,10 @@ kind: ConfigMap
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-4.6.2
+    helm.sh/chart: hearth-4.6.3
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "4.6.2"
+    app.kubernetes.io/version: "4.6.3"
     app.kubernetes.io/managed-by: Helm
 data:
   hearth.yaml: |
@@ -81,10 +81,10 @@ kind: PersistentVolumeClaim
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-4.6.2
+    helm.sh/chart: hearth-4.6.3
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "4.6.2"
+    app.kubernetes.io/version: "4.6.3"
     app.kubernetes.io/managed-by: Helm
 spec:
   accessModes:
@@ -99,10 +99,10 @@ kind: Service
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-4.6.2
+    helm.sh/chart: hearth-4.6.3
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "4.6.2"
+    app.kubernetes.io/version: "4.6.3"
     app.kubernetes.io/managed-by: Helm
 spec:
   type: ClusterIP
@@ -121,10 +121,10 @@ kind: Deployment
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-4.6.2
+    helm.sh/chart: hearth-4.6.3
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "4.6.2"
+    app.kubernetes.io/version: "4.6.3"
     app.kubernetes.io/managed-by: Helm
 spec:
   replicas: 1
@@ -162,7 +162,7 @@ spec:
             runAsGroup: 10001
             runAsNonRoot: true
             runAsUser: 10001
-          image: "ghcr.io/hearth-auth/hearth:v4.6.2"
+          image: "ghcr.io/hearth-auth/hearth:v4.6.3"
           imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/hearth", "serve", "-c", "/etc/hearth/hearth.yaml"]
           ports:
@@ -242,10 +242,10 @@ kind: Ingress
 metadata:
   name: hearth
   labels:
-    helm.sh/chart: hearth-4.6.2
+    helm.sh/chart: hearth-4.6.3
     app.kubernetes.io/name: hearth
     app.kubernetes.io/instance: hearth
-    app.kubernetes.io/version: "4.6.2"
+    app.kubernetes.io/version: "4.6.3"
     app.kubernetes.io/managed-by: Helm
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt-prod
