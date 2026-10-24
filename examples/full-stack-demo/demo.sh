@@ -275,7 +275,7 @@ echo "  ✓ backend/.env"
 
 if [[ ! -d "$HERE/frontend/node_modules" ]]; then
   echo "▸ installing frontend dependencies…"
-  (cd "$HERE/frontend" && npm install --silent)
+  (cd "$HERE/frontend" && npm ci --silent)
   echo "  ✓ installed"
 fi
 

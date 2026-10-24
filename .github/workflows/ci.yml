@@ -971,7 +971,9 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install uv (runs the pinned Python generator)
-        run: pip install 'uv==0.11.17'
+        # Hash-pinned (Scorecard Pinned-Dependencies); regenerate with the
+        # command in the file's header.
+        run: pip install --require-hashes -r .github/requirements/ci-tools.txt
       - name: Set up PHP
         uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
