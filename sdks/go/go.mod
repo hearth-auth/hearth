@@ -3,10 +3,11 @@ module github.com/hearth-auth/hearth/sdks/go/v4
 go 1.26.3
 
 // The go directive is the minimum Go an importer needs; the toolchain directive
-// is the Go this module builds and tests with. go1.26.6 fixes the stdlib
+// is the Go this module builds and tests with. go1.26.10 fixes the stdlib
 // advisories osv-scanner reports against 1.26.3 (GO-2026-4970, -5026, -5856,
-// -5942, -5972, -6088..6091, -6218), without forcing importers to upgrade.
-toolchain go1.26.6
+// -5942, -5972, -6088..6091, -6218) and against 1.26.6 (GO-2026-6599..6613,
+// -6617, -6809), without forcing importers to upgrade.
+toolchain go1.26.10
 
 require google.golang.org/protobuf v1.36.11
 
@@ -14,7 +15,7 @@ require (
 	github.com/gin-gonic/gin v1.12.0
 	github.com/go-jose/go-jose/v4 v4.1.5
 	github.com/google/uuid v1.6.0
-	github.com/labstack/echo/v4 v4.15.4
+	github.com/labstack/echo/v4 v4.16.1
 	github.com/oapi-codegen/runtime v1.7.0
 	google.golang.org/genproto/googleapis/api v0.0.0-20260618152121-87f3d3e198d3
 )
