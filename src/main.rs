@@ -1783,7 +1783,8 @@ async fn run_serve(
             Arc::clone(&storage) as Arc<dyn StorageEngine>,
             Arc::clone(&clock),
         )
-        .with_kek(audit_kek),
+        .with_kek(audit_kek)
+        .with_known_realms_only(),
     );
 
     // The identity engine writes on a cold data directory. In cluster mode
@@ -2451,7 +2452,8 @@ async fn run_serve(
             Arc::clone(&storage) as Arc<dyn StorageEngine>,
             Arc::clone(&clock),
         )
-        .with_kek(audit_kek),
+        .with_kek(audit_kek)
+        .with_known_realms_only(),
     );
     let audit_engine: Arc<dyn hearth::audit::AuditEngine> = Arc::new(
         hearth::webhook::NotifyingAuditEngine::new(Arc::clone(&raw_audit), webhook_tx),

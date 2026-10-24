@@ -185,6 +185,9 @@ pub struct EmbeddedAuditEngine {
     /// Cached per-realm HMAC key material (32 bytes each). Lazy-initialized
     /// on first access per realm; never evicted (realm IDs are stable).
     hmac_key_cache: Mutex<HashMap<RealmId, [u8; 32]>>,
+    /// Refuse an event whose realm does not exist (see
+    /// [`Self::with_known_realms_only`]).
+    known_realms_only: bool,
 }
 
 impl EmbeddedAuditEngine {
@@ -197,6 +200,7 @@ impl EmbeddedAuditEngine {
             import_locks: Mutex::new(HashMap::new()),
             kek: None,
             hmac_key_cache: Mutex::new(HashMap::new()),
+            known_realms_only: false,
         }
     }
 
@@ -208,6 +212,41 @@ impl EmbeddedAuditEngine {
     pub fn with_kek(mut self, kek: Option<[u8; 32]>) -> Self {
         self.kek = kek;
         self
+    }
+
+    /// Refuses an event whose realm does not exist, with
+    /// [`AuditError::UnknownRealm`] (#581).
+    ///
+    /// Each realm that gets an event gets a chain lock and an HMAC key in
+    /// memory, and an HMAC key and the events in storage. Without this check,
+    /// a request that names an unknown realm ID and reaches an audit append
+    /// adds that state for the ID, and nothing removes it.
+    ///
+    /// The server sets it. Tests that append for a bare `RealmId` do not.
+    #[must_use]
+    pub fn with_known_realms_only(mut self) -> Self {
+        self.known_realms_only = true;
+        self
+    }
+
+    /// Whether `realm_id` names a realm: the system realm, a realm with a chain
+    /// lock in this process (checked at its first append), or a realm whose
+    /// record is stored.
+    fn realm_is_known(&self, realm_id: &RealmId) -> Result<bool, AuditError> {
+        let system = crate::identity::keys::system_realm_id();
+        if *realm_id == system
+            || self
+                .chain_locks
+                .lock()
+                .expect("chain_locks mutex poisoned")
+                .contains_key(realm_id)
+        {
+            return Ok(true);
+        }
+        Ok(self
+            .storage
+            .get(&system, &crate::identity::keys::encode_realm_id(realm_id))?
+            .is_some())
     }
 
     /// Returns (or lazily creates) the per-realm HMAC key.
@@ -678,6 +717,10 @@ impl AuditEngine for EmbeddedAuditEngine {
         // before `await_batch_durable` allows concurrent appenders to enqueue
         // within the first writer's fsync window, enabling group-commit
         // coalescing (HEA-1948, HEA-1954).
+
+        if self.known_realms_only && !self.realm_is_known(&request.realm_id)? {
+            return Err(AuditError::UnknownRealm);
+        }
 
         let chain_lock = self.realm_chain_lock(&request.realm_id);
         let chain_lock_for_rollback = Arc::clone(&chain_lock);
@@ -1557,6 +1600,106 @@ mod tests {
             EmbeddedAuditEngine::new(storage as Arc<dyn StorageEngine>, clock as Arc<dyn Clock>);
         let realm_id = RealmId::generate();
         (engine, realm_id)
+    }
+
+    // === #581: per-realm state only for realms that exist =================
+
+    /// An engine with `known_realms_only` over its own store, and the store.
+    fn known_realms_engine() -> (
+        tempfile::TempDir,
+        EmbeddedAuditEngine,
+        Arc<EmbeddedStorageEngine>,
+    ) {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let config = StorageConfig::dev(temp_dir.path().to_path_buf());
+        let storage = Arc::new(EmbeddedStorageEngine::open(config).expect("storage"));
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+        let engine = EmbeddedAuditEngine::new(
+            Arc::clone(&storage) as Arc<dyn StorageEngine>,
+            clock as Arc<dyn Clock>,
+        )
+        .with_known_realms_only();
+        (temp_dir, engine, storage)
+    }
+
+    fn event_for(realm_id: &RealmId) -> CreateAuditEvent {
+        CreateAuditEvent {
+            realm_id: realm_id.clone(),
+            actor: "anonymous".to_string(),
+            action: AuditAction::AbuseDetected,
+            resource_type: "credential".to_string(),
+            resource_id: "unknown".to_string(),
+            metadata: None,
+        }
+    }
+
+    #[test]
+    fn known_realms_only_refuses_an_event_for_an_unknown_realm() {
+        // An event for a realm ID that names no realm must not create a chain
+        // lock, an HMAC key or stored rows: the map and the store would grow
+        // with each such ID.
+        let (_dir, engine, storage) = known_realms_engine();
+        let unknown = RealmId::generate();
+
+        let err = engine
+            .append(&event_for(&unknown))
+            .expect_err("an event for an unknown realm must be refused");
+
+        assert!(matches!(err, AuditError::UnknownRealm), "got {err}");
+        assert!(
+            engine
+                .chain_locks
+                .lock()
+                .expect("chain_locks poisoned")
+                .is_empty(),
+            "no chain lock may be created for an unknown realm"
+        );
+        assert!(
+            engine
+                .hmac_key_cache
+                .lock()
+                .expect("hmac_key_cache poisoned")
+                .is_empty(),
+            "no HMAC key may be cached for an unknown realm"
+        );
+        assert!(
+            storage
+                .get(&unknown, &keys::audit_hmac_key())
+                .expect("storage get")
+                .is_none(),
+            "no HMAC key may be stored for an unknown realm"
+        );
+    }
+
+    #[test]
+    fn known_realms_only_appends_for_a_stored_realm_and_the_system_realm() {
+        let (_dir, engine, storage) = known_realms_engine();
+        let system = crate::identity::keys::system_realm_id();
+        let realm = RealmId::generate();
+        // The identity engine writes this record when it creates the realm;
+        // the audit engine only checks that it exists.
+        storage
+            .put(
+                &system,
+                &crate::identity::keys::encode_realm_id(&realm),
+                b"realm record",
+            )
+            .expect("store realm record");
+
+        engine
+            .append(&event_for(&realm))
+            .expect("an event for a stored realm is appended");
+        engine
+            .append(&event_for(&system))
+            .expect("an event for the system realm is appended");
+        assert_eq!(
+            engine
+                .query(&AuditQuery::for_realm(realm.clone()))
+                .expect("query")
+                .len(),
+            1,
+            "the stored realm's event must be readable"
+        );
     }
 
     fn setup_with_clock() -> (EmbeddedAuditEngine, RealmId, Arc<FakeClock>) {
