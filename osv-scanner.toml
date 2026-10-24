@@ -48,88 +48,39 @@ reason = "golang.org/x/crypto/openpgp is unmaintained and unsafe by design. The 
 # (node_modules/npm/node_modules/...), pulled in by @semantic-release/npm 13
 # (requires npm ^11.6.2) for the release workflow only (dev scope). npm ships
 # bundleDependencies inside its tarball, so a lockfile update or an
-# `overrides` entry cannot change them. npm 11.20.0 is the newest 11.x and still
-# bundles ip-address 10.5.0 / undici 6.28.0; npm 12 needs Node 22 and is outside
-# @semantic-release/npm's range. The top-level copies are already patched
-# (ip-address 10.7.2, undici 6.29.0 / 7.30.0). Revisit when an npm 11.x release
-# bundles ip-address >= 10.5.1 and undici >= 6.28.1 (checked 2026-09-28).
-
-# guard: package=ip-address lockfile=package-lock.json
-[[IgnoredVulns]]
-id = "GHSA-2vr4-cq9g-pvrc"
-reason = "ip-address 10.5.0 bundled inside the npm CLI (node_modules/npm/node_modules/ip-address, via npm's socks proxy support) in the release-tooling lockfile; no npm 11.x release bundles 10.5.1 yet. Address6 classification flaw; the release workflow's npm publish uses no IPv6 range classification. Revisit when npm 11.x bundles ip-address >= 10.5.1."
-
-# guard: package=ip-address lockfile=package-lock.json
-[[IgnoredVulns]]
-id = "GHSA-rpw4-54j3-4h4q"
-reason = "Same bundled ip-address 10.5.0 inside the npm CLI (release tooling, dev scope); NAT64 local-use range classification flaw, unused by npm publish. Revisit when npm 11.x bundles ip-address >= 10.5.1."
-
-# guard: package=postcss-selector-parser lockfile=package-lock.json
-[[IgnoredVulns]]
-id = "GHSA-rj75-hqrm-r3gf"
-reason = "postcss-selector-parser 7.1.4 bundled inside the npm CLI (node_modules/npm/node_modules/postcss-selector-parser, release-tooling lockfile, dev scope); npm uses it only to parse `npm query` selectors. Checked 2026-10-06: npm 11.21.0 and 12.2.0 both still bundle 7.1.4. Quadratic CPU when parsing a crafted flat selector; the release workflow never runs `npm query`, let alone on external input. The docs-site copies are fixed by an override (7.1.6). Revisit when npm bundles postcss-selector-parser >= 7.1.6."
-
-# guard: package=brace-expansion lockfile=package-lock.json
-[[IgnoredVulns]]
-id = "GHSA-6j4f-fj2g-mc7p"
-reason = "brace-expansion 5.0.9 bundled inside the npm CLI (node_modules/npm/node_modules/brace-expansion, release-tooling lockfile, dev scope); the lockfile's own node_modules/brace-expansion is 5.0.12 (fixed). Checked 2026-09-29: npm 11.20.0 and 12.1.0 both still bundle 5.0.9. DoS by deep recursion in parseCommaParts on a crafted pattern. npm expands only the brace patterns in this repo's own package.json `files` and ignore files, never external input. Revisit when npm bundles brace-expansion >= 5.0.12."
-
-# guard: package=brace-expansion lockfile=package-lock.json
-[[IgnoredVulns]]
-id = "GHSA-qhr7-859c-m2p7"
-reason = "brace-expansion 5.0.9 bundled inside the npm CLI (node_modules/npm/node_modules/brace-expansion, release-tooling lockfile, dev scope); the lockfile's own node_modules/brace-expansion is 5.0.12 (fixed). Checked 2026-09-29: npm 11.20.0 and 12.1.0 both still bundle 5.0.9. DoS by deep recursion on nested brace groups in a crafted pattern. npm expands only the brace patterns in this repo's own package.json `files` and ignore files, never external input. Revisit when npm bundles brace-expansion >= 5.0.12."
-
-# guard: package=brace-expansion lockfile=package-lock.json
-[[IgnoredVulns]]
-id = "GHSA-q2hr-2g5m-vwhr"
-reason = "brace-expansion 5.0.9 bundled inside the npm CLI (node_modules/npm/node_modules/brace-expansion, release-tooling lockfile, dev scope); the lockfile's own node_modules/brace-expansion is 5.0.12 (fixed). Checked 2026-09-29: npm 11.20.0 and 12.1.0 both still bundle 5.0.9. Quadratic CPU on a crafted `{a},b}` pattern. npm expands only the brace patterns in this repo's own package.json `files` and ignore files, never external input. Revisit when npm bundles brace-expansion >= 5.0.12."
-
-# guard: package=ip-address lockfile=package-lock.json
-[[IgnoredVulns]]
-id = "GHSA-h3mg-xc3c-68pw"
-reason = "ip-address 10.5.0 bundled inside the npm CLI (node_modules/npm/node_modules/ip-address, via npm's socks proxy support; release tooling, dev scope); the lockfile's own node_modules/ip-address is 10.7.4 (fixed). npm 11.20.0 and 12.1.0 still bundle 10.5.0 (checked 2026-09-29). The flaw needs a very long attacker-supplied IPv6 string. The release job configures no SOCKS proxy. Revisit when npm bundles ip-address >= 10.7.1."
-
-# guard: package=ip-address lockfile=package-lock.json
-[[IgnoredVulns]]
-id = "GHSA-j6r3-76f7-8jcv"
-reason = "ip-address 10.5.0 bundled inside the npm CLI (node_modules/npm/node_modules/ip-address, via npm's socks proxy support; release tooling, dev scope); the lockfile's own node_modules/ip-address is 10.7.4 (fixed). npm 11.20.0 and 12.1.0 still bundle 10.5.0 (checked 2026-09-29). The flaw is in isInSubnet allowlist checks, which npm does not perform. The release job configures no SOCKS proxy. Revisit when npm bundles ip-address >= 10.7.1."
+# `overrides` entry cannot change them. The lockfile's npm is 11.21.1, the
+# newest 11.x; npm 12 needs Node 22 and is outside @semantic-release/npm's
+# range. npm 11.21.1 bundles fixed brace-expansion, http-cache-semantics,
+# postcss-selector-parser, ip-address >= 10.7.1 and undici >= 6.28.1, so the
+# 12 ignores for those copies were removed on 2026-10-23. The release workflow
+# installs with `npm install --ignore-scripts` (semantic-release.yml).
 
 # guard: package=ip-address lockfile=package-lock.json
 [[IgnoredVulns]]
 id = "GHSA-rxp7-6hxx-x8q5"
-reason = "ip-address 10.5.0 bundled inside the npm CLI (node_modules/npm/node_modules/ip-address, via npm's socks proxy support; release tooling, dev scope); the lockfile's own node_modules/ip-address is 10.7.4 (fixed). Checked 2026-10-22: npm 11.21.1 and 12.2.1 bundle 10.7.2, which is also affected (<= 10.7.3). Address6 strips a zone identifier in quadratic time from a crafted string of many `%` characters and a line terminator. npm reaches Address6 only through a SOCKS proxy, and the release job configures no SOCKS proxy. Revisit when npm bundles ip-address >= 10.7.4."
+reason = "ip-address 10.7.2 bundled inside the npm CLI 11.21.1 (node_modules/npm/node_modules/ip-address, via npm's socks proxy support; release tooling, dev scope); the lockfile's own node_modules/ip-address is 10.7.4 (fixed). Checked 2026-10-23: npm 11.21.1 and 12.2.1 bundle 10.7.2, which is affected (< 10.7.4). Address6 strips a zone identifier in quadratic time from a crafted string of many `%` characters and a line terminator. npm reaches Address6 only through a SOCKS proxy, and the release job configures no SOCKS proxy. Revisit when npm bundles ip-address >= 10.7.4."
 
 # guard: package=undici lockfile=package-lock.json
 [[IgnoredVulns]]
-id = "GHSA-3wwx-pv8p-q78v"
-reason = "undici 6.28.0 bundled inside the npm CLI (node_modules/npm/node_modules/undici, via node-gyp header downloads) in the release-tooling lockfile; no npm 11.x release bundles 6.28.1 yet. The flaw is a DoS in undici's WebSocket handling; npm/node-gyp make plain HTTPS requests, no WebSocket. docs-site's undici was upgraded to 7.29.1 instead. Revisit when npm 11.x bundles undici >= 6.28.1."
+id = "GHSA-4qv8-2p9j-2685"
+reason = "undici 6.29.0 bundled inside the npm CLI 11.21.1 (node_modules/npm/node_modules/undici, used only by node-gyp to download Node headers; release tooling, dev scope); the lockfile's own copies are 6.29.1 and 7.30.1 (fixed). Checked 2026-10-23: 11.21.1 is the newest npm 11.x. Unbounded memory in undici's EventSource parser; node-gyp opens no EventSource, and the release job installs with --ignore-scripts, so node-gyp does not run. Revisit when npm bundles undici >= 6.29.1."
 
 # guard: package=undici lockfile=package-lock.json
 [[IgnoredVulns]]
-id = "GHSA-rfgv-xxqx-mfg5"
-reason = "Same bundled undici 6.28.0 inside the npm CLI (node_modules/npm/node_modules/undici, release-tooling lockfile, dev scope). Checked 2026-09-29: npm 11.20.0 (the lockfile's version) and npm 12.1.0 (latest) both still bundle undici 6.28.0, so no lockfile change can reach it. The flaw is an uncaught TypeError in undici's WebSocket client handshake; npm/node-gyp open no WebSocket. The root lockfile's own node_modules/undici is 6.29.0 (fixed). Revisit when npm bundles undici >= 6.28.1."
+id = "GHSA-xjj6-f33q-929c"
+reason = "Same bundled undici 6.29.0 inside the npm CLI 11.21.1 (release tooling, dev scope); the lockfile's own copies are 6.29.1 and 7.30.1 (fixed). An unhandled error on a response with too many content-encodings lets a malicious server crash the client. Only node-gyp uses this copy, to download Node headers, and the release job installs with --ignore-scripts, so node-gyp does not run. Revisit when npm bundles undici >= 6.29.1."
 
-# guard: package=undici lockfile=package-lock.json
+# zod has no fixed 3.x release, and the root lockfile's only zod 3 dependent is
+# a local developer tool. Revisit when context-mode accepts zod 4.
+
+# guard: package=zod lockfile=package-lock.json
 [[IgnoredVulns]]
-id = "GHSA-r53p-7pc4-xj5r"
-reason = "Same bundled undici 6.28.0 inside the npm CLI (release tooling, dev scope; no npm release bundles >= 6.28.1 as of 2026-09-29). The flaw needs undici's retry interceptor AND an application that forwards the resumed response downstream (a proxy/gateway); npm publish only downloads and uploads, it forwards nothing. Revisit when npm bundles undici >= 6.28.1."
+id = "GHSA-mrhx-c7xc-m3w5"
+reason = "zod 3.25.76 in the root lockfile (dev scope) is required by context-mode (zod ^3.25.0; 1.0.169 is the newest release, checked 2026-10-23) and accepted by @modelcontextprotocol/sdk. Both are local developer tools in the root devDependencies. The fix exists only in zod 4.6.6, outside context-mode's range. The release workflow installs them with --ignore-scripts and never runs them, and neither ships in the server binary or an SDK. The flaw is memory exhaustion when zod validates an oversized constrained collection. Revisit when context-mode accepts zod >= 4.6.6."
 
-# braces 3.0.3 and http-cache-semantics 4.2.0 are the newest releases of both
-# packages; neither advisory has a patched version (checked 2026-10-03). Both
-# reach Hearth only through build tooling: Docusaurus (docs-site) and the
-# semantic-release toolchain (root package-lock.json, dev scope; the
-# http-cache-semantics copy is bundled inside the npm CLI). None of it ships in
-# the server binary or an SDK. Revisit when a patched release exists.
-
-# guard: package=braces lockfile=docs-site/package-lock.json
-[[IgnoredVulns]]
-id = "GHSA-vfj7-8cjw-p6xm"
-reason = "braces 3.0.3 (latest; no patched release as of 2026-10-03) via micromatch/chokidar in Docusaurus (docs-site build) and @semantic-release/git (release tooling, dev scope). Stack exhaustion on a crafted deeply nested pattern; both tools expand only glob patterns written in this repo, never external input. Revisit when braces publishes a fix."
-
-# guard: package=http-cache-semantics lockfile=package-lock.json
-[[IgnoredVulns]]
-id = "GHSA-ch52-4w7c-c8xp"
-reason = "http-cache-semantics 4.2.0 bundled inside the npm CLI (node_modules/npm/node_modules/http-cache-semantics, release-tooling lockfile, dev scope); docs-site moved to 4.3.0 on 2026-10-07. The flaw discloses cached responses across users of a shared cache; the release job runs as one CI user with no shared HTTP cache. Revisit when npm bundles http-cache-semantics >= 4.3.0."
+# GHSA-vfj7-8cjw-p6xm (braces 3.0.3, stack exhaustion) was ignored until
+# 2026-10-23, when GitHub withdrew the advisory and osv-scanner reported the
+# ignore as unused.
 
 # CVE-2026-42507, CVE-2026-42504 and CVE-2026-27145 were removed on 2026-09-28
 # (GA audit supply-chain fix). Their reasons blamed google.golang.org/protobuf
@@ -137,8 +88,9 @@ reason = "http-cache-semantics 4.2.0 bundled inside the npm CLI (node_modules/np
 # GO-2026-5038 (mime) and GO-2026-5037 (crypto/x509) — Go STANDARD LIBRARY
 # advisories matched against sdks/go/go.mod's `go 1.26.3` directive, fixed in
 # go1.26.4. The rationale described the wrong package, so it assessed nothing.
-# sdks/go/go.mod now pins `toolchain go1.26.6`, the advisories no longer
-# match, and osv-scanner reported the three ignores as unused.
+# sdks/go/go.mod then pinned `toolchain go1.26.6` (go1.26.10 since
+# 2026-10-23), the advisories no longer matched, and osv-scanner reported the
+# three ignores as unused.
 
 # GHSA-g7r4-m6w7-qqqr (esbuild dev-server file read on Windows) was removed on
 # 2026-09-08 by audit 2026-08-28 §4.12#15. Its reason called esbuild an

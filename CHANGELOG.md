@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Security
+- **tokio 1.53.3** (RUSTSEC-2026-0386): the server builds with tokio 1.53.3. The advisory is
+  about `AsyncFd` constructors that accept a file descriptor the caller does not own. Hearth
+  does not call `AsyncFd`, so no known path in Hearth reaches the flaw.
+- **Go SDK: echo 4.16.1** (GHSA-9969-6676-49h5, GHSA-cxf3-9h37-7rr8, GHSA-f48p-c9v4-h7xv,
+  GHSA-h7wr-284f-5qvc): the SDK's echo middleware (`hearth/echo`) requires
+  `github.com/labstack/echo/v4` 4.16.1 or later, so an application that uses it gets the echo
+  fixes. The SDK also builds and tests with go1.26.10.
+
 ## [4.6.1] — 2026-10-23
 
 ### Fixed
