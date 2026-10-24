@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.6.3] — 2026-10-24
+
 ### Security
 - **Audit events only for realms that exist** (#581): the server's audit engine refuses an
   event whose realm does not exist, before it creates any per-realm state. Before, a request
