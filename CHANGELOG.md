@@ -15,6 +15,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `github.com/labstack/echo/v4` 4.16.1 or later, so an application that uses it gets the echo
   fixes. The SDK also builds and tests with go1.26.10.
 
+### Changed
+- **Device approval forgets a day-old wrong-code count** (#581): on `POST /ui/device`, a
+  user's count of wrong user codes below the lockout ceiling restarts from zero after 24 hours
+  with no new wrong code, as it does after a correct code. Old counts also leave memory. Before,
+  each count stayed until the user's next correct code. Lockouts and their escalation do not
+  change.
+
 ## [4.6.1] — 2026-10-23
 
 ### Fixed
