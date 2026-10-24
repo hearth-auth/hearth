@@ -244,6 +244,55 @@ mod tests {
         IpAddr::V4(Ipv4Addr::LOCALHOST)
     }
 
+    // #581: a wrong-code count below the ceiling is forgotten after a day
+    // with no new wrong code, as a correct code forgets it.
+
+    #[test]
+    fn a_wrong_code_count_is_forgotten_after_a_day() {
+        let guard = attempt_only_guard(3);
+        let t0 = Instant::now();
+        guard.record_failure_at("realm:user", t0);
+        guard.record_failure_at("realm:user", t0);
+
+        // Two wrong codes a day ago and one now: the old two are forgotten,
+        // so this is the first, not the third.
+        assert_eq!(
+            guard.record_failure_at("realm:user", t0 + FAILURE_MEMORY),
+            DeviceApprovalDecision::Allow,
+            "a day-old count must not count toward the ceiling"
+        );
+        assert_eq!(
+            guard.record_failure_at("realm:user", t0 + FAILURE_MEMORY),
+            DeviceApprovalDecision::Allow,
+            "the count restarted from zero, so the ceiling is not reached yet"
+        );
+        assert!(matches!(
+            guard.record_failure_at("realm:user", t0 + FAILURE_MEMORY),
+            DeviceApprovalDecision::LockedOut { .. }
+        ));
+    }
+
+    #[test]
+    fn forgotten_counts_leave_the_map_once_it_is_large() {
+        let guard = attempt_only_guard(5);
+        let t0 = Instant::now();
+        for i in 0..PRUNE_FLOOR {
+            guard.record_failure_at(&format!("realm:user-{i}"), t0);
+        }
+
+        guard.record_failure_at("realm:latest", t0 + FAILURE_MEMORY);
+
+        let counts = guard
+            .failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            counts.map.len(),
+            1,
+            "only the new count may stay: the {PRUNE_FLOOR} day-old counts are forgotten"
+        );
+    }
+
     /// A guard with a generous shaper so the attempt ceiling — not the RPS
     /// limit — is what the test observes.
     fn attempt_only_guard(max_attempts: u32) -> DeviceApprovalGuard {
