@@ -567,6 +567,19 @@ enum AppAction {
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+/// jemalloc's options for the binary (#581), read at its first allocation.
+///
+/// `tcache_max:4096`: each thread's cache keeps freed objects of 4 KiB or less
+/// (jemalloc's default is 32 KiB). The cache is per thread, and under steady
+/// load the Tokio blocking pool keeps its threads, so the cache's size
+/// multiplies by the thread count. Larger objects go back to their arena.
+/// `_RJEM_MALLOC_CONF` (for example `prof:true` in a heap-profile build) adds
+/// to these options.
+#[cfg(not(any(target_env = "msvc", hearth_system_allocator)))]
+#[allow(non_upper_case_globals)]
+#[export_name = "_rjem_malloc_conf"]
+pub static malloc_conf: &[u8] = b"tcache_max:4096\0";
+
 /// Reads jemalloc's memory figures for `/metrics` (#445). `None` if jemalloc
 /// refuses a read, as it does when it is built without its `stats` feature.
 #[cfg(not(any(target_env = "msvc", hearth_system_allocator)))]
@@ -6465,6 +6478,20 @@ mod tests {
             after < before + BLOCK,
             "glibc holds {} more bytes while an {BLOCK}-byte Vec is live",
             after.saturating_sub(before)
+        );
+    }
+
+    /// #581: each thread's jemalloc cache keeps freed objects of 4 KiB or less
+    /// (jemalloc's default is 32 KiB). The cache is per thread, and under
+    /// steady load the Tokio blocking pool keeps its threads, so the cache's
+    /// size multiplies by the thread count.
+    #[cfg(not(any(target_env = "msvc", hearth_system_allocator)))]
+    #[test]
+    fn jemalloc_caches_only_small_objects_per_thread() {
+        assert_eq!(
+            jemalloc_stat(c"opt.tcache_max"),
+            Some(4096),
+            "the binary must set jemalloc's tcache_max to 4 KiB"
         );
     }
 
