@@ -28413,6 +28413,96 @@ mod tests {
     }
 
     #[test]
+    fn get_realm_dpop_nonce_secret_refuses_an_unknown_realm() {
+        // #581: the token endpoint asks for the secret of any realm ID a
+        // request names. An ID that names no realm must not get a stored or
+        // cached secret, or the map and the store grow with every such ID.
+        let (_dir, engine, _clock) = setup_engine();
+        let unknown = RealmId::new(uuid::Uuid::new_v4());
+
+        let result = engine.get_realm_dpop_nonce_secret(&unknown);
+
+        assert!(
+            matches!(result, Err(IdentityError::RealmNotFound)),
+            "an unknown realm must be refused; got {result:?}"
+        );
+        assert!(
+            engine
+                .storage
+                .get(&unknown, &keys::dpop_nonce_secret_key())
+                .expect("storage get")
+                .is_none(),
+            "no nonce secret may be stored for an unknown realm"
+        );
+        assert!(
+            !engine
+                .dpop_nonce_cache
+                .lock()
+                .expect("dpop_nonce_cache poisoned")
+                .contains_key(&unknown),
+            "no nonce secret may be cached for an unknown realm"
+        );
+    }
+
+    #[test]
+    fn check_and_record_dpop_jti_refuses_an_unknown_realm() {
+        // #581: a DPoP proof's jti is recorded under the realm the request
+        // names. An ID that names no realm must not get a stored row.
+        let (_dir, engine, _clock) = setup_engine();
+        let unknown = RealmId::new(uuid::Uuid::new_v4());
+        let now = 1_700_000_000;
+
+        let result = engine.check_and_record_dpop_jti(&unknown, "jti-1", now);
+
+        assert!(
+            matches!(result, Err(IdentityError::RealmNotFound)),
+            "an unknown realm must be refused; got {result:?}"
+        );
+        assert!(
+            engine
+                .storage
+                .get(&unknown, &keys::encode_dpop_jti("jti-1"))
+                .expect("storage get")
+                .is_none(),
+            "no jti row may be stored for an unknown realm"
+        );
+
+        // A realm that exists still records the jti and refuses a replay.
+        let realm = create_test_realm(&engine);
+        engine
+            .check_and_record_dpop_jti(&realm, "jti-1", now)
+            .expect("a known realm records the jti");
+        assert!(
+            matches!(
+                engine.check_and_record_dpop_jti(&realm, "jti-1", now),
+                Err(IdentityError::DPopProofReplay)
+            ),
+            "a second use of the jti must be refused as a replay"
+        );
+    }
+
+    #[test]
+    fn the_jti_lock_map_keeps_no_entry_after_the_lock_is_released() {
+        // #581: one lock entry per realm ever seen grew without a limit. The
+        // map must hold an entry only while a caller holds the lock.
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+
+        engine
+            .check_and_record_dpop_jti(&realm, "jti-1", 1_700_000_000)
+            .expect("record jti");
+
+        assert!(
+            engine
+                .jti_locks
+                .lock()
+                .expect("jti_locks poisoned")
+                .is_empty(),
+            "the jti lock entry must be reclaimed when its holder releases it"
+        );
+    }
+
+    #[test]
     fn get_realm_dpop_nonce_secret_survives_restart() {
         // Simulate persistence across restarts by rebuilding the engine from
         // the same storage directory. The second engine instance must load the
