@@ -28421,11 +28421,12 @@ mod tests {
         let (_dir, engine, _clock) = setup_engine();
         let unknown = RealmId::new(uuid::Uuid::new_v4());
 
-        let result = engine.get_realm_dpop_nonce_secret(&unknown);
+        // Keep only the error: a message must not print a secret.
+        let err = engine.get_realm_dpop_nonce_secret(&unknown).err();
 
         assert!(
-            matches!(result, Err(IdentityError::RealmNotFound)),
-            "an unknown realm must be refused; got {result:?}"
+            matches!(err, Some(IdentityError::RealmNotFound)),
+            "an unknown realm must be refused; got {err:?}"
         );
         assert!(
             engine
