@@ -56,6 +56,17 @@ pub(crate) fn record(audit: &dyn AuditEngine, event: &CreateAuditEvent) {
     let Err(e) = audit.append(event) else {
         return;
     };
+    if matches!(e, crate::audit::AuditError::UnknownRealm) {
+        // The request named a realm that does not exist: there is no realm
+        // audit log to write to (#581). Not an error, and a client chooses
+        // the realm ID, so it is not logged above debug.
+        tracing::debug!(
+            realm_id = %event.realm_id,
+            action = %event.action,
+            "audit event for an unknown realm not recorded"
+        );
+        return;
+    }
     match loss_severity(&event.action) {
         LossSeverity::Error => tracing::error!(
             realm_id = %event.realm_id,

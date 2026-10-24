@@ -14,6 +14,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   GHSA-h7wr-284f-5qvc): the SDK's echo middleware (`hearth/echo`) requires
   `github.com/labstack/echo/v4` 4.16.1 or later, so an application that uses it gets the echo
   fixes. The SDK also builds and tests with go1.26.10.
+- **Audit events only for realms that exist** (#581): the server's audit engine refuses an
+  event whose realm does not exist, before it creates any per-realm state. Before, a request
+  that named an unknown realm ID and reached an audit append (for example, a sign-in that an
+  abuse guard challenged) could add a chain lock and an HMAC key in memory, and stored rows, for
+  that ID. Nothing removed them. Events for the system realm and for existing realms do not
+  change.
 
 ## [4.6.1] — 2026-10-23
 

@@ -26,6 +26,10 @@ pub enum AuditError {
     /// [`crate::audit::AuditEngine::append`].
     MergedAppendNotSupported,
 
+    /// The event names a realm that does not exist, and the engine was built
+    /// with [`crate::audit::EmbeddedAuditEngine::with_known_realms_only`].
+    /// Nothing was written (#581).
+    UnknownRealm,
     /// The query itself is malformed and was refused without touching storage.
     ///
     /// Today the only such case is a reversed time window
@@ -49,6 +53,7 @@ impl fmt::Display for AuditError {
             Self::MergedAppendNotSupported => {
                 write!(f, "merged append not supported by this audit engine")
             }
+            Self::UnknownRealm => write!(f, "audit event names a realm that does not exist"),
         }
     }
 }
@@ -60,7 +65,8 @@ impl std::error::Error for AuditError {
             Self::IntegrityViolation { .. }
             | Self::Serialization { .. }
             | Self::InvalidQuery { .. }
-            | Self::MergedAppendNotSupported => None,
+            | Self::MergedAppendNotSupported
+            | Self::UnknownRealm => None,
         }
     }
 }

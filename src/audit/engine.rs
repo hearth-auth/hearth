@@ -185,6 +185,9 @@ pub struct EmbeddedAuditEngine {
     /// Cached per-realm HMAC key material (32 bytes each). Lazy-initialized
     /// on first access per realm; never evicted (realm IDs are stable).
     hmac_key_cache: Mutex<HashMap<RealmId, [u8; 32]>>,
+    /// Refuse an event whose realm does not exist (see
+    /// [`Self::with_known_realms_only`]).
+    known_realms_only: bool,
 }
 
 impl EmbeddedAuditEngine {
@@ -197,6 +200,7 @@ impl EmbeddedAuditEngine {
             import_locks: Mutex::new(HashMap::new()),
             kek: None,
             hmac_key_cache: Mutex::new(HashMap::new()),
+            known_realms_only: false,
         }
     }
 
@@ -208,6 +212,41 @@ impl EmbeddedAuditEngine {
     pub fn with_kek(mut self, kek: Option<[u8; 32]>) -> Self {
         self.kek = kek;
         self
+    }
+
+    /// Refuses an event whose realm does not exist, with
+    /// [`AuditError::UnknownRealm`] (#581).
+    ///
+    /// Each realm that gets an event gets a chain lock and an HMAC key in
+    /// memory, and an HMAC key and the events in storage. Without this check,
+    /// a request that names an unknown realm ID and reaches an audit append
+    /// adds that state for the ID, and nothing removes it.
+    ///
+    /// The server sets it. Tests that append for a bare `RealmId` do not.
+    #[must_use]
+    pub fn with_known_realms_only(mut self) -> Self {
+        self.known_realms_only = true;
+        self
+    }
+
+    /// Whether `realm_id` names a realm: the system realm, a realm with a chain
+    /// lock in this process (checked at its first append), or a realm whose
+    /// record is stored.
+    fn realm_is_known(&self, realm_id: &RealmId) -> Result<bool, AuditError> {
+        let system = crate::identity::keys::system_realm_id();
+        if *realm_id == system
+            || self
+                .chain_locks
+                .lock()
+                .expect("chain_locks mutex poisoned")
+                .contains_key(realm_id)
+        {
+            return Ok(true);
+        }
+        Ok(self
+            .storage
+            .get(&system, &crate::identity::keys::encode_realm_id(realm_id))?
+            .is_some())
     }
 
     /// Returns (or lazily creates) the per-realm HMAC key.
@@ -678,6 +717,10 @@ impl AuditEngine for EmbeddedAuditEngine {
         // before `await_batch_durable` allows concurrent appenders to enqueue
         // within the first writer's fsync window, enabling group-commit
         // coalescing (HEA-1948, HEA-1954).
+
+        if self.known_realms_only && !self.realm_is_known(&request.realm_id)? {
+            return Err(AuditError::UnknownRealm);
+        }
 
         let chain_lock = self.realm_chain_lock(&request.realm_id);
         let chain_lock_for_rollback = Arc::clone(&chain_lock);
