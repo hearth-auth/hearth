@@ -882,9 +882,12 @@ pub struct EmbeddedIdentityEngine {
     /// read (count live sessions) and the write (create or evict + create)
     /// must be atomic per user. Key format: `"{realm_uuid}:{user_uuid}"`.
     ///
-    // INVARIANT: outer guard released in scoped block before inner per-user lock is acquired.
+    /// Refcount-reclaimed (see [`advisory_lock`]): one entry per user with a
+    /// `create_session` in progress, not one per user who ever signed in
+    /// (#581).
+    ///
     // INVARIANT: inner (per-user) guard held only across the sync count-check + create window; no .await in scope.
-    session_limit_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    session_limit_locks: advisory_lock::AdvisoryLockMap,
     /// Per-realm locks for atomic JTI check-and-consume in the JWT Bearer grant.
     ///
     /// Eliminates the TOCTOU window between `storage.get` and `storage.put`
@@ -1587,7 +1590,6 @@ impl EmbeddedIdentityEngine {
             ip_login_rate_trackers: Mutex::new(HashMap::new()),
             // INVARIANT: guard released before method returns; all callers are non-async helpers.
             webauthn_challenges: WebAuthnChallengeStore::new(),
-            // INVARIANT: outer guard released in scoped block before inner per-user lock is acquired.
             session_limit_locks: Mutex::new(HashMap::new()),
             // INVARIANT: outer guard released inside jwt_bearer_jti_lock() before returning the inner Arc.
             jti_locks: Mutex::new(HashMap::new()),
@@ -2017,7 +2019,6 @@ impl EmbeddedIdentityEngine {
             ip_login_rate_trackers: Mutex::new(HashMap::new()),
             // INVARIANT: guard released before method returns; all callers are non-async helpers.
             webauthn_challenges: WebAuthnChallengeStore::new(),
-            // INVARIANT: outer guard released in scoped block before inner per-user lock is acquired.
             session_limit_locks: Mutex::new(HashMap::new()),
             // INVARIANT: outer guard released inside jwt_bearer_jti_lock() before returning the inner Arc.
             jti_locks: Mutex::new(HashMap::new()),
@@ -18767,17 +18768,9 @@ impl EmbeddedIdentityEngine {
 
                 // Acquire per-user lock — serializes the count-check + create
                 // sequence to prevent TOCTOU races under concurrent logins.
-                let user_lock = {
-                    let mut locks = self
-                        .session_limit_locks
-                        .lock()
-                        .expect("session_limit_locks poisoned");
-                    locks
-                        .entry(lock_key)
-                        // INVARIANT: inner guard held only across the sync session count-check + write window; no .await in scope.
-                        .or_insert_with(|| Arc::new(Mutex::new(())))
-                        .clone()
-                };
+                // INVARIANT: inner guard held only across the sync session count-check + write window; no .await in scope.
+                let user_lock =
+                    advisory_lock::AdvisoryLock::acquire(&self.session_limit_locks, &lock_key);
                 let _guard = user_lock
                     .lock()
                     .expect("session_limit_locks user lock poisoned");

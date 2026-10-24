@@ -22,6 +22,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   each count stayed until the user's next correct code. Lockouts and their escalation do not
   change.
 
+### Fixed
+- **Session limit no longer keeps one lock per user** (#581): in a realm with
+  `max_concurrent_sessions`, the lock that makes the session count and the new session atomic
+  stayed in memory for every user who ever signed in. It now exists only while a sign-in holds
+  it.
+
 ## [4.6.1] — 2026-10-23
 
 ### Fixed
