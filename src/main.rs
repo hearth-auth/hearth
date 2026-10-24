@@ -6468,6 +6468,20 @@ mod tests {
         );
     }
 
+    /// #581: each thread's jemalloc cache keeps freed objects of 4 KiB or less
+    /// (jemalloc's default is 32 KiB). The cache is per thread, and under
+    /// steady load the Tokio blocking pool keeps its threads, so the cache's
+    /// size multiplies by the thread count.
+    #[cfg(not(any(target_env = "msvc", hearth_system_allocator)))]
+    #[test]
+    fn jemalloc_caches_only_small_objects_per_thread() {
+        assert_eq!(
+            jemalloc_stat(c"opt.tcache_max"),
+            Some(4096),
+            "the binary must set jemalloc's tcache_max to 4 KiB"
+        );
+    }
+
     /// #445: jemalloc's figures follow a live allocation up and down. A build
     /// without jemalloc's `stats` feature refuses every statistics read, and
     /// `/metrics` then exports no allocator gauges.

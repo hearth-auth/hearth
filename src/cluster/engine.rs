@@ -2323,6 +2323,27 @@ mod tests {
 
     // ── §4.9#4: the app-layer storage handle ──────────────────────────────────
 
+    /// #581: a single-node point read runs on the calling thread, without
+    /// `block_in_place`. On a runtime worker, each `block_in_place` hands the
+    /// worker's other tasks to a blocking-pool thread. `block_in_place` panics
+    /// on a current-thread runtime, so this test fails while a point read
+    /// still calls it.
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::unwrap_used)]
+    async fn a_single_node_point_read_does_not_use_block_in_place() {
+        let dir = tempdir().unwrap();
+        let inner = open_engine(dir.path().join("data").as_path());
+        let realm = RealmId::generate();
+        inner.put(&realm, b"k", b"v").unwrap();
+        let adapter = ClusterStorageAdapter::new(Arc::new(ClusterEngine::single_node(inner)));
+
+        assert_eq!(adapter.get(&realm, b"k").unwrap(), Some(b"v".to_vec()));
+        assert_eq!(
+            adapter.get_uncached(&realm, b"k").unwrap(),
+            Some(b"v".to_vec())
+        );
+    }
+
     /// `serve` always installs a `ClusterStorageAdapter`, single-node included.
     /// The adapter answered `None` for the backup consistency barrier, so the
     /// export took no barrier and every mutating write ran straight through it.
