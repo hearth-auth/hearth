@@ -89,14 +89,40 @@ pub enum DeviceApprovalDecision {
     },
 }
 
+/// How long a wrong-code count below the ceiling is kept with no new wrong
+/// code (#581). After that the key starts again from zero, as it does after a
+/// correct code. A lockout is not affected: the backoff store keeps it.
+const FAILURE_MEMORY: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// The counter-map size at which a wrong code first sweeps out the forgotten
+/// counts. After a sweep, the next one waits until the map is twice as large,
+/// so the sweep costs a constant amount per wrong code.
+const PRUNE_FLOOR: usize = 1024;
+
+/// One key's wrong codes since its last success or lockout.
+#[derive(Debug, Clone, Copy)]
+struct FailureCount {
+    count: u32,
+    last: Instant,
+}
+
+/// The per-key wrong-code counters and the map size that triggers the next
+/// sweep of forgotten counts.
+#[derive(Debug)]
+struct FailureCounts {
+    map: HashMap<String, FailureCount>,
+    prune_at: usize,
+}
+
 /// Composed rate + attempt guard for the device-approval endpoint.
 #[derive(Debug)]
 pub struct DeviceApprovalGuard {
     config: DeviceApprovalConfig,
     shaper: RequestShaper,
     backoff: AdaptiveBackoffStore,
-    /// Consecutive wrong codes per key since the last success or lockout.
-    failures: Mutex<HashMap<String, u32>>,
+    /// Consecutive wrong codes per key since the last success or lockout,
+    /// forgotten after [`FAILURE_MEMORY`] with no new wrong code.
+    failures: Mutex<FailureCounts>,
 }
 
 impl DeviceApprovalGuard {
@@ -113,7 +139,10 @@ impl DeviceApprovalGuard {
             shaper: RequestShaper::with_config(config.shaper.clone()),
             backoff: AdaptiveBackoffStore::with_config(config.backoff.clone()),
             config,
-            failures: Mutex::new(HashMap::new()),
+            failures: Mutex::new(FailureCounts {
+                map: HashMap::new(),
+                prune_at: PRUNE_FLOOR,
+            }),
         }
     }
 
@@ -166,25 +195,43 @@ impl DeviceApprovalGuard {
     /// the ceiling, so the caller can surface the lockout immediately rather
     /// than on the next request.
     pub fn record_failure(&self, key: &str) -> DeviceApprovalDecision {
+        self.record_failure_at(key, Instant::now())
+    }
+
+    /// [`Self::record_failure`] at `now`.
+    fn record_failure_at(&self, key: &str, now: Instant) -> DeviceApprovalDecision {
         let Some(max) = self.config.max_attempts else {
             return DeviceApprovalDecision::Allow;
         };
 
         let tripped = {
-            let mut map = self
+            let mut guard = self
                 .failures
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let count = map.entry(key.to_owned()).or_insert(0);
-            *count = count.saturating_add(1);
-            if *count >= max {
+            let counts = &mut *guard;
+            if counts.map.len() >= counts.prune_at {
+                counts
+                    .map
+                    .retain(|_, f| now.saturating_duration_since(f.last) < FAILURE_MEMORY);
+                counts.prune_at = PRUNE_FLOOR.max(counts.map.len().saturating_mul(2));
+            }
+            let entry = counts.map.entry(key.to_owned()).or_insert(FailureCount {
+                count: 0,
+                last: now,
+            });
+            if now.saturating_duration_since(entry.last) >= FAILURE_MEMORY {
+                entry.count = 0;
+            }
+            entry.count = entry.count.saturating_add(1);
+            entry.last = now;
+            let tripped = entry.count >= max;
+            if tripped {
                 // The lockout itself now carries the state; drop the counter so
                 // the next window starts clean.
-                map.remove(key);
-                true
-            } else {
-                false
+                counts.map.remove(key);
             }
+            tripped
         };
 
         if tripped {
@@ -207,11 +254,11 @@ impl DeviceApprovalGuard {
     /// The *offense* history in the backoff store is deliberately left alone:
     /// one lucky hit must not reset an attacker's escalation ladder.
     pub fn record_success(&self, key: &str) {
-        let mut map = self
-            .failures
+        self.failures
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        map.remove(key);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .map
+            .remove(key);
     }
 
     /// Seconds a caller should wait, for a `Retry-After` header.
