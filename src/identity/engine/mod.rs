@@ -27633,6 +27633,94 @@ mod tests {
         );
     }
 
+    // ===== Failure-count memory (#581) =====
+
+    #[test]
+    fn sweep_expired_forgets_a_below_threshold_failure_count_after_a_day() {
+        // A count below the lockout threshold with no new failure for a day
+        // is forgotten, in memory and in storage, as a successful sign-in
+        // forgets it. Before, it stayed until the user's next success, so the
+        // maps grew with every account that ever had a wrong password.
+        let (_dir, engine, clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+        engine.record_failed_attempt(&realm, user.id());
+        engine.record_mfa_failed_attempt(&realm, user.id());
+
+        clock.advance(FAILURE_MEMORY_MICROS);
+        engine.sweep_expired(&realm).expect("sweep");
+
+        assert!(
+            engine.attempt_trackers.lock().expect("lock").is_empty(),
+            "a day-old password failure count below the threshold must be forgotten"
+        );
+        assert!(
+            engine.mfa_attempt_trackers.lock().expect("lock").is_empty(),
+            "a day-old MFA failure count below the threshold must be forgotten"
+        );
+        assert!(
+            engine
+                .storage
+                .get(&realm, &keys::encode_attempt_tracker(user.id()))
+                .expect("storage get")
+                .is_none(),
+            "the stored count must go too, or a restart loads it again"
+        );
+    }
+
+    #[test]
+    fn sweep_expired_keeps_a_failure_count_younger_than_a_day() {
+        let (_dir, engine, clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+        engine.record_failed_attempt(&realm, user.id());
+        engine.record_mfa_failed_attempt(&realm, user.id());
+
+        clock.advance(FAILURE_MEMORY_MICROS - 1_000_000);
+        engine.sweep_expired(&realm).expect("sweep");
+
+        assert_eq!(engine.attempt_trackers.lock().expect("lock").len(), 1);
+        assert_eq!(engine.mfa_attempt_trackers.lock().expect("lock").len(), 1);
+        assert!(
+            engine
+                .storage
+                .get(&realm, &keys::encode_attempt_tracker(user.id()))
+                .expect("storage get")
+                .is_some(),
+            "a recent stored count must stay"
+        );
+    }
+
+    #[test]
+    fn sweep_expired_keeps_a_failure_count_at_the_lockout_threshold() {
+        // A locked account keeps its count however old it is: after the
+        // lockout ends, the next wrong password locks the account again.
+        let (_dir, engine, clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+        let (max_attempts, _) = engine.effective_rate_limit(&realm);
+        for _ in 0..max_attempts {
+            engine.record_failed_attempt(&realm, user.id());
+        }
+        for _ in 0..EmbeddedIdentityEngine::MFA_MAX_ATTEMPTS {
+            engine.record_mfa_failed_attempt(&realm, user.id());
+        }
+
+        clock.advance(2 * FAILURE_MEMORY_MICROS);
+        engine.sweep_expired(&realm).expect("sweep");
+
+        assert_eq!(
+            engine.attempt_trackers.lock().expect("lock").len(),
+            1,
+            "a password failure count at the threshold must stay"
+        );
+        assert_eq!(
+            engine.mfa_attempt_trackers.lock().expect("lock").len(),
+            1,
+            "an MFA failure count at the threshold must stay"
+        );
+    }
+
     // ===== Rate Tracker Pruning Tests (HEA-1127) =====
 
     #[test]
