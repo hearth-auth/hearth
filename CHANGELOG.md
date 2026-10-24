@@ -20,6 +20,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   abuse guard challenged) could add a chain lock and an HMAC key in memory, and stored rows, for
   that ID. Nothing removed them. Events for the system realm and for existing realms do not
   change.
+- **Per-realm DPoP state only for realms that exist** (#581): Hearth creates a realm's DPoP
+  nonce secret, and records a DPoP proof's `jti`, only when the realm in the request exists. A
+  request for an unknown realm gets the server-wide DPoP nonce, and a proof under an unknown
+  realm is refused. Before, each unknown realm ID in a request could add an entry in memory and
+  a stored row that nothing removed. The per-realm replay lock map now also keeps an entry only
+  while a request holds the lock.
 
 ### Changed
 - **Device approval forgets a day-old wrong-code count** (#581): on `POST /ui/device`, a

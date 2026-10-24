@@ -929,11 +929,13 @@ pub struct EmbeddedIdentityEngine {
     /// Per-realm locks for atomic JTI check-and-consume in the JWT Bearer grant.
     ///
     /// Eliminates the TOCTOU window between `storage.get` and `storage.put`
-    /// in replay prevention. One lock per realm; created on first use.
+    /// in replay prevention.
     ///
-    // INVARIANT: outer guard released inside jwt_bearer_jti_lock() before returning the inner Arc to the caller.
+    /// Refcount-reclaimed (see [`advisory_lock`]): one entry per realm that a
+    /// holder is using, not one per realm ID ever locked (#581).
+    ///
     // INVARIANT: inner (per-realm) guard held only across the sync JTI check-and-consume window; no .await in scope.
-    jti_locks: Mutex<HashMap<RealmId, Arc<Mutex<()>>>>,
+    jti_locks: advisory_lock::AdvisoryLockMap,
     /// Per-token-hash locks for single-use enforcement of magic-link and
     /// password-reset tokens.
     ///
@@ -1630,7 +1632,6 @@ impl EmbeddedIdentityEngine {
             webauthn_challenges: WebAuthnChallengeStore::new(),
             // INVARIANT: outer guard released in scoped block before inner per-user lock is acquired.
             session_limit_locks: Mutex::new(HashMap::new()),
-            // INVARIANT: outer guard released inside jwt_bearer_jti_lock() before returning the inner Arc.
             jti_locks: Mutex::new(HashMap::new()),
             token_redemption_locks: Mutex::new(HashMap::new()),
             approval_locks: Mutex::new(HashMap::new()),
@@ -2052,7 +2053,6 @@ impl EmbeddedIdentityEngine {
             webauthn_challenges: WebAuthnChallengeStore::new(),
             // INVARIANT: outer guard released in scoped block before inner per-user lock is acquired.
             session_limit_locks: Mutex::new(HashMap::new()),
-            // INVARIANT: outer guard released inside jwt_bearer_jti_lock() before returning the inner Arc.
             jti_locks: Mutex::new(HashMap::new()),
             token_redemption_locks: Mutex::new(HashMap::new()),
             approval_locks: Mutex::new(HashMap::new()),
@@ -4853,12 +4853,6 @@ impl EmbeddedIdentityEngine {
         // realm that nothing ever removed. A re-created realm starts from
         // epoch 0 again, which is exactly what a never-rotated realm reads.
         self.realm_key_epoch.remove(realm_id);
-        // Per-realm JTI serialisation lock. A concurrent holder owns its own
-        // `Arc`, so dropping the map entry is safe; it only stops the map
-        // growing by one entry for every realm ever deleted.
-        if let Ok(mut locks) = self.jti_locks.lock() {
-            locks.remove(realm_id);
-        }
     }
 
     // ===== Session lifecycle policy helpers (A-18) =====
@@ -6253,13 +6247,8 @@ impl EmbeddedIdentityEngine {
     }
 
     /// Returns the per-realm lock for JWT Bearer JTI operations, creating it on first use.
-    fn jwt_bearer_jti_lock(&self, realm_id: &RealmId) -> Arc<Mutex<()>> {
-        let mut map = self.jti_locks.lock().expect("jti_locks poisoned");
-        Arc::clone(
-            map.entry(realm_id.clone())
-                // INVARIANT: inner guard held only across the sync JTI check-and-consume window; no .await in scope.
-                .or_insert_with(|| Arc::new(Mutex::new(()))),
-        )
+    fn jwt_bearer_jti_lock(&self, realm_id: &RealmId) -> advisory_lock::AdvisoryLock<'_> {
+        advisory_lock::AdvisoryLock::acquire(&self.jti_locks, &realm_id.as_uuid().to_string())
     }
 
     /// Returns a per-token-hash lock for single-use token redemption.
@@ -17494,6 +17483,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     ) -> Result<(), IdentityError> {
         use crate::identity::dpop::DPOP_MAX_AGE_SECS;
 
+        // Record a proof only under a realm that exists: the realm ID comes
+        // from the request, and an unknown one must not get stored rows (#581).
+        self.get_realm(realm_id)?
+            .ok_or(IdentityError::RealmNotFound)?;
+
         let jti_key = keys::encode_dpop_jti(jti);
         // Reuse the per-realm JTI lock to close the TOCTOU window between
         // the storage get (replay check) and the storage put (recording).
@@ -17528,7 +17522,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             }
         }
 
-        // Slow path: load from storage or generate a fresh secret.
+        // Slow path: load from storage or generate a fresh secret, for a realm
+        // that exists only. The token endpoint asks for the secret of any realm
+        // ID a request names, so without this check each unknown ID added a
+        // cache entry and a stored row (#581). Callers fall back to the
+        // process-wide nonce on an error.
+        self.get_realm(realm_id)?
+            .ok_or(IdentityError::RealmNotFound)?;
+
         let secret_key = keys::dpop_nonce_secret_key();
         let kek = self
             .config
@@ -28578,6 +28579,97 @@ mod tests {
             .get_realm_dpop_nonce_secret(&realm_b)
             .expect("realm_b");
         assert_ne!(s_a, s_b, "each realm must get an independent nonce secret");
+    }
+
+    #[test]
+    fn get_realm_dpop_nonce_secret_refuses_an_unknown_realm() {
+        // #581: the token endpoint asks for the secret of any realm ID a
+        // request names. An ID that names no realm must not get a stored or
+        // cached secret, or the map and the store grow with every such ID.
+        let (_dir, engine, _clock) = setup_engine();
+        let unknown = RealmId::new(uuid::Uuid::new_v4());
+
+        // Keep only the error: a message must not print a secret.
+        let err = engine.get_realm_dpop_nonce_secret(&unknown).err();
+
+        assert!(
+            matches!(err, Some(IdentityError::RealmNotFound)),
+            "an unknown realm must be refused; got {err:?}"
+        );
+        assert!(
+            engine
+                .storage
+                .get(&unknown, &keys::dpop_nonce_secret_key())
+                .expect("storage get")
+                .is_none(),
+            "no nonce secret may be stored for an unknown realm"
+        );
+        assert!(
+            !engine
+                .dpop_nonce_cache
+                .lock()
+                .expect("dpop_nonce_cache poisoned")
+                .contains_key(&unknown),
+            "no nonce secret may be cached for an unknown realm"
+        );
+    }
+
+    #[test]
+    fn check_and_record_dpop_jti_refuses_an_unknown_realm() {
+        // #581: a DPoP proof's jti is recorded under the realm the request
+        // names. An ID that names no realm must not get a stored row.
+        let (_dir, engine, _clock) = setup_engine();
+        let unknown = RealmId::new(uuid::Uuid::new_v4());
+        let now = 1_700_000_000;
+
+        let result = engine.check_and_record_dpop_jti(&unknown, "jti-1", now);
+
+        assert!(
+            matches!(result, Err(IdentityError::RealmNotFound)),
+            "an unknown realm must be refused; got {result:?}"
+        );
+        assert!(
+            engine
+                .storage
+                .get(&unknown, &keys::encode_dpop_jti("jti-1"))
+                .expect("storage get")
+                .is_none(),
+            "no jti row may be stored for an unknown realm"
+        );
+
+        // A realm that exists still records the jti and refuses a replay.
+        let realm = create_test_realm(&engine);
+        engine
+            .check_and_record_dpop_jti(&realm, "jti-1", now)
+            .expect("a known realm records the jti");
+        assert!(
+            matches!(
+                engine.check_and_record_dpop_jti(&realm, "jti-1", now),
+                Err(IdentityError::DPopProofReplay)
+            ),
+            "a second use of the jti must be refused as a replay"
+        );
+    }
+
+    #[test]
+    fn the_jti_lock_map_keeps_no_entry_after_the_lock_is_released() {
+        // #581: one lock entry per realm ever seen grew without a limit. The
+        // map must hold an entry only while a caller holds the lock.
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+
+        engine
+            .check_and_record_dpop_jti(&realm, "jti-1", 1_700_000_000)
+            .expect("record jti");
+
+        assert!(
+            engine
+                .jti_locks
+                .lock()
+                .expect("jti_locks poisoned")
+                .is_empty(),
+            "the jti lock entry must be reclaimed when its holder releases it"
+        );
     }
 
     #[test]
