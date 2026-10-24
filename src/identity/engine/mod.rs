@@ -641,6 +641,47 @@ fn remaining_lockout(
 ///
 /// Called from `EmbeddedIdentityEngine::sweep_expired` after the storage
 /// sweep to bound memory growth in the five in-memory rate-tracker maps.
+/// How long a per-account failure count below the lockout threshold is kept
+/// with no new failure (#581). After that the account starts again from zero,
+/// as it does after a successful sign-in. A count at or above the threshold is
+/// kept: after the lockout ends, the next wrong password locks it again.
+const FAILURE_MEMORY_MICROS: i64 = 24 * 60 * 60 * 1_000_000;
+
+/// Reads one stored tracker blob: `(failed_count, last_failure_micros)`.
+fn parse_blob(value: &[u8]) -> Option<(u32, i64)> {
+    let blob = serde_json::from_slice::<serde_json::Value>(value).ok()?;
+    let failed_count = blob["failed_count"].as_u64().map(|v| v as u32)?;
+    let last_failure_micros = blob["last_failure_micros"].as_i64()?;
+    Some((failed_count, last_failure_micros))
+}
+
+/// Whether `tracker` is a count below `max_attempts` whose last failure is at
+/// least [`FAILURE_MEMORY_MICROS`] before `now_micros`.
+fn failure_count_is_forgotten(
+    tracker: &AttemptTracker,
+    max_attempts: u32,
+    now_micros: i64,
+) -> bool {
+    tracker.failed_count < max_attempts
+        && now_micros.saturating_sub(tracker.last_failure_micros) >= FAILURE_MEMORY_MICROS
+}
+
+/// Removes the entries of `map` whose key starts with `prefix` and whose count
+/// is forgotten (see [`failure_count_is_forgotten`]). Returns how many it
+/// removed.
+fn forget_failure_counts(
+    map: &mut HashMap<String, AttemptTracker>,
+    prefix: &str,
+    max_attempts: u32,
+    now_micros: i64,
+) -> u64 {
+    let before = map.len() as u64;
+    map.retain(|key, t| {
+        !(key.starts_with(prefix) && failure_count_is_forgotten(t, max_attempts, now_micros))
+    });
+    before.saturating_sub(map.len() as u64)
+}
+
 fn prune_rate_tracker(map: &mut HashMap<String, AttemptTracker>, cutoff_micros: i64) -> u64 {
     let before = map.len() as u64;
     map.retain(|_, t| t.last_failure_micros >= cutoff_micros);
@@ -1650,14 +1691,6 @@ impl EmbeddedIdentityEngine {
             .map_err(Self::storage_err)?;
 
         let now = self.clock.now().as_micros();
-
-        // Helper: read one JSON blob entry and return (failed_count, last_failure_micros).
-        fn parse_blob(value: &[u8]) -> Option<(u32, i64)> {
-            let blob = serde_json::from_slice::<serde_json::Value>(value).ok()?;
-            let failed_count = blob["failed_count"].as_u64().map(|v| v as u32)?;
-            let last_failure_micros = blob["last_failure_micros"].as_i64()?;
-            Some((failed_count, last_failure_micros))
-        }
 
         for realm_entry in &realm_entries {
             let realm: Realm = match serde_json::from_slice(&realm_entry.value) {
@@ -16728,6 +16761,53 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     }
                 }
             }
+        }
+
+        // #581: forget this realm's per-account failure counts below the
+        // lockout threshold after FAILURE_MEMORY_MICROS with no new failure.
+        // The password counts are stored node-local and loaded at startup, so
+        // their rows go too. The MFA rows are already pruned above.
+        let (max_attempts, _) = self.effective_rate_limit(realm_id);
+        stats.rate_trackers_pruned += forget_failure_counts(
+            &mut self.attempt_trackers.lock().expect("tracker lock"),
+            &format!("{}:", realm_id.as_uuid()),
+            max_attempts,
+            now,
+        );
+        stats.rate_trackers_pruned += forget_failure_counts(
+            &mut self.mfa_attempt_trackers.lock().expect("mfa tracker lock"),
+            &format!("mfa:{}:", realm_id.as_uuid()),
+            Self::MFA_MAX_ATTEMPTS,
+            now,
+        );
+        let prefix = keys::attempt_tracker_scan_prefix();
+        match self
+            .storage
+            .scan(realm_id, &prefix, &keys::prefix_end(&prefix))
+        {
+            Ok(entries) => {
+                for entry in entries {
+                    let Some((failed_count, last_failure_micros)) = parse_blob(&entry.value) else {
+                        continue;
+                    };
+                    let tracker = AttemptTracker {
+                        failed_count,
+                        last_failure_micros,
+                    };
+                    if !failure_count_is_forgotten(&tracker, max_attempts, now) {
+                        continue;
+                    }
+                    // Node-local, like the write in `record_failed_attempt`.
+                    if self
+                        .storage
+                        .delete_node_local(realm_id, &entry.key)
+                        .is_err()
+                    {
+                        stats.errors += 1;
+                    }
+                }
+            }
+            Err(_) => stats.errors += 1,
         }
 
         // C-5: evict A-18 idle/absolute-timeout sessions. Policy-expired
