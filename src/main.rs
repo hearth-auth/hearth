@@ -567,6 +567,19 @@ enum AppAction {
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+/// jemalloc's options for the binary (#581), read at its first allocation.
+///
+/// `tcache_max:4096`: each thread's cache keeps freed objects of 4 KiB or less
+/// (jemalloc's default is 32 KiB). The cache is per thread, and under steady
+/// load the Tokio blocking pool keeps its threads, so the cache's size
+/// multiplies by the thread count. Larger objects go back to their arena.
+/// `_RJEM_MALLOC_CONF` (for example `prof:true` in a heap-profile build) adds
+/// to these options.
+#[cfg(not(any(target_env = "msvc", hearth_system_allocator)))]
+#[allow(non_upper_case_globals)]
+#[export_name = "_rjem_malloc_conf"]
+pub static malloc_conf: &[u8] = b"tcache_max:4096\0";
+
 /// Reads jemalloc's memory figures for `/metrics` (#445). `None` if jemalloc
 /// refuses a read, as it does when it is built without its `stats` feature.
 #[cfg(not(any(target_env = "msvc", hearth_system_allocator)))]

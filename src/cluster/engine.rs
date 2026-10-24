@@ -1803,6 +1803,29 @@ impl ClusterStorageAdapter {
             .is_none()
             .then(|| tokio::task::block_in_place(|| write(&self.engine.inner)))
     }
+
+    /// A point read of the local engine (see `ClusterEngine::read_inline`).
+    ///
+    /// Single node: on the calling thread, without `block_in_place` (#581). A
+    /// point read is a lookup in memory or in a mapped SST and takes no lock.
+    /// On a runtime worker, each `block_in_place` hands the worker's other
+    /// tasks to a blocking-pool thread, and point reads are most of the
+    /// adapter's calls: the hand-offs kept the pool's threads in use, so the
+    /// pool did not shrink after a burst. Cluster: inside `block_in_place`, as
+    /// before.
+    fn point_read<T>(
+        &self,
+        read: impl FnOnce(&EmbeddedStorageEngine) -> Result<T, crate::storage::StorageError>,
+    ) -> Result<T, crate::storage::StorageError> {
+        if self.engine.raft.is_none() {
+            return self
+                .engine
+                .read_inline(read)
+                .map_err(cluster_to_storage_err);
+        }
+        tokio::task::block_in_place(|| self.engine.read_inline(read))
+            .map_err(cluster_to_storage_err)
+    }
 }
 
 /// Tells the replicated-write observer each time this node wins leadership —
@@ -1923,15 +1946,13 @@ impl StorageEngine for ClusterStorageAdapter {
     }
 
     /// Served on the calling thread, never via the blocking pool (see
-    /// `ClusterEngine::read_inline`). `block_in_place` only hands a runtime
-    /// worker's other tasks to another thread while this one reads.
+    /// [`Self::point_read`]).
     fn get(
         &self,
         realm_id: &RealmId,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, crate::storage::StorageError> {
-        tokio::task::block_in_place(|| self.engine.read_inline(|inner| inner.get(realm_id, key)))
-            .map_err(cluster_to_storage_err)
+        self.point_read(|inner| inner.get(realm_id, key))
     }
 
     /// Forwarded so the inner engine's non-caching read runs; the trait
@@ -1941,11 +1962,7 @@ impl StorageEngine for ClusterStorageAdapter {
         realm_id: &RealmId,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, crate::storage::StorageError> {
-        tokio::task::block_in_place(|| {
-            self.engine
-                .read_inline(|inner| inner.get_uncached(realm_id, key))
-        })
-        .map_err(cluster_to_storage_err)
+        self.point_read(|inner| inner.get_uncached(realm_id, key))
     }
 
     fn put(

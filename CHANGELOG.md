@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Changed
+- **Less memory per server thread** (#581): each thread's jemalloc cache now keeps freed objects
+  of 4 KiB or less (jemalloc's default is 32 KiB), and on a single node a storage point read no
+  longer hands its runtime worker's tasks to another thread. Under steady load the Tokio blocking
+  pool keeps its threads, so their per-thread memory added up; `hearth_allocator_tcache_bytes`
+  shows the cache part.
+
 ## [4.6.3] — 2026-10-24
 
 ### Security
