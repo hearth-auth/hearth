@@ -101,11 +101,12 @@ jobs:
           node-version: "22"
 
       # Install release tooling (semantic-release + plugins) declared in the
-      # root package.json.  --ignore-scripts prevents the reflex-search
-      # postinstall from running, which would otherwise cause a redundant
-      # reinstall loop.
+      # root package.json, exactly as package-lock.json pins it (npm ci, not
+      # npm install: Scorecard Pinned-Dependencies). --ignore-scripts prevents
+      # the reflex-search postinstall from running, which would otherwise
+      # cause a redundant reinstall loop.
       - name: Install release tooling
-        run: npm install --ignore-scripts
+        run: npm ci --ignore-scripts
 
       # @semantic-release/git is intentionally absent from every .releaserc, so
       # semantic-release never pushes to main (the Protect main ruleset blocks
@@ -149,7 +150,7 @@ jobs:
           node-version: "22"
 
       - name: Install release tooling
-        run: npm install --ignore-scripts
+        run: npm ci --ignore-scripts
 
       # Runs from the repo root, picking up the root .releaserc.json.
       # tagFormat "v${version}" fires docker.yml + helm.yml + release.yml.

@@ -12,11 +12,13 @@ on:
     paths:
       - "sdks/python/**"
       - ".github/workflows/sdk-publish-python.yml"
+      - ".github/requirements/sdk-python-build.txt"
   pull_request:
     branches: [main]
     paths:
       - "sdks/python/**"
       - ".github/workflows/sdk-publish-python.yml"
+      - ".github/requirements/sdk-python-build.txt"
   workflow_dispatch:
 
 # id-token:write is required for PyPI trusted publisher OIDC attestation.
@@ -80,12 +82,15 @@ jobs:
         with:
           python-version: "3.12"
 
+      # hatchling and twine with their dependencies, hash-pinned (Scorecard
+      # Pinned-Dependencies). The publish job runs with the PyPI trusted
+      # publisher, so an unpinned build tool could change what is published.
       - name: Install build tools
-        run: pip install hatchling hatch twine
+        run: pip install --require-hashes -r .github/requirements/sdk-python-build.txt
 
       - name: Build sdist + wheel
         working-directory: sdks/python
-        run: python -m hatch build
+        run: python -m hatchling build
 
       - name: Validate distributions
         run: twine check sdks/python/dist/*
@@ -109,8 +114,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      # hatchling and twine with their dependencies, hash-pinned (Scorecard
+      # Pinned-Dependencies). The publish job runs with the PyPI trusted
+      # publisher, so an unpinned build tool could change what is published.
       - name: Install build tools
-        run: pip install hatchling hatch twine
+        run: pip install --require-hashes -r .github/requirements/sdk-python-build.txt
 
       # Stamp pyproject version from the tag so the wheel/sdist carry the
       # released version (no commit-back to main needed).
@@ -120,7 +128,7 @@ jobs:
 
       - name: Build sdist + wheel
         working-directory: sdks/python
-        run: python -m hatch build
+        run: python -m hatchling build
 
       - name: Validate distributions
         run: twine check sdks/python/dist/*

@@ -336,7 +336,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install uv and PyYAML (Python runner, driver)
-        run: pip install 'uv==0.11.17' 'pyyaml==6.0.2'
+        # Hash-pinned (Scorecard Pinned-Dependencies); regenerate with the
+        # command in the file's header.
+        run: pip install --require-hashes -r .github/requirements/ci-tools.txt
 
       - name: Set up PHP
         uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
