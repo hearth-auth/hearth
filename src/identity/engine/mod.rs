@@ -923,9 +923,12 @@ pub struct EmbeddedIdentityEngine {
     /// read (count live sessions) and the write (create or evict + create)
     /// must be atomic per user. Key format: `"{realm_uuid}:{user_uuid}"`.
     ///
-    // INVARIANT: outer guard released in scoped block before inner per-user lock is acquired.
+    /// Refcount-reclaimed (see [`advisory_lock`]): one entry per user with a
+    /// `create_session` in progress, not one per user who ever signed in
+    /// (#581).
+    ///
     // INVARIANT: inner (per-user) guard held only across the sync count-check + create window; no .await in scope.
-    session_limit_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    session_limit_locks: advisory_lock::AdvisoryLockMap,
     /// Per-realm locks for atomic JTI check-and-consume in the JWT Bearer grant.
     ///
     /// Eliminates the TOCTOU window between `storage.get` and `storage.put`
@@ -1630,7 +1633,6 @@ impl EmbeddedIdentityEngine {
             ip_login_rate_trackers: Mutex::new(HashMap::new()),
             // INVARIANT: guard released before method returns; all callers are non-async helpers.
             webauthn_challenges: WebAuthnChallengeStore::new(),
-            // INVARIANT: outer guard released in scoped block before inner per-user lock is acquired.
             session_limit_locks: Mutex::new(HashMap::new()),
             jti_locks: Mutex::new(HashMap::new()),
             token_redemption_locks: Mutex::new(HashMap::new()),
@@ -2051,7 +2053,6 @@ impl EmbeddedIdentityEngine {
             ip_login_rate_trackers: Mutex::new(HashMap::new()),
             // INVARIANT: guard released before method returns; all callers are non-async helpers.
             webauthn_challenges: WebAuthnChallengeStore::new(),
-            // INVARIANT: outer guard released in scoped block before inner per-user lock is acquired.
             session_limit_locks: Mutex::new(HashMap::new()),
             jti_locks: Mutex::new(HashMap::new()),
             token_redemption_locks: Mutex::new(HashMap::new()),
@@ -18848,17 +18849,9 @@ impl EmbeddedIdentityEngine {
 
                 // Acquire per-user lock — serializes the count-check + create
                 // sequence to prevent TOCTOU races under concurrent logins.
-                let user_lock = {
-                    let mut locks = self
-                        .session_limit_locks
-                        .lock()
-                        .expect("session_limit_locks poisoned");
-                    locks
-                        .entry(lock_key)
-                        // INVARIANT: inner guard held only across the sync session count-check + write window; no .await in scope.
-                        .or_insert_with(|| Arc::new(Mutex::new(())))
-                        .clone()
-                };
+                // INVARIANT: inner guard held only across the sync session count-check + write window; no .await in scope.
+                let user_lock =
+                    advisory_lock::AdvisoryLock::acquire(&self.session_limit_locks, &lock_key);
                 let _guard = user_lock
                     .lock()
                     .expect("session_limit_locks user lock poisoned");
@@ -20596,6 +20589,39 @@ mod tests {
             .expect("create realm")
             .id()
             .clone()
+    }
+
+    #[test]
+    fn the_session_limit_lock_map_keeps_no_entry_after_the_lock_is_released() {
+        // #581: with `max_concurrent_sessions` set, each user who ever signed
+        // in kept one lock entry. The map must hold an entry only while a
+        // `create_session` holds the lock.
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = engine
+            .create_realm(&CreateRealmRequest {
+                name: format!("session-limit-{}", uuid::Uuid::new_v4()),
+                config: Some(RealmConfig {
+                    max_concurrent_sessions: Some(2),
+                    ..RealmConfig::default()
+                }),
+            })
+            .expect("create realm")
+            .id()
+            .clone();
+        let user = create_test_user(&engine, &realm);
+
+        engine
+            .create_session(&realm, user.id(), &SessionContext::default())
+            .expect("a session under the limit");
+
+        assert!(
+            engine
+                .session_limit_locks
+                .lock()
+                .expect("session_limit_locks poisoned")
+                .is_empty(),
+            "the per-user session-limit lock must be reclaimed when its holder releases it"
+        );
     }
 
     /// Declares `scopes` in `realm`'s scope registry as bundles that grant no
