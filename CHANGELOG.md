@@ -27,6 +27,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   with no new wrong code, as it does after a correct code. Old counts also leave memory. Before,
   each count stayed until the user's next correct code. Lockouts and their escalation do not
   change.
+- **Per-realm DPoP state only for realms that exist** (#581): Hearth creates a realm's DPoP
+  nonce secret, and records a DPoP proof's `jti`, only when the realm in the request exists. A
+  request for an unknown realm gets the server-wide DPoP nonce, and a proof under an unknown
+  realm is refused. Before, each unknown realm ID in a request could add an entry in memory and
+  a stored row that nothing removed. The per-realm replay lock map now also keeps an entry only
+  while a request holds the lock.
 
 ## [4.6.1] — 2026-10-23
 
