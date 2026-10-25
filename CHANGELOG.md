@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.6.4] — 2026-10-25
+
 ### Changed
 - **Less memory per server thread** (#581): each thread's jemalloc cache now keeps freed objects
   of 4 KiB or less (jemalloc's default is 32 KiB), and on a single node a storage point read no
