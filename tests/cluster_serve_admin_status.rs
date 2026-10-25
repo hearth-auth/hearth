@@ -12,10 +12,12 @@
 //! one store, and an operator token from `hearth admin token` minted into that
 //! store before the copy (the documented rebuild).
 
+use std::hash::{BuildHasher, RandomState};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
@@ -47,21 +49,51 @@ impl Drop for Server {
 /// HTTP-to-HTTPS redirect listener on `port - 1`.
 fn free_port_pair() -> u16 {
     for _ in 0..100 {
-        let l = TcpListener::bind("127.0.0.1:0").expect("bind");
-        let port = l.local_addr().expect("addr").port();
-        if port > 1024 && TcpListener::bind(("127.0.0.1", port - 1)).is_ok() {
-            return port;
+        let redirect = next_ports(2);
+        if is_free(redirect) && is_free(redirect + 1) {
+            return redirect + 1;
         }
     }
-    panic!("no free port pair on 127.0.0.1");
+    panic!("no free port pair below the ephemeral range on 127.0.0.1");
 }
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
+    for _ in 0..100 {
+        let port = next_ports(1);
+        if is_free(port) {
+            return port;
+        }
+    }
+    panic!("no free port below the ephemeral range on 127.0.0.1");
+}
+
+fn is_free(port: u16) -> bool {
+    TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+/// The lowest port the tests use: local services often hold lower ones.
+const LOWEST_TEST_PORT: u16 = 20_000;
+
+/// The first of `count` consecutive ports below the ephemeral range. Each
+/// call in this process gets new ports. The counter starts at a random point,
+/// so two test processes seldom try the same ports.
+fn next_ports(count: u16) -> u16 {
+    static NEXT: OnceLock<AtomicU32> = OnceLock::new();
+    let span = u32::from(ephemeral_low().saturating_sub(LOWEST_TEST_PORT));
+    assert!(
+        span >= 1_000,
+        "fewer than 1,000 ports below the ephemeral range"
+    );
+    let next = NEXT.get_or_init(|| {
+        let start = RandomState::new().hash_one(std::process::id()) % u64::from(span);
+        AtomicU32::new(u32::try_from(start).expect("start is below span"))
+    });
+    loop {
+        let offset = next.fetch_add(u32::from(count), Ordering::Relaxed) % span;
+        if offset + u32::from(count) <= span {
+            return LOWEST_TEST_PORT + u16::try_from(offset).expect("offset is below span");
+        }
+    }
 }
 
 /// The first port of the kernel's ephemeral range, from which `bind(0)` and
