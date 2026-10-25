@@ -64,6 +64,45 @@ fn free_port() -> u16 {
         .port()
 }
 
+/// The first port of the kernel's ephemeral range, from which `bind(0)` and
+/// outgoing connections get their local port. 32768 (the Linux default) when
+/// `ip_local_port_range` is missing.
+fn ephemeral_low() -> u16 {
+    std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range")
+        .ok()
+        .and_then(|range| range.split_whitespace().next()?.parse().ok())
+        .unwrap_or(32_768)
+}
+
+/// The tests stop nodes and start them again on the same ports. While a node
+/// is down, a port from the ephemeral range can go to any `bind(0)` or
+/// outgoing connection on the host, and the restart then fails with "Address
+/// already in use". No `bind(0)` or outgoing connection gets a port from
+/// below that range.
+#[test]
+fn node_ports_come_from_below_the_ephemeral_range() {
+    let low = ephemeral_low();
+    let mut ports = Vec::new();
+    for _ in 0..3 {
+        let port = free_port_pair();
+        ports.extend([port - 1, port, free_port()]);
+    }
+    for port in &ports {
+        assert!(
+            *port < low,
+            "port {port} is in the ephemeral range (from {low}): {ports:?}"
+        );
+    }
+    let mut distinct = ports.clone();
+    distinct.sort_unstable();
+    distinct.dedup();
+    assert_eq!(
+        distinct.len(),
+        ports.len(),
+        "every node port is different: {ports:?}"
+    );
+}
+
 /// A CA and one leaf for `localhost` / `127.0.0.1`, used for both HTTPS and
 /// peer mTLS. Returns the CA certificate PEM.
 fn write_certs(dir: &Path) -> String {
