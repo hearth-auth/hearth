@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.6.6] — 2026-10-26
+
 ### Added
 - **`storage.max_writes_in_flight`** (default `32`) and the metrics
   `hearth_storage_writes_in_flight`, `hearth_storage_write_permits` and
