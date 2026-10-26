@@ -4842,6 +4842,11 @@ impl EmbeddedIdentityEngine {
         if let Ok(mut mfa) = self.mfa_dek_cache.lock() {
             mfa.remove(realm_id);
         }
+        // Per-realm timing-defence dummy hash: one entry per realm that
+        // nothing else removed (#581).
+        if let Ok(mut dummies) = self.dummy_hashes.lock() {
+            dummies.remove(realm_id);
+        }
         // Per-realm DPoP nonce HMAC secret. The cascade sweeps its storage key
         // with the rest of the realm's key space, but the cached copy stayed
         // live for the life of the process, so a realm re-created under the

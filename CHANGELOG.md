@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Fixed
+- **Device-approval lockout history leaves memory after its cooldown** (#581): on
+  `POST /ui/device`, a user's lockout history stayed in memory after the 7-day cooldown reset
+  it. It now leaves memory. Lockouts and their escalation do not change.
+- **Realm deletes and audit imports free their per-realm state** (#581): deleting a realm now
+  also removes the realm's cached dummy password hash from memory. A finished import of audit
+  events no longer keeps a lock in memory for its realm.
+- **The start of a passkey ceremony examines only expired challenges** (#581): each passkey
+  registration or sign-in start removes the expired pending challenges. Before, it examined
+  every pending challenge of every realm.
+
 ## [4.6.4] — 2026-10-25
 
 ### Changed

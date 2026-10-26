@@ -394,11 +394,17 @@ impl EmbeddedAuditEngine {
     }
 
     /// Returns the per-realm import lock, creating it on first access.
+    ///
+    /// First drops the locks that no import holds (#581): the map keeps the
+    /// running imports' locks and at most one finished one, not a lock for
+    /// each realm ever imported. A lock that an import holds, or is about to
+    /// take, has a second reference and stays.
     fn realm_import_lock(&self, realm_id: &RealmId) -> Arc<Mutex<()>> {
         let mut map = self
             .import_locks
             .lock()
             .expect("import_locks mutex poisoned");
+        map.retain(|_, lock| Arc::strong_count(lock) > 1);
         Arc::clone(
             map.entry(realm_id.clone())
                 .or_insert_with(|| Arc::new(Mutex::new(()))),
