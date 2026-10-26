@@ -21,3 +21,6 @@ mod wal_fsync_before_ack;
 mod wal_group_commit;
 mod wal_memtable_order;
 mod wal_rotation_crash;
+// Counts threads from /proc/self/status.
+#[cfg(target_os = "linux")]
+mod write_stall_threads;
