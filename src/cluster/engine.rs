@@ -1824,6 +1824,9 @@ impl ClusterStorageAdapter {
 
     /// Takes a place under the write limit, or `None` when the limit is full.
     fn try_start_write(&self) -> Option<WriteInFlight<'_>> {
+        // Rust 1.99 renamed `fetch_update` to `try_update`; the MSRV (1.88)
+        // has only the old name.
+        #[allow(deprecated)]
         self.writes_in_flight
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
                 (n < self.max_writes_in_flight).then_some(n + 1)
