@@ -21472,6 +21472,7 @@ mod tests {
         engine.dummy_hash_for_realm(&realm);
         assert!(cached(&engine), "the dummy hash is cached on first use");
 
+        archive_test_realm(&engine, &realm);
         engine.delete_realm(&realm).expect("delete realm");
 
         assert!(
