@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.6.5] — 2026-10-26
+
 ### Fixed
 - **Device-approval lockout history leaves memory after its cooldown** (#581): on
   `POST /ui/device`, a user's lockout history stayed in memory after the 7-day cooldown reset
