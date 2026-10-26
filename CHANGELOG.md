@@ -20,6 +20,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   and `HEARTH_CLUSTER_UNAVAILABLE`, and nothing is written. Writes that wait at a backup export's
   barrier count toward the limit too.
 
+### Security
+- **zstd 0.14.3** (RUSTSEC-2026-0391, RUSTSEC-2026-0398, RUSTSEC-2026-0403,
+  RUSTSEC-2026-0410): backup archives use zstd 0.14.3 (zstd-safe 8.2.0, zstd-sys 2.1.2).
+  Hearth does not give zstd a borrowed context, read seekable archives, or build for
+  WebAssembly, so three of the advisories do not apply. A restore and a signature check
+  decompress the archive that they are given, so the fix for legacy frames (RUSTSEC-2026-0403)
+  applies. The three zstd crates are now licensed BSD-3-Clause (`THIRD_PARTY_LICENSES`).
+
 ## [4.6.5] — 2026-10-26
 
 ### Fixed
