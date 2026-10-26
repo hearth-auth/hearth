@@ -181,6 +181,9 @@ storage:
   #                                       # cold-tier resident memory independent of corpus
   #                                       # size. Lower on RAM-constrained hosts; raise if
   #                                       # cold reads are common and frequently miss the cache.
+  # max_writes_in_flight: 32              # single-node writes in progress at once (#596); one
+  #                                       # more is refused with 503 + Retry-After, so a stalled
+  #                                       # disk cannot add a thread for each waiting write.
   # compaction:                            # optional — all fields have defaults shown below
   #   enabled: true                       # whether background SST compaction runs
   #   interval_secs: 3600                 # seconds between periodic FULL compaction sweeps

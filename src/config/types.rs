@@ -226,6 +226,14 @@ pub struct StorageSection {
     /// independent of corpus size. Default 256 MiB.
     #[serde(default = "StorageSection::default_block_cache_bytes")]
     pub block_cache_bytes: usize,
+    /// Single-node writes that may be in progress at once (#596). A write
+    /// over the limit is refused with `503` + `Retry-After` before it starts,
+    /// so a disk that stops completing syncs cannot make the server add a
+    /// thread for each waiting write. Default:
+    /// [`crate::cluster::DEFAULT_MAX_WRITES_IN_FLIGHT`]. MUST be `>= 1`.
+    /// Cluster mode ignores it.
+    #[serde(default = "StorageSection::default_max_writes_in_flight")]
+    pub max_writes_in_flight: usize,
     /// Background SST compaction (all fields optional).
     #[serde(default)]
     pub compaction: CompactionSection,
@@ -270,6 +278,10 @@ impl StorageSection {
     const fn default_hot_tier_per_realm_metrics() -> bool {
         true
     }
+
+    const fn default_max_writes_in_flight() -> usize {
+        crate::cluster::DEFAULT_MAX_WRITES_IN_FLIGHT
+    }
 }
 
 impl Default for StorageSection {
@@ -283,6 +295,7 @@ impl Default for StorageSection {
             hot_tier_per_realm_metrics: Self::default_hot_tier_per_realm_metrics(),
             fsync: None,
             block_cache_bytes: Self::default_block_cache_bytes(),
+            max_writes_in_flight: Self::default_max_writes_in_flight(),
             compaction: CompactionSection::default(),
         }
     }

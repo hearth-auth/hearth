@@ -147,6 +147,7 @@ Embedded storage engine tuning. These control WAL, memtable, and hot tier behavi
 | `hot_tier_per_realm_metrics` | bool | `true` | Export `hearth_storage_hot_tier_evictions_by_realm_total` and `hearth_storage_hot_tier_promotions_by_realm_total` with a `realm` label. The hot tier is one cache shared by every tenant, so the unlabelled totals cannot name the realm whose working set the tier holds, nor the realm evicting the others. Costs one Prometheus series per realm on each of the two counters; set `false` when the realm count makes that too expensive. The unlabelled totals are kept either way. |
 | `fsync` | bool | `true` | Whether to `fsync` WAL writes. **MUST be `true` in production.** Dev mode disables this for faster iteration. |
 | `block_cache_bytes` | integer | `268435456` (256 MiB) | Process-wide byte budget for decrypted SST blocks (HEA-1914, #445): data blocks, and the block-index and Bloom-filter blocks of v4 SST files. All SST readers share one cache bounded to this size, and it counts the real heap of each block, so cold-tier resident memory does not grow with the corpus. Index and filter blocks get priority over data blocks. This is a real resident-memory commitment — budget for it alongside `hot_tier_max_memory`. Give it room for the index and filter blocks of the data that requests read (about 2–3 % of that data for Hearth's small rows), plus the data blocks to keep warm. A cache too small for them makes a lookup that misses the hot tier read and decrypt up to two more blocks from each SST file it checks. |
+| `max_writes_in_flight` | integer | `32` | Single-node writes that may be in progress at once (#596): running, or waiting for the WAL `fsync` or a backup export's barrier. A write over the limit is refused before it starts with `503`, `Retry-After` and `HEARTH_CLUSTER_UNAVAILABLE`, and nothing is written. Each write in progress holds a thread, so the limit also bounds the threads that a slow or stalled disk adds: without it, each write that arrived during a stall held its own thread, and the server kept those threads after the disk recovered. 32 writes sustain 3,200 writes/s until one write takes 10 ms. Raise it only if `hearth_storage_writes_shed_total` rises while the disk is healthy. Cluster mode ignores it. Must be greater than 0. |
 
 ```yaml
 storage:
@@ -342,6 +343,9 @@ The `/metrics` endpoint returns metrics in Prometheus text exposition format (`t
 | `hearth_user_create_permits` | gauge | — | Configured max concurrent user creates (`operational.user_create.max_in_flight`) |
 | `hearth_user_create_queue_wait_seconds` | histogram | — | Seconds a user create waited for an admission permit (successful acquisitions only) |
 | `hearth_user_create_shed_total` | counter | — | User creates shed (`503`/`Retry-After`) because the user-create admission limit was full |
+| `hearth_storage_writes_in_flight` | gauge | — | Single-node storage writes in progress: running, or waiting for an `fsync` or a backup export's barrier. Each one holds a thread (#596) |
+| `hearth_storage_write_permits` | gauge | — | Configured maximum single-node storage writes in progress (`storage.max_writes_in_flight`) |
+| `hearth_storage_writes_shed_total` | counter | — | Single-node storage writes refused (`503`/`Retry-After`) because `storage.max_writes_in_flight` writes were already in progress |
 | `hearth_cluster_forwarded_writes_total` | counter | `outcome` | Cluster mode: writes this node forwarded to the Raft leader, by outcome — a fixed set: `committed`, `not_applied_locally`, `not_leader`, `unreachable`, `busy`, `rejected`, `outcome_unknown` (all present at 0). See the clustering guide (H-3) |
 
 ### `observability`
@@ -2147,6 +2151,7 @@ Every field's default value at a glance.
 | `security` | `key_encryption_key` | — (**required in production**; or `HEARTH_KEK`) |
 | `server` | `tls_cert_path` / `tls_key_path` | — (**one of TLS or `trust_forwarded_proto` required in production**) |
 | `storage` | `block_cache_bytes` | `268435456` (256 MiB) |
+| `storage` | `max_writes_in_flight` | `32` |
 | `storage` | `hot_tier_per_realm_metrics` | `true` |
 | `oidc` | `authorization_code_ttl` | `"10m"` |
 | `oidc` | `enforce_nonces` | `true` |

@@ -1614,9 +1614,12 @@ async fn run_serve(
 
     // `storage` is the app-layer storage handle: always a ClusterStorageAdapter,
     // which routes through Raft in cluster mode and is a thin passthrough otherwise.
-    let storage: Arc<dyn StorageEngine> = Arc::new(hearth::cluster::ClusterStorageAdapter::new(
-        Arc::clone(&cluster_engine),
-    ));
+    let storage: Arc<dyn StorageEngine> = Arc::new(
+        hearth::cluster::ClusterStorageAdapter::with_max_writes_in_flight(
+            Arc::clone(&cluster_engine),
+            config.storage.max_writes_in_flight,
+        ),
+    );
 
     // Initialize identity engine
     let clock = Arc::new(SystemClock) as Arc<dyn Clock>;

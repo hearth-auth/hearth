@@ -6,6 +6,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Added
+- **`storage.max_writes_in_flight`** (default `32`) and the metrics
+  `hearth_storage_writes_in_flight`, `hearth_storage_write_permits` and
+  `hearth_storage_writes_shed_total` (#596): the single-node write limit below.
+
+### Fixed
+- **A stalled disk no longer leaves hundreds of extra threads** (#596): on a single node, when
+  the disk stopped completing syncs, each write that arrived waited and held its own thread, and
+  the server kept those threads after the disk recovered. In one test run, a 9-second stall took
+  the server from 148 to 523 threads. Now at most `storage.max_writes_in_flight` writes are in
+  progress at once. A write over the limit is refused before it starts with `503`, `Retry-After`
+  and `HEARTH_CLUSTER_UNAVAILABLE`, and nothing is written. Writes that wait at a backup export's
+  barrier count toward the limit too.
+
 ## [4.6.5] — 2026-10-26
 
 ### Fixed
