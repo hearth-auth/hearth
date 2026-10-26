@@ -21457,6 +21457,29 @@ mod tests {
         );
     }
 
+    /// #581: a deleted realm's dummy hash does not stay in memory.
+    #[test]
+    fn deleting_a_realm_drops_its_dummy_hash() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let cached = |engine: &EmbeddedIdentityEngine| {
+            engine
+                .dummy_hashes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(&realm)
+        };
+        engine.dummy_hash_for_realm(&realm);
+        assert!(cached(&engine), "the dummy hash is cached on first use");
+
+        engine.delete_realm(&realm).expect("delete realm");
+
+        assert!(
+            !cached(&engine),
+            "the deleted realm's dummy hash must leave the cache"
+        );
+    }
+
     #[test]
     fn absent_user_hashes_exactly_once_on_a_tuned_realm() {
         // The per-realm dummy hash must be memoised: computing it inside the

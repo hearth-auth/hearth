@@ -2933,6 +2933,30 @@ mod tests {
             .expect("verify"));
     }
 
+    /// #581: a finished import does not leave its realm's import lock in
+    /// memory, one for each realm that was ever imported.
+    #[test]
+    fn finished_imports_do_not_keep_one_import_lock_per_realm() {
+        let (engine, _, clock) = setup_with_clock();
+        clock.set(Timestamp::from_micros(5_000_000));
+        for _ in 0..3 {
+            let realm_id = RealmId::generate();
+            engine
+                .import_events(&realm_id, &archived_events(&realm_id, 1_000, 1))
+                .expect("import");
+        }
+
+        let locks = engine
+            .import_locks
+            .lock()
+            .expect("import_locks mutex poisoned")
+            .len();
+        assert!(
+            locks <= 1,
+            "three finished imports left {locks} import locks; at most the last may stay"
+        );
+    }
+
     /// An imported event is part of the chain like any other: editing it in
     /// storage afterwards is detected.
     #[test]

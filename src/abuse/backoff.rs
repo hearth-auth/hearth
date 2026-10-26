@@ -210,11 +210,15 @@ impl AdaptiveBackoffStore {
     /// If the key is *already* locked this call extends the lockout to the new
     /// (potentially longer) duration rather than truncating it.
     pub fn record_lockout(&self, key: &str) -> BackoffOutcome {
+        self.record_lockout_at(key, Instant::now())
+    }
+
+    /// [`Self::record_lockout`] at `now`.
+    fn record_lockout_at(&self, key: &str, now: Instant) -> BackoffOutcome {
         if self.config.durations.is_empty() {
             return BackoffOutcome::Allow;
         }
 
-        let now = Instant::now();
         let mut map = self
             .entries
             .lock()
@@ -477,5 +481,36 @@ mod tests {
         let s = store();
         s.record_lockout("k");
         assert_eq!(s.peek_next_duration("k"), Duration::from_secs(300));
+    }
+
+    // ── Unit: memory (#581) ──────────────────────────────────────────────────
+
+    /// The number of keys the store keeps.
+    fn tracked_keys(s: &AdaptiveBackoffStore) -> usize {
+        s.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
+    #[test]
+    fn reset_entries_leave_the_map_once_it_is_large() {
+        let s = store();
+        let t0 = Instant::now();
+        // The store sweeps out reset entries once it holds 1,024 keys.
+        for i in 0..1_024 {
+            s.record_lockout_at(&format!("ip:{i}"), t0);
+        }
+        // Each lockout above ends 1 min after t0, and its offense history
+        // resets one cooldown after that.
+        let reset = t0 + Duration::from_secs(60) + s.config.offense_cooldown;
+
+        s.record_lockout_at("ip:latest", reset);
+
+        assert_eq!(
+            tracked_keys(&s),
+            1,
+            "only the new lockout may stay: the 1,024 reset entries must leave the map"
+        );
     }
 }
