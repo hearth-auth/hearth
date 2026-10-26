@@ -4842,6 +4842,11 @@ impl EmbeddedIdentityEngine {
         if let Ok(mut mfa) = self.mfa_dek_cache.lock() {
             mfa.remove(realm_id);
         }
+        // Per-realm timing-defence dummy hash: one entry per realm that
+        // nothing else removed (#581).
+        if let Ok(mut dummies) = self.dummy_hashes.lock() {
+            dummies.remove(realm_id);
+        }
         // Per-realm DPoP nonce HMAC secret. The cascade sweeps its storage key
         // with the rest of the realm's key space, but the cached copy stayed
         // live for the life of the process, so a realm re-created under the
@@ -21454,6 +21459,30 @@ mod tests {
             (m, t, p),
             (base.memory_cost_kib, base.time_cost, base.parallelism),
             "a realm with no Argon2 override must inherit the engine base config"
+        );
+    }
+
+    /// #581: a deleted realm's dummy hash does not stay in memory.
+    #[test]
+    fn deleting_a_realm_drops_its_dummy_hash() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let cached = |engine: &EmbeddedIdentityEngine| {
+            engine
+                .dummy_hashes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(&realm)
+        };
+        engine.dummy_hash_for_realm(&realm);
+        assert!(cached(&engine), "the dummy hash is cached on first use");
+
+        archive_test_realm(&engine, &realm);
+        engine.delete_realm(&realm).expect("delete realm");
+
+        assert!(
+            !cached(&engine),
+            "the deleted realm's dummy hash must leave the cache"
         );
     }
 

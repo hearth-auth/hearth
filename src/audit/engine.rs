@@ -394,11 +394,17 @@ impl EmbeddedAuditEngine {
     }
 
     /// Returns the per-realm import lock, creating it on first access.
+    ///
+    /// First drops the locks that no import holds (#581): the map keeps the
+    /// running imports' locks and at most one finished one, not a lock for
+    /// each realm ever imported. A lock that an import holds, or is about to
+    /// take, has a second reference and stays.
     fn realm_import_lock(&self, realm_id: &RealmId) -> Arc<Mutex<()>> {
         let mut map = self
             .import_locks
             .lock()
             .expect("import_locks mutex poisoned");
+        map.retain(|_, lock| Arc::strong_count(lock) > 1);
         Arc::clone(
             map.entry(realm_id.clone())
                 .or_insert_with(|| Arc::new(Mutex::new(()))),
@@ -2931,6 +2937,30 @@ mod tests {
         assert!(engine
             .verify_integrity(&realm_id, None, None)
             .expect("verify"));
+    }
+
+    /// #581: a finished import does not leave its realm's import lock in
+    /// memory, one for each realm that was ever imported.
+    #[test]
+    fn finished_imports_do_not_keep_one_import_lock_per_realm() {
+        let (engine, _, clock) = setup_with_clock();
+        clock.set(Timestamp::from_micros(5_000_000));
+        for _ in 0..3 {
+            let realm_id = RealmId::generate();
+            engine
+                .import_events(&realm_id, &archived_events(&realm_id, 1_000, 1))
+                .expect("import");
+        }
+
+        let locks = engine
+            .import_locks
+            .lock()
+            .expect("import_locks mutex poisoned")
+            .len();
+        assert!(
+            locks <= 1,
+            "three finished imports left {locks} import locks; at most the last may stay"
+        );
     }
 
     /// An imported event is part of the chain like any other: editing it in

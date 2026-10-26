@@ -120,6 +120,19 @@ impl Entry {
     }
 }
 
+/// The map size at which a new lockout first sweeps out the entries whose
+/// offense history the cooldown reset (#581). After a sweep, the next one
+/// waits until the map is twice as large, so the sweep costs a constant amount
+/// per lockout.
+const PRUNE_FLOOR: usize = 1024;
+
+/// The per-key entries and the map size that triggers the next sweep.
+#[derive(Debug)]
+struct Entries {
+    map: HashMap<String, Entry>,
+    prune_at: usize,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // AdaptiveBackoffStore
 // ─────────────────────────────────────────────────────────────────────────────
@@ -129,10 +142,12 @@ impl Entry {
 /// Keys are arbitrary strings (typically an IP address or a user ID).
 /// Share via `Arc`; the inner `Mutex` is held only for the duration of a
 /// hash-map lookup + counter update — no I/O inside the critical section.
+/// An entry whose offense history the cooldown reset leaves the map at the
+/// next sweep (see `PRUNE_FLOOR`).
 #[derive(Debug)]
 pub struct AdaptiveBackoffStore {
     config: BackoffConfig,
-    entries: Mutex<HashMap<String, Entry>>,
+    entries: Mutex<Entries>,
 }
 
 impl AdaptiveBackoffStore {
@@ -147,7 +162,10 @@ impl AdaptiveBackoffStore {
     pub fn with_config(config: BackoffConfig) -> Self {
         Self {
             config,
-            entries: Mutex::new(HashMap::new()),
+            entries: Mutex::new(Entries {
+                map: HashMap::new(),
+                prune_at: PRUNE_FLOOR,
+            }),
         }
     }
 
@@ -173,12 +191,12 @@ impl AdaptiveBackoffStore {
         }
 
         let now = Instant::now();
-        let mut map = self
+        let mut entries = self
             .entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        let Some(entry) = map.get_mut(key) else {
+        let Some(entry) = entries.map.get_mut(key) else {
             return BackoffOutcome::Allow;
         };
 
@@ -210,17 +228,31 @@ impl AdaptiveBackoffStore {
     /// If the key is *already* locked this call extends the lockout to the new
     /// (potentially longer) duration rather than truncating it.
     pub fn record_lockout(&self, key: &str) -> BackoffOutcome {
+        self.record_lockout_at(key, Instant::now())
+    }
+
+    /// [`Self::record_lockout`] at `now`.
+    fn record_lockout_at(&self, key: &str, now: Instant) -> BackoffOutcome {
         if self.config.durations.is_empty() {
             return BackoffOutcome::Allow;
         }
 
-        let now = Instant::now();
-        let mut map = self
+        let mut guard = self
             .entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entries = &mut *guard;
+        if entries.map.len() >= entries.prune_at {
+            // Keep an entry only while it holds a lockout or an offense history
+            // that still counts; a reset entry is the same as no entry.
+            let cooldown = self.config.offense_cooldown;
+            entries.map.retain(|_, e| {
+                e.last_lockout_end.is_some() && !e.should_reset_offenses(now, cooldown)
+            });
+            entries.prune_at = PRUNE_FLOOR.max(entries.map.len().saturating_mul(2));
+        }
 
-        let entry = map.entry(key.to_owned()).or_insert_with(Entry::new);
+        let entry = entries.map.entry(key.to_owned()).or_insert_with(Entry::new);
 
         // Reset offense counter if the cooldown window has passed since the
         // most recent lockout ended.
@@ -256,12 +288,13 @@ impl AdaptiveBackoffStore {
             return Duration::ZERO;
         }
 
-        let map = self
+        let entries = self
             .entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        let next_offense = map
+        let next_offense = entries
+            .map
             .get(key)
             .map(|e| e.offense_count.saturating_add(1))
             .unwrap_or(1);
@@ -276,11 +309,11 @@ impl AdaptiveBackoffStore {
     /// Call this after an admin-initiated unlock or after a successful
     /// multi-factor re-authentication that the operator trusts.
     pub fn clear(&self, key: &str) {
-        let mut map = self
-            .entries
+        self.entries
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        map.remove(key);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .map
+            .remove(key);
     }
 }
 
@@ -477,5 +510,36 @@ mod tests {
         let s = store();
         s.record_lockout("k");
         assert_eq!(s.peek_next_duration("k"), Duration::from_secs(300));
+    }
+
+    // ── Unit: memory (#581) ──────────────────────────────────────────────────
+
+    /// The number of keys the store keeps.
+    fn tracked_keys(s: &AdaptiveBackoffStore) -> usize {
+        s.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .map
+            .len()
+    }
+
+    #[test]
+    fn reset_entries_leave_the_map_once_it_is_large() {
+        let s = store();
+        let t0 = Instant::now();
+        for i in 0..PRUNE_FLOOR {
+            s.record_lockout_at(&format!("ip:{i}"), t0);
+        }
+        // Each lockout above ends 1 min after t0, and its offense history
+        // resets one cooldown after that.
+        let reset = t0 + Duration::from_secs(60) + s.config.offense_cooldown;
+
+        s.record_lockout_at("ip:latest", reset);
+
+        assert_eq!(
+            tracked_keys(&s),
+            1,
+            "only the new lockout may stay: the {PRUNE_FLOOR} reset entries must leave the map"
+        );
     }
 }

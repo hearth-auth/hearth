@@ -8,7 +8,7 @@
 //! Attestation: supports "none" and "packed" self-attestation.
 //! TPM/x5c attestation returns an error (would require X.509 chain validation).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::Mutex;
 
@@ -351,7 +351,22 @@ impl fmt::Display for ChallengeRedemptionError {
 /// only possible through [`WebAuthnChallengeStore::redeem`], which checks
 /// both (audit 2026-08-28 §4.18#8).
 pub(crate) struct WebAuthnChallengeStore {
-    challenges: Mutex<HashMap<String, PendingWebAuthnChallenge>>,
+    challenges: Mutex<PendingChallenges>,
+    /// How many pending challenges the sweeps examined (tests only).
+    #[cfg(test)]
+    examined: std::sync::atomic::AtomicUsize,
+}
+
+/// The pending challenges by key, and their keys in creation order.
+#[derive(Default)]
+struct PendingChallenges {
+    by_key: HashMap<String, PendingWebAuthnChallenge>,
+    /// The creation time and key of each inserted challenge, oldest first. A
+    /// sweep pops expired slots from the front and stops at the first live
+    /// one, so it examines only the expired challenges, not every pending one
+    /// (#581). A redeemed challenge's slot stays until it expires, so the
+    /// queue holds at most the challenges created in one expiry window.
+    by_age: VecDeque<(i64, String)>,
 }
 
 impl fmt::Debug for WebAuthnChallengeStore {
@@ -365,15 +380,20 @@ impl WebAuthnChallengeStore {
     /// Creates a new empty challenge store.
     pub(crate) fn new() -> Self {
         Self {
-            challenges: Mutex::new(HashMap::new()),
+            challenges: Mutex::new(PendingChallenges::default()),
+            #[cfg(test)]
+            examined: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
     /// Inserts a pending challenge. Returns the base64url-encoded challenge.
     pub(crate) fn insert(&self, challenge: PendingWebAuthnChallenge) -> String {
         let key = URL_SAFE_NO_PAD.encode(&challenge.challenge);
-        let mut map = self.challenges.lock().expect("challenge store lock");
-        map.insert(key.clone(), challenge);
+        let mut pending = self.challenges.lock().expect("challenge store lock");
+        pending
+            .by_age
+            .push_back((challenge.created_at, key.clone()));
+        pending.by_key.insert(key.clone(), challenge);
         key
     }
 
@@ -389,7 +409,8 @@ impl WebAuthnChallengeStore {
         realm_id: &RealmId,
         ceremony_type: CeremonyType,
     ) -> Result<PendingWebAuthnChallenge, ChallengeRedemptionError> {
-        let mut map = self.challenges.lock().expect("challenge store lock");
+        let mut challenges = self.challenges.lock().expect("challenge store lock");
+        let map = &mut challenges.by_key;
         let pending = map.get(key).ok_or(ChallengeRedemptionError::NotFound)?;
         if &pending.realm_id != realm_id {
             return Err(ChallengeRedemptionError::RealmMismatch);
@@ -403,9 +424,32 @@ impl WebAuthnChallengeStore {
     }
 
     /// Removes expired challenges from the store.
+    ///
+    /// Examines the challenges oldest first and stops at the first live one.
+    /// Creation times come from one clock, so they arrive in order. If the
+    /// clock steps back, a challenge out of order leaves with the ones before
+    /// it, and each ceremony's finish still refuses it once it has expired.
     pub(crate) fn cleanup_expired(&self, now_micros: i64) {
-        let mut map = self.challenges.lock().expect("challenge store lock");
-        map.retain(|_, v| (now_micros - v.created_at) < CHALLENGE_EXPIRY_MICROS);
+        let mut guard = self.challenges.lock().expect("challenge store lock");
+        let pending = &mut *guard;
+        while let Some(&(created_at, _)) = pending.by_age.front() {
+            #[cfg(test)]
+            self.examined
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if now_micros - created_at < CHALLENGE_EXPIRY_MICROS {
+                break;
+            }
+            if let Some((_, key)) = pending.by_age.pop_front() {
+                // The key can name a newer challenge, or none once redeemed.
+                if pending
+                    .by_key
+                    .get(&key)
+                    .is_some_and(|p| p.created_at == created_at)
+                {
+                    pending.by_key.remove(&key);
+                }
+            }
+        }
     }
 }
 
@@ -1693,6 +1737,69 @@ mod tests {
             store.redeem(&key, &test_realm(), CeremonyType::Authentication),
             Err(ChallengeRedemptionError::NotFound)
         ));
+    }
+
+    /// A pending authentication challenge with fresh bytes, created at
+    /// `created_at`.
+    fn pending_at(created_at: i64) -> PendingWebAuthnChallenge {
+        PendingWebAuthnChallenge {
+            challenge: generate_challenge().expect("generate"),
+            rp_id: "example.com".to_string(),
+            user_id: None,
+            realm_id: test_realm(),
+            ceremony_type: CeremonyType::Authentication,
+            created_at,
+        }
+    }
+
+    /// #581: each ceremony start sweeps the store, so a sweep must not
+    /// examine every pending challenge: only the expired ones, and the
+    /// oldest one that is still live.
+    #[test]
+    fn a_sweep_examines_only_the_expired_challenges() {
+        let store = WebAuthnChallengeStore::new();
+        let expired = store.insert(pending_at(1_000_000));
+        let live: Vec<String> = (0..1_000)
+            .map(|_| store.insert(pending_at(2_000_000)))
+            .collect();
+
+        store.cleanup_expired(1_000_000 + CHALLENGE_EXPIRY_MICROS);
+
+        let examined = store.examined.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            examined <= 2,
+            "the sweep examined {examined} of 1,001 challenges; one had expired"
+        );
+        assert!(matches!(
+            store.redeem(&expired, &test_realm(), CeremonyType::Authentication),
+            Err(ChallengeRedemptionError::NotFound)
+        ));
+        for key in &live {
+            store
+                .redeem(key, &test_realm(), CeremonyType::Authentication)
+                .expect("a live challenge stays");
+        }
+    }
+
+    /// A sweep removes a challenge only when it is the one that expired: a
+    /// later challenge under the same key stays.
+    #[test]
+    fn a_sweep_keeps_a_newer_challenge_under_an_expired_key() {
+        let store = WebAuthnChallengeStore::new();
+        let old = pending_at(1_000_000);
+        let newer = PendingWebAuthnChallenge {
+            created_at: 2_000_000,
+            ..old.clone()
+        };
+        let key = store.insert(old);
+        store.insert(newer);
+
+        store.cleanup_expired(1_000_000 + CHALLENGE_EXPIRY_MICROS);
+
+        let kept = store
+            .redeem(&key, &test_realm(), CeremonyType::Authentication)
+            .expect("the newer challenge stays");
+        assert_eq!(kept.created_at, 2_000_000);
     }
 
     #[test]
