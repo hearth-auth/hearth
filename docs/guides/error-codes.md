@@ -71,7 +71,7 @@ header. See the
 
 | Code | Meaning |
 |------|---------|
-| `HEARTH_CLUSTER_UNAVAILABLE` | The cluster could not serve the request right now (no Raft leader reachable, the leader at its forwarding limit, or this node's reads fenced by replication lag). Nothing was written — retry after `Retry-After`. |
+| `HEARTH_CLUSTER_UNAVAILABLE` | The cluster could not serve the request right now (no Raft leader reachable, the leader at its forwarding limit, or this node's reads fenced by replication lag), or a single node could not take another write (`storage.max_writes_in_flight` writes already in progress). Nothing was written — retry after `Retry-After`. |
 | `HEARTH_CLUSTER_WRITE_OUTCOME_UNKNOWN` | A write may or may not have been applied (the connection to the leader was lost mid-call, or it committed but this node has not applied it yet). Re-read before retrying. |
 
 ### Rate Limiting / Account Lockout

@@ -257,6 +257,7 @@ impl Config {
                 hot_tier_per_realm_metrics: true,
                 fsync: Some(false),
                 block_cache_bytes: 4 * 1024 * 1024,
+                max_writes_in_flight: crate::cluster::DEFAULT_MAX_WRITES_IN_FLIGHT,
                 compaction: CompactionSection::default(),
             },
             observability: ObservabilityConfig {
@@ -494,6 +495,13 @@ impl Config {
         if self.operational.user_create.max_queue_wait_ms == 0 {
             issues.push(ValidationIssue {
                 field: "operational.user_create.max_queue_wait_ms".to_string(),
+                reason: "must be greater than 0".to_string(),
+            });
+        }
+        // #596: a limit of 0 would refuse every single-node write.
+        if self.storage.max_writes_in_flight == 0 {
+            issues.push(ValidationIssue {
+                field: "storage.max_writes_in_flight".to_string(),
                 reason: "must be greater than 0".to_string(),
             });
         }
@@ -3992,6 +4000,20 @@ realms:
                 "{field} = 0 must be refused; issues: {fields:?}"
             );
         }
+    }
+
+    // ── #596: single-node write limit ──────────────────────────────────────
+
+    #[test]
+    fn a_zero_write_limit_is_refused_and_the_default_is_32() {
+        assert_eq!(Config::dev().storage.max_writes_in_flight, 32);
+        let mut config = Config::dev();
+        config.storage.max_writes_in_flight = 0;
+        let fields: Vec<String> = config.validate_all().into_iter().map(|i| i.field).collect();
+        assert!(
+            fields.iter().any(|f| f == "storage.max_writes_in_flight"),
+            "storage.max_writes_in_flight = 0 must be refused; issues: {fields:?}"
+        );
     }
 
     // ── #446: user-create admission limit ──────────────────────────────────

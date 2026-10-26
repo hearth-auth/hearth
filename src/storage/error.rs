@@ -114,10 +114,11 @@ pub enum StorageError {
     /// bound from a request MUST validate it themselves as well.
     InvalidRange,
 
-    /// Cluster mode: the operation was not served and **nothing was
-    /// written** — no Raft leader could be reached, the leader refused a
-    /// forwarded write because it was at its limit, or this follower's reads
-    /// are fenced by replication lag. Safe to retry after a short wait.
+    /// The operation was not served and **nothing was written** — cluster
+    /// mode: no Raft leader could be reached, the leader refused a forwarded
+    /// write because it was at its limit, or this follower's reads are fenced
+    /// by replication lag; single node: the write limit was full (#596). Safe
+    /// to retry after a short wait.
     ClusterUnavailable {
         /// Why it was not served.
         cause: ClusterUnavailableCause,
@@ -137,8 +138,7 @@ pub enum StorageError {
     },
 }
 
-/// Why a cluster-mode operation was not served
-/// ([`StorageError::ClusterUnavailable`]).
+/// Why an operation was not served ([`StorageError::ClusterUnavailable`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ClusterUnavailableCause {
@@ -149,6 +149,9 @@ pub enum ClusterUnavailableCause {
     /// This node's reads are fenced: it lags the leader beyond
     /// `cluster.read_lag_threshold_ms`.
     ReplicationLag,
+    /// Single node: `storage.max_writes_in_flight` writes were already in
+    /// progress, so this one was refused before it started (#596).
+    WriteLimit,
 }
 
 impl fmt::Display for ClusterUnavailableCause {
@@ -157,6 +160,7 @@ impl fmt::Display for ClusterUnavailableCause {
             Self::NoLeader => "no leader reachable",
             Self::LeaderBusy => "leader busy",
             Self::ReplicationLag => "replication lag",
+            Self::WriteLimit => "write limit full",
         })
     }
 }

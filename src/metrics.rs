@@ -399,6 +399,19 @@ pub struct Metrics {
     /// freed within `operational.user_create.max_queue_wait_ms`.
     pub user_create_shed_total: Counter,
 
+    // ── Single-node write limit (#596) ───────────────────────────────────────
+    /// Single-node storage writes in progress: running, or waiting for the
+    /// WAL fsync or a backup export's barrier. Each one holds a thread.
+    pub storage_writes_in_flight: Gauge,
+
+    /// Configured maximum single-node storage writes in progress
+    /// (`storage.max_writes_in_flight`).
+    pub storage_write_permits: Gauge,
+
+    /// Single-node storage writes refused (`503`/`Retry-After`) because
+    /// `storage.max_writes_in_flight` writes were already in progress.
+    pub storage_writes_shed_total: Counter,
+
     /// Total control-epoch bumps that could not be persisted.
     ///
     /// A control (token or session revocation, DPoP key block, realm status
@@ -954,6 +967,33 @@ impl Metrics {
             .register(Box::new(user_create_shed_total.clone()))
             .expect("metric registration succeeds on a fresh registry");
 
+        let storage_writes_in_flight = Gauge::new(
+            "hearth_storage_writes_in_flight",
+            "Single-node storage writes in progress (each holds a thread)",
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(storage_writes_in_flight.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
+        let storage_write_permits = Gauge::new(
+            "hearth_storage_write_permits",
+            "Configured maximum single-node storage writes in progress",
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(storage_write_permits.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
+        let storage_writes_shed_total = Counter::new(
+            "hearth_storage_writes_shed_total",
+            "Total single-node storage writes refused (503/Retry-After) because the write limit was full",
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(storage_writes_shed_total.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
         let control_epoch_bump_failures_total = Counter::new(
             "hearth_control_epoch_bump_failures_total",
             "Control-epoch bumps that could not be persisted (other nodes miss the control \
@@ -1034,6 +1074,9 @@ impl Metrics {
             user_create_permits,
             user_create_queue_wait_seconds,
             user_create_shed_total,
+            storage_writes_in_flight,
+            storage_write_permits,
+            storage_writes_shed_total,
             control_epoch_bump_failures_total,
             control_epoch_bumps_owed,
             cluster_forwarded_writes_total,

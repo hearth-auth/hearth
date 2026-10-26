@@ -26,7 +26,7 @@
 //! flag; if `false` the caller receives [`ClusterError::ReplicationLagExceeded`].
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 
@@ -182,6 +182,15 @@ struct Forwarding {
 /// Forwarded writes a leader serves concurrently. One more is refused at
 /// once (not queued), so a burst cannot pin unbounded memory on the leader.
 pub const MAX_CONCURRENT_FORWARDED_WRITES: usize = 256;
+
+/// Default `storage.max_writes_in_flight`: the single-node writes that may be
+/// in progress at once (#596). One more is refused at once, not queued.
+///
+/// Each write in progress holds a thread. When the disk stops completing
+/// syncs, each write that arrives waits, so without a limit the server adds a
+/// thread for each one, and the blocking pool keeps them after the disk
+/// recovers. 32 writes sustain 3,200 writes/s until one write takes 10 ms.
+pub const DEFAULT_MAX_WRITES_IN_FLIGHT: usize = 32;
 
 /// Extra time a follower gives a forwarded write beyond
 /// `cluster.write_timeout_ms`, so the leader's own commit-timeout answer
@@ -1774,14 +1783,56 @@ impl ClockOffsetMonitor {
 /// Every [`ClusterError`] is surfaced as [`StorageError::Io`] with a
 /// descriptive message (see [`cluster_to_storage_err`]); [`is_not_leader`]
 /// recognises the one that means no leader could be reached.
+///
+/// On a single node, at most `max_writes_in_flight` writes are in progress
+/// at once (#596). A write over the limit is refused before it starts with
+/// [`ClusterUnavailableCause::WriteLimit`](crate::storage::ClusterUnavailableCause::WriteLimit),
+/// a `503` with `Retry-After` at the HTTP layer. A wait for a write that is
+/// already queued ([`StorageEngine::await_batch_durable`]) counts toward the
+/// limit but is never refused.
 pub struct ClusterStorageAdapter {
     engine: Arc<ClusterEngine>,
+    /// Single-node writes in progress, and waits for queued writes.
+    writes_in_flight: AtomicUsize,
+    /// The most single-node writes that may be in progress at once.
+    max_writes_in_flight: usize,
 }
 
 impl ClusterStorageAdapter {
-    /// Wraps a [`ClusterEngine`] for use as [`StorageEngine`].
+    /// Wraps a [`ClusterEngine`] for use as [`StorageEngine`], with the
+    /// default write limit ([`DEFAULT_MAX_WRITES_IN_FLIGHT`]).
     pub fn new(engine: Arc<ClusterEngine>) -> Self {
-        Self { engine }
+        Self::with_max_writes_in_flight(engine, DEFAULT_MAX_WRITES_IN_FLIGHT)
+    }
+
+    /// Wraps a [`ClusterEngine`] with a single-node write limit of `max`
+    /// (`storage.max_writes_in_flight`) and publishes it to
+    /// `hearth_storage_write_permits`. A `max` of `0` is clamped to `1`: a
+    /// limit that admits nothing would refuse every write.
+    pub fn with_max_writes_in_flight(engine: Arc<ClusterEngine>, max: usize) -> Self {
+        let max = max.max(1);
+        #[allow(clippy::cast_precision_loss)]
+        crate::metrics::metrics()
+            .storage_write_permits
+            .set(max as f64);
+        Self {
+            engine,
+            writes_in_flight: AtomicUsize::new(0),
+            max_writes_in_flight: max,
+        }
+    }
+
+    /// Takes a place under the write limit, or `None` when the limit is full.
+    fn try_start_write(&self) -> Option<WriteInFlight<'_>> {
+        // Rust 1.99 renamed `fetch_update` to `try_update`; the MSRV (1.88)
+        // has only the old name.
+        #[allow(deprecated)]
+        self.writes_in_flight
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                (n < self.max_writes_in_flight).then_some(n + 1)
+            })
+            .ok()?;
+        Some(WriteInFlight::counted(&self.writes_in_flight))
     }
 
     /// Single-node mode: runs `write` against the local engine on the calling
@@ -1794,14 +1845,27 @@ impl ClusterStorageAdapter {
     /// the pool with such outer threads; when the export released it, their
     /// inner writes found no thread and the server stayed stopped (GA audit 3
     /// F-7). Inline, a writer holds only the thread it already has.
+    ///
+    /// A write over the write limit is refused before `block_in_place`: it
+    /// takes no thread and writes nothing (#596).
     fn single_node_write<T>(
         &self,
         write: impl FnOnce(&EmbeddedStorageEngine) -> Result<T, crate::storage::StorageError>,
     ) -> Option<Result<T, crate::storage::StorageError>> {
-        self.engine
-            .raft
-            .is_none()
-            .then(|| tokio::task::block_in_place(|| write(&self.engine.inner)))
+        if self.engine.raft.is_some() {
+            return None;
+        }
+        let Some(_in_flight) = self.try_start_write() else {
+            crate::metrics::metrics().storage_writes_shed_total.inc();
+            return Some(Err(crate::storage::StorageError::ClusterUnavailable {
+                cause: crate::storage::ClusterUnavailableCause::WriteLimit,
+                reason: format!(
+                    "{} single-node writes already in progress (storage.max_writes_in_flight)",
+                    self.max_writes_in_flight
+                ),
+            }));
+        };
+        Some(tokio::task::block_in_place(|| write(&self.engine.inner)))
     }
 
     /// A point read of the local engine (see `ClusterEngine::read_inline`).
@@ -1825,6 +1889,25 @@ impl ClusterStorageAdapter {
         }
         tokio::task::block_in_place(|| self.engine.read_inline(read))
             .map_err(cluster_to_storage_err)
+    }
+}
+
+/// One write counted in [`ClusterStorageAdapter`]'s write limit; the count
+/// goes down when it drops, also on an error or a panic.
+struct WriteInFlight<'a>(&'a AtomicUsize);
+
+impl<'a> WriteInFlight<'a> {
+    /// Wraps a count that the caller already took.
+    fn counted(count: &'a AtomicUsize) -> Self {
+        crate::metrics::metrics().storage_writes_in_flight.inc();
+        Self(count)
+    }
+}
+
+impl Drop for WriteInFlight<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+        crate::metrics::metrics().storage_writes_in_flight.dec();
     }
 }
 
@@ -2138,10 +2221,18 @@ impl StorageEngine for ClusterStorageAdapter {
 
     /// Forwarded to the inner engine, which issued the handle; see
     /// [`Self::enqueue_batch`]. A cluster-mode handle is `Immediate`, a no-op.
+    ///
+    /// Single node: the wait counts toward the write limit, so the writes
+    /// that wait for one fsync cannot pass it, but it is never refused: the
+    /// batch is already queued, and only a wait commits it (#596).
     fn await_batch_durable(
         &self,
         handle: crate::storage::StorageDurabilityHandle,
     ) -> Result<(), crate::storage::StorageError> {
+        let _in_flight = self.engine.raft.is_none().then(|| {
+            self.writes_in_flight.fetch_add(1, Ordering::SeqCst);
+            WriteInFlight::counted(&self.writes_in_flight)
+        });
         tokio::task::block_in_place(|| self.engine.inner.await_batch_durable(handle))
     }
 
@@ -2359,6 +2450,106 @@ mod tests {
             adapter.get_uncached(&realm, b"k").unwrap(),
             Some(b"v".to_vec())
         );
+    }
+
+    /// Waits until `count` single-node writes are in progress on `adapter`.
+    fn wait_for_writes_in_flight(adapter: &ClusterStorageAdapter, count: usize) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while adapter.writes_in_flight.load(Ordering::SeqCst) < count {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{count} writes never reached the backup barrier"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    /// #596: on a single node, a write over the write limit is refused before
+    /// it starts, so it takes no thread and writes nothing. The writes that
+    /// hold the limit (here: parked on a backup export's barrier) finish, and
+    /// then a write succeeds again.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_single_node_write_over_the_limit_is_refused_before_it_starts() {
+        let dir = tempdir().unwrap();
+        let inner = open_engine(dir.path().join("data").as_path());
+        let barrier = inner.backup_barrier().unwrap();
+        let adapter = Arc::new(ClusterStorageAdapter::with_max_writes_in_flight(
+            Arc::new(ClusterEngine::single_node(inner)),
+            2,
+        ));
+        let realm = RealmId::generate();
+
+        let export = barrier.write().unwrap();
+        let parked: Vec<_> = (0..2u8)
+            .map(|i| {
+                let (adapter, realm) = (Arc::clone(&adapter), realm.clone());
+                std::thread::spawn(move || adapter.put(&realm, &[b'p', i], b"v"))
+            })
+            .collect();
+        wait_for_writes_in_flight(&adapter, 2);
+
+        let refused = adapter.put(&realm, b"over", b"v");
+        assert!(
+            matches!(
+                refused,
+                Err(crate::storage::StorageError::ClusterUnavailable {
+                    cause: crate::storage::ClusterUnavailableCause::WriteLimit,
+                    ..
+                })
+            ),
+            "a third write over a limit of 2 must be refused: {refused:?}"
+        );
+        assert_eq!(
+            crate::storage::StorageError::retry_class_of(&refused.unwrap_err()),
+            Some(crate::storage::RetryClass::Unavailable),
+            "a refused write is a 503: nothing was written"
+        );
+
+        drop(export);
+        for writer in parked {
+            writer.join().unwrap().expect("a parked write completes");
+        }
+        assert_eq!(adapter.writes_in_flight.load(Ordering::SeqCst), 0);
+        assert_eq!(adapter.get(&realm, b"over").unwrap(), None);
+        adapter
+            .put(&realm, b"after", b"v")
+            .expect("the limit is free again");
+        assert_eq!(adapter.get(&realm, b"after").unwrap(), Some(b"v".to_vec()));
+    }
+
+    /// #596: a wait for a write that is already queued is never refused, also
+    /// when the write limit is full: only a wait commits the queued batch.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_wait_for_a_queued_write_is_not_refused_at_the_limit() {
+        let dir = tempdir().unwrap();
+        let inner = open_engine(dir.path().join("data").as_path());
+        let barrier = inner.backup_barrier().unwrap();
+        let adapter = Arc::new(ClusterStorageAdapter::with_max_writes_in_flight(
+            Arc::new(ClusterEngine::single_node(inner)),
+            1,
+        ));
+        let realm = RealmId::generate();
+        let queued = adapter
+            .enqueue_batch(&realm, &[(b"queued".to_vec(), b"v".to_vec())])
+            .unwrap();
+
+        let export = barrier.write().unwrap();
+        let parked = {
+            let (adapter, realm) = (Arc::clone(&adapter), realm.clone());
+            std::thread::spawn(move || adapter.put(&realm, b"parked", b"v"))
+        };
+        wait_for_writes_in_flight(&adapter, 1);
+
+        adapter
+            .await_batch_durable(queued)
+            .expect("a wait for a queued write must not be refused");
+
+        drop(export);
+        parked.join().unwrap().expect("the parked write completes");
+        assert_eq!(adapter.writes_in_flight.load(Ordering::SeqCst), 0);
+        assert_eq!(adapter.get(&realm, b"queued").unwrap(), Some(b"v".to_vec()));
     }
 
     /// `serve` always installs a `ClusterStorageAdapter`, single-node included.

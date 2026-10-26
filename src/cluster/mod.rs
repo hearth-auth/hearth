@@ -73,6 +73,7 @@ pub trait ReplicatedWriteObserver: Send + Sync {
 
 pub use engine::{
     is_not_leader, ClusterBuildError, ClusterEngine, ClusterError, ClusterStorageAdapter,
+    DEFAULT_MAX_WRITES_IN_FLIGHT,
 };
 pub use log_store::{HearthLogReader, HearthLogStore};
 pub use network::{HearthNetworkFactory, PeerFaults};
