@@ -2489,6 +2489,44 @@ mod tests {
             .collect()
     }
 
+    /// The `cluster.experimental_opt_in` issues of a valid cluster section
+    /// with `extra` lines added to it.
+    fn cluster_opt_in_issues(extra: &str) -> Vec<ValidationIssue> {
+        let yaml = format!(
+            "cluster:\n  node_id: 1\n{extra}  peer_address: \"10.0.0.1:8421\"\n  peers:\n    \
+             - id: 2\n      address: \"hearth-2.internal:8421\"\n  \
+             tls_cert_path: \"/etc/hearth/peer.crt\"\n  \
+             tls_key_path: \"/etc/hearth/peer.key\"\n  \
+             tls_ca_cert_path: \"/etc/hearth/ca.crt\"\n"
+        );
+        let config = Config::from_yaml_str_unchecked(&yaml).expect("parses");
+        config
+            .validate_all()
+            .into_iter()
+            .filter(|i| i.field == "cluster.experimental_opt_in")
+            .collect()
+    }
+
+    /// Cluster mode is experimental (docs/dev/CONSISTENCY.md G1–G9): a node
+    /// cut off from the leader serves revoked sessions, lockout counts are per
+    /// node, and the audit chain can fork. A `cluster:` section used to start
+    /// with only a warning, so an operator could run it in production without
+    /// knowing. It now needs `experimental_opt_in: true` (#650).
+    #[test]
+    fn a_cluster_without_the_experimental_opt_in_is_refused() {
+        for extra in ["", "  experimental_opt_in: false\n"] {
+            let issues = cluster_opt_in_issues(extra);
+            assert_eq!(issues.len(), 1, "{extra:?} must be refused: {issues:?}");
+            let reason = &issues[0].reason;
+            assert!(
+                reason.contains("experimental") && reason.contains("docs/guides/clustering.md"),
+                "the reason says why and where to read: {reason}"
+            );
+        }
+        let issues = cluster_opt_in_issues("  experimental_opt_in: true\n");
+        assert!(issues.is_empty(), "the opt-in is accepted: {issues:?}");
+    }
+
     /// The peer server binds `cluster.peer_address`, so it must be an IP
     /// address and a port. A host name used to pass validation; the peer
     /// server then stopped at start-up while the node kept serving, so no

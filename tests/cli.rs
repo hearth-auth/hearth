@@ -414,6 +414,77 @@ fn serve_exits_when_the_peer_server_cannot_bind() {
     );
 }
 
+/// Cluster mode is experimental (docs/dev/CONSISTENCY.md G1–G9) and used to
+/// start with only a warning. A `cluster:` section without
+/// `experimental_opt_in: true` must stop `serve` with an error that names the
+/// key (#650). Everything else in the config is valid, so before the fix the
+/// node started and kept running.
+#[test]
+fn serve_refuses_cluster_mode_without_the_experimental_opt_in() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_peer_tls(dir.path());
+    let cfg_path = dir.path().join("hearth.yaml");
+    let tls = dir.path().display();
+    std::fs::write(
+        &cfg_path,
+        format!(
+            "server:\n  port: {http_port}\nstorage:\n  data_dir: \"{tls}/data\"\n\
+             cluster:\n  node_id: 1\n  peer_address: \"127.0.0.1:{own_port}\"\n  peers:\n    \
+             - id: 2\n      address: \"127.0.0.1:{peer_port}\"\n  \
+             tls_cert_path: \"{tls}/node.crt\"\n  tls_key_path: \"{tls}/node.key\"\n  \
+             tls_ca_cert_path: \"{tls}/ca.crt\"\n",
+            http_port = find_available_port(),
+            own_port = find_available_port(),
+            peer_port = find_available_port(),
+        ),
+    )
+    .expect("write config");
+
+    let mut child = Command::new(hearth_bin())
+        .args([
+            "serve",
+            "--dev",
+            "--config",
+            cfg_path.to_str().expect("path"),
+        ])
+        .stdout(std::fs::File::create(dir.path().join("out.log")).expect("stdout file"))
+        .stderr(std::fs::File::create(dir.path().join("err.log")).expect("stderr file"))
+        .spawn()
+        .expect("spawn hearth serve");
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break Some(status);
+        }
+        if std::time::Instant::now() >= deadline {
+            break None;
+        }
+        // AUDIT: justified-sleep: poll interval for a child process's exit, bounded by the 20 s deadline
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    if status.is_none() {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+    let output = ["out.log", "err.log"]
+        .map(|f| std::fs::read_to_string(dir.path().join(f)).unwrap_or_default())
+        .concat();
+    let skip = output.chars().count().saturating_sub(4000);
+    let tail: String = output.chars().skip(skip).collect();
+
+    let status = status.unwrap_or_else(|| {
+        panic!("serve started cluster mode without the opt-in; output ends: {tail}")
+    });
+    assert!(
+        !status.success(),
+        "serve must exit non-zero; output ends: {tail}"
+    );
+    assert!(
+        output.contains("cluster.experimental_opt_in"),
+        "the error must name the key; output ends: {tail}"
+    );
+}
+
 // === TEST_SCENARIOS: CLI management commands ===
 
 #[test]
