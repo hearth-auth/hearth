@@ -2380,7 +2380,19 @@ mod tests {
         )))
         .expect_err("refused");
         let msg = err.to_string();
-        assert!(msg.contains("5000") && msg.contains("Re-seed"), "{msg}");
+        assert!(msg.contains("5000"), "{msg}");
+        // `raft.db` holds the node's Raft vote: a node started empty under its
+        // old id forgets it, which Raft's safety proof does not allow
+        // (docs/dev/CONSISTENCY.md G9). The refusal used to tell the operator
+        // to do exactly that (#670).
+        assert!(
+            !msg.contains("start it empty") && !msg.contains("Re-seed"),
+            "the refusal must not tell the operator to start the node empty: {msg}"
+        );
+        assert!(
+            msg.contains("raft.db") && msg.contains("vote") && msg.contains("G9"),
+            "the refusal must say why the node must not start empty: {msg}"
+        );
         assert!(
             msg.contains("no node") && msg.contains("backup") && msg.contains("upgrading guide"),
             "the refusal must give the procedure for when no node can start: {msg}"
