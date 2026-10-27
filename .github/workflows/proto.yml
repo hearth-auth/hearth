@@ -43,6 +43,11 @@ jobs:
 
       - name: Install buf
         uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99 # v1.50.0
+        # Without a token the action resolves the buf download through the
+        # unauthenticated GitHub API (60 requests/hour per runner IP), and a
+        # shared runner IP over that limit failed main CI on 93252ebd.
+        with:
+          github_token: ${{ github.token }}
 
       - name: buf lint
         run: make proto-lint
