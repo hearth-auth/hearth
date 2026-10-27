@@ -398,6 +398,12 @@ verify-docs-check: ## Assert the documented release-verification path works
 	@bash scripts/check-release-verification-docs.sh
 	@bash scripts/tests/check-release-verification-docs.test.sh
 
+## Guard: every code path and route the external pentest scope names must exist
+## (#642). Runs in ci.yml's filter job.
+pentest-scope-check: ## Assert the pentest scope names only real paths and routes
+	@python3 scripts/check-pentest-scope.py
+	@bash scripts/tests/check-pentest-scope.test.sh
+
 ## Guard: the SLSA provenance generator must still be the commit we reviewed
 ## (audit 2026-08-28 §4.8#13). Upstream refuses a @<sha> reference, so the pin
 ## lives in .github/slsa-generator.pin. Needs network. Runs in ci.yml's filter
