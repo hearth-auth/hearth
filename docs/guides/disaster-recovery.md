@@ -411,55 +411,78 @@ If the node's Raft log has been purged, this restart is refused instead
 (`this node's Raft log is purged through index N but its data directory
 holds no persisted applied state …`): Phase 1 removed the node's persisted
 applied index, and the log no longer holds the entries to rebuild from.
-Use the clean-slate path below.
+The node cannot rejoin. Use the path below.
 
-**Cluster is unavailable or you want a clean slate:**
+**The restart is refused, or the cluster has no leader:**
 
-Wipe the data directory entirely and let the node stream a fresh snapshot on join:
+There is no safe way to bring this one node back. **Do not wipe its data
+directory and start it empty.** The data directory holds `raft.db`, and a
+node that starts empty under its old node ID has forgotten its Raft vote.
+Raft's safety proof does not allow for that, and the node with the lowest
+ID also starts a cluster of its own
+([CONSISTENCY.md](../dev/CONSISTENCY.md) G9; Clustering Guide
+[C-6](./clustering.md#c-6--cluster-membership-is-immutable-after-bootstrap)).
+Recover from a backup instead:
 
-```bash
-systemctl stop hearth
-rm -rf /var/lib/hearth/data
-mkdir -p /var/lib/hearth/data
-systemctl start hearth
-```
+1. Stop every node.
+2. Rebuild the cluster from your most recent signed backup with the
+   upgrading guide's [rebuild procedure](./upgrading.md#cluster-purged-log-upgrade):
+   restore once into one empty data directory and copy that directory to
+   every node before the new cluster first starts. Or restore the backup
+   onto one node and run it as a single node, which is the supported
+   deployment shape.
 
-> **Do not manually restore from a backup** while the marker is present — the
-> backup captures a point-in-time snapshot that may be older than what the
-> cluster leader already applied. Let the leader's snapshot catch-up handle it.
+Writes made after that backup are lost (see [RPO](#recovery-point-objective-rpo--how-much-data-you-can-lose)).
+
+> **Do not restore a backup into this one node** while the other nodes run:
+> the backup is older than what the leader already applied, and a node
+> restored on its own diverges from its peers.
 
 ---
 
 ## Raft divergence and split-brain
 
+> **Cluster mode is experimental and not supported for production**
+> ([Clustering Guide](./clustering.md)). The supported deployment is one
+> node with tested backups. This section tells you how to get back to a
+> known state from a cluster that diverged. It does not repair the cluster
+> in place: Hearth has no operation that does.
+
 ### Failure shape
 
 Symptoms in a multi-node cluster:
 
-- No leader election after `cluster.election_timeout_ms` × 3.
+- `GET /admin/cluster/status` shows no node with `"role":"leader"` for
+  longer than a few election rounds, or two nodes that each report
+  `"role":"leader"`.
 - Followers log `term mismatch` or `index mismatch` on every AppendEntries.
-- `GET /admin/cluster/status` shows nodes with different `last_log_term` values
-  and no path to convergence.
+- `GET /admin/cluster/status` shows nodes with different `last_log_term`
+  values and no path to convergence.
 
-Root causes (in order of frequency):
+Known causes:
 
-1. **Clock skew** larger than the leader-timestamp tolerance — see the
-   prereq in the [Clustering Guide](./clustering.md). Fix NTP first; many
-   "divergence" reports are NTP outages in disguise.
-2. **A minority subcluster ran with a forced quorum override** while the
-   majority was still alive (true split-brain). Both subclusters now have
-   independent log suffixes that cannot be reconciled.
-3. **A node was restored from a backup taken at a different log index
-   than its peers** — common after a botched per-node restore where the
-   operator restored one node from an older archive than the others.
+1. **A node was started with an empty data directory under its old node
+   ID.** The data directory holds `raft.db`, so the node has forgotten its
+   Raft vote, and if it has the lowest node ID it starts a cluster of its
+   own ([CONSISTENCY.md](../dev/CONSISTENCY.md) G9). This is the most
+   likely cause, because older revisions of these guides told operators
+   to replace a node this way.
+2. **A node was restored from a backup on its own**, so its state comes
+   from a different point than its peers.
+3. **Clock skew** larger than the leader-timestamp tolerance — see the
+   prerequisites in the [Clustering Guide](./clustering.md). Fix NTP first.
 
 ### Recovery steps
 
-The Hearth cluster has no automatic split-brain merge. The operator
-designates which side is authoritative; the losing side is wiped and
-rejoined empty.
+Membership lives in each node's `raft.db` and is fixed at bootstrap.
+Editing `cluster.peers` in `hearth.yaml` does not change it, and a node
+initialises Raft only when its data directory is empty
+([C-6](./clustering.md#c-6--cluster-membership-is-immutable-after-bootstrap)).
+So you cannot shrink the cluster to the surviving side, and you cannot
+re-add a wiped node. The only recovery is to stop the cluster and start
+again from one node's data.
 
-1. **Stop the cluster.** All nodes.
+1. **Stop every node.**
 
    ```bash
    for n in node-1 node-2 node-3; do
@@ -467,30 +490,9 @@ rejoined empty.
    done
    ```
 
-2. **Pick the authoritative side.** This is a business call —
-   typically the side with the higher `applied_index` *and* the most
-   recent user-visible writes. Identify it by checking each node's
-   storage (run on each diverging node; the server is already stopped):
-
-   ```bash
-   hearth backup create \
-     --data-dir /var/lib/hearth/data \
-     --output /tmp/inspect-$(hostname).hearth-backup
-   hearth backup inspect --input /tmp/inspect-$(hostname).hearth-backup
-   # Prints per-realm record counts: users, credentials, clients, roles,
-   # groups, orgs, audit. The side with the most recent writes usually has
-   # the highest user/credential counts.
-   ```
-
-   These archives are unsigned and only for `inspect`; restore refuses them.
-   The restorable copies are the signed backups in step 3.
-
-   Sessions are **not** in the manifest, so this comparison cannot tell you
-   which side served more logins — only which side holds more durable
-   records. `hearth backup create` takes an exclusive lock on the data
-   directory, so the node must be stopped (it is, from step 1).
-
-3. **Take a backup of every diverging node** before wiping anything:
+2. **Take a signed backup of every node** before you change anything.
+   These backups are your evidence and your source of data. Store them
+   off the cluster:
 
    ```bash
    hearth backup create \
@@ -500,89 +502,50 @@ rejoined empty.
      --output /backups/divergence-$(hostname)-$(date +%s).hearth-backup
    ```
 
-   These backups are evidence — store them off-cluster. Sign them as they are
-   taken: restore refuses an unsigned archive outside dev mode, and if you
-   later need to restore a losing node's data you should not have to fetch the
-   private signing key in the middle of an incident. If that key lives only on
-   a separate backup host, omit `--sign-key` here and run `hearth backup sign`
-   on each archive there before step 5 wipes anything
-   ([Signed archives](./backup.md#signed-archives)).
+   `hearth backup create` takes an exclusive lock on the data directory,
+   so the node must be stopped (step 1). Restore refuses an unsigned
+   archive outside dev mode. If the signing key lives only on a separate
+   backup host, omit `--sign-key` and run `hearth backup sign` on each
+   archive there ([Signed archives](./backup.md#signed-archives)).
 
-4. **Bootstrap the authoritative node alone.** Edit its `hearth.yaml` to
-   list only itself in `cluster.peers`, start it, and confirm it elects
-   itself leader of a single-node cluster. The check needs a system-realm
-   token: sign in to this node's admin console (`/ui/admin/login`), open
-   **API Tokens** (`/ui/admin/api-tokens`) and mint one with your password
-   and second factor. The node leads alone, so the console's write commits
-   ([System-realm tokens](./clustering.md#system-realm-tokens)):
+3. **Pick the authoritative node.** This is a business decision: usually
+   the node whose data has the most recent user-visible writes. Compare the
+   archives:
 
    ```bash
-   systemctl start hearth
-   read -rs SYSTEM_TOKEN   # paste the token from the console page
-   curl -s -H "Authorization: Bearer $SYSTEM_TOKEN" \
-     -H "X-Realm-ID: 00000000-0000-0000-0000-000000000000" \
-     https://auth.example.com/admin/cluster/status
-   # Should show: {"role":"leader","term":<N>,"last_applied_index":<N>,"peers":[...]}
+   hearth backup inspect --input /backups/divergence-node-1-<ts>.hearth-backup
+   # Prints per-realm record counts: users, credentials, clients, roles,
+   # groups, orgs, audit.
    ```
 
-   **Console unreachable?** Mint on the host instead, **before**
-   `systemctl start`, while the node is still stopped since step 1:
+   Sessions are **not** in the archive, so the counts show which node holds
+   more durable records, not which node served more logins.
 
-   ```bash
-   # Needs the node's HEARTH_MASTER_KEY in the environment, as
-   # `hearth backup create` does. --sole-cluster-node is safe only because
-   # this node now runs alone and the others rejoin empty from its snapshot
-   # in step 6.
-   SYSTEM_TOKEN=$(hearth admin token --config /etc/hearth/hearth.yaml \
-     --user ops@example.com --sole-cluster-node --ttl 1h)
-   ```
+4. **Start again from the authoritative node's backup.** Choose one:
 
-   `/admin/cluster/*` requires the **system realm** (nil UUID) — a
-   realm-scoped admin token gets `403 {"error":"cluster admin requires
-   system realm"}`. Either way the token belongs to an operator-console
-   account holding the `realm.admin` role, is shown or printed once and
-   its issuance is audited. The endpoint answers `503 {"error":"not in cluster
-   mode"}` when the node is running single-node.
+   - **One node (supported).** Restore the backup onto one node and run it
+     without a `cluster:` section, as described in
+     [Restoring to a new node](./backup.md#restoring-to-a-new-node).
+   - **A new cluster (experimental).** Follow the upgrading guide's
+     [rebuild procedure](./upgrading.md#cluster-purged-log-upgrade):
+     every node starts with an empty data directory, you restore the
+     backup once into one empty data directory, and you copy that directory
+     to every node before the new cluster first starts. Never restore once
+     per node, and never restore into a cluster that has already started.
 
-   **`peers` will not be empty.** Raft membership is persisted in the log
-   and is immutable after bootstrap (C-6, HEA-2154) — editing
-   `cluster.peers` in `hearth.yaml` does **not** remove the wiped nodes
-   from the membership config. Expect them to keep appearing with
-   `"is_healthy": false` until the cluster is re-bootstrapped in step 6.
-   The field to check here is `"role":"leader"`: it proves the surviving
-   node won its own election and is accepting writes.
-
-5. **Wipe the losing nodes' data directories** (after the backups in
-   step 3 are confirmed off-cluster):
-
-   ```bash
-   ssh node-2 "rm -rf /var/lib/hearth/data && mkdir -p /var/lib/hearth/data"
-   ssh node-3 "rm -rf /var/lib/hearth/data && mkdir -p /var/lib/hearth/data"
-   ```
-
-6. **Add the wiped nodes back as fresh followers**, restore the full
-   `cluster.peers` list on the leader, restart it, then start the empty
-   followers. Each one streams a snapshot from the leader (no manual
-   restore needed):
-
-   ```bash
-   ssh node-1 "systemctl restart hearth"
-   ssh node-2 "systemctl start hearth"
-   ssh node-3 "systemctl start hearth"
-   ```
-
-7. **Reconcile lost writes.** Diff the post-recovery state against the
-   per-node backups from step 3 to identify writes that existed on the
-   losing side and were not present on the authoritative side. Replay
-   them via the normal API as the relevant user/admin.
+5. **Reconcile lost writes.** Compare the restored state with the backups
+   of the other nodes from step 2, to find writes that only the losing
+   side had. Make them again through the normal API, as the relevant user
+   or admin.
 
 ### Prevention
 
-- Always run an odd number of nodes (3 or 5). Never run 2.
-- Never use forced quorum overrides (`--unsafe-force-quorum` flags or
-  equivalent) without first confirming the other side is genuinely down.
-- Take backups from the leader once daily and from any follower hourly
-  — this gives you a per-node history when a divergence occurs.
+- Never start a node of a running cluster with an empty data directory.
+  There is no supported way to replace a failed node
+  ([CONSISTENCY.md](../dev/CONSISTENCY.md) G5 and G9).
+- Never restore a backup into one node of a cluster.
+- Take backups from the leader, and keep a history of them. See
+  [Cluster deployments](./backup.md#cluster-deployments).
 
 ---
 
@@ -838,14 +801,13 @@ directory, is truncated in place on rotation rather than retained as
 history, and is never shipped off-host. It recovers a crashed process, not
 a lost disk.
 
-In cluster mode, RPO for a single-node failure is zero (the other nodes
-hold the writes). RPO for whole-cluster loss equals the backup cadence
-plus one run.
+Cluster mode is experimental and is not a recovery plan: there is no
+supported way to replace a failed node, so plan your RPO on backups alone.
 
-Archives are also **live scans rather than snapshots**, so an archive taken
-while the realm is under write load can be internally inconsistent within
-that one-run window — see [Consistency
-caveat](./backup.md#consistency-caveat--the-recovery-point-is-an-interval-not-an-instant).
+Each realm in an archive reflects one point in time, because the exporter
+holds a per-realm consistency barrier, but different realms reflect
+different points within the run — see [Referential
+consistency](./backup.md#referential-consistency--each-realm-is-snapshotted-hea-2167).
 
 ### Recovery Time Objective (RTO) — how long recovery takes
 
@@ -871,24 +833,18 @@ each row). To meet a tighter RTO for large deployments, consider:
 - Running on NVMe rather than SATA SSD — the bottleneck after CPU is the
   WAL fsync.
 
-For cluster mode, after restore on one node, expect an additional
-1–2 minutes per follower for snapshot streaming, regardless of dataset
-size up to ~10 GB.
+### Supported deployment shape
 
-### Cluster vs single-node trade-offs
+The supported deployment is **one node, with backups to off-host storage
+and a restore you have tested** (see the drill below). Your RPO is your
+backup interval plus one run. Your RTO is the time to restore the latest
+backup onto a new node and start it.
 
-| | Single node | Cluster (3 node) |
-|---|---|---|
-| RPO (node loss, disk loss) | Last backup | Zero |
-| RPO (full datacenter loss) | Last backup | Last backup |
-| RTO (single failure) | Restore from backup | Promote follower (< 30 s) |
-| RTO (cluster-wide failure) | Restore from backup | Restore from backup |
-| Operational overhead | Low | NTP, mTLS, quorum management |
-
-For most deployments under 100 k users, single-node Hearth + hourly
-backups to off-host storage offers the best RTO/RPO-per-dollar.
-Cluster mode shines for deployments where any unplanned outage of even
-30 seconds is unacceptable.
+Cluster mode is experimental and gives you no shorter RTO today. Hearth has
+no operation that promotes a follower, membership is fixed at bootstrap,
+and per-node state does not survive a node switch
+([Clustering Guide](./clustering.md)). A failed cluster node cannot be
+replaced; the recovery is a restore from backup, as for one node.
 
 ---
 
