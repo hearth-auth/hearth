@@ -21,6 +21,7 @@ fails, and records how it fails. It complements the in-repo load test
 | `remote/` | Scripts that run on the server: observer, `kill -9`, profiler, `malloc-info.sh` (glibc heap snapshot through gdb) |
 | `ramps.py` | Per-step table for each journey type, with server CPU and generator CPU |
 | `memory.py` | Server memory over a soak: RSS, RssAnon and RssFile at fixed minutes, storage gauges, glibc heap, and the flatness test (`test_memory.py` tests it) |
+| `restore-drill.sh`, `restore_drill.py` | The weekly restore drill: seed, back up, restore, compare, time (`test_restore_drill.py` tests the comparison) |
 
 ## What "production mode" means here
 
@@ -234,6 +235,26 @@ and CPU once a second.
   `_rjem_je_prof_backtrace`, and it removes the `<...>` parts of Rust names.
 - The profiler changes the heap, so the verdict of a heap-profile run does not count. The
   workflow passes when the server wrote profiles.
+
+## Restore drill (weekly, #651)
+
+`.github/workflows/restore-drill.yml` runs `restore-drill.sh <hearth binary> <out dir>` every
+Wednesday and on demand. It needs the same host as the steady-state memory test: Linux,
+passwordless sudo, no `/opt/hearth` and no `/var/lib/hearth`.
+
+- **The server** is a release build without `dev-endpoints`, with the config from
+  `gen-config.sh` and 3 seed users with a password.
+- **The steps:** import 1,000,000 users (`USERS`) through `POST /admin/users/import`, create known
+  data through the admin API, back up with `POST /admin/backup`, `hearth backup verify` and
+  `hearth backup sign`, stop the server, restore into an empty data directory with
+  `hearth backup restore`, and start the server on it with the same config.
+- **The comparison** (`restore_drill.py`, tested by `test_restore_drill.py`) takes a snapshot of
+  each server and fails on any difference. `docs/guides/backup.md`, "Restore drill", lists the
+  checks.
+- **The out dir** (the artifact `restore-drill-<run id>`) holds `summary.md` (also the job
+  summary), `timings.json`, `findings.json`, the two snapshots, the two server logs and the output
+  of each `hearth backup` command. The archive, the keys and the passwords stay in a private
+  temporary directory that the drill deletes.
 
 ## Memory soaks (#445)
 
