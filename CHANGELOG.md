@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Security
+- **Go SDK: `go-jose` 4.1.6** (#677): the Go SDK parses the JWKS that it fetches with `go-jose`,
+  and a JWKS that holds RSA keys can cause a denial of service in `go-jose` 4.1.5 and older
+  (GHSA-mgcc-cww5-fp2q). The SDK now requires 4.1.6. Update the SDK, or run
+  `go get github.com/go-jose/go-jose/v4@v4.1.6` in your module.
+
 ## [4.6.8] — 2026-10-27
 
 ### Fixed

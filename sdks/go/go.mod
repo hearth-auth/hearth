@@ -13,7 +13,7 @@ require google.golang.org/protobuf v1.36.11
 
 require (
 	github.com/gin-gonic/gin v1.12.0
-	github.com/go-jose/go-jose/v4 v4.1.5
+	github.com/go-jose/go-jose/v4 v4.1.6
 	github.com/google/uuid v1.6.0
 	github.com/labstack/echo/v4 v4.16.1
 	github.com/oapi-codegen/runtime v1.7.0
