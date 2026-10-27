@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.6.8] — 2026-10-27
+
 ### Fixed
 - **Webhooks made in the admin UI now receive events** (#617): the admin UI saved webhooks in a
   store that the webhook sender does not read, so they never received an event, and the UI did not
