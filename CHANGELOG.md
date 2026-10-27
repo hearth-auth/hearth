@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Fixed
+- **Webhooks made in the admin UI now receive events** (#617): the admin UI saved webhooks in a
+  store that the webhook sender does not read, so they never received an event, and the UI did not
+  list webhooks made through `/admin/webhooks`. Also, the create and edit forms answered `400`
+  whenever an event box was ticked. The UI pages now use the same store as the REST API, and the
+  forms accept any number of events. Webhooks made in the UI before this release never delivered:
+  make them again. The create form now has the same rules as the REST API: a signing secret of at
+  least 16 bytes, and the URL check that refuses private and reserved addresses. The edit form no
+  longer shows the stored secret; leave the field blank to keep it.
+
 ## [4.6.6] — 2026-10-26
 
 ### Added

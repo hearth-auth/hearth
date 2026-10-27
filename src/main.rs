@@ -2939,6 +2939,7 @@ async fn run_serve(
     .with_logo_url(web_logo_url)
     .with_default_realm(config.server.default_realm.clone())
     .with_config(Arc::new(config.clone()))
+    .with_webhook(Arc::clone(&webhook_engine))
     .with_abuse_guards(Arc::clone(&abuse_guards))
     // A-12: the `/ui/device` lockout follows `security.adaptive_backoff`.
     .with_device_approval_guard(Arc::new(
