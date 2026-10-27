@@ -111,6 +111,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   assignment of a role that is archived or no longer exists. `--realm` takes a realm UUID or name;
   without it, the commands check every realm. The purge writes a `UserPermissionRevoked` or
   `RoleRevoked` audit event (actor `cli`) for each orphan that it deletes.
+- **Go SDK: calls time out, endpoints come from discovery, token requests are form-encoded, and the
+  middleware answers 401 to a missing or invalid token** (#633): `NewClient` built an HTTP client
+  with no timeout, so a server that never answered hung the caller. Every call now times out after
+  10 s (`hearth.DefaultHTTPTimeout`); the new `WithHTTPTimeout` option sets another limit. The
+  token, device-authorization, introspection and userinfo calls used paths that the SDK built
+  itself, and `VerifyToken` guessed `{baseURL}/.well-known/jwks.json` when discovery failed. They
+  now use the endpoints of the discovery document, fetched once per client, and a failed discovery
+  returns `*DiscoveryError`. The token and device-authorization calls sent JSON; they now send
+  `application/x-www-form-urlencoded` (RFC 6749, RFC 8628). The SDK sent `X-Realm-ID` to realm
+  endpoints (`/realms/{realm}/...`), which the server refuses with `400 realm_mismatch` when the
+  header does not name the realm in the path; it now sends the header only to global endpoints.
+  `RequirePermission` answered `403` to a request without a token, and sent `401` without
+  `WWW-Authenticate`. It now answers `401` with `WWW-Authenticate: Bearer realm="hearth"` (and a
+  custom `OnUnauthorized` runs, not `OnDenied`), with `error="invalid_token"` for a token that does
+  not verify or that introspection reports as inactive. A valid token without the permission still
+  gets `403`; in decision mode the server answers a bad token like a missing permission, so both get
+  `403`. In embedded mode the handler reads the verified claims with `hearth.ClaimsFromContext`.
 
 ## [4.6.6] — 2026-10-26
 

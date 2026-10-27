@@ -16,8 +16,9 @@ import (
 
 // getJwksCache lazily creates the JWKS cache.
 //
-// If jwksURLOverride is set (test use), that URL is used directly.
-// Otherwise the JWKS URI is read from the OIDC discovery document.
+// If jwksURLOverride is set (test use), that URL is used directly. Otherwise
+// the JWKS URI is the discovery document's jwks_uri. No path is guessed: a
+// failed discovery, or a document without jwks_uri, is a *DiscoveryError.
 func (c *Client) getJwksCache(ctx context.Context) (*JwksCache, error) {
 	c.jwksMu.Lock()
 	defer c.jwksMu.Unlock()
@@ -28,14 +29,10 @@ func (c *Client) getJwksCache(ctx context.Context) (*JwksCache, error) {
 
 	jwksURL := c.jwksURLOverride
 	if jwksURL == "" {
-		disc, err := c.getDiscovery(ctx)
+		var err error
+		jwksURL, err = c.discoveredEndpoint(ctx, endpointJWKS)
 		if err != nil {
-			// Fall back to the well-known default path.
-			jwksURL = c.baseURL + "/.well-known/jwks.json"
-		} else if disc.JwksURI != "" {
-			jwksURL = disc.JwksURI
-		} else {
-			jwksURL = c.baseURL + "/.well-known/jwks.json"
+			return nil, err
 		}
 	}
 
@@ -43,7 +40,54 @@ func (c *Client) getJwksCache(ctx context.Context) (*JwksCache, error) {
 	return c.jwksCache, nil
 }
 
-// getDiscovery lazily fetches and caches the OIDC discovery document.
+// Discovery-document fields that name an endpoint.
+const (
+	endpointJWKS                = "jwks_uri"
+	endpointToken               = "token_endpoint"
+	endpointDeviceAuthorization = "device_authorization_endpoint"
+	endpointIntrospection       = "introspection_endpoint"
+	endpointUserinfo            = "userinfo_endpoint"
+)
+
+// discoveredEndpoint returns the URL that the discovery document advertises
+// under name (one of the endpoint* constants). It never builds a path itself:
+// a failed discovery, or a document without that endpoint, is a
+// *DiscoveryError.
+func (c *Client) discoveredEndpoint(ctx context.Context, name string) (string, error) {
+	disc, err := c.getDiscovery(ctx)
+	if err != nil {
+		return "", err
+	}
+	var endpoint string
+	switch name {
+	case endpointJWKS:
+		endpoint = disc.JwksURI
+	case endpointToken:
+		endpoint = disc.TokenEndpoint
+	case endpointDeviceAuthorization:
+		endpoint = disc.DeviceAuthorizationEndpoint
+	case endpointIntrospection:
+		endpoint = disc.IntrospectionEndpoint
+	case endpointUserinfo:
+		endpoint = disc.UserinfoEndpoint
+	}
+	if endpoint == "" {
+		return "", &DiscoveryError{
+			URL:   c.discoveryURL(),
+			Cause: fmt.Errorf("the discovery document names no %s", name),
+		}
+	}
+	return endpoint, nil
+}
+
+// discoveryURL is the OIDC discovery document of the issuer at baseURL.
+func (c *Client) discoveryURL() string {
+	return c.baseURL + "/.well-known/openid-configuration"
+}
+
+// getDiscovery fetches the OIDC discovery document once and caches it for the
+// lifetime of the client. A failed fetch is not cached, so the next call
+// retries.
 func (c *Client) getDiscovery(ctx context.Context) (*oidcDiscovery, error) {
 	c.discMu.Lock()
 	defer c.discMu.Unlock()
@@ -52,7 +96,7 @@ func (c *Client) getDiscovery(ctx context.Context) (*oidcDiscovery, error) {
 		return c.discDoc, nil
 	}
 
-	discURL := c.baseURL + "/.well-known/openid-configuration"
+	discURL := c.discoveryURL()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, discURL, nil)
 	if err != nil {
 		return nil, &DiscoveryError{URL: discURL, Cause: err}

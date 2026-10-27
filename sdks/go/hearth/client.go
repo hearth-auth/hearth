@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -55,7 +56,13 @@ type oidcDiscovery struct {
 	JwksURI                     string `json:"jwks_uri"`
 	TokenEndpoint               string `json:"token_endpoint"`
 	DeviceAuthorizationEndpoint string `json:"device_authorization_endpoint"`
+	IntrospectionEndpoint       string `json:"introspection_endpoint"`
+	UserinfoEndpoint            string `json:"userinfo_endpoint"`
 }
+
+// DefaultHTTPTimeout bounds every outbound HTTP call of a client built by
+// NewClient, unless WithHTTPTimeout sets another bound.
+const DefaultHTTPTimeout = 10 * time.Second
 
 // ClientOption is a functional option for NewClient.
 type ClientOption func(*Client)
@@ -87,6 +94,17 @@ func WithAudience(audience string) ClientOption {
 	}
 }
 
+// WithHTTPTimeout sets the time limit for each outbound HTTP call, including
+// discovery, JWKS and session-version fetches. A zero or negative value keeps
+// DefaultHTTPTimeout: the limit cannot be turned off.
+func WithHTTPTimeout(timeout time.Duration) ClientOption {
+	return func(c *Client) {
+		if timeout > 0 {
+			c.http.Timeout = timeout
+		}
+	}
+}
+
 // WithJWKSTTL overrides the default JWKS cache TTL.
 func WithJWKSTTL(ttl time.Duration) ClientOption {
 	return func(c *Client) {
@@ -111,11 +129,15 @@ func WithSessionVersions(cfg SessionVersionConfig) ClientOption {
 	}
 }
 
-// setRealmHeader sends X-Realm-ID only when the client's realm is a UUID.
-// The server reads the header as a realm UUID and refuses a realm-path request
-// whose header names another realm (400 realm_mismatch); a realm NAME is never
-// a valid value, and the realm in the issuer path already identifies it.
+// setRealmHeader sends X-Realm-ID only when the client's realm is a UUID and
+// the request goes to a global endpoint. A realm endpoint
+// (/realms/{realm}/...) names the realm in its path, and the server refuses a
+// header that does not resolve to that realm (400 realm_mismatch). A realm
+// NAME is never a valid value.
 func (c *Client) setRealmHeader(req *http.Request) {
+	if strings.Contains(req.URL.Path, "/realms/") {
+		return
+	}
 	if _, err := uuid.Parse(c.realmID); err == nil {
 		req.Header.Set("X-Realm-ID", c.realmID)
 	}
@@ -123,13 +145,15 @@ func (c *Client) setRealmHeader(req *http.Request) {
 
 // NewClient creates a new Hearth client.
 //
-// Optional ClientOption values (e.g. WithSessionVersions) may be provided
-// and are applied in order after the client struct is initialised.
+// Every outbound HTTP call is bounded by DefaultHTTPTimeout; WithHTTPTimeout
+// sets another bound. Optional ClientOption values (e.g. WithSessionVersions)
+// may be provided and are applied in order after the client struct is
+// initialised.
 func NewClient(baseURL, realmID string, opts ...ClientOption) *Client {
 	c := &Client{
 		baseURL:  baseURL,
 		realmID:  realmID,
-		http:     &http.Client{},
+		http:     &http.Client{Timeout: DefaultHTTPTimeout},
 		audience: DefaultAudience,
 	}
 	for _, opt := range opts {
@@ -221,16 +245,18 @@ func (c *Client) Authorize(
 	return &result, nil
 }
 
-// ExchangeCode exchanges an authorization code for tokens.
+// ExchangeCode exchanges an authorization code for tokens: a form-encoded POST
+// to the discovered token endpoint.
 func (c *Client) ExchangeCode(ctx context.Context, req TokenRequest) (*TokenResponse, error) {
 	var result TokenResponse
-	if err := c.post(ctx, "/token", req, &result); err != nil {
+	if err := c.postTokenRequest(ctx, endpointToken, req.form(), &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
 }
 
-// RefreshTokens exchanges a refresh token for new tokens.
+// RefreshTokens exchanges a refresh token for new tokens at the discovered
+// token endpoint.
 func (c *Client) RefreshTokens(ctx context.Context, clientID, refreshToken string) (*TokenResponse, error) {
 	req := TokenRequest{
 		ClientID:     clientID,
@@ -238,10 +264,29 @@ func (c *Client) RefreshTokens(ctx context.Context, clientID, refreshToken strin
 		RefreshToken: refreshToken,
 	}
 	var result TokenResponse
-	if err := c.post(ctx, "/token", req, &result); err != nil {
+	if err := c.postTokenRequest(ctx, endpointToken, req.form(), &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
+}
+
+// form encodes the request as token-endpoint form fields, leaving out the
+// empty ones.
+func (r TokenRequest) form() url.Values {
+	v := url.Values{}
+	for key, value := range map[string]string{
+		"client_id":     r.ClientID,
+		"grant_type":    r.GrantType,
+		"code":          r.Code,
+		"redirect_uri":  r.RedirectURI,
+		"refresh_token": r.RefreshToken,
+		"code_verifier": r.CodeVerifier,
+	} {
+		if value != "" {
+			v.Set(key, value)
+		}
+	}
+	return v
 }
 
 // rbacClaims mirrors the RBAC-relevant subset of Hearth TokenClaims.
@@ -357,9 +402,14 @@ func (c *Client) Permissions(ctx context.Context, token string) (*MePermissionsR
 	return &result, nil
 }
 
-// UserInfo retrieves user claims using an access token.
+// UserInfo retrieves user claims from the discovered userinfo endpoint using
+// an access token.
 func (c *Client) UserInfo(ctx context.Context, accessToken string) (*UserInfoResponse, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/userinfo", nil)
+	endpoint, err := c.discoveredEndpoint(ctx, endpointUserinfo)
+	if err != nil {
+		return nil, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -373,10 +423,11 @@ func (c *Client) UserInfo(ctx context.Context, accessToken string) (*UserInfoRes
 	return &result, nil
 }
 
-// Introspect calls POST /introspect (RFC 7662) to validate a token and retrieve
-// live RBAC claims. Requires the credentials of a CONFIDENTIAL resource-server
-// client: Hearth refuses a public client with 401 invalid_client, so a missing
-// ClientSecret is rejected here with a *ConfigurationError before any request.
+// Introspect posts to the discovered introspection endpoint (RFC 7662) to
+// validate a token and retrieve live RBAC claims. Requires the credentials of
+// a CONFIDENTIAL resource-server client: Hearth refuses a public client with
+// 401 invalid_client, so a missing ClientSecret is rejected here with a
+// *ConfigurationError before any request.
 //
 // For ModeIntrospection middleware, prefer using RequirePermission which checks
 // the echoed mode for you. Call Introspect directly when you need the full
@@ -388,6 +439,10 @@ func (c *Client) Introspect(ctx context.Context, req IntrospectRequest) (*Intros
 			Message: "introspection requires a confidential client's ClientID and ClientSecret",
 		}
 	}
+	endpoint, err := c.discoveredEndpoint(ctx, endpointIntrospection)
+	if err != nil {
+		return nil, err
+	}
 	body, err := json.Marshal(map[string]string{
 		"token":           req.Token,
 		"token_type_hint": req.TokenTypeHint,
@@ -397,7 +452,7 @@ func (c *Client) Introspect(ctx context.Context, req IntrospectRequest) (*Intros
 	if err != nil {
 		return nil, err
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/introspect", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -448,11 +503,8 @@ func (c *Client) Admin(accessToken string) *AdminClient {
 	}
 }
 
-func (c *Client) post(ctx context.Context, path string, body, result any) error {
-	return c.postWithToken(ctx, path, body, result, "")
-}
-
-// postWithToken is post with an optional bearer token.
+// postWithToken posts a JSON body to path under the base URL, with an optional
+// bearer token.
 //
 // The token is passed per call rather than attached to every request, because
 // the OAuth endpoints (/token, /authorize) authenticate the *client*, and an
