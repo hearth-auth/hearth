@@ -80,6 +80,21 @@ reason = "undici 6.29.0 bundled inside the npm CLI 11.21.1 (node_modules/npm/nod
 id = "GHSA-xjj6-f33q-929c"
 reason = "Same bundled undici 6.29.0 inside the npm CLI 11.21.1 (release tooling, dev scope); the lockfile's own copies are 6.29.1 and 7.30.1 (fixed). An unhandled error on a response with too many content-encodings lets a malicious server crash the client. Only node-gyp uses this copy, to download Node headers, and the release job installs with --ignore-scripts, so node-gyp does not run. Revisit when npm bundles undici >= 6.29.1."
 
+# guard: package=undici lockfile=package-lock.json
+[[IgnoredVulns]]
+id = "GHSA-qrxm-fqhp-jwvm"
+reason = "Same bundled undici 6.29.0 inside the npm CLI 11.21.1 (release tooling, dev scope); the lockfile's own copies are 6.29.1 and 7.30.1 (fixed). Checked 2026-10-27 (#677): 11.21.1 is still the newest npm 11.x, and inside npm's bundle only node-gyp depends on undici. node-gyp uses it only to download Node headers, and every release job installs with --ignore-scripts, so node-gyp does not run. A server that changes its certificate during a TLS 1.2 renegotiation can make the client loop (denial of service). Revisit when npm bundles undici >= 6.29.1."
+
+# guard: package=undici lockfile=package-lock.json
+[[IgnoredVulns]]
+id = "GHSA-9fm3-97px-rjf6"
+reason = "Same bundled undici 6.29.0 inside the npm CLI 11.21.1 (release tooling, dev scope); the lockfile's own copies are 6.29.1 and 7.30.1 (fixed). Checked 2026-10-27 (#677): 11.21.1 is still the newest npm 11.x, and inside npm's bundle only node-gyp depends on undici. node-gyp uses it only to download Node headers, and every release job installs with --ignore-scripts, so node-gyp does not run. The WebSocket client buffers automatic PONG replies without a bound (denial of service); node-gyp opens no WebSocket. Revisit when npm bundles undici >= 6.29.1."
+
+# guard: package=undici lockfile=package-lock.json
+[[IgnoredVulns]]
+id = "GHSA-2m5v-pch6-74hx"
+reason = "Same bundled undici 6.29.0 inside the npm CLI 11.21.1 (release tooling, dev scope); the lockfile's own copies are 6.29.1 and 7.30.1 (fixed). Checked 2026-10-27 (#677): 11.21.1 is still the newest npm 11.x, and inside npm's bundle only node-gyp depends on undici. node-gyp uses it only to download Node headers, and every release job installs with --ignore-scripts, so node-gyp does not run. An Agent drops some tls options, so a certificate check can be skipped. Revisit when npm bundles undici >= 6.29.1."
+
 # zod has no fixed 3.x release, and the root lockfile's only zod 3 dependent is
 # a local developer tool. Revisit when context-mode accepts zod 4.
 
