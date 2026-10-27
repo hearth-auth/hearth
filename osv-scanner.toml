@@ -95,6 +95,11 @@ reason = "Same bundled undici 6.29.0 inside the npm CLI 11.21.1 (release tooling
 id = "GHSA-2m5v-pch6-74hx"
 reason = "Same bundled undici 6.29.0 inside the npm CLI 11.21.1 (release tooling, dev scope); the lockfile's own copies are 6.29.1 and 7.30.1 (fixed). Checked 2026-10-27 (#677): 11.21.1 is still the newest npm 11.x, and inside npm's bundle only node-gyp depends on undici. node-gyp uses it only to download Node headers, and every release job installs with --ignore-scripts, so node-gyp does not run. An Agent drops some tls options, so a certificate check can be skipped. Revisit when npm bundles undici >= 6.29.1."
 
+# guard: package=deepmerge lockfile=docs-site/package-lock.json
+[[IgnoredVulns]]
+id = "GHSA-gcqx-w48m-w2h4"
+reason = "deepmerge 4.3.1 in the docs-site lockfile (low severity; no fixed release exists, checked 2026-10-27, #677). Its only dependent is @svgr/plugin-svgo 8.1.0, a build-time plugin that turns the docs site's own SVG files into components. That version declares deepmerge but never loads it: its dist/index.js requires only svgo and cosmiconfig (read on 2026-10-27). So the flawed mergeObject() never runs, and deepmerge does not ship in the site's pages, the server or an SDK. The flaw lets a crafted input object poison the prototype of the merged result. Revisit when deepmerge publishes a fixed release or the docs site drops @svgr/plugin-svgo."
+
 # zod has no fixed 3.x release, and the root lockfile's only zod 3 dependent is
 # a local developer tool. Revisit when context-mode accepts zod 4.
 
