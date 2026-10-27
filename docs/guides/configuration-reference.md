@@ -244,7 +244,7 @@ storage:
 
 ### `cluster`
 
-> **⚠ EXPERIMENTAL — Do not use in production.** Multi-node clustering is not production-supported in Hearth 1.x. Known defects: followers do not invalidate RBAC or session caches (C-5); cluster membership is immutable after bootstrap (C-6). (Writes to followers are forwarded to the leader — H-3 is fixed.) The production deployment model is single-node. See the [Clustering guide](../guides/clustering.md).
+> **⚠ EXPERIMENTAL — Do not use in production.** Multi-node clustering is not production-supported. Known defects: followers do not invalidate RBAC or session caches (C-5); cluster membership is immutable after bootstrap (C-6). (Writes to followers are forwarded to the leader — H-3 is fixed.) The production deployment model is single-node. See the [Clustering guide](../guides/clustering.md).
 
 Multi-node Raft consensus configuration. **Omit this section entirely for single-node deployments** — when absent, Hearth runs in single-node mode with no clustering overhead, no extra port, and no Raft log.
 

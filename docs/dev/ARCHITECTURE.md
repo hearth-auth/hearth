@@ -97,7 +97,7 @@ The hot path is the most performance-critical code in the system — it executes
 
 The hot path is any code reachable from these operations **when data is in the hot tier**:
 
-- `validate_token()` — session lookup (not signature re-verification; see [Section 10.1](#101-token-validation))
+- `validate_token()` — session lookup (not signature re-verification; see [Section 8.1](#81-token-validation-and-signing))
 - `lookup_session()` — session by ID
 - `lookup_user()` — by indexed field (email, ID)
 
@@ -669,7 +669,7 @@ SDK priority order is defined in [VISION.md Section 8.2](../vision/VISION.md).
 - Backup destinations MUST support at minimum: local filesystem path. Cloud storage (S3, GCS) SHOULD be supported.
 - Scheduled automatic backups MAY be configured in `hearth.yaml` with a cron-like schedule and destination.
 - SST files and completed WAL segments MUST be safe to copy while the server is running (guaranteed by SST immutability and WAL append-only semantics).
-- In cluster mode, backups SHOULD be taken from a follower to avoid impacting the leader.
+- In cluster mode, backups SHOULD be taken from the leader while its `/readyz` answers `200`: a follower cut off from the leader, or a deposed leader, serves stale state with no time limit (CONSISTENCY.md G1).
 
 ---
 

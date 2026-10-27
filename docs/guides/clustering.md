@@ -1,7 +1,7 @@
 # Clustering Guide
 
 > **⚠ EXPERIMENTAL — multi-node is NOT supported for production.** Single-node is the only
-> supported deployment for Hearth 1.x. **Do not** use a multi-node cluster:
+> supported deployment. **Do not** use a multi-node cluster:
 >
 > - for **load-balanced traffic** — writes and logins on a follower now succeed (they are forwarded to the leader, [H-3](#h-3--writes-to-a-follower-forwarded-to-the-leader-fixed)), but reads served by a follower may be stale ([C-5](#c-5--follower-cache-invalidation-is-partial-was-followers-never-invalidate)) and per-node state (below) differs between nodes;
 > - as **HA failover** — membership is fixed at bootstrap ([C-6](#c-6--cluster-membership-is-immutable-after-bootstrap)), and per-node state (below) does not survive a node switch.
@@ -233,10 +233,10 @@ The Wave 5 roadmap items covering clustering are:
 - **P-1** — Batch the disk sync per applied batch of Raft entries (group commit on apply)
 - **P-2** — Persist Raft snapshots to disk
 
-The remaining items are post-GA. Because Hearth 1.x ships **no supported multi-node path**, none of
-them gate the 1.0 release.
+Hearth ships **no supported multi-node path** until these items and the open items in
+[CONSISTENCY.md](../dev/CONSISTENCY.md) (G1–G9) are done.
 
-Until these ship, the production deployment model is single-node with external backups and a planned failover procedure. If your reliability requirements exceed what a single node provides, contact us to understand the timeline.
+Until then, the production deployment model is a single node with external backups and a tested restore ([Disaster Recovery Guide](./disaster-recovery.md#supported-deployment-shape)). If your reliability requirements exceed what a single node provides, contact us to understand the timeline.
 
 ---
 
@@ -401,9 +401,11 @@ data directory, and on a cluster node it is limited:
 - **A cluster node's data directory is refused.** The command writes a session and an audit
   record straight into the store, not through Raft, so they would exist on that node only, and
   the audit record would fork the system realm's replicated audit chain there.
-- **`--sole-cluster-node` accepts it** for a node that next starts as the cluster's **only**
-  member while every other node rejoins empty and copies its store through a snapshot — the
-  [divergence recovery](./disaster-recovery.md#raft-divergence-and-split-brain) rebuild.
+- **`--sole-cluster-node` accepts it** for a node that is the cluster's **only** member, so
+  the session and the audit record cannot fork. No recovery in these guides uses it: the
+  [divergence recovery](./disaster-recovery.md#raft-divergence-and-split-brain) does not let
+  wiped nodes rejoin one survivor (that is unsafe, G9); it rebuilds from a backup, so mint as
+  the next bullet says.
 - **A store restored for a rebuild** holds no `raft.db` yet, so the command accepts it: mint
   into it **before** copying it to every node and the token validates on all of them (the
   [purged-log upgrade](./upgrading.md#upgrading-a-cluster-whose-raft-logs-were-purged), step 4).
@@ -425,7 +427,7 @@ first-boot setup at `/ui/setup`, verify the operator's email, stop the node, min
 
 Bootstrapping initializes the cluster's initial membership. Do this **once** — running bootstrap on an already-initialized cluster is a no-op (Raft rejects double-initialization).
 
-> **Membership is fixed at bootstrap.** The peers list set here cannot be changed: membership lives in the Raft log, so editing `peers` and restarting, even every node at once, does not change it. There is no online membership change API in Hearth 1.x (see C-6 above).
+> **Membership is fixed at bootstrap.** The peers list set here cannot be changed: membership lives in the Raft log, so editing `peers` and restarting, even every node at once, does not change it. There is no online membership change API (see C-6 above).
 
 1. Start all nodes: `hearth serve -c hearth-N.yaml`
 2. Wait until all nodes are listening (check logs for `"Raft peer gRPC server starting (mTLS)"`).
@@ -485,7 +487,7 @@ rather than being retried — re-read before retrying it.
 
 A majority (quorum) of nodes must be reachable for writes to succeed.
 
-**If a node fails permanently:** removing it from `peers` does not remove it from the cluster. The [backup guide](./backup.md) replaces it with a node that reuses its ID and address and starts with an empty data directory; the leader then sends it a snapshot. That node has forgotten its Raft vote, which Raft's safety proof does not allow for ([CONSISTENCY.md](../dev/CONSISTENCY.md) G9). Online membership changes are not yet implemented (G5).
+**If a node fails permanently:** removing it from `peers` does not remove it from the cluster, and there is no safe way to replace it. A node that reuses the failed node's ID and starts with an empty data directory has forgotten its Raft vote, which Raft's safety proof does not allow for, and if it has the lowest ID it starts a cluster of its own ([CONSISTENCY.md](../dev/CONSISTENCY.md) G9). Online membership changes are not yet implemented (G5). Recover from a backup: run one node from it, or rebuild the whole cluster from it with the [upgrading guide's rebuild procedure](./upgrading.md#cluster-purged-log-upgrade).
 
 ---
 
@@ -556,7 +558,7 @@ systemctl stop hearth
 > which voter won the election. Any other field in the body is refused with
 > `400`, so a misspelled target (`targetNodeId`, `target`) is never silently
 > dropped. `exact_target` is **deprecated** and always `false`; it stays in
-> the response for 1.x clients and will be removed in 2.0.
+> the response for older clients.
 
 > **It is not instantaneous, and it is not free.** The endpoint works by
 > letting the followers' leader leases expire, so the cluster has **no leader**
@@ -579,8 +581,6 @@ systemctl stop hearth
 
 ### Backups
 
-Take backups from a **follower** to avoid adding I/O load to the leader.
+Take backups from the **leader**, and only while its `/readyz` answers `200`. A follower that is cut off from the leader, or a deposed leader, keeps serving its own state with no time limit ([CONSISTENCY.md](../dev/CONSISTENCY.md) G1), so a backup taken there can be missing recent writes and revocations, and nothing tells you.
 
-See the [Backup and Restore Guide](./backup.md) for the full procedure.
-
-> **Note on followers and stale state (C-5):** Follower cache invalidation is partial (see C-5), so a backup taken from a follower may reflect the storage state correctly but should not be used to audit access-control decisions — the follower may have served stale data for a cached type that is not forwarded.
+See the [Backup and Restore Guide](./backup.md#cluster-deployments) for the full procedure.

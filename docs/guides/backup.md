@@ -781,11 +781,17 @@ Rotate old archives with a retention tool (e.g., `find /backups -name "*.hearth-
 
 ### Cluster deployments
 
-In a multi-node cluster, **take backups from a follower** to avoid adding I/O
-load to the leader (which is processing all writes). Point the `POST
-/admin/backup` call at the follower's own admin listener — a running follower
-holds the exclusive lock on its data directory, so the CLI form will not work
-against it either.
+Cluster mode is experimental ([Clustering Guide](./clustering.md)). In a
+multi-node cluster, **take backups from the leader**, and only while its
+`/readyz` answers `200`. A follower that is cut off from the leader, or a
+deposed leader, keeps serving its own state with no time limit
+([CONSISTENCY.md](../dev/CONSISTENCY.md) G1). A backup taken there can be
+missing recent writes and revocations, and nothing in the archive tells you.
+
+Find the leader with `GET /admin/cluster/status` (`"role":"leader"`), then
+point the `POST /admin/backup` call at that node's own admin listener. A
+running node holds the exclusive lock on its data directory, so the CLI form
+does not work against it.
 
 ### Verifying backups
 
@@ -834,7 +840,7 @@ hearth backup restore \
 hearth serve -c /etc/hearth/hearth.yaml
 ```
 
-For cluster mode, restore once into one empty data directory and copy that directory to **every** node before the cluster first starts; never restore into a cluster that has already started (its start-up has created every declared realm under a new id), and never run the restore once per node (each run writes its own keys, so the nodes would diverge). The upgrading guide's [rebuild procedure](./upgrading.md#cluster-purged-log-upgrade) gives the steps. To replace one node of a cluster that still has a leader, do not restore at all: start it with an empty data directory and the leader sends it a snapshot.
+For cluster mode, restore once into one empty data directory and copy that directory to **every** node before the cluster first starts; never restore into a cluster that has already started (its start-up has created every declared realm under a new id), and never run the restore once per node (each run writes its own keys, so the nodes would diverge). The upgrading guide's [rebuild procedure](./upgrading.md#cluster-purged-log-upgrade) gives the steps. There is no safe way to replace one failed node of a running cluster: do not restore into it, and do not start it with an empty data directory under its old ID. The data directory holds `raft.db`, so that node has forgotten its Raft vote, and if it has the lowest ID it starts a cluster of its own ([CONSISTENCY.md](../dev/CONSISTENCY.md) G9). Recover the whole deployment from a backup instead: one node, or a rebuilt cluster.
 
 ---
 

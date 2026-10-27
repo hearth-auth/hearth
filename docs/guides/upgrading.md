@@ -555,10 +555,11 @@ Releases up to v1.6.11 kept the Raft state machine's applied index and the clust
 memory only**. Once a node's log has been purged, neither can be recovered from its data directory:
 the older build cannot restart such a node, and the new build refuses to start it (`this node's
 Raft log is purged through index N but its data directory holds no persisted applied state …`).
-Re-seeding one node (move its data directory aside and start it empty, so the leader sends it a
-snapshot) works only while the rest of the cluster still has a leader. In the full-cluster restart
-this release requires, every node is in that state at once, so there is no leader: rebuild the
-cluster from a backup.
+Do not re-seed such a node by moving its data directory aside and starting it empty: the data
+directory holds `raft.db`, so the node forgets its Raft vote, which Raft's safety proof does not
+allow for ([CONSISTENCY.md](../dev/CONSISTENCY.md) G9). In the full-cluster restart this release
+requires, every node is in that state at once anyway, so there is no leader: rebuild the cluster
+from a backup.
 
 > **Stopping the old cluster is one-way.** A purged node cannot restart on **either** build, so
 > once you stop the nodes in step 2 the old cluster cannot be started again, and putting its data
