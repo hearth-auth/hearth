@@ -2098,6 +2098,84 @@ async fn restore_carries_user_consents() {
     );
 }
 
+/// A restore must give back each user's state, not only the user (#672).
+/// The restore re-created every user from eight fields, so it dropped an
+/// admin-forced password update, a verified email address, the email-code
+/// second factor, and both timestamps.
+#[tokio::test]
+async fn restore_carries_each_users_required_actions_verification_and_email_codes() {
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
+    let (realm, email, _password) = seeded_realm(&src);
+    let user = src
+        .identity()
+        .get_user_by_email(&realm, &email)
+        .expect("lookup")
+        .expect("exists");
+    let token = src
+        .identity()
+        .issue_email_verification_token(&realm, user.id())
+        .expect("issue verification token");
+    src.identity()
+        .verify_email_token(&realm, &token)
+        .expect("verify email");
+    src.identity()
+        .update_user(
+            &realm,
+            user.id(),
+            &hearth::identity::UpdateUserRequest {
+                required_actions: Some(vec![hearth::identity::RequiredAction::UpdatePassword]),
+                email_otp_enabled: Some(true),
+                ..Default::default()
+            },
+        )
+        .expect("update user");
+    let before = src
+        .identity()
+        .get_user(&realm, user.id())
+        .expect("get source user")
+        .expect("source user exists");
+    assert!(
+        before.email_verified()
+            && before.email_otp_enabled()
+            && before.required_actions() == [hearth::identity::RequiredAction::UpdatePassword],
+        "the rig must set the state that the test checks: {before:?}"
+    );
+
+    let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
+    let slug = realm_slug(&src, &realm);
+    let dst = common::TestHarness::in_process()
+        .await
+        .expect("dst harness");
+    let (restored_realm, _report) = restore_into(&dst, &tmp, &slug);
+    let after = dst
+        .identity()
+        .get_user(&restored_realm, user.id())
+        .expect("get restored user")
+        .expect("the user must survive the restore");
+
+    assert_eq!(
+        after.required_actions(),
+        before.required_actions(),
+        "an admin-forced password update must survive a restore"
+    );
+    assert!(
+        after.email_verified(),
+        "a verified email address must stay verified"
+    );
+    assert!(
+        after.email_otp_enabled(),
+        "the email-code second factor must survive a restore"
+    );
+    assert_eq!(
+        (after.created_at(), after.updated_at()),
+        (before.created_at(), before.updated_at()),
+        "a restore must keep the account's creation and last-change times"
+    );
+    assert_eq!(after, before, "every field of the user must round-trip");
+}
+
 // ── OpenSpec 26.40: the remaining entity families ────────────────────────────
 //
 // Every test below asserts the DATA or its EFFECT, never a row count. Counting
