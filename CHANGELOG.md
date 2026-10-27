@@ -45,6 +45,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   without it, the commands check every realm. The purge writes a `UserPermissionRevoked` or
   `RoleRevoked` audit event (actor `cli`) for each orphan that it deletes.
 
+### Security
+- **Capped emails are audited** (#622): when the A-4 outbound volume shield or the A-50
+  cross-realm cap stopped or flagged an email, the server only logged a warning. It now writes an
+  `AbuseDetected` audit event in the sending realm, so a `security.abuse_detected` webhook
+  receives it. The metadata has `guard` (for example `a4_email_hard_cap`), `flow`
+  (`password_reset`, `verification`, `magic_link` or `password_email`) and `sent`, and no
+  recipient address or realm count. At most one event is written per guard and realm in the
+  guard's window.
+
 ## [4.6.6] — 2026-10-26
 
 ### Added

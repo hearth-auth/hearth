@@ -51,6 +51,7 @@ fn deliver_password_email(
         state.identity.as_ref(),
         state.email.as_deref(),
         &state.abuse_guards,
+        state.audit.as_ref(),
         &base,
         realm_id,
         user_id,

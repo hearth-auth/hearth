@@ -1208,6 +1208,7 @@ async fn admin_send_password_email(
         state.identity.as_ref(),
         state.email.as_deref(),
         &state.abuse_guards,
+        state.audit.as_ref(),
         &state.public_base_url,
         &auth.realm_id,
         &uid,

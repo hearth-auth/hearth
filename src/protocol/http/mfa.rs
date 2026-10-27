@@ -734,20 +734,17 @@ fn deliver_magic_link(
     // forms apply them (GA audit L17). Checked inside the off-request-path
     // job, so a refused send costs the caller what an allowed one does.
     let guards = Arc::clone(&state.abuse_guards);
-    let realm_key = realm_id.as_uuid().to_string();
+    let audit = Arc::clone(&state.audit);
+    let realm_id = realm_id.clone();
     let job = move || {
-        match guards.check_outbound_email(&realm_key, &recipient) {
-            crate::abuse::runtime::OutboundVerdict::Deny { reason } => {
-                tracing::warn!(
-                    guard = reason,
-                    "magic_link: outbound cap reached; link not sent"
-                );
-                return;
-            }
-            crate::abuse::runtime::OutboundVerdict::Warn { reason } => {
-                tracing::warn!(guard = reason, "magic_link: outbound soft cap reached");
-            }
-            crate::abuse::runtime::OutboundVerdict::Allow => {}
+        if !crate::protocol::outbound_email::admit(
+            &guards,
+            audit.as_ref(),
+            &realm_id,
+            &recipient,
+            crate::protocol::outbound_email::EmailFlow::MagicLink,
+        ) {
+            return;
         }
         if let Err(e) = email_service.send_magic_link_email(
             &recipient,

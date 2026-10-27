@@ -4388,23 +4388,17 @@ fn forgot_password_submit_impl(
                 // costs the caller exactly what an allowed one does — the
                 // arm is invisible in the response either way (§4.24#3).
                 let guards = Arc::clone(&state.abuse_guards);
-                let realm_key = realm.id().as_uuid().to_string();
+                let audit = Arc::clone(&state.audit);
+                let realm_id = realm.id().clone();
                 spawn_off_request_path(move || {
-                    match guards.check_outbound_email(&realm_key, &recipient) {
-                        crate::abuse::runtime::OutboundVerdict::Deny { reason } => {
-                            tracing::warn!(
-                                guard = reason,
-                                "forgot_password: outbound cap reached; reset email not sent"
-                            );
-                            return;
-                        }
-                        crate::abuse::runtime::OutboundVerdict::Warn { reason } => {
-                            tracing::warn!(
-                                guard = reason,
-                                "forgot_password: outbound soft cap reached"
-                            );
-                        }
-                        crate::abuse::runtime::OutboundVerdict::Allow => {}
+                    if !crate::protocol::outbound_email::admit(
+                        &guards,
+                        audit.as_ref(),
+                        &realm_id,
+                        &recipient,
+                        crate::protocol::outbound_email::EmailFlow::PasswordReset,
+                    ) {
+                        return;
                     }
                     if let Err(e) = email_service.send_password_reset_email(
                         &recipient,
@@ -5731,23 +5725,17 @@ pub(super) fn send_verification_email_off_path(
     let branding = realm.config().email_branding.clone();
     let stored_verification = realm.config().email_templates.get("verification").cloned();
     let guards = Arc::clone(&state.abuse_guards);
-    let realm_key = realm.id().as_uuid().to_string();
+    let audit = Arc::clone(&state.audit);
+    let realm_id = realm.id().clone();
     spawn_off_request_path(move || {
-        match guards.check_outbound_email(&realm_key, &recipient) {
-            crate::abuse::runtime::OutboundVerdict::Deny { reason } => {
-                tracing::warn!(
-                    guard = reason,
-                    "verification email: outbound cap reached; not sent"
-                );
-                return;
-            }
-            crate::abuse::runtime::OutboundVerdict::Warn { reason } => {
-                tracing::warn!(
-                    guard = reason,
-                    "verification email: outbound soft cap reached"
-                );
-            }
-            crate::abuse::runtime::OutboundVerdict::Allow => {}
+        if !crate::protocol::outbound_email::admit(
+            &guards,
+            audit.as_ref(),
+            &realm_id,
+            &recipient,
+            crate::protocol::outbound_email::EmailFlow::Verification,
+        ) {
+            return;
         }
         if let Err(e) = email_service.send_verification_email(
             &recipient,

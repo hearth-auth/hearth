@@ -113,12 +113,12 @@ pub enum OutboundVerdict {
     Allow,
     /// Over the soft cap. Send, but the operator should see it.
     Warn {
-        /// Which cap fired, for `tracing` only.
+        /// Which cap fired, for `tracing` and the audit metadata.
         reason: &'static str,
     },
     /// Over the hard cap. The send MUST be abandoned.
     Deny {
-        /// Which cap fired, for `tracing` only.
+        /// Which cap fired, for `tracing` and the audit metadata.
         reason: &'static str,
     },
 }
@@ -275,8 +275,36 @@ impl AbuseGuards {
         challenge.guard.hash(&mut hasher);
         rate_limit_key(ip).hash(&mut hasher);
         username.hash(&mut hasher);
-        let key = hasher.finish();
+        self.limit_audit(hasher.finish(), window, now)
+    }
 
+    /// Whether a send that an outbound cap stopped or flagged should write an
+    /// `AbuseDetected` event: at most one per guard and realm per window of
+    /// that guard (#622). `guard` is the verdict's `reason`.
+    #[must_use]
+    pub fn should_audit_outbound(&self, realm_id: &str, guard: &'static str) -> bool {
+        self.should_audit_outbound_at(realm_id, guard, Instant::now())
+    }
+
+    /// [`should_audit_outbound`](Self::should_audit_outbound) at an explicit
+    /// time.
+    fn should_audit_outbound_at(&self, realm_id: &str, guard: &'static str, now: Instant) -> bool {
+        let window = if guard.starts_with("a4_") {
+            self.volume_shield.window()
+        } else {
+            self.agg_cap.window()
+        }
+        .max(Duration::from_secs(1));
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        "outbound".hash(&mut hasher);
+        guard.hash(&mut hasher);
+        realm_id.hash(&mut hasher);
+        self.limit_audit(hasher.finish(), window, now)
+    }
+
+    /// Whether `key` may write an audit event at `now`; a write blocks the
+    /// key for `window`.
+    fn limit_audit(&self, key: u64, window: Duration, now: Instant) -> bool {
         self.audit_limiter
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -964,6 +992,51 @@ mod tests {
                 t0 + Duration::from_secs(300)
             ),
             "the next window writes again"
+        );
+    }
+
+    /// At most one capped-send event per guard and realm per window of that
+    /// guard (#622).
+    #[test]
+    fn outbound_audit_is_written_once_per_guard_and_realm_per_window() {
+        let guards = AbuseGuards::from_security(&security_yaml(
+            "outbound_volume_shield:\n  enabled: true\n  window: 60s\n\
+             cross_realm_aggregation_cap:\n  enabled: true\n  window: 600s\n",
+        ));
+        let t0 = Instant::now();
+        assert!(guards.should_audit_outbound_at("realm-a", "a4_email_hard_cap", t0));
+        assert!(
+            !guards.should_audit_outbound_at(
+                "realm-a",
+                "a4_email_hard_cap",
+                t0 + Duration::from_secs(59)
+            ),
+            "a repeat inside the window must not write a second event"
+        );
+        assert!(
+            guards.should_audit_outbound_at("realm-b", "a4_email_hard_cap", t0),
+            "another realm is another key"
+        );
+        assert!(
+            guards.should_audit_outbound_at("realm-a", "a4_email_soft_cap", t0),
+            "another guard is another key"
+        );
+        assert!(
+            guards.should_audit_outbound_at(
+                "realm-a",
+                "a4_email_hard_cap",
+                t0 + Duration::from_secs(60)
+            ),
+            "the next A-4 window writes again"
+        );
+        assert!(guards.should_audit_outbound_at("realm-a", "a50_email_hard_cap", t0));
+        assert!(
+            !guards.should_audit_outbound_at(
+                "realm-a",
+                "a50_email_hard_cap",
+                t0 + Duration::from_secs(60)
+            ),
+            "an A-50 guard uses the A-50 window"
         );
     }
 
