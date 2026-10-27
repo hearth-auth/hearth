@@ -203,6 +203,48 @@ async fn verify_agent_api_key_returns_rate_limit_error_after_threshold() {
     );
 }
 
+/// A rate-triggered suspension is audited as the system's act, with the signal
+/// that caused it (#621). It was recorded with no metadata, so the audit log
+/// did not say why the agent was suspended.
+#[tokio::test]
+async fn a_rate_triggered_suspension_is_audited_with_its_signal() {
+    use hearth::audit::{AuditAction, AuditQuery};
+
+    let (harness, realm_id, user_id) = setup().await;
+    let identity = harness.identity();
+    let (agent, plaintext) = make_agent_with_key(identity, &realm_id, &user_id);
+    let bad_key = "00".repeat(32);
+    for i in 0..=1100u32 {
+        let key = if i == 0 { &plaintext } else { &bad_key };
+        if matches!(
+            identity.verify_agent_api_key(&realm_id, agent.id(), key),
+            Err(IdentityError::AgentRateLimitExceeded)
+        ) {
+            break;
+        }
+    }
+
+    let agent_id = agent.id().as_uuid().to_string();
+    let events = harness
+        .audit()
+        .query(&AuditQuery {
+            action: Some(AuditAction::AgentSuspended),
+            ..AuditQuery::for_realm(realm_id.clone())
+        })
+        .expect("audit query");
+    let event = events
+        .iter()
+        .find(|e| e.resource_id == agent_id)
+        .expect("the suspension is audited");
+    assert_eq!(event.actor, "system");
+    let signal = event
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("signal"))
+        .and_then(serde_json::Value::as_str);
+    assert_eq!(signal, Some("agent_rate_limit"));
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Isolation: one agent's rate limit does not affect another
 // ──────────────────────────────────────────────────────────────────────────────

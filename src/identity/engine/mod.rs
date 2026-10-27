@@ -19337,6 +19337,8 @@ mod tests {
     mod aat_chain_links;
     /// `security.max_act_chain_depth` bounds validation, exchange and agents.
     mod act_chain_ceiling;
+    /// A delegation whose audit record fails to write issues no token (#621).
+    mod delegation_audit_required;
     /// A revoke racing an onward exchange cannot leave the onward token alive.
     mod delegation_revoke_race;
 
