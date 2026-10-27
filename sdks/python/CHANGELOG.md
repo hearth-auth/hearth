@@ -4,6 +4,20 @@ All notable changes to `hearth-python` are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **The device flow works** (#634): `start_device_flow()` posted to
+  `/realms/{realm}/device/authorize`, which the server does not serve (`404`). It now
+  posts to the `device_authorization_endpoint` of the realm's discovery document, fetched
+  once per client. A discovery document that cannot be fetched, or that names no such
+  endpoint, raises `DiscoveryError`.
+- **The middleware answers 401 to a missing or invalid token** (#634):
+  `RequirePermissionMiddleware`, `WsgiPermissionMiddleware`, `HearthDjangoMiddleware` and
+  `@require_permission` answered `403`. They now answer `401` with `WWW-Authenticate:
+  Bearer realm="hearth"`, with `error="invalid_token"` for a token that does not verify or
+  that introspection reports as inactive. A valid token without the permission still gets
+  `403`. Decision mode cannot tell a bad token from a missing permission, so both get
+  `403`.
+
 ### Security
 - **Access-token audience is always checked** — `verify_token` requires `aud` to contain
   the expected audience (RFC 9068 §4): the new `HearthClient(..., audience=...)` keyword,

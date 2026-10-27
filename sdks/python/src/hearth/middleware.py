@@ -51,6 +51,15 @@ WSGIApp = Callable[..., object]
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+#: ``WWW-Authenticate`` for a request without a bearer token (RFC 6750 §3).
+_CHALLENGE = 'Bearer realm="hearth"'
+#: ``WWW-Authenticate`` for a token that does not verify or is not active.
+_INVALID_TOKEN_CHALLENGE = 'Bearer realm="hearth", error="invalid_token"'
+
+
+class _Unauthenticated(Exception):
+    """The token does not verify, or the server says it is not active: answer 401."""
+
 
 def _extract_bearer_asgi(scope: dict) -> str | None:
     """Return the Bearer token from an ASGI HTTP scope, or None."""
@@ -75,8 +84,9 @@ def _check_embedded(client: HearthClient | None, token: str, permission: str) ->
 
     *client* verifies the token end-to-end — Ed25519 signature against the
     realm's cached JWKS, plus ``exp``, ``nbf``, ``iss`` and ``aud`` — before any claim is
-    read.  A token that does not verify grants nothing, and neither does a
-    missing *client*: embedded mode has no way to verify without one, so it
+    read.  A token that does not verify grants nothing: it raises
+    ``_Unauthenticated``, which the middleware answers with 401.  A missing
+    *client* denies too: embedded mode has no way to verify without one, so it
     denies rather than falling back to trusting the payload.
 
     Returns ``False`` when the claim is absent — never falls back to a network
@@ -86,10 +96,10 @@ def _check_embedded(client: HearthClient | None, token: str, permission: str) ->
         return False
     try:
         claims = client.verify_token(token)
-        perms = claims.get("permissions") or []
-        return permission in perms
-    except Exception:  # noqa: BLE001 -- fail closed on any error
-        return False
+    except Exception as exc:  # any failure to verify is an invalid token
+        raise _Unauthenticated from exc
+    perms = claims.get("permissions") or []
+    return permission in perms
 
 
 def _check_introspection_sync(
@@ -107,7 +117,7 @@ def _check_introspection_sync(
     """
     resp = client.introspect(token, client_id=client_id, client_secret=client_secret)
     if not resp.active:
-        return False
+        raise _Unauthenticated
     # An absent mode field defaults to "embedded" (server omits it for embedded clients).
     echoed = resp.mode or "embedded"
     if echoed != expected_mode:
@@ -141,6 +151,21 @@ async def _send_401_required_action(send: Callable) -> None:
     await send({"type": "http.response.body", "body": b"Required actions pending"})
 
 
+async def _send_401(send: Callable, challenge: str) -> None:
+    """Emit a minimal HTTP 401 ASGI response with ``WWW-Authenticate``."""
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 401,
+            "headers": [
+                [b"content-type", b"text/plain; charset=utf-8"],
+                [b"www-authenticate", challenge.encode()],
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": b"Unauthorized"})
+
+
 async def _send_403(send: Callable) -> None:
     """Emit a minimal HTTP 403 ASGI response."""
     await send(
@@ -163,6 +188,15 @@ def _wsgi_401_required_action(start_response: Callable) -> list:
         ],
     )
     return [b"Required actions pending"]
+
+
+def _wsgi_401(start_response: Callable, challenge: str) -> list:
+    """Return a minimal HTTP 401 WSGI response with ``WWW-Authenticate``."""
+    start_response(
+        "401 Unauthorized",
+        [("Content-Type", "text/plain"), ("WWW-Authenticate", challenge)],
+    )
+    return [b"Unauthorized"]
 
 
 def _wsgi_403(start_response: Callable) -> list:
@@ -220,7 +254,7 @@ class RequirePermissionMiddleware:
 
         token = _extract_bearer_asgi(scope)
         if not token:
-            await _send_403(send)
+            await _send_401(send, _CHALLENGE)
             return
 
         if _is_required_action_token(token):
@@ -231,6 +265,9 @@ class RequirePermissionMiddleware:
 
         try:
             allowed = await self._check(token)
+        except _Unauthenticated:
+            await _send_401(send, _INVALID_TOKEN_CHALLENGE)
+            return
         except Exception:  # noqa: BLE001 -- fail closed on any error
             # Fail-closed on any error (mode mismatch, network, etc.)
             allowed = False
@@ -320,7 +357,7 @@ class WsgiPermissionMiddleware:
     def __call__(self, environ: dict, start_response: Callable) -> object:
         token = _extract_bearer_environ(environ)
         if not token:
-            return _wsgi_403(start_response)
+            return _wsgi_401(start_response, _CHALLENGE)
 
         if _is_required_action_token(token):
             # Spec §6 rule 6: required_action tokens must never be accepted for
@@ -329,6 +366,8 @@ class WsgiPermissionMiddleware:
 
         try:
             allowed = self._check(token)
+        except _Unauthenticated:
+            return _wsgi_401(start_response, _INVALID_TOKEN_CHALLENGE)
         except Exception:  # noqa: BLE001 -- fail closed on any error
             # Fail-closed on any error (mode mismatch, network, etc.)
             allowed = False

@@ -10,6 +10,7 @@ import jwt
 from .claims import Claims
 from .errors import (
     ConfigurationError,
+    DiscoveryError,
     HearthError,
     TokenAudienceError,
     TokenExpiredError,
@@ -94,6 +95,7 @@ class HearthClient:
         self._client_secret = client_secret
         self._jwks_ttl = jwks_ttl
         self._jwks_cache: Any | None = None  # JwksCache, lazily initialised
+        self._realm_metadata: dict[str, Any] | None = None  # realm discovery, cached
         self._http = httpx.Client(
             headers={"X-Realm-ID": realm_id},
             timeout=timeout,
@@ -329,6 +331,36 @@ class HearthClient:
         if resp.status_code != 200:
             raise HearthError(resp.status_code, resp.text)
         return resp.json()
+
+    def _realm_endpoint(self, name: str) -> str:
+        """The realm's endpoint *name* from its discovery document.
+
+        The document is fetched once and cached.  A path is never guessed:
+        a document that cannot be fetched, or that does not name the
+        endpoint, raises :class:`DiscoveryError`.
+        """
+        url = f"{self._base}/realms/{self._realm}/.well-known/openid-configuration"
+        if self._realm_metadata is None:
+            # The path names the realm, so no X-Realm-ID (see _post_realm_path).
+            request = self._http.build_request("GET", url)
+            del request.headers["X-Realm-ID"]
+            try:
+                resp = self._http.send(request)
+                if resp.status_code != 200:
+                    raise DiscoveryError(
+                        f"discovery answered HTTP {resp.status_code}", url=url
+                    )
+                self._realm_metadata = resp.json()
+            except DiscoveryError:
+                raise
+            except Exception as exc:  # network or JSON failure
+                raise DiscoveryError(
+                    "discovery document could not be fetched", url=url, cause=exc
+                ) from exc
+        endpoint = self._realm_metadata.get(name)
+        if not isinstance(endpoint, str) or not endpoint:
+            raise DiscoveryError(f"discovery document names no {name}", url=url)
+        return endpoint
 
     # ------------------------------------------------------------------
     # RBAC predicates (local verification, no per-call network hop)
@@ -691,8 +723,12 @@ class HearthClient:
     ) -> DeviceAuthorizationResponse:
         """Initiate the Device Authorization Flow (RFC 8628).
 
+        Posts to the ``device_authorization_endpoint`` of the realm's
+        discovery document.
+
         :param scope: Optional scope string.
         :raises ConfigurationError: if ``client_id`` is missing.
+        :raises DiscoveryError: if discovery names no device endpoint.
         :raises HearthError: on non-200 responses.
         """
         if not self._client_id:
@@ -705,7 +741,7 @@ class HearthClient:
             body["scope"] = scope
 
         resp = self._post_realm_path(
-            f"{self._base}/realms/{self._realm}/device/authorize",
+            self._realm_endpoint("device_authorization_endpoint"),
             data=body,
         )
         if resp.status_code != 200:
