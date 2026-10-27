@@ -15,6 +15,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   make them again. The create form now has the same rules as the REST API: a signing secret of at
   least 16 bytes, and the URL check that refuses private and reserved addresses. The edit form no
   longer shows the stored secret; leave the field blank to keep it.
+- **`hearth rbac orphans purge` deletes only orphans** (#618): the command deleted every
+  extra-permission grant in the system realm, whatever `--realm` said, and wrote no audit event.
+  `list` showed the same wrong set. Both commands now find orphans with the rule of the startup
+  orphan summary: an extra grant of a permission that `hearth.yaml` no longer declares, and an
+  assignment of a role that is archived or no longer exists. `--realm` takes a realm UUID or name;
+  without it, the commands check every realm. The purge writes a `UserPermissionRevoked` or
+  `RoleRevoked` audit event (actor `cli`) for each orphan that it deletes.
 
 ## [4.6.6] — 2026-10-26
 
