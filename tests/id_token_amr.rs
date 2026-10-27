@@ -82,7 +82,44 @@ fn build_rig() -> Rig {
         Arc::clone(&storage) as Arc<dyn StorageEngine>,
         Arc::clone(&clock),
     ));
+    let (realm_id, user, client) = seed_realm(identity.as_ref());
 
+    let email = Arc::new(
+        EmailService::new(
+            Arc::new(LoggingEmailSender::new()),
+            "Hearth".to_string(),
+            None,
+            EmailBranding::default(),
+            String::new(),
+            None,
+        )
+        .expect("email service"),
+    );
+    let onboarding = Arc::new(OnboardingService::new(
+        Arc::clone(&identity),
+        Arc::clone(&rbac) as Arc<dyn hearth::rbac::RbacEngine>,
+        Arc::clone(&email),
+        data_dir,
+    ));
+    let state = WebState::new(
+        Arc::clone(&identity),
+        rbac as Arc<dyn hearth::rbac::RbacEngine>,
+        audit,
+        onboarding,
+        CookieSecret::from_bytes(COOKIE_SECRET),
+        Some(email),
+    );
+    Rig {
+        ui: web::router(state),
+        identity,
+        realm_id,
+        client,
+        user,
+    }
+}
+
+/// The realm, its active user with a password, and a first-party client.
+fn seed_realm(identity: &dyn IdentityEngine) -> (RealmId, UserId, OAuthClient) {
     let realm = identity
         .create_realm(&CreateRealmRequest {
             name: format!("amr-{}", uuid::Uuid::new_v4()),
@@ -133,39 +170,7 @@ fn build_rig() -> Rig {
             },
         )
         .expect("register client");
-
-    let email = Arc::new(
-        EmailService::new(
-            Arc::new(LoggingEmailSender::new()),
-            "Hearth".to_string(),
-            None,
-            EmailBranding::default(),
-            String::new(),
-            None,
-        )
-        .expect("email service"),
-    );
-    let onboarding = Arc::new(OnboardingService::new(
-        Arc::clone(&identity),
-        Arc::clone(&rbac) as Arc<dyn hearth::rbac::RbacEngine>,
-        Arc::clone(&email),
-        data_dir,
-    ));
-    let state = WebState::new(
-        Arc::clone(&identity),
-        rbac as Arc<dyn hearth::rbac::RbacEngine>,
-        audit,
-        onboarding,
-        CookieSecret::from_bytes(COOKIE_SECRET),
-        Some(email),
-    );
-    Rig {
-        ui: web::router(state),
-        identity,
-        realm_id: realm.id().clone(),
-        client,
-        user: user.id().clone(),
-    }
+    (realm.id().clone(), user.id().clone(), client)
 }
 
 /// Enrols and confirms TOTP for the rig's user. Returns the secret and the
