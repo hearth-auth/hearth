@@ -224,6 +224,10 @@ pub struct WebState {
     /// Client secrets the console minted and has yet to show, once, on the
     /// page its post/redirect/get lands on (see [`secret_reveal`]).
     pub secret_reveals: Arc<secret_reveal::SecretReveals>,
+    /// The webhook store that the REST API and the webhook dispatcher use.
+    /// The admin UI webhook pages read and write it (#617). `None` makes
+    /// those pages answer with an error page.
+    pub webhook: Option<Arc<dyn crate::webhook::WebhookEngine>>,
 }
 
 /// A logo loaded from a local file path at startup.
@@ -323,6 +327,7 @@ impl WebState {
                 crate::abuse::device_approval::DeviceApprovalGuard::new(),
             ),
             secret_reveals: Arc::new(secret_reveal::SecretReveals::default()),
+            webhook: None,
         }
     }
 
@@ -547,6 +552,15 @@ impl WebState {
     #[must_use]
     pub fn with_dev_mode(mut self, val: bool) -> Self {
         self.dev_mode = val;
+        self
+    }
+
+    /// Sets the webhook store for the admin UI webhook pages. Pass the same
+    /// engine as the REST API's `AppState`, or the UI and the dispatcher
+    /// see different webhooks (#617).
+    #[must_use]
+    pub fn with_webhook(mut self, webhook: Arc<dyn crate::webhook::WebhookEngine>) -> Self {
+        self.webhook = Some(webhook);
         self
     }
 

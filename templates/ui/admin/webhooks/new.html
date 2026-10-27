@@ -57,12 +57,14 @@
     {# Signing secret #}
     <div>
       <label for="secret" class="block text-sm font-medium text-ht-content-secondary">
-        Signing secret <span class="text-ht-content-muted">(optional)</span>
+        Signing secret <span class="text-ht-content-muted">(at least 16 characters)</span>
       </label>
       <div class="relative mt-1">
         <input type="password"
                id="secret"
                name="secret"
+               required
+               minlength="16"
                autocomplete="new-password"
                placeholder="whsec_…"
                value="{{ form_secret }}"
@@ -75,7 +77,7 @@
           <svg id="secret-hide-icon" class="hidden h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
         </button>
       </div>
-      <p class="mt-1 text-xs text-ht-content-muted">Hearth includes an <code class="rounded-sm bg-ht-surface-base px-1 font-mono">X-Hearth-Signature-256</code> header on each delivery. Leave blank to skip verification.</p>
+      <p class="mt-1 text-xs text-ht-content-muted">Hearth signs each delivery with this secret in the <code class="rounded-sm bg-ht-surface-base px-1 font-mono">X-Hearth-Signature-256</code> header.</p>
     </div>
 
     {# Event subscriptions — checkbox grid #}

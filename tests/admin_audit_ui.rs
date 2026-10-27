@@ -182,7 +182,8 @@ fn build_rig() -> Rig {
         CookieSecret::from_bytes(COOKIE_SECRET),
         None,
     )
-    .with_dev_mode(true);
+    .with_dev_mode(true)
+    .with_webhook(Arc::clone(&webhook));
     let app = web::router(state);
 
     Rig {
@@ -401,9 +402,11 @@ async fn webhook_create_and_delete_lifecycle() {
     let cookie = admin_cookie(&rig, csrf);
     let realm = &rig.tenant_realm_name;
 
-    // Create.
-    let body =
-        format!("url=https%3A%2F%2Fexample.com%2Fhook&secret=mysecret&enabled=on&_csrf={csrf}");
+    // Create. An IP literal: the URL check needs no DNS lookup.
+    let body = format!(
+        "url=https%3A%2F%2F1.1.1.1%2Fhook&secret=a-signing-secret-of-32-bytes-xx\
+         &enabled=on&_csrf={csrf}"
+    );
     let resp = rig
         .app
         .clone()

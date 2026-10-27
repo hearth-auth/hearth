@@ -1,8 +1,17 @@
 //! Webhook management handlers for the admin UI.
+//!
+//! The pages use the webhook engine: the same store as the REST API
+//! (`/admin/webhooks`) and the webhook dispatcher. They used the identity
+//! engine's webhook store, which nothing delivers from (#617).
 
 use super::*;
+use crate::audit::AuditAction;
 use crate::core::{FormSecret, WebhookId};
-use crate::identity::{CreateWebhookRequest, UpdateWebhookRequest};
+use crate::identity::RealmStatus;
+use crate::webhook::{
+    CreateWebhookRequest, UpdateWebhookRequest, WebhookEngine, WebhookError, WebhookQuery,
+    MIN_SECRET_LEN,
+};
 
 // ---------------------------------------------------------------------------
 // View models
@@ -92,32 +101,30 @@ pub async fn admin_webhooks_list(
     let has_search = search_query.len() >= 2;
     let has_sort = !sort_field_str.is_empty();
 
-    let identity = state.identity.clone();
-    let realm_id = target.id().clone();
-    // Load a full window when filtering/sorting so we slice after.
-    let load_limit = if has_search || has_sort {
-        crate::core::MAX_PAGE_LIMIT
-    } else {
-        params.per_page.unwrap_or(25)
+    let engine = match webhook_engine(&state) {
+        Ok(engine) => engine,
+        Err(resp) => return resp,
     };
-    let load_req = crate::core::PageRequest::new(0, load_limit);
-    let page_result =
-        tokio::task::spawn_blocking(move || identity.list_webhooks(&realm_id, &load_req))
-            .await
-            .ok()
-            .and_then(|r| r.ok())
-            .unwrap_or_default();
+    let query = WebhookQuery {
+        realm_id: target.id().clone(),
+        enabled_only: false,
+    };
+    let mut subscriptions = tokio::task::spawn_blocking(move || engine.list(&query))
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or_default();
+    subscriptions.sort_by_key(|s| s.created_at);
 
     let base_url = format!("/ui/admin/realms/{realm_name}/webhooks");
     // Collect into owned rows before slicing.
-    let mut webhook_rows: Vec<WebhookRow> = page_result
-        .items
+    let mut webhook_rows: Vec<WebhookRow> = subscriptions
         .into_iter()
-        .map(|wh| WebhookRow {
-            id: wh.id().as_uuid().to_string(),
-            url: wh.url.clone(),
-            events: wh.events.clone(),
-            enabled: wh.enabled,
+        .map(|sub| WebhookRow {
+            id: sub.id.as_uuid().to_string(),
+            url: sub.url.clone(),
+            events: event_names(&sub.event_filters),
+            enabled: sub.enabled,
             last_delivery: None,
         })
         .collect();
@@ -194,47 +201,126 @@ pub struct WebhookEventType {
     pub is_subscribed: bool,
 }
 
+/// The event types that the create and edit forms offer: the form name, the
+/// audit action that the subscription matches, and a description. The
+/// dispatcher matches audit actions, so each form name must map to one.
+const EVENT_TYPES: &[(&str, AuditAction, &str)] = &[
+    // ── Identity events ──────────────────────────────────────────────────
+    ("user.created", AuditAction::UserCreated, "User was created"),
+    (
+        "user.updated",
+        AuditAction::UserUpdated,
+        "User profile was updated",
+    ),
+    ("user.deleted", AuditAction::UserDeleted, "User was deleted"),
+    (
+        "session.created",
+        AuditAction::SessionCreated,
+        "New session was created",
+    ),
+    (
+        "session.revoked",
+        AuditAction::SessionRevoked,
+        "Session was revoked",
+    ),
+    (
+        "role.assigned",
+        AuditAction::RoleAssigned,
+        "Role was assigned to a user",
+    ),
+    (
+        "role.revoked",
+        AuditAction::RoleRevoked,
+        "Role was revoked from a user",
+    ),
+    (
+        "credential.changed",
+        AuditAction::CredentialChanged,
+        "User changed their password",
+    ),
+    // ── Security events (A-7) ────────────────────────────────────────────
+    // Wire these to SIEM, Slack, or a custom WAF via `security.*`. The
+    // audit actions are the ones the `abuse-prevention` spec (A-7) names.
+    (
+        "security.login_failed",
+        AuditAction::LoginFailed,
+        "Credential verification failed (login attempt)",
+    ),
+    (
+        "security.account_locked",
+        AuditAction::LoginLocked,
+        "Account temporarily locked after repeated failures",
+    ),
+    (
+        "security.abuse_detected",
+        AuditAction::AbuseDetected,
+        "Abuse pattern detected (credential stuffing / spray)",
+    ),
+    (
+        "security.password_compromised",
+        AuditAction::PasswordCompromisedRejected,
+        "Password rejected as known-compromised (HIBP)",
+    ),
+    (
+        "security.rate_limit_exceeded",
+        AuditAction::IpLoginLimitExceeded,
+        "Per-IP login rate limit was exceeded",
+    ),
+];
+
+/// The form checkboxes. A subscribed name that the form does not offer (an
+/// audit action's wire key, from a subscription that the REST API made)
+/// gets a checked box of its own, so an edit keeps it.
 fn available_event_types(subscribed: &[String]) -> Vec<WebhookEventType> {
-    [
-        // ── Identity events ──────────────────────────────────────────────────
-        ("user.created", "User was created"),
-        ("user.updated", "User profile was updated"),
-        ("user.deleted", "User was deleted"),
-        ("session.created", "New session was created"),
-        ("session.revoked", "Session was revoked"),
-        ("role.assigned", "Role was assigned to a user"),
-        ("role.revoked", "Role was revoked from a user"),
-        ("credential.changed", "User changed their password"),
-        // ── Security events (A-7) ────────────────────────────────────────────
-        // Wire these to SIEM, Slack, or a custom WAF via `security.*`.
-        (
-            "security.login_failed",
-            "Credential verification failed (login attempt)",
-        ),
-        (
-            "security.account_locked",
-            "Account temporarily locked after repeated failures",
-        ),
-        (
-            "security.abuse_detected",
-            "Abuse pattern detected (credential stuffing / spray)",
-        ),
-        (
-            "security.password_compromised",
-            "Password rejected as known-compromised (HIBP)",
-        ),
-        (
-            "security.rate_limit_exceeded",
-            "Per-IP login rate limit was exceeded",
-        ),
-    ]
-    .into_iter()
-    .map(|(value, desc)| WebhookEventType {
+    let offered = EVENT_TYPES.iter().map(|(value, _, desc)| WebhookEventType {
         is_subscribed: subscribed.iter().any(|s| s == value),
-        value: value.to_string(),
-        description: Some(desc.to_string()),
-    })
-    .collect()
+        value: (*value).to_string(),
+        description: Some((*desc).to_string()),
+    });
+    let kept = subscribed
+        .iter()
+        .filter(|s| !EVENT_TYPES.iter().any(|(value, _, _)| value == s))
+        .map(|s| WebhookEventType {
+            is_subscribed: true,
+            value: s.clone(),
+            description: None,
+        });
+    offered.chain(kept).collect()
+}
+
+/// The audit actions for the form's event names. A name that the form does
+/// not offer must be an audit action's wire key.
+fn parse_events(names: &[String]) -> Result<Vec<AuditAction>, String> {
+    let mut actions = Vec::with_capacity(names.len());
+    for name in names {
+        let action = EVENT_TYPES
+            .iter()
+            .find(|(value, _, _)| value == name)
+            .map(|(_, action, _)| action.clone())
+            .or_else(|| name.parse::<AuditAction>().ok())
+            .ok_or_else(|| format!("Unknown event type: {name}"))?;
+        if !actions.contains(&action) {
+            actions.push(action);
+        }
+    }
+    Ok(actions)
+}
+
+/// The form names of a subscription's audit actions: the event type that
+/// the form offers for the action, else the action's wire key.
+fn event_names(actions: &[AuditAction]) -> Vec<String> {
+    actions
+        .iter()
+        .map(|action| {
+            EVENT_TYPES
+                .iter()
+                .find(|(_, offered, _)| offered == action)
+                .map_or_else(
+                    || action.as_str().to_string(),
+                    |(value, _, _)| (*value).to_string(),
+                )
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -294,21 +380,49 @@ pub async fn admin_webhook_create_form(
     })
 }
 
-/// Form body for creating a webhook.
-#[derive(Debug, Deserialize)]
-pub struct CreateWebhookForm {
-    #[serde(default)]
+/// Form body for creating or editing a webhook.
+#[derive(Debug, Default)]
+pub struct WebhookForm {
     pub url: String,
-    #[serde(default)]
     pub secret: FormSecret,
     /// Checked event type checkboxes — may appear multiple times.
-    #[serde(default)]
     pub events: Vec<String>,
     /// Checkbox: present means enabled.
-    #[serde(default)]
     pub enabled: Option<String>,
-    #[serde(rename = "_csrf", default)]
     pub csrf: String,
+}
+
+impl WebhookForm {
+    /// Reads the form body. Each ticked event checkbox repeats the `events`
+    /// key, which `serde_urlencoded` refuses, so the form answered `400`
+    /// whenever a box was ticked. The secret's value moves into the
+    /// `FormSecret`, so no plain copy of it is left behind. For each other
+    /// field the first value counts.
+    fn read(body: &[u8]) -> Self {
+        let mut form = Self::default();
+        for (key, value) in form_urlencoded::parse(body).into_owned() {
+            match key.as_str() {
+                "url" if form.url.is_empty() => form.url = value,
+                "secret" if form.secret.is_empty() => form.secret = FormSecret::new(value),
+                "events" => form.events.push(value),
+                "enabled" if form.enabled.is_none() => form.enabled = Some(value),
+                "_csrf" if form.csrf.is_empty() => form.csrf = value,
+                _ => {}
+            }
+        }
+        form
+    }
+}
+
+impl<S: Send + Sync> axum::extract::FromRequest<S> for WebhookForm {
+    type Rejection = axum::response::Response;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        let bytes = <axum::body::Bytes as axum::extract::FromRequest<S>>::from_request(req, state)
+            .await
+            .map_err(|e| e.into_response())?;
+        Ok(Self::read(&bytes))
+    }
 }
 
 /// `POST /ui/admin/realms/{realm}/webhooks/new` — create a webhook.
@@ -317,7 +431,7 @@ pub async fn admin_webhook_create_submit(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
-    FriendlyForm(form): FriendlyForm<CreateWebhookForm>,
+    form: WebhookForm,
 ) -> Response {
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
@@ -325,15 +439,15 @@ pub async fn admin_webhook_create_submit(
 
     let realm_name = target.0.name().to_string();
 
-    if form.url.trim().is_empty() {
-        return render(&WebhookNewTemplate {
-            realm_name,
+    let render_form_error = |error: String| {
+        render(&WebhookNewTemplate {
+            realm_name: realm_name.clone(),
             form_url: form.url.clone(),
             form_secret: form.secret.to_string(),
             form_enabled: form.enabled.is_some(),
             subscribed_events: form.events.clone(),
             available_event_types: available_event_types(&form.events),
-            error: Some("Endpoint URL is required.".to_string()),
+            error: Some(error),
             chrome: true,
             active: "webhooks",
             user_email: Some(session.user_email.clone()),
@@ -345,57 +459,54 @@ pub async fn admin_webhook_create_submit(
             logo_url: state.logo_url.clone(),
             realm_theme_url: state.realm_theme_url(),
             inline_theme_css: state.inline_theme_css(),
-        });
+        })
+    };
+
+    let engine = match webhook_engine(&state) {
+        Ok(engine) => engine,
+        Err(resp) => return resp,
+    };
+    if let Err(error) = require_active_realm(&target) {
+        return render_form_error(error);
+    }
+    if form.url.trim().is_empty() {
+        return render_form_error("Endpoint URL is required.".to_string());
+    }
+    if form.secret.len() < MIN_SECRET_LEN {
+        return render_form_error(secret_too_short());
+    }
+    let event_filters = match parse_events(&form.events) {
+        Ok(actions) => actions,
+        Err(error) => return render_form_error(error),
+    };
+    let url = form.url.trim().to_string();
+    if let Err(error) = check_url(&url).await {
+        return render_form_error(error);
     }
 
     let req = CreateWebhookRequest {
-        url: form.url.trim().to_string(),
-        secret: if form.secret.is_empty() {
-            None
-        } else {
-            Some(form.secret.to_string())
-        },
-        events: form.events.clone(),
+        realm_id: target.id().clone(),
+        url,
+        secret: form.secret.to_string(),
         enabled: form.enabled.is_some(),
+        event_filters,
     };
-
-    let identity = state.identity.clone();
-    let realm_id = target.id().clone();
-    let result = tokio::task::spawn_blocking(move || identity.create_webhook(&realm_id, &req))
+    let result = tokio::task::spawn_blocking(move || engine.create(&req))
         .await
         .unwrap_or_else(|e| {
-            Err(crate::identity::IdentityError::Internal {
+            Err(WebhookError::Storage {
                 reason: e.to_string(),
             })
         });
 
     match result {
-        Ok(_wh) => axum::response::Redirect::to(&format!(
+        Ok(_) => axum::response::Redirect::to(&format!(
             "/ui/admin/realms/{realm_name}/webhooks?flash=created"
         ))
         .into_response(),
         Err(e) => {
-            tracing::warn!(error = %e, "create_webhook failed");
-            render(&WebhookNewTemplate {
-                realm_name,
-                form_url: form.url.clone(),
-                form_secret: form.secret.to_string(),
-                form_enabled: form.enabled.is_some(),
-                subscribed_events: form.events.clone(),
-                available_event_types: available_event_types(&form.events),
-                error: Some("Failed to save webhook. Please try again.".to_string()),
-                chrome: true,
-                active: "webhooks",
-                user_email: Some(session.user_email.clone()),
-                is_admin: true,
-                flash: None,
-                csrf: session.csrf.clone(),
-                narrow: false,
-                product_name: state.product_name_for(target.id()),
-                logo_url: state.logo_url.clone(),
-                realm_theme_url: state.realm_theme_url(),
-                inline_theme_css: state.inline_theme_css(),
-            })
+            tracing::warn!(error = %e, "create webhook failed");
+            render_form_error(save_error_message(&e))
         }
     }
 }
@@ -421,12 +532,18 @@ pub async fn admin_webhook_delete(
     };
     let wid = WebhookId::new(uuid);
 
-    let identity = state.identity.clone();
+    let engine = match webhook_engine(&state) {
+        Ok(engine) => engine,
+        Err(resp) => return resp,
+    };
+    if let Err(error) = require_active_realm(&target) {
+        return super::handlers_common::bad_request(&error);
+    }
     let realm_id = target.id().clone();
-    let result = tokio::task::spawn_blocking(move || identity.delete_webhook(&realm_id, &wid))
+    let result = tokio::task::spawn_blocking(move || engine.delete(&realm_id, &wid))
         .await
         .unwrap_or_else(|e| {
-            Err(crate::identity::IdentityError::Internal {
+            Err(WebhookError::Storage {
                 reason: e.to_string(),
             })
         });
@@ -437,11 +554,11 @@ pub async fn admin_webhook_delete(
             target.0.name()
         ))
         .into_response(),
-        Err(crate::identity::IdentityError::WebhookNotFound) => {
+        Err(WebhookError::NotFound { .. }) => {
             super::handlers_common::not_found("Webhook not found")
         }
         Err(e) => {
-            tracing::warn!(error = %e, "delete_webhook failed");
+            tracing::warn!(error = %e, "delete webhook failed");
             super::handlers_common::server_error()
         }
     }
@@ -468,19 +585,20 @@ pub async fn admin_webhook_test(
     };
     let wid = WebhookId::new(uuid);
 
-    let identity = state.identity.clone();
+    let engine = match webhook_engine(&state) {
+        Ok(engine) => engine,
+        Err(resp) => return resp,
+    };
     let realm_id = target.id().clone();
-    let wh = match tokio::task::spawn_blocking(move || identity.get_webhook(&realm_id, &wid))
+    let Some(sub) = tokio::task::spawn_blocking(move || engine.get(&realm_id, &wid))
         .await
         .ok()
         .and_then(|r| r.ok())
-        .flatten()
-    {
-        Some(w) => w,
-        None => return super::handlers_common::not_found("Webhook not found"),
+    else {
+        return super::handlers_common::not_found("Webhook not found");
     };
 
-    fire_test_ping(wh.url.as_str(), wh.secret.as_deref()).await;
+    fire_test_ping(sub.url.as_str(), Some(sub.secret.as_str())).await;
 
     axum::response::Redirect::to(&format!(
         "/ui/admin/realms/{}/webhooks?flash=test_sent",
@@ -588,26 +706,30 @@ pub async fn admin_webhook_edit_form(
     };
     let wid = WebhookId::new(uuid);
 
-    let identity = state.identity.clone();
+    let engine = match webhook_engine(&state) {
+        Ok(engine) => engine,
+        Err(resp) => return resp,
+    };
     let realm_id = target.id().clone();
-    let wh = match tokio::task::spawn_blocking(move || identity.get_webhook(&realm_id, &wid))
+    let Some(sub) = tokio::task::spawn_blocking(move || engine.get(&realm_id, &wid))
         .await
         .ok()
         .and_then(|r| r.ok())
-        .flatten()
-    {
-        Some(w) => w,
-        None => return super::handlers_common::not_found("Webhook not found"),
+    else {
+        return super::handlers_common::not_found("Webhook not found");
     };
+    let subscribed = event_names(&sub.event_filters);
 
     render(&WebhookEditTemplate {
-        webhook_id: wh.id().as_uuid().to_string(),
+        webhook_id: sub.id.as_uuid().to_string(),
         realm_name: target.0.name().to_string(),
-        form_url: wh.url.clone(),
-        form_secret: wh.secret.clone().unwrap_or_default(),
-        form_enabled: wh.enabled,
-        subscribed_events: wh.events.clone(),
-        available_event_types: available_event_types(&wh.events),
+        form_url: sub.url.clone(),
+        // The stored secret is never sent back to the browser. An empty
+        // field keeps it.
+        form_secret: String::new(),
+        form_enabled: sub.enabled,
+        available_event_types: available_event_types(&subscribed),
+        subscribed_events: subscribed,
         error: None,
         chrome: true,
         active: "webhooks",
@@ -623,30 +745,13 @@ pub async fn admin_webhook_edit_form(
     })
 }
 
-/// Form body for editing a webhook.
-#[derive(Debug, Deserialize)]
-pub struct EditWebhookForm {
-    #[serde(default)]
-    pub url: String,
-    #[serde(default)]
-    pub secret: FormSecret,
-    /// Checked event type checkboxes — may appear multiple times.
-    #[serde(default)]
-    pub events: Vec<String>,
-    /// Checkbox: present means enabled.
-    #[serde(default)]
-    pub enabled: Option<String>,
-    #[serde(rename = "_csrf", default)]
-    pub csrf: String,
-}
-
 /// `POST /ui/admin/realms/{realm}/webhooks/{id}/edit` — save webhook changes.
 pub async fn admin_webhook_edit_submit(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath((_realm_name, webhook_id)): AxumPath<(String, String)>,
-    FriendlyForm(form): FriendlyForm<EditWebhookForm>,
+    form: WebhookForm,
 ) -> Response {
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
@@ -682,44 +787,56 @@ pub async fn admin_webhook_edit_submit(
         })
     };
 
+    let engine = match webhook_engine(&state) {
+        Ok(engine) => engine,
+        Err(resp) => return resp,
+    };
+    if let Err(error) = require_active_realm(&target) {
+        return render_form_error(error);
+    }
     if form.url.trim().is_empty() {
         return render_form_error("Endpoint URL is required.".to_string());
     }
+    // An empty secret field keeps the stored secret.
+    if !form.secret.is_empty() && form.secret.len() < MIN_SECRET_LEN {
+        return render_form_error(secret_too_short());
+    }
+    let event_filters = match parse_events(&form.events) {
+        Ok(actions) => actions,
+        Err(error) => return render_form_error(error),
+    };
+    let url = form.url.trim().to_string();
+    if let Err(error) = check_url(&url).await {
+        return render_form_error(error);
+    }
 
     let req = UpdateWebhookRequest {
-        url: form.url.trim().to_string(),
-        secret: if form.secret.is_empty() {
-            None
-        } else {
-            Some(form.secret.to_string())
-        },
-        events: form.events.clone(),
-        enabled: form.enabled.is_some(),
+        url: Some(url),
+        secret: (!form.secret.is_empty()).then(|| form.secret.to_string()),
+        enabled: Some(form.enabled.is_some()),
+        event_filters: Some(event_filters),
     };
-
-    let identity = state.identity.clone();
     let realm_id = target.id().clone();
     let wid_clone = wid.clone();
-    let result =
-        tokio::task::spawn_blocking(move || identity.update_webhook(&realm_id, &wid_clone, &req))
-            .await
-            .unwrap_or_else(|e| {
-                Err(crate::identity::IdentityError::Internal {
-                    reason: e.to_string(),
-                })
-            });
+    let result = tokio::task::spawn_blocking(move || engine.update(&realm_id, &wid_clone, &req))
+        .await
+        .unwrap_or_else(|e| {
+            Err(WebhookError::Storage {
+                reason: e.to_string(),
+            })
+        });
 
     match result {
         Ok(_) => axum::response::Redirect::to(&format!(
             "/ui/admin/realms/{realm_name}/webhooks?flash=updated"
         ))
         .into_response(),
-        Err(crate::identity::IdentityError::WebhookNotFound) => {
+        Err(WebhookError::NotFound { .. }) => {
             super::handlers_common::not_found("Webhook not found")
         }
         Err(e) => {
-            tracing::warn!(error = %e, "update_webhook failed");
-            render_form_error("Failed to update webhook. Please try again.".to_string())
+            tracing::warn!(error = %e, "update webhook failed");
+            render_form_error(save_error_message(&e))
         }
     }
 }
@@ -727,6 +844,49 @@ pub async fn admin_webhook_edit_submit(
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/// The webhook store, or the error page when the server has none.
+fn webhook_engine(state: &WebState) -> Result<Arc<dyn WebhookEngine>, Response> {
+    state.webhook.clone().ok_or_else(|| {
+        tracing::warn!("admin UI webhook page: the server has no webhook engine");
+        super::handlers_common::server_error()
+    })
+}
+
+/// Archival is a freeze: webhooks of a realm that is not active do not
+/// change (audit 2026-08-28 §4.20#5).
+fn require_active_realm(target: &TargetRealm) -> Result<(), String> {
+    if matches!(target.0.status(), RealmStatus::Active) {
+        Ok(())
+    } else {
+        Err("This realm is not active, so its webhooks cannot change.".to_string())
+    }
+}
+
+/// The SSRF check that the REST API applies at registration (F3/HEA-1651).
+/// It resolves DNS, so it runs on the blocking pool.
+async fn check_url(url: &str) -> Result<(), String> {
+    let url = url.to_string();
+    match tokio::task::spawn_blocking(move || crate::webhook::ssrf::check_webhook_url(&url)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(format!("Endpoint URL refused: {e}")),
+        Err(_) => Err("The URL check failed. Please try again.".to_string()),
+    }
+}
+
+fn secret_too_short() -> String {
+    format!("The signing secret must be at least {MIN_SECRET_LEN} bytes.")
+}
+
+fn save_error_message(e: &WebhookError) -> String {
+    match e {
+        WebhookError::InvalidUrl { reason } | WebhookError::BlockedDestination { reason } => {
+            format!("Endpoint URL refused: {reason}")
+        }
+        WebhookError::SecretTooShort => secret_too_short(),
+        _ => "Failed to save webhook. Please try again.".to_string(),
+    }
+}
 
 async fn fire_test_ping(url: &str, secret: Option<&str>) {
     let _ = fire_test_ping_result(url, secret).await;
@@ -809,23 +969,26 @@ mod secret_field_tests {
     }
 
     #[test]
-    fn create_webhook_form_secret_is_zeroized_and_redacted() {
-        let form: CreateWebhookForm =
-            serde_urlencoded::from_str("url=https%3A%2F%2Fx.test&secret=CANARY-whs")
-                .expect("form parses");
+    fn webhook_form_secret_is_zeroized_and_redacted() {
+        let form = WebhookForm::read(b"url=https%3A%2F%2Fx.test&secret=CANARY-whs");
         assert_zeroize_on_drop(&form.secret);
         assert_eq!(form.secret.expose(), "CANARY-whs");
         assert_redacted(&format!("{form:?}"));
     }
 
+    /// One ticked box sends `events` once; two send it twice. Both must
+    /// read (#617: the serde form refused both with `400`).
     #[test]
-    fn edit_webhook_form_secret_is_zeroized_and_redacted() {
-        let form: EditWebhookForm =
-            serde_urlencoded::from_str("url=https%3A%2F%2Fx.test&secret=CANARY-whs")
-                .expect("form parses");
-        assert_zeroize_on_drop(&form.secret);
-        assert_eq!(form.secret.expose(), "CANARY-whs");
-        assert_redacted(&format!("{form:?}"));
+    fn webhook_form_keeps_every_ticked_event() {
+        let one = WebhookForm::read(b"url=u&events=security.login_failed&_csrf=c");
+        assert_eq!(one.events, vec!["security.login_failed".to_string()]);
+        assert_eq!(one.csrf, "c");
+        let two = WebhookForm::read(b"events=user.created&enabled=on&events=user.deleted");
+        assert_eq!(
+            two.events,
+            vec!["user.created".to_string(), "user.deleted".to_string()]
+        );
+        assert_eq!(two.enabled.as_deref(), Some("on"));
     }
 
     #[test]
