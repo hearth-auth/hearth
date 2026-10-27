@@ -924,8 +924,6 @@ impl AuditAction {
             | Self::AgentSuspended
             | Self::AgentReactivated
             | Self::AgentCredentialCreated
-            // M2: delegation events are informational
-            | Self::AgentDelegation
             | Self::AgentToolInvocation
             | Self::ApprovalRequested
             | Self::ApprovalGranted
@@ -982,6 +980,10 @@ impl AuditAction {
             | Self::ProtectedResourceDeleted
             // Phase D — AAT revocation is security-sensitive.
             | Self::AatRevoked
+            // A delegated token without its delegation record must not be
+            // issued: spec `delegated-authorization` requires the record for
+            // every delegated token (#621). This was LogOnly (M2).
+            | Self::AgentDelegation
             // Disabling MFA weakens authentication posture — must not be lost.
             | Self::MfaDisabled => FailOperation,
         }

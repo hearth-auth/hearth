@@ -36,6 +36,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   without it, the commands check every realm. The purge writes a `UserPermissionRevoked` or
   `RoleRevoked` audit event (actor `cli`) for each orphan that it deletes.
 
+### Security
+- **A delegated token is issued only with its audit record** (#621): an RFC 8693 token exchange
+  issued the delegated token even when its `AgentDelegation` audit event failed to write. The
+  exchange now fails with a server error and stores no delegation grant. An agent that the rate
+  monitor suspends is now audited with actor `system` and `signal: agent_rate_limit`, and a
+  suspension that fails is logged at `error`.
+
 ## [4.6.6] — 2026-10-26
 
 ### Added
