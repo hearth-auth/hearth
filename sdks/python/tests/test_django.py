@@ -25,7 +25,7 @@ from hearth.django import HearthDjangoMiddleware, require_permission
 # ---------------------------------------------------------------------------
 # Helpers shared across tests
 # ---------------------------------------------------------------------------
-from .signing import install_test_key, sign_jwt
+from .signing import install_test_key, sign_jwt, unsigned_jwt
 
 
 def _make_jwt(payload: dict) -> str:
@@ -207,7 +207,7 @@ class TestHearthDjangoMiddlewareGlobalPermission:
         assert resp.status_code == 403
         inner.assert_not_called()
 
-    def test_global_permission_denies_missing_token(self):
+    def test_global_permission_answers_401_without_a_token(self):
         req = _make_request()  # no Authorization header
         inner = MagicMock(return_value=HttpResponse("ok"))
 
@@ -215,7 +215,24 @@ class TestHearthDjangoMiddlewareGlobalPermission:
             mw = HearthDjangoMiddleware(inner)
 
         resp = mw(req)
-        assert resp.status_code == 403
+        assert resp.status_code == 401
+        assert resp["WWW-Authenticate"] == 'Bearer realm="hearth"'
+        inner.assert_not_called()
+
+    def test_global_permission_answers_401_for_a_forged_token(self):
+        req = _make_request(
+            unsigned_jwt({"sub": "user-1", "permissions": ["app.access"]})
+        )
+        inner = MagicMock(return_value=HttpResponse("ok"))
+
+        with _mock_settings(permission="app.access"):
+            mw = HearthDjangoMiddleware(inner)
+
+        resp = mw(req)
+        assert resp.status_code == 401
+        assert (
+            resp["WWW-Authenticate"] == 'Bearer realm="hearth", error="invalid_token"'
+        )
         inner.assert_not_called()
 
     def test_global_permission_denies_absent_permissions_claim(self):
@@ -314,7 +331,7 @@ class TestRequirePermissionEmbedded:
         resp = view(req)
         assert resp.status_code == 403
 
-    def test_denies_no_token(self):
+    def test_answers_401_without_a_token(self):
         req = _make_request()  # no Authorization header
 
         with _mock_settings():
@@ -324,7 +341,8 @@ class TestRequirePermissionEmbedded:
                 return HttpResponse("view response")
 
         resp = view(req)
-        assert resp.status_code == 403
+        assert resp.status_code == 401
+        assert resp["WWW-Authenticate"] == 'Bearer realm="hearth"'
 
     def test_required_action_token_returns_401(self):
         token = _make_required_action_jwt()

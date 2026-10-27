@@ -222,7 +222,7 @@ class TestWsgiMiddleware:
         assert sr.calls[0][0].startswith("403")
         inner.assert_not_called()
 
-    def test_embedded_denies_no_token(self):
+    def test_embedded_answers_401_without_a_token(self):
         from hearth.middleware import WsgiPermissionMiddleware
 
         inner = MagicMock(return_value=[b"ok"])
@@ -231,7 +231,9 @@ class TestWsgiMiddleware:
         )
         sr = self._start_response()
         mw(self._environ(None), sr)
-        assert sr.calls[0][0].startswith("403")
+        assert sr.calls[0][0].startswith("401")
+        assert ("WWW-Authenticate", 'Bearer realm="hearth"') in sr.calls[0][1]
+        inner.assert_not_called()
 
     def test_embedded_does_not_fallback_when_permissions_absent(self):
         """Absence of permissions claim must NOT trigger mode fallback — stay embedded, deny."""

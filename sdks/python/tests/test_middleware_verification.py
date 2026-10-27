@@ -94,9 +94,15 @@ def unsigned_admin_token() -> str:
 
 async def _call_asgi(mw, token: str | None) -> int:
     """Drive an ASGI middleware once and return the response status."""
+    status, _ = await _asgi_response(mw, token)
+    return status
+
+
+async def _asgi_response(mw, token: str | None) -> tuple[int, dict[str, str]]:
+    """Drive an ASGI middleware once; return the status and the headers."""
     headers = [(b"authorization", f"Bearer {token}".encode())] if token else []
     scope = {"type": "http", "method": "GET", "path": "/", "headers": headers}
-    status = {"code": None, "downstream": False}
+    status = {"code": None, "downstream": False, "headers": {}}
 
     async def receive():
         return {"type": "http.request", "body": b"", "more_body": False}
@@ -104,6 +110,10 @@ async def _call_asgi(mw, token: str | None) -> int:
     async def send(message):
         if message["type"] == "http.response.start":
             status["code"] = message["status"]
+            status["headers"] = {
+                bytes(k).decode().lower(): bytes(v).decode()
+                for k, v in message.get("headers", [])
+            }
 
     async def downstream(scope_, receive_, send_):
         status["downstream"] = True
@@ -112,7 +122,7 @@ async def _call_asgi(mw, token: str | None) -> int:
 
     mw._app = downstream
     await mw(scope, receive, send)
-    return status["code"]
+    return status["code"], status["headers"]
 
 
 @respx.mock
@@ -124,8 +134,9 @@ def test_asgi_embedded_rejects_unsigned_token():
     mw = RequirePermissionMiddleware(
         None, client=client, permission="admin.write", mode="embedded"
     )
-    status = asyncio.run(_call_asgi(mw, unsigned_admin_token()))
-    assert status == 403, "ASGI embedded gate admitted an alg:none forgery"
+    status, headers = asyncio.run(_asgi_response(mw, unsigned_admin_token()))
+    assert status == 401, "ASGI embedded gate admitted an alg:none forgery"
+    assert headers["www-authenticate"] == 'Bearer realm="hearth", error="invalid_token"'
 
 
 @respx.mock
@@ -139,7 +150,7 @@ def test_asgi_embedded_rejects_wrong_key_token():
     mw = RequirePermissionMiddleware(
         None, client=client, permission="admin.write", mode="embedded"
     )
-    assert asyncio.run(_call_asgi(mw, token)) == 403
+    assert asyncio.run(_call_asgi(mw, token)) == 401
 
 
 @respx.mock
@@ -174,10 +185,16 @@ def test_asgi_embedded_denies_signed_token_without_the_permission():
 
 
 def _call_wsgi(mw, token: str | None) -> str:
+    status, _ = _wsgi_response(mw, token)
+    return status
+
+
+def _wsgi_response(mw, token: str | None) -> tuple[str, dict[str, str]]:
     captured = {}
 
     def start_response(status, headers, exc_info=None):
         captured["status"] = status
+        captured["headers"] = {k.lower(): v for k, v in headers}
 
     def downstream(environ, start_response_):
         start_response_("200 OK", [("Content-Type", "text/plain")])
@@ -186,7 +203,7 @@ def _call_wsgi(mw, token: str | None) -> str:
     mw._app = downstream
     environ = {"HTTP_AUTHORIZATION": f"Bearer {token}"} if token else {}
     mw(environ, start_response)
-    return captured["status"]
+    return captured["status"], captured["headers"]
 
 
 @respx.mock
@@ -198,9 +215,9 @@ def test_wsgi_embedded_rejects_unsigned_token():
     mw = WsgiPermissionMiddleware(
         None, client=client, permission="admin.write", mode="embedded"
     )
-    assert _call_wsgi(mw, unsigned_admin_token()).startswith("403"), (
-        "WSGI embedded gate admitted an alg:none forgery"
-    )
+    status, headers = _wsgi_response(mw, unsigned_admin_token())
+    assert status.startswith("401"), "WSGI embedded gate admitted an alg:none forgery"
+    assert headers["www-authenticate"] == 'Bearer realm="hearth", error="invalid_token"'
 
 
 @respx.mock
@@ -229,9 +246,10 @@ def test_django_sync_check_rejects_unsigned_token():
     respx.get(JWKS_URL).mock(return_value=httpx.Response(200, json=_jwks(x_b64, kid)))
     client = HearthClient(BASE_URL, realm_id="r1")
 
-    assert (
-        _sync_check(client, unsigned_admin_token(), "admin.write", "embedded") is False
-    )
+    from hearth.middleware import _Unauthenticated
+
+    with pytest.raises(_Unauthenticated):
+        _sync_check(client, unsigned_admin_token(), "admin.write", "embedded")
 
 
 @respx.mock
@@ -279,3 +297,69 @@ def test_verify_token_accepts_past_nbf():
 
     token = _sign(signing_key, _payload(nbf=int(time.time()) - 3600), kid)
     assert client.verify_token(token).subject() == "user-abc"
+
+
+# ---------------------------------------------------------------------------
+# 401 vs 403 (sdk-support-contract "Resource-server middleware", #634)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("mode", ["embedded", "introspection", "decision"])
+def test_asgi_answers_401_with_a_bearer_challenge_without_a_token(mode):
+    mw = RequirePermissionMiddleware(
+        None,
+        client=HearthClient(BASE_URL, realm_id="r1"),
+        permission="admin.write",
+        mode=mode,
+        client_id="cid",
+    )
+    status, headers = asyncio.run(_asgi_response(mw, None))
+    assert status == 401
+    assert headers["www-authenticate"] == 'Bearer realm="hearth"'
+
+
+@pytest.mark.parametrize("mode", ["embedded", "introspection", "decision"])
+def test_wsgi_answers_401_with_a_bearer_challenge_without_a_token(mode):
+    mw = WsgiPermissionMiddleware(
+        None,
+        client=HearthClient(BASE_URL, realm_id="r1"),
+        permission="admin.write",
+        mode=mode,
+        client_id="cid",
+    )
+    status, headers = _wsgi_response(mw, None)
+    assert status.startswith("401")
+    assert headers["www-authenticate"] == 'Bearer realm="hearth"'
+
+
+@respx.mock
+def test_introspection_answers_401_for_an_inactive_token():
+    respx.post(f"{BASE_URL}/realms/r1/introspect").mock(
+        return_value=httpx.Response(200, json={"active": False})
+    )
+    mw = WsgiPermissionMiddleware(
+        None,
+        client=HearthClient(BASE_URL, realm_id="r1"),
+        permission="admin.write",
+        mode="introspection",
+        client_id="cid",
+        client_secret="secret",
+    )
+    status, headers = _wsgi_response(mw, "opaque-or-revoked")
+    assert status.startswith("401")
+    assert headers["www-authenticate"] == 'Bearer realm="hearth", error="invalid_token"'
+
+
+@respx.mock
+def test_a_valid_token_without_the_permission_is_403_without_a_challenge():
+    signing_key, x_b64, kid = _make_key()
+    respx.get(JWKS_URL).mock(return_value=httpx.Response(200, json=_jwks(x_b64, kid)))
+    client = HearthClient(BASE_URL, realm_id="r1")
+    token = _sign(signing_key, _payload(permissions=["docs.read"]), kid)
+
+    mw = WsgiPermissionMiddleware(
+        None, client=client, permission="admin.write", mode="embedded"
+    )
+    status, headers = _wsgi_response(mw, token)
+    assert status.startswith("403")
+    assert "www-authenticate" not in headers
