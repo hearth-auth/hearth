@@ -6237,84 +6237,224 @@ fn log_orphaned_references(
     }
 }
 
-/// Runs the `hearth rbac orphans list` command.
-///
-/// Scans `rba:user_perm:*` storage keys for all realms and prints any
-/// permission names that appear in storage.  A future iteration will
-/// cross-check against the live registry to identify stale entries; for
-/// now it lists all user-extra-permission keys so operators can inspect
-/// the current runtime state.
-fn run_rbac_orphans_list(
-    _realm: Option<&str>,
+/// A stored reference to a registry entry that `hearth.yaml` no longer
+/// declares, which `hearth rbac orphans purge` deletes (#618). The rule is
+/// the one `RbacEngine::orphaned_references` uses for the startup summary.
+enum OrphanedRow {
+    /// An extra grant of a permission whose registry record is archived.
+    Grant(hearth::rbac::UserPermissionGrant),
+    /// An assignment of a role that is archived or no longer exists.
+    Assignment {
+        assignment: hearth::rbac::RoleAssignment,
+        /// The role's name, or its ID when the role no longer exists.
+        role: String,
+    },
+}
+
+impl OrphanedRow {
+    fn describe(&self) -> String {
+        match self {
+            Self::Grant(grant) => format!(
+                "extra grant of archived permission {} to user {}",
+                grant.permission.as_str(),
+                grant.user_id.as_uuid()
+            ),
+            Self::Assignment { assignment, role } => {
+                let (kind, id) = orphan_subject(&assignment.subject);
+                format!(
+                    "assignment {} of archived or missing role {role} to {kind} {id}",
+                    assignment.id
+                )
+            }
+        }
+    }
+}
+
+/// The audit resource type and ID of a role assignment's subject.
+fn orphan_subject(subject: &hearth::rbac::Subject) -> (&'static str, String) {
+    match subject {
+        hearth::rbac::Subject::User(id) => ("user", id.as_uuid().to_string()),
+        hearth::rbac::Subject::Group(id) => ("group", id.as_uuid().to_string()),
+    }
+}
+
+/// Opens the store for `hearth rbac orphans`. The identity engine resolves
+/// realms, the RBAC engine finds and revokes orphans, and the audit engine
+/// records each revocation. The audit engine needs the KEK on a store that
+/// has one, so `HEARTH_KEK` applies here as it does for `hearth backup`.
+fn open_orphan_engines(
     data_dir: &std::path::Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use hearth::storage::StorageEngine as _;
-
+) -> Result<AllEngines, Box<dyn std::error::Error>> {
     std::fs::create_dir_all(data_dir)?;
-    let storage_config = cli_storage_config(data_dir);
-    let storage = Arc::new(EmbeddedStorageEngine::open(storage_config)?);
+    let storage = Arc::new(EmbeddedStorageEngine::open(cli_storage_config(data_dir))?)
+        as Arc<dyn StorageEngine>;
+    build_all_engines(storage, resolve_cli_kek(None)?)
+}
 
-    // `rba:user_perm:` is the key prefix for user extra-permission grants.
-    // Keys embed the realm UUID so a single prefix scan discovers all entries.
-    let scan_start: &[u8] = b"rba:user_perm:";
-    let scan_end = rbac_prefix_end(scan_start);
-    let system_realm = hearth::core::RealmId::new(uuid::Uuid::nil());
-    let entries = storage.scan(&system_realm, scan_start, &scan_end)?;
-
-    if entries.is_empty() {
-        tracing::info!("No user permission grant records found.");
-        return Ok(());
+/// The realm that `--realm` names (a UUID or a name), or every realm.
+fn orphan_realms(
+    identity: &dyn IdentityEngine,
+    realm: Option<&str>,
+) -> Result<Vec<hearth::identity::Realm>, Box<dyn std::error::Error>> {
+    if let Some(wanted) = realm {
+        let found = match wanted.parse::<uuid::Uuid>() {
+            Ok(id) => identity.get_realm(&hearth::core::RealmId::new(id))?,
+            Err(_) => identity.get_realm_by_name(wanted)?,
+        };
+        return found
+            .map(|r| vec![r])
+            .ok_or_else(|| format!("no realm has the UUID or name {wanted}").into());
     }
-
-    for entry in &entries {
-        let key_str = String::from_utf8_lossy(&entry.key);
-        tracing::info!("{key_str}");
+    let mut realms = Vec::new();
+    let mut offset = 0u64;
+    loop {
+        let page = identity.list_realms(&hearth::core::PageRequest::new(
+            offset,
+            hearth::core::MAX_PAGE_LIMIT,
+        ))?;
+        let count = page.items.len();
+        realms.extend(page.items);
+        if count < hearth::core::MAX_PAGE_LIMIT as usize {
+            return Ok(realms);
+        }
+        offset += count as u64;
     }
-    tracing::info!("{} user permission grant record(s) found.", entries.len());
+}
+
+/// The orphaned extra grants and role assignments of one realm.
+fn find_orphaned_rows(
+    rbac: &dyn RbacEngine,
+    realm_id: &hearth::core::RealmId,
+) -> Result<Vec<OrphanedRow>, hearth::rbac::RbacError> {
+    let archived: Vec<String> = rbac
+        .export_all_permissions(realm_id)?
+        .into_iter()
+        .filter(|p| p.status == hearth::rbac::PermissionStatus::Archived)
+        .map(|p| p.name.as_str().to_string())
+        .collect();
+    let mut rows = Vec::new();
+    if !archived.is_empty() {
+        let names: Vec<&str> = archived.iter().map(String::as_str).collect();
+        for user_id in rbac.list_permission_grantees(realm_id, &names, usize::MAX)? {
+            for grant in rbac.list_user_permissions(realm_id, &user_id)? {
+                if names.contains(&grant.permission.as_str()) {
+                    rows.push(OrphanedRow::Grant(grant));
+                }
+            }
+        }
+    }
+    for assignment in rbac.export_all_assignments(realm_id)? {
+        let role = match rbac.get_role(realm_id, &assignment.role_id)? {
+            None => assignment.role_id.to_string(),
+            Some(role) if role.status == hearth::rbac::RoleStatus::Archived => role.name,
+            Some(_) => continue,
+        };
+        rows.push(OrphanedRow::Assignment { assignment, role });
+    }
+    Ok(rows)
+}
+
+/// Deletes one orphan and records it in the realm's audit log. The audit
+/// event is required: a failed append stops the purge with an error.
+fn purge_orphaned_row(
+    rbac: &dyn RbacEngine,
+    audit: &dyn AuditEngine,
+    realm_id: &hearth::core::RealmId,
+    row: &OrphanedRow,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use hearth::audit::{AuditAction, CreateAuditEvent};
+    let (action, resource_type, resource_id, metadata) = match row {
+        OrphanedRow::Grant(grant) => {
+            rbac.revoke_user_permission(realm_id, &grant.user_id, &grant.permission, &grant.scope)?;
+            (
+                AuditAction::UserPermissionRevoked,
+                "user",
+                grant.user_id.as_uuid().to_string(),
+                serde_json::json!({
+                    "via": "cli",
+                    "reason": "orphaned",
+                    "permission": grant.permission.as_str(),
+                    "scope": grant.scope,
+                }),
+            )
+        }
+        OrphanedRow::Assignment { assignment, role } => {
+            rbac.unassign_role(realm_id, &assignment.id)?;
+            let (kind, id) = orphan_subject(&assignment.subject);
+            (
+                AuditAction::RoleRevoked,
+                kind,
+                id,
+                serde_json::json!({
+                    "via": "cli",
+                    "reason": "orphaned",
+                    "role": role,
+                    "assignment_id": assignment.id.to_string(),
+                }),
+            )
+        }
+    };
+    audit
+        .append(&CreateAuditEvent {
+            realm_id: realm_id.clone(),
+            actor: "cli".to_string(),
+            action,
+            resource_type: resource_type.to_string(),
+            resource_id,
+            metadata: Some(metadata),
+        })
+        .map_err(|e| format!("deleted, but the audit event failed: {e}"))?;
     Ok(())
 }
 
-/// Runs the `hearth rbac orphans purge` command.
-///
-/// Scans and optionally deletes `rba:user_perm:*` storage keys.
-/// In dry-run mode prints what would be removed without writing any changes.
+/// Runs the `hearth rbac orphans list` command: prints each orphaned extra
+/// grant and role assignment in the realm that `--realm` names, or in every
+/// realm.
+fn run_rbac_orphans_list(
+    realm: Option<&str>,
+    data_dir: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (identity, _audit, rbac) = open_orphan_engines(data_dir)?;
+    let mut count = 0usize;
+    for realm in orphan_realms(identity.as_ref(), realm)? {
+        for row in find_orphaned_rows(rbac.as_ref(), realm.id())? {
+            tracing::info!("realm {}: {}", realm.name(), row.describe());
+            count += 1;
+        }
+    }
+    tracing::info!("{count} orphaned reference(s) found.");
+    Ok(())
+}
+
+/// Runs the `hearth rbac orphans purge` command: deletes each orphan that
+/// `list` prints, with one audit event each. `--dry-run` prints them and
+/// changes nothing.
 fn run_rbac_orphans_purge(
-    _realm: Option<&str>,
+    realm: Option<&str>,
     data_dir: &std::path::Path,
     dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use hearth::storage::StorageEngine as _;
-
-    std::fs::create_dir_all(data_dir)?;
-    let storage_config = cli_storage_config(data_dir);
-    let storage = Arc::new(EmbeddedStorageEngine::open(storage_config)?);
-
-    let scan_start: &[u8] = b"rba:user_perm:";
-    let scan_end = rbac_prefix_end(scan_start);
-    let system_realm = hearth::core::RealmId::new(uuid::Uuid::nil());
-    let entries = storage.scan(&system_realm, scan_start, &scan_end)?;
-
-    if entries.is_empty() {
-        tracing::info!("No user permission grant records found.");
-        return Ok(());
-    }
-
+    let (identity, audit, rbac) = open_orphan_engines(data_dir)?;
     let mut count = 0usize;
-    for entry in &entries {
-        let key_str = String::from_utf8_lossy(&entry.key);
-        if dry_run {
-            tracing::info!("[dry-run] would delete: {key_str}");
-        } else {
-            storage.delete(&system_realm, &entry.key)?;
-            tracing::info!("deleted: {key_str}");
+    for realm in orphan_realms(identity.as_ref(), realm)? {
+        for row in find_orphaned_rows(rbac.as_ref(), realm.id())? {
+            if dry_run {
+                tracing::info!(
+                    "[dry-run] would delete in realm {}: {}",
+                    realm.name(),
+                    row.describe()
+                );
+            } else {
+                purge_orphaned_row(rbac.as_ref(), audit.as_ref(), realm.id(), &row)?;
+                tracing::info!("deleted in realm {}: {}", realm.name(), row.describe());
+            }
+            count += 1;
         }
-        count += 1;
     }
-
     if dry_run {
-        tracing::info!("[dry-run] {count} record(s) would be purged.");
+        tracing::info!("[dry-run] {count} orphaned reference(s) would be purged.");
     } else {
-        tracing::info!("{count} record(s) purged.");
+        tracing::info!("{count} orphaned reference(s) purged.");
     }
     Ok(())
 }
@@ -6382,18 +6522,6 @@ fn log_verbose_startup_diagnostics(config: &Config, identity: &dyn IdentityEngin
             debug!(error = %e, "verbose: could not list realms for key diagnostics");
         }
     }
-}
-
-/// Computes the exclusive end bound for a storage prefix scan.
-///
-/// Increments the last byte of the prefix by 1 so that `scan(prefix,
-/// prefix_end)` returns exactly the entries whose keys start with `prefix`.
-fn rbac_prefix_end(prefix: &[u8]) -> Vec<u8> {
-    let mut end = prefix.to_vec();
-    if let Some(last) = end.last_mut() {
-        *last = last.saturating_add(1);
-    }
-    end
 }
 
 /// Prints a `MigrationReport` as a human-readable summary.
