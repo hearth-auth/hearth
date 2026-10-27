@@ -4926,8 +4926,12 @@ fn run_backup_create(
         .transpose()
         .map_err(|e: String| e)?;
 
-    let exporter =
-        BackupExporter::new(Arc::clone(&identity), Arc::clone(&audit), Arc::clone(&rbac));
+    let exporter = BackupExporter::new(
+        Arc::clone(&identity),
+        Arc::clone(&audit),
+        Arc::clone(&rbac),
+        cli_webhook_engine(&storage),
+    );
     let dek = BackupExporter::generate_dek()?;
     let opts = ExportOptions {
         include_audit,
@@ -5317,7 +5321,7 @@ fn run_backup_restore(
         resolve_cli_kek(config_path)?,
     )?;
 
-    let importer = BackupImporter::new(identity, rbac, audit);
+    let importer = BackupImporter::new(identity, rbac, audit, cli_webhook_engine(&storage));
     let dek_passphrase: Option<secrecy::SecretString> = if reader.manifest.sections_encrypted {
         let pp = if let Ok(mk) = std::env::var("HEARTH_MASTER_KEY") {
             mk
@@ -5483,7 +5487,7 @@ fn import_report_had_errors(report: &hearth::backup::ImportReport) -> bool {
         || report.agents.errored > 0
         || report.identity_providers.errored > 0
         || report.federation_links.errored > 0
-        || report.webhooks.errored > 0
+        || report.webhook_subscriptions.errored > 0
         || report.scim_mappings.errored > 0
         || report.invitations.errored > 0
         || report.revocations.errored > 0
@@ -5632,7 +5636,7 @@ fn run_backup_inspect(input: &std::path::Path) -> Result<(), Box<dyn std::error:
 /// 23.5). A restore report that hides seven of its eleven entity types is
 /// indistinguishable from a clean one.
 fn print_import_report(slug: &str, report: &hearth::backup::ImportReport) {
-    let buckets: [(&str, &hearth::backup::EntityCounts); 22] = [
+    let buckets: [(&str, &hearth::backup::EntityCounts); 23] = [
         ("realms", &report.realms),
         ("users", &report.users),
         ("mfa", &report.mfa_factors),
@@ -5649,7 +5653,8 @@ fn print_import_report(slug: &str, report: &hearth::backup::ImportReport) {
         ("agents", &report.agents),
         ("idps", &report.identity_providers),
         ("federation links", &report.federation_links),
-        ("webhooks", &report.webhooks),
+        ("webhooks", &report.webhook_subscriptions),
+        ("old webhooks", &report.webhooks),
         ("scim mappings", &report.scim_mappings),
         ("invitations", &report.invitations),
         ("revocations", &report.revocations),
@@ -5693,6 +5698,17 @@ type AllEngines = (
     Arc<dyn hearth::audit::AuditEngine>,
     Arc<dyn hearth::rbac::RbacEngine>,
 );
+
+/// The webhook engine over a CLI command's storage: the store that `serve`'s
+/// dispatcher reads, so a backup carries the subscriptions that deliver.
+fn cli_webhook_engine(
+    storage: &Arc<EmbeddedStorageEngine>,
+) -> Arc<dyn hearth::webhook::WebhookEngine> {
+    Arc::new(hearth::webhook::EmbeddedWebhookEngine::new(
+        Arc::clone(storage) as Arc<dyn StorageEngine>,
+        Arc::new(SystemClock) as Arc<dyn Clock>,
+    ))
+}
 
 /// Builds all three engine types (identity, audit, RBAC) for backup commands.
 ///

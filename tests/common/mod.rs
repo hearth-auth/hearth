@@ -349,6 +349,10 @@ impl TestHarness {
                 Arc::clone(&rbac_engine) as Arc<dyn RbacEngine>,
                 Arc::clone(&audit_engine) as Arc<dyn AuditEngine>,
             )
+            .with_webhook(Arc::new(hearth::webhook::EmbeddedWebhookEngine::new(
+                Arc::clone(&engine) as Arc<dyn StorageEngine>,
+                Arc::clone(&clock),
+            )))
             .with_agent_identity(true),
         );
         let router = hearth::protocol::http::router(app_state);
@@ -422,6 +426,10 @@ impl TestHarness {
                 Arc::clone(&rbac_engine) as Arc<dyn RbacEngine>,
                 Arc::clone(&audit_engine) as Arc<dyn AuditEngine>,
             )
+            .with_webhook(Arc::new(hearth::webhook::EmbeddedWebhookEngine::new(
+                Arc::clone(&engine) as Arc<dyn StorageEngine>,
+                Arc::clone(&clock),
+            )))
             .with_agent_identity(true),
         );
         let router = hearth::protocol::http::router(app_state);
@@ -494,6 +502,10 @@ impl TestHarness {
                 Arc::clone(&rbac_engine) as Arc<dyn RbacEngine>,
                 Arc::clone(&audit_engine) as Arc<dyn AuditEngine>,
             )
+            .with_webhook(Arc::new(hearth::webhook::EmbeddedWebhookEngine::new(
+                Arc::clone(&engine) as Arc<dyn StorageEngine>,
+                Arc::clone(&clock),
+            )))
             .with_agent_identity(true)
             .with_agent_approval(true),
         );

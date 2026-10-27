@@ -63,9 +63,15 @@ pub struct RecordCounts {
     /// Number of federation account links (OpenSpec 26.40).
     #[serde(default)]
     pub federation_links: u64,
-    /// Number of webhook registrations (OpenSpec 26.40).
+    /// Number of webhooks from the identity engine's old webhook store, in
+    /// archives written before #654. Those webhooks never delivered (#617),
+    /// and a restore skips them. Newer archives write zero.
     #[serde(default)]
     pub webhooks: u64,
+    /// Number of webhook subscriptions — the ones the dispatcher delivers
+    /// to — with their signing secrets (#654).
+    #[serde(default)]
+    pub webhook_subscriptions: u64,
     /// Number of SCIM `externalId` mappings, users and groups together
     /// (OpenSpec 26.40).
     #[serde(default)]

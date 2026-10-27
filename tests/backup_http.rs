@@ -63,7 +63,11 @@ fn build_app_with(
     } else {
         AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc())
     };
-    router(Arc::new(state.with_backup_verify_key(verify_key)))
+    router(Arc::new(
+        state
+            .with_webhook(h.webhooks_arc())
+            .with_backup_verify_key(verify_key),
+    ))
 }
 
 /// Signs archive bytes with `key`, as `hearth backup sign` would.

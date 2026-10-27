@@ -101,7 +101,12 @@ fn export_and_restore(
 ) -> (RealmId, String, hearth::backup::ImportReport) {
     let tmp = NamedTempFile::new().expect("tempfile");
     let mut writer = BackupArchive::create(tmp.path()).expect("create archive");
-    let exporter = BackupExporter::new(src.identity_arc(), src.audit_arc(), src.rbac_arc());
+    let exporter = BackupExporter::new(
+        src.identity_arc(),
+        src.audit_arc(),
+        src.rbac_arc(),
+        src.webhooks_arc(),
+    );
     let dek = BackupExporter::generate_dek().expect("dek");
     let realm_manifest = exporter
         .export_realm(realm, &mut writer, &ExportOptions::default(), &dek)
@@ -115,16 +120,21 @@ fn export_and_restore(
 
     let reader = BackupArchive::open(tmp.path()).expect("open archive");
     let slug = reader.realms()[0].slug.clone();
-    let report = BackupImporter::new(dst.identity_arc(), dst.rbac_arc(), dst.audit_arc())
-        .import_realm(
-            &slug,
-            &reader,
-            &ImportOptions {
-                dek_passphrase: Some(passphrase()),
-                ..ImportOptions::default()
-            },
-        )
-        .expect("import realm");
+    let report = BackupImporter::new(
+        dst.identity_arc(),
+        dst.rbac_arc(),
+        dst.audit_arc(),
+        dst.webhooks_arc(),
+    )
+    .import_realm(
+        &slug,
+        &reader,
+        &ImportOptions {
+            dek_passphrase: Some(passphrase()),
+            ..ImportOptions::default()
+        },
+    )
+    .expect("import realm");
     let restored: RealmId = reader.realms()[0].realm_id.parse().expect("realm id");
     let name = dst
         .identity()

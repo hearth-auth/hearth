@@ -18,11 +18,12 @@ use crate::identity::{
     CreateRealmRequest, FederationLinkExport, IdentityEngine, IdentityError, ImportClientRequest,
     ImportUserRequest, MfaFactorExport, Organization, OrganizationInvitation,
     OrganizationMembership, RawCredential, Realm, RestoredUserState, RetiringSigningKeyExport,
-    RevocationExport, ScimMappingExport, User, Webhook,
+    RevocationExport, ScimMappingExport, User,
 };
 use crate::rbac::{
     Group, GroupMembershipEdge, PermissionRecord, RbacEngine, Role, RoleAssignment, ScopeExport,
 };
+use crate::webhook::{WebhookEngine, WebhookSubscription};
 
 use zeroize::Zeroizing;
 
@@ -52,7 +53,10 @@ pub(crate) const RECOGNIZED_MEMBERS: &[&str] = &[
     "agents.ndjson",
     "identity_providers.ndjson",
     "federation_links.ndjson",
+    // Older archives only: the identity engine's webhook store, which never
+    // delivered (#617). Recognised so that the restore can skip and count it.
     "webhooks.ndjson",
+    "webhook_subscriptions.ndjson",
     "saml_signing_key.json",
     "scim_mappings.ndjson",
     "invitations.ndjson",
@@ -197,8 +201,13 @@ pub struct ImportReport {
     pub identity_providers: EntityCounts,
     /// Outcome counts for federation account links (OpenSpec 26.40).
     pub federation_links: EntityCounts,
-    /// Outcome counts for webhook registrations (OpenSpec 26.40).
+    /// Webhooks from the identity engine's old webhook store, in archives
+    /// written before #654. Those webhooks never delivered (#617), so every
+    /// one is counted as skipped and none is restored.
     pub webhooks: EntityCounts,
+    /// Outcome counts for webhook subscriptions, with their signing
+    /// secrets (#654).
+    pub webhook_subscriptions: EntityCounts,
     /// Outcome counts for SCIM `externalId` mappings (OpenSpec 26.40).
     pub scim_mappings: EntityCounts,
     /// Outcome counts for organization invitations (OpenSpec 26.40).
@@ -381,19 +390,25 @@ pub struct BackupImporter {
     identity: Arc<dyn IdentityEngine>,
     rbac: Arc<dyn RbacEngine>,
     audit: Arc<dyn AuditEngine>,
+    webhooks: Arc<dyn WebhookEngine>,
 }
 
 impl BackupImporter {
     /// Creates a new importer backed by the given engine instances.
+    ///
+    /// `webhooks` must be the engine that the dispatcher reads, so that the
+    /// restored subscriptions deliver events (#654).
     pub fn new(
         identity: Arc<dyn IdentityEngine>,
         rbac: Arc<dyn RbacEngine>,
         audit: Arc<dyn AuditEngine>,
+        webhooks: Arc<dyn WebhookEngine>,
     ) -> Self {
         Self {
             identity,
             rbac,
             audit,
+            webhooks,
         }
     }
 
@@ -1021,15 +1036,32 @@ impl BackupImporter {
             },
         )?;
 
+        // An older archive's webhooks.ndjson holds the identity engine's
+        // webhook store, which the dispatcher never read (#617): those
+        // webhooks never delivered. Count them as skipped instead of bringing
+        // them back as if they worked (#654).
+        if let Some(raw) = files.get(&format!("realms/{realm_slug}/webhooks.ndjson")) {
+            let skipped = count_ndjson_records(&try_decrypt(raw)?);
+            report.webhooks.skipped += skipped;
+            if skipped > 0 {
+                warn!(
+                    realm = realm_slug,
+                    count = skipped,
+                    "archive webhooks from the old identity store never delivered and are not \
+                     restored; create them again under /admin/webhooks"
+                );
+            }
+        }
+
         self.restore_member_ndjson(
             &files,
-            &format!("realms/{realm_slug}/webhooks.ndjson"),
+            &format!("realms/{realm_slug}/webhook_subscriptions.ndjson"),
             &try_decrypt,
             opts,
-            &mut report.webhooks,
-            |this, webhook: &Webhook| {
-                this.identity
-                    .import_webhook(&restored_realm_id, webhook, overwrite)
+            &mut report.webhook_subscriptions,
+            |this, sub: &WebhookSubscription| {
+                this.webhooks
+                    .import(&restored_realm_id, sub, overwrite)
                     .map_err(|e| BackupError::Engine(e.to_string()))
             },
         )?;
@@ -1672,6 +1704,13 @@ fn identity_to_backup_err(e: IdentityError) -> BackupError {
     BackupError::Io(std::io::Error::other(e.to_string()))
 }
 
+/// Counts the non-blank lines of an NDJSON member, without parsing them.
+fn count_ndjson_records(data: &[u8]) -> u64 {
+    data.split(|&b| b == b'\n')
+        .filter(|line| !trim_bytes(line).is_empty())
+        .count() as u64
+}
+
 /// Trims leading/trailing ASCII whitespace from a byte slice.
 fn trim_bytes(s: &[u8]) -> &[u8] {
     let start = s
@@ -1713,6 +1752,7 @@ mod tests {
         identity: Arc<dyn IdentityEngine>,
         rbac: Arc<dyn RbacEngine>,
         audit: Arc<dyn AuditEngine>,
+        webhooks: Arc<dyn WebhookEngine>,
         // Held to keep the temp directory alive for the duration of the test.
         _dir: TempDir,
     }
@@ -1742,10 +1782,15 @@ mod tests {
             Arc::clone(&storage),
             Arc::clone(&clock),
         )) as Arc<dyn RbacEngine>;
+        let webhooks = Arc::new(crate::webhook::EmbeddedWebhookEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock),
+        )) as Arc<dyn WebhookEngine>;
         TestRig {
             identity,
             rbac,
             audit,
+            webhooks,
             _dir: dir,
         }
     }
@@ -1895,6 +1940,7 @@ mod tests {
             Arc::clone(&rig.identity),
             Arc::clone(&rig.rbac),
             Arc::clone(&rig.audit),
+            Arc::clone(&rig.webhooks),
         );
 
         let report = importer
@@ -1941,6 +1987,7 @@ mod tests {
             Arc::clone(&rig.identity),
             Arc::clone(&rig.rbac),
             Arc::clone(&rig.audit),
+            Arc::clone(&rig.webhooks),
         )
         .import_realm(slug, &reader, &opts_with_passphrase())
         .expect("import");
@@ -1969,6 +2016,7 @@ mod tests {
             Arc::clone(&rig.identity),
             Arc::clone(&rig.rbac),
             Arc::clone(&rig.audit),
+            Arc::clone(&rig.webhooks),
         );
         let opts = ImportOptions {
             mode: RestoreMode::Skip,
@@ -2018,6 +2066,7 @@ mod tests {
             Arc::clone(&rig.identity),
             Arc::clone(&rig.rbac),
             Arc::clone(&rig.audit),
+            Arc::clone(&rig.webhooks),
         );
 
         // First import with Skip.
@@ -2068,6 +2117,7 @@ mod tests {
             Arc::clone(&rig.identity),
             Arc::clone(&rig.rbac),
             Arc::clone(&rig.audit),
+            Arc::clone(&rig.webhooks),
         );
 
         importer
@@ -2104,6 +2154,7 @@ mod tests {
             Arc::clone(&rig.identity),
             Arc::clone(&rig.rbac),
             Arc::clone(&rig.audit),
+            Arc::clone(&rig.webhooks),
         );
         let opts = ImportOptions {
             dry_run: true,
@@ -2143,6 +2194,7 @@ mod tests {
             Arc::clone(&rig.identity),
             Arc::clone(&rig.rbac),
             Arc::clone(&rig.audit),
+            Arc::clone(&rig.webhooks),
         );
 
         // No passphrase — must fail with a clear error.
@@ -2164,6 +2216,7 @@ mod tests {
             Arc::clone(&rig.identity),
             Arc::clone(&rig.rbac),
             Arc::clone(&rig.audit),
+            Arc::clone(&rig.webhooks),
         );
 
         let wrong_opts = ImportOptions {
@@ -2237,6 +2290,7 @@ mod tests {
             Arc::clone(&rig.identity),
             Arc::clone(&rig.rbac),
             Arc::clone(&rig.audit),
+            Arc::clone(&rig.webhooks),
         );
 
         let err = importer
@@ -2334,6 +2388,7 @@ mod tests {
             Arc::clone(&rig.identity),
             Arc::clone(&rig.rbac),
             Arc::clone(&rig.audit),
+            Arc::clone(&rig.webhooks),
         );
 
         // Default options: allow_missing_signing_key = false.
@@ -2377,6 +2432,7 @@ mod tests {
             Arc::clone(&rig.identity),
             Arc::clone(&rig.rbac),
             Arc::clone(&rig.audit),
+            Arc::clone(&rig.webhooks),
         );
 
         let opts = ImportOptions {
@@ -2428,6 +2484,7 @@ mod tests {
             Arc::clone(&dest.identity),
             Arc::clone(&dest.rbac),
             Arc::clone(&dest.audit),
+            Arc::clone(&dest.webhooks),
         );
 
         // Default options (allow_missing_signing_key = false) must succeed here
@@ -2471,6 +2528,7 @@ mod tests {
             Arc::clone(&rig.identity),
             Arc::clone(&rig.rbac),
             Arc::clone(&rig.audit),
+            Arc::clone(&rig.webhooks),
         );
         let mut report = ImportReport::default();
         let ndjson = format!("{line}\n");
@@ -2600,6 +2658,7 @@ mod tests {
             Arc::clone(&rig.identity),
             Arc::clone(&rig.rbac),
             Arc::clone(&rig.audit),
+            Arc::clone(&rig.webhooks),
         );
         let mut report = ImportReport::default();
         importer

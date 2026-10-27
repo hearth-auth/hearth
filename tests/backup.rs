@@ -20,12 +20,22 @@ use hearth::identity::{CleartextPassword, CreateUserRequest, SessionContext};
 
 /// Builds a `BackupExporter` from a harness.
 fn make_exporter(h: &common::TestHarness) -> BackupExporter {
-    BackupExporter::new(h.identity_arc(), h.audit_arc(), h.rbac_arc())
+    BackupExporter::new(
+        h.identity_arc(),
+        h.audit_arc(),
+        h.rbac_arc(),
+        h.webhooks_arc(),
+    )
 }
 
 /// Builds a `BackupImporter` from a harness.
 fn make_importer(h: &common::TestHarness) -> BackupImporter {
-    BackupImporter::new(h.identity_arc(), h.rbac_arc(), h.audit_arc())
+    BackupImporter::new(
+        h.identity_arc(),
+        h.rbac_arc(),
+        h.audit_arc(),
+        h.webhooks_arc(),
+    )
 }
 
 /// Creates a realm, one user with a password, seeds RBAC, and returns the realm
@@ -3220,13 +3230,18 @@ async fn export_releases_the_write_barrier_before_writing_the_archive() {
     };
 
     let export = {
-        let (identity, audit, rbac) = (h.identity_arc(), h.audit_arc(), h.rbac_arc());
+        let (identity, audit, rbac, webhooks) = (
+            h.identity_arc(),
+            h.audit_arc(),
+            h.rbac_arc(),
+            h.webhooks_arc(),
+        );
         let realm = realm.clone();
         let fifo = fifo.clone();
         std::thread::spawn(move || {
             let mut writer = BackupArchive::create(&fifo).expect("archive on the pipe");
             let dek = BackupExporter::generate_dek().expect("dek");
-            BackupExporter::new(identity, audit, rbac)
+            BackupExporter::new(identity, audit, rbac, webhooks)
                 .export_realm(&realm, &mut writer, &ExportOptions::default(), &dek)
                 .map(|_| ())
         })
@@ -3572,6 +3587,10 @@ mod export_under_blocking_pool_pressure {
             identity as Arc<dyn IdentityEngine>,
             audit,
             export_rbac as Arc<dyn RbacEngine>,
+            Arc::new(hearth::webhook::EmbeddedWebhookEngine::new(
+                Arc::clone(&storage),
+                Arc::new(hearth::core::SystemClock),
+            )),
         );
         Ok(Wiring {
             storage,
