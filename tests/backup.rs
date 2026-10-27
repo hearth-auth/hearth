@@ -3650,6 +3650,29 @@ mod export_under_blocking_pool_pressure {
 
 // ── required-action generations survive a restore (GA sweep 4) ────────────────
 
+/// Mints a browser RA token for a pending password update, for a login that
+/// proved a password and no second factor.
+fn mint_password_update_token(
+    h: &common::TestHarness,
+    realm: &hearth::core::RealmId,
+    user: &hearth::core::UserId,
+    now: hearth::core::Timestamp,
+) -> String {
+    h.identity()
+        .generate_browser_ra_token(
+            realm,
+            user,
+            vec![hearth::identity::RequiredAction::UpdatePassword],
+            None,
+            hearth::identity::MfaProof::None,
+            false,
+            hearth::identity::SignInMethod::Password,
+            None,
+            now,
+        )
+        .expect("mint RA token")
+}
+
 /// A required-action token is refused once its user's sessions are revoked:
 /// the revocation bumps the user's `ra:gen` counter and the token carries the
 /// counter it was minted under. The archive did not carry the counter, so a
@@ -3661,7 +3684,6 @@ mod export_under_blocking_pool_pressure {
 async fn restore_keeps_required_action_generations() {
     use hearth::core::Timestamp;
     use hearth::identity::ra_token::RaTokenError;
-    use hearth::identity::{MfaProof, RequiredAction};
 
     let src = common::TestHarness::in_process()
         .await
@@ -3683,21 +3705,7 @@ async fn restore_keeps_required_action_generations() {
         )
         .expect("micros"),
     );
-    let mint = |h: &common::TestHarness| {
-        h.identity()
-            .generate_browser_ra_token(
-                &realm,
-                &user,
-                vec![RequiredAction::UpdatePassword],
-                None,
-                MfaProof::None,
-                false,
-                hearth::identity::SignInMethod::Password,
-                None,
-                now,
-            )
-            .expect("mint RA token")
-    };
+    let mint = |h: &common::TestHarness| mint_password_update_token(h, &realm, &user, now);
     let revoked = mint(&src);
     src.identity()
         .revoke_all_user_sessions(&realm, &user, None)
@@ -3760,7 +3768,7 @@ async fn restore_keeps_required_action_generations() {
 #[tokio::test]
 async fn restore_keeps_ended_required_action_flows() {
     use hearth::core::Timestamp;
-    use hearth::identity::{IdentityError, MfaProof, RequiredAction};
+    use hearth::identity::IdentityError;
 
     let src = common::TestHarness::in_process()
         .await
@@ -3785,20 +3793,7 @@ async fn restore_keeps_ended_required_action_flows() {
     let ra_expires = Timestamp::from_micros(now.as_micros() + 600 * 1_000_000);
 
     // A forced password update completed on the source with this RA token.
-    let pw_token = src
-        .identity()
-        .generate_browser_ra_token(
-            &realm,
-            &user,
-            vec![RequiredAction::UpdatePassword],
-            None,
-            MfaProof::None,
-            false,
-            hearth::identity::SignInMethod::Password,
-            None,
-            now,
-        )
-        .expect("mint RA token");
+    let pw_token = mint_password_update_token(&src, &realm, &user, now);
     let new_password = CleartextPassword::from_string("An0ther-Sup3rS3cret!".to_string());
     src.identity()
         .complete_required_password_update(
@@ -3814,20 +3809,7 @@ async fn restore_keeps_ended_required_action_flows() {
     // Minted after the update (which revoked the user's sessions): one flow
     // ends on the source, the other is still open at backup time.
     let mint = || {
-        let token = src
-            .identity()
-            .generate_browser_ra_token(
-                &realm,
-                &user,
-                vec![RequiredAction::UpdatePassword],
-                None,
-                MfaProof::None,
-                false,
-                hearth::identity::SignInMethod::Password,
-                None,
-                now,
-            )
-            .expect("mint RA token");
+        let token = mint_password_update_token(&src, &realm, &user, now);
         src.identity()
             .validate_ra_token(&realm, &token, now)
             .expect("valid RA token")
