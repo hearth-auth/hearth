@@ -132,7 +132,7 @@ pub use types::{
     PasswordEmail, PasswordEmailKind, PasswordPolicy, PendingAuthorizationRequest,
     PreTokenWebhookConfig, PreTokenWebhookErrorPolicy, RawCredential, Realm, RealmConfig,
     RealmQuotaConfig, RealmStatus, RegisterUserRequest, RegisterUserResponse, RegistrationPolicy,
-    RequiredAction, ScimMappingExport, ScimMappingKind, Session, SessionContext,
+    RequiredAction, RestoredUserState, ScimMappingExport, ScimMappingKind, Session, SessionContext,
     SessionLimitPolicy, SessionVersionConfig, SignInMethod, UpdateOrganizationRequest,
     UpdateRealmRequest, UpdateUserRequest, UpdateWebhookRequest, User, UserStatus,
     VerificationOrigin, WebAuthnAttestationPolicy, Webhook,

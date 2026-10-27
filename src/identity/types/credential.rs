@@ -3,9 +3,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::core::{RealmId, UserId};
+use crate::core::{RealmId, Timestamp, UserId};
 
-use super::user::UserStatus;
+use super::user::{RequiredAction, UserStatus};
 
 /// A credential record exported from a realm for backup purposes.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -107,6 +107,28 @@ pub struct ImportUserRequest {
     pub credential: Option<RawCredential>,
     /// Custom attribute key-value pairs.
     pub attributes: BTreeMap<String, String>,
+    /// The state that only a Hearth backup carries, set by the backup
+    /// restore (#672). `None` for an import from another provider: the
+    /// user starts with no required actions, an unverified email, email
+    /// codes off, and the import time.
+    pub restored: Option<RestoredUserState>,
+}
+
+/// The state of an archived user that a restore keeps (#672). Without it a
+/// restore dropped an admin-forced required action, the email-code second
+/// factor, the email verification, and the account's timestamps.
+#[derive(Clone, Debug)]
+pub struct RestoredUserState {
+    /// The actions the user must complete at the next sign-in.
+    pub required_actions: Vec<RequiredAction>,
+    /// Whether the user proved control of the email address.
+    pub email_verified: bool,
+    /// Whether email codes are on as a second factor.
+    pub email_otp_enabled: bool,
+    /// When the account was created.
+    pub created_at: Timestamp,
+    /// When the account last changed.
+    pub updated_at: Timestamp,
 }
 
 /// Request to import an OAuth 2.0 client: from an external provider, from a

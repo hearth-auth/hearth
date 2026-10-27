@@ -393,6 +393,7 @@ impl Auth0Importer {
             status,
             credential,
             attributes: Default::default(),
+            restored: None,
         };
 
         let user = self.identity.import_user(realm_id, &request)?;

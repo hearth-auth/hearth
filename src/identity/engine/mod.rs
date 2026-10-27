@@ -5200,6 +5200,8 @@ impl EmbeddedIdentityEngine {
 
         let now = self.clock.now();
         // Imports preserve the source state; required_actions are not inferred from realm defaults.
+        // A restore also keeps the state that only a Hearth backup carries (#672).
+        let restored = request.restored.as_ref();
         let mut user = User::new(
             user_id.clone(),
             email.clone(),
@@ -5207,10 +5209,14 @@ impl EmbeddedIdentityEngine {
             first_name,
             last_name,
             request.status,
-            Vec::new(),
-            now,
-            now,
+            restored.map_or_else(Vec::new, |r| r.required_actions.clone()),
+            restored.map_or(now, |r| r.created_at),
+            restored.map_or(now, |r| r.updated_at),
         );
+        if let Some(r) = restored {
+            user.set_email_verified(r.email_verified);
+            user.set_email_otp_enabled(r.email_otp_enabled);
+        }
 
         if !request.attributes.is_empty() {
             Self::validate_user_attributes(&request.attributes)?;

@@ -209,6 +209,7 @@ async fn a_reimported_user_inherits_no_grant_from_the_deleted_realm() {
                 status: UserStatus::Active,
                 credential: None,
                 attributes: BTreeMap::new(),
+                restored: None,
             },
         )
         .expect("re-import user under its old ID");
