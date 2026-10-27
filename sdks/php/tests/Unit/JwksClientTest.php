@@ -4,14 +4,18 @@ declare(strict_types=1);
 
 namespace Hearth\Tests\Unit;
 
+use GuzzleHttp\Client as GuzzleClient;
 use GuzzleHttp\Psr7\HttpFactory;
 use GuzzleHttp\Psr7\Response;
 use Hearth\Exceptions\JWKSFetchException;
 use Hearth\Exceptions\JwksKeyNotFoundException;
 use Hearth\JwksClient;
+use Hearth\TokenVerifier;
+use JsonException;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Psr\Http\Client\ClientInterface;
+use Psr\Http\Client\NetworkExceptionInterface;
 use Psr\Http\Message\RequestInterface;
 
 /**
@@ -127,5 +131,62 @@ final class JwksClientTest extends TestCase
 
         $this->expectException(JWKSFetchException::class);
         $this->jwksClient->getKey(self::FAKE_KID);
+    }
+
+    // -------------------------------------------------------------------------
+    // Regression #635: every JWKS fetch failure is a JWKSFetchException that
+    // keeps the underlying error, not a NetworkException or a raw JsonException.
+    // -------------------------------------------------------------------------
+
+    public function testVerifyThrowsJWKSFetchExceptionWhenTheJwksEndpointRefusesTheConnection(): void
+    {
+        // A real PSR-18 client against a loopback port nothing listens on.
+        $jwksUri  = 'http://127.0.0.1:' . self::closedLocalPort() . '/.well-known/jwks.json';
+        $verifier = new TokenVerifier(
+            new JwksClient($jwksUri, new GuzzleClient(['timeout' => 5]), new HttpFactory()),
+            'https://auth.example.com',
+        );
+
+        try {
+            $verifier->verify(self::tokenWithKid(self::FAKE_KID));
+            self::fail('verify() returned while the JWKS endpoint was unreachable');
+        } catch (JWKSFetchException $e) {
+            self::assertInstanceOf(NetworkExceptionInterface::class, $e->getPrevious());
+        }
+    }
+
+    public function testThrowsJWKSFetchExceptionWhenTheBodyIsNotJson(): void
+    {
+        $this->httpClient
+            ->method('sendRequest')
+            ->willReturn(new Response(200, ['Content-Type' => 'text/html'], '<html>Bad gateway</html>'));
+
+        try {
+            $this->jwksClient->getKey(self::FAKE_KID);
+            self::fail('getKey() returned for a JWKS body that is not JSON');
+        } catch (JWKSFetchException $e) {
+            self::assertInstanceOf(JsonException::class, $e->getPrevious());
+        }
+    }
+
+    /** A loopback TCP port that nothing listens on: a connection to it is refused at once. */
+    private static function closedLocalPort(): int
+    {
+        $server = stream_socket_server('tcp://127.0.0.1:0');
+        self::assertNotFalse($server);
+        $name = (string) stream_socket_get_name($server, false);
+        fclose($server);
+
+        return (int) substr($name, (int) strrpos($name, ':') + 1);
+    }
+
+    /** A structurally valid EdDSA JWT naming `$kid`; verification stops at the key lookup. */
+    private static function tokenWithKid(string $kid): string
+    {
+        $b64 = static fn (string $raw): string => rtrim(strtr(base64_encode($raw), '+/', '-_'), '=');
+
+        return $b64((string) json_encode(['alg' => 'EdDSA', 'typ' => 'JWT', 'kid' => $kid]))
+            . '.' . $b64((string) json_encode(['sub' => 'usr_1', 'exp' => time() + 3600]))
+            . '.' . $b64(random_bytes(SODIUM_CRYPTO_SIGN_BYTES));
     }
 }
