@@ -2199,6 +2199,7 @@ async fn the_permission_checks_answer_before_the_export_rate_limit() {
     // One export per user per hour, so the quota is spent in one call.
     let app = router(Arc::new(
         AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc())
+            .with_webhook(h.webhooks_arc())
             .with_backup_verify_key(Some(test_verify_key()))
             .with_rate_limits(None, None, Some(1)),
     ));
