@@ -1551,13 +1551,14 @@ fn refuse_restart_without_applied_state(
             "this node's Raft log is purged through index {} but its data directory holds no \
              persisted applied state (it was written by an earlier Hearth release, which kept \
              its applied state and membership in memory only, or an interrupted snapshot \
-             install cleared it): it cannot be restarted in place. Re-seed it if the rest of \
-             the cluster still has a leader: stop it, move its data directory (including \
-             raft.db) aside, and start it empty so the leader sends it a snapshot. If no node \
-             can start (every node's log was purged, as in the full-cluster restart this \
-             release requires), there is no leader to send one, and the older build cannot \
-             restart this node either: rebuild the cluster from the backup taken before the \
-             upgrade. Restore it offline with `hearth backup restore` into one empty data \
+             install cleared it): it cannot be restarted in place, and the older build cannot \
+             restart it either. Do not move its data directory aside to bring the node back \
+             with an empty one under the same node id: raft.db holds this node's Raft vote, \
+             and a node that forgets its vote can help elect a second leader in one term \
+             (docs/dev/CONSISTENCY.md G9). Rebuild the cluster from the backup taken before \
+             the upgrade, which also works when no node can start (every node's log was \
+             purged, as in the full-cluster restart this release requires). Restore it \
+             offline with `hearth backup restore` into one empty data \
              directory and copy that directory to every node before the new cluster first \
              starts; restoring into a cluster that has already started leaves every realm \
              empty under a new id (see the upgrading guide, \"Upgrading a cluster whose Raft \
