@@ -5,7 +5,7 @@ package hearth
 // Tests cover:
 //   - JwksCache: TTL, cache-miss re-fetch, skip non-OKP keys, Cache-Control header
 //   - VerifyToken: signature, expiry, issuer, audience, algorithm guard
-//   - ClientCredentials: JSON encoding, required credentials, optional scope
+//   - ClientCredentials: form encoding, required credentials, optional scope
 //   - StartDeviceFlow / PollDeviceToken: response shapes, pending/slow_down handling
 //   - RequestMagicLink: correct path, email in body, 202 is success, 429 raises error
 //   - WebAuthn: registration and authentication round-trip shapes
@@ -16,9 +16,10 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
+	"net/url"
 	"testing"
 	"time"
 )
@@ -40,6 +41,25 @@ func writeBody(t *testing.T, w http.ResponseWriter, b []byte) {
 	if _, err := w.Write(b); err != nil {
 		t.Errorf("stub server: write response: %v", err)
 	}
+}
+
+// readForm decodes a stub server's request body as
+// application/x-www-form-urlencoded, one value per key.
+func readForm(t *testing.T, r *http.Request) map[string]string {
+	t.Helper()
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Errorf("stub server: read body: %v", err)
+	}
+	values, err := url.ParseQuery(string(raw))
+	if err != nil {
+		t.Errorf("request body was not form-encoded: %v (body %q)", err, raw)
+	}
+	out := make(map[string]string, len(values))
+	for k := range values {
+		out[k] = values.Get(k)
+	}
+	return out
 }
 
 // makeEd25519Key returns a fresh key pair plus the base64url-encoded public key x coordinate.
@@ -491,7 +511,7 @@ func TestVerifyToken_DoesNotFallBackToIntrospection(t *testing.T) {
 // ─── ClientCredentials ────────────────────────────────────────────────────────
 
 func TestClientCredentials_ReturnsTokenResponse(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newOAuthServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		writeJSON(t, w, map[string]any{
 			"access_token": "eyJ...",
@@ -520,16 +540,14 @@ func TestClientCredentials_ReturnsTokenResponse(t *testing.T) {
 	}
 }
 
-func TestClientCredentials_SendsCredentialsInJSONBody(t *testing.T) {
-	// Hearth's /token endpoint parses the body with an axum Json extractor and
-	// rejects form-encoded bodies with HTTP 415, so the SDK must send JSON.
+func TestClientCredentials_SendsCredentialsInFormBody(t *testing.T) {
+	// RFC 6749 §2.3.1: client_id and client_secret go in an
+	// application/x-www-form-urlencoded body.
 	var capturedBody map[string]string
 	var capturedCT string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newOAuthServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedCT = r.Header.Get("Content-Type")
-		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
-			t.Errorf("request body was not valid JSON (form-encoded regression?): %v", err)
-		}
+		capturedBody = readForm(t, r)
 		w.Header().Set("Content-Type", "application/json")
 		writeJSON(t, w, map[string]any{
 			"access_token": "t", "token_type": "Bearer", "expires_in": 3600,
@@ -544,8 +562,8 @@ func TestClientCredentials_SendsCredentialsInJSONBody(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClientCredentials: %v", err)
 	}
-	if !strings.Contains(capturedCT, "application/json") {
-		t.Fatalf("expected application/json content-type, got %q", capturedCT)
+	if capturedCT != "application/x-www-form-urlencoded" {
+		t.Fatalf("expected application/x-www-form-urlencoded content-type, got %q", capturedCT)
 	}
 	if capturedBody["client_id"] != "my-client" {
 		t.Fatalf("client_id: %q (body: %v)", capturedBody["client_id"], capturedBody)
@@ -560,10 +578,8 @@ func TestClientCredentials_SendsCredentialsInJSONBody(t *testing.T) {
 
 func TestClientCredentials_SendsOptionalScope(t *testing.T) {
 	var capturedBody map[string]string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
-			t.Errorf("request body was not valid JSON: %v", err)
-		}
+	srv := newOAuthServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedBody = readForm(t, r)
 		w.Header().Set("Content-Type", "application/json")
 		writeJSON(t, w, map[string]any{
 			"access_token": "t", "token_type": "Bearer", "expires_in": 3600,
@@ -610,7 +626,7 @@ func TestClientCredentials_RaisesConfigurationErrorWhenNoClientSecret(t *testing
 // ─── Device Flow ──────────────────────────────────────────────────────────────
 
 func TestStartDeviceFlow_ReturnsResponse(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newOAuthServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		writeJSON(t, w, map[string]any{
 			"device_code":      "DEV123",
@@ -641,13 +657,12 @@ func TestStartDeviceFlow_ReturnsResponse(t *testing.T) {
 }
 
 func TestStartDeviceFlow_SendsClientID(t *testing.T) {
+	// RFC 8628 §3.1: the device authorization request is form-encoded.
 	var capturedBody map[string]string
 	var capturedCT string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newOAuthServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedCT = r.Header.Get("Content-Type")
-		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
-			t.Errorf("request body was not valid JSON (form-encoded regression?): %v", err)
-		}
+		capturedBody = readForm(t, r)
 		w.Header().Set("Content-Type", "application/json")
 		writeJSON(t, w, map[string]any{
 			"device_code": "d", "user_code": "u",
@@ -663,8 +678,8 @@ func TestStartDeviceFlow_SendsClientID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartDeviceFlow: %v", err)
 	}
-	if !strings.Contains(capturedCT, "application/json") {
-		t.Fatalf("expected application/json content-type, got %q", capturedCT)
+	if capturedCT != "application/x-www-form-urlencoded" {
+		t.Fatalf("expected application/x-www-form-urlencoded content-type, got %q", capturedCT)
 	}
 	if capturedBody["client_id"] != "cli-app" {
 		t.Fatalf("client_id: %q (body: %v)", capturedBody["client_id"], capturedBody)
@@ -683,7 +698,7 @@ func TestStartDeviceFlow_RaisesConfigurationErrorWhenNoClientID(t *testing.T) {
 }
 
 func TestPollDeviceToken_ReturnTokensOnSuccess(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newOAuthServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		writeJSON(t, w, map[string]any{
 			"access_token": "eyJ...",
@@ -709,7 +724,7 @@ func TestPollDeviceToken_ReturnTokensOnSuccess(t *testing.T) {
 }
 
 func TestPollDeviceToken_ReturnsNilOnAuthorizationPending(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newOAuthServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(400)
 		writeJSON(t, w, map[string]any{"error": "authorization_pending"})
 	}))
@@ -728,7 +743,7 @@ func TestPollDeviceToken_ReturnsNilOnAuthorizationPending(t *testing.T) {
 }
 
 func TestPollDeviceToken_ReturnsNilOnSlowDown(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newOAuthServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(400)
 		writeJSON(t, w, map[string]any{"error": "slow_down"})
 	}))
@@ -747,7 +762,7 @@ func TestPollDeviceToken_ReturnsNilOnSlowDown(t *testing.T) {
 }
 
 func TestPollDeviceToken_RaisesTokenExpiredErrorOnExpiredToken(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newOAuthServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(400)
 		writeJSON(t, w, map[string]any{"error": "expired_token"})
 	}))
@@ -766,7 +781,7 @@ func TestPollDeviceToken_RaisesTokenExpiredErrorOnExpiredToken(t *testing.T) {
 }
 
 func TestPollDeviceToken_RaisesAPIErrorOnOtherErrors(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newOAuthServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(400)
 		writeJSON(t, w, map[string]any{"error": "access_denied"})
 	}))
@@ -863,15 +878,13 @@ func TestRequestMagicLink_RaisesAPIErrorOn429(t *testing.T) {
 // ─── ExchangeMagicLink ──────────────────────────────────────────────────────────
 
 func TestExchangeMagicLink_PostsMagicLinkGrantWithTokenInBody(t *testing.T) {
-	// Passwordless login must send JSON: Hearth's /token endpoint rejects a
-	// form-encoded body with HTTP 415.
+	// The magic-link grant goes to the token endpoint, form-encoded like every
+	// other grant (RFC 6749 §4.1.3).
 	var capturedBody map[string]string
 	var capturedCT string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newOAuthServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedCT = r.Header.Get("Content-Type")
-		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
-			t.Errorf("request body was not valid JSON (form-encoded regression?): %v", err)
-		}
+		capturedBody = readForm(t, r)
 		w.Header().Set("Content-Type", "application/json")
 		writeJSON(t, w, map[string]any{
 			"access_token": "eyJ...", "token_type": "Bearer", "expires_in": 3600,
@@ -887,8 +900,8 @@ func TestExchangeMagicLink_PostsMagicLinkGrantWithTokenInBody(t *testing.T) {
 	if resp.AccessToken != "eyJ..." {
 		t.Fatalf("access_token: %q", resp.AccessToken)
 	}
-	if !strings.Contains(capturedCT, "application/json") {
-		t.Fatalf("expected application/json content-type, got %q", capturedCT)
+	if capturedCT != "application/x-www-form-urlencoded" {
+		t.Fatalf("expected application/x-www-form-urlencoded content-type, got %q", capturedCT)
 	}
 	if capturedBody["grant_type"] != "urn:hearth:grant-type:magic-link" {
 		t.Fatalf("grant_type: %q (body: %v)", capturedBody["grant_type"], capturedBody)
@@ -899,7 +912,7 @@ func TestExchangeMagicLink_PostsMagicLinkGrantWithTokenInBody(t *testing.T) {
 }
 
 func TestExchangeMagicLink_RaisesAPIErrorOnInvalidToken(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newOAuthServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(400)
 		writeBody(t, w, []byte(`{"error":"invalid_grant"}`))
 	}))

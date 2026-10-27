@@ -51,11 +51,93 @@ func TestMiddlewareEmbeddedDenied(t *testing.T) {
 	}
 }
 
-func TestMiddlewareEmbeddedMissingToken(t *testing.T) {
-	c := NewClient("http://localhost", "r1")
-	rr := applyMiddleware(t, c, "docs.edit", MiddlewareConfig{ExpectedMode: ModeEmbedded}, "")
-	if rr.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d", rr.Code)
+// Regression — Go middleware without a token: 401 with
+// `WWW-Authenticate: Bearer realm="hearth"`, not 403, in every mode, and the
+// handler does not run.
+func TestMiddlewareMissingTokenReturns401WithChallenge(t *testing.T) {
+	for _, mode := range []AccessTokenAuthorizationMode{ModeEmbedded, ModeIntrospection, ModeDecision} {
+		c := NewClient("http://localhost", "r1")
+		nextCalled := false
+		handler := RequirePermission(c, "docs.edit", MiddlewareConfig{
+			ExpectedMode: mode, ClientID: "rs", ClientSecret: "rs-secret",
+		})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			nextCalled = true
+			w.WriteHeader(http.StatusOK)
+		}))
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, httptest.NewRequest("GET", "/test", nil))
+		if rr.Code != http.StatusUnauthorized {
+			t.Errorf("%s: expected 401, got %d", mode, rr.Code)
+		}
+		if got := rr.Header().Get("WWW-Authenticate"); got != `Bearer realm="hearth"` {
+			t.Errorf("%s: WWW-Authenticate = %q, want %q", mode, got, `Bearer realm="hearth"`)
+		}
+		if nextCalled {
+			t.Errorf("%s: the handler ran for a request without a token", mode)
+		}
+	}
+}
+
+// A token that does not verify is an invalid token: 401 with
+// `error="invalid_token"`, and the handler does not run.
+func TestMiddlewareEmbeddedInvalidTokenReturns401WithChallenge(t *testing.T) {
+	ti := newTestIssuer(t)
+	forged := forgeJWT(t, map[string]any{"iss": ti.URL(), "permissions": []string{"docs.edit"}})
+	nextCalled := false
+	handler := RequirePermission(ti.client(), "docs.edit", MiddlewareConfig{ExpectedMode: ModeEmbedded})(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			nextCalled = true
+			w.WriteHeader(http.StatusOK)
+		}))
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("Authorization", "Bearer "+forged)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rr.Code)
+	}
+	want := `Bearer realm="hearth", error="invalid_token"`
+	if got := rr.Header().Get("WWW-Authenticate"); got != want {
+		t.Errorf("WWW-Authenticate = %q, want %q", got, want)
+	}
+	if nextCalled {
+		t.Error("the handler ran for a token that does not verify")
+	}
+}
+
+// Regression — Go middleware hides the claims: the handler reads the verified
+// claims from the request context.
+func TestMiddlewareEmbeddedPutsVerifiedClaimsInContext(t *testing.T) {
+	ti := newTestIssuer(t)
+	token := ti.sign(t, map[string]any{"sub": "user_1", "permissions": []string{"docs.edit"}})
+	var (
+		claims *Claims
+		found  bool
+	)
+	handler := RequirePermission(ti.client(), "docs.edit", MiddlewareConfig{ExpectedMode: ModeEmbedded})(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			claims, found = ClaimsFromContext(r.Context())
+			w.WriteHeader(http.StatusOK)
+		}))
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	if !found || claims == nil {
+		t.Fatal("the handler found no verified claims in the request context")
+	}
+	if claims.Subject() != "user_1" || !claims.HasPermission("docs.edit") {
+		t.Fatalf("claims in context: sub=%q permissions ok=%v", claims.Subject(), claims.HasPermission("docs.edit"))
+	}
+}
+
+// A request that never passed the middleware has no claims.
+func TestClaimsFromContextEmpty(t *testing.T) {
+	if claims, ok := ClaimsFromContext(httptest.NewRequest("GET", "/", nil).Context()); ok || claims != nil {
+		t.Fatalf("expected no claims, got %v %v", claims, ok)
 	}
 }
 
@@ -176,7 +258,7 @@ func introspectResponse(active bool, mode string, permissions []string) Introspe
 }
 
 func TestMiddlewareIntrospectionAllowed(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newOAuthServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/introspect" {
 			http.NotFound(w, r)
 			return
@@ -198,8 +280,8 @@ func TestMiddlewareIntrospectionAllowed(t *testing.T) {
 	}
 }
 
-func TestMiddlewareIntrospectionDeniedInactiveToken(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func TestMiddlewareIntrospectionInactiveTokenReturns401(t *testing.T) {
+	srv := newOAuthServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/introspect" {
 			http.NotFound(w, r)
 			return
@@ -216,15 +298,20 @@ func TestMiddlewareIntrospectionDeniedInactiveToken(t *testing.T) {
 		ClientID:     "res-server",
 		ClientSecret: "secret",
 	}, token)
-	if rr.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 for inactive token, got %d", rr.Code)
+	// An inactive token is an invalid token, not a missing permission.
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for inactive token, got %d", rr.Code)
+	}
+	want := `Bearer realm="hearth", error="invalid_token"`
+	if got := rr.Header().Get("WWW-Authenticate"); got != want {
+		t.Fatalf("WWW-Authenticate = %q, want %q", got, want)
 	}
 }
 
 func TestMiddlewareIntrospectionModeMismatchRejected(t *testing.T) {
 	// Server echoes mode="embedded" but the middleware expects "introspection".
 	// Must reject — never fall back to local check.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newOAuthServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/introspect" {
 			http.NotFound(w, r)
 			return
@@ -250,7 +337,7 @@ func TestMiddlewareIntrospectionModeMismatchRejected(t *testing.T) {
 func TestMiddlewareIntrospectionAbsentModeDefaultsToEmbedded(t *testing.T) {
 	// Server omits the mode field (old server or embedded client).
 	// Absent mode defaults to "embedded" — mismatch against ModeIntrospection, so deny.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newOAuthServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/introspect" {
 			http.NotFound(w, r)
 			return
@@ -272,7 +359,7 @@ func TestMiddlewareIntrospectionAbsentModeDefaultsToEmbedded(t *testing.T) {
 }
 
 func TestMiddlewareIntrospectionMissingPermission(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newOAuthServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/introspect" {
 			http.NotFound(w, r)
 			return
@@ -308,6 +395,11 @@ func TestMiddlewareRequiredActionTokenReturns401(t *testing.T) {
 	rr := applyMiddleware(t, c, "docs.edit", MiddlewareConfig{ExpectedMode: ModeEmbedded}, token)
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("required_action token must return 401, got %d", rr.Code)
+	}
+	// RFC 7235 §3.1: a 401 carries a WWW-Authenticate challenge.
+	want := `Bearer realm="hearth", error="invalid_token"`
+	if got := rr.Header().Get("WWW-Authenticate"); got != want {
+		t.Fatalf("WWW-Authenticate = %q, want %q", got, want)
 	}
 }
 
@@ -409,7 +501,7 @@ func TestCheckPermissionNetworkErrorFailClosed(t *testing.T) {
 // ─── Introspect direct API ───────────────────────────────────────────────────
 
 func TestIntrospectActive(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newOAuthServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/introspect" {
 			http.NotFound(w, r)
 			return
