@@ -512,6 +512,7 @@ pub async fn mfa_passkey_challenge_complete(
         } else {
             MfaProof::Proved
         },
+        sign_in: pending.first_factor.sign_in_method(),
         ..build_session_context(&headers, peer_addr, &state.trusted_proxies)
     };
     if let Some(ra) = super::required_action::required_action_check_browser(

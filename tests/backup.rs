@@ -3692,6 +3692,7 @@ async fn restore_keeps_required_action_generations() {
                 None,
                 MfaProof::None,
                 false,
+                hearth::identity::SignInMethod::Password,
                 None,
                 now,
             )
@@ -3793,6 +3794,7 @@ async fn restore_keeps_ended_required_action_flows() {
             None,
             MfaProof::None,
             false,
+            hearth::identity::SignInMethod::Password,
             None,
             now,
         )
@@ -3821,6 +3823,7 @@ async fn restore_keeps_ended_required_action_flows() {
                 None,
                 MfaProof::None,
                 false,
+                hearth::identity::SignInMethod::Password,
                 None,
                 now,
             )

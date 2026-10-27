@@ -65,7 +65,7 @@ use crate::audit::{AuditAction, CreateAuditEvent};
 use crate::core::{ClientId, RealmId, Timestamp, UserId};
 use crate::identity::{
     canonicalize_scopes, CodeChallengeMethod, IdentityError, MfaProof, PendingAuthorizationRequest,
-    ResponseMode,
+    ResponseMode, SignInMethod,
 };
 
 use super::auth::{CookieSecret, UiSession};
@@ -241,6 +241,7 @@ async fn authorize_get_impl(
     // (GA audit round 3, D-7), and names this session, so RP-initiated
     // logout ends it too.
     params.mfa_proof = session.mfa_proof;
+    params.sign_in = session.sign_in;
     params.session_id = Some(session.session_id.clone());
     // A client or role that demands a second factor needs a session that
     // PROVED one (GA audit B5). Fresh entry only: the interstitial resumes
@@ -257,7 +258,7 @@ async fn authorize_get_impl(
         &session.user_id,
         &params,
         Gate::RequiredActions,
-        Vec::new(),
+        params.amr_values(),
         state.is_secure_request(headers),
         now,
     )
@@ -400,6 +401,7 @@ fn plain_params(
         organization: q.organization.clone().filter(|o| !o.is_empty()),
         // Set from the session by `authorize_get_impl`.
         mfa_proof: MfaProof::None,
+        sign_in: SignInMethod::Unknown,
         session_id: None,
     })
 }
@@ -469,6 +471,7 @@ fn par_params(
         organization: stored.organization,
         // Set from the session by `authorize_get_impl`.
         mfa_proof: MfaProof::None,
+        sign_in: SignInMethod::Unknown,
         session_id: None,
     })
 }
@@ -772,6 +775,7 @@ pub async fn consent_submit(
                 organization: pending.organization.clone(),
                 // The approving session's proof (GA audit round 3, D-7).
                 mfa_proof: session.mfa_proof,
+                sign_in: session.sign_in,
                 session_id: Some(session.session_id.clone()),
             };
             let mut response = issue_code(
@@ -1029,6 +1033,7 @@ fn jar_params(
             .filter(|o| !o.is_empty()),
         // Set from the session by `authorize_get_impl`.
         mfa_proof: MfaProof::None,
+        sign_in: SignInMethod::Unknown,
         session_id: None,
     })
 }

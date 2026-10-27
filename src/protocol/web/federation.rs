@@ -949,7 +949,7 @@ fn complete_login(
     // factor — this used to send every non-TOTP user on an `mfa_required`
     // realm to TOTP enrolment. The MFA pending cookie carries the proven
     // identity across the hop, exactly as the direct login does.
-    let first = auth::FirstFactor::Credential;
+    let first = auth::FirstFactor::Federated;
     match super::second_factor::second_factor_step(state, &realm, &user, first) {
         Ok(Some(step)) => {
             let mut response = super::second_factor::redirect_to_second_factor(
@@ -979,8 +979,11 @@ fn complete_login(
         user_id,
         Some(return_to),
         // The upstream login is one factor; nothing was owed above.
-        &build_session_context(headers, peer_addr, &state.trusted_proxies),
-        auth::FirstFactor::Credential,
+        &SessionContext {
+            sign_in: crate::identity::SignInMethod::Federated,
+            ..build_session_context(headers, peer_addr, &state.trusted_proxies)
+        },
+        auth::FirstFactor::Federated,
         headers,
         now,
     ) {
@@ -993,7 +996,10 @@ fn complete_login(
     // none, so the default (unproven) MFA context is correct. The engine
     // refuses it if either is untrue. The peer address feeds the realm's
     // network policy (GA audit M13).
-    let ctx: SessionContext = build_session_context(headers, peer_addr, &state.trusted_proxies);
+    let ctx = SessionContext {
+        sign_in: crate::identity::SignInMethod::Federated,
+        ..build_session_context(headers, peer_addr, &state.trusted_proxies)
+    };
     // A-41: a federated login rotates the session like a password login —
     // any session the browser already holds is revoked before the new one.
     auth::revoke_prior_session_cookie(state.identity.as_ref(), headers, &state.cookie_secret);

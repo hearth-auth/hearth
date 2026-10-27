@@ -8450,6 +8450,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         return_to: Option<String>,
         mfa_proof: crate::identity::MfaProof,
         inbox_first_factor: bool,
+        sign_in: crate::identity::SignInMethod,
         flow: Option<&str>,
         now: Timestamp,
     ) -> Result<String, IdentityError> {
@@ -8462,6 +8463,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return_to,
             mfa_proof,
             inbox_first_factor,
+            sign_in,
             flow.map_or_else(crate::identity::ra_token::new_flow_id, str::to_string),
             generation,
             &key,
@@ -22016,6 +22018,7 @@ mod tests {
             user_agent_raw: Some("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36".to_string()),
             device_label: Some("Chrome, Mac OSX".to_string()),
             mfa_proof: crate::identity::types::MfaProof::None,
+            sign_in: crate::identity::types::SignInMethod::Unknown,
         };
 
         let session = engine

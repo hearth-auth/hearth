@@ -366,8 +366,8 @@ pub struct TokenClaims {
     /// Authentication Methods References (RFC 8176).
     ///
     /// Lists the authentication method(s) used during the session. Examples:
-    /// `"pwd"` (password), `"otp"` (TOTP), `"hwk"` (passkey).
-    /// Non-empty only when explicit MFA was performed during token issuance.
+    /// `"pwd"` (password), `"otp"` (TOTP), `"hwk"` (passkey). Empty, and left
+    /// out, when the sign-in proved no method that RFC 8176 names.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub amr: Vec<String>,
     /// Session-version claim (RFC: HEA-930).

@@ -38,7 +38,7 @@ use crate::core::{ClientId, RealmId, SessionId, Timestamp, UserId};
 use crate::identity::ra_token::OidcParams;
 use crate::identity::{
     canonicalize_scopes, AuthorizationRequest, CodeChallengeMethod, ConsentState, MfaProof,
-    PendingAuthorizationRequest, ResponseMode,
+    PendingAuthorizationRequest, ResponseMode, SignInMethod,
 };
 
 use super::handlers::append_cookie;
@@ -88,6 +88,10 @@ pub(super) struct AuthorizeParams {
     /// opens proves exactly that (GA audit round 3, D-7). Set from the
     /// session at every entry point; `None` otherwise.
     pub mfa_proof: MfaProof,
+    /// How the user of the browser session authorizing the request signed
+    /// in. With `mfa_proof` it gives the code its `amr` (#619). Set with
+    /// `mfa_proof`; [`SignInMethod::Unknown`] otherwise.
+    pub sign_in: SignInMethod,
     /// The browser session authorizing the request. The code records it,
     /// and RP-initiated logout ends it with the token session its exchange
     /// opens (`rp-initiated-logout`). Set with `mfa_proof`; `None` at the
@@ -111,6 +115,7 @@ impl AuthorizeParams {
             response_mode: self.response_mode.as_ref().map(|m| m.as_str().to_string()),
             prompt: self.prompt.clone(),
             mfa_proof: self.mfa_proof,
+            sign_in: self.sign_in,
             resource: self.resource.clone(),
             organization: self.organization.clone(),
         }
@@ -135,8 +140,15 @@ impl AuthorizeParams {
             resource: p.resource.clone(),
             organization: p.organization.clone(),
             mfa_proof: p.mfa_proof,
+            sign_in: p.sign_in,
             session_id: None,
         })
+    }
+
+    /// The RFC 8176 `amr` values of the sign-in behind this request
+    /// ([`SignInMethod::amr_values`]).
+    pub(super) fn amr_values(&self) -> Vec<String> {
+        self.sign_in.amr_values(self.mfa_proof)
     }
 }
 
@@ -573,6 +585,7 @@ mod tests {
             response_mode: Some(ResponseMode::Fragment),
             resource: Some("https://api.example.com".to_string()),
             mfa_proof: MfaProof::Proved,
+            sign_in: SignInMethod::Password,
             session_id: None,
         }
     }
@@ -591,6 +604,8 @@ mod tests {
         assert_eq!(back.prompt, p.prompt);
         assert_eq!(back.response_mode, p.response_mode);
         assert_eq!(back.resource, p.resource);
+        assert_eq!(back.mfa_proof, p.mfa_proof);
+        assert_eq!(back.sign_in, p.sign_in);
     }
 
     #[test]
