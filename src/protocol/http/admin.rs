@@ -4565,8 +4565,85 @@ async fn admin_assign_role(
             assigned_by: Some(auth.user_id.clone()),
         },
     ) {
-        Ok(a) => (StatusCode::CREATED, Json(a)).into_response(),
+        Ok(a) => {
+            audit_role_change(
+                &state,
+                &auth,
+                true,
+                &a.subject,
+                &ChangedRole::Id(&a.role_id),
+                &a.scope,
+            );
+            (StatusCode::CREATED, Json(a)).into_response()
+        }
         Err(e) => rbac_error_to_response(&e).into_response(),
+    }
+}
+
+/// The role a role change names, as the route knows it.
+enum ChangedRole<'a> {
+    /// A route that names the role by ID.
+    Id(&'a RoleId),
+    /// A route that names the role by name.
+    Name(&'a str),
+}
+
+/// Appends a `RoleAssigned` or `RoleRevoked` event for a role change made
+/// through the REST admin API: the event the admin UI writes for the same
+/// change (#620).
+///
+/// The metadata names the role by name and by ID: the name is what an
+/// investigator reads, the ID what stays when the role is renamed. A failed
+/// role lookup still records what the route knows. A failed append is
+/// logged, not fatal: the change already happened (the same rule as the
+/// admin UI and the extra-permission routes).
+fn audit_role_change(
+    state: &AppState,
+    auth: &AdminAuth,
+    assigned: bool,
+    subject: &Subject,
+    role: &ChangedRole<'_>,
+    scope: &Scope,
+) {
+    let action = if assigned {
+        crate::audit::AuditAction::RoleAssigned
+    } else {
+        crate::audit::AuditAction::RoleRevoked
+    };
+    let (resource_type, resource_id) = match subject {
+        Subject::User(id) => ("user", id.as_uuid().to_string()),
+        Subject::Group(id) => ("group", id.as_uuid().to_string()),
+    };
+    let found = match role {
+        ChangedRole::Id(id) => state.rbac.get_role(&auth.realm_id, id),
+        ChangedRole::Name(name) => state.rbac.get_role_by_name(&auth.realm_id, name),
+    }
+    .ok()
+    .flatten();
+    let (role_name, role_id) = match (role, found) {
+        (_, Some(r)) => (r.name, r.id.as_uuid().to_string()),
+        (ChangedRole::Id(id), None) => (String::new(), id.as_uuid().to_string()),
+        (ChangedRole::Name(name), None) => ((*name).to_string(), String::new()),
+    };
+    let mut metadata = serde_json::json!({
+        "via": "api",
+        "role": role_name,
+        "role_id": role_id,
+        "scope": "realm",
+    });
+    if let Scope::Org { org_id } = scope {
+        metadata["scope"] = serde_json::json!(format!("org:{}", org_id.as_uuid()));
+        metadata["org_id"] = serde_json::json!(org_id.as_uuid().to_string());
+    }
+    if let Err(e) = state.audit.append(&CreateAuditEvent {
+        realm_id: auth.realm_id.clone(),
+        actor: auth.user_id.as_uuid().to_string(),
+        action,
+        resource_type: resource_type.to_string(),
+        resource_id,
+        metadata: Some(metadata),
+    }) {
+        tracing::warn!(error = %e, "role change audit append failed");
     }
 }
 
@@ -4699,8 +4776,25 @@ async fn admin_unassign_role(
     ) {
         return ceiling_refusal(e).into_response();
     }
+    // Read before the delete: the audit event names the subject and the role.
+    let assignment = match state.rbac.get_assignment(&auth.realm_id, &aid) {
+        Ok(a) => a,
+        Err(e) => return rbac_error_to_response(&e).into_response(),
+    };
     match state.rbac.unassign_role(&auth.realm_id, &aid) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            if let Some(a) = assignment {
+                audit_role_change(
+                    &state,
+                    &auth,
+                    false,
+                    &a.subject,
+                    &ChangedRole::Id(&a.role_id),
+                    &a.scope,
+                );
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => rbac_error_to_response(&e).into_response(),
     }
 }

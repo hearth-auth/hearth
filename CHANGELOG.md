@@ -31,6 +31,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   without it, the commands check every realm. The purge writes a `UserPermissionRevoked` or
   `RoleRevoked` audit event (actor `cli`) for each orphan that it deletes.
 
+### Security
+- **Role changes through the REST admin API are audited** (#620): assigning a role to a user or a
+  group, removing a role assignment, and adding or removing an extra organization role through
+  `/admin/*` wrote no audit event. The admin UI wrote one for the same changes. Each of these
+  routes now writes `RoleAssigned` or `RoleRevoked` with the admin as the actor, the user or group
+  as the resource, and the role, its scope and `via: api` in the metadata.
+
 ## [4.6.6] — 2026-10-26
 
 ### Added
