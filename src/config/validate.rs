@@ -1186,10 +1186,25 @@ fn validate_cidr_policies(
 /// address and a port. A host name used to pass here; the peer server then
 /// stopped at start-up while the node went on serving, and no cluster formed.
 /// A peer's `address` is dialled, not bound, so a host name is valid there.
+///
+/// Cluster mode is experimental, so the section also needs
+/// `experimental_opt_in: true` (#650).
 fn validate_cluster_all(cluster: Option<&ClusterConfig>, issues: &mut Vec<ValidationIssue>) {
     let Some(cluster) = cluster else {
         return;
     };
+    if !cluster.experimental_opt_in {
+        issues.push(ValidationIssue {
+            field: "cluster.experimental_opt_in".to_string(),
+            reason: "cluster mode is experimental and not supported in production: a node \
+                     cut off from the leader can serve revoked sessions, lockout counts are \
+                     per node, and the audit chain can fork (docs/dev/CONSISTENCY.md G1-G9). \
+                     The supported deployment is one node: remove the `cluster:` section. To \
+                     run a cluster anyway, read docs/guides/clustering.md and set \
+                     `cluster.experimental_opt_in: true`"
+                .to_string(),
+        });
+    }
     if cluster
         .peer_address
         .parse::<std::net::SocketAddr>()
@@ -2475,7 +2490,8 @@ mod tests {
     /// names `addr`.
     fn peer_address_issues(addr: &str) -> Vec<ValidationIssue> {
         let yaml = format!(
-            "cluster:\n  node_id: 1\n  peer_address: \"{addr}\"\n  peers:\n    \
+            "cluster:\n  node_id: 1\n  experimental_opt_in: true\n  \
+             peer_address: \"{addr}\"\n  peers:\n    \
              - id: 2\n      address: \"hearth-2.internal:8421\"\n  \
              tls_cert_path: \"/etc/hearth/peer.crt\"\n  \
              tls_key_path: \"/etc/hearth/peer.key\"\n  \

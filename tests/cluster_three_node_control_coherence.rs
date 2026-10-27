@@ -262,6 +262,7 @@ impl LeaderOnly {
                 // brief windows between a leader write and follower apply.
                 read_lag_threshold_ms: Some(30_000),
                 write_timeout_ms: None,
+                experimental_opt_in: true,
             };
             let engine = Arc::new(
                 ClusterEngine::build_clustered(storage, &cluster_cfg, &storage_cfg)
@@ -978,6 +979,7 @@ async fn cold_cluster_nodes(
             tls_ca_cert_path: ca_path.clone(),
             read_lag_threshold_ms: Some(30_000),
             write_timeout_ms: None,
+            experimental_opt_in: true,
         };
         let engine = Arc::new(
             ClusterEngine::build_clustered(inner, &cluster_cfg, &storage_cfg)

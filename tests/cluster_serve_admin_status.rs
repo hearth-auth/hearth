@@ -255,7 +255,8 @@ fn write_config(dir: &Path, node: &NodeSpec, cluster: &[NodeSpec]) -> PathBuf {
              \x20 allowed_hosts: [\"auth.hearth.example\", \"localhost\"]\n\
              storage:\n  data_dir: \"{d}/data{id}\"\n\
              email:\n  transport: log\n  allow_log_transport_in_production: true\n\
-             cluster:\n  node_id: {id}\n  peer_address: \"127.0.0.1:{peer_port}\"\n\
+             cluster:\n  node_id: {id}\n  experimental_opt_in: true\n\
+             \x20 peer_address: \"127.0.0.1:{peer_port}\"\n\
              \x20 peers:\n{peers}\
              \x20 tls_cert_path: \"{d}/node.crt\"\n  tls_key_path: \"{d}/node.key\"\n\
              \x20 tls_ca_cert_path: \"{d}/ca.crt\"\n",

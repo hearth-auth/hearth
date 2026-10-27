@@ -279,6 +279,7 @@ fn serve_cluster_init_failure_is_fatal() {
     let cfg_yaml = r#"
 cluster:
   node_id: 1
+  experimental_opt_in: true
   peer_address: "127.0.0.1:19001"
   peers:
     - id: 2
@@ -356,7 +357,8 @@ fn serve_exits_when_the_peer_server_cannot_bind() {
         &cfg_path,
         format!(
             "server:\n  port: {http_port}\nstorage:\n  data_dir: \"{tls}/data\"\n\
-             cluster:\n  node_id: 1\n  peer_address: \"{peer_address}\"\n  peers:\n    \
+             cluster:\n  node_id: 1\n  experimental_opt_in: true\n  \
+             peer_address: \"{peer_address}\"\n  peers:\n    \
              - id: 2\n      address: \"127.0.0.1:{peer_port}\"\n  \
              tls_cert_path: \"{tls}/node.crt\"\n  tls_key_path: \"{tls}/node.key\"\n  \
              tls_ca_cert_path: \"{tls}/ca.crt\"\n",

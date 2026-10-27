@@ -671,6 +671,7 @@ realms:
 # ============================================================================
 # cluster:
 #   node_id: 1
+#   experimental_opt_in: true            # required — cluster mode is experimental (#650)
 #   peer_address: "10.0.0.1:8421"
 #   peers:
 #     - { id: 2, address: "10.0.0.2:8421" }

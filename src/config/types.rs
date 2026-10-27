@@ -3919,6 +3919,14 @@ pub struct ClusterConfig {
     /// 26.58). Raise it on a cluster whose commits are legitimately slow.
     #[serde(default)]
     pub write_timeout_ms: Option<u64>,
+    /// Explicit opt-in to cluster mode, which is experimental (#650).
+    /// Validation refuses a `cluster:` section without
+    /// `experimental_opt_in: true`: a node cut off from the leader can serve
+    /// revoked sessions, lockout counts are per node, and the audit chain can
+    /// fork (docs/dev/CONSISTENCY.md G1–G9). The supported deployment is one
+    /// node. This rule goes away when cluster read fencing ships.
+    #[serde(default)]
+    pub experimental_opt_in: bool,
 }
 
 impl ClusterConfig {

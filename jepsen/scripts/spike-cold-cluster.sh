@@ -61,6 +61,7 @@ EOF
     {
       echo "cluster:"
       echo "  node_id: ${node#n}"
+      echo "  experimental_opt_in: true"
       echo "  peer_address: \"127.0.0.1:$(peer_port "$node")\""
       echo "  peers:"
       for peer in "${nodes[@]}"; do

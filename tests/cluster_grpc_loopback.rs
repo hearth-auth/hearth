@@ -135,6 +135,7 @@ impl TestCluster {
                 // brief replication window after the writes burst.
                 read_lag_threshold_ms: Some(10_000),
                 write_timeout_ms,
+                experimental_opt_in: true,
             };
 
             let node_faults = PeerFaults::new();

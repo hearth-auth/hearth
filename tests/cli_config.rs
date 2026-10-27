@@ -354,7 +354,8 @@ fn validate_accepts_a_saml_idp_certificate_bundle() {
 /// `VALID_CONFIG` with a cluster section whose `peer_address` is `addr`.
 fn config_with_peer_address(addr: &str) -> String {
     format!(
-        "{VALID_CONFIG}cluster:\n  node_id: 1\n  peer_address: \"{addr}\"\n  peers:\n    \
+        "{VALID_CONFIG}cluster:\n  node_id: 1\n  experimental_opt_in: true\n  \
+         peer_address: \"{addr}\"\n  peers:\n    \
          - id: 2\n      address: \"hearth-2.internal:8421\"\n  \
          tls_cert_path: \"/etc/hearth/peer.crt\"\n  \
          tls_key_path: \"/etc/hearth/peer.key\"\n  \
