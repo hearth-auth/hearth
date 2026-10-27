@@ -7,7 +7,7 @@ namespace Hearth;
 use Hearth\Contracts\JwksClientInterface;
 use Hearth\Exceptions\JWKSFetchException;
 use Hearth\Exceptions\JwksKeyNotFoundException;
-use Hearth\Exceptions\NetworkException;
+use JsonException;
 use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestFactoryInterface;
 use Throwable;
@@ -57,8 +57,7 @@ final class JwksClient implements JwksClientInterface
      *
      * @return non-empty-string Raw 32-byte Ed25519 public key
      * @throws JwksKeyNotFoundException When the key is not found after a re-fetch
-     * @throws JWKSFetchException       When the JWKS response is invalid
-     * @throws NetworkException When the JWKS endpoint is unreachable
+     * @throws JWKSFetchException       When the JWKS endpoint is unreachable or its response is invalid
      */
     public function getKey(string $kid): string
     {
@@ -79,8 +78,8 @@ final class JwksClient implements JwksClientInterface
     /**
      * Forces a refresh of the JWKS cache, regardless of TTL.
      *
-     * @throws NetworkException When the endpoint is unreachable
-     * @throws JWKSFetchException    When the response is not valid JSON or lacks a `keys` array
+     * @throws JWKSFetchException When the endpoint is unreachable, answers with an error status,
+     *                            or returns a body that is not JSON or lacks a `keys` array
      */
     public function refresh(): void
     {
@@ -100,7 +99,14 @@ final class JwksClient implements JwksClientInterface
         return time() < $this->cache[$kid]['expiresAt'];
     }
 
-    /** Fetches the JWKS endpoint, parses OKP/Ed25519 keys, and updates the cache. */
+    /**
+     * Fetches the JWKS endpoint, parses OKP/Ed25519 keys, and updates the cache.
+     *
+     * Every failure is a JWKSFetchException; a transport or JSON error is kept as
+     * its previous exception.
+     *
+     * @throws JWKSFetchException
+     */
     private function fetch(): void
     {
         $request = $this->requestFactory->createRequest('GET', $this->jwksUri);
@@ -108,7 +114,7 @@ final class JwksClient implements JwksClientInterface
         try {
             $response = $this->httpClient->sendRequest($request);
         } catch (Throwable $e) {
-            throw new NetworkException($this->jwksUri, "Failed to fetch JWKS: {$e->getMessage()}", 0, $e);
+            throw new JWKSFetchException("Failed to fetch JWKS from {$this->jwksUri}: {$e->getMessage()}", 0, $e);
         }
 
         $status = $response->getStatusCode();
@@ -121,7 +127,11 @@ final class JwksClient implements JwksClientInterface
         $ttl = min($ttl, self::MAX_TTL_SECONDS);
 
         $body = (string) $response->getBody();
-        $data = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
+        try {
+            $data = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
+        } catch (JsonException $e) {
+            throw new JWKSFetchException('JWKS response is not valid JSON', 0, $e);
+        }
 
         if (!is_array($data) || !isset($data['keys']) || !is_array($data['keys'])) {
             throw new JWKSFetchException('JWKS response is missing the "keys" array');

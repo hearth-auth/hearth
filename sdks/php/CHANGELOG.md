@@ -32,6 +32,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   against a real server. Manage realms in `hearth.yaml` and restart Hearth to
   apply changes; read them with `getRealm()`/`listRealms()` (HEA-2171).
 
+### Fixed
+- **`checkDecision()` asks the decision endpoint and fails closed** (#635) — it posted to the
+  discovered OIDC `authorization_endpoint` instead of `POST /oauth/authorize`, and threw on a
+  network error or an error answer. It now posts `$params` (`permission`, optional
+  `organization_id` and `resource`) to `/oauth/authorize` with the token as a bearer credential,
+  and returns `['allowed' => false]` on any failure without throwing; only an explicit
+  `"allowed": true` allows. The endpoint reads the realm from `X-Realm-ID`: set the new
+  `realmId` named argument of `HearthClient` (Laravel: config key `realm_id`, env
+  `HEARTH_REALM_ID`). Without it the call throws `ConfigurationException` and sends nothing.
+- **JWKS fetch failures throw `JWKSFetchException`** (#635) — an unreachable JWKS endpoint threw
+  `NetworkException`, and a body that is not JSON a raw `JsonException`. Both now throw
+  `JWKSFetchException`, with the original error as `getPrevious()`.
+
 ### Changed
 
 - **§5 error taxonomy** — renamed exceptions to match the SDK Common Specification (HEA-963):

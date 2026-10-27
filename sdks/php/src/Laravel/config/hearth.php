@@ -87,6 +87,17 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Realm ID
+    |--------------------------------------------------------------------------
+    |
+    | UUID of the realm. Hearth::checkDecision() sends it as X-Realm-ID to the
+    | decision endpoint (POST /oauth/authorize) and throws without it.
+    |
+    */
+    'realm_id' => env('HEARTH_REALM_ID'),
+
+    /*
+    |--------------------------------------------------------------------------
     | Require Authentication
     |--------------------------------------------------------------------------
     |

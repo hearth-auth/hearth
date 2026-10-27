@@ -97,9 +97,14 @@ export class JwksClient {
       return this._cache.keySet;
     }
     const keys = await this.fetchKeys();
-    const keySet = createLocalJWKSet({
-      keys: keys as Parameters<typeof createLocalJWKSet>[0]["keys"],
-    });
+    let keySet: ReturnType<typeof createLocalJWKSet>;
+    try {
+      keySet = createLocalJWKSet({
+        keys: keys as Parameters<typeof createLocalJWKSet>[0]["keys"],
+      });
+    } catch (err) {
+      throw new JWKSFetchError("JWKS response is not a valid key set", err);
+    }
     this._cache = { keySet: keySet as JwkKeyResolver, fetchedAt: now };
     return keySet as JwkKeyResolver;
   }
@@ -125,7 +130,8 @@ export class JwksClient {
    * @throws {@link TokenInvalidError} when the signature or structure is invalid.
    * @throws {@link TokenIssuerError} when the issuer does not match.
    * @throws {@link TokenAudienceError} when the audience does not match.
-   * @throws {@link JWKSFetchError} when the JWKS endpoint cannot be reached.
+   * @throws {@link JWKSFetchError} when the JWKS endpoint cannot be reached, answers
+   *   with an error status, or returns an invalid document (never for an unknown `kid`).
    * @throws {@link ConfigurationError} when no expected issuer is configured.
    */
   async verify(token: string, options?: VerifyOptions): Promise<Claims> {
@@ -236,15 +242,35 @@ export class JwksClient {
     throw new TokenInvalidError("Unknown token verification error");
   }
 
-  /** Fetch the current JWKS keys from the endpoint. */
+  /**
+   * Fetch the current JWKS keys from the endpoint.
+   *
+   * @throws {@link JWKSFetchError} when the endpoint is unreachable or times
+   * out, answers with an error status, or returns a body that is not a JWKS
+   * document. A network or parse failure is kept as the error's `cause`.
+   */
   async fetchKeys(): Promise<JsonWebKey[]> {
-    const resp = await fetch(this.jwksUri, {
-      signal: AbortSignal.timeout(this.httpTimeout),
-    });
+    let resp: Response;
+    try {
+      resp = await fetch(this.jwksUri, {
+        signal: AbortSignal.timeout(this.httpTimeout),
+      });
+    } catch (err) {
+      throw new JWKSFetchError(`JWKS endpoint unreachable: ${this.jwksUri}`, err);
+    }
     if (!resp.ok) {
       throw new JWKSFetchError(`JWKS fetch failed with HTTP ${resp.status}`);
     }
-    const doc = (await resp.json()) as { keys: JsonWebKey[] };
-    return doc.keys;
+    let doc: unknown;
+    try {
+      doc = await resp.json();
+    } catch (err) {
+      throw new JWKSFetchError("JWKS response is not valid JSON", err);
+    }
+    const keys = (doc as { keys?: unknown } | null)?.keys;
+    if (!Array.isArray(keys)) {
+      throw new JWKSFetchError('JWKS response is missing the "keys" array');
+    }
+    return keys as JsonWebKey[];
   }
 }

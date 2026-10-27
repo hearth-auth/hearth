@@ -57,6 +57,7 @@ All keys map directly to `config/hearth.php`:
 | `HEARTH_JWKS_TTL` | `jwks_ttl` | `300` | JWKS key cache lifetime in seconds |
 | `HEARTH_REQUIRE_AUTH` | `require_auth` | `true` | Return 401 when no Bearer token is present |
 | `HEARTH_TOKEN_AUTHORIZATION_MODE` | `token_authorization_mode` | `"embedded"` | Token validation strategy |
+| `HEARTH_REALM_ID` | `realm_id` | `null` | Realm UUID, sent as `X-Realm-ID` by `checkDecision()`. Required for decision mode |
 
 ## Protect routes
 

@@ -63,6 +63,8 @@ final class HearthClient
      *                                           Default `hearth`, the audience Hearth mints when a
      *                                           client names no resource; an API registered as a
      *                                           protected resource sets its resource URI. Always checked.
+     * @param string|null $realmId                 UUID of the realm, sent as `X-Realm-ID` by
+     *                                           `checkDecision()`. Required for that call only.
      *
      * @throws ConfigurationException When a required config combination is missing
      */
@@ -78,6 +80,7 @@ final class HearthClient
         ?RequestFactoryInterface $requestFactory = null,
         ?StreamFactoryInterface $streamFactory = null,
         private readonly string $audience = TokenVerifier::DEFAULT_AUDIENCE,
+        private readonly ?string $realmId = null,
     ) {
         $this->validateConfiguration();
 
@@ -592,26 +595,54 @@ final class HearthClient
     // =========================================================================
 
     /**
-     * Sends a per-request authorization decision check to the server (§3.5 Decision mode).
+     * Asks Hearth for a live, per-request permission decision (§3.5 Decision mode).
      *
      * Resource servers configured with `access_token_authorization = "decision"` MUST call
      * this method before accepting the token for any access-controlled operation.
      *
-     * The authorization endpoint is discovered from the OIDC discovery document.
+     * Posts `$params` to the decision endpoint `POST {base}/oauth/authorize`, with the token
+     * as a bearer credential and the configured `realmId` in `X-Realm-ID`. Fails closed: a
+     * network error, a non-200 answer, or an answer without `"allowed": true` returns
+     * `['allowed' => false]`; nothing is thrown.
      *
      * @param string               $accessToken Bearer token to authorize.
-     * @param array<string, mixed> $params      Decision parameters (resource, action, etc.).
+     * @param array<string, mixed> $params      `permission`, and optionally `organization_id`
+     *                                          and `resource` (RFC 8707).
      *
-     * @return array<string, mixed> Server decision payload.
+     * @return array{allowed: bool} The decision.
      *
-     * @throws NetworkException  When the authorization endpoint is unreachable.
-     * @throws \RuntimeException On non-2xx response.
+     * @throws ConfigurationException When the client has no `realmId`; no request is sent.
      */
     public function checkDecision(string $accessToken, array $params): array
     {
-        $endpoint = $this->discoverEndpoint('authorization_endpoint');
+        if ($this->realmId === null || $this->realmId === '') {
+            throw new ConfigurationException(
+                'checkDecision() requires realmId: the decision endpoint reads the realm from X-Realm-ID',
+            );
+        }
 
-        return $this->postJson($endpoint, $params, $accessToken);
+        try {
+            $body    = json_encode((object) $params, JSON_THROW_ON_ERROR);
+            $request = $this->requestFactory
+                ->createRequest('POST', $this->extractBaseUrl() . '/oauth/authorize')
+                ->withHeader('Content-Type', 'application/json')
+                ->withHeader('Accept', 'application/json')
+                ->withHeader('X-Realm-ID', $this->realmId)
+                ->withHeader('Authorization', "Bearer {$accessToken}")
+                ->withBody($this->streamFactory->createStream($body));
+
+            $response = $this->httpClient->sendRequest($request);
+            if ($response->getStatusCode() !== 200) {
+                return ['allowed' => false];
+            }
+
+            $data = json_decode((string) $response->getBody(), true, 512, JSON_THROW_ON_ERROR);
+        } catch (Throwable) {
+            // Fail closed: no error may turn into an allow, or escape as an exception.
+            return ['allowed' => false];
+        }
+
+        return ['allowed' => is_array($data) && ($data['allowed'] ?? null) === true];
     }
 
     // =========================================================================

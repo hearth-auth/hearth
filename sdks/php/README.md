@@ -234,6 +234,7 @@ HEARTH_CLIENT_SECRET=          # only required for introspection mode
 HEARTH_JWKS_TTL=300            # seconds; omit to use SDK default (300)
 HEARTH_HTTP_TIMEOUT=10
 HEARTH_TOKEN_AUTHORIZATION_MODE=embedded   # embedded | introspection | decision
+HEARTH_REALM_ID=               # realm UUID; required by Hearth::checkDecision() (decision mode)
 HEARTH_REQUIRE_AUTH=true
 ```
 

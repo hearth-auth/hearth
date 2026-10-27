@@ -9,8 +9,8 @@ use Throwable;
 /**
  * Thrown when an HTTP request to a Hearth endpoint fails.
  *
- * Covers OIDC discovery failures, JWKS fetch failures, and any
- * transport-level error (connection refused, timeout, DNS failure).
+ * Covers OIDC discovery failures and any transport-level error (connection
+ * refused, timeout, DNS failure). A JWKS fetch failure is a JWKSFetchException.
  */
 class NetworkException extends HearthException
 {
