@@ -24,6 +24,7 @@ use hearth::identity::{
 use hearth::protocol::web::{self, CookieSecret, WebState};
 use hearth::rbac::{AssignRoleRequest, EmbeddedRbacEngine, RbacEngine, Scope, Subject};
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
+use hearth::webhook::{CreateWebhookRequest, EmbeddedWebhookEngine, WebhookEngine, WebhookQuery};
 use tower::ServiceExt;
 
 const COOKIE_SECRET: [u8; 32] = [11u8; 32];
@@ -56,6 +57,9 @@ struct Rig {
     /// Tenant realm ID — needed when seeding audit rows scoped to the
     /// tenant rather than the system realm.
     tenant_realm_id: RealmId,
+    /// The webhook store that the REST API and the webhook dispatcher use,
+    /// on the same storage as the UI.
+    webhook: Arc<dyn WebhookEngine>,
 }
 
 #[allow(clippy::too_many_lines)] // TODO: split this function
@@ -159,6 +163,11 @@ fn build_rig() -> Rig {
         })
         .expect("audit event");
 
+    let webhook = Arc::new(EmbeddedWebhookEngine::new(
+        Arc::clone(&storage) as Arc<dyn StorageEngine>,
+        Arc::clone(&clock),
+    )) as Arc<dyn WebhookEngine>;
+
     let onboarding = Arc::new(OnboardingService::new(
         Arc::clone(&identity),
         Arc::clone(&rbac),
@@ -184,6 +193,7 @@ fn build_rig() -> Rig {
         identity: Arc::clone(&identity),
         audit: Arc::clone(&audit),
         tenant_realm_id: tenant.id().clone(),
+        webhook,
     }
 }
 
@@ -439,6 +449,103 @@ async fn webhook_create_and_delete_lifecycle() {
     // Extract webhook id from the identity engine directly via the test.
     // (We can't easily parse HTML here, so we skip the delete step — the
     // create redirect is sufficient to prove the handler works end-to-end.)
+}
+
+/// A webhook made in the admin UI must be in the store that the webhook
+/// dispatcher reads, with the events the operator chose (#617). The UI
+/// saved it under the identity engine's `wh:id:` keys, which nothing
+/// delivers from. The form names are the A-7 event types
+/// (`abuse-prevention` spec): `security.login_failed` is the audit action
+/// `LoginFailed`.
+#[tokio::test]
+async fn a_webhook_created_in_the_ui_is_one_the_dispatcher_delivers_to() {
+    let rig = build_rig();
+    let csrf = "csrf-dispatch";
+    let cookie = admin_cookie(&rig, csrf);
+    let realm = &rig.tenant_realm_name;
+
+    // An IP literal: the URL check needs no DNS lookup. Nothing is sent.
+    let body = format!(
+        "url=https%3A%2F%2F1.1.1.1%2Fhearth-events&secret=a-signing-secret-of-32-bytes-xx\
+         &events=security.login_failed&events=security.abuse_detected&enabled=on&_csrf={csrf}"
+    );
+    let resp = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/ui/admin/realms/{realm}/webhooks/new"))
+                .header(header::COOKIE, &cookie)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .expect("test invariant"),
+        )
+        .await
+        .expect("test invariant");
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    let subscriptions = rig
+        .webhook
+        .list(&WebhookQuery {
+            realm_id: rig.tenant_realm_id.clone(),
+            enabled_only: true,
+        })
+        .expect("list subscriptions");
+    assert_eq!(
+        subscriptions.len(),
+        1,
+        "the dispatcher sees no subscription for the webhook made in the UI"
+    );
+    let subscription = &subscriptions[0];
+    assert_eq!(subscription.url, "https://1.1.1.1/hearth-events");
+    assert!(subscription.matches(&AuditAction::LoginFailed));
+    assert!(subscription.matches(&AuditAction::AbuseDetected));
+    assert!(
+        !subscription.matches(&AuditAction::UserCreated),
+        "the subscription must keep the events the operator chose"
+    );
+}
+
+/// The admin UI lists the webhooks that the REST API made, because both
+/// use one store (#617).
+#[tokio::test]
+async fn the_ui_lists_a_webhook_made_through_the_rest_api() {
+    let rig = build_rig();
+    let csrf = "csrf-rest-made";
+    let cookie = admin_cookie(&rig, csrf);
+    let realm = &rig.tenant_realm_name;
+    rig.webhook
+        .create(&CreateWebhookRequest {
+            realm_id: rig.tenant_realm_id.clone(),
+            url: "https://siem.example/hearth-rest-made".to_string(),
+            secret: "a-signing-secret-of-32-bytes-xx".to_string(),
+            enabled: true,
+            event_filters: vec![AuditAction::LoginFailed],
+        })
+        .expect("create subscription");
+
+    let resp = rig
+        .app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/ui/admin/realms/{realm}/webhooks"))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .expect("test invariant"),
+        )
+        .await
+        .expect("test invariant");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("test invariant");
+    let html = String::from_utf8_lossy(&bytes);
+    assert!(
+        html.contains("https://siem.example/hearth-rest-made"),
+        "the UI does not list the webhook that the REST API made"
+    );
 }
 
 /// Submitting the create form with a blank URL re-renders the form with
