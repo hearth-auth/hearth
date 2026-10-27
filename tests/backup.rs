@@ -2376,50 +2376,49 @@ async fn restore_carries_identity_providers_and_their_federation_links() {
     assert_eq!(report.federation_links.created, 1);
 }
 
-/// Silent loss of an integration nobody notices until it is needed. The
-/// signing secret has to come back too, or every delivery after the restore
-/// fails the receiver's signature check.
+/// The webhook subscriptions that the dispatcher delivers to — made through
+/// `/admin/webhooks` or the admin UI — survive a restore, with their signing
+/// secret (#654). Backups exported the identity engine's webhook store, which
+/// the dispatcher never read (#617), so every working webhook was lost.
 #[tokio::test]
-async fn restore_carries_webhooks_with_their_signing_secret() {
+async fn restore_carries_webhook_subscriptions_with_their_signing_secret() {
+    use hearth::audit::AuditAction;
+    use hearth::webhook::CreateWebhookRequest;
+
     let src = common::TestHarness::in_process()
         .await
         .expect("src harness");
     let (realm, _email, _password) = seeded_realm(&src);
     let created = src
-        .identity()
-        .create_webhook(
-            &realm,
-            &hearth::identity::CreateWebhookRequest {
-                url: "https://ops.example/hearth-events".to_string(),
-                secret: Some("hmac-signing-secret-value".to_string()),
-                events: vec!["user.created".to_string(), "user.deleted".to_string()],
-                enabled: true,
-            },
-        )
-        .expect("create webhook");
+        .webhooks_arc()
+        .create(&CreateWebhookRequest {
+            realm_id: realm.clone(),
+            url: "https://ops.example/hearth-events".to_string(),
+            secret: "hmac-signing-secret-value".to_string(),
+            enabled: true,
+            event_filters: vec![AuditAction::LoginFailed, AuditAction::AbuseDetected],
+        })
+        .expect("create subscription");
 
     let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
     let slug = realm_slug(&src, &realm);
     let dst = common::TestHarness::in_process()
         .await
         .expect("dst harness");
-    let (restored_realm, report) = restore_into(&dst, &tmp, &slug);
+    let (restored_realm, _report) = restore_into(&dst, &tmp, &slug);
 
     let restored = dst
-        .identity()
-        .get_webhook(&restored_realm, created.id())
-        .expect("get webhook")
-        .expect("the webhook must survive the restore");
+        .webhooks_arc()
+        .get(&restored_realm, &created.id)
+        .expect("the subscription must survive the restore");
     assert_eq!(restored.url, created.url);
-    assert_eq!(restored.events, created.events);
+    assert_eq!(restored.event_filters, created.event_filters);
     assert!(restored.enabled);
     assert_eq!(
-        restored.secret.as_deref(),
-        Some("hmac-signing-secret-value"),
+        restored.secret, "hmac-signing-secret-value",
         "the HMAC signing secret must round-trip or every delivery after the restore fails the \
          receiver's signature check"
     );
-    assert_eq!(report.webhooks.created, 1);
 }
 
 /// The per-realm SAML RSA key, whose certificate the SP metadata publishes to
