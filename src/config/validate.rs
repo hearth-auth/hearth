@@ -1186,10 +1186,25 @@ fn validate_cidr_policies(
 /// address and a port. A host name used to pass here; the peer server then
 /// stopped at start-up while the node went on serving, and no cluster formed.
 /// A peer's `address` is dialled, not bound, so a host name is valid there.
+///
+/// Cluster mode is experimental, so the section also needs
+/// `experimental_opt_in: true` (#650).
 fn validate_cluster_all(cluster: Option<&ClusterConfig>, issues: &mut Vec<ValidationIssue>) {
     let Some(cluster) = cluster else {
         return;
     };
+    if !cluster.experimental_opt_in {
+        issues.push(ValidationIssue {
+            field: "cluster.experimental_opt_in".to_string(),
+            reason: "cluster mode is experimental and not supported in production: a node \
+                     cut off from the leader can serve revoked sessions, lockout counts are \
+                     per node, and the audit chain can fork (docs/dev/CONSISTENCY.md G1-G9). \
+                     The supported deployment is one node: remove the `cluster:` section. To \
+                     run a cluster anyway, read docs/guides/clustering.md and set \
+                     `cluster.experimental_opt_in: true`"
+                .to_string(),
+        });
+    }
     if cluster
         .peer_address
         .parse::<std::net::SocketAddr>()
@@ -2475,7 +2490,8 @@ mod tests {
     /// names `addr`.
     fn peer_address_issues(addr: &str) -> Vec<ValidationIssue> {
         let yaml = format!(
-            "cluster:\n  node_id: 1\n  peer_address: \"{addr}\"\n  peers:\n    \
+            "cluster:\n  node_id: 1\n  experimental_opt_in: true\n  \
+             peer_address: \"{addr}\"\n  peers:\n    \
              - id: 2\n      address: \"hearth-2.internal:8421\"\n  \
              tls_cert_path: \"/etc/hearth/peer.crt\"\n  \
              tls_key_path: \"/etc/hearth/peer.key\"\n  \
@@ -2487,6 +2503,44 @@ mod tests {
             .into_iter()
             .filter(|i| i.field.starts_with("cluster."))
             .collect()
+    }
+
+    /// The `cluster.experimental_opt_in` issues of a valid cluster section
+    /// with `extra` lines added to it.
+    fn cluster_opt_in_issues(extra: &str) -> Vec<ValidationIssue> {
+        let yaml = format!(
+            "cluster:\n  node_id: 1\n{extra}  peer_address: \"10.0.0.1:8421\"\n  peers:\n    \
+             - id: 2\n      address: \"hearth-2.internal:8421\"\n  \
+             tls_cert_path: \"/etc/hearth/peer.crt\"\n  \
+             tls_key_path: \"/etc/hearth/peer.key\"\n  \
+             tls_ca_cert_path: \"/etc/hearth/ca.crt\"\n"
+        );
+        let config = Config::from_yaml_str_unchecked(&yaml).expect("parses");
+        config
+            .validate_all()
+            .into_iter()
+            .filter(|i| i.field == "cluster.experimental_opt_in")
+            .collect()
+    }
+
+    /// Cluster mode is experimental (docs/dev/CONSISTENCY.md G1–G9): a node
+    /// cut off from the leader serves revoked sessions, lockout counts are per
+    /// node, and the audit chain can fork. A `cluster:` section used to start
+    /// with only a warning, so an operator could run it in production without
+    /// knowing. It now needs `experimental_opt_in: true` (#650).
+    #[test]
+    fn a_cluster_without_the_experimental_opt_in_is_refused() {
+        for extra in ["", "  experimental_opt_in: false\n"] {
+            let issues = cluster_opt_in_issues(extra);
+            assert_eq!(issues.len(), 1, "{extra:?} must be refused: {issues:?}");
+            let reason = &issues[0].reason;
+            assert!(
+                reason.contains("experimental") && reason.contains("docs/guides/clustering.md"),
+                "the reason says why and where to read: {reason}"
+            );
+        }
+        let issues = cluster_opt_in_issues("  experimental_opt_in: true\n");
+        assert!(issues.is_empty(), "the opt-in is accepted: {issues:?}");
     }
 
     /// The peer server binds `cluster.peer_address`, so it must be an IP

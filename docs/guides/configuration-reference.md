@@ -253,6 +253,7 @@ When present, Hearth starts a Raft engine and participates in peer-to-peer log r
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `node_id` | integer | — | **Required.** This node's numeric ID. Must be unique across the cluster. Typically `1`, `2`, `3`, … |
+| `experimental_opt_in` | bool | `false` | **Required as `true`.** Cluster mode is experimental, and startup refuses a `cluster:` section without `experimental_opt_in: true`. A node cut off from the leader can serve revoked sessions, lockout counts are per node, and the audit chain can fork ([CONSISTENCY.md](../dev/CONSISTENCY.md) G1–G9). The supported deployment is one node. |
 | `peer_address` | string | `"127.0.0.1:8421"` | IP address and port this node listens on for inbound Raft RPCs from peers, for example `10.0.0.1:8421` or `[fd00::1]:8421`. The node binds it, so a host name is refused. Use a routable address in production (not loopback). |
 | `peers` | list | `[]` | Known cluster peers. Each entry has `id` (integer) and `address` (string `host:port`). List all nodes except this one. **This list is fixed at bootstrap and cannot be changed without a full-cluster restart.** |
 | `tls_cert_path` | path | — | **Required.** Path to this node's PEM certificate (presented to peers during mTLS). |
@@ -264,6 +265,7 @@ When present, Hearth starts a Raft engine and participates in peer-to-peer log r
 ```yaml
 cluster:
   node_id: 1
+  experimental_opt_in: true    # required — cluster mode is experimental
   peer_address: "10.0.0.1:8421"
   peers:
     - id: 2

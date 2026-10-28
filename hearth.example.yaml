@@ -907,6 +907,7 @@ onboarding:
 #
 # cluster:
 #   node_id: 1                           # unique integer per node (1, 2, 3, …)
+#   experimental_opt_in: true            # required — cluster mode is experimental (#650)
 #   peer_address: "10.0.0.1:8421"        # this node's inbound Raft RPC address
 #                                        # an IP and port, not a host name (it is bound)
 #                                        # default: "127.0.0.1:8421"

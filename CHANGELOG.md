@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Changed
+- **Cluster mode needs an explicit opt-in** (#650): cluster mode is experimental, and a node cut
+  off from the leader can serve revoked sessions, lockout counts are per node, and the audit
+  chain can fork. It used to start with only a warning. Startup and `hearth config validate` now
+  refuse a `cluster:` section without `experimental_opt_in: true`, and the error names the key.
+  **Breaking for cluster operators:** add `experimental_opt_in: true` to the `cluster:` section of
+  each node before you upgrade. Single-node deployments are not affected, and one node is the
+  supported deployment.
+
 ### Fixed
 - **The purged-log startup refusal no longer tells operators to start a cluster node empty**
   (#670): the message said to move the node's data directory aside and start it empty under its

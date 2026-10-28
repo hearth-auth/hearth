@@ -7497,6 +7497,7 @@ mod tests {
             tls_ca_cert_path: std::path::PathBuf::from("/etc/hearth/ca.crt"),
             read_lag_threshold_ms: None,
             write_timeout_ms: None,
+            experimental_opt_in: true,
         }
     }
 

@@ -100,6 +100,7 @@ impl ThreeNodes {
                 // monitor during the brief window between commit and apply.
                 read_lag_threshold_ms: Some(30_000),
                 write_timeout_ms: None,
+                experimental_opt_in: true,
             };
             let faults = PeerFaults::new();
             let cluster = Arc::new(

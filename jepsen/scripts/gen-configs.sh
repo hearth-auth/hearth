@@ -115,6 +115,7 @@ for node in "${nodes[@]}"; do
     common "$node" "$root/data"
     echo "cluster:"
     echo "  node_id: ${node#n}"
+    echo "  experimental_opt_in: true"
     echo "  peer_address: \"$(peer_addr "$node")\""
     echo "  peers:"
     for peer in "${nodes[@]}"; do

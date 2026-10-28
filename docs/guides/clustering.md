@@ -346,6 +346,9 @@ storage:
 
 cluster:
   node_id: 1
+  # REQUIRED: cluster mode is experimental, and startup refuses a `cluster:`
+  # section without this line (#650).
+  experimental_opt_in: true
   peer_address: "10.0.0.1:8421"
   peers:
     - id: 2
