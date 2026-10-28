@@ -65,6 +65,7 @@ final class HearthServiceProvider extends ServiceProvider
                 audience: isset($config['audience']) && $config['audience'] !== ''
                     ? (string) $config['audience']
                     : TokenVerifier::DEFAULT_AUDIENCE,
+                realmId: isset($config['realm_id']) ? (string) $config['realm_id'] : null,
             );
         });
 

@@ -102,4 +102,32 @@ final class HearthServiceProviderTest extends TestCase
     {
         $this->assertInstanceOf(HearthClient::class, Hearth::getFacadeRoot());
     }
+
+    /**
+     * Regression #635: the decision check needs the realm for `X-Realm-ID`, so
+     * `hearth.realm_id` must reach the client. Without it checkDecision()
+     * throws ConfigurationException; with it, a refused request is a deny.
+     */
+    public function testHearth_realmIdConfigReachesTheDecisionCheck(): void
+    {
+        // A loopback port nothing listens on: no external network call.
+        $this->app['config']->set('hearth.issuer_url', 'http://127.0.0.1:' . self::closedLocalPort());
+        $this->app['config']->set('hearth.realm_id', '0b5f6c2e-8a3d-4f1b-9c7e-2d4a6b8c0e1f');
+
+        /** @var HearthClient $client */
+        $client = $this->app->make('hearth');
+
+        $this->assertSame(['allowed' => false], $client->checkDecision('access-token', ['permission' => 'docs.edit']));
+    }
+
+    /** A loopback TCP port that nothing listens on: a connection to it is refused at once. */
+    private static function closedLocalPort(): int
+    {
+        $server = stream_socket_server('tcp://127.0.0.1:0');
+        self::assertNotFalse($server);
+        $name = (string) stream_socket_get_name($server, false);
+        fclose($server);
+
+        return (int) substr($name, (int) strrpos($name, ':') + 1);
+    }
 }

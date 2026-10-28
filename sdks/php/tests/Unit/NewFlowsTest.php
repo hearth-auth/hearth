@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace Hearth\Tests\Unit;
 
+use GuzzleHttp\Exception\ConnectException;
 use GuzzleHttp\Psr7\HttpFactory;
 use GuzzleHttp\Psr7\Response;
+use Hearth\Exceptions\ConfigurationException;
 use Hearth\Exceptions\RateLimitException;
 use Hearth\Exceptions\TokenExpiredException;
 use Hearth\HearthClient;
@@ -16,6 +18,7 @@ use Hearth\Types\PermissionsResponse;
 use Hearth\Types\PkceChallenge;
 use Hearth\Types\TokenResponse;
 use Hearth\Types\WebAuthnOptions;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestInterface;
@@ -501,20 +504,99 @@ final class NewFlowsTest extends TestCase
     }
 
     // -------------------------------------------------------------------------
-    // Decision-mode check
+    // Decision-mode check: POST /oauth/authorize, fail closed (regression #635)
     // -------------------------------------------------------------------------
 
-    public function testCheckDecisionReturnsAuthorizationResult(): void
+    private const REALM_ID = '0b5f6c2e-8a3d-4f1b-9c7e-2d4a6b8c0e1f';
+
+    /** A client that names its realm. No discovery answer is queued: the decision check reads none. */
+    private function makeDecisionClient(ClientInterface $http): HearthClient
     {
-        $client = $this->makeClient([
-            $this->discoveryResponse(),
-            new Response(200, ['Content-Type' => 'application/json'], json_encode(['allowed' => true])),
+        $factory = new HttpFactory();
+
+        return new HearthClient(
+            issuerUrl:      'https://auth.example.com/realms/test',
+            httpClient:     $http,
+            requestFactory: $factory,
+            streamFactory:  $factory,
+            realmId:        self::REALM_ID,
+        );
+    }
+
+    public function testCheckDecisionPostsToTheDecisionEndpoint(): void
+    {
+        $mock = new CapturingMockClient([
+            new Response(200, ['Content-Type' => 'application/json'], '{"allowed":true}'),
         ]);
 
-        $result = $client->checkDecision('access-token', ['resource' => '/api/posts', 'action' => 'read']);
+        $result = $this->makeDecisionClient($mock)
+            ->checkDecision('access-token', ['permission' => 'docs.edit', 'organization_id' => 'org_1']);
 
-        self::assertArrayHasKey('allowed', $result);
-        self::assertTrue($result['allowed']);
+        self::assertSame(['allowed' => true], $result);
+        self::assertCount(1, $mock->requests, 'one request, and no discovery fetch');
+        $req = $mock->requests[0];
+        self::assertSame('POST', $req->getMethod());
+        self::assertSame('https://auth.example.com/oauth/authorize', (string) $req->getUri());
+        self::assertSame('Bearer access-token', $req->getHeaderLine('Authorization'));
+        self::assertSame(self::REALM_ID, $req->getHeaderLine('X-Realm-ID'));
+        self::assertSame('application/json', $req->getHeaderLine('Content-Type'));
+        self::assertSame(
+            ['permission' => 'docs.edit', 'organization_id' => 'org_1'],
+            json_decode((string) $req->getBody(), true),
+        );
+    }
+
+    /** @return iterable<string, array{ResponseInterface}> */
+    public static function answersThatDeny(): iterable
+    {
+        yield 'server error'        => [new Response(500, [], '{"error":"internal"}')];
+        yield 'bad request'         => [new Response(400, [], '{"error":"permission field required"}')];
+        yield 'missing realm'       => [new Response(400, [], '{"error":"missing X-Realm-ID header"}')];
+        yield 'not JSON'            => [new Response(200, [], '<html>Bad gateway</html>')];
+        yield 'no decision'         => [new Response(200, [], '{}')];
+        yield 'non-boolean allowed' => [new Response(200, [], '{"allowed":"true"}')];
+        yield 'denied'              => [new Response(200, [], '{"allowed":false}')];
+    }
+
+    #[DataProvider('answersThatDeny')]
+    public function testCheckDecisionFailsClosedWithoutThrowing(ResponseInterface $answer): void
+    {
+        $client = $this->makeDecisionClient(new SequentialMockClient([$answer]));
+
+        self::assertSame(['allowed' => false], $client->checkDecision('access-token', ['permission' => 'docs.edit']));
+    }
+
+    public function testCheckDecisionDeniesWhenTheEndpointIsUnreachable(): void
+    {
+        $http = new class implements ClientInterface {
+            public function sendRequest(RequestInterface $request): ResponseInterface
+            {
+                throw new ConnectException('Connection refused', $request);
+            }
+        };
+
+        $result = $this->makeDecisionClient($http)->checkDecision('access-token', ['permission' => 'docs.edit']);
+
+        self::assertSame(['allowed' => false], $result);
+    }
+
+    public function testCheckDecisionWithoutARealmIdThrowsConfigurationExceptionBeforeSending(): void
+    {
+        $mock    = new CapturingMockClient([]);
+        $factory = new HttpFactory();
+        $client  = new HearthClient(
+            'https://auth.example.com/realms/test',
+            httpClient: $mock,
+            requestFactory: $factory,
+            streamFactory: $factory,
+        );
+
+        try {
+            $client->checkDecision('access-token', ['permission' => 'docs.edit']);
+            self::fail('checkDecision() ran without a realm to send in X-Realm-ID');
+        } catch (ConfigurationException) {
+            self::assertSame([], $mock->requests);
+        }
     }
 
     // -------------------------------------------------------------------------

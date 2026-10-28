@@ -52,6 +52,13 @@ All notable changes to `@hearth-auth/browser` and `@hearth-auth/node` are docume
   and restart Hearth to apply changes; read them with `getRealm`/`listRealms`
   (HEA-2171).
 
+### Fixed
+- **JWKS fetch failures throw `JWKSFetchError`** (#635) — a refused connection or a timeout
+  surfaced as the raw `fetch` error, a body that is not JSON as a `SyntaxError`, and a
+  document without a `keys` array as a `jose` error. `JwksClient.verify()` and
+  `HearthClient.verifyToken()` now throw `JWKSFetchError` for each, with the original error
+  as its `cause`.
+
 ### Changed
 - SDK brought into conformance with the [Hearth SDK Common Specification](../../openspec/specs/sdk-support-contract/spec.md).
 - All 9 required error types from spec §5 are now exported.
