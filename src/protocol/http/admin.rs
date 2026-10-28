@@ -5302,6 +5302,12 @@ async fn admin_backup_create(
     if let Err(e) = require_system_backup_superuser(&auth) {
         return e.into_response();
     }
+    // #654: an archive without the webhook subscriptions loses every working
+    // webhook on restore, so a server without the webhook engine refuses.
+    let webhooks = match require_webhook_engine(&state) {
+        Ok(w) => w,
+        Err(e) => return e.into_response(),
+    };
 
     // A-30: per-export rate limit (10/hour per user).
     if let Err(e) = check_export_rate_limit(&state, &auth.user_id) {
@@ -5362,6 +5368,7 @@ async fn admin_backup_create(
             Arc::clone(&identity),
             Arc::clone(&audit_engine),
             Arc::clone(&rbac),
+            webhooks,
         );
         let dek = BackupExporter::generate_dek().map_err(|e| format!("generate_dek: {e}"))?;
         let opts = ExportOptions {
@@ -5532,6 +5539,12 @@ async fn admin_backup_restore(
     if let Err(e) = require_restore_superuser(&auth) {
         return e.into_response();
     }
+    // #654: the restore writes the webhook subscriptions through the engine
+    // that the dispatcher reads; without it they would be dropped.
+    let webhooks = match require_webhook_engine(&state) {
+        Ok(w) => w,
+        Err(e) => return e.into_response(),
+    };
 
     // SEC-14: per-user rate limit shared with export operations (A-30).
     if let Err(e) = check_export_rate_limit(&state, &auth.user_id) {
@@ -5708,7 +5721,7 @@ async fn admin_backup_restore(
             )
         })?;
 
-        let importer = BackupImporter::new(identity, rbac, import_audit);
+        let importer = BackupImporter::new(identity, rbac, import_audit, webhooks);
         let dek_passphrase: Option<secrecy::SecretString> = if reader.manifest.sections_encrypted {
             let mk = std::env::var("HEARTH_MASTER_KEY").map_err(|_| {
                 (

@@ -1,7 +1,7 @@
 //! Backup export engine — [`BackupExporter`].
 //!
-//! Walks all realm entities through the identity, audit, and RBAC engine
-//! interfaces and serialises them to NDJSON streams inside a
+//! Walks all realm entities through the identity, audit, RBAC and webhook
+//! engine interfaces and serialises them to NDJSON streams inside a
 //! [`BackupArchive`](super::BackupArchive).
 //!
 //! # Usage
@@ -14,16 +14,18 @@
 //! use hearth::identity::IdentityEngine;
 //! use hearth::audit::AuditEngine;
 //! use hearth::rbac::RbacEngine;
+//! use hearth::webhook::WebhookEngine;
 //!
 //! fn run(
 //!     identity: Arc<dyn IdentityEngine>,
 //!     audit: Arc<dyn AuditEngine>,
 //!     rbac: Arc<dyn RbacEngine>,
+//!     webhooks: Arc<dyn WebhookEngine>,
 //!     realm_id: &RealmId,
 //! ) {
 //!     let path = Path::new("backup.hearth-backup");
 //!     let mut writer = BackupArchive::create(path).unwrap();
-//!     let exporter = BackupExporter::new(identity, audit, rbac);
+//!     let exporter = BackupExporter::new(identity, audit, rbac, webhooks);
 //!     let dek = BackupExporter::generate_dek().unwrap();
 //!     let opts = ExportOptions::default();
 //!     let realm_manifest = exporter.export_realm(realm_id, &mut writer, &opts, &dek).unwrap();
@@ -47,6 +49,7 @@ use crate::audit::{AuditEngine, AuditQuery};
 use crate::core::RealmId;
 use crate::identity::IdentityEngine;
 use crate::rbac::RbacEngine;
+use crate::webhook::{WebhookEngine, WebhookQuery};
 
 use super::{ArchiveWriter, BackupError, DekWrappingParams, RealmManifest, RecordCounts};
 
@@ -77,19 +80,25 @@ pub struct BackupExporter {
     identity: Arc<dyn IdentityEngine>,
     audit: Arc<dyn AuditEngine>,
     rbac: Arc<dyn RbacEngine>,
+    webhooks: Arc<dyn WebhookEngine>,
 }
 
 impl BackupExporter {
     /// Constructs a new exporter backed by the given engine references.
+    ///
+    /// `webhooks` must be the engine that the dispatcher reads, so that the
+    /// archive carries the subscriptions that deliver events (#654).
     pub fn new(
         identity: Arc<dyn IdentityEngine>,
         audit: Arc<dyn AuditEngine>,
         rbac: Arc<dyn RbacEngine>,
+        webhooks: Arc<dyn WebhookEngine>,
     ) -> Self {
         Self {
             identity,
             audit,
             rbac,
+            webhooks,
         }
     }
 
@@ -490,17 +499,26 @@ impl BackupExporter {
             ));
         }
 
-        // webhooks.ndjson — silent loss of an integration nobody notices until
-        // it is needed. The signing secret rides along so the receiver's
-        // signature check keeps passing.
-        let webhooks = self
-            .identity
-            .export_all_webhooks(realm_id)
+        // webhook_subscriptions.ndjson — the subscriptions that the dispatcher
+        // delivers to (#654): silent loss of an integration nobody notices
+        // until it is needed. The signing secret rides along so the
+        // receiver's signature check keeps passing. The identity engine's
+        // own webhook store (`webhooks.ndjson` in older archives) never
+        // delivered (#617) and is not exported.
+        let subscriptions = self
+            .webhooks
+            .list(&WebhookQuery {
+                realm_id: realm_id.clone(),
+                enabled_only: false,
+            })
             .map_err(|e| BackupError::Engine(e.to_string()))?;
-        counts.webhooks = webhooks.len() as u64;
-        if !webhooks.is_empty() {
-            let data = to_ndjson(&webhooks)?;
-            members.push((format!("{prefix}/webhooks.ndjson"), Zeroizing::new(data)));
+        counts.webhook_subscriptions = subscriptions.len() as u64;
+        if !subscriptions.is_empty() {
+            let data = to_ndjson(&subscriptions)?;
+            members.push((
+                format!("{prefix}/webhook_subscriptions.ndjson"),
+                Zeroizing::new(data),
+            ));
         }
 
         // saml_signing_key.json — the realm's SAML key, whose certificate the

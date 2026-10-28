@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::core::{Clock, RealmId, WebhookDeliveryId, WebhookId};
+use crate::core::{Clock, ImportOutcome, RealmId, WebhookDeliveryId, WebhookId};
 use crate::storage::StorageEngine;
 
 use super::error::WebhookError;
@@ -122,6 +122,37 @@ impl WebhookEngine for EmbeddedWebhookEngine {
             }
         }
         Ok(subs)
+    }
+
+    fn import(
+        &self,
+        realm_id: &RealmId,
+        sub: &WebhookSubscription,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, WebhookError> {
+        if sub.secret.len() < MIN_SECRET_LEN {
+            return Err(WebhookError::SecretTooShort);
+        }
+        validate_url(&sub.url)?;
+
+        let key = keys::sub_key(&sub.id);
+        let exists = self.storage.get(realm_id, &key)?.is_some();
+        if exists && !overwrite {
+            return Ok(ImportOutcome::Skipped);
+        }
+        let sub = WebhookSubscription {
+            realm_id: realm_id.clone(),
+            ..sub.clone()
+        };
+        let value = serde_json::to_vec(&sub).map_err(|e| WebhookError::Serialization {
+            reason: e.to_string(),
+        })?;
+        self.storage.put(realm_id, &key, &value)?;
+        Ok(if exists {
+            ImportOutcome::Overwritten
+        } else {
+            ImportOutcome::Created
+        })
     }
 
     fn record_delivery(&self, delivery: &WebhookDelivery) -> Result<(), WebhookError> {

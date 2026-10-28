@@ -32,6 +32,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `SyntaxError`, and a document without a `keys` array as a `jose` error. `JwksClient.verify()`
   and `HearthClient.verifyToken()` now throw `JWKSFetchError` for each, with the original error
   as its `cause`.
+- **Backups carry the webhook subscriptions that deliver events** (#654): a backup exported the
+  webhooks of a store that the webhook sender never read, and not the subscriptions made under
+  `/admin/webhooks` or in the admin console. A restore lost every working webhook, with no error.
+  The archive now has a `webhook_subscriptions.ndjson` member with each subscription and its
+  signing secret, and a restore brings them back under their original IDs. A `webhooks.ndjson`
+  member in an older archive is skipped and counted as `old webhooks`, because those webhooks never
+  delivered. Archives made before this release do not hold the working subscriptions: after you
+  restore one, create the webhooks again. `POST /admin/backup` and `POST /admin/backup/restore`
+  answer `501` on a server without the webhook engine, which `hearth serve` always has.
 
 ### Security
 - **Capped emails are audited** (#622): when the A-4 outbound volume shield or the A-50

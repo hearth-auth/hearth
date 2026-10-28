@@ -502,6 +502,14 @@ mod tests {
         {
             Ok(Vec::new())
         }
+        fn import(
+            &self,
+            _realm_id: &crate::core::RealmId,
+            _sub: &super::super::types::WebhookSubscription,
+            _overwrite: bool,
+        ) -> Result<crate::core::ImportOutcome, super::super::WebhookError> {
+            unimplemented!("not exercised by the permit test")
+        }
         fn record_delivery(
             &self,
             _delivery: &super::super::types::WebhookDelivery,

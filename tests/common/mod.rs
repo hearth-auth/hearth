@@ -349,6 +349,10 @@ impl TestHarness {
                 Arc::clone(&rbac_engine) as Arc<dyn RbacEngine>,
                 Arc::clone(&audit_engine) as Arc<dyn AuditEngine>,
             )
+            .with_webhook(Arc::new(hearth::webhook::EmbeddedWebhookEngine::new(
+                Arc::clone(&engine) as Arc<dyn StorageEngine>,
+                Arc::clone(&clock),
+            )))
             .with_agent_identity(true),
         );
         let router = hearth::protocol::http::router(app_state);
@@ -422,6 +426,10 @@ impl TestHarness {
                 Arc::clone(&rbac_engine) as Arc<dyn RbacEngine>,
                 Arc::clone(&audit_engine) as Arc<dyn AuditEngine>,
             )
+            .with_webhook(Arc::new(hearth::webhook::EmbeddedWebhookEngine::new(
+                Arc::clone(&engine) as Arc<dyn StorageEngine>,
+                Arc::clone(&clock),
+            )))
             .with_agent_identity(true),
         );
         let router = hearth::protocol::http::router(app_state);
@@ -494,6 +502,10 @@ impl TestHarness {
                 Arc::clone(&rbac_engine) as Arc<dyn RbacEngine>,
                 Arc::clone(&audit_engine) as Arc<dyn AuditEngine>,
             )
+            .with_webhook(Arc::new(hearth::webhook::EmbeddedWebhookEngine::new(
+                Arc::clone(&engine) as Arc<dyn StorageEngine>,
+                Arc::clone(&clock),
+            )))
             .with_agent_identity(true)
             .with_agent_approval(true),
         );
@@ -575,6 +587,17 @@ impl TestHarness {
     /// Returns an `Arc<dyn AuditEngine>`.
     pub fn audit_arc(&self) -> Arc<dyn AuditEngine> {
         self.audit_engine.clone() as Arc<dyn AuditEngine>
+    }
+
+    /// A webhook engine over this harness's storage: the store that the
+    /// dispatcher, `/admin/webhooks` and the admin UI use. It holds no state of
+    /// its own, so every call may build a new one.
+    #[allow(dead_code)]
+    pub fn webhooks_arc(&self) -> Arc<dyn hearth::webhook::WebhookEngine> {
+        Arc::new(hearth::webhook::EmbeddedWebhookEngine::new(
+            self.engine.clone() as Arc<dyn StorageEngine>,
+            Arc::new(SystemClock) as Arc<dyn Clock>,
+        ))
     }
 
     /// Declares `scopes` in `realm`'s scope registry, as `hearth.yaml` would,

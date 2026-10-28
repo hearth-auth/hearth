@@ -47,7 +47,12 @@ fn opts(mode: RestoreMode) -> ImportOptions {
 }
 
 fn importer(h: &common::TestHarness) -> BackupImporter {
-    BackupImporter::new(h.identity_arc(), h.rbac_arc(), h.audit_arc())
+    BackupImporter::new(
+        h.identity_arc(),
+        h.rbac_arc(),
+        h.audit_arc(),
+        h.webhooks_arc(),
+    )
 }
 
 /// Creates an operator in the system realm exactly as first-run setup does:
@@ -93,7 +98,12 @@ fn seed_operator(h: &common::TestHarness, email: &str, password: &str) -> UserId
 fn export(h: &common::TestHarness, realms: &[RealmId]) -> NamedTempFile {
     let tmp = NamedTempFile::new().expect("tempfile");
     let mut writer = BackupArchive::create(tmp.path()).expect("create archive");
-    let exporter = BackupExporter::new(h.identity_arc(), h.audit_arc(), h.rbac_arc());
+    let exporter = BackupExporter::new(
+        h.identity_arc(),
+        h.audit_arc(),
+        h.rbac_arc(),
+        h.webhooks_arc(),
+    );
     let dek = BackupExporter::generate_dek().expect("DEK");
     let mut manifests = Vec::new();
     for realm in realms {
@@ -884,7 +894,12 @@ fn decrypted_members(
 ) -> std::collections::HashMap<String, Vec<u8>> {
     let tmp = NamedTempFile::new().expect("tempfile");
     let mut writer = BackupArchive::create(tmp.path()).expect("create archive");
-    let exporter = BackupExporter::new(h.identity_arc(), h.audit_arc(), h.rbac_arc());
+    let exporter = BackupExporter::new(
+        h.identity_arc(),
+        h.audit_arc(),
+        h.rbac_arc(),
+        h.webhooks_arc(),
+    );
     let dek = BackupExporter::generate_dek().expect("DEK");
     let manifest = exporter
         .export_realm(realm, &mut writer, &ExportOptions::default(), &dek)

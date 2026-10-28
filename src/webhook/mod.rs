@@ -32,6 +32,7 @@ pub use types::{
     WebhookQuery, WebhookSubscription, MAX_DELIVERY_ATTEMPTS, MIN_SECRET_LEN,
 };
 
+use crate::core::ImportOutcome;
 use crate::core::RealmId;
 use crate::core::WebhookId;
 
@@ -60,6 +61,19 @@ pub trait WebhookEngine: Send + Sync {
 
     /// Lists subscriptions matching the query.
     fn list(&self, query: &WebhookQuery) -> Result<Vec<WebhookSubscription>, WebhookError>;
+
+    /// Writes a subscription from a backup into `realm_id`, with its ID and
+    /// signing secret. A subscription with the same ID is kept as it is
+    /// unless `overwrite` is set. The record is checked as [`create`]
+    /// checks a request.
+    ///
+    /// [`create`]: WebhookEngine::create
+    fn import(
+        &self,
+        realm_id: &RealmId,
+        sub: &WebhookSubscription,
+        overwrite: bool,
+    ) -> Result<ImportOutcome, WebhookError>;
 
     /// Appends a delivery log entry.
     fn record_delivery(&self, delivery: &WebhookDelivery) -> Result<(), WebhookError>;
