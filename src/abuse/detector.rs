@@ -530,6 +530,12 @@ impl OutboundVolumeShield {
         }
     }
 
+    /// The rolling window length.
+    #[must_use]
+    pub fn window(&self) -> Duration {
+        self.config.window
+    }
+
     /// Checks and records an outbound email send for `realm_id` to `recipient`.
     ///
     /// Uses `Instant::now()`.  See [`Self::check_email_with_time`] for the
@@ -718,6 +724,12 @@ impl CrossRealmAggregationCap {
                 ..CrossRealmAggCapConfig::default()
             })
         }
+    }
+
+    /// The rolling window length.
+    #[must_use]
+    pub fn window(&self) -> Duration {
+        self.config.window
     }
 
     /// Checks and records an outbound email send from `realm_id` to `recipient`.

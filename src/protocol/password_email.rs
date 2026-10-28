@@ -9,10 +9,12 @@
 
 use std::fmt;
 
-use crate::abuse::runtime::{AbuseGuards, OutboundVerdict};
+use crate::abuse::runtime::AbuseGuards;
+use crate::audit::AuditEngine;
 use crate::core::{RealmId, UserId};
 use crate::identity::email::{EmailError, EmailService};
 use crate::identity::{IdentityEngine, IdentityError, PasswordEmailKind};
+use crate::protocol::outbound_email::{admit, EmailFlow};
 
 /// Why no password email was sent. It never carries the link token.
 #[derive(Debug)]
@@ -56,6 +58,7 @@ pub fn send_password_email(
     identity: &dyn IdentityEngine,
     email: Option<&EmailService>,
     guards: &AbuseGuards,
+    audit: &dyn AuditEngine,
     base_url: &str,
     realm_id: &RealmId,
     user_id: &UserId,
@@ -72,18 +75,14 @@ pub fn send_password_email(
 
     // A-4 + A-50: checked before the link exists, so a refused send does not
     // supersede the user's earlier link.
-    match guards.check_outbound_email(&realm_id.as_uuid().to_string(), user.email()) {
-        OutboundVerdict::Deny { reason } => {
-            tracing::warn!(
-                guard = reason,
-                "password email: outbound cap reached; email not sent"
-            );
-            return Err(PasswordEmailError::OutboundCap);
-        }
-        OutboundVerdict::Warn { reason } => {
-            tracing::warn!(guard = reason, "password email: outbound soft cap reached");
-        }
-        OutboundVerdict::Allow => {}
+    if !admit(
+        guards,
+        audit,
+        realm_id,
+        user.email(),
+        EmailFlow::PasswordEmail,
+    ) {
+        return Err(PasswordEmailError::OutboundCap);
     }
 
     let mail = identity
