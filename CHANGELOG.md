@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.6.12] — 2026-10-28
+
 ### Changed
 - **Cluster mode needs an explicit opt-in** (#650): cluster mode is experimental, and a node cut
   off from the leader can serve revoked sessions, lockout counts are per node, and the audit
