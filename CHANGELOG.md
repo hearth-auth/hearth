@@ -15,6 +15,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   with no value has no `amr` claim. Browser sessions opened before this release do not record how
   the user signed in, so their tokens name only the second factor until the user signs in again. A
   sign-in that waits for its second factor during the upgrade starts again.
+- **PHP SDK: `checkDecision()` asks the decision endpoint and fails closed** (#635): it posted to
+  the OIDC `authorization_endpoint` from discovery instead of the decision endpoint
+  `POST /oauth/authorize`, and it threw on a network error or an error answer. It now posts the
+  token and `permission` (plus optional `organization_id` and `resource`) to `/oauth/authorize`
+  and returns `['allowed' => false]` on any failure, without throwing. Only an explicit
+  `"allowed": true` allows. The endpoint reads the realm from `X-Realm-ID`, so the call needs the
+  new `realmId` argument of `HearthClient` (Laravel: `realm_id`, env `HEARTH_REALM_ID`), and
+  throws `ConfigurationException` before sending anything when it is not set.
+- **PHP SDK: an unreachable JWKS endpoint throws `JWKSFetchException`** (#635): a connection
+  failure threw `NetworkException`, and a JWKS body that is not JSON threw a raw `JsonException`.
+  Both now throw `JWKSFetchException`, with the original error as the previous exception, so one
+  `catch (JWKSFetchException)` handles every JWKS outage.
+- **TypeScript SDK: an unreachable JWKS endpoint throws `JWKSFetchError`** (#635): a refused
+  connection or a timeout surfaced as the raw `fetch` error, a body that is not JSON as a
+  `SyntaxError`, and a document without a `keys` array as a `jose` error. `JwksClient.verify()`
+  and `HearthClient.verifyToken()` now throw `JWKSFetchError` for each, with the original error
+  as its `cause`.
 
 ### Security
 - **Role changes through the REST admin API are audited** (#620): assigning a role to a user or a
@@ -61,23 +78,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   assignment of a role that is archived or no longer exists. `--realm` takes a realm UUID or name;
   without it, the commands check every realm. The purge writes a `UserPermissionRevoked` or
   `RoleRevoked` audit event (actor `cli`) for each orphan that it deletes.
-- **PHP SDK: `checkDecision()` asks the decision endpoint and fails closed** (#635): it posted to
-  the OIDC `authorization_endpoint` from discovery instead of the decision endpoint
-  `POST /oauth/authorize`, and it threw on a network error or an error answer. It now posts the
-  token and `permission` (plus optional `organization_id` and `resource`) to `/oauth/authorize`
-  and returns `['allowed' => false]` on any failure, without throwing. Only an explicit
-  `"allowed": true` allows. The endpoint reads the realm from `X-Realm-ID`, so the call needs the
-  new `realmId` argument of `HearthClient` (Laravel: `realm_id`, env `HEARTH_REALM_ID`), and
-  throws `ConfigurationException` before sending anything when it is not set.
-- **PHP SDK: an unreachable JWKS endpoint throws `JWKSFetchException`** (#635): a connection
-  failure threw `NetworkException`, and a JWKS body that is not JSON threw a raw `JsonException`.
-  Both now throw `JWKSFetchException`, with the original error as the previous exception, so one
-  `catch (JWKSFetchException)` handles every JWKS outage.
-- **TypeScript SDK: an unreachable JWKS endpoint throws `JWKSFetchError`** (#635): a refused
-  connection or a timeout surfaced as the raw `fetch` error, a body that is not JSON as a
-  `SyntaxError`, and a document without a `keys` array as a `jose` error. `JwksClient.verify()`
-  and `HearthClient.verifyToken()` now throw `JWKSFetchError` for each, with the original error
-  as its `cause`.
 
 ## [4.6.6] — 2026-10-26
 
