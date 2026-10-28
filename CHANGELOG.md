@@ -7,6 +7,41 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 ## [Unreleased]
 
 ### Fixed
+- **The purged-log startup refusal no longer tells operators to start a cluster node empty**
+  (#670): the message said to move the node's data directory aside and start it empty under its
+  old ID. The data directory holds `raft.db`, the node's Raft vote, and a node that forgets its
+  vote can help elect a second leader. The message now says not to, and gives only the rebuild
+  from a backup.
+- **Python SDK: the device flow works, and the middleware answers 401 to a missing or invalid
+  token** (#634): `start_device_flow()` posted to `/realms/{realm}/device/authorize`, which the
+  server does not serve, so the device flow always failed with `404`. It now posts to the
+  `device_authorization_endpoint` of the realm's discovery document, and raises `DiscoveryError`
+  when discovery fails or names no such endpoint. The ASGI, WSGI and Django gates answered `403`
+  to a missing or invalid token. They now answer `401` with `WWW-Authenticate: Bearer
+  realm="hearth"`, with `error="invalid_token"` for a token that does not verify or that
+  introspection reports as inactive. A valid token without the permission still gets `403`. In
+  decision mode the server answers a bad token like a missing permission, so both get `403`.
+- **Go SDK: calls time out, endpoints come from discovery, token requests are form-encoded, and the
+  middleware answers 401 to a missing or invalid token** (#633): `NewClient` built an HTTP client
+  with no timeout, so a server that never answered hung the caller. Every call now times out after
+  10 s (`hearth.DefaultHTTPTimeout`); the new `WithHTTPTimeout` option sets another limit. The
+  token, device-authorization, introspection and userinfo calls used paths that the SDK built
+  itself, and `VerifyToken` guessed `{baseURL}/.well-known/jwks.json` when discovery failed. They
+  now use the endpoints of the discovery document, fetched once per client, and a failed discovery
+  returns `*DiscoveryError`. The token and device-authorization calls sent JSON; they now send
+  `application/x-www-form-urlencoded` (RFC 6749, RFC 8628). The SDK sent `X-Realm-ID` to realm
+  endpoints (`/realms/{realm}/...`), which the server refuses with `400 realm_mismatch` when the
+  header does not name the realm in the path; it now sends the header only to global endpoints.
+  `RequirePermission` answered `403` to a request without a token, and sent `401` without
+  `WWW-Authenticate`. It now answers `401` with `WWW-Authenticate: Bearer realm="hearth"` (and a
+  custom `OnUnauthorized` runs, not `OnDenied`), with `error="invalid_token"` for a token that does
+  not verify or that introspection reports as inactive. A valid token without the permission still
+  gets `403`; in decision mode the server answers a bad token like a missing permission, so both get
+  `403`. In embedded mode the handler reads the verified claims with `hearth.ClaimsFromContext`.
+
+## [4.6.11] — 2026-10-28
+
+### Fixed
 - **ID tokens name the sign-in methods in `amr`** (#619): no sign-in flow filled the `amr` claim,
   so a relying party could not check from the ID token that the user passed MFA. The ID token and
   the access token now carry RFC 8176 values: `pwd` for a password, `otp` for a TOTP or recovery
@@ -41,37 +76,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   delivered. Archives made before this release do not hold the working subscriptions: after you
   restore one, create the webhooks again. `POST /admin/backup` and `POST /admin/backup/restore`
   answer `501` on a server without the webhook engine, which `hearth serve` always has.
-- **The purged-log startup refusal no longer tells operators to start a cluster node empty**
-  (#670): the message said to move the node's data directory aside and start it empty under its
-  old ID. The data directory holds `raft.db`, the node's Raft vote, and a node that forgets its
-  vote can help elect a second leader. The message now says not to, and gives only the rebuild
-  from a backup.
-- **Python SDK: the device flow works, and the middleware answers 401 to a missing or invalid
-  token** (#634): `start_device_flow()` posted to `/realms/{realm}/device/authorize`, which the
-  server does not serve, so the device flow always failed with `404`. It now posts to the
-  `device_authorization_endpoint` of the realm's discovery document, and raises `DiscoveryError`
-  when discovery fails or names no such endpoint. The ASGI, WSGI and Django gates answered `403`
-  to a missing or invalid token. They now answer `401` with `WWW-Authenticate: Bearer
-  realm="hearth"`, with `error="invalid_token"` for a token that does not verify or that
-  introspection reports as inactive. A valid token without the permission still gets `403`. In
-  decision mode the server answers a bad token like a missing permission, so both get `403`.
-- **Go SDK: calls time out, endpoints come from discovery, token requests are form-encoded, and the
-  middleware answers 401 to a missing or invalid token** (#633): `NewClient` built an HTTP client
-  with no timeout, so a server that never answered hung the caller. Every call now times out after
-  10 s (`hearth.DefaultHTTPTimeout`); the new `WithHTTPTimeout` option sets another limit. The
-  token, device-authorization, introspection and userinfo calls used paths that the SDK built
-  itself, and `VerifyToken` guessed `{baseURL}/.well-known/jwks.json` when discovery failed. They
-  now use the endpoints of the discovery document, fetched once per client, and a failed discovery
-  returns `*DiscoveryError`. The token and device-authorization calls sent JSON; they now send
-  `application/x-www-form-urlencoded` (RFC 6749, RFC 8628). The SDK sent `X-Realm-ID` to realm
-  endpoints (`/realms/{realm}/...`), which the server refuses with `400 realm_mismatch` when the
-  header does not name the realm in the path; it now sends the header only to global endpoints.
-  `RequirePermission` answered `403` to a request without a token, and sent `401` without
-  `WWW-Authenticate`. It now answers `401` with `WWW-Authenticate: Bearer realm="hearth"` (and a
-  custom `OnUnauthorized` runs, not `OnDenied`), with `error="invalid_token"` for a token that does
-  not verify or that introspection reports as inactive. A valid token without the permission still
-  gets `403`; in decision mode the server answers a bad token like a missing permission, so both get
-  `403`. In embedded mode the handler reads the verified claims with `hearth.ClaimsFromContext`.
 
 ### Security
 - **Capped emails are audited** (#622): when the A-4 outbound volume shield or the A-50
