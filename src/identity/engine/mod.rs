@@ -1548,6 +1548,48 @@ impl EmbeddedIdentityEngine {
         }
     }
 
+    /// Suspends an agent and records `AgentSuspended` with `audit_ctx`: the
+    /// admin who asked, or the system and the signal that caused it (#621).
+    fn suspend_agent_audited(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+        audit_ctx: Option<&crate::audit::AuditContext>,
+    ) -> Result<Agent, IdentityError> {
+        // Archival is a freeze: refuse mutations on a non-active realm
+        // (audit 2026-08-28 §4.20#5). `revoke_agent` and `delete_agent` have
+        // always had this guard; suspend/reactivate did not, and task 26.11
+        // exposed both over HTTP.
+        self.require_active_realm(realm_id)?;
+        let mut agent = IdentityEngine::get_agent(self, realm_id, agent_id)?
+            .ok_or(IdentityError::AgentNotFound)?;
+
+        if agent.status() == AgentStatus::Revoked {
+            return Err(IdentityError::AgentRevoked);
+        }
+
+        agent.set_status(AgentStatus::Suspended);
+        agent.set_updated_at(self.clock.now());
+
+        let key = keys::encode_agent_id(agent_id);
+        let bytes = serde_json::to_vec(&agent).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        self.storage
+            .put(realm_id, &key, &bytes)
+            .map_err(Self::storage_err)?;
+
+        self.record_audit(
+            realm_id,
+            audit_ctx,
+            AuditAction::AgentSuspended,
+            "agent",
+            &agent_id.as_uuid().to_string(),
+        )?;
+
+        Ok(agent)
+    }
+
     /// Creates a new identity engine, constructing a fresh
     /// [`crate::rbac::EmbeddedRbacEngine`] sharing the same storage and
     /// clock. Convenience for tests and benches that don't need to hold
@@ -16288,43 +16330,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         agent_id: &AgentId,
         caller: Option<&crate::core::UserId>,
     ) -> Result<Agent, IdentityError> {
-        // Archival is a freeze: refuse mutations on a non-active realm
-        // (audit 2026-08-28 §4.20#5). `revoke_agent` and `delete_agent` have
-        // always had this guard; suspend/reactivate did not, and task 26.11
-        // exposed both over HTTP.
-        self.require_active_realm(realm_id)?;
-        let mut agent = self
-            .get_agent(realm_id, agent_id)?
-            .ok_or(IdentityError::AgentNotFound)?;
-
-        if agent.status() == AgentStatus::Revoked {
-            return Err(IdentityError::AgentRevoked);
-        }
-
-        agent.set_status(AgentStatus::Suspended);
-        agent.set_updated_at(self.clock.now());
-
-        let key = keys::encode_agent_id(agent_id);
-        let bytes = serde_json::to_vec(&agent).map_err(|e| IdentityError::Serialization {
-            reason: e.to_string(),
-        })?;
-        self.storage
-            .put(realm_id, &key, &bytes)
-            .map_err(Self::storage_err)?;
-
         let audit_ctx = caller.map(|uid| crate::audit::AuditContext {
             actor: crate::audit::Actor::User(uid.clone()),
             metadata: None,
         });
-        self.record_audit(
-            realm_id,
-            audit_ctx.as_ref(),
-            AuditAction::AgentSuspended,
-            "agent",
-            &agent_id.as_uuid().to_string(),
-        )?;
-
-        Ok(agent)
+        self.suspend_agent_audited(realm_id, agent_id, audit_ctx.as_ref())
     }
 
     fn reactivate_agent(
@@ -16612,7 +16622,19 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 triggered_suspension,
             } => {
                 if triggered_suspension {
-                    let _ = self.suspend_agent(realm_id, agent_id, None);
+                    let ctx = crate::audit::AuditContext {
+                        actor: crate::audit::Actor::System,
+                        metadata: Some(serde_json::json!({ "signal": "agent_rate_limit" })),
+                    };
+                    // The request is refused either way, but a suspension that
+                    // did not happen must be seen (#621).
+                    if let Err(e) = self.suspend_agent_audited(realm_id, agent_id, Some(&ctx)) {
+                        tracing::error!(
+                            error = %e,
+                            agent_id = %agent_id.as_uuid(),
+                            "rate-triggered agent suspension failed"
+                        );
+                    }
                 }
                 return Err(IdentityError::AgentRateLimitExceeded);
             }
@@ -18196,13 +18218,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 "dpop_jkt": request.dpop_jkt,
             })),
         };
-        let _ = self.record_audit(
+        // The token is handed out only once the delegation is on record: a
+        // failed write fails the exchange (spec `delegated-authorization`).
+        self.record_audit(
             realm_id,
             Some(&audit_ctx),
             AuditAction::AgentDelegation,
             "token",
             &jti,
-        );
+        )?;
 
         // 11. Persist delegation grant for self-service consent management (§3.5).
         let delegation_id = uuid::Uuid::new_v4().to_string();
@@ -19337,6 +19361,8 @@ mod tests {
     mod aat_chain_links;
     /// `security.max_act_chain_depth` bounds validation, exchange and agents.
     mod act_chain_ceiling;
+    /// A delegation whose audit record fails to write issues no token (#621).
+    mod delegation_audit_required;
     /// A revoke racing an onward exchange cannot leave the onward token alive.
     mod delegation_revoke_race;
 
