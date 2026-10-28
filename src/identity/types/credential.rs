@@ -201,6 +201,9 @@ pub struct ImportClientRequest {
     pub dpop_bound_access_tokens: bool,
     /// Per-client MFA requirement.
     pub mfa_required: Option<bool>,
+    /// The archived creation time (a backup restore), kept verbatim. `None`
+    /// stamps the import time, as a migration or a `hearth.yaml` client does.
+    pub created_at: Option<Timestamp>,
 }
 
 /// Parameters for the large-scale demo seeder ([`IdentityEngine::seed_demo_users`]).
