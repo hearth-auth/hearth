@@ -7,6 +7,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 ## [Unreleased]
 
 ### Security
+- **Capped emails are audited** (#622): when the A-4 outbound volume shield or the A-50
+  cross-realm cap stopped or flagged an email, the server only logged a warning. It now writes an
+  `AbuseDetected` audit event in the sending realm, so a `security.abuse_detected` webhook
+  receives it. The metadata has `guard` (for example `a4_email_hard_cap`), `flow`
+  (`password_reset`, `verification`, `magic_link` or `password_email`) and `sent`, and no
+  recipient address or realm count. At most one event is written per guard and realm in the
+  guard's window.
+
+## [4.6.10] — 2026-10-28
+
+### Security
 - **Role changes through the REST admin API are audited** (#620): assigning a role to a user or a
   group, removing a role assignment, and adding or removing an extra organization role through
   `/admin/*` wrote no audit event. The admin UI wrote one for the same changes. Each of these
@@ -17,13 +28,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   exchange now fails with a server error and stores no delegation grant. An agent that the rate
   monitor suspends is now audited with actor `system` and `signal: agent_rate_limit`, and a
   suspension that fails is logged at `error`.
-- **Capped emails are audited** (#622): when the A-4 outbound volume shield or the A-50
-  cross-realm cap stopped or flagged an email, the server only logged a warning. It now writes an
-  `AbuseDetected` audit event in the sending realm, so a `security.abuse_detected` webhook
-  receives it. The metadata has `guard` (for example `a4_email_hard_cap`), `flow`
-  (`password_reset`, `verification`, `magic_link` or `password_email`) and `sent`, and no
-  recipient address or realm count. At most one event is written per guard and realm in the
-  guard's window.
 
 ## [4.6.9] — 2026-10-28
 
