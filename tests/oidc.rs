@@ -4,6 +4,9 @@
 //! through the public `IdentityEngine` trait.
 
 mod common;
+#[cfg(feature = "dev-endpoints")]
+#[path = "support/server_output.rs"]
+mod server_output;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
@@ -191,11 +194,16 @@ async fn oidc_authorization_code_flow_via_http() {
 
     let mut child = Command::new(hearth_bin)
         .args(["serve", "--dev", "--port", &port.to_string()])
-        .env("RUST_LOG", "info")
+        .env("RUST_LOG", "info,tower_http::trace=debug")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("spawn hearth server");
+    // Keep the server's log for a failure message; reading it also keeps the
+    // pipes from filling and blocking the server.
+    let server_output = server_output::ServerOutput::default();
+    server_output.capture(child.stdout.take().expect("server stdout is piped"));
+    server_output.capture(child.stderr.take().expect("server stderr is piped"));
 
     // Wait for server to be ready
     let start = std::time::Instant::now();
@@ -216,15 +224,22 @@ async fn oidc_authorization_code_flow_via_http() {
     let http_client = reqwest::Client::new();
 
     // Bootstrap a realm so we have a valid realm ID to use throughout the test.
-    let bootstrap_resp: serde_json::Value = http_client
+    let bootstrap_started = std::time::Instant::now();
+    let bootstrap_resp: serde_json::Value = match http_client
         .post(format!("{base}/admin/bootstrap"))
         .timeout(Duration::from_secs(5))
         .send()
         .await
-        .expect("bootstrap request")
-        .json()
-        .await
-        .expect("parse bootstrap json");
+    {
+        Ok(resp) => resp.json().await.expect("parse bootstrap json"),
+        Err(e) => panic!(
+            "bootstrap request failed after {:?} ({:?} after spawn): {e}\n\
+             --- server output, last 80 lines ---\n{}",
+            bootstrap_started.elapsed(),
+            start.elapsed(),
+            server_output.tail(80)
+        ),
+    };
     let realm_id = bootstrap_resp["realm_id"]
         .as_str()
         .expect("realm_id in bootstrap response")
