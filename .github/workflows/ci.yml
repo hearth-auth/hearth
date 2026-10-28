@@ -533,6 +533,14 @@ jobs:
       - name: Bootstrap quickstart — guard self-test
         run: bash scripts/tests/check-bootstrap-quickstart.test.sh
 
+      # #651: the weekly restore drill (restore-drill.yml) fails when a restored
+      # server does not give back the same data. Its comparison runs only once a
+      # week, so its tests run here, where a change to it is reviewed. They must
+      # prove it fails on a lost user, a changed field, another JWKS and a token
+      # that no longer validates.
+      - name: Restore drill comparison — tests (test_restore_drill.py)
+        run: python3 -I loadtest/live/test_restore_drill.py
+
       # The #[ignore] rule inside `make test-quality` was red at HEAD on a false
       # positive: it matched the literal text `#[ignore` anywhere on a line, so
       # prose saying a test must NOT be ignored reported itself. A gate that

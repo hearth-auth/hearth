@@ -843,6 +843,72 @@ hearth serve -c /etc/hearth/hearth.yaml
 
 For cluster mode, restore once into one empty data directory and copy that directory to **every** node before the cluster first starts; never restore into a cluster that has already started (its start-up has created every declared realm under a new id), and never run the restore once per node (each run writes its own keys, so the nodes would diverge). The upgrading guide's [rebuild procedure](./upgrading.md#cluster-purged-log-upgrade) gives the steps. There is no safe way to replace one failed node of a running cluster: do not restore into it, and do not start it with an empty data directory under its old ID. The data directory holds `raft.db`, so that node has forgotten its Raft vote, and if it has the lowest ID it starts a cluster of its own ([CONSISTENCY.md](../dev/CONSISTENCY.md) G9). Recover the whole deployment from a backup instead: one node, or a rebuilt cluster.
 
+### Restore drill
+
+One node, with backup and restore, is the supported deployment shape. The
+**Restore drill** workflow (`.github/workflows/restore-drill.yml`) tests that shape
+at size every week, and on demand. It does these steps on a GitHub-hosted runner:
+
+1. It starts a release build of Hearth in production mode: TLS, fsync, a
+   key-encryption key and `HEARTH_MASTER_KEY`.
+2. It imports 1,000,000 users into one realm through `POST /admin/users/import`.
+   Through the admin API it also creates five users, a role, an assignment of the
+   role, an OAuth client with a secret, and a webhook subscription. The realm admin
+   and three other seed users in `hearth.yaml` have passwords.
+3. It takes a backup as [Verifying backups](#verifying-backups) shows:
+   `POST /admin/backup`, then `hearth backup verify` and `hearth backup sign`. This
+   is the path for a live server, so the backup needs no downtime.
+4. It stops the server and moves the data directory away. It restores the archive
+   into an empty data directory with `hearth backup restore --verify-key`, as
+   [Restoring to a new node](#restoring-to-a-new-node) shows. Then it starts the
+   server again with the same config.
+5. It compares the restored server with the original. Any difference fails the job:
+   - the number of users in the realm;
+   - every field that `GET /admin/users/{id}` returns, for every 1,000th imported
+     user, the last one, the five users and the seed users;
+   - the user that `GET /admin/users?email=` finds for each of these users;
+   - a sign-in of each user with a password, with the same `sub` as before;
+   - the realm JWKS;
+   - an access token that the client got before the backup. Its signature must
+     verify with the restored JWKS. The restored server must also call it active,
+     unless the token expired before the check;
+   - the client record, a `client_credentials` grant with the secret, and the
+     refusal of the grant without the secret;
+   - the role and the assignment.
+
+   A webhook subscription that the restore loses is only a warning, until backups
+   carry webhook subscriptions (#664). The drill does not compare custom
+   attributes, because the admin API does not return them per user.
+
+**Where the times are.** The job summary and the `restore-drill-<run id>` artifact
+(`timings.json`, kept for 90 days) give the time of each step: the seed (the import
+and the known data), `POST /admin/backup`, `verify`, `sign`, the restore, and the
+start until `/readyz` answers 200. They also give the archive size and the size of the data directory.
+The recovery time is the restore plus the start. It does not include the time to
+get a host and to copy the archive to it. The runner has 4 CPUs and 16 GB of
+memory. Your hardware gives different times, so measure on it too.
+
+**Run the same drill on your own data.** Use a spare host that has no network path
+to your production data directory.
+
+1. Before the backup, record what you will compare: the realm JWKS
+   (`/realms/<realm>/.well-known/jwks.json`), some user ids with their
+   `GET /admin/users/{id}` records, a known user who can sign in, and the
+   `client_id` and secret of a confidential client.
+2. Take a backup as your schedule does, and record how long it takes.
+3. On the spare host, use the same `hearth.yaml`, `HEARTH_MASTER_KEY` and
+   `HEARTH_KEK`. Restore into an empty data directory, and record how long the
+   restore takes.
+4. Start the server, and record the time until `/readyz` answers 200.
+5. Compare. The JWKS and the user records must be equal. The known user must sign
+   in. The client must get a token with its secret, and it must be refused without
+   it. The [test-restore drill checklist](./disaster-recovery.md#test-restore-drill-checklist)
+   gives the commands.
+
+To time the drill on your own hardware with synthetic data, run
+`loadtest/live/restore-drill.sh <hearth binary> <out dir>` on a Linux host with
+passwordless sudo and no Hearth install. `USERS` sets the number of users.
+
 ---
 
 ## What is NOT backed up

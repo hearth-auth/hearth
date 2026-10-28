@@ -1,0 +1,118 @@
+# The restore drill (#651): the supported single-node shape at size. A release build of
+# Hearth gets about 1,000,000 users in one realm and a backup the way
+# docs/guides/backup.md tells operators to back up a live server. The archive is restored
+# into an empty data directory, and a server on it is compared with the original. The
+# job fails when the restored server does not give back the same data. It records the time
+# of each step (seed, backup, restore, start) and the archive size in the job summary and in
+# the artifact. See docs/guides/backup.md, "Restore drill", and loadtest/live/README.md.
+name: Restore drill
+
+on:
+  schedule:
+    # Wednesdays, 05:00 UTC.
+    - cron: "0 5 * * 3"
+  workflow_dispatch:
+    inputs:
+      users:
+        description: "Users to import"
+        required: false
+        default: "1000000"
+      require_webhooks:
+        description: "Fail when the restore loses a webhook subscription (set after #664)"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  restore-drill:
+    name: Restore drill
+    runs-on: ubuntu-latest
+    # The build, the seed, the backup and a restore that writes each user on its own;
+    # GitHub's limit is 360.
+    timeout-minutes: 345
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Check the inputs
+        env:
+          USERS: ${{ inputs.users }}
+        run: |
+          [[ "${USERS:-1000000}" =~ ^[1-9][0-9]*$ ]] || { echo "users: a positive integer"; exit 1; }
+
+      - name: Comparison tests (restore_drill.py)
+        run: python3 loadtest/live/test_restore_drill.py
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-restore-drill-${{ hashFiles('**/Cargo.lock') }}
+          # The steady-state memory test builds the same binary.
+          restore-keys: |
+            ${{ runner.os }}-restore-drill-
+            ${{ runner.os }}-steady-memory-
+
+      - name: Install protoc
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y protobuf-compiler
+          protoc --version
+
+      # The shipped feature set: no dev-endpoints, jemalloc, release profile.
+      - name: Build hearth
+        env:
+          PROTOC: protoc
+        run: cargo build --release --locked --bin hearth
+
+      - name: Run the drill
+        env:
+          USERS: ${{ inputs.users }}
+          REQUIRE_WEBHOOKS: ${{ inputs.require_webhooks && '1' || '0' }}
+        run: |
+          export USERS="${USERS:-1000000}"
+          df -h / "$RUNNER_TEMP"
+          bash loadtest/live/restore-drill.sh target/release/hearth "$RUNNER_TEMP/restore-drill"
+
+      - name: Summary
+        if: always()
+        run: |
+          f="$RUNNER_TEMP/restore-drill/summary.md"
+          if [ -f "$f" ]; then
+            cat "$f" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No summary: the drill did not start. See the log." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Pack the results
+        if: always()
+        run: |
+          [ -d "$RUNNER_TEMP/restore-drill" ] || exit 0
+          tar -czf "$RUNNER_TEMP/restore-drill.tar.gz" -C "$RUNNER_TEMP" restore-drill
+
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: restore-drill-${{ github.run_id }}
+          path: ${{ runner.temp }}/restore-drill.tar.gz
+          # The recovery times go into the guides from these files.
+          retention-days: 90
+          if-no-files-found: warn
