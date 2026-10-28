@@ -19,9 +19,9 @@ use super::super::{
     require_user_admin_ceiling, AdminAuth, AppState,
 };
 use super::{
-    parse_group_id, parse_role_id, parse_user_id_path, reject_system_realm_write,
-    require_group_in_realm, require_user_in_realm, resolve_org_scope,
-    role_permission_ceiling_refusal, PaginationParams,
+    audit_role_change, parse_group_id, parse_role_id, parse_user_id_path,
+    reject_system_realm_write, require_group_in_realm, require_user_in_realm, resolve_org_scope,
+    role_permission_ceiling_refusal, ChangedRole, PaginationParams,
 };
 use crate::audit::{AuditAction, CreateAuditEvent};
 use crate::rbac::{
@@ -170,7 +170,17 @@ pub(super) async fn admin_assign_group_role(
             assigned_by: Some(auth.user_id.clone()),
         },
     ) {
-        Ok(a) => (StatusCode::CREATED, Json(a)).into_response(),
+        Ok(a) => {
+            audit_role_change(
+                &state,
+                &auth,
+                true,
+                &a.subject,
+                &ChangedRole::Id(&a.role_id),
+                &a.scope,
+            );
+            (StatusCode::CREATED, Json(a)).into_response()
+        }
         Err(e) => rbac_error_to_response(&e).into_response(),
     }
 }

@@ -21,8 +21,8 @@ use super::super::{
     require_admin_permission, AdminAuth, AppState,
 };
 use super::{
-    parse_user_id_path, reject_system_realm_write, require_user_in_realm,
-    role_permission_ceiling_refusal, PaginationParams,
+    audit_role_change, parse_user_id_path, reject_system_realm_write, require_user_in_realm,
+    role_permission_ceiling_refusal, ChangedRole, PaginationParams,
 };
 use crate::core::OrganizationId;
 use crate::identity::{
@@ -422,7 +422,17 @@ pub(super) async fn admin_add_additional_role(
         &body.role_name,
         Some(&auth.user_id),
     ) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            audit_role_change(
+                &state,
+                &auth,
+                true,
+                &crate::rbac::Subject::User(user_id),
+                &ChangedRole::Id(&role.id),
+                &crate::rbac::Scope::Org { org_id },
+            );
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => rbac_error_to_response(&e).into_response(),
     }
 }
@@ -455,7 +465,17 @@ pub(super) async fn admin_remove_additional_role(
         .rbac
         .remove_additional_role(&auth.realm_id, &org_id, &user_id, &role_name)
     {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            audit_role_change(
+                &state,
+                &auth,
+                false,
+                &crate::rbac::Subject::User(user_id),
+                &ChangedRole::Name(&role_name),
+                &crate::rbac::Scope::Org { org_id },
+            );
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => rbac_error_to_response(&e).into_response(),
     }
 }
