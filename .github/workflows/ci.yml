@@ -509,6 +509,17 @@ jobs:
       - name: Fuzz corpus write path — guard self-test
         run: bash scripts/tests/check-fuzz-corpus-paths.test.sh
 
+      # #642: the pre-3.0 pentest scope named modules and routes that no
+      # longer existed, so a firm would have tested the wrong surface. Every
+      # code path and `METHOD /path` route in the scope must exist.
+      - name: Pentest scope names real paths (check-pentest-scope.py)
+        run: python3 scripts/check-pentest-scope.py
+
+      # Proof the guard can go red: it must reject a removed module, a route no
+      # router serves, a method the route does not accept, and an empty scope.
+      - name: Pentest scope — guard self-test
+        run: bash scripts/tests/check-pentest-scope.test.sh
+
       # Task 26.27 / audit https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/cold-first-run-2026-09-21.md C-7: the
       # `quickstart` block POST /admin/bootstrap hands a brand-new operator
       # hard-coded port 8420 and cited docs/guides/getting-started.md, which
