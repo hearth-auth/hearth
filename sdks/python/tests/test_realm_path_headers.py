@@ -42,17 +42,6 @@ def _capture(respx_mock, path: str, body: dict) -> dict:
         ("/realms/realm-1/token", TOKEN_OK, lambda c: c.poll_device_token("dc")),
         ("/realms/realm-1/token", TOKEN_OK, lambda c: c.exchange_magic_link("ml")),
         (
-            "/realms/realm-1/device/authorize",
-            {
-                "device_code": "dc",
-                "user_code": "UC",
-                "verification_uri": f"{BASE}/device",
-                "expires_in": 600,
-                "interval": 5,
-            },
-            lambda c: c.start_device_flow(),
-        ),
-        (
             "/realms/realm-1/introspect",
             {"active": False},
             lambda c: c.introspect("tok", client_id="cid", client_secret="sec"),
@@ -63,3 +52,35 @@ def test_realm_path_request_has_no_realm_header(respx_mock, path, body, call):
     seen = _capture(respx_mock, path, body)
     call(_client())
     assert "x-realm-id" not in seen["headers"]
+
+
+def test_device_flow_requests_have_no_realm_header(respx_mock):
+    """Both the realm discovery GET and the device POST name the realm in the path."""
+    seen: dict = {}
+
+    def discovery(request: httpx.Request) -> httpx.Response:
+        seen["discovery"] = request.headers
+        return httpx.Response(
+            200,
+            json={
+                "device_authorization_endpoint": f"{BASE}/realms/realm-1/device_authorization"
+            },
+        )
+
+    respx_mock.get(f"{BASE}/realms/realm-1/.well-known/openid-configuration").mock(
+        side_effect=discovery
+    )
+    device = _capture(
+        respx_mock,
+        "/realms/realm-1/device_authorization",
+        {
+            "device_code": "dc",
+            "user_code": "UC",
+            "verification_uri": f"{BASE}/device",
+            "expires_in": 600,
+            "interval": 5,
+        },
+    )
+    _client().start_device_flow()
+    assert "x-realm-id" not in seen["discovery"]
+    assert "x-realm-id" not in device["headers"]

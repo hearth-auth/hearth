@@ -506,6 +506,18 @@ class TestClientCredentials:
 # ---------------------------------------------------------------------------
 
 
+DISCOVERY_URL = "http://localhost:8420/realms/realm-1/.well-known/openid-configuration"
+# The path the server serves (`/realms/{realm}/device_authorization`).
+DEVICE_URL = "http://localhost:8420/realms/realm-1/device_authorization"
+DEVICE_OK = {
+    "device_code": "d",
+    "user_code": "u",
+    "verification_uri": "v",
+    "expires_in": 300,
+    "interval": 5,
+}
+
+
 class TestDeviceFlow:
     def _client(self, **kw):
         from hearth.client import HearthClient
@@ -517,8 +529,16 @@ class TestDeviceFlow:
             **kw,
         )
 
+    @staticmethod
+    def _discovery(respx_mock, doc=None):
+        doc = {"device_authorization_endpoint": DEVICE_URL} if doc is None else doc
+        return respx_mock.get(DISCOVERY_URL).mock(
+            return_value=httpx.Response(200, json=doc)
+        )
+
     def test_start_device_flow_returns_response(self, respx_mock):
-        respx_mock.post("http://localhost:8420/realms/realm-1/device/authorize").mock(
+        self._discovery(respx_mock)
+        respx_mock.post(DEVICE_URL).mock(
             return_value=httpx.Response(
                 200,
                 json={
@@ -551,11 +571,45 @@ class TestDeviceFlow:
                 },
             )
 
-        respx_mock.post("http://localhost:8420/realms/realm-1/device/authorize").mock(
-            side_effect=handler
-        )
+        self._discovery(respx_mock)
+        respx_mock.post(DEVICE_URL).mock(side_effect=handler)
         self._client().start_device_flow()
         assert "client_id=cli-app" in captured["body"]
+
+    def test_start_device_flow_posts_to_the_discovered_endpoint(self, respx_mock):
+        """The endpoint comes from discovery, not from a path the SDK builds (#634)."""
+        elsewhere = "http://localhost:8420/realms/realm-1/somewhere/else"
+        self._discovery(respx_mock, {"device_authorization_endpoint": elsewhere})
+        route = respx_mock.post(elsewhere).mock(
+            return_value=httpx.Response(200, json=DEVICE_OK)
+        )
+        self._client().start_device_flow()
+        assert route.called
+
+    def test_discovery_is_fetched_once(self, respx_mock):
+        discovery = self._discovery(respx_mock)
+        respx_mock.post(DEVICE_URL).mock(
+            return_value=httpx.Response(200, json=DEVICE_OK)
+        )
+        client = self._client()
+        client.start_device_flow()
+        client.start_device_flow()
+        assert discovery.call_count == 1
+
+    def test_start_device_flow_without_a_discovered_endpoint_raises(self, respx_mock):
+        """No device endpoint in discovery: raise, never guess a path."""
+        from hearth.errors import DiscoveryError
+
+        self._discovery(respx_mock, {"issuer": "http://localhost:8420/realms/realm-1"})
+        with pytest.raises(DiscoveryError):
+            self._client().start_device_flow()
+
+    def test_start_device_flow_raises_when_discovery_fails(self, respx_mock):
+        from hearth.errors import DiscoveryError
+
+        respx_mock.get(DISCOVERY_URL).mock(return_value=httpx.Response(503))
+        with pytest.raises(DiscoveryError):
+            self._client().start_device_flow()
 
     def test_poll_device_token_returns_token_on_success(self, respx_mock):
         respx_mock.post("http://localhost:8420/realms/realm-1/token").mock(

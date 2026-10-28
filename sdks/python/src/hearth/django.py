@@ -43,10 +43,13 @@ except ImportError as _exc:  # pragma: no cover
     ) from _exc
 
 from .middleware import (
+    _CHALLENGE,
+    _INVALID_TOKEN_CHALLENGE,
     _check_embedded,
     _check_introspection_sync,
     _extract_bearer_environ,
     _is_required_action_token,
+    _Unauthenticated,
 )
 
 if TYPE_CHECKING:
@@ -61,6 +64,13 @@ if TYPE_CHECKING:
 def _django_403() -> HttpResponse:
     """Return a minimal 403 Forbidden Django response."""
     return HttpResponse("Forbidden", status=403, content_type="text/plain")
+
+
+def _django_401(challenge: str) -> HttpResponse:
+    """Return a 401 Unauthorized Django response with ``WWW-Authenticate``."""
+    resp = HttpResponse("Unauthorized", status=401, content_type="text/plain")
+    resp["WWW-Authenticate"] = challenge
+    return resp
 
 
 def _django_401_required_action() -> HttpResponse:
@@ -90,7 +100,9 @@ def _sync_check(
     """Check a permission synchronously, dispatching on *mode*.
 
     Returns ``False`` when *mode* is unknown or a required *client* is absent.
-    Never raises — callers should catch and treat exceptions as denial.
+    Raises ``_Unauthenticated`` when the token does not verify or is not
+    active (the caller answers 401); callers treat any other exception as a
+    denial.
     """
     if mode == "embedded":
         return _check_embedded(client, token, permission)
@@ -146,7 +158,8 @@ class HearthDjangoMiddleware:
     * ``HEARTH_MODE`` (str) — ``"embedded"`` (default), ``"introspection"``,
       or ``"decision"``.
     * ``HEARTH_PERMISSION`` (str) — when set, every request must carry a token
-      that passes this permission gate; missing or denied tokens receive 403.
+      that passes this permission gate. A missing or invalid token receives
+      401 with ``WWW-Authenticate``; a token without the permission receives 403.
     * ``HEARTH_CLIENT_ID`` (str) — required for ``introspection`` mode.
     * ``HEARTH_CLIENT_SECRET`` (str) — optional client secret for introspection.
     * ``HEARTH_ORGANIZATION_ID`` (str) — org scope for decision/introspection.
@@ -189,7 +202,7 @@ class HearthDjangoMiddleware:
 
         if self._permission:
             if not token:
-                return _django_403()
+                return _django_401(_CHALLENGE)
             try:
                 allowed = _sync_check(
                     self._client,
@@ -201,6 +214,8 @@ class HearthDjangoMiddleware:
                     organization_id=self._organization_id,
                     resource=self._resource,
                 )
+            except _Unauthenticated:
+                return _django_401(_INVALID_TOKEN_CHALLENGE)
             except Exception:  # noqa: BLE001 -- fail closed on any error
                 # Fail-closed on any error (mode mismatch, network, etc.)
                 allowed = False
@@ -264,7 +279,7 @@ def require_permission(
                 request.META
             )
             if not token:
-                return _django_403()
+                return _django_401(_CHALLENGE)
 
             if _is_required_action_token(token):
                 return _django_401_required_action()
@@ -287,6 +302,8 @@ def require_permission(
                     organization_id=organization_id,
                     resource=resource,
                 )
+            except _Unauthenticated:
+                return _django_401(_INVALID_TOKEN_CHALLENGE)
             except Exception:  # noqa: BLE001 -- fail closed on any error
                 # Fail-closed on any error.
                 allowed = False
