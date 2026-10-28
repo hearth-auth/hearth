@@ -26,6 +26,8 @@ client := hearth.NewClient("https://hearth.example.com", "<your-realm-id>")
 
 `Client` wraps the Hearth HTTP API for auth code flows, token management, JWKS retrieval, and live RBAC claim resolution. All methods are safe to call concurrently.
 
+The token, device-authorization, introspection, userinfo and JWKS URLs come from the discovery document at `{baseURL}/.well-known/openid-configuration`, fetched once per client; a failed discovery returns `*hearth.DiscoveryError`. Every HTTP call times out after `hearth.DefaultHTTPTimeout` (10 s); `hearth.WithHTTPTimeout(d)` sets another limit.
+
 ### Audience
 
 `VerifyToken` and every RBAC helper always check the access token's `aud` (RFC 9068 §4); the check cannot be turned off. The expected audience defaults to `hearth.DefaultAudience` (`"hearth"`), the audience Hearth mints when a client names no resource. An API registered as a protected resource sets its resource URI:
@@ -471,7 +473,15 @@ always rejected, never silently downgraded.
 Permissions are baked into the JWT at issuance. The middleware verifies the
 token's signature against the cached JWKS and then reads the claims locally —
 no per-request network call. A token that fails verification is rejected with
-HTTP 401 before any permission is read.
+HTTP 401 before any permission is read. The handler reads the verified claims
+with `hearth.ClaimsFromContext(r.Context())`.
+
+In every mode, a request without a token gets `401` with
+`WWW-Authenticate: Bearer realm="hearth"`. A token that does not verify
+(`ModeEmbedded`) or that introspection reports inactive gets `401` with
+`error="invalid_token"` added. A valid token without the permission gets `403`;
+in `ModeDecision` the server answers a bad token like a missing permission, so
+it gets `403` too.
 
 ```go
 mw := hearth.RequirePermission(client, "docs.edit", hearth.MiddlewareConfig{

@@ -28,6 +28,39 @@ All notable changes to `hearth-go` are documented here.
   Hearth to apply changes; read them with `GetRealm`/`ListRealms` (HEA-2171).
 
 ### Fixed
+- **Every HTTP call times out** (#633): `NewClient` built an `http.Client` with no
+  timeout, so a server that never answered hung the caller. Every call, including
+  discovery, JWKS and session-version fetches, now times out after `DefaultHTTPTimeout`
+  (10 s). The new option `WithHTTPTimeout(d)` sets another limit; a zero or negative value
+  keeps the default.
+- **Endpoints come from discovery** (#633): `ClientCredentials`, `StartDeviceFlow`,
+  `PollDeviceToken`, `ExchangeMagicLink`, `ExchangeCode`, `RefreshTokens`, `UserInfo` and
+  `Introspect` called paths built from the base URL. They now use the `token_endpoint`,
+  `device_authorization_endpoint`, `userinfo_endpoint` and `introspection_endpoint` of the
+  discovery document at `{baseURL}/.well-known/openid-configuration`, fetched once per
+  client. `VerifyToken` no longer guesses `{baseURL}/.well-known/jwks.json` when discovery
+  fails or names no `jwks_uri`: every such call returns `*DiscoveryError`.
+- **Token requests are form-encoded** (#633): the token and device-authorization calls
+  sent JSON bodies. They now send `application/x-www-form-urlencoded` (RFC 6749 §2.3.1,
+  RFC 8628 §3.1), which Hearth accepts; this replaces the JSON bodies of the earlier
+  "Token endpoints now send JSON" entry.
+- **No `X-Realm-ID` to realm endpoints** (#633): a client configured with a realm UUID
+  sent `X-Realm-ID` to realm endpoints (`/realms/{realm}/...`) too, and the server refuses
+  a header that does not name the realm in the path with `400 realm_mismatch`. The header
+  now goes only to global endpoints.
+- **`RequirePermission` answers 401 to a missing or invalid token** (#633): it answered
+  `403` to a request without a token (through `OnDenied`), and sent `401` without
+  `WWW-Authenticate`. A request without a token now gets `401` with `WWW-Authenticate:
+  Bearer realm="hearth"` through `OnUnauthorized`; a token that does not verify, that
+  introspection reports as inactive, that carries `token_type: required_action`, or whose
+  session version is revoked or stale gets `401` with `error="invalid_token"` added. The
+  middleware sets the header before calling `OnUnauthorized` or `OnRequiredAction`. A
+  valid token without the permission still gets `403`; decision mode cannot tell a bad
+  token from a missing permission, so both get `403`.
+- **The handler can read the verified claims** (#633): in `ModeEmbedded`,
+  `RequirePermission` now stores the verified `*Claims` in the request context under
+  `ClaimsContextKey`; read them with `ClaimsFromContext(r.Context())`. Introspection and
+  decision modes verify no token in the SDK and store none.
 - **Token endpoints now send JSON, not form-encoding** — `ClientCredentials`,
   `StartDeviceFlow`, and `ExchangeMagicLink` previously posted
   `application/x-www-form-urlencoded` bodies to `/token` and

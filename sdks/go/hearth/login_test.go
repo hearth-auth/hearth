@@ -4,9 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -127,22 +125,17 @@ func TestBeginLogin_RaisesConfigurationErrorWhenNoClientID(t *testing.T) {
 }
 
 func TestCompleteLogin_CallsTokenEndpointWithVerifier(t *testing.T) {
-	// Hearth's /token endpoint parses the body with an axum Json extractor and
-	// rejects a form-encoded body with HTTP 415, so CompleteLogin must send the
-	// authorization-code exchange as application/json. This test pins that wire
-	// format: it fails loudly if the request body is not decodable JSON or the
-	// Content-Type regresses to application/x-www-form-urlencoded.
+	// RFC 6749 §4.1.3: the authorization-code exchange is a form-encoded POST
+	// to the token endpoint that discovery advertises.
 	var capturedBody map[string]string
 	var capturedCT string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newOAuthServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/token" {
 			http.NotFound(w, r)
 			return
 		}
 		capturedCT = r.Header.Get("Content-Type")
-		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
-			t.Errorf("token request body was not valid JSON (form-encoded regression?): %v", err)
-		}
+		capturedBody = readForm(t, r)
 		w.Header().Set("Content-Type", "application/json")
 		writeJSON(t, w, map[string]interface{}{
 			"access_token": "eyJ...",
@@ -163,8 +156,8 @@ func TestCompleteLogin_CallsTokenEndpointWithVerifier(t *testing.T) {
 	if resp.AccessToken != "eyJ..." {
 		t.Fatalf("access_token: %q", resp.AccessToken)
 	}
-	if !strings.Contains(capturedCT, "application/json") {
-		t.Fatalf("expected application/json content-type, got %q", capturedCT)
+	if capturedCT != "application/x-www-form-urlencoded" {
+		t.Fatalf("expected application/x-www-form-urlencoded content-type, got %q", capturedCT)
 	}
 	if capturedBody["code_verifier"] != "my-verifier-abc" {
 		t.Errorf("code_verifier missing from request body; got body: %v", capturedBody)

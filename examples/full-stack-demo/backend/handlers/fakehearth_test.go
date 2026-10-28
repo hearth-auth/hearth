@@ -49,8 +49,9 @@ func newFakeHearth() *fakeHearth {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, map[string]any{
-			"issuer":   f.server.URL,
-			"jwks_uri": f.server.URL + "/.well-known/jwks.json",
+			"issuer":            f.server.URL,
+			"jwks_uri":          f.server.URL + "/.well-known/jwks.json",
+			"userinfo_endpoint": f.server.URL + "/userinfo",
 		})
 	})
 	mux.HandleFunc("/.well-known/jwks.json", func(w http.ResponseWriter, _ *http.Request) {
