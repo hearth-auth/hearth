@@ -1109,9 +1109,11 @@ pub struct AuthorizationRequest {
     /// Nonce uniqueness is always enforced: duplicate nonces within a TTL
     /// window are rejected unconditionally.
     pub nonce: Option<String>,
-    /// Authentication Methods References (RFC 8176) established before code
-    /// issuance. Non-empty when an MFA challenge was successfully completed. Propagated to `StoredAuthorizationCode.amr_values`
-    /// and then into the issued tokens at exchange time.
+    /// Authentication Methods References (RFC 8176) of the sign-in behind the
+    /// browser session that authorizes the request
+    /// ([`crate::identity::SignInMethod::amr_values`], #619). Propagated to
+    /// `StoredAuthorizationCode.amr_values` and then into the issued tokens at
+    /// exchange time.
     pub amr_values: Vec<String>,
     /// Requested response mode: `query` (default) or `fragment`.
     pub response_mode: Option<ResponseMode>,
@@ -1316,8 +1318,7 @@ pub(crate) struct StoredAuthorizationCode {
     pub(crate) resource: Option<String>,
     /// Authentication Methods References (RFC 8176) established during the
     /// authorization flow. Propagated verbatim to both access and ID token
-    /// claims at exchange time. No flow sets it today: its only producer, the
-    /// SMS challenge, was removed in 3.0.0.
+    /// claims at exchange time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) amr_values: Vec<String>,
     /// What the session that authorized this code proved about a second

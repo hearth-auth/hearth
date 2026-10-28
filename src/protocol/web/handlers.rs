@@ -979,6 +979,7 @@ pub async fn mfa_otp_challenge_submit(
         // carries it to the session.
         &SessionContext {
             mfa_proof: pending.first_factor.proof_after_email_otp(),
+            sign_in: pending.first_factor.sign_in_method(),
             ..session_ctx.clone()
         },
         pending.first_factor,
@@ -1042,6 +1043,7 @@ fn finish_otp_login(
     // passkey's proof. The engine's gates read exactly this.
     let session_ctx = SessionContext {
         mfa_proof: pending.first_factor.proof_after_email_otp(),
+        sign_in: pending.first_factor.sign_in_method(),
         ..session_ctx
     };
 
@@ -2222,6 +2224,11 @@ fn login_finish(
         captcha_pending: _,
     } = prepared;
     let return_to = render_ctx.return_to.clone();
+    // The password is this login's first factor (#619).
+    let session_ctx = SessionContext {
+        sign_in: crate::identity::SignInMethod::Password,
+        ..session_ctx
+    };
 
     // Resolved realm → single targeted lookup. No walk.
     let Ok(Some(user)) = state.identity.get_user_by_email(realm.id(), &email) else {
@@ -2315,7 +2322,7 @@ fn login_finish(
         &state,
         &realm,
         &user,
-        super::auth::FirstFactor::Credential,
+        super::auth::FirstFactor::Password,
     ) {
         Ok(step) => step,
         Err(e) => {
@@ -2379,7 +2386,7 @@ fn login_finish(
                 realm.id(),
                 user.id(),
                 other,
-                super::auth::FirstFactor::Credential,
+                super::auth::FirstFactor::Password,
                 return_to.as_deref(),
                 secure,
             );
@@ -2405,7 +2412,7 @@ fn login_finish(
         return_to.as_deref(),
         // The password alone: nothing proved beyond the first factor.
         &session_ctx,
-        super::auth::FirstFactor::Credential,
+        super::auth::FirstFactor::Password,
         &headers,
         now,
     ) {
@@ -2807,7 +2814,7 @@ fn passkey_second_factor_gate(
     let first = if user_verified {
         super::auth::FirstFactor::VerifiedPasskey
     } else {
-        super::auth::FirstFactor::Credential
+        super::auth::FirstFactor::Passkey
     };
     let owed = match super::second_factor::non_passkey_factor_step(state, realm, &user, first) {
         // A UV-less passkey plus an email OTP is still not MFA: where MFA is
@@ -2966,6 +2973,7 @@ fn passkey_complete_for_user(
     );
     let mut session_ctx = session_ctx.clone();
     session_ctx.mfa_proof = mfa_proof;
+    session_ctx.sign_in = crate::identity::SignInMethod::Passkey;
     // A required-action detour carries the same proof to the session it
     // ends in (GA audit round 3, I-2).
     if let Some(ra) = super::required_action::required_action_check_browser(
@@ -2974,7 +2982,7 @@ fn passkey_complete_for_user(
         auth_result.user_id(),
         return_to,
         &session_ctx,
-        super::auth::FirstFactor::Credential,
+        super::auth::FirstFactor::Passkey,
         headers,
         now,
     ) {
@@ -3247,6 +3255,7 @@ pub async fn mfa_challenge_submit(
         // accepts (GA audit round 3, D-1).
         &SessionContext {
             mfa_proof: MfaProof::Proved,
+            sign_in: pending.first_factor.sign_in_method(),
             ..session_ctx.clone()
         },
         pending.first_factor,
@@ -3265,6 +3274,7 @@ pub async fn mfa_challenge_submit(
     // reads exactly this (audit 2026-08-28 §4.18#3).
     let session_ctx = SessionContext {
         mfa_proof: MfaProof::Proved,
+        sign_in: pending.first_factor.sign_in_method(),
         ..session_ctx
     };
 
@@ -3607,6 +3617,7 @@ pub async fn mfa_enroll_required_submit(
         // The live code that confirmed the enrolment (see below).
         &SessionContext {
             mfa_proof: MfaProof::Proved,
+            sign_in: pending.first_factor.sign_in_method(),
             ..session_ctx.clone()
         },
         pending.first_factor,
@@ -3624,6 +3635,7 @@ pub async fn mfa_enroll_required_submit(
     // `verify_totp_enrollment` checked above. That is a proved second factor.
     let session_ctx = SessionContext {
         mfa_proof: MfaProof::Proved,
+        sign_in: pending.first_factor.sign_in_method(),
         ..session_ctx
     };
 
@@ -5021,7 +5033,10 @@ fn magic_link_redeem_impl(
         &user_id,
         None,
         // The link proves the inbox, one factor; nothing was owed above.
-        &build_session_context(headers, peer_addr, &state.trusted_proxies),
+        &SessionContext {
+            sign_in: crate::identity::SignInMethod::Inbox,
+            ..build_session_context(headers, peer_addr, &state.trusted_proxies)
+        },
         super::auth::FirstFactor::Inbox,
         headers,
         now,
@@ -5035,7 +5050,10 @@ fn magic_link_redeem_impl(
 
     // The peer address feeds the realm's `cidr_policy`, which the engine
     // applies to every session it creates (GA audit M13).
-    let session_ctx = build_session_context(headers, peer_addr, &state.trusted_proxies);
+    let session_ctx = SessionContext {
+        sign_in: crate::identity::SignInMethod::Inbox,
+        ..build_session_context(headers, peer_addr, &state.trusted_proxies)
+    };
     let session = match state
         .identity
         .create_session(realm.id(), &user_id, &session_ctx)
@@ -6332,11 +6350,12 @@ pub async fn device_approve_submit(
         // detour ends in records no more than that.
         &SessionContext {
             mfa_proof: session.mfa_proof,
+            sign_in: session.sign_in,
             ..build_session_context(&headers, peer_addr, &state.trusted_proxies)
         },
-        // The session does not record what proved its first factor;
-        // reading it as a magic link keeps an email OTP enrolled on the
-        // way from counting as a second factor (GA sweep 4 round 2).
+        // Read as a magic link whatever the session records (a session
+        // opened before #619 records nothing), so an email OTP enrolled on
+        // the way never counts as a second factor (GA sweep 4 round 2).
         super::auth::FirstFactor::Inbox,
         &headers,
         now,

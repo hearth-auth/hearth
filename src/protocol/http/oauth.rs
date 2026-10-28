@@ -384,6 +384,7 @@ fn exchange_magic_link(
         &crate::identity::SessionContext {
             ip_address: client_ip.map(str::to_string),
             user_agent_raw: user_agent.map(str::to_string),
+            sign_in: crate::identity::SignInMethod::Inbox,
             ..crate::identity::SessionContext::default()
         },
     )?;

@@ -210,6 +210,8 @@ pub fn build_session_context(
         // Request metadata proves nothing about a second factor. The caller
         // raises this once its ceremony has verified one.
         mfa_proof: crate::identity::MfaProof::None,
+        // Nor about how the user signed in: the sign-in handler records that.
+        sign_in: crate::identity::SignInMethod::Unknown,
     }
 }
 

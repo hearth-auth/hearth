@@ -49,7 +49,9 @@ use crate::core::{ClientId, FormSecret, RealmId, Timestamp, UserId};
 use crate::identity::error::IdentityError;
 use crate::identity::ra_token::{self, OidcParams};
 use crate::identity::RequiredAction;
-use crate::identity::{CleartextPassword, MfaProof, SessionContext, UpdateUserRequest};
+use crate::identity::{
+    CleartextPassword, MfaProof, SessionContext, SignInMethod, UpdateUserRequest,
+};
 use crate::protocol::client_info::PeerAddr;
 use crate::protocol::web::auth::{issue_auth_cookies, FirstFactor, IssuedCookies};
 
@@ -353,6 +355,7 @@ pub fn required_action_check_browser(
         return_to.map(str::to_string),
         mfa_proof,
         inbox_first_factor,
+        ctx.sign_in,
         None,
         now,
     ) {
@@ -490,13 +493,16 @@ fn forbidden_page() -> Response {
 /// The session records `mfa_proof` — what the login proved, as carried in
 /// the RA token — so the engine's `mfa_required` / `webauthn_required` gates
 /// judge the login by the factor it actually proved. A proof they refuse
-/// sends the login to the passkey it owes, or refuses it.
+/// sends the login to the passkey it owes, or refuses it. The session also
+/// records `sign_in`, how the user signed in, for the ID token's `amr`
+/// (#619).
 pub fn resume_browser_flow(
     state: &Arc<WebState>,
     realm: &RealmId,
     user_sub: &str,
     return_to: Option<String>,
     mfa_proof: MfaProof,
+    sign_in: SignInMethod,
     client: &SessionContext,
     secure: bool,
 ) -> Response {
@@ -519,6 +525,7 @@ pub fn resume_browser_flow(
     // user's session list. The session used to record neither.
     let ctx = SessionContext {
         mfa_proof,
+        sign_in,
         ..client.clone()
     };
     let session = match state.identity.create_session(realm, &user_id, &ctx) {
@@ -597,7 +604,7 @@ pub fn resume_oidc_flow(
         &user_id,
         &params,
         Gate::Consent,
-        Vec::new(),
+        params.amr_values(),
         secure,
         Timestamp::from_micros(now_micros()),
     );
@@ -621,6 +628,7 @@ pub fn next_required_action(
     browser_return_to: Option<String>,
     mfa_proof: MfaProof,
     inbox_first_factor: bool,
+    sign_in: SignInMethod,
     flow: &str,
     secure: bool,
     now: Timestamp,
@@ -652,6 +660,7 @@ pub fn next_required_action(
             browser_return_to,
             mfa_proof,
             inbox_first_factor,
+            sign_in,
             Some(flow),
             now,
         ) {
@@ -1198,6 +1207,7 @@ fn advance_flow(
             claims.browser_return_to,
             claims.mfa_proof,
             claims.inbox_first_factor,
+            claims.sign_in,
             &claims.flow,
             secure,
             now,
@@ -1220,6 +1230,7 @@ fn advance_flow(
             &claims.sub,
             claims.browser_return_to,
             claims.mfa_proof,
+            claims.sign_in,
             client,
             secure,
         )
@@ -1232,6 +1243,7 @@ fn advance_flow(
             &claims.sub,
             None,
             claims.mfa_proof,
+            claims.sign_in,
             client,
             secure,
         )

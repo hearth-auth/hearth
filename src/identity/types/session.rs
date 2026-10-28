@@ -102,6 +102,68 @@ impl MfaProof {
     }
 }
 
+/// How the user proved who they are in the first step of the sign-in that
+/// opened a session: the factor before any second factor ([`MfaProof`]).
+///
+/// The ID token's `amr` claim names it (OIDC Core §2, #619). Stored records
+/// encode the variant by its position, so new variants MUST be appended,
+/// never inserted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SignInMethod {
+    /// Not recorded: a session that an API call, the dev console or a test
+    /// opened, or one written before sessions recorded this.
+    #[default]
+    Unknown,
+    /// A password.
+    Password,
+    /// A passkey (a WebAuthn assertion). Whether it proved user verification
+    /// is in the session's [`MfaProof`].
+    Passkey,
+    /// A magic link: control of the user's inbox.
+    Inbox,
+    /// An upstream identity provider.
+    Federated,
+}
+
+impl SignInMethod {
+    /// The RFC 8176 authentication method references of a sign-in that
+    /// started with this method and proved `proof`, sorted, each once.
+    ///
+    /// | Proved | Values |
+    /// |--------|--------|
+    /// | a password | `pwd` |
+    /// | a passkey | `hwk`, `user` |
+    /// | a TOTP or recovery code ([`MfaProof::Proved`]) | `otp` |
+    /// | a proof that satisfies `mfa_required` | `mfa` |
+    ///
+    /// An inbox (a magic link or an email OTP) and an upstream identity
+    /// provider have no RFC 8176 value and add nothing. Hearth does not check
+    /// passkey attestation, so `hwk` says that a WebAuthn key signed, not
+    /// that the key is in hardware.
+    #[must_use]
+    pub fn amr_values(self, proof: MfaProof) -> Vec<String> {
+        let mut values: Vec<&str> = Vec::new();
+        match self {
+            Self::Password => values.push("pwd"),
+            Self::Passkey => values.extend(["hwk", "user"]),
+            Self::Unknown | Self::Inbox | Self::Federated => {}
+        }
+        match proof {
+            MfaProof::Proved => values.push("otp"),
+            MfaProof::ProvedWebAuthn | MfaProof::PasskeyPossession => {
+                values.extend(["hwk", "user"]);
+            }
+            MfaProof::None | MfaProof::EmailOtp => {}
+        }
+        if proof.satisfies_mfa_required() {
+            values.push("mfa");
+        }
+        values.sort_unstable();
+        values.dedup();
+        values.into_iter().map(str::to_string).collect()
+    }
+}
+
 /// Device and network context captured at session creation time.
 ///
 /// All fields are optional — API-originated sessions (no browser) or
@@ -117,6 +179,9 @@ pub struct SessionContext {
     /// What this authentication can prove about a second factor. Read by the
     /// `mfa_required` gate in `create_session`.
     pub mfa_proof: MfaProof,
+    /// How the user signed in before any second factor. The session records
+    /// it for the ID token's `amr` claim.
+    pub sign_in: SignInMethod,
 }
 
 /// An authentication session bound to a user.
@@ -151,6 +216,10 @@ pub struct Session {
     /// as [`MfaProof::None`]: an unknown proof is treated as no proof.
     #[serde(default)]
     mfa_proof: MfaProof,
+    /// How the user signed in before any second factor (#619). Records
+    /// written before this field existed decode as [`SignInMethod::Unknown`].
+    #[serde(default)]
+    sign_in: SignInMethod,
 }
 
 impl Session {
@@ -180,6 +249,7 @@ impl Session {
             idle_deadline,
             absolute_deadline,
             mfa_proof: context.mfa_proof,
+            sign_in: context.sign_in,
         }
     }
 
@@ -190,6 +260,11 @@ impl Session {
     /// this — never the account's enrolled factors (GA audit B5).
     pub fn mfa_proof(&self) -> MfaProof {
         self.mfa_proof
+    }
+
+    /// Returns how the user signed in before any second factor.
+    pub fn sign_in(&self) -> SignInMethod {
+        self.sign_in
     }
 
     /// Returns the session's unique identifier.
@@ -295,6 +370,7 @@ impl Session {
             idle_deadline: self.idle_deadline,
             absolute_deadline: self.absolute_deadline,
             mfa_proof: self.mfa_proof,
+            sign_in: self.sign_in,
         }
     }
 
@@ -313,6 +389,7 @@ impl Session {
             idle_deadline: r.idle_deadline,
             absolute_deadline: r.absolute_deadline,
             mfa_proof: r.mfa_proof,
+            sign_in: r.sign_in,
         }
     }
 }
@@ -338,6 +415,28 @@ pub(crate) struct SessionStorageRecord {
     /// written before this field existed is one field short and is read by
     /// [`decode_session_record`] through [`LegacySessionStorageRecord`].
     pub(crate) mfa_proof: MfaProof,
+    /// Appended last (#619), for the same reason: a record written before
+    /// this field existed is read through [`PreSignInSessionStorageRecord`].
+    pub(crate) sign_in: SignInMethod,
+}
+
+/// [`SessionStorageRecord`] as written before sessions recorded their
+/// [`SignInMethod`]. Only ever decoded, never written.
+#[derive(Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+struct PreSignInSessionStorageRecord {
+    id: SessionId,
+    user_id: UserId,
+    created_at: Timestamp,
+    expires_at: Timestamp,
+    last_refreshed_at: Timestamp,
+    revoked: bool,
+    ip_address: Option<String>,
+    user_agent_raw: Option<String>,
+    device_label: Option<String>,
+    idle_deadline: Option<Timestamp>,
+    absolute_deadline: Option<Timestamp>,
+    mfa_proof: MfaProof,
 }
 
 /// [`SessionStorageRecord`] as written before sessions recorded their
@@ -358,37 +457,57 @@ struct LegacySessionStorageRecord {
     absolute_deadline: Option<Timestamp>,
 }
 
-/// Decodes a stored session record, current layout first, then the layout
-/// written before sessions recorded their MFA proof.
+/// Decodes a stored session record: the current layout first, then the
+/// layout written before sessions recorded how the user signed in, then the
+/// layout written before sessions recorded their MFA proof.
 ///
-/// A pre-upgrade session carries no proof, so it decodes as
-/// [`MfaProof::None`]: a gate that needs a proved factor treats it as
-/// unproved and asks the user to authenticate again, rather than trusting a
-/// proof nobody recorded.
+/// A pre-upgrade session decodes as [`SignInMethod::Unknown`], and one older
+/// still also as [`MfaProof::None`]: a gate that needs a proved factor treats
+/// it as unproved and asks the user to authenticate again, rather than
+/// trusting a proof nobody recorded.
 ///
 /// # Errors
 ///
-/// Returns the current layout's decode error when neither layout fits.
+/// Returns the current layout's decode error when no layout fits.
 pub(crate) fn decode_session_record(bytes: &[u8]) -> Result<SessionStorageRecord, String> {
-    match crate::codec::decode::<SessionStorageRecord>(bytes) {
-        Ok(record) => Ok(record),
-        Err(current_err) => crate::codec::decode::<LegacySessionStorageRecord>(bytes)
-            .map(|r| SessionStorageRecord {
-                id: r.id,
-                user_id: r.user_id,
-                created_at: r.created_at,
-                expires_at: r.expires_at,
-                last_refreshed_at: r.last_refreshed_at,
-                revoked: r.revoked,
-                ip_address: r.ip_address,
-                user_agent_raw: r.user_agent_raw,
-                device_label: r.device_label,
-                idle_deadline: r.idle_deadline,
-                absolute_deadline: r.absolute_deadline,
-                mfa_proof: MfaProof::None,
-            })
-            .map_err(|_| current_err),
+    let current_err = match crate::codec::decode::<SessionStorageRecord>(bytes) {
+        Ok(record) => return Ok(record),
+        Err(e) => e,
+    };
+    if let Ok(r) = crate::codec::decode::<PreSignInSessionStorageRecord>(bytes) {
+        return Ok(SessionStorageRecord {
+            id: r.id,
+            user_id: r.user_id,
+            created_at: r.created_at,
+            expires_at: r.expires_at,
+            last_refreshed_at: r.last_refreshed_at,
+            revoked: r.revoked,
+            ip_address: r.ip_address,
+            user_agent_raw: r.user_agent_raw,
+            device_label: r.device_label,
+            idle_deadline: r.idle_deadline,
+            absolute_deadline: r.absolute_deadline,
+            mfa_proof: r.mfa_proof,
+            sign_in: SignInMethod::Unknown,
+        });
     }
+    crate::codec::decode::<LegacySessionStorageRecord>(bytes)
+        .map(|r| SessionStorageRecord {
+            id: r.id,
+            user_id: r.user_id,
+            created_at: r.created_at,
+            expires_at: r.expires_at,
+            last_refreshed_at: r.last_refreshed_at,
+            revoked: r.revoked,
+            ip_address: r.ip_address,
+            user_agent_raw: r.user_agent_raw,
+            device_label: r.device_label,
+            idle_deadline: r.idle_deadline,
+            absolute_deadline: r.absolute_deadline,
+            mfa_proof: MfaProof::None,
+            sign_in: SignInMethod::Unknown,
+        })
+        .map_err(|_| current_err)
 }
 
 #[cfg(test)]
@@ -415,6 +534,16 @@ mod tests {
         ]
     }
 
+    fn arb_sign_in() -> impl Strategy<Value = SignInMethod> {
+        prop_oneof![
+            Just(SignInMethod::Unknown),
+            Just(SignInMethod::Password),
+            Just(SignInMethod::Passkey),
+            Just(SignInMethod::Inbox),
+            Just(SignInMethod::Federated),
+        ]
+    }
+
     fn arb_session_storage_record() -> impl Strategy<Value = SessionStorageRecord> {
         (
             (
@@ -431,6 +560,7 @@ mod tests {
                 proptest::option::of(arb_timestamp()),
             ),
             arb_mfa_proof(),
+            arb_sign_in(),
         )
             .prop_map(
                 |(
@@ -448,6 +578,7 @@ mod tests {
                         absolute_deadline,
                     ),
                     mfa_proof,
+                    sign_in,
                 )| SessionStorageRecord {
                     id: SessionId::new(session_uuid),
                     user_id: UserId::new(user_uuid),
@@ -461,6 +592,7 @@ mod tests {
                     idle_deadline,
                     absolute_deadline,
                     mfa_proof,
+                    sign_in,
                 },
             )
     }
@@ -508,6 +640,74 @@ mod tests {
         assert_eq!(decoded.ip_address.as_deref(), Some("192.0.2.1"));
         assert_eq!(decoded.absolute_deadline, Some(Timestamp::from_micros(3)));
         assert_eq!(decoded.mfa_proof, MfaProof::None);
+        assert_eq!(decoded.sign_in, SignInMethod::Unknown);
+    }
+
+    /// A session written before sessions recorded how the user signed in
+    /// keeps its MFA proof after the upgrade, and its sign-in method is
+    /// unknown (#619).
+    #[test]
+    fn a_session_record_without_a_sign_in_method_keeps_its_proof() {
+        let old = PreSignInSessionStorageRecord {
+            id: SessionId::new(Uuid::new_v4()),
+            user_id: UserId::new(Uuid::new_v4()),
+            created_at: Timestamp::from_micros(1),
+            expires_at: Timestamp::from_micros(2),
+            last_refreshed_at: Timestamp::from_micros(1),
+            revoked: false,
+            ip_address: None,
+            user_agent_raw: None,
+            device_label: Some("Firefox, Linux".to_string()),
+            idle_deadline: Some(Timestamp::from_micros(4)),
+            absolute_deadline: None,
+            mfa_proof: MfaProof::ProvedWebAuthn,
+        };
+        let bytes = crate::codec::encode(&old).expect("encode");
+        let decoded = decode_session_record(&bytes).expect("the old record must decode");
+        assert_eq!(decoded.id, old.id);
+        assert_eq!(decoded.device_label.as_deref(), Some("Firefox, Linux"));
+        assert_eq!(decoded.idle_deadline, Some(Timestamp::from_micros(4)));
+        assert_eq!(decoded.mfa_proof, MfaProof::ProvedWebAuthn);
+        assert_eq!(decoded.sign_in, SignInMethod::Unknown);
+    }
+
+    #[test]
+    fn amr_values_name_each_proved_method_once() {
+        for (sign_in, proof, amr) in [
+            (SignInMethod::Password, MfaProof::None, vec!["pwd"]),
+            (
+                SignInMethod::Password,
+                MfaProof::Proved,
+                vec!["mfa", "otp", "pwd"],
+            ),
+            (
+                SignInMethod::Password,
+                MfaProof::ProvedWebAuthn,
+                vec!["hwk", "mfa", "pwd", "user"],
+            ),
+            (SignInMethod::Password, MfaProof::EmailOtp, vec!["pwd"]),
+            (
+                SignInMethod::Passkey,
+                MfaProof::ProvedWebAuthn,
+                vec!["hwk", "mfa", "user"],
+            ),
+            (
+                SignInMethod::Passkey,
+                MfaProof::PasskeyPossession,
+                vec!["hwk", "user"],
+            ),
+            (
+                SignInMethod::Passkey,
+                MfaProof::Proved,
+                vec!["hwk", "mfa", "otp", "user"],
+            ),
+            (SignInMethod::Inbox, MfaProof::None, vec![]),
+            (SignInMethod::Inbox, MfaProof::Proved, vec!["mfa", "otp"]),
+            (SignInMethod::Federated, MfaProof::None, vec![]),
+            (SignInMethod::Unknown, MfaProof::None, vec![]),
+        ] {
+            assert_eq!(sign_in.amr_values(proof), amr, "{sign_in:?} + {proof:?}");
+        }
     }
 
     /// The proof a session was opened with is the proof it reports.

@@ -152,12 +152,16 @@ impl std::fmt::Debug for CookieSecret {
 ///
 /// Carried (MAC-protected) in the MFA pending cookie so the second-factor
 /// pages can refuse a factor that proves the same thing again (GA audit
-/// round 3, D-4).
+/// round 3, D-4), and so the session they open records how the user signed
+/// in ([`FirstFactor::sign_in_method`], #619).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FirstFactor {
-    /// A password, a passkey without user verification, or an upstream
-    /// identity provider.
-    Credential,
+    /// A password.
+    Password,
+    /// A passkey without user verification.
+    Passkey,
+    /// An upstream identity provider.
+    Federated,
     /// A magic link: control of the user's inbox. An email OTP proves the
     /// same inbox, so it cannot be this login's second factor.
     Inbox,
@@ -176,7 +180,9 @@ impl FirstFactor {
     pub fn proof_after_email_otp(self) -> crate::identity::MfaProof {
         match self {
             Self::VerifiedPasskey => crate::identity::MfaProof::ProvedWebAuthn,
-            Self::Credential | Self::Inbox => crate::identity::MfaProof::EmailOtp,
+            Self::Password | Self::Passkey | Self::Federated | Self::Inbox => {
+                crate::identity::MfaProof::EmailOtp
+            }
         }
     }
 
@@ -186,9 +192,26 @@ impl FirstFactor {
         self != Self::Inbox
     }
 
+    /// How the user signed in, as the session records it (#619).
+    #[must_use]
+    pub fn sign_in_method(self) -> crate::identity::SignInMethod {
+        use crate::identity::SignInMethod;
+        match self {
+            Self::Password => SignInMethod::Password,
+            Self::Passkey | Self::VerifiedPasskey => SignInMethod::Passkey,
+            Self::Federated => SignInMethod::Federated,
+            Self::Inbox => SignInMethod::Inbox,
+        }
+    }
+
+    // A cookie that an earlier release issued with `c` (a password, a
+    // UV-less passkey or a federated login, #619) no longer parses: the user
+    // signs in again.
     fn wire(self) -> &'static str {
         match self {
-            Self::Credential => "c",
+            Self::Password => "p",
+            Self::Passkey => "k",
+            Self::Federated => "f",
             Self::Inbox => "i",
             Self::VerifiedPasskey => "v",
         }
@@ -196,7 +219,9 @@ impl FirstFactor {
 
     fn from_wire(s: &str) -> Option<Self> {
         match s {
-            "c" => Some(Self::Credential),
+            "p" => Some(Self::Password),
+            "k" => Some(Self::Passkey),
+            "f" => Some(Self::Federated),
             "i" => Some(Self::Inbox),
             "v" => Some(Self::VerifiedPasskey),
             _ => None,
@@ -226,7 +251,7 @@ pub struct MfaPending {
 /// right to attempt the second authentication factor.
 ///
 /// Pass `secure = true` when the request is over TLS. The first factor is
-/// recorded as [`FirstFactor::Credential`]; see
+/// recorded as [`FirstFactor::Password`]; see
 /// [`issue_mfa_pending_cookie_after`].
 #[must_use]
 pub fn issue_mfa_pending_cookie(
@@ -241,7 +266,7 @@ pub fn issue_mfa_pending_cookie(
         realm_id,
         user_id,
         return_to,
-        FirstFactor::Credential,
+        FirstFactor::Password,
         secure,
     )
 }
@@ -732,6 +757,9 @@ pub struct UiSession {
     /// second factor. Gates that demand one for a particular client or role
     /// read this, never the account's enrolled factors (GA audit B5).
     pub mfa_proof: crate::identity::MfaProof,
+    /// How the user signed in to open this session, before any second
+    /// factor. The ID token's `amr` names it (#619).
+    pub sign_in: crate::identity::SignInMethod,
 }
 
 /// Parses and verifies the session cookie. Returns the underlying
@@ -831,6 +859,7 @@ where
             // attacker-chosen value against itself.
             csrf: csrf_cookie_value(parts).map(ToString::to_string),
             mfa_proof: session.mfa_proof(),
+            sign_in: session.sign_in(),
         })
     }
 }
@@ -1433,7 +1462,7 @@ mod tests {
             realm_id: RealmId::new(Uuid::from_u128(2)),
             return_to: None,
             nonce: nonce.to_string(),
-            first_factor: FirstFactor::Credential,
+            first_factor: FirstFactor::Password,
         }
     }
 
@@ -1718,7 +1747,7 @@ mod tests {
         assert_eq!(parsed.first_factor, FirstFactor::Inbox);
         let full = issue_mfa_pending_cookie(&secret, &tid, &uid, None, false);
         let parsed = parse_mfa_pending_cookie(&secret, pending_value(&full)).expect("valid");
-        assert_eq!(parsed.first_factor, FirstFactor::Credential);
+        assert_eq!(parsed.first_factor, FirstFactor::Password);
     }
 
     #[test]
@@ -1731,10 +1760,10 @@ mod tests {
         // Segments: uid.rid.expires.return_to.nonce.first.mac
         let mut parts: Vec<&str> = value.split('.').collect();
         assert_eq!(parts[5], "i");
-        parts[5] = "c";
+        parts[5] = "p";
         assert!(
             parse_mfa_pending_cookie(&secret, &parts.join(".")).is_none(),
-            "an inbox login must not be relabelled as a credential login"
+            "an inbox login must not be relabelled as a password login"
         );
     }
 

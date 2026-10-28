@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::Timestamp;
 use crate::identity::error::IdentityError;
 use crate::identity::tokens::SigningKey;
-use crate::identity::types::{MfaProof, RequiredAction};
+use crate::identity::types::{MfaProof, RequiredAction, SignInMethod};
 
 /// Cookie name for the RA session token.
 pub const RA_SESSION_COOKIE: &str = "hearth_ra_session";
@@ -76,6 +76,11 @@ pub struct OidcParams {
     /// session (GA audit round 3, D-7).
     #[serde(default)]
     pub mfa_proof: MfaProof,
+    /// How the user of the browser session authorizing the request signed
+    /// in. With [`OidcParams::mfa_proof`] it gives the code issued on resume
+    /// its `amr` (#619).
+    #[serde(default)]
+    pub sign_in: SignInMethod,
     /// RFC 8707 resource indicator from a verified request object (JAR) or
     /// PAR entry. Preserved so the code issued on resume is bound to the
     /// audience the client asked for.
@@ -131,6 +136,12 @@ pub struct RaClaims {
     /// `false` for a token minted before this field existed.
     #[serde(default)]
     pub inbox_first_factor: bool,
+    /// How the user signed in at the start of this flow. The browser-login
+    /// session created when the flow ends records it (#619). Unused on the
+    /// OIDC path, which carries it in [`OidcParams::sign_in`].
+    /// [`SignInMethod::Unknown`] for a token minted before this field existed.
+    #[serde(default)]
+    pub sign_in: SignInMethod,
     /// Identifier of the required-action flow this token belongs to, kept by
     /// every token the flow re-mints. The flow's end claims it once, so the
     /// flow ends — in a session or an authorization code — at most once
@@ -211,6 +222,7 @@ pub fn generate(
         browser_return_to: None,
         mfa_proof: MfaProof::None,
         inbox_first_factor: false,
+        sign_in: SignInMethod::Unknown,
         flow,
         generation,
         iat,
@@ -226,9 +238,9 @@ pub fn generate(
 /// session cookie and redirecting to `return_to` (or `/ui` when `None`).
 /// `mfa_proof` is what the authentication that started the flow proved; the
 /// session created at the end records it (see [`RaClaims::mfa_proof`]).
-/// `inbox_first_factor`, `flow` and `generation` are
-/// [`RaClaims::inbox_first_factor`], [`RaClaims::flow`] and
-/// [`RaClaims::generation`].
+/// `inbox_first_factor`, `sign_in`, `flow` and `generation` are
+/// [`RaClaims::inbox_first_factor`], [`RaClaims::sign_in`],
+/// [`RaClaims::flow`] and [`RaClaims::generation`].
 #[allow(clippy::too_many_arguments)]
 pub fn generate_browser(
     user_id: &str,
@@ -237,6 +249,7 @@ pub fn generate_browser(
     return_to: Option<String>,
     mfa_proof: MfaProof,
     inbox_first_factor: bool,
+    sign_in: SignInMethod,
     flow: String,
     generation: u64,
     signing_key: &SigningKey,
@@ -253,6 +266,7 @@ pub fn generate_browser(
         browser_return_to: return_to,
         mfa_proof,
         inbox_first_factor,
+        sign_in,
         flow,
         generation,
         iat,
@@ -425,6 +439,7 @@ mod tests {
             response_mode: None,
             prompt: String::new(),
             mfa_proof: MfaProof::None,
+            sign_in: SignInMethod::Unknown,
             resource: None,
         }
     }
@@ -617,6 +632,7 @@ mod tests {
             None,
             proof,
             false,
+            SignInMethod::Password,
             "flow-1".to_string(),
             0,
             &key,

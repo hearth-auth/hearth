@@ -133,9 +133,9 @@ pub use types::{
     PreTokenWebhookConfig, PreTokenWebhookErrorPolicy, RawCredential, Realm, RealmConfig,
     RealmQuotaConfig, RealmStatus, RegisterUserRequest, RegisterUserResponse, RegistrationPolicy,
     RequiredAction, ScimMappingExport, ScimMappingKind, Session, SessionContext,
-    SessionLimitPolicy, SessionVersionConfig, UpdateOrganizationRequest, UpdateRealmRequest,
-    UpdateUserRequest, UpdateWebhookRequest, User, UserStatus, VerificationOrigin,
-    WebAuthnAttestationPolicy, Webhook,
+    SessionLimitPolicy, SessionVersionConfig, SignInMethod, UpdateOrganizationRequest,
+    UpdateRealmRequest, UpdateUserRequest, UpdateWebhookRequest, User, UserStatus,
+    VerificationOrigin, WebAuthnAttestationPolicy, Webhook,
 };
 pub use types::{
     AatClaims, AatResponse, AatToolPermission, Agent, AgentCredential, AgentCredentialKind,
@@ -321,7 +321,8 @@ pub trait IdentityEngine: Send + Sync {
     /// After all actions complete, the flow resumes by creating a session
     /// cookie and redirecting to `return_to` (or `/ui` when `None`).
     /// `mfa_proof` is what the login has proved so far; the session created
-    /// when the flow ends records it (see [`ra_token::RaClaims::mfa_proof`]).
+    /// when the flow ends records it (see [`ra_token::RaClaims::mfa_proof`]),
+    /// and how the user signed in (`sign_in`, [`ra_token::RaClaims::sign_in`]).
     /// `flow` as for [`Self::generate_ra_token`].
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
@@ -333,6 +334,7 @@ pub trait IdentityEngine: Send + Sync {
         return_to: Option<String>,
         mfa_proof: MfaProof,
         inbox_first_factor: bool,
+        sign_in: SignInMethod,
         flow: Option<&str>,
         now: Timestamp,
     ) -> Result<String, IdentityError>;
