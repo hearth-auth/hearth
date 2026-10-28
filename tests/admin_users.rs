@@ -463,6 +463,7 @@ async fn export_users_includes_attributes() {
                     m.insert("tier".into(), "gold".into());
                     m
                 },
+                restored: None,
             },
         )
         .expect("import user with attributes");
@@ -1062,6 +1063,7 @@ async fn filter_users_by_status_returns_only_matching_status() {
                 status: hearth::identity::UserStatus::Active,
                 credential: None,
                 attributes: Default::default(),
+                restored: None,
             },
         )
         .expect("import active user");
@@ -1078,6 +1080,7 @@ async fn filter_users_by_status_returns_only_matching_status() {
                 status: hearth::identity::UserStatus::Disabled,
                 credential: None,
                 attributes: Default::default(),
+                restored: None,
             },
         )
         .expect("import disabled user");

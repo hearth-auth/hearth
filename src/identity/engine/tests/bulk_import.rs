@@ -48,6 +48,7 @@ fn import_request(email: &str) -> ImportUserRequest {
         status: UserStatus::Active,
         credential: None,
         attributes: std::collections::BTreeMap::new(),
+        restored: None,
     }
 }
 

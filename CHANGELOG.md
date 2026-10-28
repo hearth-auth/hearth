@@ -41,6 +41,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   (`password_reset`, `verification`, `magic_link` or `password_email`) and `sent`, and no
   recipient address or realm count. At most one event is written per guard and realm in the
   guard's window.
+- **A restore keeps each user's required actions, email verification and email codes** (#672):
+  `hearth backup restore` re-created every user without its required actions, its email
+  verification, its email-code second factor and its timestamps. After a restore, a forced
+  password update set by an admin was gone, a user who used email codes as a second factor no
+  longer had that factor, and every verified address was unverified. A restore now gives back
+  each user as archived. Archives made by earlier versions already hold these fields.
 
 ## [4.6.10] — 2026-10-28
 

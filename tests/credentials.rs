@@ -607,6 +607,7 @@ async fn legacy_verify_rehash_uses_realm_argon2_parameters_and_keeps_age() {
                     created_at_micros: Some(imported_created_at),
                 }),
                 attributes: BTreeMap::new(),
+                restored: None,
             },
         )
         .expect("import user");

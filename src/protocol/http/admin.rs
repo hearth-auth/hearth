@@ -874,6 +874,7 @@ fn import_users_blocking(
             status,
             credential: None,
             attributes: entry.attributes.clone(),
+            restored: None,
         });
     }
 

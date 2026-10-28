@@ -17,8 +17,8 @@ use crate::identity::{
     AccessTokenAuthorization, AgentExport, ApplicationStatus, ClientTrustLevel, ConsentExport,
     CreateRealmRequest, FederationLinkExport, IdentityEngine, IdentityError, ImportClientRequest,
     ImportUserRequest, MfaFactorExport, Organization, OrganizationInvitation,
-    OrganizationMembership, RawCredential, Realm, RetiringSigningKeyExport, RevocationExport,
-    ScimMappingExport, User, Webhook,
+    OrganizationMembership, RawCredential, Realm, RestoredUserState, RetiringSigningKeyExport,
+    RevocationExport, ScimMappingExport, User, Webhook,
 };
 use crate::rbac::{
     Group, GroupMembershipEdge, PermissionRecord, RbacEngine, Role, RoleAssignment, ScopeExport,
@@ -1392,6 +1392,13 @@ impl BackupImporter {
                 status: user.status(),
                 credential,
                 attributes: user.attributes().clone(),
+                restored: Some(RestoredUserState {
+                    required_actions: user.required_actions().to_vec(),
+                    email_verified: user.email_verified(),
+                    email_otp_enabled: user.email_otp_enabled(),
+                    created_at: user.created_at(),
+                    updated_at: user.updated_at(),
+                }),
             };
 
             if opts.dry_run {
