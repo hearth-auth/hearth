@@ -16,6 +16,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `/admin/*` wrote no audit event. The admin UI wrote one for the same changes. Each of these
   routes now writes `RoleAssigned` or `RoleRevoked` with the admin as the actor, the user or group
   as the resource, and the role, its scope and `via: api` in the metadata.
+- **A delegated token is issued only with its audit record** (#621): an RFC 8693 token exchange
+  issued the delegated token even when its `AgentDelegation` audit event failed to write. The
+  exchange now fails with a server error and stores no delegation grant. An agent that the rate
+  monitor suspends is now audited with actor `system` and `signal: agent_rate_limit`, and a
+  suspension that fails is logged at `error`.
 
 ## [4.6.8] — 2026-10-27
 
@@ -35,13 +40,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   assignment of a role that is archived or no longer exists. `--realm` takes a realm UUID or name;
   without it, the commands check every realm. The purge writes a `UserPermissionRevoked` or
   `RoleRevoked` audit event (actor `cli`) for each orphan that it deletes.
-
-### Security
-- **A delegated token is issued only with its audit record** (#621): an RFC 8693 token exchange
-  issued the delegated token even when its `AgentDelegation` audit event failed to write. The
-  exchange now fails with a server error and stores no delegation grant. An agent that the rate
-  monitor suspends is now audited with actor `system` and `signal: agent_rate_limit`, and a
-  suspension that fails is logged at `error`.
 
 ## [4.6.6] — 2026-10-26
 
