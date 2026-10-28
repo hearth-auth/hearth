@@ -2186,6 +2186,47 @@ async fn restore_carries_each_users_required_actions_verification_and_email_code
     assert_eq!(after, before, "every field of the user must round-trip");
 }
 
+/// A restore must keep each client's creation time (#675). The restore
+/// re-created every client through `ImportClientRequest`, which had no
+/// creation time, so each client came back created at the restore time.
+#[tokio::test]
+async fn restore_keeps_each_clients_creation_time() {
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
+    let (realm, _email, _password) = seeded_realm(&src);
+    let client = src
+        .identity()
+        .register_client(
+            &realm,
+            &hearth::identity::RegisterClientRequest {
+                client_name: "Dated Client".to_string(),
+                redirect_uris: vec!["https://app.example/cb".to_string()],
+                grant_types: vec!["authorization_code".to_string()],
+                ..Default::default()
+            },
+        )
+        .expect("register client");
+
+    let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
+    let slug = realm_slug(&src, &realm);
+    let dst = common::TestHarness::in_process()
+        .await
+        .expect("dst harness");
+    let (restored_realm, _report) = restore_into(&dst, &tmp, &slug);
+    let after = dst
+        .identity()
+        .get_client(&restored_realm, client.client_id())
+        .expect("get restored client")
+        .expect("the client must survive the restore");
+
+    assert_eq!(
+        after.created_at(),
+        client.created_at(),
+        "a restore must keep the client's creation time, not stamp the restore time"
+    );
+}
+
 // ── OpenSpec 26.40: the remaining entity families ────────────────────────────
 //
 // Every test below asserts the DATA or its EFFECT, never a row count. Counting
