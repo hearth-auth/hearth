@@ -10,10 +10,16 @@
 //!
 //! Covers TEST_SCENARIOS: Graceful shutdown (SIGTERM) (HEA-2161)
 
+#[cfg(all(unix, feature = "dev-endpoints"))]
+#[path = "support/server_output.rs"]
+mod server_output;
+
 #[cfg(unix)]
 mod sigterm {
     #[cfg(feature = "dev-endpoints")]
-    use std::io::{BufRead, Read, Write};
+    use super::server_output::ServerOutput;
+    #[cfg(feature = "dev-endpoints")]
+    use std::io::{Read, Write};
     use std::net::TcpListener;
     #[cfg(feature = "dev-endpoints")]
     use std::net::TcpStream;
@@ -64,30 +70,28 @@ mod sigterm {
             .args(["serve", "--dev", "--port", &port.to_string()])
             .env("RUST_LOG", "warn,tower_http::trace=debug")
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .spawn()
             .expect("spawn hearth server")
     }
 
-    /// Drains `child`'s stdout on a background thread and sends one message per
+    /// Keeps `child`'s stdout and stderr in `output` and sends one message per
     /// request the server begins processing.
     ///
-    /// The thread must keep reading after the first match, otherwise the pipe
-    /// fills and the server blocks on its own log writes.
+    /// The reader threads keep reading after the first match, otherwise the
+    /// pipe fills and the server blocks on its own log writes.
     #[cfg(feature = "dev-endpoints")]
-    fn watch_for_request_start(child: &mut Child) -> Receiver<()> {
-        let stdout = child.stdout.take().expect("server stdout must be piped");
+    fn watch_for_request_start(child: &mut Child, output: &ServerOutput) -> Receiver<()> {
         let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            for line in std::io::BufReader::new(stdout)
-                .lines()
-                .map_while(Result::ok)
-            {
+        output.capture_with(
+            child.stdout.take().expect("server stdout must be piped"),
+            move |line| {
                 if line.contains("started processing request") {
                     let _ = tx.send(());
                 }
-            }
-        });
+            },
+        );
+        output.capture(child.stderr.take().expect("server stderr must be piped"));
         rx
     }
 
@@ -200,7 +204,8 @@ mod sigterm {
     fn sigterm_does_not_abort_inflight_http_request() {
         let port = find_available_port();
         let mut child = start_server_dev_traced(port);
-        let request_started = watch_for_request_start(&mut child);
+        let output = ServerOutput::default();
+        let request_started = watch_for_request_start(&mut child, &output);
 
         assert!(
             wait_for_server(port, Duration::from_secs(20)),
@@ -231,21 +236,33 @@ mod sigterm {
         // request is still in flight when the drain begins.
         request_started
             .recv_timeout(Duration::from_secs(30))
-            .expect("server must log that it started processing the bootstrap request");
+            .unwrap_or_else(|_| {
+                panic!(
+                    "server must log that it started processing the bootstrap request\n\
+                     --- server output, last 80 lines ---\n{}",
+                    output.tail(80)
+                )
+            });
 
         send_sigterm(pid);
 
         // The in-flight request must complete — not get a TCP reset.
         let mut response = Vec::new();
-        stream.read_to_end(&mut response).expect(
-            "in-flight bootstrap request must complete cleanly during graceful drain; \
-             a read error here means SIGTERM aborted the request",
-        );
+        stream.read_to_end(&mut response).unwrap_or_else(|e| {
+            panic!(
+                "in-flight bootstrap request must complete cleanly during graceful drain; \
+                 a read error here means SIGTERM aborted the request: {e}\n\
+                 --- server output, last 80 lines ---\n{}",
+                output.tail(80)
+            )
+        });
         let head = String::from_utf8_lossy(&response);
         assert!(
             head.starts_with("HTTP/1.1 200"),
-            "bootstrap should return 200 when the server drains cleanly, got: {}",
-            head.lines().next().unwrap_or("<empty response>")
+            "bootstrap should return 200 when the server drains cleanly, got: {}\n\
+             --- server output, last 80 lines ---\n{}",
+            head.lines().next().unwrap_or("<empty response>"),
+            output.tail(80)
         );
 
         // Process must exit 0 within the drain deadline + buffer.
