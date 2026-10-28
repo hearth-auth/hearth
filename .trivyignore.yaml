@@ -85,3 +85,15 @@ vulnerabilities:
     paths:
       - "docs-site/package-lock.json"
     statement: "sprintf-js via argparse in Docusaurus build tooling; formats only its own templates; no patched release."
+
+  # CVE-2026-93753 (GHSA-gcqx-w48m-w2h4): deepmerge mergeObject() can poison
+  # the prototype of the merged result. deepmerge 4.3.1 has NO fixed release.
+  # Its only dependent in docs-site is @svgr/plugin-svgo 8.1.0, which declares
+  # it but never loads it: dist/index.js requires only svgo and cosmiconfig
+  # (read on 2026-10-27, #677). Same assessment as the osv-scanner.toml entry
+  # that the owner approved in #680. Revisit when deepmerge publishes a fixed
+  # release or the docs site drops @svgr/plugin-svgo.
+  - id: CVE-2026-93753
+    paths:
+      - "docs-site/package-lock.json"
+    statement: "deepmerge declared but never loaded by @svgr/plugin-svgo 8.1.0 (docs build tooling); no patched release."
