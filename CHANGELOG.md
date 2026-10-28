@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Fixed
+- **ID tokens name the sign-in methods in `amr`** (#619): no sign-in flow filled the `amr` claim,
+  so a relying party could not check from the ID token that the user passed MFA. The ID token and
+  the access token now carry RFC 8176 values: `pwd` for a password, `otp` for a TOTP or recovery
+  code, `hwk` and `user` for a passkey, and `mfa` when the sign-in proved a second factor that the
+  MFA policy accepts. A magic link, an email OTP and a federated sign-in add no value, and a token
+  with no value has no `amr` claim. Browser sessions opened before this release do not record how
+  the user signed in, so their tokens name only the second factor until the user signs in again. A
+  sign-in that waits for its second factor during the upgrade starts again.
+
 ### Security
 - **Role changes through the REST admin API are audited** (#620): assigning a role to a user or a
   group, removing a role assignment, and adding or removing an extra organization role through
@@ -51,14 +61,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   assignment of a role that is archived or no longer exists. `--realm` takes a realm UUID or name;
   without it, the commands check every realm. The purge writes a `UserPermissionRevoked` or
   `RoleRevoked` audit event (actor `cli`) for each orphan that it deletes.
-- **ID tokens name the sign-in methods in `amr`** (#619): no sign-in flow filled the `amr` claim,
-  so a relying party could not check from the ID token that the user passed MFA. The ID token and
-  the access token now carry RFC 8176 values: `pwd` for a password, `otp` for a TOTP or recovery
-  code, `hwk` and `user` for a passkey, and `mfa` when the sign-in proved a second factor that the
-  MFA policy accepts. A magic link, an email OTP and a federated sign-in add no value, and a token
-  with no value has no `amr` claim. Browser sessions opened before this release do not record how
-  the user signed in, so their tokens name only the second factor until the user signs in again. A
-  sign-in that waits for its second factor during the upgrade starts again.
 
 ## [4.6.6] — 2026-10-26
 
