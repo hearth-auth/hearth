@@ -41,6 +41,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   delivered. Archives made before this release do not hold the working subscriptions: after you
   restore one, create the webhooks again. `POST /admin/backup` and `POST /admin/backup/restore`
   answer `501` on a server without the webhook engine, which `hearth serve` always has.
+- **The purged-log startup refusal no longer tells operators to start a cluster node empty**
+  (#670): the message said to move the node's data directory aside and start it empty under its
+  old ID. The data directory holds `raft.db`, the node's Raft vote, and a node that forgets its
+  vote can help elect a second leader. The message now says not to, and gives only the rebuild
+  from a backup.
 
 ### Security
 - **Capped emails are audited** (#622): when the A-4 outbound volume shield or the A-50
@@ -97,11 +102,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   assignment of a role that is archived or no longer exists. `--realm` takes a realm UUID or name;
   without it, the commands check every realm. The purge writes a `UserPermissionRevoked` or
   `RoleRevoked` audit event (actor `cli`) for each orphan that it deletes.
-- **The purged-log startup refusal no longer tells operators to start a cluster node empty**
-  (#670): the message said to move the node's data directory aside and start it empty under its
-  old ID. The data directory holds `raft.db`, the node's Raft vote, and a node that forgets its
-  vote can help elect a second leader. The message now says not to, and gives only the rebuild
-  from a backup.
 
 ## [4.6.6] — 2026-10-26
 
