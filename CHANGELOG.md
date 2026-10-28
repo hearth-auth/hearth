@@ -46,6 +46,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   old ID. The data directory holds `raft.db`, the node's Raft vote, and a node that forgets its
   vote can help elect a second leader. The message now says not to, and gives only the rebuild
   from a backup.
+- **Python SDK: the device flow works, and the middleware answers 401 to a missing or invalid
+  token** (#634): `start_device_flow()` posted to `/realms/{realm}/device/authorize`, which the
+  server does not serve, so the device flow always failed with `404`. It now posts to the
+  `device_authorization_endpoint` of the realm's discovery document, and raises `DiscoveryError`
+  when discovery fails or names no such endpoint. The ASGI, WSGI and Django gates answered `403`
+  to a missing or invalid token. They now answer `401` with `WWW-Authenticate: Bearer
+  realm="hearth"`, with `error="invalid_token"` for a token that does not verify or that
+  introspection reports as inactive. A valid token without the permission still gets `403`. In
+  decision mode the server answers a bad token like a missing permission, so both get `403`.
 
 ### Security
 - **Capped emails are audited** (#622): when the A-4 outbound volume shield or the A-50
@@ -102,15 +111,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   assignment of a role that is archived or no longer exists. `--realm` takes a realm UUID or name;
   without it, the commands check every realm. The purge writes a `UserPermissionRevoked` or
   `RoleRevoked` audit event (actor `cli`) for each orphan that it deletes.
-- **Python SDK: the device flow works, and the middleware answers 401 to a missing or invalid
-  token** (#634): `start_device_flow()` posted to `/realms/{realm}/device/authorize`, which the
-  server does not serve, so the device flow always failed with `404`. It now posts to the
-  `device_authorization_endpoint` of the realm's discovery document, and raises `DiscoveryError`
-  when discovery fails or names no such endpoint. The ASGI, WSGI and Django gates answered `403`
-  to a missing or invalid token. They now answer `401` with `WWW-Authenticate: Bearer
-  realm="hearth"`, with `error="invalid_token"` for a token that does not verify or that
-  introspection reports as inactive. A valid token without the permission still gets `403`. In
-  decision mode the server answers a bad token like a missing permission, so both get `403`.
 
 ## [4.6.6] — 2026-10-26
 
