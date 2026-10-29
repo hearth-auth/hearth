@@ -332,7 +332,7 @@ See the [Gin adapter guide](/docs/sdks/go-gin) for per-route and per-group permi
 import (
     hearth      "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
     hearthecho  "github.com/hearth-auth/hearth/sdks/go/v4/hearth/echo"
-    "github.com/labstack/echo/v4"
+    "github.com/labstack/echo/v5"
     "net/http"
 )
 
@@ -342,14 +342,14 @@ client := hearth.NewClient("http://localhost:8420", "<realm-id>",
 e := echo.New()
 e.Use(hearthecho.HearthMiddleware(client))
 
-e.GET("/login", func(c echo.Context) error {
+e.GET("/login", func(c *echo.Context) error {
     result, _ := client.BeginLogin(c.Request().Context(), "http://localhost:3000/callback", "openid")
     c.SetCookie(&http.Cookie{Name: "state", Value: result.State, Path: "/", HttpOnly: true})
     c.SetCookie(&http.Cookie{Name: "code_verifier", Value: result.CodeVerifier, Path: "/", HttpOnly: true})
     return c.Redirect(http.StatusFound, result.AuthorizationURL)
 })
 
-e.GET("/callback", func(c echo.Context) error {
+e.GET("/callback", func(c *echo.Context) error {
     cv, _ := c.Cookie("code_verifier")
     tokens, _ := client.CompleteLogin(c.Request().Context(),
         c.QueryParam("code"), cv.Value, "http://localhost:3000/callback",
@@ -760,7 +760,7 @@ See the [Gin adapter guide](/docs/sdks/go-gin) for per-route and per-group patte
 import (
     hearth      "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
     hearthecho  "github.com/hearth-auth/hearth/sdks/go/v4/hearth/echo"
-    "github.com/labstack/echo/v4"
+    "github.com/labstack/echo/v5"
 )
 
 client := hearth.NewClient(hearthURL, realmID)
@@ -769,7 +769,7 @@ e.Use(hearthecho.HearthMiddleware(client))
 
 // RequirePermission decodes claims locally from the stored JWT — no network call
 admin := e.Group("/admin", hearthecho.RequirePermission("hearth.admin"))
-admin.GET("/data", func(c echo.Context) error {
+admin.GET("/data", func(c *echo.Context) error {
     return c.JSON(200, map[string]any{"token": hearthecho.GetToken(c)})
 })
 ```

@@ -15,7 +15,7 @@
 //	admin := e.Group("/admin")
 //	admin.Use(hearthecho.RequirePermission("admin.write"))  // guard by permission
 //
-//	admin.GET("/users", func(c echo.Context) error {
+//	admin.GET("/users", func(c *echo.Context) error {
 //	    token := hearthecho.GetToken(c)
 //	    _ = token
 //	    return c.JSON(200, map[string]bool{"ok": true})
@@ -26,7 +26,7 @@ import (
 	"net/http"
 
 	hearth "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
-	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v5"
 )
 
 const (
@@ -49,30 +49,32 @@ const (
 type MiddlewareOption func(*middlewareConfig)
 
 type middlewareConfig struct {
-	tokenExtractor func(c echo.Context) string
-	onUnauthorized func(c echo.Context) error
+	tokenExtractor func(c *echo.Context) string
+	onUnauthorized func(c *echo.Context) error
 }
 
 // WithTokenExtractor replaces the default Authorization: Bearer <token> extractor
 // with a custom function. Use this when the token arrives via a cookie, query
 // parameter, or any other transport.
-func WithTokenExtractor(fn func(c echo.Context) string) MiddlewareOption {
+func WithTokenExtractor(fn func(c *echo.Context) string) MiddlewareOption {
 	return func(cfg *middlewareConfig) {
 		cfg.tokenExtractor = fn
 	}
 }
 
 // WithOnUnauthorized replaces the default HTTP 401 handler that is called when
-// no bearer token is found in the request. The function must return an error
-// (typically an echo.HTTPError) to abort the request chain.
-func WithOnUnauthorized(fn func(c echo.Context) error) MiddlewareOption {
+// no bearer token is found in the request, or the token does not verify. The
+// next handler never runs after it: return an error (for example
+// echo.ErrUnauthorized or an *echo.HTTPError), or write the response yourself
+// (for example with c.JSON) and return its result.
+func WithOnUnauthorized(fn func(c *echo.Context) error) MiddlewareOption {
 	return func(cfg *middlewareConfig) {
 		cfg.onUnauthorized = fn
 	}
 }
 
 // defaultExtractor strips the "Bearer " prefix from the Authorization header.
-func defaultExtractor(c echo.Context) string {
+func defaultExtractor(c *echo.Context) string {
 	auth := c.Request().Header.Get("Authorization")
 	if len(auth) > 7 && auth[:7] == "Bearer " {
 		return auth[7:]
@@ -81,7 +83,7 @@ func defaultExtractor(c echo.Context) string {
 }
 
 // defaultUnauthorized returns echo.ErrUnauthorized (HTTP 401).
-func defaultUnauthorized(_ echo.Context) error {
+func defaultUnauthorized(_ *echo.Context) error {
 	return echo.ErrUnauthorized
 }
 
@@ -114,7 +116,7 @@ func HearthMiddleware(client *hearth.Client, opts ...MiddlewareOption) echo.Midd
 		opt(cfg)
 	}
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
-		return func(c echo.Context) error {
+		return func(c *echo.Context) error {
 			token := cfg.tokenExtractor(c)
 			if token == "" {
 				return cfg.onUnauthorized(c)
@@ -133,7 +135,7 @@ func HearthMiddleware(client *hearth.Client, opts ...MiddlewareOption) echo.Midd
 
 // GetClaims retrieves the verified Hearth claims stored in the Echo context by
 // HearthMiddleware. Returns nil when HearthMiddleware has not run.
-func GetClaims(c echo.Context) *hearth.Claims {
+func GetClaims(c *echo.Context) *hearth.Claims {
 	val := c.Get(ClaimsContextKey)
 	if val == nil {
 		return nil
@@ -145,7 +147,7 @@ func GetClaims(c echo.Context) *hearth.Claims {
 // GetToken retrieves the Hearth bearer token stored in the Echo context by
 // HearthMiddleware. Returns an empty string when no token has been stored (i.e.
 // HearthMiddleware has not run or the request had no token).
-func GetToken(c echo.Context) string {
+func GetToken(c *echo.Context) string {
 	val := c.Get(TokenContextKey)
 	if val == nil {
 		return ""
@@ -175,16 +177,16 @@ func GetToken(c echo.Context) string {
 //	admin.Use(hearthecho.RequirePermission("admin.write"))
 func RequirePermission(permission string) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
-		return func(c echo.Context) error {
+		return func(c *echo.Context) error {
 			if GetToken(c) == "" {
 				return echo.ErrUnauthorized
 			}
 			clientVal := c.Get(ClientContextKey)
 			if clientVal == nil {
-				return echo.NewHTTPError(http.StatusInternalServerError)
+				return echo.NewHTTPError(http.StatusInternalServerError, http.StatusText(http.StatusInternalServerError))
 			}
 			if _, ok := clientVal.(*hearth.Client); !ok {
-				return echo.NewHTTPError(http.StatusInternalServerError)
+				return echo.NewHTTPError(http.StatusInternalServerError, http.StatusText(http.StatusInternalServerError))
 			}
 			// A token was stashed but nothing verified it — refuse. This is the
 			// only place the raw token is consulted, and only to decide whether

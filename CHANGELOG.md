@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Changed
+- **Go SDK: the Echo adapter uses Echo v5** (#688): `hearthecho` used `github.com/labstack/echo/v4`,
+  which has two advisories with no v4 fix (GHSA-99jh-6h7p-pp36 in the reverse-proxy middleware,
+  GHSA-246p-cpwv-v3jq in the rate limiter). It now uses `github.com/labstack/echo/v5` v5.4.2.
+  **Breaking for Echo users:** your application must move to Echo v5, and handlers and the
+  `WithTokenExtractor` and `WithOnUnauthorized` callbacks take `*echo.Context` instead of
+  `echo.Context`. The SDK's other middleware does not change.
+
 ## [4.6.12] — 2026-10-28
 
 ### Changed

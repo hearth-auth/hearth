@@ -220,5 +220,5 @@ A complete runnable example with dev bootstrap is at
 ## Next steps
 
 - [Go SDK quickstart](./go.md) — `NewClient`, PKCE login, RBAC helpers, and the `net/http` generic middleware
-- [Echo adapter](./go-echo.md) — `hearthecho` for Echo v4 applications
+- [Echo adapter](./go-echo.md) — `hearthecho` for Echo v5 applications
 - [RBAC guide](/docs/rbac) — roles, groups, permissions, and JWT claim structure
