@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.6.14] — 2026-10-29
+
 ### Fixed
 - **A restore keeps each OAuth client's creation time** (#675): `hearth backup restore` gave each
   restored client the restore time as `created_at`, so the admin API and the admin console showed
