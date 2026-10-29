@@ -872,6 +872,9 @@ pub fn unwrap_dek(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::{
+        EmbeddedStorageEngine, EntryVisitor, ScanEntry, StorageEngine, StorageError,
+    };
 
     #[test]
     fn to_ndjson_line_count_matches_input() {
@@ -983,6 +986,207 @@ mod tests {
         assert_ne!(
             b1, b2,
             "each wrap must produce a distinct ciphertext (random nonce+salt)"
+        );
+    }
+
+    /// Storage that counts the user records (`usr:id:` keys) that reads walk or
+    /// return. Every call goes through to the real engine.
+    struct UserReadCountingStorage {
+        inner: Arc<EmbeddedStorageEngine>,
+        user_reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl UserReadCountingStorage {
+        fn count(&self, key: &[u8]) {
+            if key.starts_with(&crate::identity::keys::user_id_scan_prefix()) {
+                self.user_reads
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        fn take(&self) -> usize {
+            self.user_reads.swap(0, std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl StorageEngine for UserReadCountingStorage {
+        fn get(&self, realm_id: &RealmId, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+            self.inner.get(realm_id, key)
+        }
+
+        fn put(&self, realm_id: &RealmId, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+            self.inner.put(realm_id, key, value)
+        }
+
+        fn delete(&self, realm_id: &RealmId, key: &[u8]) -> Result<(), StorageError> {
+            self.inner.delete(realm_id, key)
+        }
+
+        fn scan(
+            &self,
+            realm_id: &RealmId,
+            start: &[u8],
+            end: &[u8],
+        ) -> Result<Vec<ScanEntry>, StorageError> {
+            let entries = self.inner.scan(realm_id, start, end)?;
+            for entry in &entries {
+                self.count(&entry.key);
+            }
+            Ok(entries)
+        }
+
+        fn scan_keys(
+            &self,
+            realm_id: &RealmId,
+            start: &[u8],
+            end: &[u8],
+        ) -> Result<Vec<Vec<u8>>, StorageError> {
+            let keys = self.inner.scan_keys(realm_id, start, end)?;
+            for key in &keys {
+                self.count(key);
+            }
+            Ok(keys)
+        }
+
+        fn visit_keys(
+            &self,
+            realm_id: &RealmId,
+            start: &[u8],
+            end: &[u8],
+            visit: &mut dyn FnMut(&[u8]) -> std::ops::ControlFlow<()>,
+        ) -> Result<(), StorageError> {
+            self.inner.visit_keys(realm_id, start, end, &mut |key| {
+                self.count(key);
+                visit(key)
+            })
+        }
+
+        fn visit_entries(
+            &self,
+            realm_id: &RealmId,
+            start: &[u8],
+            end: &[u8],
+            visit: &mut EntryVisitor<'_>,
+        ) -> Result<(), StorageError> {
+            self.inner
+                .visit_entries(realm_id, start, end, &mut |key, value| {
+                    self.count(key);
+                    visit(key, value)
+                })
+        }
+
+        fn list_realms(&self) -> Result<Vec<RealmId>, StorageError> {
+            self.inner.list_realms()
+        }
+
+        fn begin_snapshot_restore(&self, snapshot_id: &str) -> Result<(), StorageError> {
+            self.inner.begin_snapshot_restore(snapshot_id)
+        }
+
+        fn complete_snapshot_restore(&self) -> Result<(), StorageError> {
+            self.inner.complete_snapshot_restore()
+        }
+
+        fn backup_barrier(&self) -> Option<Arc<std::sync::RwLock<()>>> {
+            self.inner.backup_barrier()
+        }
+    }
+
+    /// A backup reads each user record a bounded number of times. The export
+    /// read users a page of 200 at a time, and each page walked every user key
+    /// in the realm to count them. At 1,000,000 users that is 5,000 walks of
+    /// 1,000,000 keys, and every write on the node waits on the backup barrier
+    /// until the reads end: 36 minutes in the restore drill (#695).
+    #[test]
+    fn export_reads_each_user_record_a_bounded_number_of_times() {
+        use crate::audit::EmbeddedAuditEngine;
+        use crate::core::{Clock, SystemClock};
+        use crate::identity::{
+            CreateRealmRequest, CreateUserRequest, CredentialConfig, EmbeddedIdentityEngine,
+            IdentityConfig,
+        };
+        use crate::rbac::EmbeddedRbacEngine;
+        use crate::storage::StorageConfig;
+        use crate::webhook::EmbeddedWebhookEngine;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Arc::new(UserReadCountingStorage {
+            inner: Arc::new(
+                EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().to_path_buf()))
+                    .expect("open storage"),
+            ),
+            user_reads: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let shared = Arc::clone(&storage) as Arc<dyn StorageEngine>;
+        let clock = Arc::new(SystemClock) as Arc<dyn Clock>;
+        let rbac = Arc::new(EmbeddedRbacEngine::new(
+            Arc::clone(&shared),
+            Arc::clone(&clock),
+        ));
+        let audit = Arc::new(EmbeddedAuditEngine::new(
+            Arc::clone(&shared),
+            Arc::clone(&clock),
+        ));
+        let identity = Arc::new(
+            EmbeddedIdentityEngine::with_rbac(
+                Arc::clone(&shared),
+                Arc::clone(&clock),
+                IdentityConfig {
+                    credential: CredentialConfig::fast_for_testing(),
+                    ..IdentityConfig::default()
+                },
+                Arc::clone(&rbac) as Arc<dyn RbacEngine>,
+                Arc::clone(&audit) as Arc<dyn AuditEngine>,
+            )
+            .expect("identity engine"),
+        );
+        let webhooks = Arc::new(EmbeddedWebhookEngine::new(
+            Arc::clone(&shared),
+            Arc::clone(&clock),
+        ));
+
+        let realm = identity
+            .create_realm(&CreateRealmRequest {
+                name: "user-read-count".into(),
+                config: None,
+            })
+            .expect("create realm")
+            .id()
+            .clone();
+        // Three full pages and one more user.
+        let users = 3 * crate::core::MAX_PAGE_LIMIT as usize + 1;
+        for i in 0..users {
+            identity
+                .create_user(
+                    &realm,
+                    &CreateUserRequest {
+                        email: format!("user-{i}@user-read-count.example"),
+                        display_name: format!("User {i}"),
+                        first_name: "User".into(),
+                        last_name: "Count".into(),
+                        attributes: Default::default(),
+                    },
+                )
+                .expect("create user");
+        }
+
+        let exporter = BackupExporter::new(identity, audit, rbac, webhooks);
+        let archive = tempfile::NamedTempFile::new().expect("tempfile");
+        let mut writer = crate::backup::BackupArchive::create(archive.path()).expect("archive");
+        let dek = BackupExporter::generate_dek().expect("generate DEK");
+        storage.take();
+        let manifest = exporter
+            .export_realm(&realm, &mut writer, &ExportOptions::default(), &dek)
+            .expect("export realm");
+
+        let reads = storage.take();
+        assert_eq!(
+            manifest.record_counts.users, users as u64,
+            "every user is in the archive"
+        );
+        assert!(
+            reads <= 2 * users,
+            "the export read {reads} user records for {users} users"
         );
     }
 }
