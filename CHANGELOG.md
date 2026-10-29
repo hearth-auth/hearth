@@ -14,6 +14,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `WithTokenExtractor` and `WithOnUnauthorized` callbacks take `*echo.Context` instead of
   `echo.Context`. The SDK's other middleware does not change.
 
+### Fixed
+- **A restore keeps each OAuth client's creation time** (#675): `hearth backup restore` gave each
+  restored client the restore time as `created_at`, so the admin API and the admin console showed
+  every client as new. A restore now keeps the archived creation time. Clients from the Auth0 and
+  Keycloak migrations and from `hearth.yaml` still get the import time.
+
 ## [4.6.12] — 2026-10-28
 
 ### Changed
@@ -57,10 +63,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   not verify or that introspection reports as inactive. A valid token without the permission still
   gets `403`; in decision mode the server answers a bad token like a missing permission, so both get
   `403`. In embedded mode the handler reads the verified claims with `hearth.ClaimsFromContext`.
-- **A restore keeps each OAuth client's creation time** (#675): `hearth backup restore` gave each
-  restored client the restore time as `created_at`, so the admin API and the admin console showed
-  every client as new. A restore now keeps the archived creation time. Clients from the Auth0 and
-  Keycloak migrations and from `hearth.yaml` still get the import time.
 
 ## [4.6.11] — 2026-10-28
 
