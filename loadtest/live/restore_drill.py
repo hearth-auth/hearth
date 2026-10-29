@@ -1073,6 +1073,26 @@ def cmd_compare(args):
     return 0 if v == "PASS" else 1
 
 
+# The line `hearth backup keygen` prints: "verify_key: " and a 32-byte key in base64url.
+VERIFY_KEY_LINE = re.compile(r"\bverify_key: ([A-Za-z0-9_-]{43})(?![A-Za-z0-9_-])")
+
+
+def verify_key_from_keygen(text):
+    """The verify_key in the output of `hearth backup keygen`, as an operator reads it
+    (backup.md). Not from the key file: the runner's openssl did not read the PKCS#8 v2
+    key that keygen writes (#690)."""
+    keys = set(VERIFY_KEY_LINE.findall(text))
+    if len(keys) != 1:
+        raise DrillError(f"expected one verify_key in the keygen output, found {len(keys)}")
+    return keys.pop()
+
+
+def cmd_verify_key(args):
+    with open(args.keygen_output, encoding="utf-8") as f:
+        print(verify_key_from_keygen(f.read()))
+    return 0
+
+
 def cmd_report(args):
     findings = load_json(args.findings) if args.findings and os.path.exists(args.findings) \
         else []
@@ -1122,6 +1142,10 @@ def parse_args(argv):
     sp.add_argument("before")
     sp.add_argument("after")
     sp.set_defaults(fn=cmd_compare)
+
+    sp = sub.add_parser("verify-key")
+    sp.add_argument("keygen_output", help="what hearth backup keygen printed")
+    sp.set_defaults(fn=cmd_verify_key)
 
     sp = sub.add_parser("report")
     sp.add_argument("--steps", required=True)

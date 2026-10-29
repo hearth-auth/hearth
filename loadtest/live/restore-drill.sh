@@ -146,6 +146,8 @@ fact hearth_version "$("$hearth" --version 2>&1 | head -n 1)"
 fact commit "${GITHUB_SHA:-$(git -C "$here" rev-parse HEAD 2> /dev/null || echo unknown)}"
 fact cpus "$(nproc)"
 fact memory_bytes "$(awk '/^MemTotal:/ { print $2 * 1024 }' /proc/meminfo)"
+# restore_drill.py verifies the pre-backup token with openssl.
+fact openssl_version "$(openssl version)"
 fact users "$USERS"
 
 log "generating a production config ($LOGIN_USERS seed users with a password)"
@@ -158,12 +160,12 @@ state=$work/state
 mkdir -m 0700 "$state" "$work/archive"
 archive=$work/archive/hearth.hearth-backup
 
-# The key that signs the archive, and its public verify key (backup.md, "Signed archives").
+# The key that signs the archive, and the verify_key that keygen prints for it (backup.md,
+# "Signed archives").
 hearth_cli backup keygen --output "$work/backup-signing.pem" > "$out/backup-keygen.txt" 2>&1 \
   || die "hearth backup keygen failed (see backup-keygen.txt)"
-verify_key=$(openssl pkey -in "$work/backup-signing.pem" -pubout -outform DER | tail -c 32 \
-  | basenc --base64url | tr -d '=') || die "openssl cannot read the archive signing key"
-[ "${#verify_key}" -eq 43 ] || die "no verify key from the archive signing key"
+verify_key=$(drill verify-key "$out/backup-keygen.txt") \
+  || die "no verify_key in the hearth backup keygen output (see backup-keygen.txt)"
 
 log "starting hearth ($hearth)"
 t=$(now)
