@@ -2820,6 +2820,14 @@ pub trait IdentityEngine: Send + Sync {
 
     // ===== Backup export helpers =====
 
+    /// Returns every user record in a realm for backup export, in one walk of
+    /// the user keys.
+    ///
+    /// Paging with [`list_users`](Self::list_users) walks every user key once
+    /// per page to count the total, and a backup holds every write on the node
+    /// until its reads end.
+    fn export_all_users(&self, realm_id: &RealmId) -> Result<Vec<User>, IdentityError>;
+
     /// Returns all stored credentials in a realm for backup export.
     ///
     /// Each entry pairs a `UserId` with the PHC-formatted hash and its

@@ -288,12 +288,13 @@ impl BackupExporter {
             members.push((format!("{prefix}/realm.json"), Zeroizing::new(data)));
         }
 
-        // users.ndjson
-        let users = self.export_offset_paginated(|page| {
-            self.identity
-                .list_users(realm_id, &page)
-                .map_err(|e| BackupError::Engine(e.to_string()))
-        })?;
+        // users.ndjson — one walk of the user keys. Pages of `list_users` each
+        // walk every user key to count the total, while this pass holds every
+        // write on the node.
+        let users = self
+            .identity
+            .export_all_users(realm_id)
+            .map_err(|e| BackupError::Engine(e.to_string()))?;
         counts.users = users.len() as u64;
         if !users.is_empty() {
             let data = to_ndjson(&users)?;
