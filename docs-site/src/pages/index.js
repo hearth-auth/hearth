@@ -162,7 +162,7 @@ const GO_ECHO_SNIPPET = `\
 import (
     hearth      "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
     hearthecho  "github.com/hearth-auth/hearth/sdks/go/v4/hearth/echo"
-    "github.com/labstack/echo/v4"
+    "github.com/labstack/echo/v5"
 )
 
 client := hearth.NewClient("https://hearth.example.com", "<realm-id>")
@@ -172,7 +172,7 @@ e.Use(hearthecho.HearthMiddleware(client))
 
 // Gate a group on a permission — claims decoded locally, no network call
 admin := e.Group("/admin", hearthecho.RequirePermission("hearth.admin"))
-admin.GET("/data", func(c echo.Context) error {
+admin.GET("/data", func(c *echo.Context) error {
     return c.JSON(200, map[string]any{"token": hearthecho.GetToken(c)})
 })
 `;
