@@ -418,6 +418,34 @@ class MainTest(unittest.TestCase):
         with open(out_json) as f:
             self.assertIsNone(json.load(f)["recovery_seconds"])
 
+    def keygen_output(self, text):
+        path = os.path.join(self.d, "backup-keygen.txt")
+        with open(path, "w") as f:
+            f.write(text)
+        return path
+
+    def test_verify_key_reads_the_key_that_keygen_prints(self):
+        # What `hearth backup keygen` printed in restore drill run 40870138476.
+        keygen = self.keygen_output(
+            "12:11:00  INFO hearth: Private signing key written to: /tmp/x/backup-signing.pem\n"
+            "12:11:00  INFO hearth: verify_key: qkYq1pEjLIFPzl5bFRoP_v-iJSevkF6fmZsUynVH4wI\n"
+            "12:11:00  INFO hearth: Set `security.backup.verify_key` to the verify_key above on"
+            " every instance that restores, and sign archives with `hearth backup create"
+            " --sign-key /tmp/x/backup-signing.pem`.\n")
+        code, out = self.run_main("verify-key", keygen)
+        self.assertEqual((code, out), (0, "qkYq1pEjLIFPzl5bFRoP_v-iJSevkF6fmZsUynVH4wI\n"))
+
+    def test_verify_key_fails_without_exactly_one_key(self):
+        key_a = "qkYq1pEjLIFPzl5bFRoP_v-iJSevkF6fmZsUynVH4wI"
+        key_b = "zv9Pb4Qfh5gYiCBsJWRvbUWdDduqxlVrPtBob2SBY6w"
+        for text in ("12:11:00 ERROR hearth: cannot create '/tmp/x': File exists\n",
+                     f"12:11:00  INFO hearth: verify_key: {key_a[:-1]}\n",
+                     f"12:11:00  INFO hearth: verify_key: {key_a}x\n",
+                     f"verify_key: {key_a}\nverify_key: {key_b}\n"):
+            with self.subTest(text=text), contextlib.redirect_stderr(io.StringIO()):
+                code, out = self.run_main("verify-key", self.keygen_output(text))
+                self.assertEqual((code, out), (2, ""))
+
 
 class HelpersTest(unittest.TestCase):
     def test_count_by_probe_finds_the_exact_count_in_few_probes(self):
