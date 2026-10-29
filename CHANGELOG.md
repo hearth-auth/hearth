@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Fixed
+- **A restore keeps each OAuth client's creation time** (#675): `hearth backup restore` gave each
+  restored client the restore time as `created_at`, so the admin API and the admin console showed
+  every client as new. A restore now keeps the archived creation time. Clients from the Auth0 and
+  Keycloak migrations and from `hearth.yaml` still get the import time.
+
+## [4.6.13] — 2026-10-29
+
 ### Changed
 - **Go SDK: the Echo adapter uses Echo v5** (#688): `hearthecho` used `github.com/labstack/echo/v4`,
   which has two advisories with no v4 fix (GHSA-99jh-6h7p-pp36 in the reverse-proxy middleware,
@@ -13,12 +21,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   **Breaking for Echo users:** your application must move to Echo v5, and handlers and the
   `WithTokenExtractor` and `WithOnUnauthorized` callbacks take `*echo.Context` instead of
   `echo.Context`. The SDK's other middleware does not change.
-
-### Fixed
-- **A restore keeps each OAuth client's creation time** (#675): `hearth backup restore` gave each
-  restored client the restore time as `created_at`, so the admin API and the admin console showed
-  every client as new. A restore now keeps the archived creation time. Clients from the Auth0 and
-  Keycloak migrations and from `hearth.yaml` still get the import time.
 
 ## [4.6.12] — 2026-10-28
 
