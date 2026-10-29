@@ -7470,7 +7470,8 @@ impl EmbeddedIdentityEngine {
 
         let client_id = request.id.clone().unwrap_or_else(ClientId::generate);
 
-        let now = self.clock.now();
+        // A backup restore keeps the archived creation time (#675).
+        let created_at = request.created_at.unwrap_or_else(|| self.clock.now());
         let grant_types = if request.grant_types.is_empty() {
             crate::identity::oidc::default_grant_types()
         } else {
@@ -7502,13 +7503,17 @@ impl EmbeddedIdentityEngine {
                 client_id,
                 client_name,
                 request.redirect_uris.clone(),
-                now,
+                created_at,
                 secret_hash,
                 grant_types,
             )
         } else {
-            let mut c =
-                OAuthClient::new(client_id, client_name, request.redirect_uris.clone(), now);
+            let mut c = OAuthClient::new(
+                client_id,
+                client_name,
+                request.redirect_uris.clone(),
+                created_at,
+            );
             c.set_grant_types(grant_types);
             c
         };

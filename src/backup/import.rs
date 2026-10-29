@@ -333,6 +333,10 @@ struct BackupClient {
     dpop_bound_access_tokens: bool,
     #[serde(default)]
     mfa_required: Option<bool>,
+    /// When the client was registered (#675). `None` only for a line that
+    /// has no `created_at`; the restore then stamps the restore time.
+    #[serde(default)]
+    created_at: Option<crate::core::Timestamp>,
 }
 
 fn default_true() -> bool {
@@ -1557,6 +1561,7 @@ impl BackupImporter {
                 jwks_uri: client.jwks_uri,
                 dpop_bound_access_tokens: client.dpop_bound_access_tokens,
                 mfa_required: client.mfa_required,
+                created_at: client.created_at,
             };
 
             // Validate before anything is written or deleted — with exactly
