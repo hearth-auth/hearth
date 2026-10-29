@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v5"
 )
 
 // An attacker mints an unsigned token claiming admin.write. Wiring the adapter
@@ -22,10 +22,9 @@ func TestHearthMiddlewareRejectsUnsignedToken(t *testing.T) {
 
 	handlerCalled := false
 	e := echo.New()
-	e.HideBanner = true
 	e.Use(HearthMiddleware(client))
 	e.Use(RequirePermission("admin.write"))
-	e.GET("/test", func(c echo.Context) error {
+	e.GET("/test", func(c *echo.Context) error {
 		handlerCalled = true
 		return c.String(http.StatusOK, "ok")
 	})
@@ -49,16 +48,15 @@ func TestRequirePermissionIgnoresRawTokenWithoutVerifiedClaims(t *testing.T) {
 
 	handlerCalled := false
 	e := echo.New()
-	e.HideBanner = true
 	e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
-		return func(c echo.Context) error {
+		return func(c *echo.Context) error {
 			c.Set(TokenContextKey, forged)
 			c.Set(ClientContextKey, client)
 			return next(c)
 		}
 	})
 	e.Use(RequirePermission("admin.write"))
-	e.GET("/test", func(c echo.Context) error {
+	e.GET("/test", func(c *echo.Context) error {
 		handlerCalled = true
 		return c.String(http.StatusOK, "ok")
 	})

@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	hearth "github.com/hearth-auth/hearth/sdks/go/v4/hearth"
-	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v5"
 )
 
 // forgeJWT builds a syntactically valid three-segment JWT with a garbage
@@ -34,9 +34,8 @@ func forgeJWT(t *testing.T, claims map[string]any) string {
 // and a GET /test route that writes HTTP 200 "ok".
 func newEcho(client *hearth.Client, opts ...MiddlewareOption) *echo.Echo {
 	e := echo.New()
-	e.HideBanner = true
 	e.Use(HearthMiddleware(client, opts...))
-	e.GET("/test", func(c echo.Context) error {
+	e.GET("/test", func(c *echo.Context) error {
 		return c.String(http.StatusOK, "ok")
 	})
 	return e
@@ -80,11 +79,10 @@ func TestHearthMiddlewareStoresTokenInContext(t *testing.T) {
 	token := ti.sign(t, map[string]any{"sub": "user_1"})
 
 	e := echo.New()
-	e.HideBanner = true
 	e.Use(HearthMiddleware(client))
 
 	var capturedToken string
-	e.GET("/test", func(c echo.Context) error {
+	e.GET("/test", func(c *echo.Context) error {
 		capturedToken = GetToken(c)
 		return c.NoContent(http.StatusOK)
 	})
@@ -104,14 +102,13 @@ func TestHearthMiddlewareCustomExtractor(t *testing.T) {
 	token := ti.sign(t, map[string]any{"sub": "user_1"})
 
 	// Extract from X-Auth-Token header instead of Authorization.
-	extractor := func(c echo.Context) string {
+	extractor := func(c *echo.Context) string {
 		return c.Request().Header.Get("X-Auth-Token")
 	}
 
 	e := echo.New()
-	e.HideBanner = true
 	e.Use(HearthMiddleware(client, WithTokenExtractor(extractor)))
-	e.GET("/test", func(c echo.Context) error { return c.NoContent(http.StatusOK) })
+	e.GET("/test", func(c *echo.Context) error { return c.NoContent(http.StatusOK) })
 
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
 	req.Header.Set("X-Auth-Token", token)
@@ -127,14 +124,13 @@ func TestHearthMiddlewareCustomUnauthorizedHandler(t *testing.T) {
 	ti := newTestIssuer(t)
 	client := ti.client()
 
-	customHandler := func(c echo.Context) error {
+	customHandler := func(c *echo.Context) error {
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "no token"})
 	}
 
 	e := echo.New()
-	e.HideBanner = true
 	e.Use(HearthMiddleware(client, WithOnUnauthorized(customHandler)))
-	e.GET("/test", func(c echo.Context) error { return c.NoContent(http.StatusOK) })
+	e.GET("/test", func(c *echo.Context) error { return c.NoContent(http.StatusOK) })
 
 	rr := httptest.NewRecorder()
 	e.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/test", nil))
@@ -151,9 +147,8 @@ func TestHearthMiddlewareCustomUnauthorizedHandler(t *testing.T) {
 
 func TestGetTokenReturnsEmptyWhenNotSet(t *testing.T) {
 	e := echo.New()
-	e.HideBanner = true
 	var capturedToken string
-	e.GET("/test", func(c echo.Context) error {
+	e.GET("/test", func(c *echo.Context) error {
 		capturedToken = GetToken(c)
 		return c.NoContent(http.StatusOK)
 	})
@@ -171,10 +166,9 @@ func TestRequirePermissionAllowed(t *testing.T) {
 	token := ti.sign(t, map[string]any{"permissions": []string{"docs.edit"}})
 
 	e := echo.New()
-	e.HideBanner = true
 	e.Use(HearthMiddleware(client))
 	e.Use(RequirePermission("docs.edit"))
-	e.GET("/test", func(c echo.Context) error { return c.NoContent(http.StatusOK) })
+	e.GET("/test", func(c *echo.Context) error { return c.NoContent(http.StatusOK) })
 
 	rr := serve(e, token)
 	if rr.Code != http.StatusOK {
@@ -188,10 +182,9 @@ func TestRequirePermissionDenied(t *testing.T) {
 	token := ti.sign(t, map[string]any{"permissions": []string{"docs.view"}})
 
 	e := echo.New()
-	e.HideBanner = true
 	e.Use(HearthMiddleware(client))
 	e.Use(RequirePermission("docs.edit"))
-	e.GET("/test", func(c echo.Context) error { return c.NoContent(http.StatusOK) })
+	e.GET("/test", func(c *echo.Context) error { return c.NoContent(http.StatusOK) })
 
 	rr := serve(e, token)
 	if rr.Code != http.StatusForbidden {
@@ -202,9 +195,8 @@ func TestRequirePermissionDenied(t *testing.T) {
 func TestRequirePermissionNoToken(t *testing.T) {
 	// RequirePermission without HearthMiddleware — no token in context.
 	e := echo.New()
-	e.HideBanner = true
 	e.Use(RequirePermission("docs.edit"))
-	e.GET("/test", func(c echo.Context) error { return c.NoContent(http.StatusOK) })
+	e.GET("/test", func(c *echo.Context) error { return c.NoContent(http.StatusOK) })
 
 	rr := serve(e, "")
 	if rr.Code != http.StatusUnauthorized {
@@ -216,16 +208,15 @@ func TestRequirePermissionNoClientInContext(t *testing.T) {
 	// Client is stored under ClientContextKey; if it is absent (e.g. RequirePermission
 	// used without HearthMiddleware) the middleware must not panic — it returns 500.
 	e := echo.New()
-	e.HideBanner = true
 	// Manually set the token but not the client.
 	e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
-		return func(c echo.Context) error {
+		return func(c *echo.Context) error {
 			c.Set(TokenContextKey, "some.token.stub")
 			return next(c)
 		}
 	})
 	e.Use(RequirePermission("docs.edit"))
-	e.GET("/test", func(c echo.Context) error { return c.NoContent(http.StatusOK) })
+	e.GET("/test", func(c *echo.Context) error { return c.NoContent(http.StatusOK) })
 
 	rr := httptest.NewRecorder()
 	e.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/test", nil))
@@ -243,16 +234,15 @@ func TestRouteGroupProtection(t *testing.T) {
 	viewToken := ti.sign(t, map[string]any{"permissions": []string{"docs.view"}})
 
 	e := echo.New()
-	e.HideBanner = true
 	e.Use(HearthMiddleware(client))
 
 	// Public route — any authenticated user.
-	e.GET("/public", func(c echo.Context) error { return c.NoContent(http.StatusOK) })
+	e.GET("/public", func(c *echo.Context) error { return c.NoContent(http.StatusOK) })
 
 	// Protected group — requires docs.edit.
 	protected := e.Group("/protected")
 	protected.Use(RequirePermission("docs.edit"))
-	protected.GET("/resource", func(c echo.Context) error { return c.NoContent(http.StatusOK) })
+	protected.GET("/resource", func(c *echo.Context) error { return c.NoContent(http.StatusOK) })
 
 	cases := []struct {
 		name   string
