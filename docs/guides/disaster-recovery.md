@@ -787,9 +787,11 @@ backup run** — the recovery point is the *start* of a run, not its end:
 | Every 6 hours | ~6 hours + one run |
 | Daily (typical) | ~24 hours + one run |
 
-Measure your own run duration — the RTO table below covers *restore* time,
-which is not a proxy for *backup* time (restore is dominated by per-record
-re-encryption on write; export is a read scan).
+Measure your own run duration. In the restore drill, `POST /admin/backup` of a
+realm with 1,000,000 users took 5.5 s ([Measured times](#measured-times)), so the
+backup interval is the dominant term. Do not use the restore time as an
+estimate of the backup time: in the same drill, the restore took 100 times
+longer than the backup.
 
 RPO is dominated by your backup schedule, not by Hearth's recovery
 mechanics. Hearth itself is durable to the last `fsync` — for any single-
@@ -811,27 +813,52 @@ consistency](./backup.md#referential-consistency--each-realm-is-snapshotted-hea-
 
 ### Recovery Time Objective (RTO) — how long recovery takes
 
-RTO breaks down into archive read time + entity restore time + server
-warm-up. These rough numbers come from the
-`large_realm_restore_under_60s` performance baseline (`tests/backup.rs`)
-and the storage-tier latencies in [Storage Sizing](./storage-sizing.md):
+RTO is the sum of these times:
 
-| Deployment size | Backup file size | Restore time | Server warm-up | Total RTO |
-|---|---|---|---|---|
-| Small (1 realm, 10 k users) | ~30 MB | < 60 s | ~10 s | **< 2 min** |
-| Medium (5 realms, 100 k users) | ~300 MB | ~5 min | ~30 s | **< 10 min** |
-| Large (20 realms, 1 M users) | ~3 GB | ~30–60 min | ~2 min | **< 90 min** |
+1. The time to get a host and to copy the archive to it. The restore drill
+   does not measure this time.
+2. The restore (`hearth backup restore`).
+3. The start of the server until `/readyz` answers 200.
 
-The dominant cost in large restores is per-user Argon2id hash rewriting
-(credentials are imported verbatim, but the storage layer still encrypts
-each row). To meet a tighter RTO for large deployments, consider:
+After a restore, every user must sign in again, because a backup does not
+carry sessions ([What a backup does not
+carry](./backup.md#what-a-backup-does-not-carry)).
 
-- Restoring per-realm in parallel from the same archive (one CLI
-  invocation per realm — they do not contend on writes).
-- Pre-staging the archive on the same disk as the target `--data-dir` to
-  avoid network read overhead.
-- Running on NVMe rather than SATA SSD — the bottleneck after CPU is the
-  WAL fsync.
+#### Measured times
+
+The [restore drill](./backup.md#restore-drill) measured these times on
+2026-10-30, on `main` at `09711488` (v4.6.15 and #696). The runner is a
+GitHub-hosted runner with 4 CPUs and 16 GB of memory. Each run passed all 14
+checks of the drill.
+
+| Users (one realm) | Archive | `POST /admin/backup` | Restore | Start until `/readyz` answers 200 | Recovery (restore and start) | Run |
+|---:|---:|---:|---:|---:|---:|---|
+| 250,000 | 67.4 MiB | 1.4 s | 2 min 41 s | 4.0 s | 2 min 45 s | [41100519533](https://github.com/hearth-auth/hearth/actions/runs/41100519533) |
+| 500,000 | 135.0 MiB | 2.9 s | 3 min 42 s | 4.0 s | 3 min 46 s | [41100522563](https://github.com/hearth-auth/hearth/actions/runs/41100522563) |
+| 1,000,000 | 270.4 MiB | 5.5 s | 9 min 10 s | 3.0 s | 9 min 13 s | [41097818397](https://github.com/hearth-auth/hearth/actions/runs/41097818397) |
+
+The restore time changes from run to run. On 2026-10-29, before #696, the same
+drills restored 250,000 users in 1 min 28 s, 500,000 users in 4 min 4 s and
+1,000,000 users in 7 min 38 s
+([40941183987](https://github.com/hearth-auth/hearth/actions/runs/40941183987),
+[40941187987](https://github.com/hearth-auth/hearth/actions/runs/40941187987),
+[40932385441](https://github.com/hearth-auth/hearth/actions/runs/40932385441)).
+#696 changed the backup only, not the restore.
+
+**The drill data is smaller than most production data.** The imported users
+have no password, no MFA factor and one custom attribute. Only four users have
+a password. A realm in which each user has a password or MFA factors, or that
+has groups and organizations, gives a larger archive and a longer restore.
+Use these times for a first plan only, and measure on your own data and
+hardware.
+
+The restore CLI processes one realm after the other. To make the RTO
+shorter for a large deployment:
+
+- Put the archive on the same disk as the target `--data-dir` before you
+  start, so that the restore does not read it over the network.
+- Use NVMe storage rather than SATA SSD, because every restored write is
+  synced to disk.
 
 ### Supported deployment shape
 
@@ -839,6 +866,12 @@ The supported deployment is **one node, with backups to off-host storage
 and a restore you have tested** (see the drill below). Your RPO is your
 backup interval plus one run. Your RTO is the time to restore the latest
 backup onto a new node and start it.
+
+For one realm with 1,000,000 users on the drill runner, one backup run took
+5.5 s, and the restore and start took 8 to 10 minutes ([Measured
+times](#measured-times)). With hourly backups, the RPO is about one hour.
+The RTO is about 10 minutes, plus the time to get a host and to copy the
+archive to it.
 
 Cluster mode is experimental and gives you no shorter RTO today. Hearth has
 no operation that promotes a follower, membership is fixed at bootstrap,

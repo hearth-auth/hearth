@@ -677,10 +677,12 @@ time curl -fsS -X POST -H "Authorization: Bearer $HEARTH_ADMIN_TOKEN" \
   "http://127.0.0.1:8420/admin/backup" -o /tmp/timing-probe.hearth-backup
 ```
 
-For small realms this is typically well under a minute, making the interval the
-dominant term. Confirm it during your [test-restore
-drill](./disaster-recovery.md#test-restore-drill-checklist) and re-measure as
-the realm grows.
+In the [restore drill](#restore-drill), `POST /admin/backup` of a realm with
+1,000,000 users took 5.5 s, so the interval is the dominant term. The
+[measured times](./disaster-recovery.md#measured-times) give the other sizes.
+Confirm the duration during your [test-restore
+drill](./disaster-recovery.md#test-restore-drill-checklist) and measure it again
+as the realm grows.
 
 **What this figure does and does not cover:**
 
@@ -708,12 +710,21 @@ reference (an assignment's subject, a credential's user) resolves within the
 same archive.
 
 **Write-availability impact — know this before you schedule backups.** While an
-export holds the barrier, **writes to that node block** until the export's read
-pass for the current realm completes; they are not lost, only delayed. Reads —
-token validation, session and user lookups — are **never** blocked, so
-authentication continues normally during a backup. The blocking window scales
-with realm size (how long it takes to scan and serialise the realm's entities
-into memory), so for very large realms prefer a low-write window. The barrier
+export holds the barrier, **every write to that node waits** until the export's
+read pass for the current realm completes. This includes writes of data that the
+archive does not carry:
+
+- a sign-in, because it writes a session;
+- a token refresh, a sign-up and an MFA enrollment;
+- an admin change and an audit record.
+
+Reads do **not** wait: token validation, introspection, and session and user
+lookups continue during a backup. A request that waits longer than the request
+timeout (`operational.request_timeout_secs`, 30 s by default) fails. The wait
+increases with realm size (the time to read the realm's entities into memory). In
+the [restore drill](#restore-drill), the whole `POST /admin/backup` of a realm with
+1,000,000 users took 5.5 s, and the read pass is only a part of it. For very
+large realms, prefer a low-write window. The barrier
 covers only that read pass: it is released before the realm's sections are
 encrypted, compressed and written to the archive, so a slow or remote backup
 destination does not stall writes. The cost is memory — the exporter holds one
@@ -886,7 +897,9 @@ and the known data), `POST /admin/backup`, `verify`, `sign`, the restore, and th
 start until `/readyz` answers 200. They also give the archive size and the size of the data directory.
 The recovery time is the restore plus the start. It does not include the time to
 get a host and to copy the archive to it. The runner has 4 CPUs and 16 GB of
-memory. Your hardware gives different times, so measure on it too.
+memory. Your hardware gives different times, so measure on it too. The DR guide
+gives the [measured times](./disaster-recovery.md#measured-times) for 250,000,
+500,000 and 1,000,000 users.
 
 **Run the same drill on your own data.** Use a spare host that has no network path
 to your production data directory.
