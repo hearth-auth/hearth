@@ -754,6 +754,27 @@ mod tests {
         assert_eq!(idx, Some(1), "second code should still match");
     }
 
+    /// A far code that equals a code inside the window is accepted: codes have
+    /// 6 digits, so two steps can share one. The time-window property hit this
+    /// input on main (CI run 41141767202): steps 61438146 and 61438141 share
+    /// the code 932623.
+    #[test]
+    fn far_code_equal_to_a_window_code_is_accepted() {
+        let secret = b"12345678901234567890";
+        let base_time = 1_843_144_263;
+        let far_code = compute_totp(secret, (base_time + 117) / TOTP_PERIOD);
+        assert_eq!(
+            far_code,
+            compute_totp(secret, base_time / TOTP_PERIOD - TOTP_WINDOW),
+            "the far step shares its code with the first step of the window"
+        );
+        assert_eq!(
+            validate_totp(secret, &far_code, base_time, None),
+            Some(base_time / TOTP_PERIOD - TOTP_WINDOW),
+            "the code is valid for a step inside the window"
+        );
+    }
+
     // ===== Scenario E: Property test — TOTP time tolerance =====
 
     mod proptests {
@@ -787,7 +808,11 @@ mod tests {
                 // Only assert rejection if the far code is actually for a different step range
                 let far_step = far_time / TOTP_PERIOD;
                 let current_step = base_time / TOTP_PERIOD;
-                if far_step > current_step + TOTP_WINDOW {
+                // A code has 6 digits, so a far step can share its code with a step
+                // inside the window, and validate_totp rightly accepts that code.
+                let shares_a_window_code = (current_step - TOTP_WINDOW..=current_step + TOTP_WINDOW)
+                    .any(|step| compute_totp(secret, step) == far_code);
+                if far_step > current_step + TOTP_WINDOW && !shares_a_window_code {
                     let result = validate_totp(secret, &far_code, base_time, None);
                     prop_assert!(result.is_none(), "far code should NOT validate: base={base_time}, offset={far_offset}");
                 }
