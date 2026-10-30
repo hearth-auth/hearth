@@ -355,6 +355,41 @@ mod tests {
 
     // ── key handling ─────────────────────────────────────────────────────
 
+    /// A key that `openssl genpkey -algorithm ed25519` wrote: PKCS#8 v1, with no
+    /// public key.
+    const OPENSSL_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
+        MC4CAQAwBQYDK2VwBCIEIBJga6BJyucFOXunA+oAB3JEXBR0Q+ZWepPJ0QZdsprJ\n\
+        -----END PRIVATE KEY-----\n";
+
+    /// The DER in a PEM `PRIVATE KEY` block.
+    fn pem_der(pem: &str) -> Vec<u8> {
+        let body: String = pem
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("-----"))
+            .collect();
+        STANDARD.decode(body).expect("PEM body is base64")
+    }
+
+    #[test]
+    fn generated_key_has_the_pkcs8_form_that_openssl_writes() {
+        // PKCS#8 v2 (RFC 5958: version 1, with the public key) is what ring
+        // writes, and OpenSSL 3.0 (Ubuntu 24.04) cannot read it, so an operator
+        // could not use the key file with openssl (#690). `openssl genpkey`
+        // writes v1 (RFC 8410): version 0 and the 32-byte seed only.
+        let (k, pem) = BackupSigningKey::generate().expect("generate");
+        let der = pem_der(&pem);
+        let openssl = pem_der(OPENSSL_PEM);
+        assert_eq!(
+            der.len(),
+            openssl.len(),
+            "PKCS#8 v1: a 16-byte header and the 32-byte seed"
+        );
+        assert_eq!(der[..16], openssl[..16], "the header of an openssl key");
+        let back = BackupSigningKey::from_pem(&pem).expect("parse own PEM");
+        assert_eq!(back.verify_key_b64(), k.verify_key_b64());
+    }
+
     #[test]
     fn generated_key_round_trips_through_pem() {
         let (k, pem) = BackupSigningKey::generate().expect("generate");
@@ -374,10 +409,6 @@ mod tests {
 
     #[test]
     fn openssl_style_unversioned_pkcs8_is_accepted() {
-        // `openssl genpkey -algorithm ed25519` writes PKCS#8 v1 (no public key).
-        const OPENSSL_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
-            MC4CAQAwBQYDK2VwBCIEIBJga6BJyucFOXunA+oAB3JEXBR0Q+ZWepPJ0QZdsprJ\n\
-            -----END PRIVATE KEY-----\n";
         // Derived independently: `openssl pkey -pubout -outform DER | tail -c 32 | basenc --base64url`.
         const OPENSSL_PUB: &str = "5settUVm3ZDqg9RWtbbLjmbA1RK2KOvVu_PmihsFk-8";
         let k = BackupSigningKey::from_pem(OPENSSL_PEM).expect("openssl key");
