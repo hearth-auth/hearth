@@ -18,10 +18,10 @@ on:
         required: false
         default: "1000000"
       require_webhooks:
-        description: "Fail when the restore loses a webhook subscription (set after #664)"
+        description: "Fail when the restore loses a webhook subscription (off: only a warning)"
         type: boolean
         required: false
-        default: false
+        default: true
 
 permissions:
   contents: read
@@ -85,7 +85,8 @@ jobs:
       - name: Run the drill
         env:
           USERS: ${{ inputs.users }}
-          REQUIRE_WEBHOOKS: ${{ inputs.require_webhooks && '1' || '0' }}
+          # A scheduled run has no inputs: it requires the webhook subscriptions too.
+          REQUIRE_WEBHOOKS: ${{ github.event_name == 'workflow_dispatch' && !inputs.require_webhooks && '0' || '1' }}
         run: |
           export USERS="${USERS:-1000000}"
           df -h / "$RUNNER_TEMP"

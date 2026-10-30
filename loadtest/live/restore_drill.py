@@ -479,7 +479,7 @@ def check_assignments(before, after):
 def check_webhooks(before, after, required):
     name = "webhook subscriptions"
     result = "FAIL" if required else "ADVISORY"
-    note = "" if required else " (advisory until backups carry webhook subscriptions, #664)"
+    note = "" if required else " (advisory: the drill ran without --require-webhooks)"
     b, a, why = pair(before, after, "webhooks")
     if why:
         return finding(name, result, why + note)
