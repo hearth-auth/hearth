@@ -885,11 +885,12 @@ at size every week, and on demand. It does these steps on a GitHub-hosted runner
      unless the token expired before the check;
    - the client record, a `client_credentials` grant with the secret, and the
      refusal of the grant without the secret;
-   - the role and the assignment.
+   - the role and the assignment;
+   - the webhook subscription. A run started by hand with `require_webhooks` off
+     only gives a warning when the restore loses it.
 
-   A webhook subscription that the restore loses is only a warning, until backups
-   carry webhook subscriptions (#664). The drill does not compare custom
-   attributes, because the admin API does not return them per user.
+   The drill does not compare custom attributes, because the admin API does not
+   return them per user.
 
 **Where the times are.** The job summary and the `restore-drill-<run id>` artifact
 (`timings.json`, kept for 90 days) give the time of each step: the seed (the import

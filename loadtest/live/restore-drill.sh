@@ -20,8 +20,8 @@
 #   SAMPLE_EVERY      compare every Nth imported user in full (1000)
 #   LOGIN_USERS       users with a password, declared as seed_users (3)
 #   READY_TIMEOUT_S   the longest start the drill waits for (3600)
-#   REQUIRE_WEBHOOKS  1: a webhook subscription that the restore loses fails the drill (0).
-#                     Until backups carry webhook subscriptions (#664), a loss is advisory.
+#   REQUIRE_WEBHOOKS  1: a webhook subscription that the restore loses fails the drill (1).
+#                     0: a loss is only a warning (ADVISORY).
 #
 # The out dir receives summary.md, timings.json, findings.json, compare.txt, before.json,
 # after.json, steps.txt, facts.txt, the two server logs and the output of each hearth
@@ -42,7 +42,7 @@ IMPORT_WORKERS=${IMPORT_WORKERS:-4}
 SAMPLE_EVERY=${SAMPLE_EVERY:-1000}
 LOGIN_USERS=${LOGIN_USERS:-3}
 READY_TIMEOUT_S=${READY_TIMEOUT_S:-3600}
-REQUIRE_WEBHOOKS=${REQUIRE_WEBHOOKS:-0}
+REQUIRE_WEBHOOKS=${REQUIRE_WEBHOOKS:-1}
 
 for var in USERS IMPORT_BATCH IMPORT_WORKERS SAMPLE_EVERY LOGIN_USERS READY_TIMEOUT_S; do
   if ! [[ ${!var} =~ ^[1-9][0-9]*$ ]]; then
@@ -149,6 +149,7 @@ fact memory_bytes "$(awk '/^MemTotal:/ { print $2 * 1024 }' /proc/meminfo)"
 # restore_drill.py verifies the pre-backup token with openssl.
 fact openssl_version "$(openssl version)"
 fact users "$USERS"
+fact require_webhooks "$REQUIRE_WEBHOOKS"
 
 log "generating a production config ($LOGIN_USERS seed users with a password)"
 bash "$here/gen-config.sh" "$work/bundle" 127.0.0.1 "$LOGIN_USERS"
