@@ -142,6 +142,51 @@ async fn bcrypt_custom_password_hash_verifies_natively_after_import() {
     assert!(!wrong, "wrong password must not verify");
 }
 
+/// PHP's `password_hash()` writes bcrypt as `$2y$`, the same algorithm as
+/// `$2b$`. The parser and the verifier accept it, so the import must too
+/// (#703).
+#[tokio::test]
+async fn bcrypt_2y_custom_password_hash_imports_and_verifies() {
+    let (identity, authz, _tmp) = build_engines();
+    let importer = Auth0Importer::new(Arc::clone(&identity), Arc::clone(&authz));
+    let hash = bcrypt::hash("hunter2", 4)
+        .expect("bcrypt hash")
+        .replacen("$2b$", "$2y$", 1);
+    let bytes = BUNDLE_TEMPLATE
+        .replace("__BCRYPT_HUNTER2_HASH__", &hash)
+        .into_bytes();
+    let bundle = Auth0Importer::parse(&bytes).expect("parse bundle");
+    let report = importer
+        .import_bundle(&bundle, None, &Auth0ImportOptions::default())
+        .expect("import");
+    assert_eq!(report.users_imported, 3, "{:?}", report.warnings);
+    let realm_id = report.realm_id.expect("realm_id");
+
+    let alice = identity
+        .get_user_by_email(&realm_id, "alice@acme.test")
+        .expect("lookup")
+        .expect("alice exists");
+    let wrong = identity
+        .verify_password(
+            &realm_id,
+            alice.id(),
+            &CleartextPassword::from_string("wrong".to_string()),
+        )
+        .expect("verify_password");
+    assert!(!wrong, "wrong password must not verify");
+    let ok = identity
+        .verify_password(
+            &realm_id,
+            alice.id(),
+            &CleartextPassword::from_string("hunter2".to_string()),
+        )
+        .expect("verify_password");
+    assert!(
+        ok,
+        "an imported $2y$ hash must verify the original password"
+    );
+}
+
 // ===== 3. Auth0 roles → RBAC assignments =====
 
 #[tokio::test]
