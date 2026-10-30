@@ -39,16 +39,6 @@
 # GHSA-g7r4-m6w7-qqqr suppressed `esbuild`, which is not installed in any
 # scanned lockfile. A suppression that matches nothing is coverage on paper.
 
-# Root and fuzz Cargo.lock: block-buffer 0.10.4, only through digest 0.10.7
-# (sha2, hmac, pbkdf2, blake2). The advisory range is "< 0.12.1", but the
-# fault needs a cursor stored inside the buffer's block (`EagerBuffer` in
-# 0.11 and later, and `ReadBuffer`), which a caught panic in a callback can
-# leave invalid. 0.10.4 has neither.
-# guard: package=block-buffer lockfile=Cargo.lock
-[[IgnoredVulns]]
-id = "GHSA-qwgh-2vcv-g2f7"
-reason = "block-buffer 0.10.4 (via digest 0.10.7: sha2, hmac, pbkdf2, blake2) does not have the fault. The fault needs a cursor stored inside the block (EagerBuffer in 0.11+, ReadBuffer) that a panic caught in the compress or generate callback leaves outside the block. In 0.10.4 the cursor is a separate `pos: u8` field that `digest_blocks` sets only after `compress` returns, so a panic leaves the old, valid value; ReadBuffer does not exist (checked in the 0.10.4 crate source, 2026-10-26). Also, the release profile sets panic = \"abort\", so the shipped binary never catches a panic. Remove this entry when sha2, hmac, pbkdf2 and blake2 move to digest 0.11 (block-buffer >= 0.12.1), or if OSV narrows the range."
-
 # guard: package=golang.org/x/crypto lockfile=sdks/go/go.mod
 [[IgnoredVulns]]
 id = "GO-2026-5932"
