@@ -19,6 +19,7 @@ use std::io::Read as _;
 
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
+use ring::rand::SecureRandom as _;
 use ring::signature::{Ed25519KeyPair, KeyPair as _};
 use zeroize::Zeroizing;
 
@@ -26,6 +27,13 @@ use crate::backup::{BackupArchive, BackupError, BackupManifest};
 
 const PEM_BEGIN: &str = "-----BEGIN PRIVATE KEY-----";
 const PEM_END: &str = "-----END PRIVATE KEY-----";
+
+/// The DER header of a PKCS#8 v1 Ed25519 private key (RFC 8410): version 0,
+/// the algorithm id 1.3.101.112, and the OCTET STRING that holds the 32-byte
+/// seed. `openssl genpkey -algorithm ed25519` writes this form.
+const PKCS8_V1_ED25519_HEADER: [u8; 16] = [
+    0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
+];
 
 /// Outcome of a successful [`check_restore_signature`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,17 +113,24 @@ pub struct BackupSigningKey {
 
 impl BackupSigningKey {
     /// Generates a fresh key and returns it with its PEM (`PRIVATE KEY`,
-    /// PKCS#8) encoding, which is what [`Self::from_pem`] reads back.
+    /// PKCS#8 v1) encoding, which is what [`Self::from_pem`] reads back.
+    ///
+    /// The key is PKCS#8 v1, as `openssl genpkey` writes it. ring's
+    /// `generate_pkcs8` writes v2 (RFC 5958), which OpenSSL 3.0 cannot read
+    /// (#690).
     ///
     /// # Errors
     ///
     /// [`BackupError::Crypto`] when the system RNG fails.
     pub fn generate() -> Result<(Self, Zeroizing<String>), BackupError> {
-        let rng = ring::rand::SystemRandom::new();
-        let doc = Ed25519KeyPair::generate_pkcs8(&rng)
+        let mut seed = Zeroizing::new([0u8; 32]);
+        ring::rand::SystemRandom::new()
+            .fill(&mut seed[..])
             .map_err(|_| BackupError::Crypto("Ed25519 key generation failed".into()))?;
-        let pkcs8 = Zeroizing::new(doc.as_ref().to_vec());
-        let pair = Ed25519KeyPair::from_pkcs8(&pkcs8)
+        let mut pkcs8 = Zeroizing::new(Vec::with_capacity(PKCS8_V1_ED25519_HEADER.len() + 32));
+        pkcs8.extend_from_slice(&PKCS8_V1_ED25519_HEADER);
+        pkcs8.extend_from_slice(&seed[..]);
+        let pair = Ed25519KeyPair::from_pkcs8_maybe_unchecked(&pkcs8)
             .map_err(|_| BackupError::Crypto("generated key did not parse".into()))?;
         let b64 = Zeroizing::new(STANDARD.encode(pkcs8.as_slice()));
         let mut pem = Zeroizing::new(String::with_capacity(b64.len() + 64));

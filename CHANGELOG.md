@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Changed
+- **`hearth backup keygen` writes a PKCS#8 v1 key** (#690): the key file had the PKCS#8 v2 form
+  (RFC 5958, with the public key), which OpenSSL 3.0 (the version on Ubuntu 24.04) cannot read, so
+  the `openssl pkey` command in the backup guide failed on such hosts. keygen now writes the v1
+  form that `openssl genpkey -algorithm ed25519` writes. Keys from earlier versions keep working:
+  Hearth reads both forms.
+
 ## [4.6.16] — 2026-10-30
 
 ### Fixed
