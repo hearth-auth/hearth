@@ -580,6 +580,15 @@ fn argon2_params_within(parsed: &PasswordHash<'_>) -> Result<(), IdentityError> 
     phc_param_within(parsed, "p", work_factor::MAX_ARGON2_P, "argon2")
 }
 
+/// Refuses a scrypt PHC string whose `ln`, `r` or `p` is above the
+/// [`work_factor`] ceilings. scrypt's memory is `128 * 2^ln * r` bytes, so
+/// both parameters are allocation inputs.
+fn scrypt_params_within(parsed: &PasswordHash<'_>) -> Result<(), IdentityError> {
+    phc_param_within(parsed, "ln", work_factor::MAX_SCRYPT_LN, "scrypt")?;
+    phc_param_within(parsed, "r", work_factor::MAX_SCRYPT_R, "scrypt")?;
+    phc_param_within(parsed, "p", work_factor::MAX_SCRYPT_P, "scrypt")
+}
+
 /// Set once the first over-ceiling client-secret hash has been logged, so a
 /// client hammered with authentication attempts cannot flood the log.
 static OVER_CEILING_SECRET_HASH_LOGGED: std::sync::atomic::AtomicBool =
@@ -648,11 +657,8 @@ pub(crate) fn verify_hash(
             .verify_password(password.as_bytes(), &parsed)
             .is_ok())
     } else if alg_id == scrypt::ALG_ID {
-        // Refuse BEFORE the KDF runs (26.36). scrypt's memory is
-        // 128 * 2^ln * r bytes, so both parameters are allocation inputs.
-        phc_param_within(&parsed, "ln", work_factor::MAX_SCRYPT_LN, "scrypt")?;
-        phc_param_within(&parsed, "r", work_factor::MAX_SCRYPT_R, "scrypt")?;
-        phc_param_within(&parsed, "p", work_factor::MAX_SCRYPT_P, "scrypt")?;
+        // Refuse BEFORE the KDF runs (26.36).
+        scrypt_params_within(&parsed)?;
         Ok(scrypt::Scrypt
             .verify_password(password.as_bytes(), &parsed)
             .is_ok())
@@ -716,6 +722,13 @@ fn pbkdf2_iterations(params: &str) -> Result<u32, IdentityError> {
     Ok(iterations)
 }
 
+/// The parts of a `$pbkdf2-sha256$i=<n>$<salt>$<digest>` PHC string.
+struct Pbkdf2Sha256Hash {
+    iterations: u32,
+    salt: Vec<u8>,
+    digest: Vec<u8>,
+}
+
 /// Verifies a password against a PBKDF2-HMAC-SHA256 PHC string.
 ///
 /// Format: `$pbkdf2-sha256$i=<iterations>$<salt-b64>$<hash-b64>`.
@@ -725,6 +738,21 @@ fn pbkdf2_iterations(params: &str) -> Result<u32, IdentityError> {
 /// compute; this matches Keycloak's default of 32 bytes but also
 /// supports other sizes produced by alternative exporters.
 fn verify_pbkdf2_sha256(password: &[u8], hash_str: &str) -> Result<bool, IdentityError> {
+    let parsed = parse_pbkdf2_sha256(hash_str)?;
+    let mut derived = vec![0u8; parsed.digest.len()];
+    pbkdf2::<Hmac<Sha256>>(password, &parsed.salt, parsed.iterations, &mut derived).map_err(
+        |e| IdentityError::InvalidInput {
+            reason: format!("pbkdf2 derivation failed: {e}"),
+        },
+    )?;
+
+    // Constant-time equality — prevents timing oracles on hash comparison.
+    Ok(derived.ct_eq(&parsed.digest).into())
+}
+
+/// Parses a PBKDF2-HMAC-SHA256 PHC string and bounds its iteration count
+/// with [`pbkdf2_iterations`]. Runs no key derivation.
+fn parse_pbkdf2_sha256(hash_str: &str) -> Result<Pbkdf2Sha256Hash, IdentityError> {
     let mut parts = hash_str.split('$');
     // The PHC string starts with an empty segment because of the
     // leading '$'; skip it, then consume the four payload segments.
@@ -758,21 +786,81 @@ fn verify_pbkdf2_sha256(password: &[u8], hash_str: &str) -> Result<bool, Identit
         .map_err(|e| IdentityError::InvalidInput {
             reason: format!("invalid pbkdf2 salt: {e}"),
         })?;
-    let expected = STANDARD_NO_PAD
+    let digest = STANDARD_NO_PAD
         .decode(hash_b64)
         .map_err(|e| IdentityError::InvalidInput {
             reason: format!("invalid pbkdf2 hash: {e}"),
         })?;
+    Ok(Pbkdf2Sha256Hash {
+        iterations,
+        salt,
+        digest,
+    })
+}
 
-    let mut derived = vec![0u8; expected.len()];
-    pbkdf2::<Hmac<Sha256>>(password, &salt, iterations, &mut derived).map_err(|e| {
-        IdentityError::InvalidInput {
-            reason: format!("pbkdf2 derivation failed: {e}"),
+/// The shortest PBKDF2 digest that a user import may store, in bytes.
+///
+/// Keycloak writes 32 bytes for `pbkdf2-sha256`. 16 bytes (128 bits) is the
+/// floor for a digest that keeps the strength of a password hash.
+const PBKDF2_MIN_DIGEST_BYTES: usize = 16;
+
+/// Checks a password hash that a user import hands over, without running the
+/// key derivation (#701).
+///
+/// Accepts the formats that sign-in verifies and that the import stores:
+/// bcrypt (`$2a$`, `$2b$`), `$argon2id$`, `$scrypt$` and `$pbkdf2-sha256$`.
+/// Refuses a malformed hash, and a hash whose work factor is above the
+/// [`work_factor`] ceilings or [`PBKDF2_MAX_ITERATIONS`]: sign-in refuses such
+/// a hash, so the user could never sign in with it. No key derivation runs, so
+/// an import of many users stays fast.
+///
+/// # Errors
+///
+/// [`IdentityError::InvalidInput`] that names the problem. The reason never
+/// contains the hash.
+pub(crate) fn check_importable_hash(hash_str: &str) -> Result<(), IdentityError> {
+    let invalid = |reason: String| IdentityError::InvalidInput { reason };
+    if hash_str.starts_with("$2a$") || hash_str.starts_with("$2b$") {
+        hash_str
+            .parse::<bcrypt::HashParts>()
+            .map_err(|_| invalid("malformed bcrypt hash".to_string()))?;
+        return bcrypt_cost_within_limit(hash_str);
+    }
+    if hash_str.starts_with("$pbkdf2-sha256$") {
+        let parsed = parse_pbkdf2_sha256(hash_str)?;
+        if parsed.digest.len() < PBKDF2_MIN_DIGEST_BYTES {
+            return Err(invalid(format!(
+                "pbkdf2 digest of {} bytes is shorter than {PBKDF2_MIN_DIGEST_BYTES}",
+                parsed.digest.len()
+            )));
         }
-    })?;
-
-    // Constant-time equality — prevents timing oracles on hash comparison.
-    Ok(derived.ct_eq(&expected).into())
+        return Ok(());
+    }
+    if hash_str.starts_with("$argon2id$") || hash_str.starts_with("$scrypt$") {
+        let parsed = PasswordHash::new(hash_str)
+            .map_err(|e| invalid(format!("invalid password hash format: {e}")))?;
+        if parsed.salt.is_none() || parsed.hash.is_none() {
+            return Err(invalid(
+                "password hash has no salt or no digest".to_string(),
+            ));
+        }
+        // The ceilings first, so that a costly hash gets the ceiling error.
+        if parsed.algorithm == argon2::ARGON2ID_IDENT {
+            argon2_params_within(&parsed)?;
+            argon2::Params::try_from(&parsed)
+                .map_err(|e| invalid(format!("invalid argon2 parameters: {e}")))?;
+        } else {
+            scrypt_params_within(&parsed)?;
+            scrypt::Params::try_from(&parsed)
+                .map_err(|e| invalid(format!("invalid scrypt parameters: {e}")))?;
+        }
+        return Ok(());
+    }
+    Err(invalid(
+        "unsupported password hash format: Hearth verifies bcrypt ($2a$, $2b$), \
+         $argon2id$, $scrypt$ and $pbkdf2-sha256$"
+            .to_string(),
+    ))
 }
 
 /// Hashes a raw secret (e.g., client secret) with Argon2id.
@@ -2094,5 +2182,109 @@ mod tests {
             matches!(outcome, Ok(false)),
             "an unknown fast-hash version must never verify, got {outcome:?}"
         );
+    }
+
+    // ===== Import hash check (#701) =====
+
+    /// Each format that sign-in verifies passes the import check, and the
+    /// password of each hash still verifies.
+    #[test]
+    fn importable_hash_accepts_each_format_that_sign_in_verifies() {
+        use password_hash::PasswordHasher;
+        let pw = CleartextPassword::from_string("import-pw".to_string());
+        let salt = SaltString::generate(&mut OsRng);
+        let scrypt_hash = scrypt::Scrypt
+            .hash_password_customized(
+                b"import-pw",
+                None,
+                None,
+                scrypt::Params::new(8, 1, 1, 32).expect("scrypt params"),
+                &salt,
+            )
+            .expect("scrypt hash")
+            .to_string();
+        let argon2_hash = hash_password(&pw, &CredentialConfig::fast_for_testing(), 0)
+            .expect("argon2 hash")
+            .hash;
+        let hashes = [
+            bcrypt::hash("import-pw", 4).expect("bcrypt hash"),
+            argon2_hash,
+            scrypt_hash,
+            build_pbkdf2_phc(b"import-pw", 1_000, b"import-salt"),
+        ];
+        for hash in &hashes {
+            let prefix = &hash[..10];
+            check_importable_hash(hash).unwrap_or_else(|e| panic!("{prefix}: {e}"));
+            assert!(
+                verify_hash(&pw, hash).expect("verify"),
+                "{prefix}: the password must verify"
+            );
+        }
+    }
+
+    /// The import check refuses each hash that sign-in could never match or
+    /// would refuse to compute, and names the problem without the hash.
+    #[test]
+    fn importable_hash_refuses_what_sign_in_cannot_verify() {
+        let digest = STANDARD_NO_PAD.encode([7u8; 32]);
+        let salt = "c29tZXNhbHQ";
+        let bcrypt_cost_18 = bcrypt::hash("import-pw", 4)
+            .expect("bcrypt hash")
+            .replacen("$04$", "$18$", 1);
+        let cases = [
+            (String::new(), "unsupported password hash format"),
+            (
+                "5f4dcc3b5aa765d61d8327deb882cf99".to_string(),
+                "unsupported password hash format",
+            ),
+            (
+                format!("$argon2i$v=19$m=65536,t=2,p=1${salt}${digest}"),
+                "unsupported password hash format",
+            ),
+            ("$2b$10$tooshort".to_string(), "malformed bcrypt hash"),
+            (bcrypt_cost_18, "exceeds the maximum"),
+            (
+                format!("$argon2id$v=19$m=65536,t=2,p=1${salt}"),
+                "no salt or no digest",
+            ),
+            (
+                format!("$argon2id$v=19$m=7,t=1,p=1${salt}${digest}"),
+                "invalid argon2 parameters",
+            ),
+            (
+                format!("$argon2id$v=19$m=65536,t=2,p=1,x=3${salt}${digest}"),
+                "invalid argon2 parameters",
+            ),
+            (
+                format!("$argon2id$v=19$m=2097152,t=2,p=1${salt}${digest}"),
+                "exceeds the maximum",
+            ),
+            (
+                format!("$scrypt$ln=21,r=8,p=1${salt}${digest}"),
+                "exceeds the maximum",
+            ),
+            (
+                format!("$pbkdf2-sha256$i=2000001${salt}${digest}"),
+                "exceeds the maximum",
+            ),
+            (format!("$pbkdf2-sha256$i=1000${salt}"), "missing hash"),
+            (format!("$pbkdf2-sha256$i=1000${salt}$"), "shorter than 16"),
+            (
+                format!("$pbkdf2-sha256$i=1000${salt}$AAAAAAAAAAA"),
+                "shorter than 16",
+            ),
+        ];
+        for (hash, expected) in &cases {
+            let err = check_importable_hash(hash)
+                .expect_err("the import check must refuse this hash")
+                .to_string();
+            assert!(err.contains(expected), "{expected}: got {err}");
+            if !hash.is_empty() {
+                assert!(
+                    !err.contains(hash.as_str()),
+                    "the reason echoed the hash: {err}"
+                );
+            }
+        }
     }
 }

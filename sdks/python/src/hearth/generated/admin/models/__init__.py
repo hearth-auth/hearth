@@ -22,7 +22,9 @@ from .admin_group import AdminGroup
 from .admin_group_member_page import AdminGroupMemberPage
 from .admin_group_membership import AdminGroupMembership
 from .admin_group_page import AdminGroupPage
-from .admin_import_users_body import AdminImportUsersBody
+from .admin_import_user_entry import AdminImportUserEntry
+from .admin_import_user_entry_attributes import AdminImportUserEntryAttributes
+from .admin_import_users_request import AdminImportUsersRequest
 from .admin_organization import AdminOrganization
 from .admin_organization_attributes import AdminOrganizationAttributes
 from .admin_organization_page import AdminOrganizationPage
@@ -104,7 +106,9 @@ __all__ = (
     "AdminGroupMemberPage",
     "AdminGroupMembership",
     "AdminGroupPage",
-    "AdminImportUsersBody",
+    "AdminImportUserEntry",
+    "AdminImportUserEntryAttributes",
+    "AdminImportUsersRequest",
     "AdminOrganization",
     "AdminOrganizationAttributes",
     "AdminOrganizationPage",

@@ -699,12 +699,13 @@ class Client extends \Hearth\Generated\Admin\Runtime\Client\Client
         return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\AdminExportUsers(), $fetch);
     }
     /**
-     * @param null|\stdClass $requestBody
+     * Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue.
+     * @param null|\Hearth\Generated\Admin\Model\AdminImportUsersRequest $requestBody
      * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
      *
      * @return ($fetch is 'object' ? null : \Psr\Http\Message\ResponseInterface)
      */
-    public function adminImportUsers(?\stdClass $requestBody = null, string $fetch = self::FETCH_OBJECT)
+    public function adminImportUsers(?\Hearth\Generated\Admin\Model\AdminImportUsersRequest $requestBody = null, string $fetch = self::FETCH_OBJECT)
     {
         return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\AdminImportUsers($requestBody), $fetch);
     }

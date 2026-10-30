@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Added
+- **`POST /admin/users/import` takes a password hash for each user** (#701). An entry's optional
+  `password_hash` is a PHC string from another system: bcrypt (`$2a$`, `$2b$`), `$argon2id$`,
+  `$scrypt$` or `$pbkdf2-sha256$`. The user signs in with their existing password, and the first
+  successful sign-in replaces the hash with an Argon2id hash. The import refuses an entry, with an
+  error in `results`, when its hash is malformed, in another format, or asks for a work factor above
+  the ceilings that sign-in applies. The response never contains the hash. The SDK admin clients now
+  type the import request (`AdminImportUsersRequest`, `AdminImportUserEntry`).
+
 ### Fixed
 - **`hearth migrate auth0` imports a user whose bcrypt hash starts with `$2y$`** (#703). PHP's
   `password_hash()` writes this prefix. The import refused such a hash as an unrecognized format,
