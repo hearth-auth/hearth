@@ -18710,7 +18710,8 @@ fn classify_phc_algorithm(phc: &str) -> Option<crate::identity::credentials::Pas
     use crate::identity::credentials::PasswordAlgorithm;
     if phc.starts_with("$argon2id$") {
         Some(PasswordAlgorithm::Argon2id)
-    } else if phc.starts_with("$2a$") || phc.starts_with("$2b$") {
+    } else if phc.starts_with("$2a$") || phc.starts_with("$2b$") || phc.starts_with("$2y$") {
+        // `$2y$` is PHP's name for `$2b$`; `verify_hash` accepts all three (#703).
         Some(PasswordAlgorithm::Bcrypt)
     } else if phc.starts_with("$scrypt$") {
         Some(PasswordAlgorithm::Scrypt)
