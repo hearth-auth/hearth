@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.6.16] — 2026-10-30
+
 ### Fixed
 - **A backup of a large realm no longer stops writes for most of an hour** (#695): `POST /admin/backup`
   read users 200 at a time, and each page walked every user key in the realm. Every write on the
