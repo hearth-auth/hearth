@@ -17071,6 +17071,34 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.storage.is_write_fenced()
     }
 
+    fn export_all_users(&self, realm_id: &RealmId) -> Result<Vec<User>, IdentityError> {
+        let prefix = keys::user_id_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let mut users = Vec::new();
+        let mut failure = None;
+        self.storage
+            .visit_entries(
+                realm_id,
+                &prefix,
+                &end,
+                &mut |_, value| match Self::deserialize_user(value) {
+                    Ok(user) => {
+                        users.push(user);
+                        std::ops::ControlFlow::Continue(())
+                    }
+                    Err(e) => {
+                        failure = Some(e);
+                        std::ops::ControlFlow::Break(())
+                    }
+                },
+            )
+            .map_err(Self::storage_err)?;
+        match failure {
+            Some(e) => Err(e),
+            None => Ok(users),
+        }
+    }
+
     fn export_all_credentials(
         &self,
         realm_id: &RealmId,
