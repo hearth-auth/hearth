@@ -19,6 +19,7 @@ use std::io::Read as _;
 
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
+use ring::rand::SecureRandom as _;
 use ring::signature::{Ed25519KeyPair, KeyPair as _};
 use zeroize::Zeroizing;
 
@@ -26,6 +27,13 @@ use crate::backup::{BackupArchive, BackupError, BackupManifest};
 
 const PEM_BEGIN: &str = "-----BEGIN PRIVATE KEY-----";
 const PEM_END: &str = "-----END PRIVATE KEY-----";
+
+/// The DER header of a PKCS#8 v1 Ed25519 private key (RFC 8410): version 0,
+/// the algorithm id 1.3.101.112, and the OCTET STRING that holds the 32-byte
+/// seed. `openssl genpkey -algorithm ed25519` writes this form.
+const PKCS8_V1_ED25519_HEADER: [u8; 16] = [
+    0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
+];
 
 /// Outcome of a successful [`check_restore_signature`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,17 +113,24 @@ pub struct BackupSigningKey {
 
 impl BackupSigningKey {
     /// Generates a fresh key and returns it with its PEM (`PRIVATE KEY`,
-    /// PKCS#8) encoding, which is what [`Self::from_pem`] reads back.
+    /// PKCS#8 v1) encoding, which is what [`Self::from_pem`] reads back.
+    ///
+    /// The key is PKCS#8 v1, as `openssl genpkey` writes it. ring's
+    /// `generate_pkcs8` writes v2 (RFC 5958), which OpenSSL 3.0 cannot read
+    /// (#690).
     ///
     /// # Errors
     ///
     /// [`BackupError::Crypto`] when the system RNG fails.
     pub fn generate() -> Result<(Self, Zeroizing<String>), BackupError> {
-        let rng = ring::rand::SystemRandom::new();
-        let doc = Ed25519KeyPair::generate_pkcs8(&rng)
+        let mut seed = Zeroizing::new([0u8; 32]);
+        ring::rand::SystemRandom::new()
+            .fill(&mut seed[..])
             .map_err(|_| BackupError::Crypto("Ed25519 key generation failed".into()))?;
-        let pkcs8 = Zeroizing::new(doc.as_ref().to_vec());
-        let pair = Ed25519KeyPair::from_pkcs8(&pkcs8)
+        let mut pkcs8 = Zeroizing::new(Vec::with_capacity(PKCS8_V1_ED25519_HEADER.len() + 32));
+        pkcs8.extend_from_slice(&PKCS8_V1_ED25519_HEADER);
+        pkcs8.extend_from_slice(&seed[..]);
+        let pair = Ed25519KeyPair::from_pkcs8_maybe_unchecked(&pkcs8)
             .map_err(|_| BackupError::Crypto("generated key did not parse".into()))?;
         let b64 = Zeroizing::new(STANDARD.encode(pkcs8.as_slice()));
         let mut pem = Zeroizing::new(String::with_capacity(b64.len() + 64));
@@ -355,6 +370,41 @@ mod tests {
 
     // ── key handling ─────────────────────────────────────────────────────
 
+    /// A key that `openssl genpkey -algorithm ed25519` wrote: PKCS#8 v1, with no
+    /// public key.
+    const OPENSSL_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
+        MC4CAQAwBQYDK2VwBCIEIBJga6BJyucFOXunA+oAB3JEXBR0Q+ZWepPJ0QZdsprJ\n\
+        -----END PRIVATE KEY-----\n";
+
+    /// The DER in a PEM `PRIVATE KEY` block.
+    fn pem_der(pem: &str) -> Vec<u8> {
+        let body: String = pem
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("-----"))
+            .collect();
+        STANDARD.decode(body).expect("PEM body is base64")
+    }
+
+    #[test]
+    fn generated_key_has_the_pkcs8_form_that_openssl_writes() {
+        // PKCS#8 v2 (RFC 5958: version 1, with the public key) is what ring
+        // writes, and OpenSSL 3.0 (Ubuntu 24.04) cannot read it, so an operator
+        // could not use the key file with openssl (#690). `openssl genpkey`
+        // writes v1 (RFC 8410): version 0 and the 32-byte seed only.
+        let (k, pem) = BackupSigningKey::generate().expect("generate");
+        let der = pem_der(&pem);
+        let openssl = pem_der(OPENSSL_PEM);
+        assert_eq!(
+            der.len(),
+            openssl.len(),
+            "PKCS#8 v1: a 16-byte header and the 32-byte seed"
+        );
+        assert_eq!(der[..16], openssl[..16], "the header of an openssl key");
+        let back = BackupSigningKey::from_pem(&pem).expect("parse own PEM");
+        assert_eq!(back.verify_key_b64(), k.verify_key_b64());
+    }
+
     #[test]
     fn generated_key_round_trips_through_pem() {
         let (k, pem) = BackupSigningKey::generate().expect("generate");
@@ -374,10 +424,6 @@ mod tests {
 
     #[test]
     fn openssl_style_unversioned_pkcs8_is_accepted() {
-        // `openssl genpkey -algorithm ed25519` writes PKCS#8 v1 (no public key).
-        const OPENSSL_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
-            MC4CAQAwBQYDK2VwBCIEIBJga6BJyucFOXunA+oAB3JEXBR0Q+ZWepPJ0QZdsprJ\n\
-            -----END PRIVATE KEY-----\n";
         // Derived independently: `openssl pkey -pubout -outform DER | tail -c 32 | basenc --base64url`.
         const OPENSSL_PUB: &str = "5settUVm3ZDqg9RWtbbLjmbA1RK2KOvVu_PmihsFk-8";
         let k = BackupSigningKey::from_pem(OPENSSL_PEM).expect("openssl key");
