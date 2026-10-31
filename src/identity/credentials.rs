@@ -1507,6 +1507,40 @@ mod tests {
         assert!(verify_hash(&pw, bad).is_err(), "malformed PHC must error");
     }
 
+    #[test]
+    fn verify_pbkdf2_sha256_refuses_a_digest_shorter_than_16_bytes() {
+        let pw = CleartextPassword::from_string("keycloak-password".to_string());
+        let salt = STANDARD_NO_PAD.encode(b"keycloak-salt-16");
+        let phc_with_digest_of = |len: usize| {
+            let mut derived = vec![0u8; len];
+            pbkdf2::<Hmac<Sha256>>(
+                b"keycloak-password",
+                b"keycloak-salt-16",
+                1000,
+                &mut derived,
+            )
+            .expect("pbkdf2 derivation");
+            format!(
+                "$pbkdf2-sha256$i=1000${salt}${}",
+                STANDARD_NO_PAD.encode(derived)
+            )
+        };
+        for len in [0, 1, 15] {
+            let result = verify_hash(&pw, &phc_with_digest_of(len));
+            assert!(
+                matches!(
+                    &result,
+                    Err(IdentityError::InvalidInput { reason }) if reason.contains("shorter than 16")
+                ),
+                "a {len}-byte digest must be refused: {result:?}"
+            );
+        }
+        assert!(
+            verify_hash(&pw, &phc_with_digest_of(16)).expect("a 16-byte digest verifies"),
+            "a 16-byte digest of the right password must verify"
+        );
+    }
+
     // ===== Scenario 4 (P1): Custom params =====
 
     #[test]
