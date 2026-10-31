@@ -15,7 +15,7 @@ Hearth SHALL verify legacy hashes imported from Keycloak or Auth0 migrations or 
 ## ADDED Requirements
 
 ### Requirement: The admin user import stores a password hash
-`POST /admin/users/import` SHALL accept an optional `password_hash` for each entry, and SHALL store a well-formed bcrypt (`$2a$`, `$2b$`), `$argon2id$`, `$scrypt$` or `$pbkdf2-sha256$` PHC string as the user's credential. The response SHALL NOT contain a hash.
+`POST /admin/users/import` SHALL accept an optional `password_hash` for each entry, and SHALL store a well-formed bcrypt (`$2a$`, `$2b$`, `$2y$`), `$argon2id$`, `$scrypt$` or `$pbkdf2-sha256$` PHC string as the user's credential. The response SHALL NOT contain a hash.
 
 #### Scenario: An imported bcrypt hash
 - **WHEN** an import entry carries the bcrypt hash of a password

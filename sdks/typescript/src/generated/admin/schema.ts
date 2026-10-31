@@ -1125,7 +1125,7 @@ export interface components {
             attributes?: {
                 [key: string]: string;
             };
-            /** @description A PHC password hash from another system: bcrypt (`$2a$`, `$2b$`), `$argon2id$`, `$scrypt$` or `$pbkdf2-sha256$`. Sign-in verifies it, and the first successful sign-in replaces it with an Argon2id hash. A hash that is malformed, in another format, or with a work factor above the server's ceilings fails the entry. Without it, the user gets no password. */
+            /** @description A PHC password hash from another system: bcrypt (`$2a$`, `$2b$`, `$2y$`), `$argon2id$`, `$scrypt$` or `$pbkdf2-sha256$`. Sign-in verifies it, and the first successful sign-in replaces it with an Argon2id hash. A hash that is malformed, in another format, or with a work factor above the server's ceilings fails the entry. Without it, the user gets no password. */
             password_hash?: string;
         };
         AdminImportUsersRequest: {

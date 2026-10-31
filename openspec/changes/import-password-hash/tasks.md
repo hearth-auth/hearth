@@ -1,6 +1,6 @@
 ## 1. Tests first
 
-- [x] 1.1 Black-box `tests/admin_users.rs`: an imported bcrypt or Argon2id hash verifies its password and no other; an entry without `password_hash` gets no password; a hash in another format, a malformed hash, an empty PBKDF2 digest and a work factor above the ceilings each fail their entry and create no user; the response does not contain a hash.
+- [x] 1.1 Black-box `tests/admin_users.rs`: an imported bcrypt (`$2b$` and `$2y$`) or Argon2id hash verifies its password and no other; an entry without `password_hash` gets no password; a hash in another format, a malformed hash, an empty PBKDF2 digest and a work factor above the ceilings each fail their entry and create no user; the response does not contain a hash.
 - [x] 1.2 Run them red.
 
 ## 2. Implementation

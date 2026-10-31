@@ -8,7 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ### Added
 - **`POST /admin/users/import` takes a password hash for each user** (#701). An entry's optional
-  `password_hash` is a PHC string from another system: bcrypt (`$2a$`, `$2b$`), `$argon2id$`,
+  `password_hash` is a PHC string from another system: bcrypt (`$2a$`, `$2b$`, `$2y$`), `$argon2id$`,
   `$scrypt$` or `$pbkdf2-sha256$`. The user signs in with their existing password, and the first
   successful sign-in replaces the hash with an Argon2id hash. The import refuses an entry, with an
   error in `results`, when its hash is malformed, in another format, or asks for a work factor above

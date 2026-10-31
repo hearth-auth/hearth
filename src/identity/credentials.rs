@@ -808,7 +808,7 @@ const PBKDF2_MIN_DIGEST_BYTES: usize = 16;
 /// key derivation (#701).
 ///
 /// Accepts the formats that sign-in verifies and that the import stores:
-/// bcrypt (`$2a$`, `$2b$`), `$argon2id$`, `$scrypt$` and `$pbkdf2-sha256$`.
+/// bcrypt (`$2a$`, `$2b$`, `$2y$`), `$argon2id$`, `$scrypt$` and `$pbkdf2-sha256$`.
 /// Refuses a malformed hash, and a hash whose work factor is above the
 /// [`work_factor`] ceilings or [`PBKDF2_MAX_ITERATIONS`]: sign-in refuses such
 /// a hash, so the user could never sign in with it. No key derivation runs, so
@@ -820,7 +820,8 @@ const PBKDF2_MIN_DIGEST_BYTES: usize = 16;
 /// contains the hash.
 pub(crate) fn check_importable_hash(hash_str: &str) -> Result<(), IdentityError> {
     let invalid = |reason: String| IdentityError::InvalidInput { reason };
-    if hash_str.starts_with("$2a$") || hash_str.starts_with("$2b$") {
+    if hash_str.starts_with("$2a$") || hash_str.starts_with("$2b$") || hash_str.starts_with("$2y$")
+    {
         hash_str
             .parse::<bcrypt::HashParts>()
             .map_err(|_| invalid("malformed bcrypt hash".to_string()))?;
@@ -857,7 +858,7 @@ pub(crate) fn check_importable_hash(hash_str: &str) -> Result<(), IdentityError>
         return Ok(());
     }
     Err(invalid(
-        "unsupported password hash format: Hearth verifies bcrypt ($2a$, $2b$), \
+        "unsupported password hash format: Hearth verifies bcrypt ($2a$, $2b$, $2y$), \
          $argon2id$, $scrypt$ and $pbkdf2-sha256$"
             .to_string(),
     ))
@@ -2206,8 +2207,10 @@ mod tests {
         let argon2_hash = hash_password(&pw, &CredentialConfig::fast_for_testing(), 0)
             .expect("argon2 hash")
             .hash;
+        let bcrypt_hash = bcrypt::hash("import-pw", 4).expect("bcrypt hash");
         let hashes = [
-            bcrypt::hash("import-pw", 4).expect("bcrypt hash"),
+            bcrypt_hash.replacen("$2b$", "$2y$", 1),
+            bcrypt_hash,
             argon2_hash,
             scrypt_hash,
             build_pbkdf2_phc(b"import-pw", 1_000, b"import-salt"),

@@ -252,7 +252,7 @@ Creates one user for each entry in `users` (at least one entry). Each entry has 
 }
 ```
 
-**Password hashes.** `password_hash` is a PHC string in a format that sign-in verifies: bcrypt (`$2a$`, `$2b$`), `$argon2id$`, `$scrypt$` or `$pbkdf2-sha256$`. Hearth stores the hash as it is, so the user signs in with their existing password. The first successful sign-in replaces it with an Argon2id hash. An entry without `password_hash` gets no password: send the user a password email (`POST /admin/users/{id}/password-email`).
+**Password hashes.** `password_hash` is a PHC string in a format that sign-in verifies: bcrypt (`$2a$`, `$2b$`, `$2y$`), `$argon2id$`, `$scrypt$` or `$pbkdf2-sha256$`. Hearth stores the hash as it is, so the user signs in with their existing password. The first successful sign-in replaces it with an Argon2id hash. An entry without `password_hash` gets no password: send the user a password email (`POST /admin/users/{id}/password-email`).
 
 The import refuses an entry when its hash:
 
