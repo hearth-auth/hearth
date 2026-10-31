@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.7.0] — 2026-10-31
+
 ### Added
 - **`POST /admin/users/import` takes a password hash for each user** (#701). An entry's optional
   `password_hash` is a PHC string from another system: bcrypt (`$2a$`, `$2b$`, `$2y$`), `$argon2id$`,
