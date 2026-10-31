@@ -780,7 +780,7 @@ export interface paths {
         put?: never;
         /**
          * Import users (migration)
-         * @description Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue.
+         * @description Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue. A request takes at most 10,000 entries and a body of at most 16 MiB; the import checks the admin token before it reads the body.
          */
         post: operations["adminImportUsers"];
         delete?: never;

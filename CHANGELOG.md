@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Changed
+- **`POST /admin/users/import` takes a request body up to 16 MiB** (#714). The body limit was
+  the 1 MiB default, so a request got `413` at about 3,800 entries with password hashes, below
+  the cap of 10,000 entries per request. The import now checks the admin token before it reads
+  the body: a request without a valid token gets `401` (it got `413` for a large body, or `422`
+  for a malformed one). The admin API guide and the OpenAPI document state both limits.
+
 ## [4.7.1] — 2026-10-31
 
 No changelog entries for this release. The [GitHub release](https://github.com/hearth-auth/hearth/releases/tag/v4.7.1) lists its commits.

@@ -5,7 +5,7 @@ namespace Hearth\Generated\Admin\Endpoint;
 class AdminImportUsers extends \Hearth\Generated\Admin\Runtime\Client\BaseEndpoint implements \Hearth\Generated\Admin\Runtime\Client\Endpoint
 {
     /**
-     * Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue.
+     * Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue. A request takes at most 10,000 entries and a body of at most 16 MiB; the import checks the admin token before it reads the body.
      * @param null|\Hearth\Generated\Admin\Model\AdminImportUsersRequest $requestBody
      */
     public function __construct(?\Hearth\Generated\Admin\Model\AdminImportUsersRequest $requestBody = null)
