@@ -4281,6 +4281,14 @@ impl EmbeddedIdentityEngine {
             }
         }
 
+        // #624 (OpenSpec `dpop`): the proof's `jti` is spent only after the
+        // key check above, so a proof from the wrong key cannot spend the
+        // holder's one-shot slot. It is spent before the rotation, so a
+        // replayed proof rotates nothing.
+        if let Some(jti) = bind_ctx.and_then(|c| c.dpop_jti.as_deref()) {
+            self.check_and_record_dpop_jti(realm_id, jti, now_secs)?;
+        }
+
         self.refresh_session(realm_id, session_id)?;
 
         // Re-resolve the subject's CURRENT authority instead of copying the
@@ -18009,6 +18017,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 }
             }
         }
+        // #624 (OpenSpec `dpop`): the proof's `jti` is spent only after the
+        // `cnf.jkt` check above, so a proof from the wrong key cannot spend the
+        // holder's one-shot slot.
+        if let Some(ref jti) = request.dpop_jti {
+            self.check_and_record_dpop_jti(realm_id, jti, now_secs)?;
+        }
 
         // 3. Validate actor_token if present (B.5 OBO).
         // Returns (actor_sub, actor_scope_owned, actor_permissions_owned) — the actor's scope
@@ -28378,6 +28392,7 @@ mod tests {
             resource: None,
             audience: None,
             dpop_jkt: None,
+            dpop_jti: None,
         };
 
         // Control: with agent A active, the exchange succeeds.
@@ -28512,6 +28527,7 @@ mod tests {
                     resource: None,
                     audience: None,
                     dpop_jkt: None,
+                    dpop_jti: None,
                 },
             )
             .expect("token exchange")

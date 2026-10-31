@@ -1354,6 +1354,11 @@ pub struct RefreshBindContext {
     /// clients must authenticate on the refresh arm. `None` for legacy
     /// session-bound refresh tokens (grant family carries no `client_id`).
     pub authenticated_client_id: Option<crate::core::ClientId>,
+    /// The `jti` of the request's DPoP proof, when the engine is to spend it.
+    /// `rotate_grant_family` records it after the grant family's key check
+    /// passes, so a proof from the wrong key does not spend it (#624). `None`
+    /// when the caller already recorded it, or presented no proof.
+    pub dpop_jti: Option<String>,
 }
 
 /// OIDC Discovery document (`OpenID` Connect Discovery 1.0).

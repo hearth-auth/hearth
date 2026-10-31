@@ -149,6 +149,7 @@ fn audience_only_token(h: &common::TestHarness, realm: &RealmId) -> String {
                 resource: None,
                 audience: Some(RS.to_string()),
                 dpop_jkt: None,
+                dpop_jti: None,
             },
         )
         .expect("exchange for the resource")

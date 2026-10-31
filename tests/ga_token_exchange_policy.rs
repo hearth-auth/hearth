@@ -105,6 +105,7 @@ fn exchange(
                 resource: resource.map(str::to_string),
                 audience: audience.map(str::to_string),
                 dpop_jkt: None,
+                dpop_jti: None,
             },
         )
         .map(|r| r.access_token)

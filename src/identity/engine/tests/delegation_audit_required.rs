@@ -184,6 +184,7 @@ fn a_delegation_whose_audit_write_fails_issues_no_token() {
             resource: None,
             audience: None,
             dpop_jkt: None,
+            dpop_jti: None,
         },
     );
     assert!(

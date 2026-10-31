@@ -159,6 +159,7 @@ fn exchange(
                 resource,
                 audience,
                 dpop_jkt: None,
+                dpop_jti: None,
             },
         )
         .map(|r| r.access_token)

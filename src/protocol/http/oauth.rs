@@ -1010,6 +1010,15 @@ fn multiple_auth_methods_response() -> Response {
         .into_response()
 }
 
+/// Token-endpoint grants that check the DPoP proof key against a key the grant
+/// is bound to: the grant family's key, or the subject token's `cnf.jkt`. The
+/// engine spends the proof's `jti` after that check (#624), so the endpoint
+/// does not spend it first; a proof from the wrong key keeps its `jti`.
+const GRANTS_CHECKING_DPOP_BINDING: [&str; 2] = [
+    "refresh_token",
+    "urn:ietf:params:oauth:grant-type:token-exchange",
+];
+
 /// Token-endpoint grants whose arm authenticates the client itself, and so
 /// verifies a presented `private_key_jwt` assertion (directly or in the
 /// engine's grant).
@@ -2651,7 +2660,7 @@ async fn token_exchange_impl(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    let dpop_jkt: Option<String> =
+    let dpop_proof: Option<(String, Option<String>)> =
         if let Some(proof) = headers.get("DPoP").and_then(|v| v.to_str().ok()) {
             let expected_htu = state.identity.oidc_discovery().token_endpoint.clone();
             match crate::identity::dpop::validate_dpop_proof(
@@ -2682,20 +2691,28 @@ async fn token_exchange_impl(
                         )
                         .into_response();
                     }
-                    if let Err(e) = state.identity.check_and_record_dpop_jti(
-                        &realm_id,
-                        &validated.jti,
-                        now_secs,
-                    ) {
-                        return identity_error_to_response(&e).into_response();
-                    }
-                    Some(validated.jkt)
+                    // #624: a grant that checks the proof key against a key
+                    // it is bound to spends the `jti` itself, after that check.
+                    let engine_jti = if GRANTS_CHECKING_DPOP_BINDING.contains(&grant_type) {
+                        Some(validated.jti)
+                    } else {
+                        if let Err(e) = state.identity.check_and_record_dpop_jti(
+                            &realm_id,
+                            &validated.jti,
+                            now_secs,
+                        ) {
+                            return identity_error_to_response(&e).into_response();
+                        }
+                        None
+                    };
+                    Some((validated.jkt, engine_jti))
                 }
                 Err(e) => return identity_error_to_response(&e).into_response(),
             }
         } else {
             None
         };
+    let (dpop_jkt, dpop_jti) = dpop_proof.map_or((None, None), |(jkt, jti)| (Some(jkt), jti));
 
     match grant_type {
         "authorization_code" => {
@@ -2811,6 +2828,7 @@ async fn token_exchange_impl(
 
             let refresh_bind = crate::identity::RefreshBindContext {
                 authenticated_client_id,
+                dpop_jti,
             };
 
             match state.identity.refresh_tokens_for_resource(
@@ -3064,6 +3082,7 @@ async fn token_exchange_impl(
                 resource: body.resource,
                 audience: body.audience,
                 dpop_jkt: dpop_jkt.clone(),
+                dpop_jti,
             };
             match state.identity.rfc8693_token_exchange(&realm_id, &request) {
                 Ok(resp) => {
@@ -3858,7 +3877,7 @@ async fn realm_token_exchange(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    let dpop_jkt: Option<String> =
+    let dpop_proof: Option<(String, Option<String>)> =
         if let Some(proof) = headers.get("DPoP").and_then(|v| v.to_str().ok()) {
             let base_issuer = state.identity.oidc_discovery().issuer;
             let expected_htu = format!("{base_issuer}/realms/{realm_name}/token");
@@ -3902,20 +3921,28 @@ async fn realm_token_exchange(
                         }
                         return err_resp;
                     }
-                    if let Err(e) = state.identity.check_and_record_dpop_jti(
-                        &realm_id,
-                        &validated.jti,
-                        now_secs,
-                    ) {
-                        return identity_error_to_response(&e).into_response();
-                    }
-                    Some(validated.jkt)
+                    // #624: a grant that checks the proof key against a key
+                    // it is bound to spends the `jti` itself, after that check.
+                    let engine_jti = if GRANTS_CHECKING_DPOP_BINDING.contains(&grant_type) {
+                        Some(validated.jti)
+                    } else {
+                        if let Err(e) = state.identity.check_and_record_dpop_jti(
+                            &realm_id,
+                            &validated.jti,
+                            now_secs,
+                        ) {
+                            return identity_error_to_response(&e).into_response();
+                        }
+                        None
+                    };
+                    Some((validated.jkt, engine_jti))
                 }
                 Err(e) => return identity_error_to_response(&e).into_response(),
             }
         } else {
             None
         };
+    let (dpop_jkt, dpop_jti) = dpop_proof.map_or((None, None), |(jkt, jti)| (Some(jkt), jti));
 
     let mut resp = match grant_type {
         "authorization_code" => {
@@ -4014,6 +4041,7 @@ async fn realm_token_exchange(
             };
             let refresh_bind = crate::identity::RefreshBindContext {
                 authenticated_client_id,
+                dpop_jti,
             };
             match state.identity.refresh_tokens_for_resource(
                 &realm_id,
@@ -4234,6 +4262,7 @@ async fn realm_token_exchange(
                 resource: body.resource,
                 audience: body.audience,
                 dpop_jkt: dpop_jkt.clone(),
+                dpop_jti,
             };
             match state.identity.rfc8693_token_exchange(&realm_id, &request) {
                 Ok(resp) => {

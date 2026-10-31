@@ -975,6 +975,11 @@ pub struct Rfc8693Request {
     pub audience: Option<String>,
     /// DPoP key thumbprint, if the caller provided a DPoP proof header.
     pub dpop_jkt: Option<String>,
+    /// The `jti` of that DPoP proof, when the engine is to spend it. The
+    /// exchange records it after the subject token's `cnf.jkt` check passes,
+    /// so a proof from the wrong key does not spend it (#624). `None` when the
+    /// caller already recorded it, or presented no proof.
+    pub dpop_jti: Option<String>,
 }
 
 /// Successful RFC 8693 token exchange response.

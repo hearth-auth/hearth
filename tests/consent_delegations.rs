@@ -168,6 +168,7 @@ async fn delegation_grant_persisted_after_exchange() {
         resource: None,
         audience: None,
         dpop_jkt: None,
+        dpop_jti: None,
     };
 
     identity
@@ -224,6 +225,7 @@ async fn revoked_delegation_rejects_previously_issued_obo_token() {
         resource: None,
         audience: None,
         dpop_jkt: None,
+        dpop_jti: None,
     };
 
     let exchange = identity
@@ -351,6 +353,7 @@ async fn revoked_delegation_is_inactive_on_introspect_and_decide() {
         resource: None,
         audience: None,
         dpop_jkt: None,
+        dpop_jti: None,
     };
     let obo_token = identity
         .rfc8693_token_exchange(&realm_id, &request)
@@ -453,6 +456,7 @@ fn exchange_onward(
                 resource: None,
                 audience: None,
                 dpop_jkt: None,
+                dpop_jti: None,
             },
         )
         .expect("exchange should succeed")
@@ -557,6 +561,7 @@ async fn revoke_other_users_delegation_is_not_found() {
         resource: None,
         audience: None,
         dpop_jkt: None,
+        dpop_jti: None,
     };
 
     identity
@@ -607,6 +612,7 @@ async fn revoke_delegation_is_idempotent() {
         resource: None,
         audience: None,
         dpop_jkt: None,
+        dpop_jti: None,
     };
 
     identity
