@@ -15,7 +15,9 @@
 #
 # Environment (default):
 #   USERS             users to import (1000000)
-#   IMPORT_BATCH      users per POST /admin/users/import request (5000)
+#   IMPORT_BATCH      users per POST /admin/users/import request (2500). Each entry carries
+#                     a password_hash, about 270 bytes in all, and the admin body limit is
+#                     1 MiB: 5000 entries (about 1.35 MB) get 413.
 #   IMPORT_WORKERS    import requests at a time (4)
 #   SAMPLE_EVERY      compare every Nth imported user in full (1000)
 #   LOGIN_USERS       users with a password, declared as seed_users (3)
@@ -37,7 +39,7 @@ out=$(cd "$2" && pwd)
 here=$(cd "$(dirname "$0")" && pwd)
 
 USERS=${USERS:-1000000}
-IMPORT_BATCH=${IMPORT_BATCH:-5000}
+IMPORT_BATCH=${IMPORT_BATCH:-2500}
 IMPORT_WORKERS=${IMPORT_WORKERS:-4}
 SAMPLE_EVERY=${SAMPLE_EVERY:-1000}
 LOGIN_USERS=${LOGIN_USERS:-3}

@@ -1209,7 +1209,7 @@ def parse_args(argv):
     server_args(sp)
     sp.add_argument("--state", required=True)
     sp.add_argument("--users", type=int, default=1_000_000)
-    sp.add_argument("--batch", type=int, default=5000)
+    sp.add_argument("--batch", type=int, default=2500)
     sp.add_argument("--workers", type=int, default=4)
     sp.add_argument("--sample-every", type=int, default=1000)
     sp.set_defaults(fn=cmd_seed)
