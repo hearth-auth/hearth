@@ -8,6 +8,7 @@ checks the pre-backup token with openssl too.
 """
 import base64
 import contextlib
+import hashlib
 import copy
 import io
 import json
@@ -31,7 +32,7 @@ CHECKS = {
     "restore exit status", "realm id", "user count", "sampled users", "email index",
     "known users sign in", "realm JWKS", "pre-backup token signature",
     "pre-backup token introspection", "client record", "client credentials", "role",
-    "role assignments", "webhook subscriptions",
+    "role assignments", "webhook subscriptions", "bulk users sign in",
 }
 
 
@@ -99,6 +100,8 @@ def snapshot(keys, phase="before", n_users=5):
             "email_index": ok({rec["email"]: uid for uid, rec in records.items()}),
             "known_users": ok({ADMIN: {"ok": True, "sub": "sub-admin"},
                                USER1: {"ok": True, "sub": "sub-user1"}}),
+            # Other bulk users sign in in each phase (bulk_sign_in_users).
+            "bulk_sign_in": ok(bulk_sign_in(1 if phase == "before" else 2)),
             "jwks": ok({"keys": [keys.jwk("realm", "k1")]}),
             "client": ok({"client_id": CLIENT, "client_name": "Restore drill service",
                           "is_confidential": True, "grant_types": ["client_credentials"],
@@ -112,6 +115,11 @@ def snapshot(keys, phase="before", n_users=5):
                              "secret_sha256": "ab" * 32, "event_filters": ["realm_deleted"]}]),
         },
     }
+
+
+def bulk_sign_in(i):
+    uid = f"00000000-0000-4000-8000-{i:012d}"
+    return {f"bulk{i:07d}@hearth.stress.test": {"ok": True, "id": uid, "sub": uid}}
 
 
 def results(findings):
@@ -224,6 +232,28 @@ class CompareTest(unittest.TestCase):
         # A seed user that the restore lost comes back from hearth.yaml with a new id.
         self.after_section("known_users")[USER1] = {"ok": True, "sub": "sub-new"}
         self.assertFails("known users sign in", USER1, "sub-new")
+
+    def test_a_bulk_user_who_cannot_sign_in_after_the_restore_fails(self):
+        r = self.after_section("bulk_sign_in")
+        email = next(iter(r))
+        r[email] = {"ok": False, "id": r[email]["id"], "error": "login_submit: 200"}
+        self.assertFails("bulk users sign in", email, "login_submit")
+
+    def test_a_bulk_user_who_signs_in_as_another_user_fails(self):
+        r = self.after_section("bulk_sign_in")
+        email = next(iter(r))
+        r[email]["sub"] = "sub-other"
+        self.assertFails("bulk users sign in", email, "sub-other")
+
+    def test_no_bulk_sign_in_after_the_restore_fails(self):
+        self.after["sections"]["bulk_sign_in"] = ok({})
+        self.assertFails("bulk users sign in", "no bulk user")
+
+    def test_a_broken_bulk_sign_in_baseline_fails(self):
+        r = self.before["sections"]["bulk_sign_in"]["value"]
+        email = next(iter(r))
+        r[email] = {"ok": False, "id": r[email]["id"], "error": "login_submit: 200"}
+        self.assertFails("bulk users sign in", "before (the drill's baseline)", email)
 
     def test_a_different_jwks_fails(self):
         self.after["sections"]["jwks"] = ok({"keys": [self.keys.jwk("other", "k2")]})
@@ -474,6 +504,36 @@ class HelpersTest(unittest.TestCase):
         statuses = {restore_drill.bulk_user(i, "h.test").get("status", "active")
                     for i in range(1000)}
         self.assertEqual(statuses, {"active", "disabled", "pending_verification"})
+
+    def test_bulk_users_carry_the_password_hash(self):
+        a = restore_drill.bulk_user(7, "h.test", "$pbkdf2-sha256$i=1$c2FsdA$ZGlnZXN0")
+        self.assertEqual(a["password_hash"], "$pbkdf2-sha256$i=1$c2FsdA$ZGlnZXN0")
+        self.assertNotIn("password_hash", restore_drill.bulk_user(7, "h.test"))
+
+    def test_the_password_hash_is_a_pbkdf2_phc_string_that_verifies(self):
+        phc = restore_drill.pbkdf2_phc("drill-pw", b"0123456789abcdef", iterations=1000)
+        algo, params, salt, digest = phc.split("$")[1:]
+        self.assertEqual((algo, params), ("pbkdf2-sha256", "i=1000"))
+        # Standard base64 without padding, as Hearth reads it.
+        self.assertNotIn("=", salt + digest)
+        pad = lambda t: t + "=" * (-len(t) % 4)  # noqa: E731
+        self.assertEqual(base64.b64decode(pad(salt)), b"0123456789abcdef")
+        self.assertEqual(base64.b64decode(pad(digest)),
+                         hashlib.pbkdf2_hmac("sha256", b"drill-pw", b"0123456789abcdef", 1000))
+
+    def test_bulk_sign_in_users_are_active_disjoint_and_sampled(self):
+        domain = "hearth.stress.test"
+        sample = [[f"bulk{i:07d}@{domain}", f"id-{i}"]
+                  for i in restore_drill.sample_indexes(1_000_000, 1000)]
+        sample += [[f"api1@{domain}", "id-api1"], [USER1, "id-user1"]]
+        before, after = restore_drill.bulk_sign_in_users(sample)
+        n = restore_drill.BULK_SIGN_INS
+        self.assertEqual((len(before), len(after)), (n, n))
+        self.assertFalse({e for e, _ in before} & {e for e, _ in after})
+        for email, uid in before + after:
+            self.assertIn([email, uid], sample)
+            i = int(email[4:11])
+            self.assertNotIn("status", restore_drill.bulk_user(i, domain), email)
 
     def test_a_signature_needs_the_right_key(self):
         with tempfile.TemporaryDirectory() as d:
