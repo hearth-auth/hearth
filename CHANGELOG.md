@@ -15,7 +15,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [4.7.1] — 2026-10-31
 
-No changelog entries for this release. The [GitHub release](https://github.com/hearth-auth/hearth/releases/tag/v4.7.1) lists its commits.
+### Security
+- **Sign-in refuses a stored PBKDF2-SHA256 hash whose digest is shorter than 16 bytes**
+  (hardening). The user import refuses such a hash (#701); a hash that `hearth migrate keycloak`
+  or `hearth migrate auth0` stored now gets the same check at sign-in. Keycloak writes a 32-byte
+  digest. A user whose stored hash has a shorter digest cannot sign in with a password: reset that
+  user's password.
 
 ## [4.7.0] — 2026-10-31
 
@@ -27,13 +32,6 @@ No changelog entries for this release. The [GitHub release](https://github.com/h
   error in `results`, when its hash is malformed, in another format, or asks for a work factor above
   the ceilings that sign-in applies. The response never contains the hash. The SDK admin clients now
   type the import request (`AdminImportUsersRequest`, `AdminImportUserEntry`).
-
-### Security
-- **Sign-in refuses a stored PBKDF2-SHA256 hash whose digest is shorter than 16 bytes**
-  (hardening). The user import refuses such a hash (#701); a hash that `hearth migrate keycloak`
-  or `hearth migrate auth0` stored now gets the same check at sign-in. Keycloak writes a 32-byte
-  digest. A user whose stored hash has a shorter digest cannot sign in with a password: reset that
-  user's password.
 
 ## [4.6.18] — 2026-10-31
 
