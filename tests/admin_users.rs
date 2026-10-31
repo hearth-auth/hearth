@@ -448,6 +448,10 @@ async fn import_users_with_password_hash_signs_in_with_that_password() {
 
     // Hashes that another system wrote, at the lowest cost each crate accepts.
     let bcrypt_hash = bcrypt::hash("Bcrypt-Import-1", 4).expect("bcrypt hash");
+    // PHP's password_hash() writes bcrypt as `$2y$`, the same algorithm (#703).
+    let bcrypt_2y_hash = bcrypt::hash("Bcrypt-2y-Import-1", 4)
+        .expect("bcrypt hash")
+        .replacen("$2b$", "$2y$", 1);
     let argon2_hash = {
         use argon2::password_hash::{PasswordHasher as _, SaltString};
         let salt = SaltString::encode_b64(b"import-test-salt").expect("salt");
@@ -465,22 +469,26 @@ async fn import_users_with_password_hash_signs_in_with_that_password() {
         "users": [
             {"email": "bcrypt@example.com", "display_name": "Bcrypt", "password_hash": bcrypt_hash},
             {"email": "argon2@example.com", "display_name": "Argon2", "password_hash": argon2_hash},
+            {"email": "bcrypt2y@example.com", "display_name": "Bcrypt 2y", "password_hash": bcrypt_2y_hash},
             {"email": "nohash@example.com", "display_name": "No Hash"}
         ]
     });
     let (status, text) = post_import(&h, &realm, &token, &payload).await;
     assert_eq!(status, StatusCode::OK, "{text}");
     let body: serde_json::Value = serde_json::from_str(&text).expect("JSON");
-    assert_eq!(body["imported"], 3, "{body}");
+    assert_eq!(body["imported"], 4, "{body}");
     assert_eq!(body["failed"], 0, "{body}");
     assert!(
-        !text.contains(&bcrypt_hash) && !text.contains(&argon2_hash),
+        !text.contains(&bcrypt_hash)
+            && !text.contains(&argon2_hash)
+            && !text.contains(&bcrypt_2y_hash),
         "the response must not echo a password hash: {text}"
     );
 
     for (email, password) in [
         ("bcrypt@example.com", "Bcrypt-Import-1"),
         ("argon2@example.com", "Argon2-Import-1"),
+        ("bcrypt2y@example.com", "Bcrypt-2y-Import-1"),
     ] {
         let user = h
             .identity()
