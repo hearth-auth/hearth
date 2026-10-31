@@ -692,3 +692,77 @@ async fn cross_realm_create_realm_is_refused_and_creates_nothing() {
         "no realm may be created"
     );
 }
+
+// ─── #623: the disabled realm routes check authentication first ──────────────
+
+/// The two disabled realm routes: the method and the path.
+fn disabled_realm_routes(realm: &RealmId) -> [(&'static str, String); 2] {
+    [
+        ("POST", "/admin/realms".to_string()),
+        ("PATCH", format!("/admin/realms/{}", realm.as_uuid())),
+    ]
+}
+
+/// `POST /admin/realms` and `PATCH /admin/realms/{id}` are disabled (realms
+/// live in `hearth.yaml`), but a caller without a token must get 401, not the
+/// 405 that describes the route. Every admin route checks authentication first.
+#[tokio::test]
+async fn disabled_realm_routes_refuse_a_request_without_a_token_with_401() {
+    let h = common::TestHarness::in_process().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed rbac");
+
+    for (method, uri) in disabled_realm_routes(&realm) {
+        let resp = build_app(&h)
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(&uri)
+                    .header("X-Realm-ID", realm.as_uuid().to_string())
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"name":"no-token"}"#))
+                    .expect("build request"),
+            )
+            .await
+            .expect("request");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{method} {uri}");
+    }
+}
+
+/// A signed-in user without `hearth.realm.admin` must get 403 on both routes.
+#[tokio::test]
+async fn disabled_realm_routes_need_the_realm_admin_permission() {
+    let h = common::TestHarness::in_process().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed rbac");
+    let user = h
+        .identity()
+        .create_user(
+            &realm,
+            &CreateUserRequest {
+                email: "no-role@test.example".into(),
+                display_name: "No Role".into(),
+                first_name: "No".into(),
+                last_name: "Role".into(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create user");
+    let token = common::user_token_pair(h.identity(), &realm, user.id())
+        .access_token()
+        .to_string();
+
+    for (method, uri) in disabled_realm_routes(&realm) {
+        let resp = build_app(&h)
+            .oneshot(req(
+                method,
+                uri.clone(),
+                &token,
+                &realm,
+                r#"{"name":"no-role"}"#,
+            ))
+            .await
+            .expect("request");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{method} {uri}");
+    }
+}
