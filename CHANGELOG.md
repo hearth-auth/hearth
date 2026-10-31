@@ -6,18 +6,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Fixed
+- **`hearth migrate auth0` imports a user whose bcrypt hash starts with `$2y$`** (#703). PHP's
+  `password_hash()` writes this prefix. The import refused such a hash as an unrecognized format,
+  so the user was not imported at all. The user now signs in with their existing password, and the
+  first successful sign-in replaces the hash with an Argon2id hash.
+
+## [4.6.17] — 2026-10-31
+
 ### Changed
 - **`hearth backup keygen` writes a PKCS#8 v1 key** (#690): the key file had the PKCS#8 v2 form
   (RFC 5958, with the public key), which OpenSSL 3.0 (the version on Ubuntu 24.04) cannot read, so
   the `openssl pkey` command in the backup guide failed on such hosts. keygen now writes the v1
   form that `openssl genpkey -algorithm ed25519` writes. Keys from earlier versions keep working:
   Hearth reads both forms.
-
-### Fixed
-- **`hearth migrate auth0` imports a user whose bcrypt hash starts with `$2y$`** (#703). PHP's
-  `password_hash()` writes this prefix. The import refused such a hash as an unrecognized format,
-  so the user was not imported at all. The user now signs in with their existing password, and the
-  first successful sign-in replaces the hash with an Argon2id hash.
 
 ## [4.6.16] — 2026-10-30
 
