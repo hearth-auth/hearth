@@ -39,16 +39,6 @@
 # GHSA-g7r4-m6w7-qqqr suppressed `esbuild`, which is not installed in any
 # scanned lockfile. A suppression that matches nothing is coverage on paper.
 
-# Root and fuzz Cargo.lock: block-buffer 0.10.4, only through digest 0.10.7
-# (sha2, hmac, pbkdf2, blake2). The advisory range is "< 0.12.1", but the
-# fault needs a cursor stored inside the buffer's block (`EagerBuffer` in
-# 0.11 and later, and `ReadBuffer`), which a caught panic in a callback can
-# leave invalid. 0.10.4 has neither.
-# guard: package=block-buffer lockfile=Cargo.lock
-[[IgnoredVulns]]
-id = "GHSA-qwgh-2vcv-g2f7"
-reason = "block-buffer 0.10.4 (via digest 0.10.7: sha2, hmac, pbkdf2, blake2) does not have the fault. The fault needs a cursor stored inside the block (EagerBuffer in 0.11+, ReadBuffer) that a panic caught in the compress or generate callback leaves outside the block. In 0.10.4 the cursor is a separate `pos: u8` field that `digest_blocks` sets only after `compress` returns, so a panic leaves the old, valid value; ReadBuffer does not exist (checked in the 0.10.4 crate source, 2026-10-26). Also, the release profile sets panic = \"abort\", so the shipped binary never catches a panic. Remove this entry when sha2, hmac, pbkdf2 and blake2 move to digest 0.11 (block-buffer >= 0.12.1), or if OSV narrows the range."
-
 # guard: package=golang.org/x/crypto lockfile=sdks/go/go.mod
 [[IgnoredVulns]]
 id = "GO-2026-5932"
@@ -121,6 +111,29 @@ reason = "zod 3.25.76 in the root lockfile (dev scope) is required by context-mo
 # sdks/go/go.mod then pinned `toolchain go1.26.6` (go1.26.10 since
 # 2026-10-23), the advisories no longer matched, and osv-scanner reported the
 # three ignores as unused.
+
+# Advisories published on 2026-10-30. docs-site takes the fixed follow-redirects
+# 1.16.2 and joi 17.13.9. The copies below cannot take a fix: reflex-search
+# 2.2.0 (root devDependency, the installer of the Reflex code-search binary for
+# local development; 2.2.0 is its newest release, checked 2026-10-30) pins its
+# nested versions with an npm-shrinkwrap.json, npm ships its bundled copies
+# inside its tarball, and the minimatch and glob fixes exist only in a new major
+# version that no dependent accepts.
+
+# guard: package=follow-redirects lockfile=package-lock.json
+[[IgnoredVulns]]
+id = "GHSA-mrwp-f3q8-3g9p"
+reason = "follow-redirects 1.16.1 in the root lockfile, pinned by the npm-shrinkwrap.json of reflex-search 2.2.0 (axios 1.20.0; dev scope). A shrinkwrap fixes the nested versions, so a lockfile update cannot change them. The flaw sends custom credentials or sensitiveHeaders to another host after a cross-host redirect. reflex-search makes one axios request, the postinstall download of the Reflex release archive, with no credentials and no custom headers (binary-install.js, read 2026-10-30), and the release workflow installs with --ignore-scripts, so the download never runs in CI. docs-site takes the fixed 1.16.2. Revisit when reflex-search releases a version with follow-redirects >= 1.16.2."
+
+# guard: package=minimatch lockfile=sdks/typescript/package-lock.json
+[[IgnoredVulns]]
+id = "GHSA-g3hv-75wg-m249"
+reason = "minimatch below 11.0.1 in dev and build tooling only: sdks/typescript 10.2.6 (eslint, typescript-eslint) and 5.1.9 (@redocly/openapi-core via openapi-typescript, the admin type generator); docs-site 3.1.5 (serve-handler via @docusaurus/core); root 10.2.5 bundled inside the npm CLI and 10.2.6 pinned by the reflex-search shrinkwrap. The fix exists only in 11.0.1, outside every dependent's range (checked 2026-10-30). The flaw is a crafted glob pattern whose parts multiply into a denial of service. Each pattern here comes from this repository's own config files and packages, not from outside input, and none of these packages ships: the TypeScript SDK's runtime dependencies are jose and openapi-fetch, and the docs site is static HTML. Revisit when eslint, typescript-eslint, @redocly/openapi-core, serve-handler, npm and reflex-search accept minimatch >= 11.0.1."
+
+# guard: package=glob lockfile=package-lock.json
+[[IgnoredVulns]]
+id = "GHSA-3g3m-2fjr-6pw4"
+reason = "glob 13.0.6 bundled inside the npm CLI 11.21.1 (release tooling, dev scope) and glob 13.0.3 pinned by the reflex-search 2.2.0 shrinkwrap (rimraf 6.1.3; dev scope). The fix exists only in glob 14.0.2, outside both dependents' ranges (checked 2026-10-30). The flaw is that a walk continues on the local filesystem after its caller aborts it with an AbortSignal; no input from outside is involved, and the only effect is extra work on a developer machine or the release runner. Revisit when npm bundles glob >= 14.0.2 and reflex-search updates rimraf."
 
 # GHSA-g7r4-m6w7-qqqr (esbuild dev-server file read on Windows) was removed on
 # 2026-09-08 by audit 2026-08-28 §4.12#15. Its reason called esbuild an
