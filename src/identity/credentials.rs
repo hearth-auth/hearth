@@ -750,8 +750,9 @@ fn verify_pbkdf2_sha256(password: &[u8], hash_str: &str) -> Result<bool, Identit
     Ok(derived.ct_eq(&parsed.digest).into())
 }
 
-/// Parses a PBKDF2-HMAC-SHA256 PHC string and bounds its iteration count
-/// with [`pbkdf2_iterations`]. Runs no key derivation.
+/// Parses a PBKDF2-HMAC-SHA256 PHC string, bounds its iteration count with
+/// [`pbkdf2_iterations`] and refuses a digest shorter than
+/// [`PBKDF2_MIN_DIGEST_BYTES`]. Runs no key derivation.
 fn parse_pbkdf2_sha256(hash_str: &str) -> Result<Pbkdf2Sha256Hash, IdentityError> {
     let mut parts = hash_str.split('$');
     // The PHC string starts with an empty segment because of the
@@ -791,6 +792,14 @@ fn parse_pbkdf2_sha256(hash_str: &str) -> Result<Pbkdf2Sha256Hash, IdentityError
         .map_err(|e| IdentityError::InvalidInput {
             reason: format!("invalid pbkdf2 hash: {e}"),
         })?;
+    if digest.len() < PBKDF2_MIN_DIGEST_BYTES {
+        return Err(IdentityError::InvalidInput {
+            reason: format!(
+                "pbkdf2 digest of {} bytes is shorter than {PBKDF2_MIN_DIGEST_BYTES}",
+                digest.len()
+            ),
+        });
+    }
     Ok(Pbkdf2Sha256Hash {
         iterations,
         salt,
@@ -798,7 +807,8 @@ fn parse_pbkdf2_sha256(hash_str: &str) -> Result<Pbkdf2Sha256Hash, IdentityError
     })
 }
 
-/// The shortest PBKDF2 digest that a user import may store, in bytes.
+/// The shortest PBKDF2 digest that sign-in verifies and a user import stores,
+/// in bytes.
 ///
 /// Keycloak writes 32 bytes for `pbkdf2-sha256`. 16 bytes (128 bits) is the
 /// floor for a digest that keeps the strength of a password hash.
@@ -828,13 +838,7 @@ pub(crate) fn check_importable_hash(hash_str: &str) -> Result<(), IdentityError>
         return bcrypt_cost_within_limit(hash_str);
     }
     if hash_str.starts_with("$pbkdf2-sha256$") {
-        let parsed = parse_pbkdf2_sha256(hash_str)?;
-        if parsed.digest.len() < PBKDF2_MIN_DIGEST_BYTES {
-            return Err(invalid(format!(
-                "pbkdf2 digest of {} bytes is shorter than {PBKDF2_MIN_DIGEST_BYTES}",
-                parsed.digest.len()
-            )));
-        }
+        parse_pbkdf2_sha256(hash_str)?;
         return Ok(());
     }
     if hash_str.starts_with("$argon2id$") || hash_str.starts_with("$scrypt$") {

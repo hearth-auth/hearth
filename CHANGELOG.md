@@ -15,6 +15,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   the ceilings that sign-in applies. The response never contains the hash. The SDK admin clients now
   type the import request (`AdminImportUsersRequest`, `AdminImportUserEntry`).
 
+### Security
+- **Sign-in refuses a stored PBKDF2-SHA256 hash whose digest is shorter than 16 bytes**
+  (hardening). The user import refuses such a hash (#701); a hash that `hearth migrate keycloak`
+  or `hearth migrate auth0` stored now gets the same check at sign-in. Keycloak writes a 32-byte
+  digest. A user whose stored hash has a shorter digest cannot sign in with a password: reset that
+  user's password.
+
 ## [4.6.18] — 2026-10-31
 
 ### Fixed
