@@ -1,4 +1,4 @@
-[![CI](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml/badge.svg)](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/hearth-auth/hearth/badge)](https://scorecard.dev/viewer/?uri=github.com/hearth-auth/hearth) [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0) [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange)](https://www.rust-lang.org/) ![v4.6.16](https://img.shields.io/badge/status-v4.6.16-brightgreen)
+[![CI](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml/badge.svg)](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/hearth-auth/hearth/badge)](https://scorecard.dev/viewer/?uri=github.com/hearth-auth/hearth) [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0) [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange)](https://www.rust-lang.org/) ![v4.6.17](https://img.shields.io/badge/status-v4.6.17-brightgreen)
 
 # Hearth — a purpose-built identity database
 
@@ -12,7 +12,7 @@ Every other identity provider is an application sitting on top of a generic data
 
 Token validation, session lookup, and permission checks run in-process against lock-free in-memory structures (epoch-reclaimed `HashMap` snapshots) — no network hop, no cache round-trip, no database query on the hot path. Deploy as a single binary with one config file and a data directory. No Postgres to provision, no Redis to invalidate, no policy service to operate.
 
-> **Stable 4.6.16:** APIs and on-disk formats are stable. See [CHANGELOG](CHANGELOG.md) for the full release history.
+> **Stable 4.6.17:** APIs and on-disk formats are stable. See [CHANGELOG](CHANGELOG.md) for the full release history.
 >
 > **Upgrade from 1.x:** 2.0.x carries the GA audit fixes merged in PRs #358 through #380. It
 > changes several defaults and token claim values; read the [upgrading guide](docs/guides/upgrading.md)
@@ -22,7 +22,7 @@ Token validation, session lookup, and permission checks run in-process against l
 
 ## Install
 
-Download pre-built v4.6.16 artifacts from the [Releases page](https://github.com/hearth-auth/hearth/releases/tag/v4.6.16), or use Docker or Helm.
+Download pre-built v4.6.17 artifacts from the [Releases page](https://github.com/hearth-auth/hearth/releases/tag/v4.6.17), or use Docker or Helm.
 
 ### Released binary — Linux / macOS
 
@@ -67,11 +67,11 @@ chmod +x "${ARTIFACT}"
 
 ```powershell
 Invoke-WebRequest `
-  -Uri "https://github.com/hearth-auth/hearth/releases/download/v4.6.16/hearth-windows-amd64.exe" `
+  -Uri "https://github.com/hearth-auth/hearth/releases/download/v4.6.17/hearth-windows-amd64.exe" `
   -OutFile hearth-windows-amd64.exe
 foreach ($f in 'SHA256SUMS','SHA256SUMS.sigstore.json') {
   Invoke-WebRequest `
-    -Uri "https://github.com/hearth-auth/hearth/releases/download/v4.6.16/$f" `
+    -Uri "https://github.com/hearth-auth/hearth/releases/download/v4.6.17/$f" `
     -OutFile $f
 }
 
@@ -95,10 +95,10 @@ if ($expected -eq $actual) { "OK" } else { throw "CHECKSUM MISMATCH" }
 ### Docker — multi-arch (linux/amd64 + linux/arm64)
 
 ```bash
-docker pull ghcr.io/hearth-auth/hearth:v4.6.16
+docker pull ghcr.io/hearth-auth/hearth:v4.6.17
 
 # Dev mode — in-memory store, no data persistence (Linux only; --dev requires loopback bind)
-docker run --rm --network=host ghcr.io/hearth-auth/hearth:v4.6.16 serve --dev
+docker run --rm --network=host ghcr.io/hearth-auth/hearth:v4.6.17 serve --dev
 curl -fsS http://127.0.0.1:8420/health   # → {"status":"ok"}
 ```
 
@@ -108,7 +108,7 @@ curl -fsS http://127.0.0.1:8420/health   # → {"status":"ok"}
 
 ```bash
 helm install hearth oci://ghcr.io/hearth-auth/charts/hearth \
-  --version 4.6.16 \
+  --version 4.6.17 \
   --namespace auth \
   --create-namespace
 ```
@@ -120,7 +120,7 @@ cosign verify \
   --certificate-identity-regexp \
     '^https://github\.com/hearth-auth/hearth/\.github/workflows/helm\.yml@refs/tags/v' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/hearth-auth/charts/hearth:4.6.16
+  ghcr.io/hearth-auth/charts/hearth:4.6.17
 ```
 
 For signature and SLSA provenance verification of binaries, see [docs/guides/verify-release.md](docs/guides/verify-release.md). For production deployment (systemd, Docker Compose, Kubernetes), see [`deploy/README.md`](deploy/README.md).
