@@ -4,8 +4,8 @@ description: Hearth — single-binary identity database (OIDC/OAuth 2.0)
 type: application
 # The publish workflow stamps the release tag at package time; these values
 # only affect in-repo renders, but they must not lie about the shipping version.
-version: 4.6.17
-appVersion: "4.6.17"
+version: 4.6.18
+appVersion: "4.6.18"
 keywords:
   - identity
   - auth
