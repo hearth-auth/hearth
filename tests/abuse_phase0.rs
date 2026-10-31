@@ -32,7 +32,9 @@ use axum::http::header::{CONTENT_TYPE, HOST};
 use axum::http::{Request, StatusCode};
 use hearth::abuse::guards::{MAX_JSON_ARRAY_LEN, MAX_JSON_DEPTH};
 use hearth::abuse::shaper::{RequestShaper, ShaperConfig};
+use hearth::identity::CreateUserRequest;
 use hearth::protocol::http::{router, AppState};
+use hearth::rbac::{AssignRoleRequest, Scope, Subject};
 use tower::ServiceExt as _;
 
 // A-2: global request shaper (per-IP + per-realm) ─────────────────────────────
@@ -473,12 +475,44 @@ fn a40_session_cookie_hardening_attributes() {
 /// silently dropped (extension-field bypass defense).
 ///
 /// A-47 — the admin `ImportUsersBody`/`ImportUserEntry` shapes carry
-/// `#[serde(deny_unknown_fields)]` (src/protocol/http/admin.rs). The `Json`
-/// extractor runs before the auth check, so an unknown field is rejected with
-/// HTTP 422 regardless of credentials — proving the guard fires at the wire.
+/// `#[serde(deny_unknown_fields)]` (src/protocol/http/admin.rs). The import
+/// checks the admin token before it reads the body (#714), so the request
+/// carries a realm admin's token; the unknown field still gets HTTP 422.
 #[tokio::test]
 async fn a47_unknown_fields_in_request_body_rejected() {
     let h = common::TestHarness::in_process().await.unwrap();
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).unwrap();
+    let admin = h
+        .identity()
+        .create_user(
+            &realm,
+            &CreateUserRequest {
+                email: "admin@a47.example".into(),
+                display_name: "A47 Admin".into(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .unwrap();
+    let role = h
+        .rbac()
+        .get_role_by_name(&realm, "realm.admin")
+        .unwrap()
+        .expect("realm.admin seeded");
+    h.rbac()
+        .assign_role(
+            &realm,
+            &AssignRoleRequest {
+                subject: Subject::User(admin.id().clone()),
+                role_id: role.id,
+                scope: Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .unwrap();
+    let token = common::user_token_pair(h.identity(), &realm, admin.id());
     let state = Arc::new(AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()));
 
     // Valid JSON, valid shape, plus one field the struct does not declare.
@@ -490,6 +524,8 @@ async fn a47_unknown_fields_in_request_body_rejected() {
                 .method("POST")
                 .uri("/admin/users/import")
                 .header(CONTENT_TYPE, "application/json")
+                .header("Authorization", format!("Bearer {}", token.access_token()))
+                .header("X-Realm-ID", realm.as_uuid().to_string())
                 .body(Body::from(body))
                 .unwrap(),
         )

@@ -62,7 +62,8 @@ def sync_detailed(
     """Import users (migration)
 
      Creates one user for each entry. An entry that fails gets an error in `results`, and the other
-    entries continue.
+    entries continue. A request takes at most 10,000 entries and a body of at most 16 MiB; the import
+    checks the admin token before it reads the body.
 
     Args:
         body (AdminImportUsersRequest):
@@ -94,7 +95,8 @@ async def asyncio_detailed(
     """Import users (migration)
 
      Creates one user for each entry. An entry that fails gets an error in `results`, and the other
-    entries continue.
+    entries continue. A request takes at most 10,000 entries and a body of at most 16 MiB; the import
+    checks the admin token before it reads the body.
 
     Args:
         body (AdminImportUsersRequest):

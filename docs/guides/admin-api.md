@@ -229,7 +229,7 @@ SDKs: `sendPasswordEmail` (TypeScript, PHP), `SendPasswordEmail` (Go), `send_pas
 
 `POST /admin/users/import`
 
-Creates one user for each entry in `users` (at least one entry). Each entry has these fields:
+Creates one user for each entry in `users`: at least one entry and at most 10,000. The request body can be up to 16 MiB, so 10,000 entries with password hashes fit in one request. A request with more entries gets `400`, and a larger body gets `413`. The import checks the admin token before it reads the body. Each entry has these fields:
 
 | Field | Required | Description |
 |---|---|---|

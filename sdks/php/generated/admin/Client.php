@@ -699,7 +699,7 @@ class Client extends \Hearth\Generated\Admin\Runtime\Client\Client
         return $this->executeEndpoint(new \Hearth\Generated\Admin\Endpoint\AdminExportUsers(), $fetch);
     }
     /**
-     * Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue.
+     * Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue. A request takes at most 10,000 entries and a body of at most 16 MiB; the import checks the admin token before it reads the body.
      * @param null|\Hearth\Generated\Admin\Model\AdminImportUsersRequest $requestBody
      * @param string $fetch Fetch mode to use (can be OBJECT or RESPONSE)
      *
