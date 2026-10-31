@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.7.2] — 2026-10-31
+
 ### Changed
 - **`POST /admin/users/import` takes a request body up to 16 MiB** (#714). The body limit was
   the 1 MiB default, so a request got `413` at about 3,800 entries with password hashes, below
