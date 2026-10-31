@@ -1536,8 +1536,17 @@ async fn admin_list_realms(
     }
 }
 
-/// Admin: create realm — disabled; realms are managed via `hearth.yaml`.
-async fn admin_create_realm() -> impl IntoResponse {
+/// The `405` of a disabled realm route, after the admin token and
+/// `hearth.realm.admin` checks (#623): a caller without a token gets `401`,
+/// and one without the permission gets `403`, never the method answer.
+fn realm_route_disabled(state: &AppState, headers: &HeaderMap) -> Response {
+    let auth = match extract_admin_auth(headers, state) {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
     (
         StatusCode::METHOD_NOT_ALLOWED,
         Json(serde_json::json!({
@@ -1545,6 +1554,15 @@ async fn admin_create_realm() -> impl IntoResponse {
             "message": crate::protocol::admin_auth::REALMS_ARE_YAML_MANAGED
         })),
     )
+        .into_response()
+}
+
+/// Admin: create realm — disabled; realms are managed via `hearth.yaml`.
+async fn admin_create_realm(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    realm_route_disabled(&state, &headers)
 }
 
 /// Admin: get realm by ID.
@@ -1593,14 +1611,12 @@ async fn admin_get_realm(
 }
 
 /// Admin: update realm — disabled; realms are managed via `hearth.yaml`.
-async fn admin_update_realm(Path(_id): Path<String>) -> impl IntoResponse {
-    (
-        StatusCode::METHOD_NOT_ALLOWED,
-        Json(serde_json::json!({
-            "error": "method_not_allowed",
-            "message": crate::protocol::admin_auth::REALMS_ARE_YAML_MANAGED
-        })),
-    )
+async fn admin_update_realm(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(_id): Path<String>,
+) -> impl IntoResponse {
+    realm_route_disabled(&state, &headers)
 }
 
 /// Admin: delete realm by ID.
