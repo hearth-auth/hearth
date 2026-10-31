@@ -329,6 +329,12 @@ jobs:
       - name: Release PR — self-test
         run: bash scripts/tests/release-pr.test.sh
 
+      # Proof the CHANGELOG placement guard can go red: it must reject an entry
+      # added into a released section, and the #709 shape, an entry that a
+      # merge after a release cut places in the section the cut created.
+      - name: CHANGELOG placement — guard self-test
+        run: bash scripts/tests/check-changelog-placement.test.sh
+
       # Audit §4.8#12: the verification guide told the reader to run two
       # commands that cannot execute (`cosign triangulate` on a detached blob
       # signature, and `brew install slsa-verifier`, which has no formula), and
