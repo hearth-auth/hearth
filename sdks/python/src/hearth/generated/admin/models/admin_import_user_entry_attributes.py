@@ -9,12 +9,12 @@ from attrs import field as _attrs_field
 from ..types import UNSET, Unset
 
 
-T = TypeVar("T", bound="AdminImportUsersBody")
+T = TypeVar("T", bound="AdminImportUserEntryAttributes")
 
 
 @_attrs_define
-class AdminImportUsersBody:
-    additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
+class AdminImportUserEntryAttributes:
+    additional_properties: dict[str, str] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
 
@@ -26,19 +26,19 @@ class AdminImportUsersBody:
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         d = dict(src_dict)
-        admin_import_users_body = cls()
+        admin_import_user_entry_attributes = cls()
 
-        admin_import_users_body.additional_properties = d
-        return admin_import_users_body
+        admin_import_user_entry_attributes.additional_properties = d
+        return admin_import_user_entry_attributes
 
     @property
     def additional_keys(self) -> list[str]:
         return list(self.additional_properties.keys())
 
-    def __getitem__(self, key: str) -> Any:
+    def __getitem__(self, key: str) -> str:
         return self.additional_properties[key]
 
-    def __setitem__(self, key: str, value: Any) -> None:
+    def __setitem__(self, key: str, value: str) -> None:
         self.additional_properties[key] = value
 
     def __delitem__(self, key: str) -> None:

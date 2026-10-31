@@ -11,7 +11,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use hearth::core::RealmId;
-use hearth::identity::{CreateUserRequest, SessionContext};
+use hearth::identity::{CleartextPassword, CreateUserRequest, SessionContext};
 use hearth::protocol::http::{router, AppState};
 use hearth::rbac::{AssignRoleRequest, Scope, Subject};
 use tower::ServiceExt as _;
@@ -383,6 +383,261 @@ async fn import_users_empty_array_returns_400() {
         .expect("response");
 
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// ===== Import with a password hash (#701) =====
+
+/// Posts `payload` to `POST /admin/users/import` and returns the status and
+/// the body text.
+async fn post_import(
+    h: &common::TestHarness,
+    realm: &RealmId,
+    token: &str,
+    payload: &serde_json::Value,
+) -> (StatusCode, String) {
+    let resp = build_app(h)
+        .await
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/users/import")
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .header("Content-Type", "application/json")
+                .body(Body::from(payload.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let status = resp.status();
+    (status, resp_text(resp).await)
+}
+
+/// Asserts that the import refused the entry for `email` and created no user.
+fn assert_entry_refused(
+    h: &common::TestHarness,
+    realm: &RealmId,
+    body: &serde_json::Value,
+    email: &str,
+) -> String {
+    let results = body["results"].as_array().expect("results array");
+    let entry = results
+        .iter()
+        .find(|r| r["email"] == email)
+        .unwrap_or_else(|| panic!("no result for {email}: {body}"));
+    let error = entry["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{email} must be refused: {entry}"))
+        .to_string();
+    assert!(
+        h.identity()
+            .get_user_by_email(realm, email)
+            .expect("lookup")
+            .is_none(),
+        "a refused entry must create no user: {email}"
+    );
+    error
+}
+
+#[tokio::test]
+async fn import_users_with_password_hash_signs_in_with_that_password() {
+    let h = common::TestHarness::in_process().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = admin_token(&h, &realm).await;
+
+    // Hashes that another system wrote, at the lowest cost each crate accepts.
+    let bcrypt_hash = bcrypt::hash("Bcrypt-Import-1", 4).expect("bcrypt hash");
+    // PHP's password_hash() writes bcrypt as `$2y$`, the same algorithm (#703).
+    let bcrypt_2y_hash = bcrypt::hash("Bcrypt-2y-Import-1", 4)
+        .expect("bcrypt hash")
+        .replacen("$2b$", "$2y$", 1);
+    let argon2_hash = {
+        use argon2::password_hash::{PasswordHasher as _, SaltString};
+        let salt = SaltString::encode_b64(b"import-test-salt").expect("salt");
+        argon2::Argon2::new(
+            argon2::Algorithm::Argon2id,
+            argon2::Version::V0x13,
+            argon2::Params::new(64, 1, 1, None).expect("params"),
+        )
+        .hash_password(b"Argon2-Import-1", &salt)
+        .expect("argon2 hash")
+        .to_string()
+    };
+
+    let payload = serde_json::json!({
+        "users": [
+            {"email": "bcrypt@example.com", "display_name": "Bcrypt", "password_hash": bcrypt_hash},
+            {"email": "argon2@example.com", "display_name": "Argon2", "password_hash": argon2_hash},
+            {"email": "bcrypt2y@example.com", "display_name": "Bcrypt 2y", "password_hash": bcrypt_2y_hash},
+            {"email": "nohash@example.com", "display_name": "No Hash"}
+        ]
+    });
+    let (status, text) = post_import(&h, &realm, &token, &payload).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let body: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+    assert_eq!(body["imported"], 4, "{body}");
+    assert_eq!(body["failed"], 0, "{body}");
+    assert!(
+        !text.contains(&bcrypt_hash)
+            && !text.contains(&argon2_hash)
+            && !text.contains(&bcrypt_2y_hash),
+        "the response must not echo a password hash: {text}"
+    );
+
+    for (email, password) in [
+        ("bcrypt@example.com", "Bcrypt-Import-1"),
+        ("argon2@example.com", "Argon2-Import-1"),
+        ("bcrypt2y@example.com", "Bcrypt-2y-Import-1"),
+    ] {
+        let user = h
+            .identity()
+            .get_user_by_email(&realm, email)
+            .expect("lookup")
+            .unwrap_or_else(|| panic!("{email} must exist"));
+        let wrong = h
+            .identity()
+            .verify_password(
+                &realm,
+                user.id(),
+                &CleartextPassword::from_string("Wrong-Password-1".to_string()),
+            )
+            .expect("verify wrong password");
+        assert!(!wrong, "{email}: a wrong password must not match");
+        let right = h
+            .identity()
+            .verify_password(
+                &realm,
+                user.id(),
+                &CleartextPassword::from_string(password.to_string()),
+            )
+            .expect("verify imported password");
+        assert!(
+            right,
+            "{email}: the password of the imported hash must match"
+        );
+    }
+
+    let no_hash = h
+        .identity()
+        .get_user_by_email(&realm, "nohash@example.com")
+        .expect("lookup")
+        .expect("nohash must exist");
+    assert!(
+        !h.identity()
+            .has_password_credential(&realm, no_hash.id())
+            .expect("credential lookup"),
+        "an entry without password_hash gets no password"
+    );
+}
+
+#[tokio::test]
+async fn import_users_refuses_a_password_hash_it_cannot_verify() {
+    let h = common::TestHarness::in_process().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = admin_token(&h, &realm).await;
+
+    let refused = [
+        // Unsalted MD5: not a format Hearth verifies.
+        (
+            "md5@example.com",
+            "5f4dcc3b5aa765d61d8327deb882cf99".to_string(),
+        ),
+        // A bcrypt prefix with no salt or digest.
+        ("short-bcrypt@example.com", "$2b$10$tooshort".to_string()),
+        // Argon2i: Hearth verifies Argon2id only.
+        (
+            "argon2i@example.com",
+            format!(
+                "$argon2i$v=19$m=65536,t=2,p=1$c2FsdHNhbHQ${}",
+                "A".repeat(43)
+            ),
+        ),
+        // A PBKDF2 hash with no digest segment.
+        (
+            "pbkdf2@example.com",
+            "$pbkdf2-sha256$i=27500$c2FsdHNhbHQ".to_string(),
+        ),
+        // A PBKDF2 hash with an empty digest.
+        (
+            "pbkdf2-empty@example.com",
+            "$pbkdf2-sha256$i=27500$c2FsdHNhbHQ$".to_string(),
+        ),
+        ("empty@example.com", String::new()),
+    ];
+    let mut users: Vec<serde_json::Value> = refused
+        .iter()
+        .map(|(email, hash)| {
+            serde_json::json!({"email": email, "display_name": "Refused", "password_hash": hash})
+        })
+        .collect();
+    users.push(serde_json::json!({"email": "valid@example.com", "display_name": "Valid"}));
+
+    let payload = serde_json::json!({ "users": users });
+    let (status, text) = post_import(&h, &realm, &token, &payload).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let body: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+    assert_eq!(body["imported"], 1, "{body}");
+    assert_eq!(body["failed"], refused.len(), "{body}");
+
+    for (email, hash) in &refused {
+        let error = assert_entry_refused(&h, &realm, &body, email);
+        assert!(
+            error.contains("password_hash"),
+            "{email}: the error must name the field: {error}"
+        );
+        if !hash.is_empty() {
+            assert!(!text.contains(hash.as_str()), "the response echoed {hash}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn import_users_refuses_a_password_hash_above_the_work_factor_ceiling() {
+    let h = common::TestHarness::in_process().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = admin_token(&h, &realm).await;
+
+    // Well-formed hashes whose work factors are above what sign-in will
+    // compute (bcrypt cost 17, argon2 m 1 GiB, PBKDF2 2,000,000 rounds).
+    let digest = "A".repeat(43);
+    let bcrypt_cost_18 = bcrypt::hash("Ceiling-1", 4)
+        .expect("bcrypt hash")
+        .replacen("$04$", "$18$", 1);
+    let refused = [
+        ("bcrypt@example.com", bcrypt_cost_18),
+        (
+            "argon2@example.com",
+            format!("$argon2id$v=19$m=2097152,t=2,p=1$c2FsdHNhbHQ${digest}"),
+        ),
+        (
+            "pbkdf2@example.com",
+            format!("$pbkdf2-sha256$i=2000001$c2FsdHNhbHQ${digest}"),
+        ),
+    ];
+    let users: Vec<serde_json::Value> = refused
+        .iter()
+        .map(|(email, hash)| {
+            serde_json::json!({"email": email, "display_name": "Costly", "password_hash": hash})
+        })
+        .collect();
+
+    let payload = serde_json::json!({ "users": users });
+    let (status, text) = post_import(&h, &realm, &token, &payload).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let body: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+    assert_eq!(body["imported"], 0, "{body}");
+    assert_eq!(body["failed"], refused.len(), "{body}");
+
+    for (email, _) in &refused {
+        let error = assert_entry_refused(&h, &realm, &body, email);
+        assert!(
+            error.contains("exceeds the maximum"),
+            "{email}: the error must name the work-factor ceiling: {error}"
+        );
+    }
 }
 
 // ===== Export tests =====

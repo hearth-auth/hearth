@@ -44,6 +44,10 @@ class JaneObjectNormalizer implements DenormalizerInterface, NormalizerInterface
         
         \Hearth\Generated\Admin\Model\AdminGroupPage::class => \Hearth\Generated\Admin\Normalizer\AdminGroupPageNormalizer::class,
         
+        \Hearth\Generated\Admin\Model\AdminImportUserEntry::class => \Hearth\Generated\Admin\Normalizer\AdminImportUserEntryNormalizer::class,
+        
+        \Hearth\Generated\Admin\Model\AdminImportUsersRequest::class => \Hearth\Generated\Admin\Normalizer\AdminImportUsersRequestNormalizer::class,
+        
         \Hearth\Generated\Admin\Model\AdminOrganization::class => \Hearth\Generated\Admin\Normalizer\AdminOrganizationNormalizer::class,
         
         \Hearth\Generated\Admin\Model\AdminOrganizationPage::class => \Hearth\Generated\Admin\Normalizer\AdminOrganizationPageNormalizer::class,

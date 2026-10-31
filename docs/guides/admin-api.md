@@ -229,7 +229,55 @@ SDKs: `sendPasswordEmail` (TypeScript, PHP), `SendPasswordEmail` (Go), `send_pas
 
 `POST /admin/users/import`
 
-Accepts an array of user objects (same schema as create). Returns a summary of created, skipped, and failed records.
+Creates one user for each entry in `users` (at least one entry). Each entry has these fields:
+
+| Field | Required | Description |
+|---|---|---|
+| `email` | yes | The user's email address. |
+| `display_name` | yes | The display name. |
+| `first_name`, `last_name` | no | Default: empty. |
+| `status` | no | `active` (the default), `disabled` or `pending_verification`. |
+| `attributes` | no | A map of string attributes. |
+| `password_hash` | no | A password hash from another system. See below. |
+
+```json
+{
+  "users": [
+    {
+      "email": "ada@example.com",
+      "display_name": "Ada",
+      "password_hash": "$2b$10$..."
+    }
+  ]
+}
+```
+
+**Password hashes.** `password_hash` is a PHC string in a format that sign-in verifies: bcrypt (`$2a$`, `$2b$`, `$2y$`), `$argon2id$`, `$scrypt$` or `$pbkdf2-sha256$`. Hearth stores the hash as it is, so the user signs in with their existing password. The first successful sign-in replaces it with an Argon2id hash. An entry without `password_hash` gets no password: send the user a password email (`POST /admin/users/{id}/password-email`).
+
+The import refuses an entry when its hash:
+
+- is in another format (for example unsalted MD5, or `$argon2i$`);
+- is malformed;
+- asks for a work factor above the ceilings that sign-in applies: bcrypt cost 17; Argon2 `m` 1 GiB, `t` 64, `p` 16; scrypt `ln` 20, `r` 32, `p` 16; PBKDF2 2,000,000 rounds;
+- is a PBKDF2 hash with a digest shorter than 16 bytes.
+
+The check reads the hash only and runs no key derivation.
+
+**Response (200 OK):**
+
+```json
+{
+  "imported": 1,
+  "failed": 1,
+  "total": 2,
+  "results": [
+    {"email": "ada@example.com", "id": "0b6f...", "error": null},
+    {"email": "bob@example.com", "error": "password_hash: invalid input: bcrypt cost 18 exceeds the maximum ..."}
+  ]
+}
+```
+
+An entry that fails gets an error in `results` and no user. The other entries continue. The response never contains a password hash.
 
 ---
 

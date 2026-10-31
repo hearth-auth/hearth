@@ -789,6 +789,10 @@ struct ImportUserEntry {
     status: Option<String>,
     #[serde(default)]
     attributes: std::collections::BTreeMap<String, String>,
+    /// A PHC password hash from another system (#701). Sign-in verifies it,
+    /// and the first successful sign-in replaces it with an Argon2id hash.
+    #[serde(default)]
+    password_hash: Option<FormSecret>,
 }
 
 /// Admin: bulk import users (`POST /admin/users/import`).
@@ -851,8 +855,9 @@ fn import_users_blocking(
     realm_id: &RealmId,
     users: &[ImportUserEntry],
 ) -> Response {
-    // An entry with an unknown status is not imported: `Some(reason)`.
-    let mut status_errors: Vec<Option<String>> = Vec::with_capacity(users.len());
+    // An entry with an unknown status, or with a password hash that sign-in
+    // cannot verify, is not imported: `Some(reason)`.
+    let mut entry_errors: Vec<Option<String>> = Vec::with_capacity(users.len());
     let mut requests = Vec::with_capacity(users.len());
     for entry in users {
         let status = match entry.status.as_deref().unwrap_or("active") {
@@ -860,11 +865,24 @@ fn import_users_blocking(
             "disabled" => crate::identity::UserStatus::Disabled,
             "pending_verification" => crate::identity::UserStatus::PendingVerification,
             other => {
-                status_errors.push(Some(format!("unknown status: {other}")));
+                entry_errors.push(Some(format!("unknown status: {other}")));
                 continue;
             }
         };
-        status_errors.push(None);
+        let credential = match entry.password_hash.as_deref() {
+            None => None,
+            Some(hash) => match crate::identity::credentials::check_importable_hash(hash) {
+                Ok(()) => Some(crate::identity::RawCredential {
+                    phc_string: hash.to_string(),
+                    created_at_micros: None,
+                }),
+                Err(e) => {
+                    entry_errors.push(Some(format!("password_hash: {e}")));
+                    continue;
+                }
+            },
+        };
+        entry_errors.push(None);
         requests.push(crate::identity::ImportUserRequest {
             id: None,
             email: entry.email.clone(),
@@ -872,7 +890,7 @@ fn import_users_blocking(
             first_name: entry.first_name.clone(),
             last_name: entry.last_name.clone(),
             status,
-            credential: None,
+            credential,
             attributes: entry.attributes.clone(),
             restored: None,
         });
@@ -882,8 +900,8 @@ fn import_users_blocking(
     let mut imported = 0u32;
     let mut failed = 0u32;
     let mut results = Vec::with_capacity(users.len());
-    for (entry, status_error) in users.iter().zip(status_errors) {
-        let outcome = match status_error {
+    for (entry, entry_error) in users.iter().zip(entry_errors) {
+        let outcome = match entry_error {
             Some(reason) => Err(reason),
             None => match outcomes.next() {
                 Some(Ok(user)) => Ok(user),

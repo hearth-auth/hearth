@@ -2038,6 +2038,7 @@
     "/admin/users/import": {
       "post": {
         "summary": "Import users (migration)",
+        "description": "Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue.",
         "operationId": "adminImportUsers",
         "tags": [
           "Admin"
@@ -2047,7 +2048,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object"
+                "$ref": "#/components/schemas/AdminImportUsersRequest"
               }
             }
           }
@@ -6528,6 +6529,58 @@
           }
         },
         "description": "Vote RPC response.\nPayload is CBOR-encoded openraft::VoteResponse<u64>."
+      },
+      "AdminImportUsersRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "users"
+        ],
+        "properties": {
+          "users": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/AdminImportUserEntry"
+            }
+          }
+        }
+      },
+      "AdminImportUserEntry": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "email",
+          "display_name"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "first_name": {
+            "type": "string"
+          },
+          "last_name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "description": "`active` (the default), `disabled` or `pending_verification`. Another value fails the entry."
+          },
+          "attributes": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "password_hash": {
+            "type": "string",
+            "description": "A PHC password hash from another system: bcrypt (`$2a$`, `$2b$`, `$2y$`), `$argon2id$`, `$scrypt$` or `$pbkdf2-sha256$`. Sign-in verifies it, and the first successful sign-in replaces it with an Argon2id hash. A hash that is malformed, in another format, or with a work factor above the server's ceilings fails the entry. Without it, the user gets no password."
+          }
+        }
       },
       "AdminRole": {
         "type": "object",

@@ -8,13 +8,13 @@ from ...client import AuthenticatedClient, Client
 from ...types import Response, UNSET
 from ... import errors
 
-from ...models.admin_import_users_body import AdminImportUsersBody
+from ...models.admin_import_users_request import AdminImportUsersRequest
 from typing import cast
 
 
 def _get_kwargs(
     *,
-    body: AdminImportUsersBody,
+    body: AdminImportUsersRequest,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
 
@@ -57,12 +57,15 @@ def _build_response(
 def sync_detailed(
     *,
     client: AuthenticatedClient | Client,
-    body: AdminImportUsersBody,
+    body: AdminImportUsersRequest,
 ) -> Response[Any]:
     """Import users (migration)
 
+     Creates one user for each entry. An entry that fails gets an error in `results`, and the other
+    entries continue.
+
     Args:
-        body (AdminImportUsersBody):
+        body (AdminImportUsersRequest):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -86,12 +89,15 @@ def sync_detailed(
 async def asyncio_detailed(
     *,
     client: AuthenticatedClient | Client,
-    body: AdminImportUsersBody,
+    body: AdminImportUsersRequest,
 ) -> Response[Any]:
     """Import users (migration)
 
+     Creates one user for each entry. An entry that fails gets an error in `results`, and the other
+    entries continue.
+
     Args:
-        body (AdminImportUsersBody):
+        body (AdminImportUsersRequest):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

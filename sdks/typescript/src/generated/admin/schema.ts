@@ -778,7 +778,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Import users (migration) */
+        /**
+         * Import users (migration)
+         * @description Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue.
+         */
         post: operations["adminImportUsers"];
         delete?: never;
         options?: never;
@@ -1111,6 +1114,22 @@ export interface components {
             next_cursor: string | null;
             /** Format: int64 */
             total: number;
+        };
+        AdminImportUserEntry: {
+            email: string;
+            display_name: string;
+            first_name?: string;
+            last_name?: string;
+            /** @description `active` (the default), `disabled` or `pending_verification`. Another value fails the entry. */
+            status?: string;
+            attributes?: {
+                [key: string]: string;
+            };
+            /** @description A PHC password hash from another system: bcrypt (`$2a$`, `$2b$`, `$2y$`), `$argon2id$`, `$scrypt$` or `$pbkdf2-sha256$`. Sign-in verifies it, and the first successful sign-in replaces it with an Argon2id hash. A hash that is malformed, in another format, or with a work factor above the server's ceilings fails the entry. Without it, the user gets no password. */
+            password_hash?: string;
+        };
+        AdminImportUsersRequest: {
+            users: components["schemas"]["AdminImportUserEntry"][];
         };
         AdminOrganization: {
             /** Format: uuid */
@@ -3193,7 +3212,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": Record<string, never>;
+                "application/json": components["schemas"]["AdminImportUsersRequest"];
             };
         };
         responses: {

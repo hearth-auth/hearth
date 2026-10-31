@@ -418,6 +418,26 @@ type AdminGroupPage struct {
 	Total      int64        `json:"total"`
 }
 
+// AdminImportUserEntry defines model for AdminImportUserEntry.
+type AdminImportUserEntry struct {
+	Attributes  *map[string]string `json:"attributes,omitempty"`
+	DisplayName string             `json:"display_name"`
+	Email       string             `json:"email"`
+	FirstName   *string            `json:"first_name,omitempty"`
+	LastName    *string            `json:"last_name,omitempty"`
+
+	// PasswordHash A PHC password hash from another system: bcrypt (`$2a$`, `$2b$`, `$2y$`), `$argon2id$`, `$scrypt$` or `$pbkdf2-sha256$`. Sign-in verifies it, and the first successful sign-in replaces it with an Argon2id hash. A hash that is malformed, in another format, or with a work factor above the server's ceilings fails the entry. Without it, the user gets no password.
+	PasswordHash *string `json:"password_hash,omitempty"`
+
+	// Status `active` (the default), `disabled` or `pending_verification`. Another value fails the entry.
+	Status *string `json:"status,omitempty"`
+}
+
+// AdminImportUsersRequest defines model for AdminImportUsersRequest.
+type AdminImportUsersRequest struct {
+	Users []AdminImportUserEntry `json:"users"`
+}
+
 // AdminOrganization defines model for AdminOrganization.
 type AdminOrganization struct {
 	Attributes map[string]string `json:"attributes"`
@@ -914,9 +934,6 @@ type IdentityAdminServiceListUsersParams struct {
 // AdminBulkUsersJSONBody defines parameters for AdminBulkUsers.
 type AdminBulkUsersJSONBody = map[string]interface{}
 
-// AdminImportUsersJSONBody defines parameters for AdminImportUsers.
-type AdminImportUsersJSONBody = map[string]interface{}
-
 // AdminRevokeUserPermissionParams defines parameters for AdminRevokeUserPermission.
 type AdminRevokeUserPermissionParams struct {
 	OrgId *string `form:"org_id,omitempty" json:"org_id,omitempty"`
@@ -998,7 +1015,7 @@ type IdentityAdminServiceCreateUserJSONRequestBody = V1CreateUserRequest
 type AdminBulkUsersJSONRequestBody = AdminBulkUsersJSONBody
 
 // AdminImportUsersJSONRequestBody defines body for AdminImportUsers for application/json ContentType.
-type AdminImportUsersJSONRequestBody = AdminImportUsersJSONBody
+type AdminImportUsersJSONRequestBody = AdminImportUsersRequest
 
 // IdentityAdminServiceUpdateUserJSONRequestBody defines body for IdentityAdminServiceUpdateUser for application/json ContentType.
 type IdentityAdminServiceUpdateUserJSONRequestBody = V1UpdateUserRequest
@@ -1621,12 +1638,16 @@ type ClientInterface interface {
 
 	// AdminImportUsersWithBody Import users (migration)
 	//
+	// Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue.
+	//
 	// Takes any type of body and a specified content type.
 	//
 	// Corresponds with POST /admin/users/import (the `AdminImportUsers` operationId).
 	AdminImportUsersWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// AdminImportUsers Import users (migration)
+	//
+	// Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue.
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -2975,6 +2996,8 @@ func (c *Client) AdminExportUsers(ctx context.Context, reqEditors ...RequestEdit
 
 // AdminImportUsersWithBody Import users (migration)
 //
+// Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue.
+//
 // Takes any type of body and a specified content type.
 //
 // Corresponds with POST /admin/users/import (the `AdminImportUsers` operationId).
@@ -2991,6 +3014,8 @@ func (c *Client) AdminImportUsersWithBody(ctx context.Context, contentType strin
 }
 
 // AdminImportUsers Import users (migration)
+//
+// Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue.
 //
 // Takes a body of the `application/json` content type.
 //
@@ -7381,12 +7406,16 @@ type ClientWithResponsesInterface interface {
 
 	// AdminImportUsersWithBodyWithResponse Import users (migration)
 	//
+	// Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue.
+	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
 	// Corresponds with POST /admin/users/import (the `AdminImportUsers` operationId).
 	AdminImportUsersWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AdminImportUsersResponse, error)
 
 	// AdminImportUsersWithResponse Import users (migration)
+	//
+	// Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -11666,6 +11695,8 @@ func (c *ClientWithResponses) AdminExportUsersWithResponse(ctx context.Context, 
 
 // AdminImportUsersWithBodyWithResponse Import users (migration)
 //
+// Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue.
+//
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
 // Corresponds with POST /admin/users/import (the `AdminImportUsers` operationId).
@@ -11678,6 +11709,8 @@ func (c *ClientWithResponses) AdminImportUsersWithBodyWithResponse(ctx context.C
 }
 
 // AdminImportUsersWithResponse Import users (migration)
+//
+// Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //
