@@ -863,6 +863,8 @@ at size every week, and on demand. It does these steps on a GitHub-hosted runner
 1. It starts a release build of Hearth in production mode: TLS, fsync, a
    key-encryption key and `HEARTH_MASTER_KEY`.
 2. It imports 1,000,000 users into one realm through `POST /admin/users/import`.
+   Each imported user gets the same `password_hash`: one PBKDF2-SHA256 hash of a
+   random password, so each user has a password credential.
    Through the admin API it also creates five users, a role, an assignment of the
    role, an OAuth client with a secret, and a webhook subscription. The realm admin
    and three other seed users in `hearth.yaml` have passwords.
@@ -879,6 +881,11 @@ at size every week, and on demand. It does these steps on a GitHub-hosted runner
      user, the last one, the five users and the seed users;
    - the user that `GET /admin/users?email=` finds for each of these users;
    - a sign-in of each user with a password, with the same `sub` as before;
+   - a sign-in of five sampled imported users before the backup, and of five other
+     sampled imported users after the restore, with the imported password. Each
+     must sign in as its own user. The first sign-in replaces the imported hash
+     with an Argon2id hash, so the users of the second group still have the
+     imported hash when the restore runs;
    - the realm JWKS;
    - an access token that the client got before the backup. Its signature must
      verify with the restored JWKS. The restored server must also call it active,
