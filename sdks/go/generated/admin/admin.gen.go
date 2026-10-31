@@ -1638,7 +1638,7 @@ type ClientInterface interface {
 
 	// AdminImportUsersWithBody Import users (migration)
 	//
-	// Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue.
+	// Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue. A request takes at most 10,000 entries and a body of at most 16 MiB; the import checks the admin token before it reads the body.
 	//
 	// Takes any type of body and a specified content type.
 	//
@@ -1647,7 +1647,7 @@ type ClientInterface interface {
 
 	// AdminImportUsers Import users (migration)
 	//
-	// Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue.
+	// Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue. A request takes at most 10,000 entries and a body of at most 16 MiB; the import checks the admin token before it reads the body.
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -2996,7 +2996,7 @@ func (c *Client) AdminExportUsers(ctx context.Context, reqEditors ...RequestEdit
 
 // AdminImportUsersWithBody Import users (migration)
 //
-// Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue.
+// Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue. A request takes at most 10,000 entries and a body of at most 16 MiB; the import checks the admin token before it reads the body.
 //
 // Takes any type of body and a specified content type.
 //
@@ -3015,7 +3015,7 @@ func (c *Client) AdminImportUsersWithBody(ctx context.Context, contentType strin
 
 // AdminImportUsers Import users (migration)
 //
-// Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue.
+// Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue. A request takes at most 10,000 entries and a body of at most 16 MiB; the import checks the admin token before it reads the body.
 //
 // Takes a body of the `application/json` content type.
 //
@@ -7406,7 +7406,7 @@ type ClientWithResponsesInterface interface {
 
 	// AdminImportUsersWithBodyWithResponse Import users (migration)
 	//
-	// Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue.
+	// Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue. A request takes at most 10,000 entries and a body of at most 16 MiB; the import checks the admin token before it reads the body.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -7415,7 +7415,7 @@ type ClientWithResponsesInterface interface {
 
 	// AdminImportUsersWithResponse Import users (migration)
 	//
-	// Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue.
+	// Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue. A request takes at most 10,000 entries and a body of at most 16 MiB; the import checks the admin token before it reads the body.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -11695,7 +11695,7 @@ func (c *ClientWithResponses) AdminExportUsersWithResponse(ctx context.Context, 
 
 // AdminImportUsersWithBodyWithResponse Import users (migration)
 //
-// Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue.
+// Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue. A request takes at most 10,000 entries and a body of at most 16 MiB; the import checks the admin token before it reads the body.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
@@ -11710,7 +11710,7 @@ func (c *ClientWithResponses) AdminImportUsersWithBodyWithResponse(ctx context.C
 
 // AdminImportUsersWithResponse Import users (migration)
 //
-// Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue.
+// Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue. A request takes at most 10,000 entries and a body of at most 16 MiB; the import checks the admin token before it reads the body.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //

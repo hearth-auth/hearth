@@ -110,6 +110,19 @@ pub(crate) const BODY_LIMIT_SAML: usize = 4 * 1024 * 1024;
 /// [`BACKUP_RESTORE_BODY_LIMIT`] (task 21.1).
 pub(crate) const BODY_LIMIT_CSV_IMPORT: usize = 16 * 1024 * 1024;
 
+/// Body limit (16 MiB) for `POST /admin/users/import`.
+///
+/// The import takes up to 10,000 entries per request. An entry with a
+/// password hash is about 180 bytes, so a full request is about 2 MB, above
+/// [`BODY_LIMIT_DEFAULT`]; 16 MiB leaves room for attributes. The handler
+/// checks the admin token before it reads the body (#714).
+pub(crate) const BODY_LIMIT_USER_IMPORT: usize = 16 * 1024 * 1024;
+
+/// Routes whose handler runs the [`json_depth_guard`] check itself, after the
+/// admin token check and with its own body limit. The guard skips them, so it
+/// does not read their body before the token check.
+const JSON_GUARD_IN_HANDLER: &[&str] = &["/admin/users/import"];
+
 // ── KDF admission gate (HEA-1887 / R1, extended by HEA-1891) ──────────────────
 
 /// [`identity_error_to_response`](auth::identity_error_to_response) as a full
@@ -338,6 +351,9 @@ pub(crate) async fn dev_loopback_only(req: Request, next: Next) -> Response {
 /// routes (not on 404 paths) and runs inside the [`DefaultBodyLimit`] layer,
 /// ensuring the body is already capped at [`BODY_LIMIT_DEFAULT`] before we
 /// attempt to collect it.
+///
+/// Skips the routes in [`JSON_GUARD_IN_HANDLER`]: their handler runs the same
+/// check after the admin token check.
 async fn json_depth_guard(req: Request, next: Next) -> Response {
     use axum::http::header::CONTENT_TYPE;
     use axum::http::Method;
@@ -349,8 +365,12 @@ async fn json_depth_guard(req: Request, next: Next) -> Response {
             .and_then(|v| v.to_str().ok())
             .map(|ct| ct.starts_with("application/json"))
             .unwrap_or(false);
+    let checked_in_handler = req
+        .extensions()
+        .get::<MatchedPath>()
+        .is_some_and(|path| JSON_GUARD_IN_HANDLER.contains(&path.as_str()));
 
-    if !is_json_body {
+    if !is_json_body || checked_in_handler {
         return next.run(req).await;
     }
 

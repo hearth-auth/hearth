@@ -395,22 +395,144 @@ async fn post_import(
     token: &str,
     payload: &serde_json::Value,
 ) -> (StatusCode, String) {
+    post_import_raw(h, realm, Some(token), payload.to_string()).await
+}
+
+/// Sends `body` as it is to `POST /admin/users/import`, with a bearer token
+/// only when one is given.
+async fn post_import_raw(
+    h: &common::TestHarness,
+    realm: &RealmId,
+    token: Option<&str>,
+    body: String,
+) -> (StatusCode, String) {
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/admin/users/import")
+        .header("X-Realm-ID", realm.as_uuid().to_string())
+        .header("Content-Type", "application/json");
+    if let Some(token) = token {
+        req = req.header("Authorization", format!("Bearer {token}"));
+    }
     let resp = build_app(h)
         .await
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/admin/users/import")
-                .header("Authorization", format!("Bearer {token}"))
-                .header("X-Realm-ID", realm.as_uuid().to_string())
-                .header("Content-Type", "application/json")
-                .body(Body::from(payload.to_string()))
-                .expect("request"),
-        )
+        .oneshot(req.body(Body::from(body)).expect("request"))
         .await
         .expect("response");
     let status = resp.status();
     (status, resp_text(resp).await)
+}
+
+/// The first 300 characters of a response, for an assertion message.
+fn head(text: &str) -> &str {
+    text.get(..300).unwrap_or(text)
+}
+
+/// A body of `len` bytes: one entry whose display name fills it.
+fn import_body_of(len: usize) -> String {
+    let frame = r#"{"users":[{"email":"big@example.com","display_name":""}]}"#;
+    let name = "x".repeat(len - frame.len());
+    let body = format!(r#"{{"users":[{{"email":"big@example.com","display_name":"{name}"}}]}}"#);
+    assert_eq!(body.len(), len);
+    body
+}
+
+/// 10,000 entries (the import's cap) with password hashes come to about
+/// 1.8 MB: above the 1 MiB default body limit, inside the import's limit.
+#[tokio::test]
+async fn import_users_takes_10000_entries_with_password_hashes_in_one_request() {
+    let h = common::TestHarness::in_process().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = admin_token(&h, &realm).await;
+
+    let hash = bcrypt::hash("Bulk-Import-1", 4).expect("bcrypt hash");
+    let users: Vec<serde_json::Value> = (0..10_000)
+        .map(|i| {
+            serde_json::json!({
+                "email": format!("bulk{i:05}@example.com"),
+                "display_name": format!("Bulk User {i}"),
+                "first_name": "Bulk",
+                "last_name": format!("User {i}"),
+                "password_hash": hash,
+            })
+        })
+        .collect();
+    let payload = serde_json::json!({ "users": users });
+    let size = payload.to_string().len();
+    assert!(
+        size > 1024 * 1024,
+        "the request must be above 1 MiB to test the limit: {size} bytes"
+    );
+
+    let (status, text) = post_import(&h, &realm, &token, &payload).await;
+    assert_eq!(status, StatusCode::OK, "{}", head(&text));
+    let body: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+    assert_eq!(body["imported"], 10_000, "{}", head(&text));
+    assert_eq!(body["failed"], 0, "{}", head(&text));
+
+    let last = h
+        .identity()
+        .get_user_by_email(&realm, "bulk09999@example.com")
+        .expect("lookup")
+        .expect("the last entry must exist");
+    assert!(
+        h.identity()
+            .verify_password(
+                &realm,
+                last.id(),
+                &CleartextPassword::from_string("Bulk-Import-1".to_string()),
+            )
+            .expect("verify"),
+        "the last entry must sign in with the imported hash"
+    );
+}
+
+/// The import checks the token before it reads the body. A body above the
+/// import's own limit gets 401 without a token: a body read first would get
+/// 413, so a client without a token cannot make the server read 16 MiB.
+#[tokio::test]
+async fn import_users_without_a_token_is_refused_before_the_body_is_read() {
+    let h = common::TestHarness::in_process().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+
+    let (status, text) = post_import_raw(&h, &realm, None, import_body_of(17 * 1024 * 1024)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{}", head(&text));
+}
+
+#[tokio::test]
+async fn import_users_refuses_a_body_above_16_mib() {
+    let h = common::TestHarness::in_process().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = admin_token(&h, &realm).await;
+
+    let (status, text) = post_import_raw(
+        &h,
+        &realm,
+        Some(&token),
+        import_body_of(16 * 1024 * 1024 + 1),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{}", head(&text));
+}
+
+/// The JSON depth check still applies to the import, after the token check.
+#[tokio::test]
+async fn import_users_refuses_a_deeply_nested_body() {
+    let h = common::TestHarness::in_process().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = admin_token(&h, &realm).await;
+
+    let nested = format!("{}{}", "[".repeat(200), "]".repeat(200));
+    let body = format!(
+        r#"{{"users":[{{"email":"a@example.com","display_name":"A","attributes":{{"x":{nested}}}}}]}}"#
+    );
+    let (status, text) = post_import_raw(&h, &realm, Some(&token), body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{}", head(&text));
+    assert!(text.contains("nesting depth"), "{}", head(&text));
 }
 
 /// Asserts that the import refused the entry for `email` and created no user.

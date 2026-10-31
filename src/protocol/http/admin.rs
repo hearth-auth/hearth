@@ -36,6 +36,7 @@ use super::{
     extract_admin_auth, identity_error_to_response, proto_to_rest_json, rbac_error_to_response,
     require_admin_permission, require_any_admin_permission, require_superuser,
     require_user_admin_ceiling, AdminAuth, AppState, BACKUP_RESTORE_BODY_LIMIT,
+    BODY_LIMIT_USER_IMPORT,
 };
 
 /// Registers all admin API routes (mounted under `/admin` by the parent router).
@@ -795,11 +796,55 @@ struct ImportUserEntry {
     password_hash: Option<FormSecret>,
 }
 
+/// Reads an import body after the admin token check (#714): at most
+/// [`BODY_LIMIT_USER_IMPORT`] bytes, then the JSON depth check that
+/// `json_depth_guard` skips for this route, then the parse, with the status
+/// codes of the `Json` extractor.
+async fn read_import_body(
+    headers: &HeaderMap,
+    body: axum::body::Body,
+) -> Result<ImportUsersBody, Response> {
+    let is_json = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.starts_with("application/json"));
+    if !is_json {
+        return Err((
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Json(serde_json::json!({"error": "expected Content-Type: application/json"})),
+        )
+            .into_response());
+    }
+    let bytes = axum::body::to_bytes(body, BODY_LIMIT_USER_IMPORT)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(serde_json::json!({"error": "request body too large"})),
+            )
+                .into_response()
+        })?;
+    crate::abuse::guards::check_json_depth(&bytes).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response()
+    })?;
+    Json::<ImportUsersBody>::from_bytes(&bytes)
+        .map(|Json(body)| body)
+        .map_err(IntoResponse::into_response)
+}
+
 /// Admin: bulk import users (`POST /admin/users/import`).
+///
+/// Takes the body as a stream and reads it only after the admin token check,
+/// so a client without a token cannot make the server read up to
+/// [`BODY_LIMIT_USER_IMPORT`] (#714).
 async fn admin_import_users(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(body): Json<ImportUsersBody>,
+    body: axum::body::Body,
 ) -> impl IntoResponse {
     let auth = match extract_admin_auth(&headers, &state) {
         Ok(a) => a,
@@ -808,6 +853,10 @@ async fn admin_import_users(
     if let Err(e) = require_admin_permission(&auth, "hearth.users.admin") {
         return e.into_response();
     }
+    let body = match read_import_body(&headers, body).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
 
     if body.users.is_empty() {
         return (

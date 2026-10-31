@@ -2038,7 +2038,7 @@
     "/admin/users/import": {
       "post": {
         "summary": "Import users (migration)",
-        "description": "Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue.",
+        "description": "Creates one user for each entry. An entry that fails gets an error in `results`, and the other entries continue. A request takes at most 10,000 entries and a body of at most 16 MiB; the import checks the admin token before it reads the body.",
         "operationId": "adminImportUsers",
         "tags": [
           "Admin"
@@ -6540,6 +6540,7 @@
           "users": {
             "type": "array",
             "minItems": 1,
+            "maxItems": 10000,
             "items": {
               "$ref": "#/components/schemas/AdminImportUserEntry"
             }
