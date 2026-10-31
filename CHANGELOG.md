@@ -15,6 +15,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   the ceilings that sign-in applies. The response never contains the hash. The SDK admin clients now
   type the import request (`AdminImportUsersRequest`, `AdminImportUserEntry`).
 
+## [4.6.18] — 2026-10-31
+
 ### Fixed
 - **`hearth migrate auth0` imports a user whose bcrypt hash starts with `$2y$`** (#703). PHP's
   `password_hash()` writes this prefix. The import refused such a hash as an unrecognized format,

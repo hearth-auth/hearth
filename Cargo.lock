@@ -1246,7 +1246,7 @@ dependencies = [
 
 [[package]]
 name = "hearth"
-version = "4.6.17"
+version = "4.6.18"
 dependencies = [
  "argon2",
  "askama",
