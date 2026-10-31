@@ -92,7 +92,7 @@ git -C "$r" checkout -q main
 # The release PR: [Unreleased]'s entries move under a new [1.1.0] heading.
 sed -i 's/^## \[Unreleased\]$/&\n\n## [1.1.0] — 2026-02-01/' "$r/CHANGELOG.md"
 commit_file "$r" "chore(release): v1.1.0"
-git -C "$r" merge -q --no-edit feature
+git -C "$r" merge -q --no-edit feature >/dev/null
 if git -C "$r" show HEAD:CHANGELOG.md | awk '/^## \[1\.1\.0\]/{s=1} /^## \[1\.0\.0\]/{s=0} s && /Hardening/{f=1} END{exit !f}'; then
     run_case "entry merged after a release cut lands in [1.1.0]" 1 "$r" "" "Hardening"
 else
