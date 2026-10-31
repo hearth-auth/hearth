@@ -788,9 +788,9 @@ backup run** — the recovery point is the *start* of a run, not its end:
 | Daily (typical) | ~24 hours + one run |
 
 Measure your own run duration. In the restore drill, `POST /admin/backup` of a
-realm with 1,000,000 users took 5.5 s ([Measured times](#measured-times)), so the
+realm with 1,000,000 users took 9.7 s ([Measured times](#measured-times)), so the
 backup interval is the dominant term. Do not use the restore time as an
-estimate of the backup time: in the same drill, the restore took 100 times
+estimate of the backup time: in the same drill, the restore took 65 times
 longer than the backup.
 
 RPO is dominated by your backup schedule, not by Hearth's recovery
@@ -827,29 +827,34 @@ carry](./backup.md#what-a-backup-does-not-carry)).
 #### Measured times
 
 The [restore drill](./backup.md#restore-drill) measured these times on
-2026-10-30, on `main` at `09711488` (v4.6.15 and #696). The runner is a
-GitHub-hosted runner with 4 CPUs and 16 GB of memory. Each run passed all 14
-checks of the drill.
+2026-10-31, with the server code of `main` at `03f55580` (v4.7.0). Each
+imported user has a password (#710). The runner is a GitHub-hosted runner
+with 4 CPUs and 16 GB of memory. Each run passed all 15 checks of the drill.
 
 | Users (one realm) | Archive | `POST /admin/backup` | Restore | Start until `/readyz` answers 200 | Recovery (restore and start) | Run |
 |---:|---:|---:|---:|---:|---:|---|
-| 250,000 | 67.4 MiB | 1.4 s | 2 min 41 s | 4.0 s | 2 min 45 s | [41100519533](https://github.com/hearth-auth/hearth/actions/runs/41100519533) |
-| 500,000 | 135.0 MiB | 2.9 s | 3 min 42 s | 4.0 s | 3 min 46 s | [41100522563](https://github.com/hearth-auth/hearth/actions/runs/41100522563) |
-| 1,000,000 | 270.4 MiB | 5.5 s | 9 min 10 s | 3.0 s | 9 min 13 s | [41097818397](https://github.com/hearth-auth/hearth/actions/runs/41097818397) |
+| 250,000 | 113.6 MiB | 2.5 s | 2 min 46 s | 1.0 s | 2 min 47 s | [41180643000](https://github.com/hearth-auth/hearth/actions/runs/41180643000) |
+| 500,000 | 227.6 MiB | 4.6 s | 4 min 19 s | 1.0 s | 4 min 20 s | [41184433213](https://github.com/hearth-auth/hearth/actions/runs/41184433213) |
+| 1,000,000 | 455.4 MiB | 9.7 s | 10 min 27 s | 1.0 s | 10 min 28 s | [41180633499](https://github.com/hearth-auth/hearth/actions/runs/41180633499) |
 
-The restore time changes from run to run. On 2026-10-29, before #696, the same
-drills restored 250,000 users in 1 min 28 s, 500,000 users in 4 min 4 s and
-1,000,000 users in 7 min 38 s
+The restore time changes from run to run. On 2026-10-30, when the imported
+users had no password, the same drills gave archives of 67.4, 135.0 and
+270.4 MiB, and restores of 2 min 41 s, 3 min 42 s and 9 min 10 s
+([41100519533](https://github.com/hearth-auth/hearth/actions/runs/41100519533),
+[41100522563](https://github.com/hearth-auth/hearth/actions/runs/41100522563),
+[41097818397](https://github.com/hearth-auth/hearth/actions/runs/41097818397)).
+On 2026-10-29, before #696, they restored in 1 min 28 s, 4 min 4 s and
+7 min 38 s
 ([40941183987](https://github.com/hearth-auth/hearth/actions/runs/40941183987),
 [40941187987](https://github.com/hearth-auth/hearth/actions/runs/40941187987),
 [40932385441](https://github.com/hearth-auth/hearth/actions/runs/40932385441)).
 #696 changed the backup only, not the restore.
 
-**The drill data is smaller than most production data.** The imported users
-have no password, no MFA factor and one custom attribute. Only four users have
-a password. A realm in which each user has a password or MFA factors, or that
-has groups and organizations, gives a larger archive and a longer restore.
-Use these times for a first plan only, and measure on your own data and
+**The drill data is smaller than most production data.** Each imported user
+has one password (a PBKDF2-SHA256 hash) and one custom attribute, but no MFA
+factor and no group or organization membership. A realm with MFA factors,
+groups or organizations gives a larger archive and a longer restore. Use
+these times for a first plan only, and measure on your own data and
 hardware.
 
 The restore CLI processes one realm after the other. To make the RTO
@@ -867,11 +872,11 @@ and a restore you have tested** (see the drill below). Your RPO is your
 backup interval plus one run. Your RTO is the time to restore the latest
 backup onto a new node and start it.
 
-For one realm with 1,000,000 users on the drill runner, one backup run took
-5.5 s, and the restore and start took 8 to 10 minutes ([Measured
-times](#measured-times)). With hourly backups, the RPO is about one hour.
-The RTO is about 10 minutes, plus the time to get a host and to copy the
-archive to it.
+For one realm with 1,000,000 users, each with a password, on the drill
+runner, one backup run took 9.7 s, and the restore and start took 10 min 28 s
+([Measured times](#measured-times)). With hourly backups, the RPO is about
+one hour. The RTO is about 11 minutes, plus the time to get a host and to
+copy the archive to it.
 
 Cluster mode is experimental and gives you no shorter RTO today. Hearth has
 no operation that promotes a follower, membership is fixed at bootstrap,

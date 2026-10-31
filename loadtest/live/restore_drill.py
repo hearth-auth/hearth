@@ -15,11 +15,13 @@ ENV is the generator.env that gen-config.sh writes, and CRT the run's CA. restor
 runs the subcommands in this order:
 
 1. seed: as the realm admin, import --users users through POST /admin/users/import, in
-   requests of --batch users, --workers requests at a time. Then create known data through
+   requests of --batch users, --workers requests at a time. Each bulk user gets the same
+   password_hash: one PBKDF2-SHA256 hash of a random password, so that each user has a
+   credential row, as in a realm whose users have passwords. Then create known data through
    the admin API: 5 users (one of them updated), a role, an assignment of the role, an OAuth
    client with a secret, and a webhook subscription. The state dir (private) receives
-   seed.json: the ids, the client's secret, and the sample: every --sample-every-th bulk
-   user, the last one, the 5 users and the hearth.yaml seed users.
+   seed.json: the ids, the client's secret, the bulk users' password, and the sample: every
+   --sample-every-th bulk user, the last one, the 5 users and the hearth.yaml seed users.
 2. snapshot --phase before: what the server answers about that data (below).
 3. backup: POST /admin/backup, streamed to a file.
 4. hearth backup verify, sign and restore, and a server on the restored data
@@ -34,6 +36,9 @@ A snapshot holds, per section, {"ok": true, "value": ...} or {"ok": false, "erro
   users         GET /admin/users/{id} of each sampled user: every field that the API returns
   email_index   GET /admin/users?email= of each sampled user: the id that it finds
   known_users   a sign-in of the admin and of each seed user: the sub of the token
+  bulk_sign_in  a sign-in of sampled active bulk users with the imported password: other
+                users in each phase, so that the users of the after phase still have the
+                imported hash (the first sign-in replaces it with an Argon2id hash)
   jwks          GET /realms/{realm}/.well-known/jwks.json
   client        GET /admin/applications/{id}
   client_token  the status of client_credentials with the secret, and without it
@@ -74,6 +79,10 @@ import urllib.parse
 import urllib.request
 
 API_USERS = 5
+# Bulk users that sign in with the imported password hash, in each snapshot phase.
+BULK_SIGN_INS = 5
+# OWASP's 2023 figure for PBKDF2-HMAC-SHA256. The drill computes the hash once.
+PBKDF2_ITERATIONS = 600_000
 ROLE_NAME = "drill.reader"
 ROLE_PERMISSIONS = ["drill.read", "user.read"]
 CLIENT_NAME = "Restore drill service"
@@ -110,9 +119,19 @@ def log(msg):
 # ---------------------------------------------------------------- data and comparison
 
 
-def bulk_user(i, domain):
-    """The import entry for bulk user i. Every 13th user is disabled and every 17th waits
-    for verification (moduli prime to the sample stride, so the sample has each status)."""
+def bulk_status(i):
+    """The status of bulk user i, or None for active. Every 13th user is disabled and every
+    17th waits for verification (moduli prime to the sample stride, so the sample has each
+    status)."""
+    if i % 13 == 3:
+        return "disabled"
+    if i % 17 == 5:
+        return "pending_verification"
+    return None
+
+
+def bulk_user(i, domain, password_hash=None):
+    """The import entry for bulk user i, with password_hash when one is given."""
     entry = {
         "email": f"bulk{i:07d}@{domain}",
         "display_name": f"Bulk {i}",
@@ -120,11 +139,34 @@ def bulk_user(i, domain):
         "last_name": f"Family{i}",
         "attributes": {"drill_index": str(i)},
     }
-    if i % 13 == 3:
-        entry["status"] = "disabled"
-    elif i % 17 == 5:
-        entry["status"] = "pending_verification"
+    status = bulk_status(i)
+    if status:
+        entry["status"] = status
+    if password_hash:
+        entry["password_hash"] = password_hash
     return entry
+
+
+def pbkdf2_phc(password, salt, iterations=PBKDF2_ITERATIONS):
+    """A $pbkdf2-sha256$ PHC string of password, with standard base64 without padding, as
+    Hearth reads it."""
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
+
+    def enc(raw):
+        return base64.b64encode(raw).rstrip(b"=").decode()
+
+    return f"$pbkdf2-sha256$i={iterations}${enc(salt)}${enc(digest)}"
+
+
+def bulk_sign_in_users(sample):
+    """(before, after): the first BULK_SIGN_INS sampled active bulk users, and the next
+    BULK_SIGN_INS, as [email, id] pairs."""
+    active = []
+    for email, uid in sample:
+        m = re.fullmatch(r"bulk(\d{7})@.+", email)
+        if m and bulk_status(int(m.group(1))) is None:
+            active.append([email, uid])
+    return active[:BULK_SIGN_INS], active[BULK_SIGN_INS:2 * BULK_SIGN_INS]
 
 
 def sample_indexes(users, every):
@@ -373,6 +415,37 @@ def check_known_users(before, after):
                                  f"sub")
 
 
+def check_bulk_sign_in(before, after):
+    name = "bulk users sign in"
+    b, a, why = pair(before, after, "bulk_sign_in")
+    if why:
+        return finding(name, "FAIL", why)
+
+    def problems(results):
+        bad = []
+        for email, r in results.items():
+            if not r.get("ok"):
+                bad.append(f"{email} cannot sign in ({r.get('error')})")
+            elif r.get("sub") != r.get("id"):
+                bad.append(f"{email} signs in as another user: sub {r.get('sub')}, id "
+                           f"{r.get('id')}")
+        return bad
+
+    if not b:
+        return finding(name, "FAIL", "before (the drill's baseline): no bulk user signed in")
+    bad = problems(b)
+    if bad:
+        return finding(name, "FAIL", "before (the drill's baseline): " + "; ".join(bad))
+    if not a:
+        return finding(name, "FAIL", "after: no bulk user signed in")
+    bad = problems(a)
+    if bad:
+        return finding(name, "FAIL", "after: " + "; ".join(bad))
+    return finding(name, "PASS", f"{len(b)} bulk users sign in before the backup and {len(a)} "
+                                 f"other bulk users after the restore, each as its own id, "
+                                 f"with the imported password hash")
+
+
 def jwks_keys(jwks):
     return sorted(canonical(k) for k in (jwks or {}).get("keys", []))
 
@@ -503,6 +576,7 @@ def compare(before, after, *, token, restore_exit, require_webhooks=False, verif
         check_users(before, after),
         check_email_index(before, after),
         check_known_users(before, after),
+        check_bulk_sign_in(before, after),
         check_jwks(before, after),
         check_token_signature(before, after, token, verify),
         check_token_introspection(before, after, token),
@@ -842,9 +916,11 @@ def cmd_seed(args):
     os.makedirs(args.state, mode=0o700, exist_ok=True)
     admin = Admin(target)
     sample_at = set(sample_indexes(args.users, args.sample_every))
+    bulk_password = secrets.token_urlsafe(18)
+    password_hash = pbkdf2_phc(bulk_password, secrets.token_bytes(16))
 
     def import_batch(start):
-        entries = [bulk_user(i, target.host)
+        entries = [bulk_user(i, target.host, password_hash)
                    for i in range(start, min(start + args.batch, args.users))]
         r = expect(admin.call("POST", "/admin/users/import", {"users": entries}), 200,
                    f"import of users {start}..")
@@ -910,7 +986,7 @@ def cmd_seed(args):
 
     write_private_json(os.path.join(args.state, "seed.json"), {
         "users": args.users, "import_seconds": round(import_s, 3),
-        "realm_id": admin.realm_id,
+        "realm_id": admin.realm_id, "bulk_password": bulk_password,
         "sample": sorted(sample) + api_users + seed_users,
         "client": {"id": client["client_id"], "secret": client["client_secret"]},
         "role_id": role["id"], "role_user_id": role_user, "webhook_error": webhook_error,
@@ -959,6 +1035,17 @@ def sign_in_known_users(target):
             out[email] = {"ok": True, "sub": jwt_claims(sign_in(target, email, password))["sub"]}
         except (DrillError, OSError, KeyError, ValueError) as e:
             out[email] = {"ok": False, "error": str(e)}
+    return out
+
+
+def sign_in_bulk_users(target, users, password):
+    out = {}
+    for email, uid in users:
+        try:
+            out[email] = {"ok": True, "id": uid,
+                          "sub": jwt_claims(sign_in(target, email, password))["sub"]}
+        except (DrillError, OSError, KeyError, ValueError) as e:
+            out[email] = {"ok": False, "id": uid, "error": str(e)}
     return out
 
 
@@ -1022,13 +1109,18 @@ def cmd_snapshot(args):
     client = seed["client"]
     # Sign-ins before the reads on the original server and after them on the restored one,
     # so that no sign-in changes what the other phase reads.
+    bulk_before, bulk_after = bulk_sign_in_users(seed["sample"])
     if args.phase == "before":
         take("known_users", lambda: sign_in_known_users(target))
+        take("bulk_sign_in", lambda: sign_in_bulk_users(target, bulk_before,
+                                                        seed["bulk_password"]))
     take("users", lambda: read_users(admin, seed["sample"]))
     take("email_index", lambda: read_email_index(admin, seed["sample"]))
     take("user_count", lambda: count_users(admin))
     if args.phase == "after":
         take("known_users", lambda: sign_in_known_users(target))
+        take("bulk_sign_in", lambda: sign_in_bulk_users(target, bulk_after,
+                                                        seed["bulk_password"]))
     take("jwks", lambda: expect(request(target, "GET",
                                         f"/realms/{target.realm}/.well-known/jwks.json"),
                                 200, "GET jwks.json").json())
@@ -1117,7 +1209,7 @@ def parse_args(argv):
     server_args(sp)
     sp.add_argument("--state", required=True)
     sp.add_argument("--users", type=int, default=1_000_000)
-    sp.add_argument("--batch", type=int, default=5000)
+    sp.add_argument("--batch", type=int, default=2500)
     sp.add_argument("--workers", type=int, default=4)
     sp.add_argument("--sample-every", type=int, default=1000)
     sp.set_defaults(fn=cmd_seed)

@@ -678,7 +678,7 @@ time curl -fsS -X POST -H "Authorization: Bearer $HEARTH_ADMIN_TOKEN" \
 ```
 
 In the [restore drill](#restore-drill), `POST /admin/backup` of a realm with
-1,000,000 users took 5.5 s, so the interval is the dominant term. The
+1,000,000 users took 9.7 s, so the interval is the dominant term. The
 [measured times](./disaster-recovery.md#measured-times) give the other sizes.
 Confirm the duration during your [test-restore
 drill](./disaster-recovery.md#test-restore-drill-checklist) and measure it again
@@ -723,7 +723,7 @@ lookups continue during a backup. A request that waits longer than the request
 timeout (`operational.request_timeout_secs`, 30 s by default) fails. The wait
 increases with realm size (the time to read the realm's entities into memory). In
 the [restore drill](#restore-drill), the whole `POST /admin/backup` of a realm with
-1,000,000 users took 5.5 s, and the read pass is only a part of it. For very
+1,000,000 users took 9.7 s, and the read pass is only a part of it. For very
 large realms, prefer a low-write window. The barrier
 covers only that read pass: it is released before the realm's sections are
 encrypted, compressed and written to the archive, so a slow or remote backup
@@ -863,6 +863,8 @@ at size every week, and on demand. It does these steps on a GitHub-hosted runner
 1. It starts a release build of Hearth in production mode: TLS, fsync, a
    key-encryption key and `HEARTH_MASTER_KEY`.
 2. It imports 1,000,000 users into one realm through `POST /admin/users/import`.
+   Each imported user gets the same `password_hash`: one PBKDF2-SHA256 hash of a
+   random password, so each user has a password credential.
    Through the admin API it also creates five users, a role, an assignment of the
    role, an OAuth client with a secret, and a webhook subscription. The realm admin
    and three other seed users in `hearth.yaml` have passwords.
@@ -879,6 +881,11 @@ at size every week, and on demand. It does these steps on a GitHub-hosted runner
      user, the last one, the five users and the seed users;
    - the user that `GET /admin/users?email=` finds for each of these users;
    - a sign-in of each user with a password, with the same `sub` as before;
+   - a sign-in of five sampled imported users before the backup, and of five other
+     sampled imported users after the restore, with the imported password. Each
+     must sign in as its own user. The first sign-in replaces the imported hash
+     with an Argon2id hash, so the users of the second group still have the
+     imported hash when the restore runs;
    - the realm JWKS;
    - an access token that the client got before the backup. Its signature must
      verify with the restored JWKS. The restored server must also call it active,
