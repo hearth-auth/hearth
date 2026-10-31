@@ -329,6 +329,22 @@ jobs:
       - name: Release PR — self-test
         run: bash scripts/tests/release-pr.test.sh
 
+      # #716: a PR that merges after a release PR merges with no conflict and no
+      # new CI run, and its entry can land in the section the release cut. On a
+      # PR this checks the PR applied to the current main; on a push to main it
+      # turns CI red right after such a merge. The title arrives through env,
+      # never through the script text.
+      - name: CHANGELOG placement (check-changelog-placement.sh)
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: bash scripts/check-changelog-placement.sh
+
+      # Proof the CHANGELOG placement guard can go red: it must reject an entry
+      # added into a released section, and the #709 shape, an entry that a
+      # merge after a release cut places in the section the cut created.
+      - name: CHANGELOG placement — guard self-test
+        run: bash scripts/tests/check-changelog-placement.test.sh
+
       # Audit §4.8#12: the verification guide told the reader to run two
       # commands that cannot execute (`cosign triangulate` on a detached blob
       # signature, and `brew install slsa-verifier`, which has no formula), and

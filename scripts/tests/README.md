@@ -10,6 +10,7 @@ exists to catch — a guard that only ever exits 0 is indistinguishable from a s
 | Test | Guard under test |
 |------|------------------|
 | `check-readme-version.test.sh` | `scripts/check-readme-version.sh` (HEA-2116) |
+| `check-changelog-placement.test.sh` | `scripts/check-changelog-placement.sh` (#716) |
 | `release-pr.test.sh` | `scripts/release-bump.sh`, `scripts/changelog_cut.py` and `scripts/release-pr.sh` (the release PR, and its `--refresh`) |
 | `check-publish-gating.test.sh` | `scripts/check-publish-gating.sh` (audit B2/B6) |
 | `await-green-commit.test.sh` | `scripts/await-green-commit.sh` (audit B2/B6) |
