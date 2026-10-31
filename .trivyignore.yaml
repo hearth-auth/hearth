@@ -97,3 +97,19 @@ vulnerabilities:
     paths:
       - "docs-site/package-lock.json"
     statement: "deepmerge declared but never loaded by @svgr/plugin-svgo 8.1.0 (docs build tooling); no patched release."
+
+  # CVE-2026-118764 (GHSA-g3hv-75wg-m249, published 2026-10-30): an
+  # attacker-controlled glob pattern makes minimatch multiply its pattern parts
+  # and compare them pairwise (CPU and memory), when optimizationLevel >= 2 (the
+  # default is 1). The fix exists only in minimatch 11.0.1. docs-site has
+  # minimatch 3.1.5 only through serve-handler 6.1.7, the newest release, which
+  # pins exactly 3.1.5; @docusaurus/core 3.10.2 (the newest) needs serve-handler
+  # ^6.1.7 (checked 2026-10-30). serve-handler matches request paths against the
+  # patterns of its own config, so no pattern comes from outside, and it runs
+  # only in `docusaurus serve`, a local preview of the static site. Same
+  # assessment as the osv-scanner.toml entry (GHSA-g3hv-75wg-m249) that #705
+  # added. Revisit when serve-handler accepts minimatch >= 11.0.1.
+  - id: CVE-2026-118764
+    paths:
+      - "docs-site/package-lock.json"
+    statement: "minimatch 3.1.5 pinned by serve-handler 6.1.7 (Docusaurus local preview); patterns come from its own config; fix only in 11.0.1."
