@@ -678,7 +678,7 @@ time curl -fsS -X POST -H "Authorization: Bearer $HEARTH_ADMIN_TOKEN" \
 ```
 
 In the [restore drill](#restore-drill), `POST /admin/backup` of a realm with
-1,000,000 users took 5.5 s, so the interval is the dominant term. The
+1,000,000 users took 9.7 s, so the interval is the dominant term. The
 [measured times](./disaster-recovery.md#measured-times) give the other sizes.
 Confirm the duration during your [test-restore
 drill](./disaster-recovery.md#test-restore-drill-checklist) and measure it again
@@ -723,7 +723,7 @@ lookups continue during a backup. A request that waits longer than the request
 timeout (`operational.request_timeout_secs`, 30 s by default) fails. The wait
 increases with realm size (the time to read the realm's entities into memory). In
 the [restore drill](#restore-drill), the whole `POST /admin/backup` of a realm with
-1,000,000 users took 5.5 s, and the read pass is only a part of it. For very
+1,000,000 users took 9.7 s, and the read pass is only a part of it. For very
 large realms, prefer a low-write window. The barrier
 covers only that read pass: it is released before the realm's sections are
 encrypted, compressed and written to the archive, so a slow or remote backup
