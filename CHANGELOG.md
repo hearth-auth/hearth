@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Changed
+- **The token endpoint answers `400` for `invalid_dpop_proof` and `use_dpop_nonce`** (#626). Both
+  token routes (`/token` and `/realms/{name}/token`) answered `401`, so a DPoP client library
+  could treat the refusal as an authentication failure and not retry with the nonce. RFC 9449 §5
+  and §8 give `400`. The `DPoP-Nonce` header is unchanged. Resource endpoints still answer `401`
+  with `WWW-Authenticate`. A client that retries on `401 use_dpop_nonce` from the token endpoint
+  must also retry on `400`.
+
 ## [4.7.5] — 2026-11-01
 
 ### Fixed
