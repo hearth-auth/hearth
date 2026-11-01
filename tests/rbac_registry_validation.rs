@@ -461,6 +461,50 @@ fn tier3_https_claim_accepted() {
     );
 }
 
+/// #625 (spec regression scenario): an HTTPS-namespaced claim name gets the
+/// character check of `^https://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+$`. A
+/// space, a control character, or a character outside that set is refused, and
+/// the refusal names the claim.
+#[test]
+fn tier3_https_claim_with_a_character_outside_the_uri_set_rejected() {
+    for claim in [
+        "https://acme.com/dept name",
+        "https://acme.com/dept\tname",
+        "https://acme.com/dept\nname",
+        "https://acme.com/dept\u{0}",
+        "https://acme.com/dept\u{7f}",
+        "https://acme.com/d\u{e9}pt",
+        "https://acme.com/\"dept\"",
+        "https://acme.com/<dept>",
+        "https://acme.com/dept\\name",
+        "https://acme.com/{dept}",
+        "https://acme.com/dept|name",
+        "https://acme.com/dept^name",
+        "https://acme.com/`dept`",
+    ] {
+        let errs = reg_with_claim(claim)
+            .validate()
+            .expect_err("a claim name outside the URI character set must be refused");
+        let refusal = errs
+            .iter()
+            .find(|e| matches!(e, RegistryError::InvalidClaimName { claim: c, .. } if c == claim))
+            .unwrap_or_else(|| panic!("{claim:?}: expected InvalidClaimName; got {errs:?}"));
+        assert!(
+            refusal.to_string().contains(&format!("{claim:?}")),
+            "the refusal names the claim: {refusal}"
+        );
+    }
+}
+
+/// Every character of the spec's set stays accepted in an HTTPS claim name.
+#[test]
+fn tier3_https_claim_with_every_uri_character_accepted() {
+    let claim = "https://Acme-0.example.com:8443/a_b.c~d/e?f=g&h=i;j,k+l*m(n)o'p!q$r@s#t[u]v%20";
+    if let Err(errs) = reg_with_claim(claim).validate() {
+        panic!("{claim:?} uses only URI characters and must be accepted; got {errs:?}");
+    }
+}
+
 /// Tier 1 claim `exp` must be rejected as a mapper target.
 #[test]
 fn tier1_claim_exp_rejected() {

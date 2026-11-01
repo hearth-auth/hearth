@@ -556,7 +556,8 @@ pub fn validate_bundle_name(name: &str) -> Result<(), String> {
 ///
 /// - **Short form:** `^[a-z][a-z0-9_]*$`, ≤64 chars. Used for simple custom
 ///   claims such as `department` or `employee_id`.
-/// - **HTTPS-namespaced form:** must start with `https://`, ≤256 chars.
+/// - **HTTPS-namespaced form:** must start with `https://`, ≤256 chars, and
+///   use only URI characters after it (`A-Za-z0-9` and `-._~:/?#[]@!$&'()*+,;=%`).
 ///   Collision-free namespacing following the Auth0/Okta convention, e.g.
 ///   `https://acme.com/department`. HTTP (non-TLS) URLs are rejected.
 ///
@@ -568,14 +569,23 @@ pub fn validate_tier3_claim_name(name: &str) -> Result<(), String> {
     }
 
     // HTTPS-namespaced form.
-    if name.starts_with("https://") {
+    if let Some(rest) = name.strip_prefix("https://") {
         if name.len() > 256 {
             return Err("HTTPS-namespaced claim name exceeds 256 chars".to_string());
         }
-        if name.len() <= "https://".len() {
+        if rest.is_empty() {
             return Err(
                 "HTTPS-namespaced claim name must have a host after 'https://'".to_string(),
             );
+        }
+        // #625: a space or a control character in a claim name lets relying
+        // parties parse the token in different ways. `{c:?}` keeps such a
+        // character out of the error text.
+        if let Some(c) = rest.chars().find(|&c| !is_claim_uri_char(c)) {
+            return Err(format!(
+                "HTTPS-namespaced claim name contains invalid character {c:?} \
+                 (allowed: A-Za-z0-9 -._~:/?#[]@!$&'()*+,;=%)"
+            ));
         }
         return Ok(());
     }
@@ -610,6 +620,12 @@ pub fn validate_tier3_claim_name(name: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Whether `c` may appear after `https://` in a claim name: the RFC 3986
+/// unreserved and reserved characters, and `%` (spec `custom-permissions`).
+fn is_claim_uri_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || "-._~:/?#[]@!$&'()*+,;=%".contains(c)
 }
 
 // ---------------------------------------------------------------------------
