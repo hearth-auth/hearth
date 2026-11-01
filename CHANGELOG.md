@@ -8,7 +8,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [4.7.4] — 2026-11-01
 
-No changelog entries for this release. The [GitHub release](https://github.com/hearth-auth/hearth/releases/tag/v4.7.4) lists its commits.
+### Security
+- **An HTTPS-namespaced custom claim name may contain only URI characters** (#625). A claim
+  mapping whose name starts with `https://` was accepted with any characters after the host,
+  including spaces and control characters. Config load now refuses a name with a character
+  outside `A-Za-z0-9` and `-._~:/?#[]@!$&'()*+,;=%`, and the error names the claim. Rename such a
+  claim before you upgrade.
 
 ## [4.7.3] — 2026-11-01
 
@@ -17,11 +22,6 @@ No changelog entries for this release. The [GitHub release](https://github.com/h
   routes are disabled (realms live in `hearth.yaml`) and answered `405` to any caller. A request
   without a token now gets `401`, and a token without `hearth.realm.admin` gets `403`; a realm
   admin still gets the `405`.
-- **An HTTPS-namespaced custom claim name may contain only URI characters** (#625). A claim
-  mapping whose name starts with `https://` was accepted with any characters after the host,
-  including spaces and control characters. Config load now refuses a name with a character
-  outside `A-Za-z0-9` and `-._~:/?#[]@!$&'()*+,;=%`, and the error names the claim. Rename such a
-  claim before you upgrade.
 
 ## [4.7.2] — 2026-10-31
 
