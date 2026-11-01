@@ -5,10 +5,13 @@ name: Release PR refresh
 # PR merges next to them makes the release PR conflict, and it can no longer
 # auto-merge; the README pins then stay stale and fail every PR's CI.
 #
-# On each CHANGELOG.md push to main, scripts/release-pr.sh --refresh checks the
-# open release PR. When GitHub reports it CONFLICTING, the script rebuilds it on
-# the new main for the same version. A PR that merges cleanly is left alone, so
-# its CI is not restarted.
+# An entry merged in another hunk does not conflict, but the squash merge of the
+# release PR then puts it under the new version (#721's entry went into [4.7.3]).
+#
+# On each CHANGELOG.md push to main, scripts/release-pr.sh --refresh rebuilds the
+# open release PR on the new main for the same version. It pushes the rebuild
+# when the merge of the open PR into main (git merge-tree) gives another tree. A
+# PR whose merge gives the rebuilt tree is left alone, so its CI is not restarted.
 # workflow_dispatch runs the same check by hand (`gh workflow run release-pr-refresh.yml`).
 on:
   push:

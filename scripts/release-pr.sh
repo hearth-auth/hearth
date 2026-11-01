@@ -17,8 +17,11 @@
 # [Unreleased] at the tag (scripts/changelog_cut.py); later entries stay there.
 #
 # --refresh (.github/workflows/release-pr-refresh.yml, on each CHANGELOG.md
-# push to main): when the open release PR conflicts with main, rebuild it on the
-# new main for its version. A PR that merges cleanly is left alone.
+# push to main): rebuild the open release PR on the new main for its version,
+# and push the rebuild when the merge of the open PR into main gives another
+# tree. That is a conflict, or a clean merge that puts an entry main got after
+# the tag under the new version (#721's entry went into [4.7.3] this way). A PR
+# whose merge gives the rebuilt tree is left alone, so its CI does not restart.
 #
 # Idempotent. A re-run on the same main finds the same tree on release/next,
 # does not push, and updates the open PR in place. A later release rebuilds
@@ -34,7 +37,6 @@
 #         RELEASE_MAIN_BRANCH      base branch of the PR (default: main)
 #         RELEASE_BRANCH           PR head branch (default: release/next)
 #         RELEASE_DATE             CHANGELOG heading date (default: the tag commit's date, UTC)
-#         RELEASE_POLL_SECONDS     --refresh: wait between mergeability reads (default: 10)
 # Exit:   0 when the PR is open and current, when the tag is not on the main
 #         branch (a maintenance release), or when --refresh has nothing to do;
 #         1 on any failure; 2 on a usage error.
@@ -51,9 +53,10 @@ main() {
     MAIN="${RELEASE_MAIN_BRANCH:-main}"
     BRANCH="${RELEASE_BRANCH:-release/next}"
 
-    local ref="${1:-}"
+    local ref="${1:-}" refresh=0
     if [[ "$ref" == "--refresh" ]]; then
-        ref="$(conflicting_release_pr_version)"
+        refresh=1
+        ref="$(open_release_pr_version)"
         [[ -n "$ref" ]] || return 0
     fi
     if [[ ! "$ref" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -119,17 +122,23 @@ the Cargo.toml, Cargo.lock and Chart.yaml versions to ${VER}.
 Written by scripts/release-pr.sh.
 EOF
 
-    # Push only when release/next does not hold this change on this main already.
-    local same=0 remote_ref
+    # Push only when the merge of release/next into main does not give this
+    # tree. The squash merge of the PR writes that merge's tree on main, so a
+    # release/next that merges to the same tree needs no push, even after main
+    # moved. A conflict, or a clean merge to another tree, needs one.
+    local same=0 remote_ref merged
     if git ls-remote --exit-code --heads "$REMOTE" "$BRANCH" >/dev/null 2>&1; then
         git fetch --quiet "$REMOTE" "+refs/heads/${BRANCH}:refs/remotes/${REMOTE}/${BRANCH}"
         remote_ref="refs/remotes/${REMOTE}/${BRANCH}"
-        if [[ "$(git rev-parse "${remote_ref}^{tree}")" == "$(git rev-parse "HEAD^{tree}")" \
-            && "$(git rev-parse -q --verify "${remote_ref}^" || true)" == "$main_head" ]]; then
+        if merged="$(git merge-tree --write-tree "$main_head" "$remote_ref" 2>/dev/null)" \
+            && [[ "$merged" == "$(git rev-parse "HEAD^{tree}")" ]]; then
             same=1
         fi
     fi
-    if [[ "$same" -eq 1 ]]; then
+    if [[ "$same" -eq 1 && "$refresh" -eq 1 ]]; then
+        echo "release-pr: the release PR merges into ${MAIN} as this rebuild; nothing to refresh."
+        return 0
+    elif [[ "$same" -eq 1 ]]; then
         echo "release-pr: ${REMOTE}/${BRANCH} already holds this change; not pushing."
     else
         git push --quiet --force "$REMOTE" "HEAD:refs/heads/${BRANCH}"
@@ -143,7 +152,7 @@ EOF
 - Pins the README install docs to ${TAG}, so \`check-readme-version.sh\` passes again.
 - Sets the \`Cargo.toml\`, \`Cargo.lock\` and \`Chart.yaml\` versions to ${VER}.
 
-\`scripts/release-pr.sh\` wrote this PR after the GitHub Release was published. It rebuilds the PR on the new main when a later CHANGELOG change conflicts with it.
+\`scripts/release-pr.sh\` wrote this PR after the GitHub Release was published. It rebuilds the PR on the new main when a later CHANGELOG change conflicts with it or would merge into the wrong section.
 Auto-merge (squash) is on: the PR merges when CI is green.
 A later release replaces this PR. The title cuts no release."
 
@@ -169,32 +178,19 @@ A later release replaces this PR. The title cuts no release."
     fi
 }
 
-# conflicting_release_pr_version — print the version of the open release PR when
-# it conflicts with main; print nothing when there is no open release PR or it
-# merges cleanly. GitHub computes mergeability after a push, so an UNKNOWN
-# answer is read again a few times.
-conflicting_release_pr_version() {
+# open_release_pr_version — print the version of the open release PR; print
+# nothing when there is no open release PR.
+open_release_pr_version() {
     local branch="${RELEASE_BRANCH:-release/next}" main="${RELEASE_MAIN_BRANCH:-main}"
-    local line pr title state tries
+    local line title
     line="$(gh pr list --head "$branch" --base "$main" --state open \
         --json number,title --jq '.[0] | select(.) | "\(.number) \(.title)"')"
     if [[ -z "$line" ]]; then
         echo "release-pr: no open release PR; nothing to refresh." >&2
         return 0
     fi
-    pr="${line%% *}"
     title="${line#* }"
-    state=UNKNOWN
-    for tries in 1 2 3 4 5 6; do
-        state="$(gh pr view "$pr" --json mergeable --jq .mergeable)"
-        [[ "$state" != UNKNOWN ]] && break
-        sleep "${RELEASE_POLL_SECONDS:-10}"
-    done
-    if [[ "$state" != CONFLICTING ]]; then
-        echo "release-pr: release PR #${pr} is ${state} (after ${tries} reads); nothing to refresh." >&2
-        return 0
-    fi
-    echo "release-pr: release PR #${pr} conflicts with ${main}; rebuilding it." >&2
+    echo "release-pr: checking release PR #${line%% *} against a rebuild on ${main}." >&2
     echo "${title#chore(release): }"
 }
 
