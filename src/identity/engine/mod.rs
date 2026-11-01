@@ -28300,6 +28300,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn token_exchange_rejects_revoked_agent_in_act_chain() {
         use crate::identity::tokens::{decode_claims_unverified, ActClaim};
         use crate::identity::{
