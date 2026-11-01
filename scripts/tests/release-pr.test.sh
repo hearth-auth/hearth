@@ -481,6 +481,32 @@ check "--refresh leaves a release PR that merges cleanly" \
     '[[ "$rc" -eq 0 && "$(git -C "$REMOTE" rev-parse refs/heads/release/next)" == "$before_refresh" ]] \
      && ! grep -q "^pr edit" "$GH_LOG"' || echo "$out" | sed 's/^/    /'
 
+# Main gets an entry below a released one, in another hunk than the release
+# cut: the PR still merges cleanly, but the squash merge would put the new entry
+# under [9.9.9] (#721 landed in [4.7.3] this way). --refresh rebuilds the PR.
+python3 - "$WORK/CHANGELOG.md" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+s = s.replace("- **Bug** — fixed.\n", "- **Bug** — fixed.\n- **Late fix** — after the tag.\n", 1)
+open(p, "w").write(s)
+PY
+git -C "$WORK" commit --quiet -am "fix: late fix"
+git -C "$WORK" push --quiet origin main
+: > "$GH_LOG"
+out="$(GH_MERGEABLE=MERGEABLE run_pr --refresh 2>&1)"
+rc=$?
+rebuilt="$(git -C "$REMOTE" rev-parse refs/heads/release/next)"
+# What GitHub's squash merge of the PR would put on main.
+merged_tree="$(git -C "$REMOTE" merge-tree --write-tree refs/heads/main "$rebuilt" | head -1)"
+merged_changelog="$(git -C "$REMOTE" show "${merged_tree}:CHANGELOG.md" 2>/dev/null)"
+check "--refresh rebuilds a release PR whose clean merge misplaces a later entry" \
+    '[[ "$rc" -eq 0 && "$(git -C "$REMOTE" rev-parse "${rebuilt}^")" == "$(git -C "$REMOTE" rev-parse refs/heads/main)" ]] \
+     && grep -q "^pr edit 7 --title chore(release): v9.9.9" "$GH_LOG" \
+     && [[ "$(sed -n "/^## \[Unreleased\]/,/^## \[9\.9\.9\]/p" <<<"$merged_changelog")" == *"Late fix"* \
+        && "$(sed -n "/^## \[9\.9\.9\]/,/^## \[1\.0\.0\]/p" <<<"$merged_changelog")" != *"Late fix"* ]]' \
+    || echo "$out" | sed 's/^/    /'
+
 # Main gets another entry next to the released ones, and the PR conflicts:
 # --refresh rebuilds release/next on the new main, for the PR's version.
 add_entry "Even later thing"
