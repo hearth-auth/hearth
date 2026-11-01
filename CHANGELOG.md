@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.7.6] — 2026-11-01
+
 ### Changed
 - **The token endpoint answers `400` for `invalid_dpop_proof` and `use_dpop_nonce`** (#626). Both
   token routes (`/token` and `/realms/{name}/token`) answered `401`, so a DPoP client library
