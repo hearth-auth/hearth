@@ -2203,6 +2203,25 @@ fn non_interactive_authorization_request(
             }
         }
 
+        // The PAR endpoint stores `response_mode` unparsed; the browser
+        // refuses an unsupported one when it consumes the request, and so
+        // does this path (#628).
+        let Ok(response_mode) = stored
+            .response_mode
+            .as_deref()
+            .map(str::parse::<crate::identity::ResponseMode>)
+            .transpose()
+        else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid_request",
+                    "error_description": "unsupported_response_mode"
+                })),
+            )
+                .into_response());
+        };
+
         AuthorizationRequest {
             organization: stored.organization,
             client_id: stored.client_id,
@@ -2216,7 +2235,7 @@ fn non_interactive_authorization_request(
             code_challenge_method: stored.code_challenge_method,
             nonce: stored.nonce,
             amr_values: Vec::new(),
-            response_mode: None,
+            response_mode,
             request: None,
         }
     } else {
