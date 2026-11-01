@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Security
+- **`POST /admin/realms` and `PATCH /admin/realms/{id}` check authentication first** (#623). Both
+  routes are disabled (realms live in `hearth.yaml`) and answered `405` to any caller. A request
+  without a token now gets `401`, and a token without `hearth.realm.admin` gets `403`; a realm
+  admin still gets the `405`.
+
 ## [4.7.2] — 2026-10-31
 
 ### Changed
