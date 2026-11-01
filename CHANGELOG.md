@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Fixed
+- **`POST /authorize` refuses a pushed request with an unsupported `response_mode`** (#628). With
+  a PAR `request_uri`, `POST /authorize` and `POST /realms/{name}/authorize` ignored the pushed
+  `response_mode`, so a pushed mode such as `query.jwt` got a code. Both routes now answer `400`
+  `invalid_request` (`unsupported_response_mode`), as the browser `/authorize` does. For embedders
+  of the engine, `authorize()` now uses the `response_mode` of a signed request object (RFC 9101
+  §4) and refuses an unsupported one.
+
 ## [4.7.5] — 2026-11-01
 
 ### Fixed
