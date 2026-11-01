@@ -777,3 +777,50 @@ async fn realm_authorize_consumes_a_pushed_authorization_request() {
         "a spent request_uri; body {body}"
     );
 }
+
+/// #628: `POST /authorize` dropped a pushed request's `response_mode` and so
+/// never checked it. A pushed mode Hearth does not support got a code, while
+/// the browser `/authorize` refuses it. Both routes now answer
+/// `400 invalid_request`.
+#[tokio::test]
+async fn json_authorize_refuses_a_pushed_request_with_an_unsupported_response_mode() {
+    use hearth::identity::PushedAuthorizationRequest;
+
+    let f = setup().await;
+    let client = f.register(ClientTrustLevel::FirstParty, false);
+    let realm_uri = format!("/realms/{}/authorize", f.realm_name);
+    for uri in ["/authorize", realm_uri.as_str()] {
+        let request_uri = f
+            .harness
+            .identity()
+            .push_authorization_request(
+                &f.realm,
+                &PushedAuthorizationRequest {
+                    organization: None,
+                    client_id: client.clone(),
+                    redirect_uri: REDIRECT_URI.into(),
+                    scope: "openid".into(),
+                    state: "pushed-state".into(),
+                    resource: None,
+                    response_type: "code".into(),
+                    code_challenge: Some(PKCE_CHALLENGE.into()),
+                    code_challenge_method: Some(CodeChallengeMethod::S256),
+                    nonce: None,
+                    request: None,
+                    response_mode: Some("query.jwt".into()),
+                    prompt: None,
+                },
+            )
+            .expect("push authorization request")
+            .request_uri;
+        let body = serde_json::json!({
+            "client_id": client.as_uuid().to_string(),
+            "request_uri": request_uri,
+        })
+        .to_string();
+        let (status, body) = post_authorize(&f, uri, &f.token, body, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: body {body}");
+        assert_eq!(body["error"], "invalid_request", "{uri}: body {body}");
+        assert!(body.get("code").is_none(), "{uri}: no code; body {body}");
+    }
+}
