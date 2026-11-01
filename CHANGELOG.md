@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Security
+- **A DPoP proof that fails the key-binding check at the token endpoint no longer spends its
+  `jti`** (#624). On the refresh-token and token-exchange grants, the proof key must match the
+  grant family's key or the subject token's `cnf.jkt`. A proof from another key was refused but
+  still recorded its `jti`, so the key holder's later proof with that `jti` was refused as a
+  replay. The `jti` is now recorded after the check passes, and before tokens are issued.
+
 ## [4.7.4] — 2026-11-01
 
 ### Security

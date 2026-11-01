@@ -309,6 +309,7 @@ async fn f2_01_cnf_bound_subject_without_dpop_is_rejected() {
         resource: None,
         audience: None,
         dpop_jkt: None, // no DPoP proof presented
+        dpop_jti: None,
     };
     let err = h
         .identity()
@@ -338,6 +339,7 @@ async fn f2_02_cnf_bound_subject_with_wrong_dpop_is_rejected() {
         resource: None,
         audience: None,
         dpop_jkt: Some("attacker-controlled-key".to_string()),
+        dpop_jti: None,
     };
     let err = h
         .identity()
@@ -367,6 +369,7 @@ async fn f2_03_cnf_bound_subject_with_matching_dpop_succeeds() {
         resource: None,
         audience: None,
         dpop_jkt: Some(SUBJECT_JKT.to_string()), // matches subject cnf.jkt
+        dpop_jti: None,
     };
     let resp = h
         .identity()

@@ -453,6 +453,7 @@ async fn decide_caps_a_delegated_token_at_its_delegated_permissions() {
                     resource: None,
                     audience: None,
                     dpop_jkt: None,
+                    dpop_jti: None,
                 },
             )
             .expect("token exchange")
@@ -543,6 +544,7 @@ async fn decide_denies_a_delegation_beyond_the_actors_permissions() {
                     resource: None,
                     audience: None,
                     dpop_jkt: None,
+                    dpop_jti: None,
                 },
             )
             .expect("token exchange")

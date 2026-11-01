@@ -140,6 +140,7 @@ async fn a_concurrently_replayed_actor_token_is_accepted_once() {
                     resource: None,
                     audience: None,
                     dpop_jkt: None,
+                    dpop_jti: None,
                 },
             )
         });

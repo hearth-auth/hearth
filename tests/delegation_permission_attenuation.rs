@@ -221,6 +221,7 @@ async fn actor_with_no_permissions_yields_empty_delegated_permissions() {
         resource: None,
         audience: None,
         dpop_jkt: None,
+        dpop_jti: None,
     };
 
     let resp = h
@@ -287,6 +288,7 @@ async fn no_actor_token_attenuates_to_client_permissions() {
         resource: None,
         audience: None,
         dpop_jkt: None,
+        dpop_jti: None,
     };
 
     let resp = h

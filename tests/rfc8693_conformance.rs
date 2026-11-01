@@ -242,6 +242,7 @@ async fn rfc8693_response_required_fields() {
                 resource: None,
                 audience: None,
                 dpop_jkt: None,
+                dpop_jti: None,
             },
         )
         .expect("rfc8693_token_exchange");
@@ -315,6 +316,7 @@ async fn rfc8693_err01_wrong_subject_token_type() {
                 resource: None,
                 audience: None,
                 dpop_jkt: None,
+                dpop_jti: None,
             },
         )
         .expect_err("must reject wrong subject_token_type");
@@ -387,6 +389,7 @@ async fn rfc8693_err02_invalid_signature_subject_token_rejected() {
                 resource: None,
                 audience: None,
                 dpop_jkt: None,
+                dpop_jti: None,
             },
         )
         .expect_err("must reject subject token with invalid signature");
@@ -440,6 +443,7 @@ async fn rfc8693_err03_scope_wider_than_subject() {
                 resource: None,
                 audience: None,
                 dpop_jkt: None,
+                dpop_jti: None,
             },
         )
         .expect_err("must reject scope wider than subject");

@@ -255,6 +255,7 @@ async fn refresh_without_a_proof_is_refused_once_the_client_is_flagged() {
 
     let bind = RefreshBindContext {
         authenticated_client_id: Some(client.clone()),
+        dpop_jti: None,
     };
     let err = env
         .h
@@ -287,6 +288,7 @@ async fn refresh_with_the_bound_proof_gets_a_bound_token() {
         .expect("bound exchange");
     let bind = RefreshBindContext {
         authenticated_client_id: Some(client.clone()),
+        dpop_jti: None,
     };
     env.h
         .identity()
@@ -323,6 +325,7 @@ async fn refresh_without_the_flag_stays_bearer() {
             None,
             Some(&RefreshBindContext {
                 authenticated_client_id: Some(client.clone()),
+                dpop_jti: None,
             }),
         )
         .expect("an unflagged client refreshes without DPoP");

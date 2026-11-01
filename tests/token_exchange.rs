@@ -380,6 +380,7 @@ async fn token_exchange_requires_access_token_type() {
         resource: None,
         audience: None,
         dpop_jkt: None,
+        dpop_jti: None,
     };
 
     let err = identity
@@ -432,6 +433,7 @@ async fn token_exchange_rejects_expired_subject_token() {
         resource: None,
         audience: None,
         dpop_jkt: None,
+        dpop_jti: None,
     };
 
     let err = identity
@@ -475,6 +477,7 @@ async fn token_exchange_empty_scope_intersection_rejected() {
         resource: None,
         audience: None,
         dpop_jkt: None,
+        dpop_jti: None,
     };
 
     let err = identity
@@ -521,6 +524,7 @@ async fn token_exchange_produces_act_claim() {
         resource: None,
         audience: None,
         dpop_jkt: None,
+        dpop_jti: None,
     };
 
     let response = identity
@@ -574,6 +578,7 @@ async fn token_exchange_actor_token_requires_jwt_actor_token_type() {
             resource: None,
             audience: None,
             dpop_jkt: None,
+            dpop_jti: None,
         };
 
         let err = identity
@@ -616,6 +621,7 @@ async fn token_exchange_actor_jti_replay_rejected() {
         resource: None,
         audience: None,
         dpop_jkt: None,
+        dpop_jti: None,
     };
 
     // Two separate real subject tokens — both cryptographically valid.
@@ -675,6 +681,7 @@ async fn token_exchange_delegation_depth_enforced() {
                     resource: None,
                     audience: None,
                     dpop_jkt: None,
+                    dpop_jti: None,
                 },
             )
             .unwrap_or_else(|e| panic!("hop {i} of {max_depth} failed: {e}"))
@@ -699,6 +706,7 @@ async fn token_exchange_delegation_depth_enforced() {
                 resource: None,
                 audience: None,
                 dpop_jkt: None,
+                dpop_jti: None,
             },
         )
         .expect_err("depth at global ceiling + 1 must be rejected");
@@ -745,6 +753,7 @@ async fn token_exchange_lifetime_bounded_by_subject() {
         resource: None,
         audience: None,
         dpop_jkt: None,
+        dpop_jti: None,
     };
 
     let response = identity
@@ -792,6 +801,7 @@ async fn token_exchange_nested_act_chain_two_hops() {
                 resource: None,
                 audience: None,
                 dpop_jkt: None,
+                dpop_jti: None,
             },
         )
         .expect("first hop should succeed")
@@ -815,6 +825,7 @@ async fn token_exchange_nested_act_chain_two_hops() {
                 resource: None,
                 audience: None,
                 dpop_jkt: None,
+                dpop_jti: None,
             },
         )
         .expect("two-hop exchange should succeed");
@@ -897,6 +908,7 @@ async fn token_exchange_actor_scope_limits_result() {
         resource: None,
         audience: None,
         dpop_jkt: None,
+        dpop_jti: None,
     };
 
     let response = identity
@@ -949,6 +961,7 @@ async fn token_exchange_zero_scope_actor_rejected() {
         resource: None,
         audience: None,
         dpop_jkt: None,
+        dpop_jti: None,
     };
 
     let err = identity
@@ -993,6 +1006,7 @@ async fn token_exchange_rejects_cross_realm_subject_tid() {
         resource: None,
         audience: None,
         dpop_jkt: None,
+        dpop_jti: None,
     };
 
     // Exchange is performed against realm_b — must be rejected.
@@ -1047,6 +1061,7 @@ async fn token_exchange_actor_sub_mismatch_rejected() {
         resource: None,
         audience: None,
         dpop_jkt: None,
+        dpop_jti: None,
     };
 
     let err = identity
@@ -1091,6 +1106,7 @@ async fn token_exchange_overrides_iss_and_tid_to_serving_realm() {
         resource: None,
         audience: None,
         dpop_jkt: None,
+        dpop_jti: None,
     };
 
     let response = identity
@@ -1162,6 +1178,7 @@ async fn token_exchange_rejects_forged_subject_token_bogus_signature() {
                 resource: None,
                 audience: None,
                 dpop_jkt: None,
+                dpop_jti: None,
             },
         )
         .expect_err("forged subject_token must be rejected");

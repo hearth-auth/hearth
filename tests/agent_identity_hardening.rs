@@ -541,6 +541,7 @@ async fn token_exchange_refuses_a_suspended_agent_actor() {
         resource: None,
         audience: None,
         dpop_jkt: None,
+        dpop_jti: None,
     };
 
     // Control: an Active agent may exchange.

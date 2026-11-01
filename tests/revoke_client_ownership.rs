@@ -527,6 +527,7 @@ fn exchange(
                 resource: None,
                 audience: None,
                 dpop_jkt: None,
+                dpop_jti: None,
             },
         )
         .expect("token exchange")
@@ -753,6 +754,7 @@ async fn an_exchanged_token_with_an_actor_token_belongs_to_the_actor() {
                 resource: None,
                 audience: None,
                 dpop_jkt: None,
+                dpop_jti: None,
             },
         )
         .expect("token exchange with actor_token")

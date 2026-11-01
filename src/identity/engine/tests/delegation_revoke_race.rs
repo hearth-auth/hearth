@@ -204,6 +204,7 @@ fn an_exchange_racing_a_revoke_of_its_parent_fails_and_leaves_no_live_grant() {
             resource: None,
             audience: None,
             dpop_jkt: None,
+            dpop_jti: None,
         },
     );
     assert!(

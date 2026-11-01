@@ -109,6 +109,7 @@ fn client_refresh(h: &common::TestHarness, realm: &RealmId, client: &ClientId) -
 fn bind(client: &ClientId) -> RefreshBindContext {
     RefreshBindContext {
         authenticated_client_id: Some(client.clone()),
+        dpop_jti: None,
     }
 }
 
