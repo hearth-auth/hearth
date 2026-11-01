@@ -17,11 +17,13 @@ use crate::identity::federation::saml::authn_request::BuildAuthnRequestParams;
 use crate::identity::federation::saml::types::{
     SamlNameIdFormat, SamlStateBag, SAML_ASSERTION_SENTINEL_SKEW_SECS,
 };
+use crate::identity::federation::saml::SamlError;
 use crate::identity::federation::saml::{
     build_authn_request_xml, build_redirect_url, build_sp_metadata, parse_post_form_saml,
     SamlSpOutcome, SamlSpService, SpMetadataParams,
 };
 use crate::identity::federation::IdpKind;
+use crate::identity::IdentityError;
 
 use super::WebState;
 use crate::abuse::redirect::validate_return_to;
@@ -47,15 +49,15 @@ pub async fn sp_metadata(
 ) -> Response {
     let realm = match resolve_realm(&state, &realm_name) {
         Some(r) => r,
-        None => return (StatusCode::NOT_FOUND, "realm not found").into_response(),
+        None => return saml_endpoint_error(&IdentityError::RealmNotFound),
     };
 
     // Check that an IdP with this name exists and is SAML-kind.
     let Ok(Some(idp)) = state.identity.get_idp_by_name(&realm, &q.idp) else {
-        return (StatusCode::NOT_FOUND, "IdP not configured").into_response();
+        return saml_refusal(SamlError::UnknownIdp);
     };
     if idp.kind != IdpKind::Saml {
-        return (StatusCode::BAD_REQUEST, "IdP is not SAML").into_response();
+        return saml_refusal(SamlError::UnknownIdp);
     }
 
     // Build SP metadata. For Phase 1 we advertise unsigned AuthnRequests by
@@ -114,7 +116,7 @@ pub async fn sp_acs(
 ) -> Response {
     let realm = match resolve_realm(&state, &realm_name) {
         Some(r) => r,
-        None => return (StatusCode::NOT_FOUND, "realm not found").into_response(),
+        None => return saml_endpoint_error(&IdentityError::RealmNotFound),
     };
 
     let _span = tracing::info_span!(
@@ -127,24 +129,28 @@ pub async fn sp_acs(
     // Decode the base64 payload.
     let xml = match parse_post_form_saml(&form.saml_response) {
         Ok(b) => b,
-        Err(_) => return (StatusCode::BAD_REQUEST, "invalid SAMLResponse").into_response(),
+        Err(e) => return saml_endpoint_error(&e),
     };
 
     // Resolve the state bag from RelayState (it carries the IdP we're
     // expecting + the request ID).
     let Some(relay) = form.relay_state.as_deref() else {
-        return (StatusCode::BAD_REQUEST, "missing RelayState").into_response();
+        return saml_refusal(SamlError::InvalidAuthnRequest {
+            reason: "missing RelayState".to_string(),
+        });
     };
     let Ok(bag) = state.identity.take_saml_state(&realm, relay) else {
-        return (StatusCode::BAD_REQUEST, "invalid RelayState").into_response();
+        return saml_refusal(SamlError::InvalidAuthnRequest {
+            reason: "unknown RelayState".to_string(),
+        });
     };
 
     // Load the corresponding IdP config.
     let Ok(Some(idp_cfg)) = state.identity.get_idp(&realm, &bag.idp_id) else {
-        return (StatusCode::BAD_REQUEST, "IdP not found").into_response();
+        return saml_refusal(SamlError::UnknownIdp);
     };
     if idp_cfg.kind != IdpKind::Saml {
-        return (StatusCode::BAD_REQUEST, "IdP is not SAML").into_response();
+        return saml_refusal(SamlError::UnknownIdp);
     }
 
     // Adapt generic IdpConfig → SamlIdpConfig (SAML-specific fields are
@@ -225,7 +231,7 @@ pub async fn sp_acs(
                         metadata: Some(serde_json::json!({ "reason": "replay" })),
                     },
                 );
-                return (StatusCode::BAD_REQUEST, "replay detected").into_response();
+                return saml_refusal(SamlError::Replay);
             }
 
             // 19.5 (audit §4.10#6, §4.22#4): this used to stop here — audit a
@@ -340,7 +346,14 @@ pub async fn sp_acs(
                     metadata: Some(serde_json::json!({ "reason": reason })),
                 },
             );
-            (StatusCode::BAD_REQUEST, "SAML response rejected").into_response()
+            if matches!(error, IdentityError::Saml(_)) {
+                saml_endpoint_error(&error)
+            } else {
+                // Not a SAML check: still a rejected response, as before.
+                saml_refusal(SamlError::Parse {
+                    reason: "SAML response rejected".to_string(),
+                })
+            }
         }
     }
 }
@@ -362,13 +375,13 @@ pub async fn sp_begin(
 ) -> Response {
     let realm = match resolve_realm(&state, &realm_name) {
         Some(r) => r,
-        None => return (StatusCode::NOT_FOUND, "realm not found").into_response(),
+        None => return saml_endpoint_error(&IdentityError::RealmNotFound),
     };
     let Ok(Some(idp_cfg)) = state.identity.get_idp_by_name(&realm, &q.idp) else {
-        return (StatusCode::NOT_FOUND, "IdP not configured").into_response();
+        return saml_refusal(SamlError::UnknownIdp);
     };
     if idp_cfg.kind != IdpKind::Saml {
-        return (StatusCode::BAD_REQUEST, "IdP is not SAML").into_response();
+        return saml_refusal(SamlError::UnknownIdp);
     }
 
     let Some(realm_url) = realm_base_url_from_headers(&state, &headers, &realm_name) else {
@@ -418,7 +431,11 @@ pub async fn sp_begin(
         Some(&state_token),
     ) {
         Ok(u) => u,
-        Err(_) => return (StatusCode::BAD_REQUEST, "redirect build failed").into_response(),
+        Err(_) => {
+            return saml_refusal(SamlError::InvalidAuthnRequest {
+                reason: "redirect build failed".to_string(),
+            })
+        }
     };
 
     crate::protocol::audit_log::record(
@@ -470,6 +487,18 @@ fn issued_session_cookie(response: &Response) -> bool {
 /// SAML entity IDs, `Destination` and `AudienceRestriction` are all absolute
 /// URLs that must be stable and operator-chosen. Serving a SAML endpoint
 /// without one is a misconfiguration, not a request error.
+/// A SAML endpoint refusal (#629) in the REST error shape, with the wire code
+/// of `err` (`HEARTH_SAML_*` for a SAML failure, per the `saml-sp-profile`
+/// spec).
+fn saml_endpoint_error(err: &IdentityError) -> Response {
+    crate::protocol::http::identity_error_to_response(err).into_response()
+}
+
+/// [`saml_endpoint_error`] for a [`SamlError`].
+fn saml_refusal(err: SamlError) -> Response {
+    saml_endpoint_error(&IdentityError::Saml(err))
+}
+
 fn saml_origin_unconfigured() -> Response {
     tracing::warn!(
         "SAML endpoint refused: neither `onboarding.base_url` nor `oidc.issuer` is \
