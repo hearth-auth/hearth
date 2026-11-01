@@ -1010,6 +1010,23 @@ fn multiple_auth_methods_response() -> Response {
         .into_response()
 }
 
+/// [`identity_error_to_response`] for the token endpoint (#626). There a DPoP
+/// proof error is an RFC 6749 §5.2 error response, so `invalid_dpop_proof` and
+/// `use_dpop_nonce` answer `400` (RFC 9449 §5 and §8). Resource endpoints keep
+/// the `401` that [`identity_error_to_response`] gives them.
+fn token_error_to_response(
+    err: &crate::identity::IdentityError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    use crate::identity::IdentityError;
+    let (status, body) = identity_error_to_response(err);
+    match err {
+        IdentityError::InvalidDPopProof { .. }
+        | IdentityError::DPopProofReplay
+        | IdentityError::DPopNonceInvalid => (StatusCode::BAD_REQUEST, body),
+        _ => (status, body),
+    }
+}
+
 /// Token-endpoint grants that check the DPoP proof key against a key the grant
 /// is bound to: the grant family's key, or the subject token's `cnf.jkt`. The
 /// engine spends the proof's `jti` after that check (#624), so the endpoint
@@ -2686,7 +2703,7 @@ async fn token_exchange_impl(
                             .unwrap_or_else(|| state.dpop.is_valid_nonce(n, now_secs)),
                     };
                     if !nonce_valid {
-                        return identity_error_to_response(
+                        return token_error_to_response(
                             &crate::identity::error::IdentityError::DPopNonceInvalid,
                         )
                         .into_response();
@@ -2701,13 +2718,13 @@ async fn token_exchange_impl(
                             &validated.jti,
                             now_secs,
                         ) {
-                            return identity_error_to_response(&e).into_response();
+                            return token_error_to_response(&e).into_response();
                         }
                         None
                     };
                     Some((validated.jkt, engine_jti))
                 }
-                Err(e) => return identity_error_to_response(&e).into_response(),
+                Err(e) => return token_error_to_response(&e).into_response(),
             }
         } else {
             None
@@ -2786,7 +2803,7 @@ async fn token_exchange_impl(
                     }
                     (StatusCode::OK, Json(proto_to_rest_json(&token_resp))).into_response()
                 }
-                Err(e) => identity_error_to_response(&e).into_response(),
+                Err(e) => token_error_to_response(&e).into_response(),
             }
         }
         "refresh_token" => {
@@ -2855,7 +2872,7 @@ async fn token_exchange_impl(
                     };
                     (StatusCode::OK, Json(proto_to_rest_json(&resp))).into_response()
                 }
-                Err(e) => identity_error_to_response(&e).into_response(),
+                Err(e) => token_error_to_response(&e).into_response(),
             }
         }
         "client_credentials" => {
@@ -2990,7 +3007,7 @@ async fn token_exchange_impl(
                     )
                         .into_response()
                 }
-                Err(e) => identity_error_to_response(&e).into_response(),
+                Err(e) => token_error_to_response(&e).into_response(),
             }
         }
         "urn:ietf:params:oauth:grant-type:jwt-bearer" => {
@@ -3036,7 +3053,7 @@ async fn token_exchange_impl(
                     };
                     (StatusCode::OK, Json(proto_to_rest_json(&token_resp))).into_response()
                 }
-                Err(e) => identity_error_to_response(&e).into_response(),
+                Err(e) => token_error_to_response(&e).into_response(),
             }
         }
         // RFC 8693 Token Exchange (openspec/specs/delegated-authorization/spec.md / B.4)
@@ -3105,7 +3122,7 @@ async fn token_exchange_impl(
                     )
                         .into_response()
                 }
-                Err(e) => identity_error_to_response(&e).into_response(),
+                Err(e) => token_error_to_response(&e).into_response(),
             }
         }
         // Magic-link grant — completes the passwordless flow the SDKs start
@@ -3133,7 +3150,7 @@ async fn token_exchange_impl(
                 user_agent,
             ) {
                 Ok(resp) => (StatusCode::OK, Json(resp)).into_response(),
-                Err(e) => identity_error_to_response(&e).into_response(),
+                Err(e) => token_error_to_response(&e).into_response(),
             }
         }
         _ => (
@@ -3906,7 +3923,7 @@ async fn realm_token_exchange(
                         // Include DPoP-Nonce in the error so the client can retry.
                         // (The success-path DPoP-Nonce at the bottom of this fn is
                         //  not reached on early return.)
-                        let mut err_resp = identity_error_to_response(
+                        let mut err_resp = token_error_to_response(
                             &crate::identity::error::IdentityError::DPopNonceInvalid,
                         )
                         .into_response();
@@ -3931,13 +3948,13 @@ async fn realm_token_exchange(
                             &validated.jti,
                             now_secs,
                         ) {
-                            return identity_error_to_response(&e).into_response();
+                            return token_error_to_response(&e).into_response();
                         }
                         None
                     };
                     Some((validated.jkt, engine_jti))
                 }
-                Err(e) => return identity_error_to_response(&e).into_response(),
+                Err(e) => return token_error_to_response(&e).into_response(),
             }
         } else {
             None
@@ -4004,7 +4021,7 @@ async fn realm_token_exchange(
                     }
                     (StatusCode::OK, Json(proto_to_rest_json(&token_resp))).into_response()
                 }
-                Err(e) => identity_error_to_response(&e).into_response(),
+                Err(e) => token_error_to_response(&e).into_response(),
             }
         }
         "refresh_token" => {
@@ -4060,7 +4077,7 @@ async fn realm_token_exchange(
                     };
                     (StatusCode::OK, Json(proto_to_rest_json(&resp))).into_response()
                 }
-                Err(e) => identity_error_to_response(&e).into_response(),
+                Err(e) => token_error_to_response(&e).into_response(),
             }
         }
         "client_credentials" => {
@@ -4166,7 +4183,7 @@ async fn realm_token_exchange(
                     Json(proto_to_rest_json(&pb::OidcTokenResponse::from(&response))),
                 )
                     .into_response(),
-                Err(e) => identity_error_to_response(&e).into_response(),
+                Err(e) => token_error_to_response(&e).into_response(),
             }
         }
         "urn:ietf:params:oauth:grant-type:jwt-bearer" => {
@@ -4212,7 +4229,7 @@ async fn realm_token_exchange(
                     };
                     (StatusCode::OK, Json(proto_to_rest_json(&token_resp))).into_response()
                 }
-                Err(e) => identity_error_to_response(&e).into_response(),
+                Err(e) => token_error_to_response(&e).into_response(),
             }
         }
         // RFC 8693 Token Exchange (openspec/specs/delegated-authorization/spec.md / B.4)
@@ -4285,7 +4302,7 @@ async fn realm_token_exchange(
                     )
                         .into_response()
                 }
-                Err(e) => identity_error_to_response(&e).into_response(),
+                Err(e) => token_error_to_response(&e).into_response(),
             }
         }
         // Magic-link grant — completes the passwordless flow the SDKs start
@@ -4313,7 +4330,7 @@ async fn realm_token_exchange(
                 user_agent,
             ) {
                 Ok(resp) => (StatusCode::OK, Json(resp)).into_response(),
-                Err(e) => identity_error_to_response(&e).into_response(),
+                Err(e) => token_error_to_response(&e).into_response(),
             }
         }
         // The same answer as the global endpoint: the RFC 6749 §5.2 code, and

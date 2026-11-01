@@ -354,8 +354,8 @@ async fn dpop_replay_rejected() {
     let resp2 = app2.oneshot(mk_req(&proof)).await.unwrap();
     assert_eq!(
         resp2.status(),
-        StatusCode::UNAUTHORIZED,
-        "replay must be rejected with 401"
+        StatusCode::BAD_REQUEST,
+        "a replay at the token endpoint must be rejected with 400 (RFC 6749 §5.2, #626)"
     );
     let bytes = to_bytes(resp2.into_body(), 1024 * 1024).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -392,8 +392,8 @@ async fn dpop_invalid_proof_rejected() {
 
     assert_eq!(
         resp.status(),
-        StatusCode::UNAUTHORIZED,
-        "bad proof must be 401"
+        StatusCode::BAD_REQUEST,
+        "a bad proof at the token endpoint must be 400 (RFC 9449 §5, #626)"
     );
     let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -488,13 +488,13 @@ async fn dpop_nonce_required_missing_nonce_rejected() {
         .unwrap();
     assert_eq!(
         resp1.status(),
-        StatusCode::UNAUTHORIZED,
-        "DPoP without nonce must be 401"
+        StatusCode::BAD_REQUEST,
+        "DPoP without nonce at the token endpoint must be 400 (RFC 9449 §8, #626)"
     );
     let issued_nonce = resp1
         .headers()
         .get("DPoP-Nonce")
-        .expect("401 response must contain DPoP-Nonce")
+        .expect("400 response must contain DPoP-Nonce")
         .to_str()
         .unwrap()
         .to_string();
@@ -895,7 +895,7 @@ async fn dpop_htm_mismatch_rejected() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(json["error"].as_str().unwrap(), "invalid_dpop_proof");

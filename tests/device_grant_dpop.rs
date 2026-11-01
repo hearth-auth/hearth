@@ -377,9 +377,9 @@ async fn http_dpop_bound_client_requires_dpop_on_the_device_grant() {
         let client = fx.device_client(true);
         let code = fx.approved_device_code(&client);
         let (status, body) = fx.poll(route, &client, &code, None).await;
-        // The token endpoint answers `InvalidDPopProof` with 401 (as for a
-        // malformed proof), not the 400 the removed FAPI gate used.
-        assert_eq!(status, 401, "{route:?}: unbound device grant: {body}");
+        // The token endpoint answers `invalid_dpop_proof` with 400 (RFC 9449
+        // §5, RFC 6749 §5.2; #626). Resource endpoints answer 401.
+        assert_eq!(status, 400, "{route:?}: unbound device grant: {body}");
         assert_eq!(body["error"], "invalid_dpop_proof", "{route:?}: {body}");
         assert!(body.get("access_token").is_none(), "{route:?}: {body}");
 
@@ -387,5 +387,39 @@ async fn http_dpop_bound_client_requires_dpop_on_the_device_grant() {
         let (status, body) = fx.poll(route, &client, &code, Some(&key)).await;
         assert_eq!(status, 200, "{route:?}: bound retry: {body}");
         assert_eq!(body["token_type"], "DPoP", "{route:?}");
+    }
+}
+
+/// #626: on both token routes, a proof whose nonce is not a current server
+/// nonce gets `400 use_dpop_nonce` and a `DPoP-Nonce` header to retry with
+/// (RFC 9449 §8), not 401.
+#[tokio::test]
+async fn http_a_proof_without_a_server_nonce_gets_400_use_dpop_nonce() {
+    let fx = fixture(common::TestHarness::server().await.unwrap()).await;
+    for route in [Route::Header, Route::Realm] {
+        let client = fx.device_client(false);
+        let code = fx.approved_device_code(&client);
+        let mut req = reqwest::Client::new()
+            .post(fx.token_url(route))
+            .form(&[
+                ("grant_type", DEVICE_GRANT.to_string()),
+                ("device_code", code),
+                ("client_id", client.as_uuid().to_string()),
+            ])
+            .header(
+                "DPoP",
+                // A nonce value the server never issued.
+                DpopKey::new().proof(&fx.token_htu(route), &uuid::Uuid::new_v4().to_string()),
+            );
+        if let Route::Header = route {
+            req = req.header("X-Realm-ID", fx.realm.as_uuid().to_string());
+        }
+        let resp = req.send().await.expect("token request");
+        let status = resp.status().as_u16();
+        let nonce = resp.headers().get("DPoP-Nonce").cloned();
+        let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+        assert_eq!(status, 400, "{route:?}: {body}");
+        assert_eq!(body["error"], "use_dpop_nonce", "{route:?}: {body}");
+        assert!(nonce.is_some(), "{route:?}: the refusal carries DPoP-Nonce");
     }
 }
