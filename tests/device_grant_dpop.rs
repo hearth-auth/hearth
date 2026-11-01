@@ -408,7 +408,8 @@ async fn http_a_proof_without_a_server_nonce_gets_400_use_dpop_nonce() {
             ])
             .header(
                 "DPoP",
-                DpopKey::new().proof(&fx.token_htu(route), "not-a-server-nonce"),
+                // A nonce value the server never issued.
+                DpopKey::new().proof(&fx.token_htu(route), &uuid::Uuid::new_v4().to_string()),
             );
         if let Route::Header = route {
             req = req.header("X-Realm-ID", fx.realm.as_uuid().to_string());
