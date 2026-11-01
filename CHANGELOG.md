@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.7.5] — 2026-11-01
+
 ### Fixed
 - **A required password change before consent no longer sends the user back to the login page**
   (#627). When a user had to change their password (`UPDATE_PASSWORD`) during an authorization
