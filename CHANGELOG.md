@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Fixed
+- **The SAML endpoints answer with `HEARTH_SAML_*` error codes** (#629). The ACS, metadata and
+  begin endpoints under `/ui/realms/{realm}/federation/saml/` answered a refusal with plain text
+  and no code. They now answer with the JSON error shape of the REST API (`error` and
+  `error_code`): a parse, signature, validity, replay or `RelayState` failure is
+  `HEARTH_SAML_INVALID` (`400`), and an IdP that is not a SAML IdP of the realm is
+  `HEARTH_SAML_ENTITY_NOT_FOUND` (`404`; the ACS answered `400` for it). The `5xx` answers do not
+  change.
+
 ## [4.7.5] — 2026-11-01
 
 ### Fixed

@@ -664,3 +664,112 @@ fn sp_acs_accepts_an_assertion_signed_by_the_second_certificate_of_a_bundle() {
         "the accepted assertion must produce a session; got {cookies:?}"
     );
 }
+
+/// The JSON body of `resp`, or `Null` when the body is not JSON.
+fn body_json(resp: axum::http::Response<Body>) -> serde_json::Value {
+    let bytes = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(axum::body::to_bytes(resp.into_body(), 1 << 20))
+        .expect("body");
+    serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+}
+
+/// Asserts a SAML endpoint refusal: `status` and the `HEARTH_*` wire code in
+/// the REST error shape (`{"error": …, "error_code": …}`).
+fn assert_saml_refusal(resp: axum::http::Response<Body>, status: u16, code: &str, what: &str) {
+    assert_eq!(resp.status().as_u16(), status, "{what}: status");
+    let body = body_json(resp);
+    assert_eq!(
+        body["error_code"], code,
+        "{what}: the refusal must carry the wire code; body {body}"
+    );
+}
+
+/// #629 (`saml-sp-profile`, "SAML failures map to stable wire codes"): the
+/// ACS refused with a plain-text `400` and no wire code. A replayed
+/// assertion, an undecodable `SAMLResponse` and an unknown `RelayState` are
+/// all `HEARTH_SAML_INVALID`.
+#[test]
+fn sp_acs_refusals_carry_the_saml_wire_code() {
+    let (app, identity, realm_id) = build_app_full();
+    let idp_key = hearth::identity::tokens::RsaSigningKey::generate("corp-idp", 365).expect("key");
+    let idp_id = register_saml_idp(
+        identity.as_ref(),
+        &realm_id,
+        "corp",
+        "https://corp-idp.example",
+        cert_der_to_pem(idp_key.cert_der()),
+    );
+    let sp_entity_id = "http://localhost:8420/ui/realms/demo";
+    let acs_url = format!("{sp_entity_id}/federation/saml/acs");
+    let b64 = signed_saml_response_b64(
+        &idp_key,
+        "_req_629",
+        &acs_url,
+        sp_entity_id,
+        "https://corp-idp.example",
+        "saml-629@corp.example",
+    );
+
+    // Control: the assertion is accepted once.
+    seed_saml_state(
+        identity.as_ref(),
+        &realm_id,
+        &idp_id,
+        "relay-629-a",
+        "_req_629",
+    );
+    let resp = post_acs(&app, &b64, "relay-629-a", &[]);
+    assert_eq!(
+        resp.status().as_u16(),
+        303,
+        "control: the first use logs in"
+    );
+
+    // The same assertion again, under a fresh RelayState for the same request.
+    seed_saml_state(
+        identity.as_ref(),
+        &realm_id,
+        &idp_id,
+        "relay-629-b",
+        "_req_629",
+    );
+    let resp = post_acs(&app, &b64, "relay-629-b", &[]);
+    assert_saml_refusal(resp, 400, "HEARTH_SAML_INVALID", "a replayed assertion");
+
+    seed_saml_state(
+        identity.as_ref(),
+        &realm_id,
+        &idp_id,
+        "relay-629-c",
+        "_req_629",
+    );
+    let resp = post_acs(&app, "not*base64!", "relay-629-c", &[]);
+    assert_saml_refusal(
+        resp,
+        400,
+        "HEARTH_SAML_INVALID",
+        "an undecodable SAMLResponse",
+    );
+
+    let resp = post_acs(&app, &b64, "relay-629-unknown", &[]);
+    assert_saml_refusal(resp, 400, "HEARTH_SAML_INVALID", "an unknown RelayState");
+}
+
+/// #629: an IdP name that is not a registered SAML IdP of the realm got
+/// `404 "IdP not configured"` with no wire code. The metadata and begin
+/// endpoints now answer `HEARTH_SAML_ENTITY_NOT_FOUND`.
+#[test]
+fn saml_endpoints_answer_an_unknown_idp_with_entity_not_found() {
+    let (app, _identity, _realm_id) = build_app_full();
+    for path in [
+        "/ui/realms/demo/federation/saml/metadata?idp=no-such-idp",
+        "/ui/realms/demo/federation/saml/begin?idp=no-such-idp",
+    ] {
+        let req = Request::builder().uri(path).body(Body::empty()).unwrap();
+        let resp = send(&app, req);
+        assert_saml_refusal(resp, 404, "HEARTH_SAML_ENTITY_NOT_FOUND", path);
+    }
+}
