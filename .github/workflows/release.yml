@@ -625,7 +625,7 @@ jobs:
   # only the entries that were in [Unreleased] at the tag. A branch built on the
   # tag conflicted with every CHANGELOG entry merged after it, so it could never
   # auto-merge. release-pr-refresh.yml rebuilds the PR if a later CHANGELOG
-  # change conflicts with it.
+  # change conflicts with it or would merge into the wrong section.
   #
   # SEMANTIC_RELEASE_PAT does the checkout, the push and the gh calls. A branch
   # pushed or a PR opened with GITHUB_TOKEN starts no CI run, so the PR could

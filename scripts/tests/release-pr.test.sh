@@ -353,7 +353,9 @@ git -C "$WORK" push --quiet origin main v9.9.9
 
 # Main moves on after the tag: another PR adds a CHANGELOG entry right next to
 # the released ones. A release PR built on the tag conflicts with this.
+# release-pr.sh leaves the work tree on release/next, so go back to main first.
 add_entry() {
+    git -C "$WORK" checkout --quiet main
     python3 - "$WORK/CHANGELOG.md" "$1" <<'PY'
 import sys
 p, entry = sys.argv[1], sys.argv[2]
@@ -380,7 +382,6 @@ case "$1 $2" in
         else
             cat "$GH_STATE" 2>/dev/null || true
         fi ;;
-    "pr view")      echo "${GH_MERGEABLE:-MERGEABLE}" ;;
     "pr create")    echo 7 > "$GH_STATE"; echo "https://github.com/hearth-auth/hearth/pull/7" ;;
     "pr edit")      ;;
     "pr merge")     [[ -n "${GH_MERGE_FAILS:-}" ]] && { echo "auto-merge is not allowed" >&2; exit 1; } ;;
@@ -393,7 +394,7 @@ export GH_LOG GH_STATE
 # run_pr <tag> — run release-pr.sh in the work tree with the fake gh.
 run_pr() {
     (cd "$WORK" && PATH="$FAKEBIN:$PATH" GH_RELEASE="${GH_RELEASE:-v9.9.9}" \
-        RELEASE_DATE=2026-10-14 RELEASE_POLL_SECONDS=0 bash scripts/release-pr.sh "$1")
+        RELEASE_DATE=2026-10-14 bash scripts/release-pr.sh "$1")
 }
 
 out="$(run_pr v9.9.9 2>&1)"
@@ -473,17 +474,45 @@ git -C "$WORK" checkout --quiet main
 git -C "$WORK" pull --quiet origin main
 before_refresh="$(git -C "$REMOTE" rev-parse refs/heads/release/next)"
 
-# A release PR that still merges cleanly is left alone.
+# Main moved by a commit without a CHANGELOG change: the release PR merges
+# into main as a rebuild would write it, so it is left alone.
 : > "$GH_LOG"
-out="$(GH_MERGEABLE=MERGEABLE run_pr --refresh 2>&1)"
+out="$(run_pr --refresh 2>&1)"
 rc=$?
 check "--refresh leaves a release PR that merges cleanly" \
     '[[ "$rc" -eq 0 && "$(git -C "$REMOTE" rev-parse refs/heads/release/next)" == "$before_refresh" ]] \
      && ! grep -q "^pr edit" "$GH_LOG"' || echo "$out" | sed 's/^/    /'
 
+# Main gets another entry directly above the released ones, where the release
+# cut puts the new version heading, and the PR conflicts: --refresh rebuilds
+# release/next on the new main, for the PR's version.
+git -C "$WORK" checkout --quiet main
+python3 - "$WORK/CHANGELOG.md" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+s = s.replace("- **New thing**", "- **Even later thing** — after the tag.\n\n- **New thing**", 1)
+open(p, "w").write(s)
+PY
+git -C "$WORK" commit --quiet -am "feat: Even later thing"
+git -C "$WORK" push --quiet origin main
+check "the release PR conflicts with main" \
+    '! git -C "$REMOTE" merge-tree --write-tree refs/heads/main refs/heads/release/next >/dev/null'
+: > "$GH_LOG"
+out="$(run_pr --refresh 2>&1)"
+rc=$?
+refreshed="$(git -C "$REMOTE" rev-parse refs/heads/release/next)"
+refreshed_changelog="$(git -C "$REMOTE" show "${refreshed}:CHANGELOG.md")"
+check "--refresh rebuilds a conflicting release PR on the new main" \
+    '[[ "$rc" -eq 0 && "$(git -C "$REMOTE" rev-parse "${refreshed}^")" == "$(git -C "$REMOTE" rev-parse refs/heads/main)" ]] \
+     && grep -q "^pr edit 7 --title chore(release): v9.9.9" "$GH_LOG" \
+     && [[ "$(sed -n "/^## \[Unreleased\]/,/^## \[9\.9\.9\]/p" <<<"$refreshed_changelog")" == *"Even later thing"* ]]' \
+    || echo "$out" | sed 's/^/    /'
+
 # Main gets an entry below a released one, in another hunk than the release
 # cut: the PR still merges cleanly, but the squash merge would put the new entry
 # under [9.9.9] (#721 landed in [4.7.3] this way). --refresh rebuilds the PR.
+git -C "$WORK" checkout --quiet main
 python3 - "$WORK/CHANGELOG.md" <<'PY'
 import sys
 p = sys.argv[1]
@@ -493,8 +522,12 @@ open(p, "w").write(s)
 PY
 git -C "$WORK" commit --quiet -am "fix: late fix"
 git -C "$WORK" push --quiet origin main
+stale_tree="$(git -C "$REMOTE" merge-tree --write-tree refs/heads/main refs/heads/release/next)"
+stale_changelog="$(git -C "$REMOTE" show "${stale_tree}:CHANGELOG.md" 2>/dev/null)"
+check "the release PR merges cleanly but puts the late entry under [9.9.9]" \
+    '[[ "$(sed -n "/^## \[9\.9\.9\]/,/^## \[1\.0\.0\]/p" <<<"$stale_changelog")" == *"Late fix"* ]]'
 : > "$GH_LOG"
-out="$(GH_MERGEABLE=MERGEABLE run_pr --refresh 2>&1)"
+out="$(run_pr --refresh 2>&1)"
 rc=$?
 rebuilt="$(git -C "$REMOTE" rev-parse refs/heads/release/next)"
 # What GitHub's squash merge of the PR would put on main.
@@ -507,27 +540,14 @@ check "--refresh rebuilds a release PR whose clean merge misplaces a later entry
         && "$(sed -n "/^## \[9\.9\.9\]/,/^## \[1\.0\.0\]/p" <<<"$merged_changelog")" != *"Late fix"* ]]' \
     || echo "$out" | sed 's/^/    /'
 
-# Main gets another entry next to the released ones, and the PR conflicts:
-# --refresh rebuilds release/next on the new main, for the PR's version.
-add_entry "Even later thing"
-: > "$GH_LOG"
-out="$(GH_MERGEABLE=CONFLICTING run_pr --refresh 2>&1)"
-rc=$?
-refreshed="$(git -C "$REMOTE" rev-parse refs/heads/release/next)"
-refreshed_changelog="$(git -C "$REMOTE" show "${refreshed}:CHANGELOG.md")"
-check "--refresh rebuilds a conflicting release PR on the new main" \
-    '[[ "$rc" -eq 0 && "$(git -C "$REMOTE" rev-parse "${refreshed}^")" == "$(git -C "$REMOTE" rev-parse refs/heads/main)" ]] \
-     && grep -q "^pr edit 7 --title chore(release): v9.9.9" "$GH_LOG" \
-     && [[ "$(sed -n "/^## \[Unreleased\]/,/^## \[9\.9\.9\]/p" <<<"$refreshed_changelog")" == *"Even later thing"* ]]' \
-    || echo "$out" | sed 's/^/    /'
-
 # No open release PR: nothing to do.
+before_none="$(git -C "$REMOTE" rev-parse refs/heads/release/next)"
 rm -f "$GH_STATE"
 : > "$GH_LOG"
 out="$(run_pr --refresh 2>&1)"
 rc=$?
 check "--refresh without an open release PR does nothing" \
-    '[[ "$rc" -eq 0 && "$(git -C "$REMOTE" rev-parse refs/heads/release/next)" == "$refreshed" ]] \
+    '[[ "$rc" -eq 0 && "$(git -C "$REMOTE" rev-parse refs/heads/release/next)" == "$before_none" ]] \
      && ! grep -q "^pr \(edit\|create\|merge\|view\)" "$GH_LOG"' || echo "$out" | sed 's/^/    /'
 
 echo ""
