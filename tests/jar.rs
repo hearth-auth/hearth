@@ -24,7 +24,7 @@ use hearth::core::{ClientId, Clock, FakeClock, RealmId, Timestamp, UserId};
 use hearth::identity::{
     AuthorizationRequest, AuthorizationResponse, CodeChallengeMethod, CreateRealmRequest,
     CreateUserRequest, CredentialConfig, EmbeddedIdentityEngine, IdentityConfig, IdentityEngine,
-    IdentityError, PushedAuthorizationRequest, RegisterClientRequest,
+    IdentityError, PushedAuthorizationRequest, RegisterClientRequest, ResponseMode,
 };
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
 
@@ -1200,12 +1200,29 @@ fn sign_jar_with_redirect(
     jti: &str,
     jar_redirect_uri: &str,
 ) -> String {
+    sign_jar_with_claims(
+        pkcs8_bytes,
+        client_id,
+        issuer,
+        jti,
+        &serde_json::json!({ "redirect_uri": jar_redirect_uri }),
+    )
+}
+
+/// A signed JAR with the standard claims, then `extra` (which wins).
+fn sign_jar_with_claims(
+    pkcs8_bytes: &[u8],
+    client_id: &str,
+    issuer: &str,
+    jti: &str,
+    extra: &serde_json::Value,
+) -> String {
     use data_encoding::BASE64URL_NOPAD;
 
     let header = serde_json::json!({ "alg": "EdDSA", "kid": TEST_KID });
     let pkce_challenge = BASE64URL_NOPAD
         .encode(ring::digest::digest(&ring::digest::SHA256, PKCE_VERIFIER.as_bytes()).as_ref());
-    let claims = serde_json::json!({
+    let mut claims = serde_json::json!({
         "iss": client_id,
         "aud": issuer,
         "exp": EPOCH_MICROS / 1_000_000 + 3600,
@@ -1213,12 +1230,15 @@ fn sign_jar_with_redirect(
         "jti": jti,
         "client_id": client_id,
         "response_type": "code",
-        "redirect_uri": jar_redirect_uri,
+        "redirect_uri": REDIRECT_URI,
         "scope": "openid",
         "state": "jar-state",
         "code_challenge": pkce_challenge,
         "code_challenge_method": "S256",
     });
+    for (k, v) in extra.as_object().expect("extra claims object") {
+        claims[k] = v.clone();
+    }
 
     let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).expect("header"));
     let claims_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("claims"));
@@ -1344,4 +1364,99 @@ fn authorization_response_reports_the_outer_redirect_uri_without_a_jar() {
 
     let resp = env.engine.authorize(&env.realm, &req).expect("authorize");
     assert_eq!(resp.redirect_uri(), REDIRECT_URI);
+}
+
+/// An authorization request whose only `response_mode` is in its JAR, for a
+/// new user of `client`.
+fn jar_only_request(
+    env: &TestEnv,
+    client: &hearth::identity::OAuthClient,
+    jar: String,
+    email: &str,
+) -> AuthorizationRequest {
+    let user = env
+        .engine
+        .create_user(
+            &env.realm,
+            &CreateUserRequest {
+                email: email.to_string(),
+                display_name: "JAR response mode user".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("create user");
+    AuthorizationRequest {
+        organization: None,
+        client_id: client.client_id().clone(),
+        redirect_uri: REDIRECT_URI.to_string(),
+        scope: "openid".to_string(),
+        state: "outer-state".to_string(),
+        resource: None,
+        response_type: "code".to_string(),
+        user_id: user.id().clone(),
+        code_challenge: None,
+        code_challenge_method: None,
+        nonce: None,
+        amr_values: Vec::new(),
+        response_mode: None,
+        request: Some(jar),
+    }
+}
+
+/// #628 (RFC 9101 §4): the engine's `authorize()` takes `response_mode` from
+/// the request object, as the browser path does. It used the outer value only.
+#[test]
+fn authorize_uses_the_jar_response_mode() {
+    let env = setup();
+    let (pkcs8, pub_bytes) = generate_ed25519();
+    let client = register_client_with_jwks(&env, &jwks_json(&pub_bytes));
+    let cid = client.client_id().as_uuid().to_string();
+    let jar = sign_jar_with_claims(
+        &pkcs8,
+        &cid,
+        &env.issuer,
+        "jti-response-mode-1",
+        &serde_json::json!({ "response_mode": "fragment" }),
+    );
+    let req = jar_only_request(&env, &client, jar, "jar-rmode-1@example.com");
+
+    let resp = env.engine.authorize(&env.realm, &req).expect("authorize");
+    assert_eq!(
+        resp.response_mode(),
+        &ResponseMode::Fragment,
+        "the JAR's response_mode decides how the code is delivered"
+    );
+}
+
+/// #628: an unsupported `response_mode` in the request object is refused, as
+/// it is in the outer query (`invalid_request`, `unsupported_response_mode`).
+#[test]
+fn authorize_refuses_an_unsupported_jar_response_mode() {
+    let env = setup();
+    let (pkcs8, pub_bytes) = generate_ed25519();
+    let client = register_client_with_jwks(&env, &jwks_json(&pub_bytes));
+    let cid = client.client_id().as_uuid().to_string();
+    for (i, mode) in ["query.jwt", "jwt", "form_post", "unknown_mode"]
+        .iter()
+        .enumerate()
+    {
+        let jar = sign_jar_with_claims(
+            &pkcs8,
+            &cid,
+            &env.issuer,
+            &format!("jti-response-mode-bad-{i}"),
+            &serde_json::json!({ "response_mode": mode }),
+        );
+        let req = jar_only_request(
+            &env,
+            &client,
+            jar,
+            &format!("jar-rmode-bad-{i}@example.com"),
+        );
+        let result = env.engine.authorize(&env.realm, &req);
+        assert!(
+            matches!(result, Err(IdentityError::InvalidInput { .. })),
+            "{mode}: an unsupported JAR response_mode must be refused; got {result:?}"
+        );
+    }
 }
