@@ -81,6 +81,13 @@ pub struct OidcParams {
     /// its `amr` (#619).
     #[serde(default)]
     pub sign_in: SignInMethod,
+    /// The flow changed the user's password, which revoked the browser session
+    /// authorizing the request (#627). The flow's end then opens a new browser
+    /// session with the same [`OidcParams::mfa_proof`] and
+    /// [`OidcParams::sign_in`], so the consent step that follows has a session
+    /// to post from. `false` for a token minted before this field existed.
+    #[serde(default)]
+    pub browser_session_revoked: bool,
     /// RFC 8707 resource indicator from a verified request object (JAR) or
     /// PAR entry. Preserved so the code issued on resume is bound to the
     /// audience the client asked for.
@@ -440,6 +447,7 @@ mod tests {
             prompt: String::new(),
             mfa_proof: MfaProof::None,
             sign_in: SignInMethod::Unknown,
+            browser_session_revoked: false,
             resource: None,
         }
     }

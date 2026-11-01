@@ -116,6 +116,7 @@ impl AuthorizeParams {
             prompt: self.prompt.clone(),
             mfa_proof: self.mfa_proof,
             sign_in: self.sign_in,
+            browser_session_revoked: false,
             resource: self.resource.clone(),
             organization: self.organization.clone(),
         }

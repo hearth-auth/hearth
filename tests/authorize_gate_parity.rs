@@ -1218,8 +1218,8 @@ async fn required_action_resume_keeps_the_requested_response_mode() {
 
 /// JAR + required action + consent: the JAR's resource and response mode
 /// survive both interstitials, and the consent ticket carries them to the
-/// code. (VERIFY_EMAIL, not UPDATE_PASSWORD: a password change revokes the
-/// browser session the consent approval is posted from.)
+/// code. (VERIFY_EMAIL: `a_password_change_then_consent_delivers_the_code`
+/// covers UPDATE_PASSWORD, which also replaces the browser session.)
 #[tokio::test]
 async fn jar_through_a_required_action_and_consent_keeps_resource_and_response_mode() {
     let rig = rig().await;
@@ -1242,6 +1242,49 @@ async fn jar_through_a_required_action_and_consent_keeps_resource_and_response_m
         .unwrap_or_else(|| panic!("fragment response_mode must deliver #code=; got {loc}"));
     let aud = exchanged_audience(&rig, &client, Some(&pair), code);
     assert!(aud.iter().any(|a| a == RESOURCE), "aud = {aud:?}");
+}
+
+/// #627: UPDATE_PASSWORD, then consent. The password change revokes the
+/// browser session the consent approval is posted from, so the resumed flow
+/// must set a new session cookie. A browser keeps the cookies the response
+/// sets; with them, the approval delivers the code.
+#[tokio::test]
+async fn a_password_change_then_consent_delivers_the_code() {
+    let rig = rig().await;
+    require_password_update(&rig);
+    let client = register(&rig, true, None);
+    let resp = get(&rig, &plain_uri(&client, ""), &session_cookie(&rig)).await;
+    let resp = complete_password_update(&rig, &resp).await;
+    assert_consent_prompt(&resp, "after a password change");
+
+    let session = cookie_pair(&resp, "hearth_ui_session").expect(
+        "the resumed flow must set a new session cookie: the password change revoked the old one",
+    );
+    let csrf_pair =
+        cookie_pair(&resp, "hearth_ui_csrf").unwrap_or_else(|| format!("hearth_ui_csrf={CSRF}"));
+    let csrf = csrf_pair
+        .strip_prefix("hearth_ui_csrf=")
+        .expect("CSRF cookie pair")
+        .to_string();
+    let ticket_pair = cookie_pair(&resp, "hearth_ui_oauth_ticket").expect("consent ticket cookie");
+    let ticket = ticket_pair
+        .strip_prefix("hearth_ui_oauth_ticket=")
+        .and_then(|v| v.split('.').next())
+        .expect("ticket value")
+        .to_string();
+    let resp = post_form(
+        &rig,
+        "/ui/oauth/consent",
+        &format!("{session}; {csrf_pair}; {ticket_pair}"),
+        format!("ticket={ticket}&decision=approve&scope=openid&_csrf={csrf}"),
+    )
+    .await;
+    let loc = location(&resp);
+    assert!(
+        redirect_param(&loc, "code", false).is_some(),
+        "the approval after a password change must deliver a code; got {loc} ({})",
+        resp.status()
+    );
 }
 
 // ===========================================================================

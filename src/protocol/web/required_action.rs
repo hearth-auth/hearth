@@ -578,11 +578,17 @@ pub fn resume_browser_flow(
 /// This used to issue the code directly — skipping the SMS factor (fixed
 /// earlier) and the consent prompt, so any request that detoured through a
 /// required action got a code for a client the user never approved.
+///
+/// When the flow changed the password ([`OidcParams::browser_session_revoked`]),
+/// the browser session that authorized the request is revoked. The flow then
+/// opens a new one for `client`, with the proof and sign-in method of the
+/// revoked one, and sets its cookies: the consent step posts from it (#627).
 pub fn resume_oidc_flow(
     state: &Arc<WebState>,
     realm: &RealmId,
     user_sub: &str,
     oidc_params: OidcParams,
+    client: &SessionContext,
     secure: bool,
 ) -> Response {
     let clear_cookie = ra_token::clear_ra_session_cookie(secure);
@@ -598,6 +604,32 @@ pub fn resume_oidc_flow(
         return handlers_common::server_error();
     };
 
+    // Opened before the gates run: no code or consent ticket exists for a
+    // flow whose new session was refused.
+    let new_session_cookies = if oidc_params.browser_session_revoked {
+        let ctx = SessionContext {
+            mfa_proof: oidc_params.mfa_proof,
+            sign_in: oidc_params.sign_in,
+            ..client.clone()
+        };
+        match state.identity.create_session(realm, &user_id, &ctx) {
+            Ok(session) => Some(issue_auth_cookies(
+                &state.cookie_secret,
+                realm,
+                session.id(),
+                secure,
+            )),
+            Err(e) => {
+                tracing::warn!(error = %e, "resume_oidc_flow: create_session failed");
+                let mut response = handlers_common::server_error();
+                append_cookie(&mut response, &clear_cookie);
+                return response;
+            }
+        }
+    } else {
+        None
+    };
+
     let mut response = run_authorize_gates(
         state,
         realm,
@@ -609,6 +641,14 @@ pub fn resume_oidc_flow(
         Timestamp::from_micros(now_micros()),
     );
     append_cookie(&mut response, &clear_cookie);
+    if let Some(IssuedCookies {
+        session_cookie,
+        csrf_cookie,
+    }) = new_session_cookies
+    {
+        append_cookie(&mut response, &session_cookie);
+        append_cookie(&mut response, &csrf_cookie);
+    }
     response
 }
 
@@ -1235,7 +1275,7 @@ fn advance_flow(
             secure,
         )
     } else if let Some(oidc_params) = claims.oidc_params {
-        resume_oidc_flow(state, realm, &claims.sub, oidc_params, secure)
+        resume_oidc_flow(state, realm, &claims.sub, oidc_params, client, secure)
     } else {
         resume_browser_flow(
             state,
@@ -1550,6 +1590,14 @@ pub async fn update_password_submit(
         metadata: Some(serde_json::json!({ "action_type": "UPDATE_PASSWORD" })),
     }) {
         tracing::warn!(error = %e, "update_password_submit: audit append failed");
+    }
+
+    // The password change revoked the user's sessions, the browser session
+    // that authorized an OIDC request among them: the flow's end opens a new
+    // one (#627).
+    let mut claims = claims;
+    if let Some(oidc) = claims.oidc_params.as_mut() {
+        oidc.browser_session_revoked = true;
     }
 
     // Advance the OIDC flow: remove UPDATE_PASSWORD from the RA JWT pending list.

@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Fixed
+- **A required password change before consent no longer sends the user back to the login page**
+  (#627). When a user had to change their password (`UPDATE_PASSWORD`) during an authorization
+  and the client then asked for consent, the password change revoked the browser session that the
+  consent approval is posted from. The flow now opens a new browser session after the password
+  change, with the same second-factor proof as the revoked one, and shows the consent page.
+
 ### Security
 - **A DPoP proof that fails the key-binding check at the token endpoint no longer spends its
   `jti`** (#624). On the refresh-token and token-exchange grants, the proof key must match the
