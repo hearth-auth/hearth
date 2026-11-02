@@ -2698,6 +2698,36 @@ pub struct CidrPolicyYaml {
     pub deny: Vec<String>,
 }
 
+/// YAML for `realms.<name>.quotas` (A-24).
+///
+/// Every limit is optional, and an absent limit is unlimited. The fields and
+/// their enforcement are those of [`crate::identity::RealmQuotaConfig`].
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RealmQuotaYaml {
+    /// Maximum number of users in the realm.
+    #[serde(default)]
+    pub max_users: Option<u64>,
+    /// Maximum number of organizations in the realm.
+    #[serde(default)]
+    pub max_orgs: Option<u64>,
+    /// Maximum number of OAuth/OIDC clients registered in the realm.
+    #[serde(default)]
+    pub max_clients: Option<u64>,
+    /// Maximum number of agents registered in the realm.
+    #[serde(default)]
+    pub max_agents: Option<u64>,
+    /// Maximum number of active sessions across all users in the realm.
+    #[serde(default)]
+    pub max_sessions: Option<u64>,
+    /// Maximum number of audit rows kept for the realm.
+    #[serde(default)]
+    pub max_audit_rows: Option<u64>,
+    /// Disk-usage warning threshold in bytes for the realm.
+    #[serde(default)]
+    pub max_disk_bytes: Option<u64>,
+}
+
 /// Per-realm YAML configuration block.
 ///
 /// Fields are optional — `None` inherits from global `auth:` defaults.
@@ -2715,6 +2745,12 @@ pub struct RealmYamlConfig {
     /// boot (audit §4.17#9).
     #[serde(default)]
     pub security: Option<RealmSecurityYaml>,
+    /// Per-realm resource quotas (`realms.<name>.quotas`, A-24).
+    ///
+    /// Until #630 this struct had no such field: `deny_unknown_fields` made the
+    /// documented block a refusal to boot, and no operator could set a quota.
+    #[serde(default)]
+    pub quotas: Option<RealmQuotaYaml>,
     /// Maximum concurrent sessions per user for this realm.
     /// Overrides global `auth.session_max_concurrent`. `None` = unlimited.
     #[serde(default)]
@@ -3823,7 +3859,18 @@ impl RealmYamlConfig {
                     deny: p.deny.clone(),
                 })
                 .filter(|p| !p.is_empty()),
-            quotas: None,
+            quotas: self
+                .quotas
+                .as_ref()
+                .map(|q| crate::identity::RealmQuotaConfig {
+                    max_users: q.max_users,
+                    max_orgs: q.max_orgs,
+                    max_clients: q.max_clients,
+                    max_agents: q.max_agents,
+                    max_sessions: q.max_sessions,
+                    max_audit_rows: q.max_audit_rows,
+                    max_disk_bytes: q.max_disk_bytes,
+                }),
             // Audit §4.13#9: the pre-token webhook has NO YAML key and NO admin-API
             // surface. `RealmYamlConfig` has no `pre_token_webhook` field, so a
             // config file declaring one is rejected by `deny_unknown_fields`. It is

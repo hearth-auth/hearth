@@ -501,6 +501,16 @@ realms:
       cidr_policy:
         allow: []                           # e.g. ["10.0.0.0/8", "192.0.2.0/24"]
         deny: ["198.51.100.0/24"]           # TEST-NET-2, a harmless worked example
+    # Per-realm resource quotas (A-24). Every limit is optional (absent =
+    # unlimited). A create at a count limit fails with 429 HEARTH_QUOTA_EXCEEDED.
+    quotas:
+      max_users: 100000
+      max_orgs: 1000
+      max_clients: 50
+      max_agents: 500
+      max_sessions: 500000
+      max_audit_rows: 10000000
+      max_disk_bytes: 53687091200           # 50 GiB: a warning only, never blocks
     auth:
       mfa_required: true
       passkey_requires_mfa: true            # regulated: TOTP even after passkey

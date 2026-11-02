@@ -1720,33 +1720,29 @@ The first user created in a realm is automatically assigned the seed `realm.admi
 
 ### `realms.<name>.quotas`
 
-> **Admin API only.** Per-realm resource quotas are not currently configurable via `hearth.yaml`. They are set and read via `PATCH /admin/realms/{id}/config` and `GET /admin/realms/{id}`. This section documents the available quota fields for operators using the admin API.
-
-Resource quotas cap the number of entities that can exist in a realm at once. All limits are enforced synchronously on the create path (except `max_disk_bytes`, which is sampled by a background task).
+Resource quotas cap the number of entities that can exist in a realm at once. Every limit is optional, and an absent limit is unlimited. Count limits are enforced on the create path: a create at the limit fails with HTTP `429` and `HEARTH_QUOTA_EXCEEDED`. If the count cannot be read, the create fails (fail-closed).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `max_users` | integer | unlimited | Maximum number of user records allowed in the realm. Attempts to create a user when this limit is reached return HTTP 422. |
-| `max_orgs` | integer | unlimited | Maximum number of organizations allowed in the realm. |
+| `max_users` | integer | unlimited | Maximum number of user records in the realm. |
+| `max_orgs` | integer | unlimited | Maximum number of organizations in the realm. |
 | `max_clients` | integer | unlimited | Maximum number of OAuth/OIDC clients registered in the realm. |
-| `max_sessions` | integer | unlimited | Maximum total active sessions across all users in the realm. Checked synchronously on `create_session`. Because this requires a full-prefix scan, only set this for realms with a known bounded user population. |
-| `max_audit_rows` | integer | unlimited | Maximum number of audit log rows retained for the realm. Enforced by the background pruner — oldest rows are deleted when the limit is exceeded. |
-| `max_disk_bytes` | integer | unlimited | Disk-usage warning threshold in bytes for the realm's storage prefix. Checked by the background pruner (sampled, once per day). Exceeding this limit emits a warning log but does **not** block writes. |
+| `max_agents` | integer | unlimited | Maximum number of agents registered in the realm. |
+| `max_sessions` | integer | unlimited | Maximum number of active sessions across all users in the realm. |
+| `max_audit_rows` | integer | unlimited | Maximum number of audit rows kept for the realm. Accepted, but not enforced yet (#630). Use the audit `max_rows` setting for a row backstop. |
+| `max_disk_bytes` | integer | unlimited | Disk-usage warning threshold in bytes for the realm. The background pruner checks it once per day. Above the threshold it logs a warning; it does **not** block writes. |
 
-**Example (admin API):**
+**Cost.** Each create counts the existing keys of its kind, up to the limit. It reads no records, but the count costs time in proportion to the limit. A limit in the millions adds milliseconds to each create of that kind.
 
-```bash
-curl -s -X PATCH \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  http://127.0.0.1:8420/admin/realms/<realm-id>/config \
-  -d '{
-    "quotas": {
-      "max_users": 10000,
-      "max_clients": 50,
-      "max_audit_rows": 1000000
-    }
-  }'
+Quotas come from `hearth.yaml` only. The admin API does not set them. A restart or a configuration reload (`SIGHUP`) applies a changed quota.
+
+```yaml
+realms:
+  customer-portal:
+    quotas:
+      max_users: 10000
+      max_clients: 50
+      max_sessions: 50000
 ```
 
 ---
