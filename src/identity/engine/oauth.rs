@@ -395,7 +395,17 @@ impl EmbeddedIdentityEngine {
                 code_challenge_method: ccm.or_else(|| request.code_challenge_method.clone()),
                 nonce: jar.nonce.or_else(|| request.nonce.clone()),
                 amr_values: request.amr_values.clone(),
-                response_mode: request.response_mode.clone(),
+                // The JAR's `response_mode` wins over the outer one (RFC 9101
+                // §4), as on the browser path; an unsupported value is
+                // refused there too (#628).
+                response_mode: match jar.response_mode.as_deref() {
+                    None => request.response_mode.clone(),
+                    Some(mode) => Some(mode.parse::<ResponseMode>().map_err(|()| {
+                        IdentityError::InvalidInput {
+                            reason: "unsupported_response_mode".to_string(),
+                        }
+                    })?),
+                },
                 request: None, // consumed — prevent re-entry
             };
             &jar_override
