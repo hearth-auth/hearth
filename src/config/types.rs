@@ -2702,6 +2702,8 @@ pub struct CidrPolicyYaml {
 ///
 /// Every limit is optional, and an absent limit is unlimited. The fields and
 /// their enforcement are those of [`crate::identity::RealmQuotaConfig`].
+// The field names are the documented `hearth.yaml` keys.
+#[allow(clippy::struct_field_names)]
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RealmQuotaYaml {
