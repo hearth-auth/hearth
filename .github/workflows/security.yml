@@ -128,7 +128,7 @@ jobs:
           components: ""
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           languages: ${{ matrix.language }}
           # HEA-690: effective for interpreted legs (JS/TS, Python) only.
@@ -176,7 +176,7 @@ jobs:
 
       - name: Autobuild
         if: matrix.build-mode == 'autobuild'
-        uses: github/codeql-action/autobuild@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        uses: github/codeql-action/autobuild@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
 
       - name: Free disk space for Rust CodeQL build
         if: matrix.language == 'rust'
@@ -194,7 +194,7 @@ jobs:
         run: cargo build --workspace --all-features --locked
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           category: "/language:${{ matrix.language }}"
 
@@ -240,7 +240,7 @@ jobs:
 
       - name: Upload Trivy SARIF to GitHub Code Scanning
         if: always()
-        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           sarif_file: trivy.sarif
           category: trivy
@@ -338,7 +338,7 @@ jobs:
 
       - name: Upload OSV SARIF to GitHub Code Scanning
         if: always() && hashFiles('osv.sarif') != ''
-        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           sarif_file: osv.sarif
           category: osv-scanner
