@@ -5,6 +5,7 @@
 //! May call `authz` (lateral dependency). Never the reverse.
 
 pub mod approval_notifier;
+pub mod audit_prune;
 pub mod claims_config;
 pub(crate) mod cleanup;
 pub mod client_auth;

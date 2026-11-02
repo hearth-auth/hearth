@@ -1248,10 +1248,10 @@ impl AuditEngine for EmbeddedAuditEngine {
     }
 
     fn count_events(&self, realm_id: &RealmId) -> Result<u64, AuditError> {
-        let prefix = keys::event_scan_prefix();
-        let end = keys::prefix_end(&prefix);
-        let entries = self.storage.scan(realm_id, &prefix, &end)?;
-        Ok(entries.len() as u64)
+        // Keys only: the daily row-limit check reads no event (#630).
+        Ok(self
+            .storage
+            .count_prefix(realm_id, &keys::event_scan_prefix(), 0)?)
     }
 
     fn prune_oldest(&self, realm_id: &RealmId, n: u64) -> Result<u64, AuditError> {
