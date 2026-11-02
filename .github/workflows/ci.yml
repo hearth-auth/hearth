@@ -59,7 +59,10 @@ jobs:
   filter:
     name: filter (paths-filter)
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    # The steps take about 25 s. The limit is 10 min because, from 2026-11-02,
+    # the runner's clean-up after the last step took up to 280 s. At 2 min,
+    # three main runs in a row timed out with every step green.
+    timeout-minutes: 10
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       ui: ${{ steps.filter.outputs.ui }}
