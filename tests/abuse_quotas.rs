@@ -677,3 +677,266 @@ async fn a24_quota_isolation_across_resources() {
         "expected QuotaExceeded(orgs), got: {err:?}"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Regression (#630): the documented quota block loads from hearth.yaml
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A production `hearth.yaml` (it passes the checked loader) with `extra`
+/// appended at the top level.
+fn prod_yaml(extra: &str) -> String {
+    format!(
+        "server:\n  trust_forwarded_proto: true\n  trusted_proxies: [\"127.0.0.1\"]\n\
+         storage:\n  data_dir: \"/tmp/hearth-a24-quotas\"\n\
+         security:\n  key_encryption_key: \"\
+         1111111111111111111111111111111111111111111111111111111111111111\"\n\
+         oidc:\n  issuer: \"https://auth.example.test\"\n\
+         email:\n  allow_log_transport_in_production: true\n{extra}"
+    )
+}
+
+/// Scenario "Regression — documented quota block loads": the production loader
+/// accepts `realms.<name>.quotas`, every key reaches the realm config, and the
+/// eleventh user create fails with `HEARTH_QUOTA_EXCEEDED`.
+#[tokio::test]
+async fn a24_documented_quota_block_loads_from_yaml() {
+    let config = hearth::config::Config::from_yaml_str(&prod_yaml(
+        "realms:\n  acme:\n    quotas:\n      max_users: 10\n      max_orgs: 2\n      \
+         max_clients: 3\n      max_agents: 4\n      max_sessions: 5\n      \
+         max_audit_rows: 1000\n      max_disk_bytes: 1073741824\n",
+    ))
+    .expect("the documented quota block must load");
+    let acme = config.realms.as_ref().expect("realms block")["acme"]
+        .to_realm_config("acme", &config.auth, None)
+        .expect("acme realm config");
+    assert_eq!(
+        acme.quotas,
+        Some(RealmQuotaConfig {
+            max_users: Some(10),
+            max_orgs: Some(2),
+            max_clients: Some(3),
+            max_agents: Some(4),
+            max_sessions: Some(5),
+            max_audit_rows: Some(1000),
+            max_disk_bytes: Some(1_073_741_824),
+        }),
+        "every quota key in hearth.yaml must reach the realm config"
+    );
+
+    let harness = common::TestHarness::in_process().await.expect("setup");
+    let realm = harness
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("acme-{}", uuid::Uuid::new_v4()),
+            config: Some(acme),
+        })
+        .expect("create realm from the YAML config")
+        .id()
+        .clone();
+    for n in 1..=10 {
+        create_user(&harness, &realm, n);
+    }
+    let err = harness
+        .identity()
+        .create_user(
+            &realm,
+            &CreateUserRequest {
+                email: unique_email("eleventh"),
+                display_name: "Eleventh".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect_err("the eleventh create must fail when max_users=10");
+    assert!(
+        matches!(
+            err,
+            IdentityError::QuotaExceeded {
+                resource: "users",
+                limit: 10,
+                current: 10,
+            }
+        ),
+        "expected QuotaExceeded(users,10,10), got: {err:?}"
+    );
+    assert_eq!(err.wire_error_code(), Some("HEARTH_QUOTA_EXCEEDED"));
+}
+
+/// A quota key that is not in the documented set refuses to load, as every
+/// other misspelt `hearth.yaml` key does.
+#[test]
+fn a24_a_misspelt_quota_key_is_refused() {
+    let err = hearth::config::Config::from_yaml_str(&prod_yaml(
+        "realms:\n  acme:\n    quotas:\n      max_user: 10\n",
+    ))
+    .expect_err("a misspelt quota key must not load");
+    assert!(
+        err.to_string().contains("max_user"),
+        "the error must name the misspelt key: {err}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #630: the quota count reads keys, not values
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Storage that refuses a value scan of the whole user prefix (the scan a
+/// quota count does when it reads every user record) and serves key walks.
+struct UserValueScanRefused {
+    inner: std::sync::Arc<hearth::storage::EmbeddedStorageEngine>,
+}
+
+impl hearth::storage::StorageEngine for UserValueScanRefused {
+    fn get(
+        &self,
+        realm_id: &hearth::core::RealmId,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, hearth::storage::StorageError> {
+        self.inner.get(realm_id, key)
+    }
+
+    fn put(
+        &self,
+        realm_id: &hearth::core::RealmId,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<(), hearth::storage::StorageError> {
+        self.inner.put(realm_id, key, value)
+    }
+
+    fn delete(
+        &self,
+        realm_id: &hearth::core::RealmId,
+        key: &[u8],
+    ) -> Result<(), hearth::storage::StorageError> {
+        self.inner.delete(realm_id, key)
+    }
+
+    fn scan(
+        &self,
+        realm_id: &hearth::core::RealmId,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Vec<hearth::storage::ScanEntry>, hearth::storage::StorageError> {
+        if start == b"usr:id:" {
+            return Err(hearth::storage::StorageError::Io(std::io::Error::other(
+                "a value scan of every user record",
+            )));
+        }
+        self.inner.scan(realm_id, start, end)
+    }
+
+    fn scan_keys(
+        &self,
+        realm_id: &hearth::core::RealmId,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Vec<Vec<u8>>, hearth::storage::StorageError> {
+        self.inner.scan_keys(realm_id, start, end)
+    }
+
+    fn visit_keys(
+        &self,
+        realm_id: &hearth::core::RealmId,
+        start: &[u8],
+        end: &[u8],
+        visit: &mut dyn FnMut(&[u8]) -> std::ops::ControlFlow<()>,
+    ) -> Result<(), hearth::storage::StorageError> {
+        self.inner.visit_keys(realm_id, start, end, visit)
+    }
+
+    fn list_realms(&self) -> Result<Vec<hearth::core::RealmId>, hearth::storage::StorageError> {
+        self.inner.list_realms()
+    }
+
+    fn begin_snapshot_restore(
+        &self,
+        snapshot_id: &str,
+    ) -> Result<(), hearth::storage::StorageError> {
+        self.inner.begin_snapshot_restore(snapshot_id)
+    }
+
+    fn complete_snapshot_restore(&self) -> Result<(), hearth::storage::StorageError> {
+        self.inner.complete_snapshot_restore()
+    }
+}
+
+/// The user quota counts the realm's user keys without reading a user record:
+/// with a value scan of the user prefix refused, users below the limit are
+/// still created, and the create at the limit still fails.
+#[test]
+fn a24_the_user_quota_counts_keys_without_reading_values() {
+    use std::sync::Arc;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let inner = Arc::new(
+        hearth::storage::EmbeddedStorageEngine::open(hearth::storage::StorageConfig::dev(
+            temp.path().join("data"),
+        ))
+        .expect("open storage"),
+    );
+    let storage: Arc<dyn hearth::storage::StorageEngine> = Arc::new(UserValueScanRefused { inner });
+    let clock: Arc<dyn hearth::core::Clock> = Arc::new(hearth::core::SystemClock);
+    let rbac: Arc<dyn hearth::rbac::RbacEngine> = Arc::new(hearth::rbac::EmbeddedRbacEngine::new(
+        Arc::clone(&storage),
+        Arc::clone(&clock),
+    ));
+    let audit: Arc<dyn hearth::audit::AuditEngine> = Arc::new(
+        hearth::audit::EmbeddedAuditEngine::new(Arc::clone(&storage), Arc::clone(&clock)),
+    );
+    let identity = hearth::identity::EmbeddedIdentityEngine::with_rbac(
+        storage,
+        clock,
+        hearth::identity::IdentityConfig {
+            credential: hearth::identity::CredentialConfig::fast_for_testing(),
+            ..hearth::identity::IdentityConfig::default()
+        },
+        rbac,
+        audit,
+    )
+    .expect("identity engine");
+    let realm = hearth::identity::IdentityEngine::create_realm(
+        &identity,
+        &CreateRealmRequest {
+            name: "quota-keys".to_string(),
+            config: Some(RealmConfig {
+                quotas: Some(RealmQuotaConfig {
+                    max_users: Some(2),
+                    ..RealmQuotaConfig::default()
+                }),
+                ..RealmConfig::default()
+            }),
+        },
+    )
+    .expect("create realm")
+    .id()
+    .clone();
+
+    let create = |n: u32| {
+        hearth::identity::IdentityEngine::create_user(
+            &identity,
+            &realm,
+            &CreateUserRequest {
+                email: unique_email(&format!("k{n}")),
+                display_name: format!("User {n}"),
+                ..Default::default()
+            },
+        )
+    };
+    for n in 1..=2 {
+        if let Err(err) = create(n) {
+            panic!("create {n} is below max_users=2 and must not read user records: {err:?}");
+        }
+    }
+    let err = create(3).expect_err("the third create must fail when max_users=2");
+    assert!(
+        matches!(
+            err,
+            IdentityError::QuotaExceeded {
+                resource: "users",
+                limit: 2,
+                current: 2,
+            }
+        ),
+        "expected QuotaExceeded(users,2,2), got: {err:?}"
+    );
+}

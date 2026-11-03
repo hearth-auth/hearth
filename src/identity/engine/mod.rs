@@ -6000,9 +6000,10 @@ impl EmbeddedIdentityEngine {
         Ok(())
     }
 
-    /// Counts keys under `prefix` in the realm and returns `QuotaExceeded` if
-    /// the count is at or above `limit`. Fail-closed: a storage error becomes
-    /// `QuotaExceeded` to prevent unbounded growth on scan failure.
+    /// Counts keys under `prefix` in the realm, up to `limit`, and returns
+    /// `QuotaExceeded` if the count is at or above `limit`. `current` in the
+    /// error is therefore at most `limit`. Fail-closed: a storage error becomes
+    /// `QuotaExceeded` to prevent unbounded growth on a count failure.
     fn check_resource_quota(
         &self,
         realm_id: &RealmId,
@@ -6010,11 +6011,18 @@ impl EmbeddedIdentityEngine {
         prefix: &[u8],
         limit: u64,
     ) -> Result<(), IdentityError> {
-        let end = keys::prefix_end(prefix);
+        if limit == 0 {
+            return Err(IdentityError::QuotaExceeded {
+                resource,
+                limit,
+                current: 0,
+            });
+        }
+        // Walk keys only, and stop at the limit: a check costs at most `limit`
+        // keys and reads no record, however large the realm is (#630).
         let current = self
             .storage
-            .scan(realm_id, prefix, &end)
-            .map(|e| e.len() as u64)
+            .count_prefix(realm_id, prefix, limit)
             .unwrap_or(limit); // fail-closed
         if current >= limit {
             return Err(IdentityError::QuotaExceeded {
