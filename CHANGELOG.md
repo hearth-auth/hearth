@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Fixed
+- **The audit prune deletes in batches of 10 000 events** (#735). Before, the retention and row
+  limit prune read every event that it deleted into memory, deleted them in one write, and blocked
+  the realm's audit writes until the end. Now each batch streams its events and commits on its
+  own, so the prune of a large log needs memory for one batch, and an audit write waits for one
+  batch at most. If a batch fails, the batches before it stay deleted.
+
 ## [4.7.9] — 2026-11-03
 
 ### Fixed

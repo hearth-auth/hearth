@@ -4,6 +4,7 @@
 //! Events are append-only: no update or delete operations exist.
 
 use std::collections::HashMap;
+use std::ops::ControlFlow;
 use std::sync::{Arc, Mutex};
 
 use ring::hmac;
@@ -11,7 +12,7 @@ use ring::rand::SecureRandom as _;
 
 use crate::codec;
 use crate::core::{AuditEventId, Clock, RealmId, Timestamp};
-use crate::storage::StorageEngine;
+use crate::storage::{ScanEntry, StorageEngine};
 
 use super::error::AuditError;
 use super::keys;
@@ -153,6 +154,13 @@ pub(crate) struct ChainHead {
 /// across a chunk's fsync, nor across the whole import — so a live audit
 /// write waits at most for one chunk, however large the archive.
 pub(crate) const IMPORT_CHUNK: usize = 512;
+
+/// Events a prune deletes per atomic batch (#735). Each batch streams its
+/// events, re-anchors the chain head and commits its own `write_batch`, and
+/// the realm's chain lock is held for one batch at a time. So a prune of a
+/// large log needs memory for one batch, writes WAL records of bounded size,
+/// and makes a live audit write wait for one batch at most.
+const PRUNE_BATCH: usize = 10_000;
 
 /// Embedded audit engine backed by the storage layer.
 ///
@@ -629,6 +637,60 @@ impl EmbeddedAuditEngine {
         };
         let new_head = Self::signed_head(hmac_key, anchor, last_hash, head.seq, new_count);
         Ok((new_head, delete_keys, deleted))
+    }
+
+    /// Deletes the oldest events below `end`, at most `max` of them, in one
+    /// atomic batch, and returns how many it deleted (#735).
+    ///
+    /// The batch holds the realm's chain lock, so the head read-modify-write is
+    /// coherent with appends, and releases it when it returns. The events are
+    /// streamed with `visit_entries`, so memory follows `max`, not the log.
+    fn prune_batch(&self, realm_id: &RealmId, end: &[u8], max: usize) -> Result<u64, AuditError> {
+        let chain_lock = self.realm_chain_lock(realm_id);
+        let mut cached = chain_lock.lock().expect("realm chain lock poisoned");
+
+        let mut entries: Vec<ScanEntry> = Vec::new();
+        self.storage.visit_entries(
+            realm_id,
+            &keys::event_scan_prefix(),
+            end,
+            &mut |key, value| {
+                entries.push(ScanEntry {
+                    key: key.to_vec(),
+                    value: value.to_vec(),
+                });
+                if entries.len() < max {
+                    ControlFlow::Continue(())
+                } else {
+                    ControlFlow::Break(())
+                }
+            },
+        )?;
+        if entries.is_empty() {
+            return Ok(0);
+        }
+
+        let hmac_key = self.get_realm_hmac_key(realm_id)?;
+        let head = match cached.as_ref() {
+            Some(h) => h.clone(),
+            None => self.load_or_init_head(realm_id, &hmac_key)?,
+        };
+
+        let (new_head, delete_keys, deleted) = self.plan_prune(&hmac_key, &head, entries.iter())?;
+        let head_value = Self::head_bytes(&new_head)?;
+
+        // One atomic WAL record per batch: the batch's keys removed and the
+        // re-anchored head written together (HEA-1756 U2). A crash between
+        // batches leaves a shorter log whose head matches it, so verification
+        // never raises a false tamper alarm after a prune.
+        self.storage.write_batch(
+            realm_id,
+            &[(keys::chain_head_key(), head_value)],
+            &delete_keys,
+        )?;
+
+        *cached = Some(new_head);
+        Ok(deleted)
     }
 }
 
@@ -1213,38 +1275,15 @@ impl AuditEngine for EmbeddedAuditEngine {
     }
 
     fn prune_before(&self, realm_id: &RealmId, cutoff: Timestamp) -> Result<u64, AuditError> {
-        // Serialize against appends so the head read-modify-write is coherent.
-        let chain_lock = self.realm_chain_lock(realm_id);
-        let mut cached = chain_lock.lock().expect("realm chain lock poisoned");
-
-        let start = keys::event_scan_prefix();
         let end = keys::event_scan_end(cutoff);
-        let entries = self.storage.scan(realm_id, &start, &end)?;
-        if entries.is_empty() {
-            return Ok(0);
+        let mut deleted: u64 = 0;
+        loop {
+            let batch = self.prune_batch(realm_id, &end, PRUNE_BATCH)?;
+            deleted += batch;
+            if batch < PRUNE_BATCH as u64 {
+                return Ok(deleted);
+            }
         }
-
-        let hmac_key = self.get_realm_hmac_key(realm_id)?;
-        let head = match cached.as_ref() {
-            Some(h) => h.clone(),
-            None => self.load_or_init_head(realm_id, &hmac_key)?,
-        };
-
-        let (new_head, delete_keys, deleted) = self.plan_prune(&hmac_key, &head, entries.iter())?;
-        let head_value = Self::head_bytes(&new_head)?;
-
-        // One atomic WAL record: every pruned key removed and the re-anchored
-        // head written together (HEA-1756 U2). A crash can never leave the head
-        // and the surviving events inconsistent, so verification never raises a
-        // false tamper alarm after a prune.
-        self.storage.write_batch(
-            realm_id,
-            &[(keys::chain_head_key(), head_value)],
-            &delete_keys,
-        )?;
-
-        *cached = Some(new_head);
-        Ok(deleted)
     }
 
     fn count_events(&self, realm_id: &RealmId) -> Result<u64, AuditError> {
@@ -1255,40 +1294,18 @@ impl AuditEngine for EmbeddedAuditEngine {
     }
 
     fn prune_oldest(&self, realm_id: &RealmId, n: u64) -> Result<u64, AuditError> {
-        // Serialize against appends so the head read-modify-write is coherent.
-        let chain_lock = self.realm_chain_lock(realm_id);
-        let mut cached = chain_lock.lock().expect("realm chain lock poisoned");
-
-        // Scan all primary event keys in chronological order (keys encode the
-        // timestamp then the monotonic sequence, so lexicographic order equals
-        // append order).
-        let prefix = keys::event_scan_prefix();
-        let end = keys::prefix_end(&prefix);
-        let entries = self.storage.scan(realm_id, &prefix, &end)?;
-
-        let to_delete = (n as usize).min(entries.len());
-        if to_delete == 0 {
-            return Ok(0);
+        // Keys encode the timestamp then the monotonic sequence, so key order
+        // is append order and each batch takes the oldest events left.
+        let end = keys::prefix_end(&keys::event_scan_prefix());
+        let mut deleted: u64 = 0;
+        while deleted < n {
+            let want = usize::try_from(n - deleted).map_or(PRUNE_BATCH, |r| r.min(PRUNE_BATCH));
+            let batch = self.prune_batch(realm_id, &end, want)?;
+            deleted += batch;
+            if batch < want as u64 {
+                break;
+            }
         }
-
-        let hmac_key = self.get_realm_hmac_key(realm_id)?;
-        let head = match cached.as_ref() {
-            Some(h) => h.clone(),
-            None => self.load_or_init_head(realm_id, &hmac_key)?,
-        };
-
-        let (new_head, delete_keys, deleted) =
-            self.plan_prune(&hmac_key, &head, entries.iter().take(to_delete))?;
-        let head_value = Self::head_bytes(&new_head)?;
-
-        // One atomic WAL record — see `prune_before` (HEA-1756 U2).
-        self.storage.write_batch(
-            realm_id,
-            &[(keys::chain_head_key(), head_value)],
-            &delete_keys,
-        )?;
-
-        *cached = Some(new_head);
         Ok(deleted)
     }
 }
