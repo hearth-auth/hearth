@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.7.9] — 2026-11-03
+
 ### Fixed
 - **The daily audit prune enforces the realm quota `max_audit_rows`** (#630). Before, it had no
   effect. The prune now keeps no more events than the lower of the audit `max_rows` and
