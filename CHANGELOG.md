@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.7.7] — 2026-11-02
+
 ### Fixed
 - **`POST /authorize` refuses a pushed request with an unsupported `response_mode`** (#628). With
   a PAR `request_uri`, `POST /authorize` and `POST /realms/{name}/authorize` ignored the pushed
