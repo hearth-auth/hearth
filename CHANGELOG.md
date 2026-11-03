@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.7.8] — 2026-11-03
+
 ### Fixed
 - **Realm quotas load from `hearth.yaml`** (#630). The documented `realms.<name>.quotas` block
   (`max_users`, `max_orgs`, `max_clients`, `max_agents`, `max_sessions`, `max_audit_rows`,
