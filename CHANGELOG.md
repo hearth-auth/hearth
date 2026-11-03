@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Fixed
+- **Realm quotas load from `hearth.yaml`** (#630). The documented `realms.<name>.quotas` block
+  (`max_users`, `max_orgs`, `max_clients`, `max_agents`, `max_sessions`, `max_audit_rows`,
+  `max_disk_bytes`) refused to boot, and no other way set a quota. It now loads, and a create at a
+  count limit fails with `429` and `HEARTH_QUOTA_EXCEEDED`. Each quota check now counts keys up to
+  the limit and reads no records; before, it read every record of its kind in the realm.
+  `max_audit_rows` is accepted but not enforced yet.
+
 ## [4.7.7] — 2026-11-02
 
 ### Fixed
@@ -22,12 +30,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `HEARTH_SAML_INVALID` (`400`), and an IdP that is not a SAML IdP of the realm is
   `HEARTH_SAML_ENTITY_NOT_FOUND` (`404`; the ACS answered `400` for it). The `5xx` answers do not
   change.
-- **Realm quotas load from `hearth.yaml`** (#630). The documented `realms.<name>.quotas` block
-  (`max_users`, `max_orgs`, `max_clients`, `max_agents`, `max_sessions`, `max_audit_rows`,
-  `max_disk_bytes`) refused to boot, and no other way set a quota. It now loads, and a create at a
-  count limit fails with `429` and `HEARTH_QUOTA_EXCEEDED`. Each quota check now counts keys up to
-  the limit and reads no records; before, it read every record of its kind in the realm.
-  `max_audit_rows` is accepted but not enforced yet.
 
 ## [4.7.6] — 2026-11-01
 
@@ -4335,7 +4337,6 @@ clustering is not supported for production.)
   `docker pull` / `helm install` blocks now disclose that both GHCR packages are private and
   fail anonymously today. Full ledger: `reports/documentation-truth-sweep-2026-09-21.md`.
 
-
 ### Security
 - **The reserved system realm is read-only for RBAC writes on the public APIs (audit 2026-08-28
   §4.1#7)** — the README states the system realm is read-only through public APIs, and
@@ -7422,7 +7423,6 @@ clustering is not supported for production.)
   for quorum commit before the caller is told the outcome is unknown (default `10000`, task 26.58). Raise it
   on a cluster whose commits are legitimately slow; a fixed bound would trade a liveness bug for an
   availability one.
-
 
 ## [1.0.0] — 2026-06-21
 
