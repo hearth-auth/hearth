@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.7.10] — 2026-11-03
+
 ### Fixed
 - **The audit prune deletes in batches of 10 000 events** (#735). Before, the retention and row
   limit prune read every event that it deleted into memory, deleted them in one write, and blocked
