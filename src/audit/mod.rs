@@ -212,6 +212,10 @@ pub trait AuditEngine: Send + Sync {
     /// window — integrity verification should only be run against the
     /// retained window after pruning.
     ///
+    /// The events go in atomic batches of bounded size, oldest first, and the
+    /// realm's chain lock is held for one batch at a time (#735). If a batch
+    /// fails, the batches before it stay deleted and the error is returned.
+    ///
     /// Returns the number of primary events deleted.
     fn prune_before(&self, realm_id: &RealmId, cutoff: Timestamp) -> Result<u64, AuditError>;
 
@@ -221,6 +225,9 @@ pub trait AuditEngine: Send + Sync {
     fn count_events(&self, realm_id: &RealmId) -> Result<u64, AuditError>;
 
     /// Deletes the oldest `n` audit events for this realm (A-25 max_rows backstop).
+    ///
+    /// Deletes in atomic batches of bounded size, as
+    /// [`prune_before`](Self::prune_before) does.
     ///
     /// Returns the number of primary events actually deleted (may be less than
     /// `n` if the realm has fewer events).
