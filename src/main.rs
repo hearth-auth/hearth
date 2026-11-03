@@ -2475,9 +2475,8 @@ async fn run_serve(
         hearth::webhook::NotifyingAuditEngine::new(Arc::clone(&raw_audit), webhook_tx),
     );
 
-    // Background daily audit log pruning sweep (A-25).
-    // Per realm: (1) time-based prune by retention_days, (2) max_rows backstop,
-    // (3) disk-pressure warning if max_disk_bytes is configured.
+    // Background daily audit log pruning sweep (A-24, A-25). Per realm, see
+    // `hearth::identity::audit_prune::prune_realm_audit`.
     {
         let prune_audit = Arc::clone(&raw_audit);
         let prune_identity = Arc::clone(&identity_engine);
@@ -2502,88 +2501,12 @@ async fn run_serve(
                     };
                     let prune_n = page.items.len() as u64;
                     for realm in &page.items {
-                        let retention = match prune_audit.get_retention_config(realm.id()) {
-                            Ok(c) => c,
-                            Err(e) => {
-                                warn!(realm = %realm.name(), error = %e, "audit prune: config fetch failed");
-                                continue;
-                            }
-                        };
-
-                        // (1) Time-based retention prune.
-                        if retention.retention_days > 0 {
-                            let now_micros = hearth::core::Timestamp::now().as_micros();
-                            let window_micros =
-                                (retention.retention_days as i64) * 86_400 * 1_000_000;
-                            let cutoff = hearth::core::Timestamp::from_micros(
-                                now_micros.saturating_sub(window_micros),
-                            );
-                            match prune_audit.prune_before(realm.id(), cutoff) {
-                                Ok(0) => {}
-                                Ok(n) => {
-                                    info!(realm = %realm.name(), deleted = n, "audit prune: pruned old events");
-                                }
-                                Err(e) => {
-                                    warn!(realm = %realm.name(), error = %e, "audit prune: prune failed");
-                                }
-                            }
-                        }
-
-                        // (2) max_rows backstop — hard cap on total event count.
-                        if let Some(max_rows) = retention.max_rows {
-                            match prune_audit.count_events(realm.id()) {
-                                Ok(count) if count > max_rows => {
-                                    let excess = count - max_rows;
-                                    match prune_audit.prune_oldest(realm.id(), excess) {
-                                        Ok(0) => {}
-                                        Ok(n) => {
-                                            info!(
-                                                realm = %realm.name(),
-                                                deleted = n,
-                                                max_rows,
-                                                "audit prune: max_rows backstop trimmed oldest events"
-                                            );
-                                        }
-                                        Err(e) => {
-                                            warn!(realm = %realm.name(), error = %e, "audit prune: max_rows trim failed");
-                                        }
-                                    }
-                                }
-                                Ok(_) => {} // within limit
-                                Err(e) => {
-                                    warn!(realm = %realm.name(), error = %e, "audit prune: count_events failed");
-                                }
-                            }
-                        }
-
-                        // (3) Disk-pressure warning — sampled, non-blocking.
-                        let max_disk_bytes = prune_identity
-                            .get_realm(realm.id())
-                            .ok()
-                            .flatten()
-                            .and_then(|r| {
-                                r.config().quotas.as_ref().and_then(|q| q.max_disk_bytes)
-                            });
-                        if let Some(limit) = max_disk_bytes {
-                            // Estimate realm disk usage by summing key+value bytes
-                            // across all storage entries for this realm.  Sampled
-                            // once per day — not checked on every write.
-                            let end_key = vec![0xFFu8; 256];
-                            let usage_bytes: u64 = prune_storage
-                                .scan(realm.id(), b"", &end_key)
-                                .unwrap_or_default()
-                                .iter()
-                                .map(|e| (e.key.len() + e.value.len()) as u64)
-                                .sum();
-                            if usage_bytes >= limit {
-                                warn!(
-                                    realm = %realm.name(),
-                                    usage_bytes,
-                                    limit_bytes = limit,
-                                    "disk pressure: realm storage usage at or above configured max_disk_bytes"
-                                );
-                            }
-                        }
+                        hearth::identity::audit_prune::prune_realm_audit(
+                            prune_audit.as_ref(),
+                            prune_storage.as_ref(),
+                            realm,
+                            hearth::core::Timestamp::now(),
+                        );
                     }
                     if prune_n == 0 || prune_offset + prune_n >= page.total {
                         break;
