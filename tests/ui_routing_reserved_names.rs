@@ -74,7 +74,8 @@ async fn r4_every_admin_route_keyword_is_a_reserved_realm_name() {
         });
         match result {
             Err(IdentityError::InvalidInput { reason }) if reason.contains("reserved") => {}
-            other => accepted.push(format!("{keyword}: {other:?}")),
+            Ok(_) => accepted.push(format!("{keyword}: created")),
+            Err(e) => accepted.push(format!("{keyword}: {e:?}")),
         }
     }
     assert!(
