@@ -1729,7 +1729,7 @@ Resource quotas cap the number of entities that can exist in a realm at once. Ev
 | `max_clients` | integer | unlimited | Maximum number of OAuth/OIDC clients registered in the realm. |
 | `max_agents` | integer | unlimited | Maximum number of agents registered in the realm. |
 | `max_sessions` | integer | unlimited | Maximum number of active sessions across all users in the realm. |
-| `max_audit_rows` | integer | unlimited | Maximum number of audit rows kept for the realm. Accepted, but not enforced yet (#630). Use the audit `max_rows` setting for a row backstop. |
+| `max_audit_rows` | integer | unlimited | Maximum number of audit rows kept for the realm. The daily audit prune keeps no more events than the lower of this value and the audit `max_rows`, and deletes the oldest. |
 | `max_disk_bytes` | integer | unlimited | Disk-usage warning threshold in bytes for the realm. The background pruner checks it once per day. Above the threshold it logs a warning; it does **not** block writes. |
 
 **Cost.** Each create counts the existing keys of its kind, up to the limit. It reads no records, but the count costs time in proportion to the limit. A limit in the millions adds milliseconds to each create of that kind.

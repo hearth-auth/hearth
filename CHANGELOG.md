@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Fixed
+- **The daily audit prune enforces the realm quota `max_audit_rows`** (#630). Before, it had no
+  effect. The prune now keeps no more events than the lower of the audit `max_rows` and
+  `max_audit_rows`, and deletes the oldest. The prune also counts the events, and measures the realm
+  for `max_disk_bytes`, without loading them into memory.
+
 ## [4.7.8] — 2026-11-03
 
 ### Fixed
@@ -32,10 +38,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `HEARTH_SAML_INVALID` (`400`), and an IdP that is not a SAML IdP of the realm is
   `HEARTH_SAML_ENTITY_NOT_FOUND` (`404`; the ACS answered `400` for it). The `5xx` answers do not
   change.
-- **The daily audit prune enforces the realm quota `max_audit_rows`** (#630). Before, it had no
-  effect. The prune now keeps no more events than the lower of the audit `max_rows` and
-  `max_audit_rows`, and deletes the oldest. The prune also counts the events, and measures the realm
-  for `max_disk_bytes`, without loading them into memory.
 
 ## [4.7.6] — 2026-11-01
 
