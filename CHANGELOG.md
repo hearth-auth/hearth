@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Fixed
+- **Five more realm names are reserved** (#631). `config`, `identity-providers`, `abuse`,
+  `webhooks` and `approvals` are admin console route keywords under `/ui/admin/realms/{realm}/`,
+  but a realm could take one of these names and collide with an admin route. Realm create and
+  realm rename now refuse them as reserved. An existing realm with one of these names does not
+  change.
+
 ## [4.7.10] — 2026-11-03
 
 ### Fixed

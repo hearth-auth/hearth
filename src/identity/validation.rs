@@ -564,13 +564,17 @@ pub(crate) fn validate_slug(slug: &str) -> Result<String, IdentityError> {
 /// rule R-4. Adding a new sub-resource keyword to the route map MUST also
 /// add it here.
 const RESERVED_REALM_NAMES: &[&str] = &[
+    "abuse",
     "admins",
     "api",
     "applications",
+    "approvals",
     "audit",
     "claims",
+    "config",
     "delete",
     "groups",
+    "identity-providers",
     "new",
     "organizations",
     "permissions",
@@ -580,6 +584,7 @@ const RESERVED_REALM_NAMES: &[&str] = &[
     "status",
     "test-email",
     "users",
+    "webhooks",
 ];
 
 /// Maximum length for a realm name.

@@ -32,29 +32,6 @@
 
 {# Active / Expired / All filter pills. Realm scope is in the URL path. #}
 <div class="mb-4 flex items-center gap-1" role="tablist" aria-label="Session expiry filter">
-  {% if is_global %}
-  <a href="/ui/admin/sessions?status=active"
-     role="tab"
-     aria-selected="{% if status_filter == "active" %}true{% else %}false{% endif %}"
-     class="rounded px-3 py-1.5 text-xs font-medium transition-colors
-            {% if status_filter == "active" %}bg-ht-divider/[0.10] text-ht-content-primary{% else %}text-ht-content-secondary hover:bg-ht-divider/[0.07] hover:text-ht-content-primary{% endif %}">
-    Active <span class="ml-1 text-ht-content-muted">{{ count_active }}</span>
-  </a>
-  <a href="/ui/admin/sessions?status=expired"
-     role="tab"
-     aria-selected="{% if status_filter == "expired" %}true{% else %}false{% endif %}"
-     class="rounded px-3 py-1.5 text-xs font-medium transition-colors
-            {% if status_filter == "expired" %}bg-ht-divider/[0.10] text-ht-content-primary{% else %}text-ht-content-secondary hover:bg-ht-divider/[0.07] hover:text-ht-content-primary{% endif %}">
-    Expired <span class="ml-1 text-ht-content-muted">{{ count_expired }}</span>
-  </a>
-  <a href="/ui/admin/sessions?status=all"
-     role="tab"
-     aria-selected="{% if status_filter == "all" %}true{% else %}false{% endif %}"
-     class="rounded px-3 py-1.5 text-xs font-medium transition-colors
-            {% if status_filter == "all" %}bg-ht-divider/[0.10] text-ht-content-primary{% else %}text-ht-content-secondary hover:bg-ht-divider/[0.07] hover:text-ht-content-primary{% endif %}">
-    All <span class="ml-1 text-ht-content-muted">{{ count_active + count_expired }}</span>
-  </a>
-  {% else %}
   <a href="/ui/admin/realms/{{ realm_name }}/sessions?status=active"
      role="tab"
      aria-selected="{% if status_filter == "active" %}true{% else %}false{% endif %}"
@@ -76,7 +53,6 @@
             {% if status_filter == "all" %}bg-ht-divider/[0.10] text-ht-content-primary{% else %}text-ht-content-secondary hover:bg-ht-divider/[0.07] hover:text-ht-content-primary{% endif %}">
     All <span class="ml-1 text-ht-content-muted">{{ count_active + count_expired }}</span>
   </a>
-  {% endif %}
 </div>
 
 {# Table region — swapped as one unit on sort so the pagination bar stays in

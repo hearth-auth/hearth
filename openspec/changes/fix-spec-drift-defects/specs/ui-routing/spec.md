@@ -3,7 +3,7 @@
 ### Requirement: R-4 Realm names exclude admin route keywords
 A realm name MUST NOT collide with any first-segment sub-resource keyword used under `/ui/admin/realms/{name}/...`. Realm-name validation SHALL reject these names at realm-create time:
 
-`admins`, `api`, `applications`, `audit`, `claims`, `delete`, `groups`, `new`, `organizations`, `permissions`, `rbac`, `sessions`, `settings`, `status`, `test-email`, `users`
+`abuse`, `admins`, `api`, `applications`, `approvals`, `audit`, `claims`, `config`, `delete`, `groups`, `identity-providers`, `new`, `organizations`, `permissions`, `rbac`, `sessions`, `settings`, `status`, `test-email`, `users`, `webhooks`
 
 The set SHALL be closed. Adding a new sub-resource keyword to the route map MUST also add it to this set.
 
