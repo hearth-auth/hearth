@@ -64,6 +64,7 @@ fn an_expired_request_reads_expired_in_get_and_list() {
                 owner: AgentOwner::User(owner.id().clone()),
                 capabilities: vec![],
                 max_delegation_depth: 1,
+                endpoint_url: None,
             },
             None,
         )
