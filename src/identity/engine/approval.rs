@@ -131,9 +131,11 @@ impl EmbeddedIdentityEngine {
             .get(realm_id, &key)
             .map_err(Self::storage_err)?
             .ok_or(IdentityError::ApprovalRequestNotFound)?;
-        serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
-            reason: e.to_string(),
-        })
+        let record: ApprovalRequest =
+            serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        Ok(expired_if_past(record, self.clock.now()))
     }
 
     /// Approves a pending approval request and mints a capability token.
@@ -361,6 +363,7 @@ impl EmbeddedIdentityEngine {
         let has_more = request_ids.len() > limit;
         request_ids.truncate(limit);
 
+        let now = self.clock.now();
         let mut items = Vec::new();
         for rid in &request_ids {
             let pk = keys::encode_approval_request_id(rid);
@@ -371,8 +374,10 @@ impl EmbeddedIdentityEngine {
                 serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
                     reason: e.to_string(),
                 })?;
+            let record = expired_if_past(record, now);
 
-            // Apply status filter for non-pending queries.
+            // Filter on the status the caller sees, so the pending index
+            // drops a request that expired without a decision.
             if let Some(ref sf) = status_filter {
                 if &record.status != sf {
                     continue;
@@ -730,4 +735,14 @@ impl EmbeddedIdentityEngine {
 
         Ok(agent_id)
     }
+}
+
+/// Reports a `Pending` request whose `expires_at` has passed as `Expired`
+/// (#632). Approve already refuses such a request. The stored record keeps
+/// `Pending`, so a read writes nothing.
+fn expired_if_past(mut record: ApprovalRequest, now: crate::core::Timestamp) -> ApprovalRequest {
+    if record.status == ApprovalRequestStatus::Pending && record.expires_at <= now {
+        record.status = ApprovalRequestStatus::Expired;
+    }
+    record
 }
