@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.7.12] — 2026-11-04
+
 ### Fixed
 - **An approval request past its `expires_at` reads `Expired`** (#632). Before, a request that
   expired without a decision stayed `Pending` in `GET /v1/approval-requests/{id}` and in the list,
