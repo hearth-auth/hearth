@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Added
+- **Agents have an optional `endpoint_url`, and the Agent Card serves it as `url`** (#632). Set it
+  on `POST /v1/agents` or `PATCH /v1/agents/{id}`; it must be an absolute `https` URL, and an
+  empty string on update clears it. Before, `/.well-known/agent.json` always served `url: ""`;
+  now it serves the endpoint, and leaves `url` out for an agent that has none.
+
 ## [4.7.13] — 2026-11-05
 
 ### Fixed

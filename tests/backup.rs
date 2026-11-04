@@ -2273,6 +2273,7 @@ async fn restore_carries_agents_whose_api_keys_still_authenticate() {
                 owner: hearth::identity::AgentOwner::User(owner.id().clone()),
                 capabilities: vec!["hearth:sync".to_string()],
                 max_delegation_depth: 2,
+                endpoint_url: None,
             },
             Some(owner.id()),
         )

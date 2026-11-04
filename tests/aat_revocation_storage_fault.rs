@@ -150,6 +150,7 @@ fn build_fixture() -> Fixture {
                 owner: AgentOwner::User(owner),
                 capabilities: vec![],
                 max_delegation_depth: 3,
+                endpoint_url: None,
             },
             None,
         )

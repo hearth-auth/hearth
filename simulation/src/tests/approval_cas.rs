@@ -84,6 +84,7 @@ fn make_realm_and_agent(engine: &EmbeddedIdentityEngine) -> (RealmId, AgentId) {
                 owner: AgentOwner::User(owner),
                 capabilities: vec![],
                 max_delegation_depth: 3,
+                endpoint_url: None,
             },
             None,
         )

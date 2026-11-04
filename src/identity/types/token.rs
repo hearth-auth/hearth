@@ -563,6 +563,10 @@ pub struct Agent {
     status: AgentStatus,
     /// Maximum number of delegation hops this agent may initiate (1 to `security.max_act_chain_depth`).
     max_delegation_depth: u8,
+    /// The agent's own endpoint, an absolute `https` URL. The Agent Card
+    /// serves it as `url` (#632). A record stored before the field reads `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    endpoint_url: Option<String>,
     created_at: Timestamp,
     updated_at: Timestamp,
 }
@@ -579,6 +583,7 @@ impl Agent {
         capabilities: Vec<String>,
         status: AgentStatus,
         max_delegation_depth: u8,
+        endpoint_url: Option<String>,
         created_at: Timestamp,
         updated_at: Timestamp,
     ) -> Self {
@@ -591,6 +596,7 @@ impl Agent {
             capabilities,
             status,
             max_delegation_depth,
+            endpoint_url,
             created_at,
             updated_at,
         }
@@ -636,6 +642,11 @@ impl Agent {
         self.max_delegation_depth
     }
 
+    /// Returns the agent's endpoint URL, if it has one.
+    pub fn endpoint_url(&self) -> Option<&str> {
+        self.endpoint_url.as_deref()
+    }
+
     /// Returns when the agent was created (UTC microseconds).
     pub fn created_at(&self) -> Timestamp {
         self.created_at
@@ -671,6 +682,11 @@ impl Agent {
         self.max_delegation_depth = depth;
     }
 
+    /// Sets or clears the endpoint URL.
+    pub(crate) fn set_endpoint_url(&mut self, endpoint_url: Option<String>) {
+        self.endpoint_url = endpoint_url;
+    }
+
     /// Updates the `updated_at` timestamp.
     pub(crate) fn set_updated_at(&mut self, ts: Timestamp) {
         self.updated_at = ts;
@@ -690,6 +706,9 @@ pub struct CreateAgentRequest {
     pub capabilities: Vec<String>,
     /// Maximum number of delegation hops (1 to `security.max_act_chain_depth`, default 1).
     pub max_delegation_depth: u8,
+    /// The agent's endpoint, an absolute `https` URL; `None` or an empty
+    /// string for none. The Agent Card serves it as `url`.
+    pub endpoint_url: Option<String>,
 }
 
 /// Request to update an existing agent's mutable fields.
@@ -703,6 +722,9 @@ pub struct UpdateAgentRequest {
     pub capabilities: Option<Vec<String>>,
     /// New max delegation depth, or `None` to leave unchanged.
     pub max_delegation_depth: Option<u8>,
+    /// New endpoint URL, an empty string to clear it, or `None` to leave it
+    /// unchanged.
+    pub endpoint_url: Option<String>,
 }
 
 /// Query parameters for listing agents.

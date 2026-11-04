@@ -16002,6 +16002,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
 
         validate_agent_capabilities(&request.capabilities)?;
+        let endpoint_url = super::validation::agent_endpoint_url(request.endpoint_url.as_deref())?;
 
         // Owner FK: the referenced user or org must exist in this realm.
         match &request.owner {
@@ -16040,6 +16041,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             request.capabilities.clone(),
             AgentStatus::Active,
             request.max_delegation_depth,
+            endpoint_url,
             now,
             now,
         );
@@ -16146,6 +16148,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         if let Some(depth) = request.max_delegation_depth {
             self.check_delegation_depth(depth)?;
             agent.set_max_delegation_depth(depth);
+        }
+
+        if let Some(url) = request.endpoint_url.as_deref() {
+            // An empty string clears the endpoint.
+            agent.set_endpoint_url(super::validation::agent_endpoint_url(Some(url))?);
         }
 
         agent.set_updated_at(self.clock.now());
@@ -28140,6 +28147,7 @@ mod tests {
                     owner: AgentOwner::User(owner.id().clone()),
                     capabilities: vec![],
                     max_delegation_depth: 2,
+                    endpoint_url: None,
                 },
                 None,
             )
@@ -28183,6 +28191,7 @@ mod tests {
                     owner: AgentOwner::User(owner.id().clone()),
                     capabilities: vec![],
                     max_delegation_depth: 3,
+                    endpoint_url: None,
                 },
                 None,
             )
@@ -28243,6 +28252,7 @@ mod tests {
                         owner: AgentOwner::User(owner.id().clone()),
                         capabilities: vec![],
                         max_delegation_depth: 3,
+                        endpoint_url: None,
                     },
                     None,
                 )
@@ -28336,6 +28346,7 @@ mod tests {
                     owner: AgentOwner::User(owner.id().clone()),
                     capabilities: vec![],
                     max_delegation_depth: 3,
+                    endpoint_url: None,
                 },
                 None,
             )

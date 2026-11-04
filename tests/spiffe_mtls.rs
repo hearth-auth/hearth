@@ -53,6 +53,7 @@ fn make_agent(h: &TestHarness, realm_id: &RealmId) -> hearth::core::AgentId {
                 owner: AgentOwner::User(owner.id().clone()),
                 capabilities: vec!["urn:hearth:workload".to_string()],
                 max_delegation_depth: 1,
+                endpoint_url: None,
             },
             None,
         )

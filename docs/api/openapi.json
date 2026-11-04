@@ -4920,6 +4920,10 @@
           "updated_at": {
             "type": "integer",
             "format": "int64"
+          },
+          "endpoint_url": {
+            "type": "string",
+            "description": "The agent's endpoint, an absolute https URL. The Agent Card serves it as\n`url`. Absent when the agent has none."
           }
         },
         "description": "An autonomous agent registered within a realm."
@@ -5323,6 +5327,10 @@
             "type": "integer",
             "format": "int64",
             "description": "Maximum delegation depth (1 to `security.max_act_chain_depth`, default 1)."
+          },
+          "endpoint_url": {
+            "type": "string",
+            "description": "The agent's endpoint, an absolute https URL (at most 2048 characters).\nThe Agent Card serves it as `url`."
           }
         },
         "description": "Request to create a new agent."
@@ -6303,6 +6311,10 @@
           "max_delegation_depth": {
             "type": "integer",
             "format": "int64"
+          },
+          "endpoint_url": {
+            "type": "string",
+            "description": "A new endpoint, an absolute https URL. An empty string clears it."
           }
         },
         "description": "Fields that may be updated on an agent."

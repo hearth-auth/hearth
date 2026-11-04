@@ -132,6 +132,7 @@ fn make_realm_with_webhook(
                 owner: AgentOwner::User(owner.id().clone()),
                 capabilities: vec![],
                 max_delegation_depth: 3,
+                endpoint_url: None,
             },
             None,
         )
@@ -327,6 +328,7 @@ async fn approval_webhook_not_delivered_when_not_configured() {
                 owner: AgentOwner::User(owner.id().clone()),
                 capabilities: vec![],
                 max_delegation_depth: 3,
+                endpoint_url: None,
             },
             None,
         )
@@ -428,6 +430,7 @@ async fn approval_webhook_ssrf_blocked_at_delivery() {
                 owner: AgentOwner::User(owner.id().clone()),
                 capabilities: vec![],
                 max_delegation_depth: 3,
+                endpoint_url: None,
             },
             None,
         )

@@ -979,6 +979,7 @@ async fn a_system_realm_restore_refuses_what_the_live_api_never_creates_there() 
             owner: AgentOwner::User(user.id().clone()),
             capabilities: vec![],
             max_delegation_depth: 1,
+            endpoint_url: None,
         },
         Some(user.id()),
     )

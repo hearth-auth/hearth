@@ -314,6 +314,9 @@ message Agent {
   uint32 max_delegation_depth = 9;
   int64 created_at = 10;
   int64 updated_at = 11;
+  // The agent's endpoint, an absolute https URL. The Agent Card serves it as
+  // `url`. Absent when the agent has none.
+  optional string endpoint_url = 12;
 }
 
 // A stored agent credential record (no secret material).
@@ -362,6 +365,9 @@ message CreateAgentRequest {
   repeated string capabilities = 5;
   // Maximum delegation depth (1 to `security.max_act_chain_depth`, default 1).
   uint32 max_delegation_depth = 6;
+  // The agent's endpoint, an absolute https URL (at most 2048 characters).
+  // The Agent Card serves it as `url`.
+  optional string endpoint_url = 7;
 }
 
 // Fields that may be updated on an agent.
@@ -370,6 +376,8 @@ message UpdateAgentRequest {
   optional string description = 2;
   repeated string capabilities = 3;
   optional uint32 max_delegation_depth = 4;
+  // A new endpoint, an absolute https URL. An empty string clears it.
+  optional string endpoint_url = 5;
 }
 
 // Wraps an UpdateAgentRequest with the target id.
