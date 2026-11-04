@@ -18275,6 +18275,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             metadata: Some(serde_json::json!({
                 "actor": actor_sub,
                 "on_behalf_of": subject_claims.sub,
+                "delegation_chain": crate::identity::tokens::delegation_chain(
+                    &subject_claims.sub,
+                    issued_claims.act.as_ref(),
+                ),
                 "delegation_depth": new_depth,
                 "effective_scope": effective_scope,
                 "token_jti": jti,
