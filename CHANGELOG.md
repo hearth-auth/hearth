@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.7.11] — 2026-11-04
+
 ### Fixed
 - **Five more realm names are reserved** (#631). `config`, `identity-providers`, `abuse`,
   `webhooks` and `approvals` are admin console route keywords under `/ui/admin/realms/{realm}/`,
