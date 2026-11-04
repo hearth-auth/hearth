@@ -19425,6 +19425,8 @@ mod tests {
     mod aat_chain_links;
     /// `security.max_act_chain_depth` bounds validation, exchange and agents.
     mod act_chain_ceiling;
+    /// A request past `expires_at` with no decision reads `Expired` (#632).
+    mod approval_expiry;
     /// A delegation whose audit record fails to write issues no token (#621).
     mod delegation_audit_required;
     /// A revoke racing an onward exchange cannot leave the onward token alive.
