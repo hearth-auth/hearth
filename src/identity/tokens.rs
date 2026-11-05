@@ -111,6 +111,25 @@ impl ActClaim {
     }
 }
 
+/// The delegation chain of a token, for agent audit events (#632): the subject
+/// `sub`, then each actor of the `act` chain from the earliest to the
+/// immediate one. A token with no `act` claim gives `[sub]`.
+///
+/// For `{ "sub": "user:U", "act": { "sub": "agent:B", "act": { "sub":
+/// "agent:A" } } }` the chain is `["user:U", "agent:A", "agent:B"]`.
+#[must_use]
+pub fn delegation_chain(sub: &str, act: Option<&ActClaim>) -> Vec<String> {
+    let mut chain = vec![sub.to_string()];
+    let mut cur = act;
+    while let Some(actor) = cur {
+        chain.push(actor.sub.clone());
+        cur = actor.act.as_deref();
+    }
+    // The walk visits the immediate actor first; the chain lists it last.
+    chain[1..].reverse();
+    chain
+}
+
 /// JWT `aud` claim — either a single StringOrURI or a JSON array.
 ///
 /// Per RFC 7519 §4.1.3. Serializes as a plain string when the audience

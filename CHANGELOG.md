@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Fixed
+- **Agent audit events carry the delegation chain and the tool invocation context** (#632). The
+  `AgentDelegation` event now records `delegation_chain`: the user, then each actor from the
+  earliest to the newest. An allowed `POST /v1/tools/invoke` now records `actor`, `on_behalf_of`,
+  `delegation_chain`, `tool`, `token_jti` and `dpop_jkt` in its `AgentToolInvocation` event.
+  Before, that event had no metadata, so an audit query by `tool` did not find it.
+
 ## [4.7.12] — 2026-11-04
 
 ### Fixed

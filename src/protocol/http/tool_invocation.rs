@@ -128,7 +128,13 @@ async fn invoke_tool(
 
     match evaluate_tool_access(&claims.permissions, &body.tool, &tool_groups) {
         ToolAccessDecision::Allow => {
-            // M6 — Audit every authorized invocation.
+            // M6 — Audit every authorized invocation, with the delegation
+            // context of `agent-identity` (#632): `actor` is the immediate
+            // actor, so `act.sub` for a delegated token.
+            let actor = claims
+                .act
+                .as_ref()
+                .map_or(claims.sub.as_str(), |a| a.sub.as_str());
             crate::protocol::audit_log::record(
                 state.audit.as_ref(),
                 &CreateAuditEvent {
@@ -137,7 +143,17 @@ async fn invoke_tool(
                     action: AuditAction::AgentToolInvocation,
                     resource_type: "tool".to_string(),
                     resource_id: format!("{}.{}", body.tool, body.action),
-                    metadata: None,
+                    metadata: Some(serde_json::json!({
+                        "actor": actor,
+                        "on_behalf_of": claims.act.as_ref().map(|_| claims.sub.as_str()),
+                        "delegation_chain": crate::identity::tokens::delegation_chain(
+                            &claims.sub,
+                            claims.act.as_ref(),
+                        ),
+                        "tool": body.tool,
+                        "token_jti": claims.jti,
+                        "dpop_jkt": claims.cnf.as_ref().map(|c| c.jkt.as_str()),
+                    })),
                 },
             );
             (
