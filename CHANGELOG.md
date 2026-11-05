@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.7.13] — 2026-11-05
+
 ### Fixed
 - **Agent audit events carry the delegation chain and the tool invocation context** (#632). The
   `AgentDelegation` event now records `delegation_chain`: the user, then each actor from the
