@@ -123,6 +123,7 @@ fn build_realm_with_every_secret_family(h: &common::TestHarness) -> RealmId {
                 owner: AgentOwner::Organization(org.id().clone()),
                 capabilities: Vec::new(),
                 max_delegation_depth: 1,
+                endpoint_url: None,
             },
             None,
         )

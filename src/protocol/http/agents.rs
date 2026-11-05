@@ -69,6 +69,8 @@ struct AgentResponse {
     capabilities: Vec<String>,
     status: &'static str,
     max_delegation_depth: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    endpoint_url: Option<String>,
     created_at: i64,
     updated_at: i64,
 }
@@ -95,7 +97,9 @@ struct CredentialResponse {
 struct AgentCard {
     name: String,
     description: String,
-    url: String,
+    /// The agent's endpoint; left out for an agent that has none (#632).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
     capabilities: Vec<String>,
     authentication: Vec<&'static str>,
     version: u32,
@@ -124,6 +128,7 @@ fn agent_to_wire(a: &crate::identity::Agent) -> AgentResponse {
             AgentStatus::Revoked => "revoked",
         },
         max_delegation_depth: a.max_delegation_depth(),
+        endpoint_url: a.endpoint_url().map(str::to_string),
         created_at: a.created_at().as_micros(),
         updated_at: a.updated_at().as_micros(),
     }
@@ -208,7 +213,7 @@ async fn agent_card(
             let card = AgentCard {
                 name: agent.display_name().to_string(),
                 description: agent.description().to_string(),
-                url: String::new(), // operator configures this externally
+                url: agent.endpoint_url().map(str::to_string),
                 capabilities: agent.capabilities().to_vec(),
                 authentication: vec!["api_key"],
                 version: 1,
@@ -240,6 +245,8 @@ struct CreateAgentBody {
     capabilities: Vec<String>,
     #[serde(default = "default_delegation_depth")]
     max_delegation_depth: u8,
+    #[serde(default)]
+    endpoint_url: Option<String>,
 }
 
 fn default_delegation_depth() -> u8 {
@@ -278,6 +285,7 @@ async fn create_agent(
         owner,
         capabilities: body.capabilities,
         max_delegation_depth: body.max_delegation_depth,
+        endpoint_url: body.endpoint_url,
     };
 
     let caller = Some(auth.user_id.clone());
@@ -470,6 +478,8 @@ struct UpdateAgentBody {
     description: Option<String>,
     capabilities: Option<Vec<String>>,
     max_delegation_depth: Option<u8>,
+    /// An empty string clears the endpoint.
+    endpoint_url: Option<String>,
 }
 
 /// `PATCH /v1/agents/{id}`
@@ -503,6 +513,7 @@ async fn update_agent(
         description: body.description,
         capabilities: body.capabilities,
         max_delegation_depth: body.max_delegation_depth,
+        endpoint_url: body.endpoint_url,
     };
 
     let caller = Some(auth.user_id.clone());

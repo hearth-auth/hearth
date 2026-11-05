@@ -2317,8 +2317,11 @@ type Agent struct {
 	MaxDelegationDepth uint32      `protobuf:"varint,9,opt,name=max_delegation_depth,json=maxDelegationDepth,proto3" json:"max_delegation_depth,omitempty"`
 	CreatedAt          int64       `protobuf:"varint,10,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
 	UpdatedAt          int64       `protobuf:"varint,11,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// The agent's endpoint, an absolute https URL. The Agent Card serves it as
+	// `url`. Absent when the agent has none.
+	EndpointUrl   *string `protobuf:"bytes,12,opt,name=endpoint_url,json=endpointUrl,proto3,oneof" json:"endpoint_url,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Agent) Reset() {
@@ -2426,6 +2429,13 @@ func (x *Agent) GetUpdatedAt() int64 {
 		return x.UpdatedAt
 	}
 	return 0
+}
+
+func (x *Agent) GetEndpointUrl() string {
+	if x != nil && x.EndpointUrl != nil {
+		return *x.EndpointUrl
+	}
+	return ""
 }
 
 // A stored agent credential record (no secret material).
@@ -2745,8 +2755,11 @@ type CreateAgentRequest struct {
 	Capabilities []string `protobuf:"bytes,5,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
 	// Maximum delegation depth (1 to `security.max_act_chain_depth`, default 1).
 	MaxDelegationDepth uint32 `protobuf:"varint,6,opt,name=max_delegation_depth,json=maxDelegationDepth,proto3" json:"max_delegation_depth,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// The agent's endpoint, an absolute https URL (at most 2048 characters).
+	// The Agent Card serves it as `url`.
+	EndpointUrl   *string `protobuf:"bytes,7,opt,name=endpoint_url,json=endpointUrl,proto3,oneof" json:"endpoint_url,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CreateAgentRequest) Reset() {
@@ -2821,6 +2834,13 @@ func (x *CreateAgentRequest) GetMaxDelegationDepth() uint32 {
 	return 0
 }
 
+func (x *CreateAgentRequest) GetEndpointUrl() string {
+	if x != nil && x.EndpointUrl != nil {
+		return *x.EndpointUrl
+	}
+	return ""
+}
+
 // Fields that may be updated on an agent.
 type UpdateAgentRequest struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
@@ -2828,8 +2848,10 @@ type UpdateAgentRequest struct {
 	Description        *string                `protobuf:"bytes,2,opt,name=description,proto3,oneof" json:"description,omitempty"`
 	Capabilities       []string               `protobuf:"bytes,3,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
 	MaxDelegationDepth *uint32                `protobuf:"varint,4,opt,name=max_delegation_depth,json=maxDelegationDepth,proto3,oneof" json:"max_delegation_depth,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// A new endpoint, an absolute https URL. An empty string clears it.
+	EndpointUrl   *string `protobuf:"bytes,5,opt,name=endpoint_url,json=endpointUrl,proto3,oneof" json:"endpoint_url,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *UpdateAgentRequest) Reset() {
@@ -2888,6 +2910,13 @@ func (x *UpdateAgentRequest) GetMaxDelegationDepth() uint32 {
 		return *x.MaxDelegationDepth
 	}
 	return 0
+}
+
+func (x *UpdateAgentRequest) GetEndpointUrl() string {
+	if x != nil && x.EndpointUrl != nil {
+		return *x.EndpointUrl
+	}
+	return ""
 }
 
 // Wraps an UpdateAgentRequest with the target id.
@@ -3393,7 +3422,7 @@ const file_hearth_identity_v1_identity_proto_rawDesc = "" +
 	"\x16UpdateOrganizationCall\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12A\n" +
 	"\x04body\x18\x02 \x01(\v2-.hearth.identity.v1.UpdateOrganizationRequestR\x04body\"\a\n" +
-	"\x05Empty\"\xfe\x02\n" +
+	"\x05Empty\"\xb7\x03\n" +
 	"\x05Agent\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x19\n" +
 	"\brealm_id\x18\x02 \x01(\tR\arealmId\x12\x1d\n" +
@@ -3409,7 +3438,9 @@ const file_hearth_identity_v1_identity_proto_rawDesc = "" +
 	"created_at\x18\n" +
 	" \x01(\x03R\tcreatedAt\x12\x1d\n" +
 	"\n" +
-	"updated_at\x18\v \x01(\x03R\tupdatedAt\"\xe1\x01\n" +
+	"updated_at\x18\v \x01(\x03R\tupdatedAt\x12&\n" +
+	"\fendpoint_url\x18\f \x01(\tH\x00R\vendpointUrl\x88\x01\x01B\x0f\n" +
+	"\r_endpoint_url\"\xe1\x01\n" +
 	"\x0fAgentCredential\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x19\n" +
 	"\bagent_id\x18\x02 \x01(\tR\aagentId\x12;\n" +
@@ -3441,7 +3472,7 @@ const file_hearth_identity_v1_identity_proto_rawDesc = "" +
 	"\a_cursorB\b\n" +
 	"\x06_limit\"!\n" +
 	"\x0fGetAgentRequest\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\"\xfe\x01\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\"\xb7\x02\n" +
 	"\x12CreateAgentRequest\x12!\n" +
 	"\fdisplay_name\x18\x01 \x01(\tR\vdisplayName\x12%\n" +
 	"\vdescription\x18\x02 \x01(\tH\x00R\vdescription\x88\x01\x01\x12\x1d\n" +
@@ -3449,16 +3480,20 @@ const file_hearth_identity_v1_identity_proto_rawDesc = "" +
 	"owner_type\x18\x03 \x01(\tR\townerType\x12\x19\n" +
 	"\bowner_id\x18\x04 \x01(\tR\aownerId\x12\"\n" +
 	"\fcapabilities\x18\x05 \x03(\tR\fcapabilities\x120\n" +
-	"\x14max_delegation_depth\x18\x06 \x01(\rR\x12maxDelegationDepthB\x0e\n" +
-	"\f_description\"\xf8\x01\n" +
+	"\x14max_delegation_depth\x18\x06 \x01(\rR\x12maxDelegationDepth\x12&\n" +
+	"\fendpoint_url\x18\a \x01(\tH\x01R\vendpointUrl\x88\x01\x01B\x0e\n" +
+	"\f_descriptionB\x0f\n" +
+	"\r_endpoint_url\"\xb1\x02\n" +
 	"\x12UpdateAgentRequest\x12&\n" +
 	"\fdisplay_name\x18\x01 \x01(\tH\x00R\vdisplayName\x88\x01\x01\x12%\n" +
 	"\vdescription\x18\x02 \x01(\tH\x01R\vdescription\x88\x01\x01\x12\"\n" +
 	"\fcapabilities\x18\x03 \x03(\tR\fcapabilities\x125\n" +
-	"\x14max_delegation_depth\x18\x04 \x01(\rH\x02R\x12maxDelegationDepth\x88\x01\x01B\x0f\n" +
+	"\x14max_delegation_depth\x18\x04 \x01(\rH\x02R\x12maxDelegationDepth\x88\x01\x01\x12&\n" +
+	"\fendpoint_url\x18\x05 \x01(\tH\x03R\vendpointUrl\x88\x01\x01B\x0f\n" +
 	"\r_display_nameB\x0e\n" +
 	"\f_descriptionB\x17\n" +
-	"\x15_max_delegation_depth\"]\n" +
+	"\x15_max_delegation_depthB\x0f\n" +
+	"\r_endpoint_url\"]\n" +
 	"\x0fUpdateAgentCall\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12:\n" +
 	"\x04body\x18\x02 \x01(\v2&.hearth.identity.v1.UpdateAgentRequestR\x04body\"$\n" +
@@ -3723,6 +3758,7 @@ func file_hearth_identity_v1_identity_proto_init() {
 	file_hearth_identity_v1_identity_proto_msgTypes[20].OneofWrappers = []any{}
 	file_hearth_identity_v1_identity_proto_msgTypes[22].OneofWrappers = []any{}
 	file_hearth_identity_v1_identity_proto_msgTypes[28].OneofWrappers = []any{}
+	file_hearth_identity_v1_identity_proto_msgTypes[33].OneofWrappers = []any{}
 	file_hearth_identity_v1_identity_proto_msgTypes[34].OneofWrappers = []any{}
 	file_hearth_identity_v1_identity_proto_msgTypes[35].OneofWrappers = []any{}
 	file_hearth_identity_v1_identity_proto_msgTypes[37].OneofWrappers = []any{}

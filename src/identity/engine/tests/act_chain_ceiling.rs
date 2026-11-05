@@ -77,6 +77,7 @@ fn agent_request(owner: &User, depth: u8) -> CreateAgentRequest {
         owner: AgentOwner::User(owner.id().clone()),
         capabilities: vec![],
         max_delegation_depth: depth,
+        endpoint_url: None,
     }
 }
 

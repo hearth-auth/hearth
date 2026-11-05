@@ -311,6 +311,52 @@ pub(crate) fn validate_client_name(name: &str) -> Result<String, IdentityError> 
     Ok(trimmed.to_string())
 }
 
+/// Maximum length of an agent endpoint URL.
+const MAX_AGENT_ENDPOINT_URL_LENGTH: usize = 2048;
+
+/// The endpoint an agent request sets (#632): `None` for no value or an empty
+/// string, else the validated URL (see [`validate_agent_endpoint_url`]).
+pub(crate) fn agent_endpoint_url(url: Option<&str>) -> Result<Option<String>, IdentityError> {
+    match url {
+        None | Some("") => Ok(None),
+        Some(url) => {
+            validate_agent_endpoint_url(url)?;
+            Ok(Some(url.to_string()))
+        }
+    }
+}
+
+/// Validates an agent's `endpoint_url` (#632), which the Agent Card serves as
+/// `url` for other agents to call. It must be an absolute `https` URL with a
+/// host, at most 2048 characters, with no whitespace, control character, user
+/// information or fragment.
+fn validate_agent_endpoint_url(url: &str) -> Result<(), IdentityError> {
+    let invalid = |reason: &str| IdentityError::InvalidInput {
+        reason: format!("endpoint_url {reason}"),
+    };
+    if url.len() > MAX_AGENT_ENDPOINT_URL_LENGTH {
+        return Err(invalid(&format!(
+            "exceeds maximum length of {MAX_AGENT_ENDPOINT_URL_LENGTH} characters"
+        )));
+    }
+    if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(invalid("must not contain whitespace or control characters"));
+    }
+    let rest = url
+        .get(..8)
+        .filter(|scheme| scheme.eq_ignore_ascii_case("https://"))
+        .and_then(|_| url.get(8..))
+        .ok_or_else(|| invalid("must be an absolute https URL"))?;
+    if url.contains('#') {
+        return Err(invalid("must not contain a fragment"));
+    }
+    let authority = rest.split(['/', '?']).next().unwrap_or_default();
+    if authority.is_empty() || authority.contains('@') {
+        return Err(invalid("must name a host and no user information"));
+    }
+    Ok(())
+}
+
 /// Validates a redirect URI.
 pub(crate) fn validate_redirect_uri(uri: &str) -> Result<(), IdentityError> {
     if uri.is_empty() {

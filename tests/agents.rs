@@ -67,6 +67,7 @@ fn create_agent(
                 owner: AgentOwner::User(owner_id.clone()),
                 capabilities: vec!["urn:hearth:capability:email:send".to_string()],
                 max_delegation_depth: 1,
+                endpoint_url: None,
             },
             None,
         )
@@ -155,6 +156,7 @@ async fn agent_update_metadata() {
                 description: Some("Updated description".to_string()),
                 capabilities: None,
                 max_delegation_depth: Some(3),
+                endpoint_url: None,
             },
             None,
         )
@@ -401,6 +403,7 @@ async fn agent_max_delegation_depth_must_be_1_to_10() {
                 owner: AgentOwner::User(user_id.clone()),
                 capabilities: vec![],
                 max_delegation_depth: 0,
+                endpoint_url: None,
             },
             None,
         )
@@ -420,6 +423,7 @@ async fn agent_max_delegation_depth_must_be_1_to_10() {
                 owner: AgentOwner::User(user_id.clone()),
                 capabilities: vec![],
                 max_delegation_depth: 4,
+                endpoint_url: None,
             },
             None,
         )
@@ -447,6 +451,7 @@ async fn agent_display_name_length_validated() {
                 owner: AgentOwner::User(user_id.clone()),
                 capabilities: vec![],
                 max_delegation_depth: 1,
+                endpoint_url: None,
             },
             None,
         )
@@ -464,6 +469,7 @@ async fn agent_display_name_length_validated() {
                 owner: AgentOwner::User(user_id.clone()),
                 capabilities: vec![],
                 max_delegation_depth: 1,
+                endpoint_url: None,
             },
             None,
         )
@@ -492,6 +498,7 @@ async fn create_agent_rejects_nonexistent_user_owner() {
                 owner: AgentOwner::User(ghost_user),
                 capabilities: vec![],
                 max_delegation_depth: 1,
+                endpoint_url: None,
             },
             None,
         )
@@ -545,6 +552,7 @@ async fn create_agent_respects_max_agents_quota() {
                 owner: AgentOwner::User(user_id.clone()),
                 capabilities: vec![],
                 max_delegation_depth: 1,
+                endpoint_url: None,
             },
             None,
         )
@@ -918,6 +926,7 @@ async fn agent_capability_count_bounded_on_create() {
                 owner: AgentOwner::User(user_id.clone()),
                 capabilities: caps,
                 max_delegation_depth: 1,
+                endpoint_url: None,
             },
             None,
         )
@@ -938,6 +947,7 @@ async fn agent_capability_count_bounded_on_create() {
                 owner: AgentOwner::User(user_id.clone()),
                 capabilities: caps_ok,
                 max_delegation_depth: 1,
+                endpoint_url: None,
             },
             None,
         )
@@ -962,6 +972,7 @@ async fn agent_capability_string_length_bounded_on_create() {
                 owner: AgentOwner::User(user_id.clone()),
                 capabilities: vec![long_cap],
                 max_delegation_depth: 1,
+                endpoint_url: None,
             },
             None,
         )
@@ -982,6 +993,7 @@ async fn agent_capability_string_length_bounded_on_create() {
                 owner: AgentOwner::User(user_id.clone()),
                 capabilities: vec![cap_ok],
                 max_delegation_depth: 1,
+                endpoint_url: None,
             },
             None,
         )
@@ -1934,6 +1946,7 @@ async fn agent_lifecycle_routes_reject_another_realms_agent() {
                 owner: AgentOwner::User(owner_b),
                 capabilities: vec![],
                 max_delegation_depth: 1,
+                endpoint_url: None,
             },
             None,
         )

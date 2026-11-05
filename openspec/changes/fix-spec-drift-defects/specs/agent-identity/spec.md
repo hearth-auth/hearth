@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Agent Cards
-An Agent Card MUST be served at `/.well-known/agent.json?agent_id={agent_id}`. A request without `agent_id` SHALL be refused with `400`, and an `agent_id` that names no agent of the caller's realm SHALL answer `404`. The endpoint SHALL require a bearer token with the `hearth.agents.admin` permission. Hearth SHOULD serve an Agent Card for each registered agent, so other agents can discover it per the A2A protocol. The card MUST include `name`, `description`, `url` (the agent endpoint), `authentication` (the supported schemes) and `capabilities` (the skill list). The card MUST NOT expose internal implementation details, credential material, or the agent's full permission set. The card SHOULD include a `version` field for cache busting.
+An Agent Card MUST be served at `/.well-known/agent.json?agent_id={agent_id}`. A request without `agent_id` SHALL be refused with `400`, and an `agent_id` that names no agent of the caller's realm SHALL answer `404`. The endpoint SHALL require a bearer token with the `hearth.agents.admin` permission. Hearth SHOULD serve an Agent Card for each registered agent, so other agents can discover it per the A2A protocol. The card MUST include `name`, `description`, `authentication` (the supported schemes) and `capabilities` (the skill list). The card MUST include `url`, the agent endpoint, when the agent has one: the agent's optional `endpoint_url`, an absolute `https` URL set at agent create or update. The card SHALL leave `url` out for an agent that has no endpoint, and SHALL NOT serve an empty `url`. The card MUST NOT expose internal implementation details, credential material, or the agent's full permission set. The card SHOULD include a `version` field for cache busting.
 
 #### Scenario: Fetch a card
 - **WHEN** a caller with `hearth.agents.admin` requests `/.well-known/agent.json?agent_id={agent_id}` for an existing agent
@@ -22,6 +22,14 @@ An Agent Card MUST be served at `/.well-known/agent.json?agent_id={agent_id}`. A
 #### Scenario: Regression — the card has no endpoint URL
 - **WHEN** a caller fetches the Agent Card of an existing agent
 - **THEN** the card's `url` is the agent's endpoint URL, not an empty string
+
+#### Scenario: An agent without an endpoint
+- **WHEN** a caller fetches the Agent Card of an agent that has no `endpoint_url`
+- **THEN** the card has no `url` field
+
+#### Scenario: An endpoint that is not https
+- **WHEN** an agent is created or updated with an `endpoint_url` that is not an absolute `https` URL
+- **THEN** the request is refused with `400`, and an empty `endpoint_url` on update clears the endpoint
 
 ### Requirement: Agent audit events carry the delegation context
 Every audit event for an agent action MUST include these fields.

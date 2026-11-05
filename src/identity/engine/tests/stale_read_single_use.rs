@@ -423,6 +423,7 @@ fn make_agent(f: &Fixture) -> crate::core::AgentId {
                 owner: crate::identity::types::AgentOwner::User(owner.id().clone()),
                 capabilities: vec![],
                 max_delegation_depth: 3,
+                endpoint_url: None,
             },
             None,
         )

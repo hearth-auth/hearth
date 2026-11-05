@@ -61,6 +61,7 @@ fn make_agent_with_key(
                 owner: AgentOwner::User(user_id.clone()),
                 capabilities: vec![],
                 max_delegation_depth: 1,
+                endpoint_url: None,
             },
             None,
         )

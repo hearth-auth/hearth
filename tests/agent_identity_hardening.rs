@@ -185,6 +185,7 @@ fn make_agent(identity: &dyn IdentityEngine, realm_id: &RealmId, owner: &UserId)
                 owner: AgentOwner::User(owner.clone()),
                 capabilities: vec![],
                 max_delegation_depth: 3,
+                endpoint_url: None,
             },
             None,
         )

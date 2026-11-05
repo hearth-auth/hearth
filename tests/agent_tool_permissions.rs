@@ -484,6 +484,7 @@ fn setup_m5_entities(h: &common::TestHarness) -> M5Entities {
                 owner: AgentOwner::User(owner_b.id().clone()),
                 capabilities: vec![],
                 max_delegation_depth: 1,
+                endpoint_url: None,
             },
             None,
         )
