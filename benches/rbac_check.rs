@@ -11,12 +11,22 @@
 //!
 //! | Gate | Limit | Regression delta |
 //! |------|-------|-----------------|
-//! | `resolve_permissions` (JWT decode + HashSet lookup) | p99 ≤ 1 ms | 0% (hard limit) |
+//! | `resolve_permissions` (RBAC engine, typical user, cache miss) | p99 ≤ 1 ms | 0% (hard limit) |
 //! | `hasPermission` (pre-parsed `HashSet::contains`)    | p99 ≤ 1 µs | 0% (hard limit) |
 //! | `hasPermission` allocations                         | ≤ [`MAX_ALLOCS_PER_CALL`] (0) | 0% (hard limit) |
 //!
 //! Gates collect [`GATE_SAMPLES`] measurements after [`GATE_WARMUP`]
 //! discard iterations, then assert `samples[samples.len() * 99 / 100]`.
+//!
+//! ## `resolve_permissions` gate (#636)
+//!
+//! The gate times `EmbeddedRbacEngine::resolve_permissions` for the spec's
+//! typical user: 5 roles, 10 groups and 30 permissions
+//! (`benches/support/rbac_typical_user.rs`, shared with
+//! `tests/rbac_check_gate.rs`). Before each sample, an untimed write to the
+//! realm's RBAC graph makes the engine's resolution cache miss, so each sample
+//! is a full graph walk: the worst case at token issue. Before #636 the gate
+//! timed a bench-local JWT decode that never reached the engine.
 //!
 //! ## Allocation ceiling rationale (HEA-1776)
 //!
@@ -45,6 +55,11 @@ use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use criterion::{black_box, criterion_group, BenchmarkId, Criterion};
+
+#[path = "support/rbac_typical_user.rs"]
+mod typical_user;
+
+use typical_user::TypicalUser;
 
 // ── Counting allocator ────────────────────────────────────────────────────────
 
@@ -106,7 +121,7 @@ const MAX_ALLOCS_PER_CALL: usize = 0;
 /// Rounds used to amortize per-call allocation counting noise.
 const ALLOC_ROUNDS: usize = 200;
 
-/// Hard p99 limit for `resolve_permissions` (full JWT decode + lookup path).
+/// Hard p99 limit for `resolve_permissions` (RBAC engine, cache miss).
 const RESOLVE_PERMISSIONS_P99_LIMIT: Duration = Duration::from_millis(1);
 
 /// Hard p99 limit for `hasPermission` (pre-parsed `HashSet::contains` only).
@@ -152,7 +167,8 @@ fn forge_token(permission_count: usize) -> String {
 
 // ── Inner hot-path helpers (shared by gates and Criterion) ───────────────────
 
-/// JWT decode + linear permission scan — the `resolve_permissions` path.
+/// JWT decode + linear permission scan — a client-side `hasPermission` on a
+/// raw token. Criterion only; no gate times it.
 #[inline]
 fn do_jwt_lookup(token: &str, target: &str) -> bool {
     let parts: Vec<&str> = token.split('.').collect();
@@ -174,20 +190,27 @@ fn do_hashset_contains(set: &HashSet<String>, target: &str) -> bool {
 
 /// Assert `resolve_permissions` p99 ≤ [`RESOLVE_PERMISSIONS_P99_LIMIT`].
 ///
-/// Uses the worst-case fixture: 100 permissions, target is the last one
-/// (maximises the linear scan in `do_jwt_lookup`).
+/// Times the RBAC engine's resolution for the typical user (5 roles,
+/// 10 groups, 30 permissions). An untimed write before each sample makes the
+/// resolution cache miss, so every sample walks the graph.
 fn gate_resolve_permissions_p99() {
-    let token = forge_token(100);
-    let target = format!("namespace.resource.action_{:04}", 99);
+    let mut fixture = TypicalUser::build();
+    assert_eq!(
+        fixture.resolve().permissions.len(),
+        typical_user::PERMISSIONS,
+        "the typical user resolves to the spec's 30 permissions"
+    );
 
     for _ in 0..GATE_WARMUP {
-        black_box(do_jwt_lookup(black_box(&token), black_box(&target)));
+        fixture.invalidate();
+        black_box(fixture.resolve());
     }
 
     let mut samples: Vec<Duration> = Vec::with_capacity(GATE_SAMPLES);
     for _ in 0..GATE_SAMPLES {
+        fixture.invalidate();
         let start = Instant::now();
-        black_box(do_jwt_lookup(black_box(&token), black_box(&target)));
+        black_box(fixture.resolve());
         samples.push(start.elapsed());
     }
 
@@ -320,7 +343,34 @@ fn bench_hashset_contains(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_jwt_lookup, bench_hashset_contains);
+/// Benchmarks the RBAC engine's `resolve_permissions` for the typical user,
+/// on a resolution-cache hit (`warm`) and on a miss (`cold`, an untimed write
+/// to the realm's RBAC graph before each call).
+fn bench_resolve_permissions(c: &mut Criterion) {
+    let mut group = c.benchmark_group("rbac_resolve_permissions");
+    let mut fixture = TypicalUser::build();
+    group.bench_function("warm", |b| b.iter(|| black_box(fixture.resolve())));
+    group.bench_function("cold", |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                fixture.invalidate();
+                let start = Instant::now();
+                black_box(fixture.resolve());
+                total += start.elapsed();
+            }
+            total
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_resolve_permissions,
+    bench_jwt_lookup,
+    bench_hashset_contains
+);
 
 // Custom main: run hard threshold gates before Criterion sampling.
 // Panicking here causes non-zero exit, which fails `make bench-gate`.

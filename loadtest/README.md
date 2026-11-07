@@ -367,7 +367,9 @@ every other mode, so existing consumers are unaffected):
 ```
 
 The `lookup_hot` / `lookup_cold` journeys also appear as normal rows in the
-`journeys` table (with the issuance budget, since each is a full `/token` call).
+`journeys` table. Each is a `GET /dev/probe-user` user lookup, so `lookup_hot` has
+the user-lookup budget (1,200 μs) and `lookup_cold` the user-lookup cold-path
+budget (6,000 μs).
 `expected_cold_miss_rate` is a **by-construction estimate** from capacity ÷ corpus,
 not a per-request server signal — the HTTP client cannot see which tier served a
 given lookup.

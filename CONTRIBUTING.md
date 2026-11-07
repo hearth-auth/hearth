@@ -178,7 +178,7 @@ make bench-gate          # compile + run all three gate binaries
 
 | Binary | Operation | p50 limit | p99 limit |
 |--------|-----------|-----------|-----------|
-| `rbac_check` | `resolve_permissions` (JWT decode + scan) | — | 1 ms |
+| `rbac_check` | `resolve_permissions` (RBAC engine: 5 roles, 10 groups, 30 permissions; cache miss) | — | 1 ms |
 | `rbac_check` | `hasPermission` (`HashSet::contains`) | — | 1 µs |
 | `storage_gate` | Storage hot-tier key lookup | 10 µs | 100 µs |
 | `storage_gate` | Session lookup by ID | 10 µs | 100 µs |

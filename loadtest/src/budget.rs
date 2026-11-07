@@ -45,6 +45,11 @@ pub const SPEC_P99_ENGINE_PERMISSION_CHECK_US: u64 = 200;
 /// "User lookup budget" (p99 `< 200 μs`).
 pub const SPEC_P99_ENGINE_USER_LOOKUP_US: u64 = 200;
 
+/// Engine cold path — user lookup by email/ID on a cold-path first access.
+/// Source: `openspec/specs/performance-budgets/spec.md`, requirement
+/// "User lookup budget" (`< 5 ms` on a cold-path first access).
+pub const SPEC_COLD_ENGINE_USER_LOOKUP_US: u64 = 5_000;
+
 /// Engine p99 — token issuance (full OAuth2 flow).
 /// Source: `openspec/specs/performance-budgets/spec.md`, requirement
 /// "Token issuance budget" (p99 `< 5 ms`).
@@ -70,6 +75,11 @@ pub const HTTP_BUDGET_P99_SESSION_US: u64 =
 
 /// HTTP p99 budget — user-lookup journey (`GET /admin/users/{id}`).
 pub const HTTP_BUDGET_P99_USER_US: u64 = SPEC_P99_ENGINE_USER_LOOKUP_US + LOOPBACK_ENVELOPE_P99_US;
+
+/// HTTP p99 budget — cold tier-miss user lookup (`lookup_cold`,
+/// `GET /dev/probe-user`).
+pub const HTTP_BUDGET_COLD_USER_US: u64 =
+    SPEC_COLD_ENGINE_USER_LOOKUP_US + LOOPBACK_ENVELOPE_P99_US;
 
 /// HTTP p99 budget — issuance journey (`POST /token`).
 pub const HTTP_BUDGET_P99_ISSUANCE_US: u64 =
@@ -102,14 +112,14 @@ pub fn budget_for(journey_name: &str) -> Option<Budget> {
             SPEC_P99_ENGINE_SESSION_LOOKUP_US,
             HTTP_BUDGET_P99_SESSION_US,
         ),
-        "user_lookup" => (SPEC_P99_ENGINE_USER_LOOKUP_US, HTTP_BUDGET_P99_USER_US),
-        // The tier-miss profile (HEA-1801) drives `lookup_user` over the corpus
-        // via ROPC `POST /token`, split into a resident "hot" working set and a
-        // uniform "cold" draw. Both are full `/token` issuances, so both map to
-        // the issuance budget — the tier *delta* (cold p99 vs hot p99), not the
-        // absolute pass, is the corpus-scale proof (see the `tier_miss` report
-        // block).
-        "issuance" | "lookup_hot" | "lookup_cold" => (
+        // The tier-miss profile (HEA-1801) drives `get_user_by_email()` over
+        // the corpus via `GET /dev/probe-user`, split into a resident "hot"
+        // working set and a uniform "cold" draw. Both are user lookups, so the
+        // hot draw carries the user-lookup p99 budget and the cold draw the
+        // user-lookup cold-path budget (#636).
+        "user_lookup" | "lookup_hot" => (SPEC_P99_ENGINE_USER_LOOKUP_US, HTTP_BUDGET_P99_USER_US),
+        "lookup_cold" => (SPEC_COLD_ENGINE_USER_LOOKUP_US, HTTP_BUDGET_COLD_USER_US),
+        "issuance" => (
             SPEC_P99_ENGINE_TOKEN_ISSUANCE_US,
             HTTP_BUDGET_P99_ISSUANCE_US,
         ),
@@ -179,6 +189,7 @@ mod tests {
         assert_eq!(SPEC_P99_ENGINE_PERMISSION_CHECK_US, 200);
         assert_eq!(SPEC_P99_ENGINE_USER_LOOKUP_US, 200);
         assert_eq!(SPEC_P99_ENGINE_TOKEN_ISSUANCE_US, 5_000);
+        assert_eq!(SPEC_COLD_ENGINE_USER_LOOKUP_US, 5_000);
     }
 
     #[test]
@@ -192,6 +203,7 @@ mod tests {
         assert_eq!(HTTP_BUDGET_P99_SESSION_US, 1_100);
         assert_eq!(HTTP_BUDGET_P99_USER_US, 1_200);
         assert_eq!(HTTP_BUDGET_P99_ISSUANCE_US, 6_000);
+        assert_eq!(HTTP_BUDGET_COLD_USER_US, 6_000);
     }
 
     #[test]
