@@ -285,7 +285,7 @@ asan: ## Run the unsafe modules' unit tests under AddressSanitizer
 ## `package(hearth)` keeps the simulation crate's tests out.
 heap-check: ## Run EpochCell's consumers' concurrency tests under glibc heap checking
 	CARGO_TARGET_$(HOST_TRIPLE_ENV)_RUNNER="$(CURDIR)/scripts/heap-check-runner.sh" \
-	  PROTOC=$(PROTOC) cargo nextest run --workspace --lib --test epoch_cell_hot_path \
+	  PROTOC=$(PROTOC) cargo nextest run --workspace $(DEV_FEATURES) --lib --test epoch_cell_hot_path \
 	  --retries 0 --no-fail-fast --stress-count $(HEAP_CHECK_RUNS) $(CARGO_FLAGS) \
 	  -E 'package(hearth) & ($(HEAP_CHECK_FILTER))'
 
