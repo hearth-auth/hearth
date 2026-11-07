@@ -567,3 +567,89 @@ fn a_realm_requiring_mfa_must_offer_a_qualifying_method() {
         );
     }
 }
+
+/// Kills the server when the test ends, whatever the outcome.
+struct Server(std::process::Child);
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// The startup `WARN` lines that `hearth serve` wrote to `log`, as JSON.
+fn mfa_off_warnings(log: &std::path::Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|event| {
+            event["level"] == "WARN"
+                && event["fields"]["message"]
+                    .as_str()
+                    .is_some_and(|m| m.starts_with("MFA is NOT required"))
+        })
+        .collect()
+}
+
+/// #637 (1.10): `hearth serve` warns once at startup about every realm whose
+/// MFA is off, and names only those realms.
+#[test]
+fn serve_warns_at_startup_about_a_realm_with_mfa_off() {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind to port 0")
+        .local_addr()
+        .expect("local addr")
+        .port();
+    let config = dir.path().join("hearth.yaml");
+    std::fs::write(
+        &config,
+        format!(
+            "storage:\n  data_dir: \"{}\"\n\
+             observability:\n  log_format: json\n\
+             realms:\n  \
+               mfa-on: {{}}\n  \
+               mfa-off:\n    auth:\n      mfa_required: false\n",
+            dir.path().join("data").display()
+        ),
+    )
+    .expect("write config");
+    let log = dir.path().join("serve.log");
+    let log_file = std::fs::File::create(&log).expect("create log file");
+    let _server = Server(
+        Command::new(env!("CARGO_BIN_EXE_hearth"))
+            .args(["serve", "--dev", "--port", &port.to_string(), "--config"])
+            .arg(&config)
+            .stdout(log_file.try_clone().expect("clone log file"))
+            .stderr(log_file)
+            .stdin(Stdio::null())
+            .spawn()
+            .expect("spawn hearth serve"),
+    );
+
+    // Below nextest's 60 s kill, so a failure reports its own message.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut warnings = mfa_off_warnings(&log);
+    while warnings.is_empty() && Instant::now() < deadline {
+        // AUDIT: justified-sleep: polls a log file that the server process writes; bounded by the deadline (#637).
+        std::thread::sleep(Duration::from_millis(200));
+        warnings = mfa_off_warnings(&log);
+    }
+    assert_eq!(
+        warnings.len(),
+        1,
+        "one MFA-off startup warning in 30 s; log:\n{}",
+        std::fs::read_to_string(&log).unwrap_or_default()
+    );
+    let realms = warnings[0]["fields"]["realms"]
+        .as_str()
+        .expect("the warning names the realms");
+    let named: Vec<&str> = realms.split(", ").collect();
+    assert!(named.contains(&"mfa-off"), "realms: {realms}");
+    assert!(!named.contains(&"mfa-on"), "realms: {realms}");
+}

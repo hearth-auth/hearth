@@ -953,4 +953,25 @@ mod tests {
         assert_eq!(p.items, [] as [crate::rbac::types::Role; 0]);
         assert!(p.next_cursor.is_none());
     }
+
+    /// #637 (1.8): the reserved-namespace bypass is never read from
+    /// serialized input. Only Rust code that builds the request sets it.
+    #[test]
+    fn the_reserved_namespace_bypass_is_never_deserialized() {
+        let create: CreateRoleRequest = serde_json::from_value(serde_json::json!({
+            "name": "r",
+            "description": null,
+            "permissions": [],
+            "parent_roles": [],
+            "allow_reserved_permissions": true,
+        }))
+        .expect("deserialize create");
+        assert!(!create.allow_reserved_permissions, "create: {create:?}");
+
+        let update: UpdateRoleRequest = serde_json::from_value(serde_json::json!({
+            "allow_reserved_permissions": true,
+        }))
+        .expect("deserialize update");
+        assert!(!update.allow_reserved_permissions, "update: {update:?}");
+    }
 }
