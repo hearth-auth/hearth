@@ -209,15 +209,18 @@ mod tests {
     }
 
     #[test]
-    fn tier_miss_lookup_journeys_map_to_the_issuance_budget() {
-        // Regression (HEA-1801): the hot/cold tier-miss lookups are ROPC
-        // `/token` issuances and must carry the issuance budget so the run has a
-        // pass verdict; the corpus-scale proof is the hot-vs-cold p99 delta.
-        for name in ["lookup_hot", "lookup_cold"] {
-            let b = budget_for(name).unwrap_or_else(|| panic!("{name} must have a budget"));
-            assert_eq!(b.http_p99_us, HTTP_BUDGET_P99_ISSUANCE_US);
-            assert_eq!(b.spec_engine_p99_us, SPEC_P99_ENGINE_TOKEN_ISSUANCE_US);
-        }
+    fn tier_miss_lookups_carry_the_user_lookup_budget() {
+        // #636: the hot/cold tier-miss journeys are `GET /dev/probe-user`, a
+        // user lookup by email, so they carry the user-lookup budgets of
+        // `openspec/specs/performance-budgets/spec.md` ("Load-test journeys are
+        // graded against HTTP budgets"), not the token-issuance budget.
+        let hot = budget_for("lookup_hot").expect("lookup_hot must have a budget");
+        assert_eq!(hot.spec_engine_p99_us, 200, "hot: {hot:?}");
+        assert_eq!(hot.http_p99_us, 1_200, "hot: {hot:?}");
+
+        let cold = budget_for("lookup_cold").expect("lookup_cold must have a budget");
+        assert_eq!(cold.spec_engine_p99_us, 5_000, "cold: {cold:?}");
+        assert_eq!(cold.http_p99_us, 6_000, "cold: {cold:?}");
     }
 
     #[test]
