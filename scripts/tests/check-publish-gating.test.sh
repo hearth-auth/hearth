@@ -159,6 +159,33 @@ jobs:
 ' \
     "job 'release' publishes without waiting for a verdict"
 
+# 7c — REGRESSION: a SCHEDULED release workflow is in scope. semantic-release.yml
+#      releases main once a day on a schedule, not on each push. An R2 scoped to
+#      push triggers would skip the daily release, the source of every tag.
+run_case "scheduled release workflow is in scope" 1 "" \
+'on:
+  schedule:
+    - cron: "17 11 * * *"
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx semantic-release
+' \
+    "job 'release' publishes without waiting for a verdict"
+
+# 7d — a release that an operator starts by hand is in scope too.
+run_case "manually started release workflow is in scope" 1 "" \
+'on:
+  workflow_dispatch:
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx semantic-release
+' \
+    "job 'release' publishes without waiting for a verdict"
+
 # 8 — a PR-only workflow is not a release channel; R2 must not reach it.
 run_case "PR-only workflow with a publish marker is out of scope" 0 "" \
 'on:

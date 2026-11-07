@@ -52,10 +52,10 @@ semantic-release computes the "next" version by looking at the most recent git t
 3. Required CI checks must pass (nextest, clippy, cargo-audit, CodeQL, css-check, proto-check).
 4. Obtain ≥ 1 PR review (branch protection enforced).
 5. Squash-merge to `main`.
-6. `semantic-release.yml` fires; only packages whose paths contain changed files get a release.
+6. `semantic-release.yml` runs once a day at 6:17 AM EST (7:17 AM EDT); only packages whose paths contain changed files get a release. To release before then, start it by hand: `gh workflow run semantic-release.yml --ref main`.
 7. A `v0.1.1` tag (or similar) is pushed → `release.yml` builds and publishes signed binaries + Helm chart.
 
-End-to-end time: CI gates (~5 min) → merge → release run (~5 min) → publish run (~10 min).
+End-to-end time: CI gates → merge → the next daily release run (~5 min) → publish run (~10 min).
 
 ## How to cut a backport (maintenance branches)
 

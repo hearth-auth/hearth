@@ -275,8 +275,8 @@ pass — that was the old behaviour.
 
 The gate sits at two levels.
 
-**Level 1 — tag creation.** `semantic-release.yml` runs on every push to `main`. It
-creates the four SDK Release objects and pushes the `v*` and `sdk-*-v*` tags that
+**Level 1 — tag creation.** `semantic-release.yml` runs on `main` once a day, at 6:17 AM
+EST (7:17 AM EDT), and when an operator starts it by hand. It creates the four SDK Release objects and pushes the `v*` and `sdk-*-v*` tags that
 trigger every other workflow. It now waits for `required-summary` on that commit. A red
 commit produces no tag, so no downstream channel is ever triggered.
 

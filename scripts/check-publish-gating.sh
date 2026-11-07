@@ -16,14 +16,16 @@
 #
 #   R1  Every workflow named in PUBLISH_WORKFLOWS must contain a gate job.
 #       Pins the known channels, so deleting the gate is a failure, not a silence.
-#   R2  In any push-triggered workflow, every job carrying a publish marker must
-#       reach a gate job through its `needs:` chain.
+#   R2  In any workflow that a push, a schedule or a manual dispatch starts,
+#       every job carrying a publish marker must reach a gate job through its
+#       `needs:` chain.
 #       Catches a NEW publishing workflow the manifest does not know about.
 #
-# R2 covers branch pushes, not only tag pushes. semantic-release.yml is why: it
-# runs on every push to main, creates the seven SDK Release objects, and pushes
-# the tags that trigger every other channel. A rule scoped to tag triggers would
-# have walked straight past the workflow that starts the whole release.
+# R2 covers branch pushes and schedules, not only tag pushes. semantic-release.yml
+# is why: it releases main once a day on a schedule, creates the seven SDK Release
+# objects, and pushes the tags that trigger every other channel. A rule scoped to
+# tag triggers would have walked straight past the workflow that starts the whole
+# release.
 #
 # A gate job is a job whose block contains either:
 #   - `await-green-commit`  — the shared wait-for-verdict action, or
@@ -169,9 +171,10 @@ check_workflow() {
     fi
 
     # ── R2: a publish job must reach a gate through `needs:`. ─────────────────
-    # Scoped to push-triggered workflows. A PR-only workflow that matches a
-    # marker is running a dry-run smoke build, not shipping a release.
-    if ! grep -qE '^[[:space:]]{2}push:' "$wf"; then
+    # Scoped to workflows that a push, a schedule or a manual dispatch starts.
+    # A PR-only workflow that matches a marker is running a dry-run smoke build,
+    # not shipping a release.
+    if ! grep -qE '^[[:space:]]{2}(push|schedule|workflow_dispatch):' "$wf"; then
         rm -rf "$tmp"
         return
     fi

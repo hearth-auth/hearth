@@ -1,6 +1,10 @@
 name: Semantic Release
 
-# Runs on every push to a release branch (main, 1.x, 2.x) and releases live.
+# Releases main once a day (on a schedule, or when an operator starts it by
+# hand), and the maintenance branches (1.x, 2.x) on each push. A release after
+# each merge put a chore(release) commit and a release PR after every PR: each
+# release window failed the README pin check on every open PR, and the release
+# commits filled the runner queue.
 # Each SDK is released independently with plain semantic-release (one matrix job
 # per package). Plain semantic-release honours each package's .releaserc
 # `tagFormat`, so the tags match the downstream publish triggers — unlike
@@ -24,9 +28,14 @@ name: Semantic Release
 #   See docs/release-runbook.md § "Bootstrapping — anchor tags"
 
 on:
+  # 11:17 UTC = 6:17 AM EST (7:17 AM EDT). Off the hour, because GitHub delays
+  # scheduled runs at the top of the hour. A day with no fix: or feat: commit
+  # cuts no release.
+  schedule:
+    - cron: "17 11 * * *"
+  workflow_dispatch:
   push:
     branches:
-      - main
       - "1.x"
       - "2.x"
 
