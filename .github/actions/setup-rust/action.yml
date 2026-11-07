@@ -64,6 +64,13 @@ runs:
       with:
         key: ${{ inputs.cache-key-suffix }}
         workspaces: ${{ inputs.cache-workspaces }}
+        # Only main saves; a PR restores main's cache and saves nothing. The
+        # repository has a 10 GB cache limit. On 2026-11-06 it held 10.47 GB:
+        # 7.9 GB from main and 4.2 GB from PR branches, which no other branch
+        # can read. GitHub then deleted the oldest entries, main's `quality`
+        # cache among them, and PRs compiled every dependency from scratch
+        # (test build 8m49s, compared with 6m12s on a cache hit).
+        save-if: ${{ github.ref == 'refs/heads/main' }}
 
     - name: Install protoc
       shell: bash
