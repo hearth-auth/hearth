@@ -191,7 +191,8 @@ pub struct EmbeddedAuditEngine {
     /// AES-256-GCM-wrapped at rest.
     kek: Option<[u8; 32]>,
     /// Cached per-realm HMAC key material (32 bytes each). Lazy-initialized
-    /// on first access per realm; never evicted (realm IDs are stable).
+    /// on first access per realm; removed when the realm is deleted
+    /// ([`AuditEngine::forget_realm`]).
     hmac_key_cache: Mutex<HashMap<RealmId, [u8; 32]>>,
     /// Refuse an event whose realm does not exist (see
     /// [`Self::with_known_realms_only`]).
@@ -748,6 +749,23 @@ impl AuditEngine for EmbeddedAuditEngine {
         for lock in locks {
             if let Ok(mut cached) = lock.try_lock() {
                 *cached = None;
+            }
+        }
+    }
+
+    /// Drops the deleted realm's chain lock and HMAC key (#609).
+    ///
+    /// An append that already holds the old chain lock keeps its own `Arc` and
+    /// finishes. A later append for the realm finds no lock, so the realm must
+    /// be known again (see [`Self::with_known_realms_only`]) before it gets new
+    /// state. The cached key is zeroed before its slot is freed.
+    fn forget_realm(&self, realm_id: &RealmId) {
+        if let Ok(mut map) = self.chain_locks.lock() {
+            map.remove(realm_id);
+        }
+        if let Ok(mut cache) = self.hmac_key_cache.lock() {
+            if let Some(mut key) = cache.remove(realm_id) {
+                zeroize::Zeroize::zeroize(&mut key);
             }
         }
     }

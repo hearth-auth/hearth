@@ -8338,6 +8338,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                         metadata: None,
                     };
                     let _ = audit.append(&audit_event);
+                    // The cascade swept the realm's audit rows and HMAC key;
+                    // the audit engine's copies of them go too (#609).
+                    audit.forget_realm(&realm_id_bg);
 
                     // Remove from in-memory caches.
                     signing_keys.remove(&realm_id_bg);
@@ -8391,6 +8394,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // not reach; otherwise a deleted realm's session stays readable from
         // the hot cache (§4.9#1).
         self.purge_realm_caches(realm_id);
+        // The cascade swept the realm's audit rows and HMAC key; the audit
+        // engine's copies of them go too (#609).
+        self.audit.forget_realm(realm_id);
 
         // Idempotency guard: if nothing existed for this realm anywhere, the
         // caller is asking to delete something that was never created (or was

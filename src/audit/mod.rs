@@ -193,6 +193,15 @@ pub trait AuditEngine: Send + Sync {
     /// drop every cached chain head.
     fn on_replicated_snapshot(&self);
 
+    /// The realm was deleted: its stored audit rows, HMAC key and chain anchor
+    /// are gone. Implementors MUST drop all in-memory state they keep for
+    /// `realm_id` (#609).
+    ///
+    /// The identity engine calls this after the realm-delete cascade. There is
+    /// deliberately no default implementation: a wrapper that did nothing
+    /// would keep the inner engine's state for every deleted realm.
+    fn forget_realm(&self, realm_id: &RealmId);
+
     /// Returns the retention configuration for a realm.
     ///
     /// Returns the default config (90 days) if none has been set.

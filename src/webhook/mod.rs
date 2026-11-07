@@ -132,6 +132,10 @@ impl crate::audit::AuditEngine for NotifyingAuditEngine {
         self.inner.on_replicated_snapshot();
     }
 
+    fn forget_realm(&self, realm_id: &RealmId) {
+        self.inner.forget_realm(realm_id);
+    }
+
     fn import_events(
         &self,
         realm_id: &crate::core::RealmId,

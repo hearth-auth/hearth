@@ -6,6 +6,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Fixed
+- **Realm deletes free the realm's audit state in memory** (#609): deleting a realm now also
+  removes the realm's audit chain lock and its cached audit HMAC key from memory. Before, both
+  stayed until the server restarted.
+
 ## [4.8.0] — 2026-11-06
 
 ### Added
