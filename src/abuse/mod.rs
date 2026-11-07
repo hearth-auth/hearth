@@ -14,11 +14,11 @@
 //! | A-23 | Trait-level pagination hard cap          | (constant here)          |
 //! | A-24 | Per-realm resource quotas                | `src/identity/engine`    |
 //! | A-25 | Audit auto-retention + max_rows backstop | `src/audit/engine` + `src/main` |
+//! | A-35 | SAML XML parse-event cap                 | (constant here)          |
 //! | A-38 | ACT actor-chain depth cap                | (constant here)          |
 //! | D-6  | Per-agent rate monitor + auto-suspend    | [`agent_monitor`]        |
 //! | A-39 | HTTP/2 rapid-reset defense               | `src/protocol/http`      |
 //! | A-40 | Host allowlist + COOP/COEP + cookies     | `src/protocol/web`       |
-//! | A-44 | SAML XML parse-event cap                 | (constant here)          |
 //! | A-45 | Tenant HTML/CSS/SVG sanitization         | [`sanitize`]             |
 //! | A-47 | `deny_unknown_fields` on request shapes  | (annotations)            |
 //! | A-50 | Cross-realm email aggregation cap        | [`detector`]             |
@@ -56,7 +56,7 @@ pub const MAX_SCIM_OPERATIONS: usize = 1_000;
 /// realm.
 pub const SCIM_MAX_SCAN_LIMIT: usize = 1_000;
 
-/// Maximum SAML XML parse-event count per `AuthnResponse` (A-44).
+/// Maximum SAML XML parse-event count per `AuthnResponse` (A-35).
 pub const MAX_SAML_XML_EVENTS: usize = 10_000;
 
 /// Fail-open vs fail-closed decision for Phase 0 guards.
