@@ -4,7 +4,8 @@ name: CI
 #
 # Architecture (post-HEA-680 mega-consolidation):
 #
-#   filter ─┬─> quality        (Rust changes)
+#   filter ─┬─> lint           (Rust changes: clippy, fmt, guards, css, openapi)
+#           ├─> quality        (Rust changes: nextest, heap-check)
 #           ├─> proto-freshness (proto/ or generated SDK types — audit §4.8#8)
 #           ├─> ui             (UI changes — replaces ui-tests + ui-tests-exploratory)
 #           ├─> sdk-*          (one job per supported SDK: go, typescript, python, php)
@@ -668,8 +669,107 @@ jobs:
 
   # ── Rust quality gate ────────────────────────────────────────────────────────
 
+  # ── Lint gate: everything in the old `quality` job that is not a test ─────
+  #
+  # clippy (two passes), fmt and the guards ran in `quality` before the test
+  # build, so they added ~3 min to the longest job of every PR. Here they run
+  # at the same time as the tests, and a lint error is red in ~5 min. Every
+  # step has `!cancelled()`, so one red gate does not hide the others: that is
+  # what `make check` does with its loop (check-red-test-gate.sh R2).
+  lint:
+    name: lint (clippy + fmt + guards + css + openapi)
+    needs: filter
+    if: (needs.filter.result == 'success' && needs.filter.outputs.rust == 'true') || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Rust toolchain + buf + tailwind (HEA-676 reusable)
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: stable
+          components: clippy,rustfmt
+          install-buf: "true"
+          install-tailwind: "true"
+          # clippy writes check-mode metadata, not the test build of `quality`:
+          # a disjoint cache, so the two jobs do not overwrite one key.
+          cache-key-suffix: lint
+
+      # cargo-audit and cargo-deny run in the dedicated cargo-deny job below,
+      # which runs on EVERY PR and can fail. The audit 2026-08-28 (§4.12#3)
+      # found the step here was continue-on-error with no re-raise, so a
+      # 70-vulnerability scan produced a `success` job. Do not re-add a
+      # disarmed advisory step; scripts/check-advisory-gates.sh fails if one
+      # appears.
+
+      - name: make test-quality (block false-confidence test patterns — HEA-571)
+        if: ${{ !cancelled() }}
+        run: make test-quality
+
+      # Asserts the ROPC (RFC 6749 §4.3) password grant stays unreachable, in both
+      # the config allowlist and the HTTP token dispatch. HEA-1862: the two drifted
+      # apart — config was clean while both token endpoints still served ROPC — so
+      # this gate checks the dispatch arm, not just the allowlist.
+      - name: make security-gate (assert ROPC password grant is unreachable — HEA-1862)
+        if: ${{ !cancelled() }}
+        run: make security-gate
+
+      - name: make clippy (-D warnings, without and with dev-endpoints)
+        if: ${{ !cancelled() }}
+        run: make clippy
+
+      - name: make fmt (cargo fmt --check)
+        if: ${{ !cancelled() }}
+        run: make fmt
+
+      - name: make css-check (rebuild Tailwind and fail if app.css drifts)
+        if: ${{ !cancelled() }}
+        run: make css-check
+
+      # `make proto-check` deliberately does NOT run here. Audit §4.8#8: it sat
+      # after `make check` in this job, so a clippy or test failure meant the
+      # freshness verdict was never produced — and this job is gated on the
+      # `rust` filter, which does not name the generated directories at all.
+      # It now runs in the dedicated `proto-freshness` job below, gated on the
+      # `proto` filter and independent of the Rust toolchain.
+
+      - name: Install PyYAML (needed by make openapi-check)
+        # Use the distro package manager instead of an unpinned pip install —
+        # `apt-get install` is not flagged by Scorecard pinned-dependencies check.
+        if: ${{ !cancelled() }}
+        run: python3 -c "import yaml" 2>/dev/null || sudo apt-get install -y --no-install-recommends python3-yaml
+
+      - name: make openapi-check (regenerate and fail if openapi.json drifts — HEA-972)
+        if: ${{ !cancelled() }}
+        run: make openapi-check
+
+      # HEA-1268: THIRD_PARTY_LICENSES staleness gate.
+      # Checks that THIRD_PARTY_LICENSES.sha256 still matches Cargo.lock — does
+      # not regenerate the file, just compares the stored hash. Re-run
+      # `make notice` whenever Cargo.lock changes and commit the updated file.
+      - name: make notice-check (fail if THIRD_PARTY_LICENSES is stale — HEA-1268)
+        if: ${{ !cancelled() }}
+        run: make notice-check
+
+      # Audit §4.8#10: the freshness key was a whole-file hash of Cargo.lock,
+      # which includes the workspace's own packages, so every release version
+      # bump failed this gate with nothing attributable to regenerate. The key
+      # is now scripts/attribution-key.sh. This self-test proves it ignores a
+      # workspace version bump and a re-pointed dependency edge, and still moves
+      # on anything that can change a licence.
+      - name: Attribution freshness key — self-test
+        if: ${{ !cancelled() }}
+        run: bash scripts/tests/attribution-key.test.sh
+
+  # ── Test gate ───────────────────────────────────────────────────────────────
   quality:
-    name: quality (clippy + fmt + nextest + css check)
+    name: quality (nextest + heap-check)
     needs: filter
     # HEA-685: guard with `needs.filter.result == 'success'` so a filter-job
     # failure causes downstream jobs to FAIL (not silently SKIP). Without the
@@ -700,16 +800,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          # proto-check / proto-breaking compare against main via the local
-          # .git refs; need full history (not the default shallow checkout)
-          # so the comparison works for PR branches.
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Free disk space (Rust debug builds need ~12 GB)
+      # The delete took 2m10s in the foreground (run 2026-11-02). It now runs
+      # in the background while the toolchain installs and the cache restores;
+      # the test build fills the disk only minutes later. The step before
+      # `make test` waits for it, so the build never starts on a full disk.
+      - name: Free disk space in the background (Rust debug builds need ~12 GB)
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
-          df -h
+          nohup sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL \
+            > /tmp/free-disk.log 2>&1 &
+          echo $! > /tmp/free-disk.pid
 
       - name: Setup Rust toolchain + buf + tailwind (HEA-676 reusable)
         uses: ./.github/actions/setup-rust
@@ -717,29 +819,17 @@ jobs:
           toolchain: stable
           components: clippy,rustfmt
           install-buf: "true"
-          install-tailwind: "true"
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2.77.7
         with:
           tool: cargo-nextest
 
-      # cargo-audit and cargo-deny run in the dedicated cargo-deny job below,
-      # which runs on EVERY PR and can fail. The audit 2026-08-28 (§4.12#3)
-      # found the step here was continue-on-error with no re-raise, so a
-      # 70-vulnerability scan produced a `success` job. Do not re-add a
-      # disarmed advisory step; scripts/check-advisory-gates.sh fails if one
-      # appears.
-
-      - name: make test-quality (block false-confidence test patterns — HEA-571)
-        run: make test-quality
-
-      # Asserts the ROPC (RFC 6749 §4.3) password grant stays unreachable, in both
-      # the config allowlist and the HTTP token dispatch. HEA-1862: the two drifted
-      # apart — config was clean while both token endpoints still served ROPC — so
-      # this gate checks the dispatch arm, not just the allowlist.
-      - name: make security-gate (assert ROPC password grant is unreachable — HEA-1862)
-        run: make security-gate
+      - name: Wait for the background disk clean-up
+        run: |
+          # `kill -0` cannot probe a root process from the runner user; /proc can.
+          while [ -e "/proc/$(cat /tmp/free-disk.pid)" ]; do sleep 2; done
+          df -h
 
       # Audit §4.12#18: `[profile.ci]` in .config/nextest.toml (retries = 2,
       # fail-fast = false) was dead — nothing selected it, so every run used
@@ -748,60 +838,30 @@ jobs:
       # failed the build with no retry. nextest reads NEXTEST_PROFILE, so this
       # one variable makes the profile live without changing `make check`, and
       # leaves the local TDD loop on the fail-fast default where it belongs.
-      - name: make check (clippy -D warnings + fmt --check + nextest --workspace)
+      # clippy, fmt and test-quality, the other gates of `make check`, run in
+      # the `lint` job.
+      - name: make test (nextest --workspace)
         env:
           NEXTEST_PROFILE: ci
-        run: make check
+        run: make test
 
       # docs/dev/ARCHITECTURE.md §9.2, the hearth-side half of the `unsafe-code` job
       # below: EpochCell's tests and those of every cell built on it — hot
       # tier, block cache, memtable, flush-vs-read, identity caches — under
       # glibc heap checking, three passes. It runs here because `make check`
       # has just built the test binaries it needs, and it reuses them only
-      # because `make heap-check` selects them with `--workspace`, as
-      # `make test` does: the simulation crate turns on hearth's `test-hooks`
-      # feature, and a hearth-only selection would compile hearth and its lib
-      # tests a second time without it. `make heap-check` passes `--retries 0`
+      # because `make heap-check` selects them with `--workspace` and
+      # `dev-endpoints`, as `make test` does: the simulation crate turns on
+      # hearth's `test-hooks` feature, and a hearth-only selection would compile
+      # hearth and its lib tests a second time without it. Without
+      # `dev-endpoints` it compiled them a second time too (1m27s, run
+      # 2026-11-02). `make heap-check` passes `--retries 0`
       # itself: the `ci` profile's retries would turn a heap error that fires
       # one run in three into a pass. `!cancelled()`: a red test suite above
       # must not also hide this verdict.
       - name: make heap-check (EpochCell's consumers under glibc heap checking)
         if: ${{ !cancelled() }}
         run: make heap-check
-
-      - name: make css-check (rebuild Tailwind and fail if app.css drifts)
-        run: make css-check
-
-      # `make proto-check` deliberately does NOT run here. Audit §4.8#8: it sat
-      # after `make check` in this job, so a clippy or test failure meant the
-      # freshness verdict was never produced — and this job is gated on the
-      # `rust` filter, which does not name the generated directories at all.
-      # It now runs in the dedicated `proto-freshness` job below, gated on the
-      # `proto` filter and independent of the Rust toolchain.
-
-      - name: Install PyYAML (needed by make openapi-check)
-        # Use the distro package manager instead of an unpinned pip install —
-        # `apt-get install` is not flagged by Scorecard pinned-dependencies check.
-        run: python3 -c "import yaml" 2>/dev/null || sudo apt-get install -y --no-install-recommends python3-yaml
-
-      - name: make openapi-check (regenerate and fail if openapi.json drifts — HEA-972)
-        run: make openapi-check
-
-      # HEA-1268: THIRD_PARTY_LICENSES staleness gate.
-      # Checks that THIRD_PARTY_LICENSES.sha256 still matches Cargo.lock — does
-      # not regenerate the file, just compares the stored hash. Re-run
-      # `make notice` whenever Cargo.lock changes and commit the updated file.
-      - name: make notice-check (fail if THIRD_PARTY_LICENSES is stale — HEA-1268)
-        run: make notice-check
-
-      # Audit §4.8#10: the freshness key was a whole-file hash of Cargo.lock,
-      # which includes the workspace's own packages, so every release version
-      # bump failed this gate with nothing attributable to regenerate. The key
-      # is now scripts/attribution-key.sh. This self-test proves it ignores a
-      # workspace version bump and a re-pointed dependency edge, and still moves
-      # on anything that can change a licence.
-      - name: Attribution freshness key — self-test
-        run: bash scripts/tests/attribution-key.test.sh
 
   # ── Generated-SDK freshness (audit 2026-08-28 §4.8#8) ──────────────────────
   #
@@ -1613,7 +1673,7 @@ jobs:
   required-summary:
     name: required-summary
     if: always()
-    needs: [filter, quality, proto-freshness, ui, sdk-python, sdk-php, sdk-go, sdk-typescript, sdk-conformance, sdk-admin-freshness, abuse-coverage, cluster-chaos, no-dev-endpoints, cargo-deny, msrv, unsafe-code, leak-check, commit-lint, proto-governance, sdk-smoke, security, loadtest-smoke]
+    needs: [filter, lint, quality, proto-freshness, ui, sdk-python, sdk-php, sdk-go, sdk-typescript, sdk-conformance, sdk-admin-freshness, abuse-coverage, cluster-chaos, no-dev-endpoints, cargo-deny, msrv, unsafe-code, leak-check, commit-lint, proto-governance, sdk-smoke, security, loadtest-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 1
 
@@ -1621,6 +1681,7 @@ jobs:
       - name: Check all jobs passed or were skipped
         env:
           FILTER: ${{ needs.filter.result }}
+          LINT: ${{ needs.lint.result }}
           QUALITY: ${{ needs.quality.result }}
           PROTO_FRESHNESS: ${{ needs.proto-freshness.result }}
           UI: ${{ needs.ui.result }}
@@ -1643,14 +1704,14 @@ jobs:
           SECURITY: ${{ needs.security.result }}
           LOADTEST_SMOKE: ${{ needs.loadtest-smoke.result }}
         run: |
-          echo "filter=$FILTER quality=$QUALITY proto-freshness=$PROTO_FRESHNESS ui=$UI sdk-python=$SDK_PYTHON sdk-php=$SDK_PHP sdk-go=$SDK_GO sdk-typescript=$SDK_TYPESCRIPT sdk-conformance=$SDK_CONFORMANCE sdk-admin-freshness=$SDK_ADMIN_FRESHNESS abuse-coverage=$ABUSE_COVERAGE cluster-chaos=$CLUSTER_CHAOS no-dev-endpoints=$NO_DEV_ENDPOINTS cargo-deny=$CARGO_DENY msrv=$MSRV unsafe-code=$UNSAFE_CODE leak-check=$LEAK_CHECK commit-lint=$COMMIT_LINT proto-governance=$PROTO_GOVERNANCE sdk-smoke=$SDK_SMOKE security=$SECURITY loadtest-smoke=$LOADTEST_SMOKE"
+          echo "filter=$FILTER lint=$LINT quality=$QUALITY proto-freshness=$PROTO_FRESHNESS ui=$UI sdk-python=$SDK_PYTHON sdk-php=$SDK_PHP sdk-go=$SDK_GO sdk-typescript=$SDK_TYPESCRIPT sdk-conformance=$SDK_CONFORMANCE sdk-admin-freshness=$SDK_ADMIN_FRESHNESS abuse-coverage=$ABUSE_COVERAGE cluster-chaos=$CLUSTER_CHAOS no-dev-endpoints=$NO_DEV_ENDPOINTS cargo-deny=$CARGO_DENY msrv=$MSRV unsafe-code=$UNSAFE_CODE leak-check=$LEAK_CHECK commit-lint=$COMMIT_LINT proto-governance=$PROTO_GOVERNANCE sdk-smoke=$SDK_SMOKE security=$SECURITY loadtest-smoke=$LOADTEST_SMOKE"
           # ALLOWLIST, not a denylist (production-readiness task 24.4). This
           # loop used to fail only on "failure" or "cancelled". That is
           # fail-open by construction: any result GitHub adds, and any empty
           # string from an expression that did not evaluate, would have been
           # read as "fine". `success` and `skipped` are the only two results
           # that may pass; everything else — including "" — blocks the merge.
-          for result in "$FILTER" "$QUALITY" "$PROTO_FRESHNESS" "$UI" "$SDK_PYTHON" "$SDK_PHP" "$SDK_GO" "$SDK_TYPESCRIPT" "$SDK_CONFORMANCE" "$SDK_ADMIN_FRESHNESS" "$ABUSE_COVERAGE" "$CLUSTER_CHAOS" "$NO_DEV_ENDPOINTS" "$CARGO_DENY" "$MSRV" "$UNSAFE_CODE" "$LEAK_CHECK" "$COMMIT_LINT" "$PROTO_GOVERNANCE" "$SDK_SMOKE" "$SECURITY" "$LOADTEST_SMOKE"; do
+          for result in "$FILTER" "$LINT" "$QUALITY" "$PROTO_FRESHNESS" "$UI" "$SDK_PYTHON" "$SDK_PHP" "$SDK_GO" "$SDK_TYPESCRIPT" "$SDK_CONFORMANCE" "$SDK_ADMIN_FRESHNESS" "$ABUSE_COVERAGE" "$CLUSTER_CHAOS" "$NO_DEV_ENDPOINTS" "$CARGO_DENY" "$MSRV" "$UNSAFE_CODE" "$LEAK_CHECK" "$COMMIT_LINT" "$PROTO_GOVERNANCE" "$SDK_SMOKE" "$SECURITY" "$LOADTEST_SMOKE"; do
             case "$result" in
               success|skipped) ;;
               *)
