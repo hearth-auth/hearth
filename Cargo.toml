@@ -257,6 +257,43 @@ harness = false
 name = "point_lookup"
 harness = false
 
+# Test and dev builds compile the crypto and compression dependencies with
+# optimization; Hearth's own code stays at opt-level 0 with all debug checks.
+# At opt-level 0, one Argon2id derivation with the backup parameters (64 MiB,
+# t=3, p=4) takes 1.8 s; at opt-level 3 it takes 0.12 s. Every test that hashes
+# a password, encrypts a backup or makes an RSA key paid that cost. For a C
+# crate (ring, aws-lc-sys, zstd-sys) the build script reads this opt-level too.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
+[profile.dev.package.bcrypt]
+opt-level = 3
+[profile.dev.package.blowfish]
+opt-level = 3
+[profile.dev.package.scrypt]
+opt-level = 3
+[profile.dev.package.salsa20]
+opt-level = 3
+[profile.dev.package.pbkdf2]
+opt-level = 3
+[profile.dev.package.hmac]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.digest]
+opt-level = 3
+[profile.dev.package.crc32fast]
+opt-level = 3
+[profile.dev.package.ring]
+opt-level = 3
+[profile.dev.package.aws-lc-rs]
+opt-level = 3
+[profile.dev.package.aws-lc-sys]
+opt-level = 3
+[profile.dev.package.zstd-sys]
+opt-level = 3
+
 [profile.release]
 overflow-checks = true
 panic = "abort"
