@@ -389,6 +389,23 @@ impl EmbeddedAuditEngine {
         }
     }
 
+    /// Whether this engine holds a chain lock or an HMAC key in memory for
+    /// `realm_id` (tests only).
+    #[cfg(test)]
+    pub(crate) fn holds_realm_state(&self, realm_id: &RealmId) -> bool {
+        let lock = self
+            .chain_locks
+            .lock()
+            .expect("chain_locks mutex poisoned")
+            .contains_key(realm_id);
+        let key = self
+            .hmac_key_cache
+            .lock()
+            .expect("hmac_key_cache poisoned")
+            .contains_key(realm_id);
+        lock || key
+    }
+
     /// Returns the per-realm chain lock, creating it on first access.
     fn realm_chain_lock(&self, realm_id: &RealmId) -> Arc<Mutex<Option<ChainHead>>> {
         let mut map = self.chain_locks.lock().expect("chain_locks mutex poisoned");
