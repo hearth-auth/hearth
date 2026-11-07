@@ -191,7 +191,8 @@ pub struct EmbeddedAuditEngine {
     /// AES-256-GCM-wrapped at rest.
     kek: Option<[u8; 32]>,
     /// Cached per-realm HMAC key material (32 bytes each). Lazy-initialized
-    /// on first access per realm; never evicted (realm IDs are stable).
+    /// on first access per realm; removed when the realm is deleted
+    /// ([`AuditEngine::forget_realm`]).
     hmac_key_cache: Mutex<HashMap<RealmId, [u8; 32]>>,
     /// Refuse an event whose realm does not exist (see
     /// [`Self::with_known_realms_only`]).
@@ -387,6 +388,23 @@ impl EmbeddedAuditEngine {
                 tracing::warn!(realm_id = %realm_id, error = %e, "audit-chain anchor read failed");
             }
         }
+    }
+
+    /// Whether this engine holds a chain lock or an HMAC key in memory for
+    /// `realm_id` (tests only).
+    #[cfg(test)]
+    pub(crate) fn holds_realm_state(&self, realm_id: &RealmId) -> bool {
+        let lock = self
+            .chain_locks
+            .lock()
+            .expect("chain_locks mutex poisoned")
+            .contains_key(realm_id);
+        let key = self
+            .hmac_key_cache
+            .lock()
+            .expect("hmac_key_cache poisoned")
+            .contains_key(realm_id);
+        lock || key
     }
 
     /// Returns the per-realm chain lock, creating it on first access.
@@ -731,6 +749,23 @@ impl AuditEngine for EmbeddedAuditEngine {
         for lock in locks {
             if let Ok(mut cached) = lock.try_lock() {
                 *cached = None;
+            }
+        }
+    }
+
+    /// Drops the deleted realm's chain lock and HMAC key (#609).
+    ///
+    /// An append that already holds the old chain lock keeps its own `Arc` and
+    /// finishes. A later append for the realm finds no lock, so the realm must
+    /// be known again (see [`Self::with_known_realms_only`]) before it gets new
+    /// state. The cached key is zeroed before its slot is freed.
+    fn forget_realm(&self, realm_id: &RealmId) {
+        if let Ok(mut map) = self.chain_locks.lock() {
+            map.remove(realm_id);
+        }
+        if let Ok(mut cache) = self.hmac_key_cache.lock() {
+            if let Some(mut key) = cache.remove(realm_id) {
+                zeroize::Zeroize::zeroize(&mut key);
             }
         }
     }

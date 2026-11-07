@@ -200,6 +200,8 @@ async fn test_destructive_delete_fails_when_audit_down() {
         // nothing to invalidate.
         fn on_replicated_row(&self, _realm_id: &hearth::core::RealmId, _key: &[u8]) {}
         fn on_replicated_snapshot(&self) {}
+        // No per-realm state to drop (#609).
+        fn forget_realm(&self, _realm_id: &hearth::core::RealmId) {}
 
         fn append(
             &self,

@@ -8338,6 +8338,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                         metadata: None,
                     };
                     let _ = audit.append(&audit_event);
+                    // The cascade swept the realm's audit rows and HMAC key;
+                    // the audit engine's copies of them go too (#609).
+                    audit.forget_realm(&realm_id_bg);
 
                     // Remove from in-memory caches.
                     signing_keys.remove(&realm_id_bg);
@@ -8391,6 +8394,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // not reach; otherwise a deleted realm's session stays readable from
         // the hot cache (§4.9#1).
         self.purge_realm_caches(realm_id);
+        // The cascade swept the realm's audit rows and HMAC key; the audit
+        // engine's copies of them go too (#609).
+        self.audit.forget_realm(realm_id);
 
         // Idempotency guard: if nothing existed for this realm anywhere, the
         // caller is asking to delete something that was never created (or was
@@ -21586,6 +21592,72 @@ mod tests {
         assert!(
             !cached(&engine),
             "the deleted realm's dummy hash must leave the cache"
+        );
+    }
+
+    /// Creates a realm with one user (so the audit engine caches the realm's
+    /// chain lock and HMAC key), deletes the realm, and returns whether the
+    /// audit engine still holds state for it.
+    ///
+    /// `background_threshold` picks the cascade branch: `usize::MAX` forces the
+    /// synchronous path, `0` forces the backgrounded one.
+    async fn audit_holds_realm_state_after_delete(background_threshold: usize) -> bool {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = StorageConfig::dev(dir.path().to_path_buf());
+        let storage =
+            Arc::new(EmbeddedStorageEngine::open(config).expect("open")) as Arc<dyn StorageEngine>;
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+        let identity_config = IdentityConfig {
+            credential: CredentialConfig::fast_for_testing(),
+            cascade_background_threshold: background_threshold,
+            ..IdentityConfig::default()
+        };
+        let audit = Arc::new(EmbeddedAuditEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        ));
+        let engine = EmbeddedIdentityEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock) as Arc<dyn Clock>,
+            identity_config,
+            Arc::clone(&audit) as Arc<dyn AuditEngine>,
+        )
+        .expect("engine creation");
+
+        let realm = create_test_realm(&engine);
+        create_test_user(&engine, &realm);
+        assert!(
+            audit.holds_realm_state(&realm),
+            "an audited write caches the realm's chain lock and HMAC key"
+        );
+
+        archive_test_realm(&engine, &realm);
+        engine.delete_realm(&realm).expect("delete realm");
+        // The backgrounded cascade is a spawned task with no `.await` in it;
+        // yield so it runs to completion on the current-thread runtime.
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+
+        audit.holds_realm_state(&realm)
+    }
+
+    /// #609: a deleted realm's audit chain lock and HMAC key do not stay in
+    /// memory, on the synchronous cascade path.
+    #[tokio::test]
+    async fn deleting_a_realm_drops_its_audit_state() {
+        assert!(
+            !audit_holds_realm_state_after_delete(usize::MAX).await,
+            "the deleted realm's audit chain lock and HMAC key must leave memory"
+        );
+    }
+
+    /// #609: the same on the backgrounded cascade path.
+    #[tokio::test]
+    async fn deleting_a_large_realm_drops_its_audit_state() {
+        assert!(
+            !audit_holds_realm_state_after_delete(0).await,
+            "the deleted realm's audit chain lock and HMAC key must leave memory"
         );
     }
 
