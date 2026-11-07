@@ -28,9 +28,10 @@ allow = [
     "MIT-0",
     "BSD-2-Clause",
     "BSD-3-Clause",
-    "MPL-2.0",
+    # MPL-2.0 is allowed by the dependency policy (CLAUDE.md), but no dependency
+    # uses it now, and an unused entry makes cargo-deny warn. Add it back with the
+    # first dependency that needs it.
     "ISC",
-    "Unicode-DFS-2016",
     "Unicode-3.0",
     "0BSD",
     # Unlicense: public-domain dedication; used by ~8 packages in the tree.

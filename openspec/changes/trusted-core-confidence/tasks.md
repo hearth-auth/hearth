@@ -7,16 +7,26 @@
 
 ## 1. Known defects carried from the scope trim (allowed under the freeze)
 
-- [ ] 1.1 `amr`: no flow fills `amr_values` since the SMS removal, so TOTP and passkey logins emit no `amr` claim. Red test per login method, then fill it (`src/identity/oidc.rs`)
-- [ ] 1.2 The HTTP device grant answers `401` for `invalid_dpop_proof`; RFC 9449 §5 says `400`. Red test, then fix
-- [ ] 1.3 `/authorize` answers an unsupported `response_mode` as `invalid_request` with the description `unsupported_response_mode`. Decide the right error, red test, fix
-- [ ] 1.4 The engine's `authorize()` ignores a JAR's `response_mode` (RFC 9101 §4). Red test, then fix
-- [ ] 1.5 An `UPDATE_PASSWORD` required action followed by consent bounces to login (the password change revokes the session, and the resume issues no new cookie). Red test, then fix
-- [ ] 1.6 `HEARTH_ABUSE_CHALLENGE_REQUIRED` is documented but never emitted. Emit it or delete it from the docs
-- [ ] 1.7 `/admin/realms` answers `405` before authentication. Red test (unauthenticated caller gets the auth error), then fix
-- [ ] 1.8 `allow_reserved_permissions: true` is set only by tests. Decide: remove the key, or document it
-- [ ] 1.9 `cargo deny` warns about unused license allowances. Remove them
-- [ ] 1.10 The startup warning when a realm sets `mfa: optional` is not asserted by a test. Add the assertion
+- [x] 1.1 `amr`: no flow fills `amr_values` since the SMS removal, so TOTP and passkey logins emit no `amr` claim. Red test per login method, then fill it (`src/identity/oidc.rs`)
+  - Fixed by #619 in PR #656 (`b34ebc7e`).
+- [x] 1.2 The HTTP device grant answers `401` for `invalid_dpop_proof`; RFC 9449 §5 says `400`. Red test, then fix
+  - Fixed by #626 in PR #722 (`29d67272`).
+- [x] 1.3 `/authorize` answers an unsupported `response_mode` as `invalid_request` with the description `unsupported_response_mode`. Decide the right error, red test, fix
+  - Fixed by #628 in PR #728 (`935acc99`). Decision: the error stays `invalid_request` with the description `unsupported_response_mode` (RFC 6749 §4.1.2.1 has no `unsupported_response_mode` code).
+- [x] 1.4 The engine's `authorize()` ignores a JAR's `response_mode` (RFC 9101 §4). Red test, then fix
+  - Fixed by #628 in PR #728 (`935acc99`).
+- [x] 1.5 An `UPDATE_PASSWORD` required action followed by consent bounces to login (the password change revokes the session, and the resume issues no new cookie). Red test, then fix
+  - Fixed by #627 in PR #725 (`9507aa38`).
+- [x] 1.6 `HEARTH_ABUSE_CHALLENGE_REQUIRED` is documented but never emitted. Emit it or delete it from the docs
+  - Already true before this change: PR #404 (`3af06628`, 2026-10-05) emits it from every challenged API sign-in, and `tests/abuse_captcha.rs` asserts it.
+- [x] 1.7 `/admin/realms` answers `405` before authentication. Red test (unauthenticated caller gets the auth error), then fix
+  - Fixed by #623 in PR #719 (`1e1814d6`).
+- [x] 1.8 `allow_reserved_permissions: true` is set only by tests. Decide: remove the key, or document it
+  - Decision: document it, and never read it from serialized input (`serde(skip)`). Removal would leave the backup tests no way to build a delegated operator role with an exact reserved permission set (#637).
+- [x] 1.9 `cargo deny` warns about unused license allowances. Remove them
+  - Removed `MPL-2.0` and `Unicode-DFS-2016` from `deny.toml` (#637).
+- [x] 1.10 The startup warning when a realm sets `mfa: optional` is not asserted by a test. Add the assertion
+  - `tests/mfa_policy.rs::serve_warns_at_startup_about_a_realm_with_mfa_off` starts `hearth serve` and checks the warning (#637).
 
 ## 2. External OIDC conformance
 

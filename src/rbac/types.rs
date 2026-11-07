@@ -558,9 +558,14 @@ pub struct CreateRoleRequest {
     #[serde(default = "default_role_scope_kind")]
     pub scope_kind: RoleScopeKind,
     /// When `true`, permissions in the `hearth.*` reserved namespace are
-    /// allowed. Only the removed gRPC handler set it (for a `hearth.admin`
-    /// caller); every current caller passes `false` (operator-safe behaviour).
-    #[serde(default)]
+    /// allowed. No server code path sets it: every admin surface (REST, the
+    /// admin UI, migrations) passes `false`, so an operator cannot grant a
+    /// reserved permission through a custom role. Only tests set it, to build
+    /// a delegated operator role with an exact reserved permission set.
+    ///
+    /// Never read from serialized input (`serde(skip)`): a request body that
+    /// carries the field gets `false` (#637).
+    #[serde(skip)]
     pub allow_reserved_permissions: bool,
 }
 
@@ -581,9 +586,14 @@ pub struct UpdateRoleRequest {
     /// New lifecycle status. Used to archive or restore a role.
     pub status: Option<RoleStatus>,
     /// When `true`, permissions in the `hearth.*` reserved namespace are
-    /// allowed. Only the removed gRPC handler set it (for a `hearth.admin`
-    /// caller); every current caller passes `false` (operator-safe behaviour).
-    #[serde(default)]
+    /// allowed. No server code path sets it: every admin surface (REST, the
+    /// admin UI, migrations) passes `false`, so an operator cannot grant a
+    /// reserved permission through a custom role. Only tests set it, to build
+    /// a delegated operator role with an exact reserved permission set.
+    ///
+    /// Never read from serialized input (`serde(skip)`): a request body that
+    /// carries the field gets `false` (#637).
+    #[serde(skip)]
     pub allow_reserved_permissions: bool,
 }
 
@@ -952,5 +962,26 @@ mod tests {
         let p: Page<Role> = Page::default();
         assert_eq!(p.items, [] as [crate::rbac::types::Role; 0]);
         assert!(p.next_cursor.is_none());
+    }
+
+    /// #637 (1.8): the reserved-namespace bypass is never read from
+    /// serialized input. Only Rust code that builds the request sets it.
+    #[test]
+    fn the_reserved_namespace_bypass_is_never_deserialized() {
+        let create: CreateRoleRequest = serde_json::from_value(serde_json::json!({
+            "name": "r",
+            "description": null,
+            "permissions": [],
+            "parent_roles": [],
+            "allow_reserved_permissions": true,
+        }))
+        .expect("deserialize create");
+        assert!(!create.allow_reserved_permissions, "create: {create:?}");
+
+        let update: UpdateRoleRequest = serde_json::from_value(serde_json::json!({
+            "allow_reserved_permissions": true,
+        }))
+        .expect("deserialize update");
+        assert!(!update.allow_reserved_permissions, "update: {update:?}");
     }
 }
