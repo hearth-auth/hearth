@@ -168,10 +168,12 @@ both TOTP secrets, under the same `--dev` and loopback gates. The UI test harnes
 
 Releases are automatic. Do not tag by hand.
 
-- `semantic-release` (`.github/workflows/semantic-release.yml`) runs on every push to `main`. It
-  reads the squash-merge title (Conventional Commits): `fix:` cuts a patch, `feat:` a minor, a
-  `!` or `BREAKING CHANGE` a major. `docs:`, `chore:`, `ci:` and the like cut no release.
-- It first waits for `main`'s CI on that commit (`required-summary`). If CI failed for an
+- `semantic-release` (`.github/workflows/semantic-release.yml`) releases `main` once a day, at
+  6:17 AM EST (7:17 AM EDT). To release before then, start it by hand:
+  `gh workflow run semantic-release.yml --ref main`. One release holds all the commits since the
+  last tag. It reads each squash-merge title (Conventional Commits): `fix:` cuts a patch, `feat:`
+  a minor, a `!` or `BREAKING CHANGE` a major. `docs:`, `chore:`, `ci:` and the like cut no release.
+- It first waits for `main`'s CI on the head commit of `main` (`required-summary`). If CI failed for an
   infrastructure reason (a rate limit, no runner), re-run the failed jobs with
   `gh run rerun <id> --failed`, then re-run the release.
 - The `v*` tag triggers `release.yml` (signed binaries, SBOM, provenance), `docker.yml` and
