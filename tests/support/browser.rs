@@ -202,7 +202,7 @@ pub fn hidden_fields(html: &str, action: &str) -> Vec<(String, String)> {
     let marker = format!("action=\"{action}\"");
     let start = html
         .find(&marker)
-        .unwrap_or_else(|| panic!("no form posting to {action} in:\n{html}"));
+        .unwrap_or_else(|| panic!("no form posting to {action} on the page"));
     let form = &html[start..];
     let form = &form[..form.find("</form>").unwrap_or(form.len())];
     let mut fields = Vec::new();
