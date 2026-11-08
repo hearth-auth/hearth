@@ -238,16 +238,24 @@ mkdir -p "$results"
 results="$(cd "$results" && pwd)"
 run_dir="$(mktemp -d "${TMPDIR:-/tmp}/hearth-oidf-XXXXXX")"
 # Hearth runs as UID 10001 and reads tls/ through a bind mount, so the run
-# directory is traversable. The secrets file (hearth.env) stays owner-only.
+# directory is traversable. The secrets file (secrets.env) stays owner-only.
 chmod 711 "$run_dir"
 
-compose() {
+# compose runs in a subshell: the run's secrets reach compose's environment
+# (for the hearth service's `environment:` block) and nothing else.
+compose() (
+    if [[ -f "${run_dir}/secrets.env" ]]; then
+        set -a
+        # shellcheck disable=SC1091
+        . "${run_dir}/secrets.env"
+        set +a
+    fi
     OIDF_RUN_DIR="$run_dir" OIDF_CONFIG_DIR="$CONFIG_DIR" OIDF_SUITE_DIR="$SUITE_DIR" \
     HEARTH_IMAGE="$image" IMAGE_TAG="$SUITE_TAG" MONGODB_IMAGE="$MONGODB_IMAGE" \
         docker compose -p "$PROJECT" \
             -f "${SUITE_DIR}/docker-compose-prebuilt.yml" \
             -f "${CONFIG_DIR}/compose.yaml" "$@"
-}
+)
 
 cleanup() {
     local rc=$?
@@ -272,8 +280,9 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=hearth" \
 # must read it.
 chmod 644 "${run_dir}/tls/hearth.key" "${run_dir}/tls/hearth.crt"
 
-# Fresh secrets for each run. They go to hearth.env (owner-only) and to the
-# rendered plan configs in the run directory. They are never printed.
+# Fresh secrets for each run. They go to secrets.env (owner-only), to the
+# hearth container's environment and to the rendered plan configs in the run
+# directory. They are never printed.
 (
     umask 077
     {
@@ -282,12 +291,12 @@ chmod 644 "${run_dir}/tls/hearth.key" "${run_dir}/tls/hearth.crt"
         echo "OIDF_CLIENT_SECRET=$(openssl rand -hex 24)"
         echo "OIDF_CLIENT2_SECRET=$(openssl rand -hex 24)"
         echo "OIDF_USER_PASSWORD=Oidf-$(openssl rand -hex 16)"
-    } > "${run_dir}/hearth.env"
+    } > "${run_dir}/secrets.env"
 )
 
 mkdir -m 755 "${run_dir}/plans" "${run_dir}/export"
 python3 -I "${CONFIG_DIR}/render-plans.py" \
-    --config-dir "$CONFIG_DIR" --env-file "${run_dir}/hearth.env" --out "${run_dir}/plans" \
+    --config-dir "$CONFIG_DIR" --env-file "${run_dir}/secrets.env" --out "${run_dir}/plans" \
     --plans "${plans[@]}"
 chmod 644 "${run_dir}"/plans/*.json
 

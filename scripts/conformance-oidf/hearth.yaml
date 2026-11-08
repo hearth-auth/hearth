@@ -2,8 +2,8 @@
 # conformance suite). Hearth runs in production mode (`serve -c`, not
 # `--dev`): TLS on, a real KEK and host key, fsync on.
 #
-# The script sets every ${VAR} below in hearth.env, with fresh random values
-# for each run. Hearth expands them at startup.
+# The script puts every ${VAR} below in the container environment, with
+# fresh random values for each run. Hearth expands them at startup.
 #
 # One key differs from the defaults: realms.conformance.auth.mfa_required is
 # false. MFA is not part of OpenID Connect Core 1.0, and the suite's browser

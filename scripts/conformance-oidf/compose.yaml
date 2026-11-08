@@ -26,11 +26,18 @@ services:
     # Production mode: `serve -c`. scripts/conformance-oidf.sh refuses to
     # start a stack whose Hearth command contains the dev flag.
     command: ["serve", "-c", "/conformance/hearth.yaml"]
-    env_file:
-      - ${OIDF_RUN_DIR:?set OIDF_RUN_DIR}/hearth.env
+    # Fresh values for each run. scripts/conformance-oidf.sh generates them and
+    # passes them to compose; no env file is involved. Hearth refuses to start
+    # in production mode without the KEK and the host key.
+    environment:
+      HEARTH_KEK: ${HEARTH_KEK:-}
+      HEARTH_MASTER_KEY: ${HEARTH_MASTER_KEY:-}
+      OIDF_CLIENT_SECRET: ${OIDF_CLIENT_SECRET:-}
+      OIDF_CLIENT2_SECRET: ${OIDF_CLIENT2_SECRET:-}
+      OIDF_USER_PASSWORD: ${OIDF_USER_PASSWORD:-}
     volumes:
       - ${OIDF_CONFIG_DIR:?set OIDF_CONFIG_DIR}/hearth.yaml:/conformance/hearth.yaml:ro
-      - ${OIDF_RUN_DIR}/tls:/conformance/tls:ro
+      - ${OIDF_RUN_DIR:?set OIDF_RUN_DIR}/tls:/conformance/tls:ro
     tmpfs:
       - /var/lib/hearth:uid=10001,gid=10001,mode=0700
     networks:
