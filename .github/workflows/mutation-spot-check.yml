@@ -25,7 +25,10 @@ name: Mutation Spot-Check
 # two integration binaries, and the lib) so they cannot share one. Measured on
 # a warm target directory with CARGO_BUILD_JOBS=2, the four-entry run takes
 # ~8 minutes; on a cold GitHub runner with no shared target cache the rebuilds
-# dominate and 25-40 minutes is the realistic band. ci.yml's `quality` job
+# dominate and 25-40 minutes is the realistic band. The six entry-point
+# invariant entries (#640) share one test target but still rebuild the lib
+# twice each, which adds about 4 minutes on a warm many-core host and more on
+# a runner. ci.yml's `quality` job
 # already carries a 30-minute budget on its own, and the merge gate's value is
 # in its latency.
 #
@@ -61,8 +64,9 @@ jobs:
   mutation-spot-check:
     name: mutation-spot-check (can the guards go red?)
     runs-on: ubuntu-latest
-    # Two builds per entry across four distinct targets, cold cache.
-    timeout-minutes: 75
+    # Two builds per entry across four distinct targets, cold cache; ten
+    # entries since the entry-point invariants (#640).
+    timeout-minutes: 120
     env:
       # Force HTTP/1.1 to eliminate crates.io HTTP/2 framing-layer resets (HEA-1530).
       CARGO_HTTP_MULTIPLEXING: "false"

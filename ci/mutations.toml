@@ -140,3 +140,108 @@ replace = '''
             .map(|entry| (entry.key().key.clone(), entry.value().clone()))
             .collect()
 '''
+
+# ── 5–10. Entry-point invariants (trusted-core-confidence task 3.5, #640) ────
+#
+# `tests/entry_point_invariants.rs` runs six invariants against every entry
+# point that issues a session, a code or a token. Each entry below removes the
+# shared check that one invariant depends on, and the table-driven test of that
+# invariant must notice: at least one entry point then issues under the
+# violation. The test must pass on an unmutated tree, so no TRACKED gap of the
+# invariant may hide the case that goes red.
+[[mutation]]
+id = "invariant-realm-status"
+file = "src/identity/engine/mod.rs"
+test = "a_suspended_realm_issues_nothing"
+cargo_args = "--features hearth/dev-endpoints --test entry_point_invariants"
+why = "A suspended realm must issue no session, code or token."
+find = '''
+            RealmStatus::DeletingInProgress => return Err(IdentityError::RealmSuspended),
+            _ => return Err(IdentityError::RealmSuspended),
+'''
+replace = '''
+            _ => {}
+'''
+
+[[mutation]]
+id = "invariant-organization-status"
+file = "src/identity/engine/scope_grant.rs"
+test = "a_suspended_organization_issues_nothing_in_its_context"
+cargo_args = "--features hearth/dev-endpoints --test entry_point_invariants"
+why = "A suspended organization must not be the context of an issued code or token."
+find = '''
+            .is_some_and(|o| o.status() == crate::identity::OrganizationStatus::Active);
+'''
+replace = '''
+            .is_some();
+'''
+
+[[mutation]]
+id = "invariant-user-status"
+file = "src/identity/engine/mod.rs"
+test = "a_disabled_or_locked_user_gets_nothing"
+cargo_args = "--features hearth/dev-endpoints --test entry_point_invariants"
+why = "A disabled user must not get a session."
+find = '''
+            UserStatus::Disabled => return Err(IdentityError::Unauthorized),
+        }
+
+        if !derived {
+'''
+replace = '''
+            UserStatus::Disabled => {}
+        }
+
+        if !derived {
+'''
+
+[[mutation]]
+id = "invariant-client-status"
+file = "src/identity/engine/oauth.rs"
+test = "an_archived_client_gets_nothing"
+cargo_args = "--features hearth/dev-endpoints --test entry_point_invariants"
+why = "An archived client must get no code or token."
+find = '''
+        if client.status() == ApplicationStatus::Active {
+            Ok(())
+'''
+replace = '''
+        if client.status() == ApplicationStatus::Active || true {
+            Ok(())
+'''
+
+[[mutation]]
+id = "invariant-mfa-policy"
+file = "src/identity/engine/mod.rs"
+test = "required_mfa_is_never_skipped"
+cargo_args = "--features hearth/dev-endpoints --test entry_point_invariants"
+why = "A realm that requires MFA must not issue to a user who proved no second factor."
+find = '''
+        if crate::identity::realm_requires_mfa(realm.config()) {
+            return Ok(true);
+        }
+        if let Some(client_id) = client_id {
+'''
+replace = '''
+        if let Some(client_id) = client_id {
+'''
+
+[[mutation]]
+id = "invariant-pre-token-webhook"
+file = "src/identity/engine/mod.rs"
+test = "a_failing_fail_closed_webhook_stops_the_token"
+cargo_args = "--features hearth/dev-endpoints --test entry_point_invariants"
+why = "A failing pre-token webhook with on_error fail_closed must stop the token."
+find = '''
+                PreTokenWebhookErrorPolicy::FailClosed => {
+                    Err(IdentityError::PreTokenWebhookFailed {
+                        reason: e.to_string(),
+                    })
+                }
+'''
+replace = '''
+                PreTokenWebhookErrorPolicy::FailClosed => {
+                    let _ = e;
+                    Ok(BTreeMap::new())
+                }
+'''
