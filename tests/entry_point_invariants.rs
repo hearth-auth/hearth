@@ -20,9 +20,30 @@
 //! When the guard fails on a new route: read its handler. If it can create a
 //! session or issue a token, add a row to [`ENTRY_POINTS`] (the invariant tests
 //! then cover it). Otherwise add it to [`NON_ISSUING_ROUTES`].
+//!
+//! The invariant tests (below the guard) run each entry point against six
+//! invariants: realm status, organization status, user status, client status,
+//! the MFA policy and the pre-token webhook. A new row in [`ENTRY_POINTS`]
+//! needs a driver in `entry_point_invariants/drivers.rs`; until then
+//! `drivers::run` panics on it. Each invariant applies to a case, or the rule
+//! gives the reason why not, or a `TRACKED` row names the open issue.
+
+mod common;
+
+#[path = "support/browser.rs"]
+mod browser;
+#[path = "entry_point_invariants/drivers.rs"]
+mod drivers;
+#[path = "entry_point_invariants/fixture.rs"]
+mod fixture;
+#[path = "common/webauthn_helper.rs"]
+mod webauthn_helper;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+
+use drivers::{Case, Variant, GRANTS, ORG_GRANTS};
+use fixture::Violation;
 
 // ─── Registry ───────────────────────────────────────────────────────────────
 
@@ -1197,4 +1218,424 @@ fn the_registry_covers_every_family() {
     assert!(CLI_ENTRY_POINTS
         .iter()
         .all(|c| c.issues == Token && !c.command.is_empty()));
+}
+
+// ─── Invariants (task 3.3) ──────────────────────────────────────────────────
+//
+// Six invariants, each a table-driven test over every case: an entry point
+// (and, for the token endpoint, each grant; for an entry point that accepts an
+// `organization`, the org-context variant too). For each case where the
+// invariant applies, a fresh fixture runs the case's driver with the
+// violation applied just before the request to the entry point, and the entry
+// point must not issue. `every_case_issues_without_a_violation` runs each case
+// once with no violation and proves that the same request issues, so a
+// refusal under a violation is the violation's effect, not a broken driver.
+
+/// A property that every entry point must enforce.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Invariant {
+    /// A suspended realm issues nothing.
+    RealmStatus,
+    /// A suspended organization issues nothing in its context.
+    OrgStatus,
+    /// A disabled or locked user gets nothing.
+    UserStatus,
+    /// An archived client gets nothing.
+    ClientStatus,
+    /// A realm that requires MFA issues nothing without a second factor.
+    MfaPolicy,
+    /// A fail-closed pre-token webhook that fails stops the token.
+    PreTokenWebhook,
+}
+
+const INVARIANTS: [Invariant; 6] = [
+    Invariant::RealmStatus,
+    Invariant::OrgStatus,
+    Invariant::UserStatus,
+    Invariant::ClientStatus,
+    Invariant::MfaPolicy,
+    Invariant::PreTokenWebhook,
+];
+
+/// Whether an invariant applies to a case.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Rule {
+    /// The case must refuse under the violation.
+    Applies,
+    /// The invariant has no meaning for the case, for the reason given.
+    NotApplicable(&'static str),
+    /// A known gap, open on the GitHub issue named: the case still issues
+    /// under the violation. The test asserts that it does, so the fix must
+    /// change the rule to `Applies` (or, after an owner decision, to
+    /// `NotApplicable`) in the same PR.
+    Tracked(&'static str),
+    /// The case has no driver yet (a later PR of task 3.3 adds it).
+    Later,
+}
+
+/// Entry points whose drivers come in a later PR of task 3.3.
+const LATER: &[&str] = &[
+    "password-login-admin",
+    "passkey-login-admin",
+    "ra-verify-email-page",
+    "ra-verify-email-confirm",
+    "ra-update-password",
+    "ra-email-otp-page",
+    "ra-email-otp-verify",
+    "ra-enroll-mfa-page",
+    "ra-enroll-mfa",
+    "ra-enroll-passkey",
+    "social-callback",
+    "social-callback-post",
+    "social-callback-realm",
+    "social-callback-realm-post",
+    "social-confirm-link",
+    "social-confirm-link-realm",
+    "saml-acs",
+    "aat-issue",
+    "aat-derive",
+    "transaction-token",
+    "agent-api-key",
+    "admin-api-token",
+];
+
+/// Entry points that create a browser session and act for no client.
+const SESSION_ONLY: &[&str] = &[
+    "password-login",
+    "password-login-realm",
+    "passkey-login",
+    "passkey-login-realm",
+    "magic-link",
+    "magic-link-realm",
+    "totp-step",
+    "email-otp-step",
+    "passkey-step",
+    "mfa-enroll-required",
+];
+
+/// Second-factor steps: they are the MFA, so the MFA policy cannot apply.
+const SECOND_FACTOR_STEPS: &[&str] = &[
+    "totp-step",
+    "email-otp-step",
+    "passkey-step",
+    "mfa-enroll-required",
+];
+
+/// Entry points that check the password, where a locked login applies.
+const PASSWORD_CHECKS: &[&str] = &["password-login", "password-login-realm"];
+
+/// Entry points that accept an `organization`. The JSON `POST /authorize`
+/// has no `organization` field, so it issues in realm context only.
+const ORG_CAPABLE: &[&str] = &["authorize-browser", "authorize-browser-realm", "consent"];
+
+/// Grants with no user: the client acts for itself.
+const MACHINE_GRANTS: &[&str] = &[
+    "client_credentials",
+    "urn:ietf:params:oauth:grant-type:jwt-bearer",
+];
+
+/// Known gaps: `(case, invariant, issue)`. A case is `entry` or
+/// `entry[grant]`, as [`Case`] prints it.
+const TRACKED: &[(&str, Invariant, &str)] = &[
+    ("device-approval", Invariant::ClientStatus, "#764"),
+    ("consent", Invariant::MfaPolicy, "#765"),
+    ("consent[org]", Invariant::MfaPolicy, "#765"),
+    (
+        "token[urn:ietf:params:oauth:grant-type:token-exchange]",
+        Invariant::PreTokenWebhook,
+        "#763",
+    ),
+    (
+        "token-realm[urn:ietf:params:oauth:grant-type:token-exchange]",
+        Invariant::PreTokenWebhook,
+        "#763",
+    ),
+    (
+        "token[client_credentials]",
+        Invariant::PreTokenWebhook,
+        "#766",
+    ),
+    (
+        "token-realm[client_credentials]",
+        Invariant::PreTokenWebhook,
+        "#766",
+    ),
+    (
+        "token[urn:ietf:params:oauth:grant-type:jwt-bearer]",
+        Invariant::PreTokenWebhook,
+        "#766",
+    ),
+    (
+        "token-realm[urn:ietf:params:oauth:grant-type:jwt-bearer]",
+        Invariant::PreTokenWebhook,
+        "#766",
+    ),
+    ("token[authorization_code]", Invariant::MfaPolicy, "#767"),
+    (
+        "token[authorization_code, org]",
+        Invariant::MfaPolicy,
+        "#767",
+    ),
+    ("token[refresh_token]", Invariant::MfaPolicy, "#767"),
+    ("token[refresh_token, org]", Invariant::MfaPolicy, "#767"),
+    (
+        "token[urn:ietf:params:oauth:grant-type:device_code]",
+        Invariant::MfaPolicy,
+        "#767",
+    ),
+    (
+        "token[urn:ietf:params:oauth:grant-type:token-exchange]",
+        Invariant::MfaPolicy,
+        "#767",
+    ),
+    (
+        "token-realm[authorization_code]",
+        Invariant::MfaPolicy,
+        "#767",
+    ),
+    (
+        "token-realm[authorization_code, org]",
+        Invariant::MfaPolicy,
+        "#767",
+    ),
+    ("token-realm[refresh_token]", Invariant::MfaPolicy, "#767"),
+    (
+        "token-realm[refresh_token, org]",
+        Invariant::MfaPolicy,
+        "#767",
+    ),
+    (
+        "token-realm[urn:ietf:params:oauth:grant-type:device_code]",
+        Invariant::MfaPolicy,
+        "#767",
+    ),
+    (
+        "token-realm[urn:ietf:params:oauth:grant-type:token-exchange]",
+        Invariant::MfaPolicy,
+        "#767",
+    ),
+];
+
+const NO_ORG: &str = "issues in realm context: no organization is named";
+const NO_CLIENT: &str = "acts for no OAuth client";
+const NO_USER: &str = "a machine grant: the client acts for itself, with no user";
+const IS_FACTOR: &str = "the entry point is the second factor";
+const PASSKEY_UV: &str = "a user-verified passkey is a multi-factor proof by itself";
+const NO_ACCESS_TOKEN: &str =
+    "issues no access token; the webhook runs before an access token is issued";
+const DEV_ONLY: &str = "dev-endpoints builds only; never in a release build";
+
+/// Every case: each entry point, each token grant, each org variant.
+fn cases() -> Vec<Case> {
+    let mut out = Vec::new();
+    for ep in ENTRY_POINTS {
+        let case = |variant| Case {
+            entry: ep.id,
+            variant,
+        };
+        if matches!(ep.id, "token" | "token-realm") {
+            out.extend(GRANTS.iter().map(|g| case(Variant::Grant(g))));
+            out.extend(ORG_GRANTS.iter().map(|g| case(Variant::OrgGrant(g))));
+        } else {
+            out.push(case(Variant::Plain));
+            if ORG_CAPABLE.contains(&ep.id) {
+                out.push(case(Variant::Org));
+            }
+        }
+    }
+    out
+}
+
+fn entry(id: &str) -> &'static EntryPoint {
+    ENTRY_POINTS
+        .iter()
+        .find(|e| e.id == id)
+        .unwrap_or_else(|| panic!("no entry point {id}"))
+}
+
+/// Whether `inv` applies to `case`.
+fn rule(case: Case, inv: Invariant) -> Rule {
+    match base_rule(case, inv) {
+        Rule::Applies => {
+            let name = case.to_string();
+            TRACKED
+                .iter()
+                .find(|(c, i, _)| *c == name && *i == inv)
+                .map_or(Rule::Applies, |(_, _, issue)| Rule::Tracked(issue))
+        }
+        other => other,
+    }
+}
+
+/// [`rule`] before the known gaps.
+fn base_rule(case: Case, inv: Invariant) -> Rule {
+    use Rule::{Applies, Later, NotApplicable as Na};
+    let e = case.entry;
+    if entry(e).build == DevEndpoints {
+        return Na(DEV_ONLY);
+    }
+    if LATER.contains(&e) {
+        return Later;
+    }
+    let grant = case.grant();
+    let machine = grant.is_some_and(|g| MACHINE_GRANTS.contains(&g));
+    match inv {
+        Invariant::RealmStatus => Applies,
+        Invariant::OrgStatus if case.org() => Applies,
+        Invariant::OrgStatus => Na(NO_ORG),
+        Invariant::UserStatus if machine => Na(NO_USER),
+        Invariant::UserStatus => Applies,
+        Invariant::ClientStatus
+            if SESSION_ONLY.contains(&e) || grant == Some("urn:hearth:grant-type:magic-link") =>
+        {
+            Na(NO_CLIENT)
+        }
+        Invariant::ClientStatus => Applies,
+        Invariant::MfaPolicy if SECOND_FACTOR_STEPS.contains(&e) => Na(IS_FACTOR),
+        Invariant::MfaPolicy if e.starts_with("passkey-login") => Na(PASSKEY_UV),
+        Invariant::MfaPolicy if machine => Na(NO_USER),
+        Invariant::MfaPolicy => Applies,
+        Invariant::PreTokenWebhook if grant.is_some() => Applies,
+        Invariant::PreTokenWebhook => Na(NO_ACCESS_TOKEN),
+    }
+}
+
+/// The violations that break `inv` for `case`.
+fn violations(inv: Invariant, case: Case) -> Vec<Violation> {
+    match inv {
+        Invariant::RealmStatus => vec![Violation::RealmSuspended],
+        Invariant::OrgStatus => vec![Violation::OrgSuspended],
+        Invariant::UserStatus if PASSWORD_CHECKS.contains(&case.entry) => {
+            vec![Violation::UserDisabled, Violation::UserLocked]
+        }
+        Invariant::UserStatus => vec![Violation::UserDisabled],
+        Invariant::ClientStatus => vec![Violation::ClientArchived],
+        Invariant::MfaPolicy => vec![Violation::MfaRequired],
+        Invariant::PreTokenWebhook => vec![Violation::WebhookDenies],
+    }
+}
+
+/// Runs every case where `inv` applies, under each of its violations, and
+/// fails with the list of cases that still issued.
+async fn check(inv: Invariant) {
+    let mut ran = 0;
+    let mut failures = Vec::new();
+    for case in cases() {
+        let tracked = match rule(case, inv) {
+            Rule::Applies => None,
+            Rule::Tracked(issue) => Some(issue),
+            Rule::NotApplicable(_) | Rule::Later => continue,
+        };
+        for v in violations(inv, case) {
+            ran += 1;
+            let fx = fixture::fixture().await;
+            let issued = drivers::run(&fx, case, Some(v)).await;
+            match (issued, tracked) {
+                (true, None) => failures.push(format!("  {case}: issued under {v:?}")),
+                (false, Some(issue)) => failures.push(format!(
+                    "  {case}: refuses under {v:?} now; {issue} is fixed, so change its \
+                     TRACKED row to a rule"
+                )),
+                _ => {}
+            }
+        }
+    }
+    assert!(ran > 0, "{inv:?} applies to no case");
+    assert!(
+        failures.is_empty(),
+        "{inv:?}: entry points that break the invariant:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[tokio::test]
+async fn every_case_issues_without_a_violation() {
+    let mut refused = Vec::new();
+    for case in cases() {
+        if !INVARIANTS
+            .iter()
+            .any(|i| matches!(rule(case, *i), Rule::Applies | Rule::Tracked(_)))
+        {
+            continue;
+        }
+        let fx = fixture::fixture().await;
+        if !drivers::run(&fx, case, None).await {
+            refused.push(format!("  {case}"));
+        }
+    }
+    assert!(
+        refused.is_empty(),
+        "cases that issue nothing with no violation (a broken driver):\n{}",
+        refused.join("\n")
+    );
+}
+
+#[tokio::test]
+async fn a_suspended_realm_issues_nothing() {
+    check(Invariant::RealmStatus).await;
+}
+
+#[tokio::test]
+async fn a_suspended_organization_issues_nothing_in_its_context() {
+    check(Invariant::OrgStatus).await;
+}
+
+#[tokio::test]
+async fn a_disabled_or_locked_user_gets_nothing() {
+    check(Invariant::UserStatus).await;
+}
+
+#[tokio::test]
+async fn an_archived_client_gets_nothing() {
+    check(Invariant::ClientStatus).await;
+}
+
+#[tokio::test]
+async fn required_mfa_is_never_skipped() {
+    check(Invariant::MfaPolicy).await;
+}
+
+#[tokio::test]
+async fn a_failing_fail_closed_webhook_stops_the_token() {
+    check(Invariant::PreTokenWebhook).await;
+}
+
+/// Each invariant names, for each case, whether it applies and why not. A
+/// case with a rule of `NotApplicable` for every invariant would be an
+/// entry point that nothing checks.
+#[test]
+fn every_case_has_an_applicable_invariant() {
+    let unchecked: Vec<String> = cases()
+        .into_iter()
+        .filter(|c| entry(c.entry).build == Always)
+        .filter(|c| {
+            INVARIANTS
+                .iter()
+                .all(|i| matches!(rule(*c, *i), Rule::NotApplicable(_)))
+        })
+        .map(|c| c.to_string())
+        .collect();
+    assert!(
+        unchecked.is_empty(),
+        "cases that no invariant checks: {unchecked:?}"
+    );
+}
+
+/// Every `TRACKED` row names a case and an invariant that applies to it, so
+/// a typo cannot hide a gap.
+#[test]
+fn every_tracked_row_names_a_case() {
+    let names: BTreeSet<String> = cases().iter().map(ToString::to_string).collect();
+    for (case, inv, issue) in TRACKED {
+        assert!(names.contains(*case), "TRACKED names no case: {case}");
+        let c = cases()
+            .into_iter()
+            .find(|c| c.to_string() == *case)
+            .expect("case");
+        assert_eq!(
+            base_rule(c, *inv),
+            Rule::Applies,
+            "TRACKED row {case} {inv:?} ({issue}) is for an invariant that does not apply"
+        );
+    }
 }
