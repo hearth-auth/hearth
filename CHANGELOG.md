@@ -20,6 +20,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   role can never hold a `hearth.*` permission. No HTTP endpoint or config key changes: the field
   was never read from a request body.
 
+### Security
+- **The consent approval applies the current MFA requirement** (#765): `POST /ui/oauth/consent`
+  now does the second-factor and required-action checks of the authorization request again before
+  it records the consent and issues the code. If the realm or the client starts to require a second
+  factor while the consent page is open, a session that proved no second factor gets
+  `login_required` (or the enrolment page, if the user has no factor yet). Before, the approval
+  issued the code.
+
 ### Fixed
 - **Device approval refuses an archived client** (#764): `POST /ui/device` now refuses a user code
   whose client was archived (or deleted) after the device flow started, and shows the "invalid

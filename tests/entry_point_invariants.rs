@@ -1369,8 +1369,6 @@ const TRACKED: &[(&str, Invariant, &str)] = &[
     ("aat-derive", Invariant::UserStatus, "#770"),
     ("transaction-token", Invariant::UserStatus, "#770"),
     ("agent-api-key", Invariant::UserStatus, "#770"),
-    ("consent", Invariant::MfaPolicy, "#765"),
-    ("consent[org]", Invariant::MfaPolicy, "#765"),
     (
         "token[urn:ietf:params:oauth:grant-type:token-exchange]",
         Invariant::PreTokenWebhook,
