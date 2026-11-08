@@ -16,6 +16,7 @@ use axum::response::Response;
 use hearth::audit::{Actor, AuditContext};
 use hearth::core::{ClientId, OrganizationId, RealmId, UserId};
 use hearth::identity::email::{EmailBranding, EmailError, EmailMessage, EmailSender, EmailService};
+use hearth::identity::federation::{FederationHttpTransport, StubFederationTransport};
 use hearth::identity::onboarding::OnboardingService;
 use hearth::identity::pre_token_webhook::{
     PreTokenWebhookError, PreTokenWebhookResponse, PreTokenWebhookTransport,
@@ -28,6 +29,7 @@ use hearth::identity::{
     UpdateUserRequest, User, UserStatus,
 };
 use hearth::protocol::web::{self, CookieSecret, WebState};
+use hearth::rbac::{AssignRoleRequest, Scope, Subject};
 use tower::ServiceExt as _;
 
 use super::browser::Browser;
@@ -50,7 +52,8 @@ pub const ORIGIN: &str = "http://example.com";
 /// The slug of the organization the user belongs to.
 pub const ORG_SLUG: &str = "acme";
 
-const COOKIE_SECRET: [u8; 32] = [77u8; 32];
+/// The cookie secret of the web router.
+pub const COOKIE_SECRET: [u8; 32] = [77u8; 32];
 const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 const TOKEN_EXCHANGE_GRANT: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 const JWT_BEARER_GRANT: &str = "urn:ietf:params:oauth:grant-type:jwt-bearer";
@@ -161,6 +164,8 @@ pub struct Fx {
     pub outbox: Arc<Outbox>,
     /// The pre-token webhook.
     pub hook: Arc<SwitchHook>,
+    /// The upstream identity provider the web router calls (federation).
+    pub upstream: Arc<StubFederationTransport>,
 }
 
 /// Builds a fresh fixture.
@@ -310,6 +315,7 @@ pub async fn fixture() -> Fx {
         data_dir,
     ));
     let secret = CookieSecret::from_bytes(COOKIE_SECRET);
+    let upstream = Arc::new(StubFederationTransport::new());
     let web = web::router(
         WebState::new(
             h.identity_arc(),
@@ -319,13 +325,15 @@ pub async fn fixture() -> Fx {
             CookieSecret::from_bytes(COOKIE_SECRET),
             Some(email),
         )
-        .with_dev_mode(false),
+        .with_dev_mode(false)
+        .with_federation_http(Arc::clone(&upstream) as Arc<dyn FederationHttpTransport>),
     );
-    let rest = hearth::protocol::http::router(Arc::new(hearth::protocol::http::AppState::new_dev(
-        h.identity_arc(),
-        h.rbac_arc(),
-        h.audit_arc(),
-    )));
+    let rest = hearth::protocol::http::router(Arc::new(
+        hearth::protocol::http::AppState::new_dev(h.identity_arc(), h.rbac_arc(), h.audit_arc())
+            .with_agent_identity(true)
+            .with_agent_approval(true)
+            .with_agent_advanced(true),
+    ));
     Fx {
         h,
         realm,
@@ -341,6 +349,7 @@ pub async fn fixture() -> Fx {
         rest,
         outbox,
         hook,
+        upstream,
     }
 }
 
@@ -382,7 +391,74 @@ pub fn create_user(h: &common::TestHarness, realm: &RealmId, email: &str) -> Use
         .expect("user exists")
 }
 
+/// The system realm: the operator console's realm.
+pub fn system_realm() -> RealmId {
+    RealmId::new(uuid::Uuid::nil())
+}
+
 impl Fx {
+    /// Creates an active operator: a system-realm user with [`PASSWORD`] and
+    /// the `realm.admin` role, and no second factor.
+    ///
+    /// A server records `mfa_required: true` on the system realm; the
+    /// in-process harness does not, so this sets it.
+    pub fn operator(&self) -> User {
+        let sys = system_realm();
+        // The harness seeds tenant realms only.
+        self.h
+            .rbac()
+            .seed_realm(&sys)
+            .expect("seed the system realm");
+        self.h
+            .identity()
+            .apply_system_realm_mfa_required(true)
+            .expect("the system realm requires MFA");
+        let id = self.h.identity();
+        let user = id
+            .create_admin_user(&CreateUserRequest {
+                email: format!("ops-{}@inv.test", uuid::Uuid::new_v4().simple()),
+                display_name: "Invariant Operator".to_string(),
+                ..Default::default()
+            })
+            .expect("create operator");
+        id.set_password(
+            &sys,
+            user.id(),
+            &CleartextPassword::from_string(PASSWORD.to_string()),
+        )
+        .expect("operator password");
+        id.update_user(
+            &sys,
+            user.id(),
+            &UpdateUserRequest {
+                status: Some(UserStatus::Active),
+                ..Default::default()
+            },
+        )
+        .expect("activate operator");
+        let role = self
+            .h
+            .rbac()
+            .get_role_by_name(&sys, "realm.admin")
+            .expect("role lookup")
+            .expect("the system realm has realm.admin");
+        self.h
+            .rbac()
+            .assign_role(
+                &sys,
+                &AssignRoleRequest {
+                    subject: Subject::User(user.id().clone()),
+                    role_id: role.id,
+                    scope: Scope::Realm,
+                    assigned_by: None,
+                },
+            )
+            .expect("grant realm.admin");
+        id.get_user(&sys, user.id())
+            .expect("get operator")
+            .expect("operator exists")
+    }
+
     /// The user's id.
     pub fn uid(&self) -> &UserId {
         self.user.id()
@@ -419,12 +495,24 @@ impl Fx {
     /// Applies `v` (when given) to this fixture. `client` is the client the
     /// entry point acts for, `user` the user it signs in.
     pub fn violate(&self, v: Option<Violation>, client: Option<&ClientId>, user: &UserId) {
+        self.violate_in(&self.realm, v, client, user);
+    }
+
+    /// [`Self::violate`] for a user of `realm` (the system realm, for the
+    /// operator entry points).
+    pub fn violate_in(
+        &self,
+        realm: &RealmId,
+        v: Option<Violation>,
+        client: Option<&ClientId>,
+        user: &UserId,
+    ) {
         let Some(v) = v else { return };
         let id = self.h.identity();
         match v {
             Violation::RealmSuspended => {
                 id.set_realm_suspended(
-                    &self.realm,
+                    realm,
                     true,
                     &AuditContext {
                         actor: Actor::System,
@@ -435,7 +523,7 @@ impl Fx {
             }
             Violation::OrgSuspended => {
                 id.update_organization(
-                    &self.realm,
+                    realm,
                     &self.org,
                     &UpdateOrganizationRequest {
                         status: Some(OrganizationStatus::Suspended),
@@ -446,7 +534,7 @@ impl Fx {
             }
             Violation::UserDisabled => {
                 id.update_user(
-                    &self.realm,
+                    realm,
                     user,
                     &UpdateUserRequest {
                         status: Some(UserStatus::Disabled),
@@ -457,17 +545,22 @@ impl Fx {
             }
             Violation::UserLocked => {
                 let wrong = CleartextPassword::from_string("not-the-password-0".to_string());
-                for _ in 0..3 {
-                    let _ = id.verify_password(&self.realm, user, &wrong);
+                // The fixture realm locks after 3 failures; the system realm
+                // uses the server default.
+                for _ in 0..20 {
+                    if id.login_lockout_remaining(realm, user).is_some() {
+                        break;
+                    }
+                    let _ = id.verify_password(realm, user, &wrong);
                 }
                 assert!(
-                    id.login_lockout_remaining(&self.realm, user).is_some(),
-                    "three failed attempts must lock the login"
+                    id.login_lockout_remaining(realm, user).is_some(),
+                    "failed attempts must lock the login"
                 );
             }
             Violation::ClientArchived => {
                 id.update_client(
-                    &self.realm,
+                    realm,
                     client.expect("a client-status violation needs the entry point's client"),
                     &UpdateClientRequest {
                         status: Some(ApplicationStatus::Archived),
@@ -484,12 +577,23 @@ impl Fx {
     /// A browser holding a signed-in session (no second factor proved) for
     /// `user`, plus its CSRF cookie.
     pub fn signed_in(&self, user: &UserId, host: Option<&str>) -> Browser {
+        self.signed_in_with(&self.realm, user, SessionContext::default(), host)
+    }
+
+    /// [`Self::signed_in`] in `realm`, with the session's `context`.
+    pub fn signed_in_with(
+        &self,
+        realm: &RealmId,
+        user: &UserId,
+        context: SessionContext,
+        host: Option<&str>,
+    ) -> Browser {
         let session = self
             .h
             .identity()
-            .create_session(&self.realm, user, &SessionContext::default())
+            .create_session(realm, user, &context)
             .expect("create session");
-        let cookies = web::auth::issue_auth_cookies(&self.secret, &self.realm, session.id(), false);
+        let cookies = web::auth::issue_auth_cookies(&self.secret, realm, session.id(), false);
         let mut browser = self.browser(host);
         browser.accept_set_cookie(&cookies.session_cookie, "/ui/login");
         browser.accept_set_cookie(&cookies.csrf_cookie, "/ui/login");

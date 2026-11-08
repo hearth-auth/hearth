@@ -1269,12 +1269,37 @@ enum Rule {
     /// change the rule to `Applies` (or, after an owner decision, to
     /// `NotApplicable`) in the same PR.
     Tracked(&'static str),
-    /// The case has no driver yet (a later PR of task 3.3 adds it).
-    Later,
+    /// A known defect, open on the GitHub issue named, stops the entry point
+    /// from issuing at all, so no invariant can be checked. The baseline test
+    /// asserts that it still issues nothing, so the fix must remove the
+    /// `BROKEN` row in the same PR.
+    Broken(&'static str),
 }
 
-/// Entry points whose drivers come in a later PR of task 3.3.
-const LATER: &[&str] = &[
+/// Entry points that issue agent tokens or credentials through the admin
+/// API: an admin acts for an agent that the user owns.
+const AGENT_TOKENS: &[&str] = &[
+    "aat-issue",
+    "aat-derive",
+    "transaction-token",
+    "agent-api-key",
+];
+
+/// Entry points that issue nothing even with no violation: `(entry, issue)`.
+const BROKEN: &[(&str, &str)] = &[("passkey-login-admin", "#769")];
+
+/// Entry points that create a browser session and act for no client.
+const SESSION_ONLY: &[&str] = &[
+    "password-login",
+    "password-login-realm",
+    "passkey-login",
+    "passkey-login-realm",
+    "magic-link",
+    "magic-link-realm",
+    "totp-step",
+    "email-otp-step",
+    "passkey-step",
+    "mfa-enroll-required",
     "password-login-admin",
     "passkey-login-admin",
     "ra-verify-email-page",
@@ -1292,25 +1317,6 @@ const LATER: &[&str] = &[
     "social-confirm-link",
     "social-confirm-link-realm",
     "saml-acs",
-    "aat-issue",
-    "aat-derive",
-    "transaction-token",
-    "agent-api-key",
-    "admin-api-token",
-];
-
-/// Entry points that create a browser session and act for no client.
-const SESSION_ONLY: &[&str] = &[
-    "password-login",
-    "password-login-realm",
-    "passkey-login",
-    "passkey-login-realm",
-    "magic-link",
-    "magic-link-realm",
-    "totp-step",
-    "email-otp-step",
-    "passkey-step",
-    "mfa-enroll-required",
 ];
 
 /// Second-factor steps: they are the MFA, so the MFA policy cannot apply.
@@ -1321,8 +1327,30 @@ const SECOND_FACTOR_STEPS: &[&str] = &[
     "mfa-enroll-required",
 ];
 
+/// Required actions that enrol the second factor: they are the MFA.
+const FACTOR_ENROLMENTS: &[&str] = &["ra-email-otp-verify", "ra-enroll-mfa", "ra-enroll-passkey"];
+
+/// Required actions that the login reaches only after it proved a second
+/// factor (the page completes the action because the factor is held).
+const AFTER_FACTOR: &[&str] = &["ra-email-otp-page", "ra-enroll-mfa-page"];
+
+/// Operator console entry points, in the system realm.
+const OPERATOR: &[&str] = &[
+    "password-login-admin",
+    "passkey-login-admin",
+    "admin-api-token",
+];
+
 /// Entry points that check the password, where a locked login applies.
-const PASSWORD_CHECKS: &[&str] = &["password-login", "password-login-realm"];
+const PASSWORD_CHECKS: &[&str] = &[
+    "password-login",
+    "password-login-realm",
+    "password-login-admin",
+    "ra-update-password",
+    "admin-api-token",
+    "social-confirm-link",
+    "social-confirm-link-realm",
+];
 
 /// Entry points that accept an `organization`. The JSON `POST /authorize`
 /// has no `organization` field, so it issues in realm context only.
@@ -1337,6 +1365,10 @@ const MACHINE_GRANTS: &[&str] = &[
 /// Known gaps: `(case, invariant, issue)`. A case is `entry` or
 /// `entry[grant]`, as [`Case`] prints it.
 const TRACKED: &[(&str, Invariant, &str)] = &[
+    ("aat-issue", Invariant::UserStatus, "#770"),
+    ("aat-derive", Invariant::UserStatus, "#770"),
+    ("transaction-token", Invariant::UserStatus, "#770"),
+    ("agent-api-key", Invariant::UserStatus, "#770"),
     ("device-approval", Invariant::ClientStatus, "#764"),
     ("consent", Invariant::MfaPolicy, "#765"),
     ("consent[org]", Invariant::MfaPolicy, "#765"),
@@ -1424,6 +1456,11 @@ const PASSKEY_UV: &str = "a user-verified passkey is a multi-factor proof by its
 const NO_ACCESS_TOKEN: &str =
     "issues no access token; the webhook runs before an access token is issued";
 const DEV_ONLY: &str = "dev-endpoints builds only; never in a release build";
+const SYSTEM_REALM: &str = "the system realm cannot be suspended";
+const ENROLS_FACTOR: &str = "the entry point enrols the second factor";
+const FACTOR_PROVED: &str = "the login proved a second factor before this entry point";
+const NO_SIGN_IN: &str = "an admin API call for an agent: no user signs in";
+const STEP_UP: &str = "the form asks for the password and the second factor itself";
 
 /// Every case: each entry point, each token grant, each org variant.
 fn cases() -> Vec<Case> {
@@ -1469,29 +1506,37 @@ fn rule(case: Case, inv: Invariant) -> Rule {
 
 /// [`rule`] before the known gaps.
 fn base_rule(case: Case, inv: Invariant) -> Rule {
-    use Rule::{Applies, Later, NotApplicable as Na};
+    use Rule::{Applies, NotApplicable as Na};
     let e = case.entry;
     if entry(e).build == DevEndpoints {
         return Na(DEV_ONLY);
     }
-    if LATER.contains(&e) {
-        return Later;
+    if let Some((_, issue)) = BROKEN.iter().find(|(b, _)| *b == e) {
+        return Rule::Broken(issue);
     }
     let grant = case.grant();
     let machine = grant.is_some_and(|g| MACHINE_GRANTS.contains(&g));
     match inv {
+        Invariant::RealmStatus if OPERATOR.contains(&e) => Na(SYSTEM_REALM),
         Invariant::RealmStatus => Applies,
         Invariant::OrgStatus if case.org() => Applies,
         Invariant::OrgStatus => Na(NO_ORG),
         Invariant::UserStatus if machine => Na(NO_USER),
         Invariant::UserStatus => Applies,
         Invariant::ClientStatus
-            if SESSION_ONLY.contains(&e) || grant == Some("urn:hearth:grant-type:magic-link") =>
+            if SESSION_ONLY.contains(&e)
+                || e == "admin-api-token"
+                || AGENT_TOKENS.contains(&e)
+                || grant == Some("urn:hearth:grant-type:magic-link") =>
         {
             Na(NO_CLIENT)
         }
         Invariant::ClientStatus => Applies,
         Invariant::MfaPolicy if SECOND_FACTOR_STEPS.contains(&e) => Na(IS_FACTOR),
+        Invariant::MfaPolicy if FACTOR_ENROLMENTS.contains(&e) => Na(ENROLS_FACTOR),
+        Invariant::MfaPolicy if AFTER_FACTOR.contains(&e) => Na(FACTOR_PROVED),
+        Invariant::MfaPolicy if e == "admin-api-token" => Na(STEP_UP),
+        Invariant::MfaPolicy if AGENT_TOKENS.contains(&e) => Na(NO_SIGN_IN),
         Invariant::MfaPolicy if e.starts_with("passkey-login") => Na(PASSKEY_UV),
         Invariant::MfaPolicy if machine => Na(NO_USER),
         Invariant::MfaPolicy => Applies,
@@ -1524,7 +1569,7 @@ async fn check(inv: Invariant) {
         let tracked = match rule(case, inv) {
             Rule::Applies => None,
             Rule::Tracked(issue) => Some(issue),
-            Rule::NotApplicable(_) | Rule::Later => continue,
+            Rule::NotApplicable(_) | Rule::Broken(_) => continue,
         };
         for v in violations(inv, case) {
             ran += 1;
@@ -1552,6 +1597,19 @@ async fn check(inv: Invariant) {
 async fn every_case_issues_without_a_violation() {
     let mut refused = Vec::new();
     for case in cases() {
+        if let Some(Rule::Broken(issue)) = INVARIANTS
+            .iter()
+            .map(|i| rule(case, *i))
+            .find(|r| matches!(r, Rule::Broken(_)))
+        {
+            let fx = fixture::fixture().await;
+            if drivers::run(&fx, case, None).await {
+                refused.push(format!(
+                    "  {case}: issues now; {issue} is fixed, so remove its BROKEN row"
+                ));
+            }
+            continue;
+        }
         if !INVARIANTS
             .iter()
             .any(|i| matches!(rule(case, *i), Rule::Applies | Rule::Tracked(_)))
@@ -1565,7 +1623,8 @@ async fn every_case_issues_without_a_violation() {
     }
     assert!(
         refused.is_empty(),
-        "cases that issue nothing with no violation (a broken driver):\n{}",
+        "cases that issue nothing with no violation (a broken driver), or BROKEN rows that \
+         issue:\n{}",
         refused.join("\n")
     );
 }
@@ -1625,6 +1684,9 @@ fn every_case_has_an_applicable_invariant() {
 /// a typo cannot hide a gap.
 #[test]
 fn every_tracked_row_names_a_case() {
+    for (e, _) in BROKEN {
+        entry(e);
+    }
     let names: BTreeSet<String> = cases().iter().map(ToString::to_string).collect();
     for (case, inv, issue) in TRACKED {
         assert!(names.contains(*case), "TRACKED names no case: {case}");
