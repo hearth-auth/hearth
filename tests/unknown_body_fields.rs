@@ -188,7 +188,6 @@ async fn a47_role_assignment_refuses_scope_object() {
                 permissions: vec![],
                 parent_roles: vec![],
                 scope_kind: hearth::rbac::RoleScopeKind::default(),
-                allow_reserved_permissions: false,
             },
         )
         .expect("create role");

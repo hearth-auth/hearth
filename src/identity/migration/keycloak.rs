@@ -318,7 +318,6 @@ impl KeycloakImporter {
                             permissions: Vec::new(),
                             parent_roles: Vec::new(),
                             scope_kind: crate::rbac::RoleScopeKind::Realm,
-                            allow_reserved_permissions: false,
                         },
                     )?;
                     created.id

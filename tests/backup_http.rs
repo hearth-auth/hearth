@@ -1529,10 +1529,10 @@ async fn only_a_system_realm_caller_restores_the_system_realm_over_http() {
     );
 }
 
-/// Creates an operator in the system realm holding exactly `permissions`
-/// (through one custom role) and returns a system-realm access token for it.
-fn make_system_token_with(h: &common::TestHarness, email: &str, permissions: &[&str]) -> String {
-    use hearth::rbac::{CreateRoleRequest, Permission};
+/// Creates an operator in the system realm that holds the seed roles `roles`
+/// and returns a system-realm access token for it. A custom role cannot hold a
+/// `hearth.*` permission, so delegated operators get seed roles only.
+fn make_system_token_with(h: &common::TestHarness, email: &str, roles: &[&str]) -> String {
     let sys = system_realm();
     let user = h
         .identity()
@@ -1543,34 +1543,7 @@ fn make_system_token_with(h: &common::TestHarness, email: &str, permissions: &[&
         })
         .expect("operator");
     h.rbac().seed_realm(&sys).expect("seed system roles");
-    let role = h
-        .rbac()
-        .create_role(
-            &sys,
-            &CreateRoleRequest {
-                name: format!("delegated-{}", uuid::Uuid::new_v4()),
-                description: None,
-                permissions: permissions
-                    .iter()
-                    .map(|p| Permission::new(*p).expect("permission"))
-                    .collect(),
-                parent_roles: vec![],
-                scope_kind: hearth::rbac::RoleScopeKind::Realm,
-                allow_reserved_permissions: true,
-            },
-        )
-        .expect("role");
-    h.rbac()
-        .assign_role(
-            &sys,
-            &AssignRoleRequest {
-                subject: Subject::User(user.id().clone()),
-                role_id: role.id,
-                scope: Scope::Realm,
-                assigned_by: None,
-            },
-        )
-        .expect("grant role");
+    grant(h, &sys, user.id(), roles);
     let session = h
         .identity()
         .create_session(&sys, user.id(), &SessionContext::default())
@@ -1707,12 +1680,8 @@ async fn a_system_realm_backup_or_restore_needs_hearth_admin_not_a_sub_admin() {
         "a refused restore records no BackupRestored event: {restored_events:?}"
     );
 
-    // hearth.admin + hearth.export (and nothing else) is enough.
-    let admin = make_system_token_with(
-        &dst,
-        "superuser@hearth.test",
-        &["hearth.admin", "hearth.export"],
-    );
+    // The seeded realm.admin role (hearth.admin + hearth.export) is enough.
+    let admin = make_system_token_with(&dst, "superuser@hearth.test", &["realm.admin"]);
     assert_eq!(
         post_backup_status(&dst, "/admin/backup?realm=system", &admin, &system_realm()).await,
         StatusCode::OK,
@@ -2007,14 +1976,14 @@ async fn post_restore_on(
 }
 
 /// Creates a user in `realm` (the system realm through `create_admin_user`)
-/// holding exactly `permissions` through one custom role, and returns the user
-/// id and the role assignment.
+/// that holds the seed roles `roles`, and returns the user id and the role
+/// assignments.
 fn delegate(
     h: &common::TestHarness,
     realm: &RealmId,
     email: &str,
-    permissions: &[&str],
-) -> (hearth::core::UserId, hearth::rbac::RoleAssignment) {
+    roles: &[&str],
+) -> (hearth::core::UserId, Vec<hearth::rbac::RoleAssignment>) {
     let request = CreateUserRequest {
         email: email.to_string(),
         display_name: "Delegated".into(),
@@ -2027,46 +1996,38 @@ fn delegate(
     }
     .expect("user");
     h.rbac().seed_realm(realm).expect("seed roles");
-    let assignment = grant(h, realm, user.id(), permissions);
-    (user.id().clone(), assignment)
+    let assignments = grant(h, realm, user.id(), roles);
+    (user.id().clone(), assignments)
 }
 
-/// Grants `user` exactly `permissions` through a fresh custom role.
+/// Assigns the seed roles `roles` to `user` in `realm`, one assignment each.
 fn grant(
     h: &common::TestHarness,
     realm: &RealmId,
     user: &hearth::core::UserId,
-    permissions: &[&str],
-) -> hearth::rbac::RoleAssignment {
-    use hearth::rbac::{CreateRoleRequest, Permission};
-    let role = h
-        .rbac()
-        .create_role(
-            realm,
-            &CreateRoleRequest {
-                name: format!("delegated-{}", uuid::Uuid::new_v4()),
-                description: None,
-                permissions: permissions
-                    .iter()
-                    .map(|p| Permission::new(*p).expect("permission"))
-                    .collect(),
-                parent_roles: vec![],
-                scope_kind: hearth::rbac::RoleScopeKind::Realm,
-                allow_reserved_permissions: true,
-            },
-        )
-        .expect("role");
-    h.rbac()
-        .assign_role(
-            realm,
-            &AssignRoleRequest {
-                subject: Subject::User(user.clone()),
-                role_id: role.id,
-                scope: Scope::Realm,
-                assigned_by: None,
-            },
-        )
-        .expect("grant role")
+    roles: &[&str],
+) -> Vec<hearth::rbac::RoleAssignment> {
+    roles
+        .iter()
+        .map(|name| {
+            let role = h
+                .rbac()
+                .get_role_by_name(realm, name)
+                .expect("role lookup")
+                .unwrap_or_else(|| panic!("seed role {name} is missing"));
+            h.rbac()
+                .assign_role(
+                    realm,
+                    &AssignRoleRequest {
+                        subject: Subject::User(user.clone()),
+                        role_id: role.id,
+                        scope: Scope::Realm,
+                        assigned_by: None,
+                    },
+                )
+                .expect("grant role")
+        })
+        .collect()
 }
 
 /// A fresh access token for `user` in `realm`.
@@ -2108,7 +2069,7 @@ async fn a_tenant_restore_needs_the_realm_admin_not_a_sub_admin() {
     );
     let archive = export_archive(&h, &tenant, &admin_token).await;
     h.rbac()
-        .unassign_role(&tenant, &revoked.id)
+        .unassign_role(&tenant, &revoked[0].id)
         .expect("revoke the grant");
 
     for sub_admin in [
@@ -2212,7 +2173,7 @@ async fn the_permission_checks_answer_before_the_export_rate_limit() {
             &h,
             &realm,
             &format!("quota-{}@hearth.test", uuid::Uuid::new_v4()),
-            &["hearth.admin", "hearth.export"],
+            &["realm.admin"],
         );
         let full_token = token_for(&h, &realm, &user);
         assert_eq!(
@@ -2226,7 +2187,7 @@ async fn the_permission_checks_answer_before_the_export_rate_limit() {
             "precondition: {uri} — the user's export quota is spent"
         );
 
-        h.rbac().unassign_role(&realm, &full.id).expect("demote");
+        h.rbac().unassign_role(&realm, &full[0].id).expect("demote");
         grant(&h, &realm, &user, &["hearth.users.admin", "hearth.export"]);
         let demoted = token_for(&h, &realm, &user);
         if realm.as_uuid().is_nil() {

@@ -490,7 +490,6 @@ async fn archived_role_blocks_and_restore_allows_assignment() {
                 permissions: perms(&["docs.read"]),
                 parent_roles: vec![],
                 scope_kind: Default::default(),
-                allow_reserved_permissions: false,
             },
         )
         .expect("create role");
@@ -599,7 +598,6 @@ async fn delete_user_cascades_rbac_state() {
                 permissions: perms(&["docs.write"]),
                 parent_roles: vec![],
                 scope_kind: Default::default(),
-                allow_reserved_permissions: false,
             },
         )
         .expect("role_a");
@@ -613,7 +611,6 @@ async fn delete_user_cascades_rbac_state() {
                 permissions: perms(&["docs.read"]),
                 parent_roles: vec![],
                 scope_kind: Default::default(),
-                allow_reserved_permissions: false,
             },
         )
         .expect("role_b");

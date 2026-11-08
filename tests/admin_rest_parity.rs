@@ -153,7 +153,6 @@ impl Fixture {
                         .collect(),
                     parent_roles: vec![],
                     scope_kind: Default::default(),
-                    allow_reserved_permissions: false,
                 },
             )
             .expect("create role")

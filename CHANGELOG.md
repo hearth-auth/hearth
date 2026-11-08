@@ -6,6 +6,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Added
+- **A `hearth.export` seed role** (#637): every new realm now has a `hearth.export` role that holds
+  only the `hearth.export` permission. Assign it next to a sub-admin role (for example
+  `hearth.users.admin`) to let that sub-admin export its realm. Alone it grants nothing, because
+  every export endpoint also requires an admin permission. Before, the only role with
+  `hearth.export` was `realm.admin`, which is full superuser access, so a sub-admin could not get
+  export rights. A realm created before this release does not get the role automatically.
+
+### Removed
+- **The reserved-permission bypass on role requests** (#637): `CreateRoleRequest` and
+  `UpdateRoleRequest` in the Rust library no longer have `allow_reserved_permissions`. A custom
+  role can never hold a `hearth.*` permission. No HTTP endpoint or config key changes: the field
+  was never read from a request body.
+
 ### Fixed
 - **Realm deletes free the realm's audit state in memory** (#609): deleting a realm now also
   removes the realm's audit chain lock and its cached audit HMAC key from memory. Before, both

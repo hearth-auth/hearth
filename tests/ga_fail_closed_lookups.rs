@@ -224,7 +224,6 @@ async fn scim_delete_fails_closed_when_the_admin_check_cannot_read_rbac() {
                 permissions: vec![Permission::new("docs.read".to_string()).unwrap()],
                 parent_roles: Vec::new(),
                 scope_kind: hearth::rbac::RoleScopeKind::Realm,
-                allow_reserved_permissions: false,
             },
         )
         .unwrap();

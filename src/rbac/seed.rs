@@ -130,10 +130,14 @@ struct SeedRoleSpec {
 /// and `realm.member` are standalone; `org.member` is parent of
 /// `org.admin`, which is parent of `org.owner`.
 ///
-/// Three sub-admin roles (`hearth.users.admin`, `hearth.clients.admin`,
-/// `hearth.realm.admin`) allow Keycloak-style delegation without granting full
-/// superuser access. Assign one of these instead of `realm.admin` to restrict
-/// a service account or operator to only the endpoints they need.
+/// Four sub-admin roles (`hearth.users.admin`, `hearth.clients.admin`,
+/// `hearth.realm.admin`, `hearth.agents.admin`) allow Keycloak-style
+/// delegation without granting full superuser access. Assign one of these
+/// instead of `realm.admin` to restrict a service account or operator to only
+/// the endpoints they need. `hearth.export` adds export rights to a sub-admin:
+/// alone it grants nothing, because every export endpoint also requires an
+/// admin permission. Custom roles never hold a `hearth.*` permission, so these
+/// seed roles are the only way to grant one.
 const SEED_ROLES: &[SeedRoleSpec] = &[
     SeedRoleSpec {
         name: "realm.admin",
@@ -180,6 +184,12 @@ const SEED_ROLES: &[SeedRoleSpec] = &[
     SeedRoleSpec {
         name: "hearth.agents.admin",
         permissions: &["hearth.agents.admin"],
+        parent_names: &[],
+        scope_kind: RoleScopeKind::Realm,
+    },
+    SeedRoleSpec {
+        name: "hearth.export",
+        permissions: &["hearth.export"],
         parent_names: &[],
         scope_kind: RoleScopeKind::Realm,
     },
@@ -540,6 +550,24 @@ mod tests {
         let names: Vec<&str> = list.iter().map(Permission::as_str).collect();
         assert!(names.contains(&"hearth.admin"));
         assert!(names.contains(&"realm.admin"));
+    }
+
+    /// An operator gives a sub-admin export rights through a seed role, not a
+    /// custom role: custom roles never hold a `hearth.*` permission.
+    #[test]
+    fn seed_hearth_export_role_holds_only_the_export_permission() {
+        let (storage, clock, realm) = setup();
+        seed_realm(&storage, &clock, &realm).expect("seed");
+        let k = keys::encode_role_name(&realm, "hearth.export");
+        assert!(
+            storage.get(&realm, &k).expect("get").is_some(),
+            "a new realm must have a seed role named hearth.export"
+        );
+        let role = load_role_by_name(&storage, &realm, "hearth.export");
+        let names: Vec<&str> = role.permissions.iter().map(Permission::as_str).collect();
+        assert_eq!(names, vec!["hearth.export"]);
+        assert_eq!(role.parent_roles, Vec::<RoleId>::new());
+        assert_eq!(role.scope_kind, RoleScopeKind::Realm);
     }
 
     fn load_role_by_name(storage: &Arc<dyn StorageEngine>, realm: &RealmId, name: &str) -> Role {

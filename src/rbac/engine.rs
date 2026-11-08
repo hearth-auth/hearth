@@ -1040,9 +1040,7 @@ impl RbacEngine for EmbeddedRbacEngine {
 
     fn create_role(&self, realm_id: &RealmId, req: &CreateRoleRequest) -> Result<Role, RbacError> {
         Self::validate_role_name(&req.name)?;
-        if !req.allow_reserved_permissions {
-            Self::validate_permissions_for_operator(&req.permissions)?;
-        }
+        Self::validate_permissions_for_operator(&req.permissions)?;
 
         if self.load_role_id_by_name(realm_id, &req.name)?.is_some() {
             return Err(RbacError::DuplicateRoleName);
@@ -1130,9 +1128,7 @@ impl RbacEngine for EmbeddedRbacEngine {
         }
 
         if let Some(perms) = &req.permissions {
-            if !req.allow_reserved_permissions {
-                Self::validate_permissions_for_operator(perms)?;
-            }
+            Self::validate_permissions_for_operator(perms)?;
             role.permissions.clone_from(perms);
         }
 

@@ -35,7 +35,6 @@ fn create_role(h: &common::TestHarness, realm: &RealmId, name: &str, perms: &[&s
                     .collect(),
                 parent_roles: Vec::new(),
                 scope_kind: hearth::rbac::RoleScopeKind::Realm,
-                allow_reserved_permissions: false,
             },
         )
         .unwrap()

@@ -1720,7 +1720,6 @@ fn role_mfa_rig() -> FaultRig {
                 permissions: vec![hearth::rbac::Permission::new("docs.read").expect("perm")],
                 parent_roles: vec![],
                 scope_kind: hearth::rbac::RoleScopeKind::Realm,
-                allow_reserved_permissions: false,
             },
         )
         .expect("role");

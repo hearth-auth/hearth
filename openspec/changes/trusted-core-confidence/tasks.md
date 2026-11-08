@@ -22,7 +22,8 @@
 - [x] 1.7 `/admin/realms` answers `405` before authentication. Red test (unauthenticated caller gets the auth error), then fix
   - Fixed by #623 in PR #719 (`1e1814d6`).
 - [x] 1.8 `allow_reserved_permissions: true` is set only by tests. Decide: remove the key, or document it
-  - Decision: document it, and never read it from serialized input (`serde(skip)`). Removal would leave the backup tests no way to build a delegated operator role with an exact reserved permission set (#637).
+  - First decision (#637): document it, and never read it from serialized input (`serde(skip)`).
+  - Final decision (owner, 2026-11-07): remove it. Reserved `hearth.*` permissions exist only in seed roles. A new `hearth.export` seed role lets an operator give export rights to a sub-admin, and the backup tests now assign seed roles.
 - [x] 1.9 `cargo deny` warns about unused license allowances. Remove them
   - Removed `MPL-2.0` and `Unicode-DFS-2016` from `deny.toml` (#637).
 - [x] 1.10 The startup warning when a realm sets `mfa: optional` is not asserted by a test. Add the assertion
