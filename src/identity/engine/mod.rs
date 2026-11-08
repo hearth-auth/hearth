@@ -18230,7 +18230,40 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             subject_claims.aud.clone()
         };
 
-        // 9. Issue token.
+        // openspec/specs/rbac-token-claims/spec.md (HEA-1726): effective permissions are the
+        // intersection of the subject's grants and the actor's own grants.
+        let permissions: Vec<String> = {
+            let actor_perm_set: std::collections::HashSet<&str> =
+                actor_permissions_owned.iter().map(|s| s.as_str()).collect();
+            subject_claims
+                .permissions
+                .iter()
+                .filter(|p| actor_perm_set.contains(p.as_str()))
+                .cloned()
+                .collect()
+        };
+
+        // 9. Pre-token webhook (#763): the exchange issues an access token, so
+        //    the realm's webhook runs and its `on_error` policy applies, as for
+        //    the other user grants.
+        let extra_claims = self.fire_pre_token_webhook(
+            realm_id,
+            &subject_claims.sub,
+            &crate::identity::tokens::issued_client_id(&request.client_id),
+            "urn:ietf:params:oauth:grant-type:token-exchange",
+            Some(effective_scope.as_str()),
+            (!subject_claims.sid.is_empty()).then_some(subject_claims.sid.as_str()),
+            &[],
+            &[],
+            &permissions,
+            &subject_claims.custom,
+        )?;
+        let custom = crate::identity::pre_token_webhook::merge_extra_claims(
+            subject_claims.custom.clone(),
+            extra_claims,
+        );
+
+        // 10. Issue token.
         let signing_key = self.get_signing_key_or_default(realm_id);
         let jti = uuid::Uuid::new_v4().to_string();
         let issued_claims = crate::identity::tokens::TokenClaims {
@@ -18265,24 +18298,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             roles: Vec::new(),
             groups: Vec::new(),
             org_groups: Vec::new(),
-            permissions: {
-                let actor_perm_set: std::collections::HashSet<&str> =
-                    actor_permissions_owned.iter().map(|s| s.as_str()).collect();
-                subject_claims
-                    .permissions
-                    .iter()
-                    .filter(|p| actor_perm_set.contains(p.as_str()))
-                    .cloned()
-                    .collect()
-            },
+            permissions,
             act: Some(new_act),
             amr: subject_claims.amr.clone(),
             sv: subject_claims.sv,
-            custom: subject_claims.custom.clone(),
+            custom,
         };
         let access_token = signing_key.issue_token(&issued_claims)?;
 
-        // 10. Audit.
+        // 11. Audit.
         let audit_ctx = AuditContext {
             actor: Actor::System,
             metadata: Some(serde_json::json!({
@@ -18308,7 +18332,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             &jti,
         )?;
 
-        // 11. Persist delegation grant for self-service consent management (§3.5).
+        // 12. Persist delegation grant for self-service consent management (§3.5).
         let delegation_id = uuid::Uuid::new_v4().to_string();
         let now_ts = self.clock.now();
         let expires_ts = crate::core::Timestamp::from_micros(exp * 1_000_000);

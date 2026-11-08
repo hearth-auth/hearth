@@ -1370,16 +1370,6 @@ const TRACKED: &[(&str, Invariant, &str)] = &[
     ("transaction-token", Invariant::UserStatus, "#770"),
     ("agent-api-key", Invariant::UserStatus, "#770"),
     (
-        "token[urn:ietf:params:oauth:grant-type:token-exchange]",
-        Invariant::PreTokenWebhook,
-        "#763",
-    ),
-    (
-        "token-realm[urn:ietf:params:oauth:grant-type:token-exchange]",
-        Invariant::PreTokenWebhook,
-        "#763",
-    ),
-    (
         "token[client_credentials]",
         Invariant::PreTokenWebhook,
         "#766",

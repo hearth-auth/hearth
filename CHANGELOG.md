@@ -21,6 +21,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   was never read from a request body.
 
 ### Security
+- **Token exchange runs the pre-token webhook** (#763): the token-exchange grant
+  (`urn:ietf:params:oauth:grant-type:token-exchange`) at `POST /token` and
+  `POST /realms/{realm_name}/token` now calls the realm's pre-token webhook before it issues the
+  token, and obeys `on_error`. If the webhook fails and `on_error` is `fail_closed`, the grant
+  issues no token, as the other user grants do. The webhook's `extra_claims` now reach the
+  exchanged token.
 - **The consent approval applies the current MFA requirement** (#765): `POST /ui/oauth/consent`
   now does the second-factor and required-action checks of the authorization request again before
   it records the consent and issues the code. If the realm or the client starts to require a second
