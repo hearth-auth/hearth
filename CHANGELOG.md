@@ -35,6 +35,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   issued the code.
 
 ### Fixed
+- **A confidential client's authorization request without PKCE gets an error redirect** (#639):
+  `GET /ui/oauth/authorize` and `GET /ui/realms/{realm_name}/oauth/authorize` now refuse a plain
+  request without `code_challenge` from any client, public or confidential, with an
+  `invalid_request` redirect to the registered `redirect_uri` (the `state` comes back). Before,
+  only a public client got this redirect. A confidential client's request went on through consent,
+  and then the user got a server error page (`500`). PKCE is still required for every client: no
+  request without it gets a code.
 - **A `prompt=none` authorization request with no signed-in user gets `login_required`** (#639):
   `GET /realms/{realm_name}/authorize` (and `/ui/realms/{realm_name}/oauth/authorize`) now answers
   a plain `prompt=none` request from a browser with no session with an `error=login_required`

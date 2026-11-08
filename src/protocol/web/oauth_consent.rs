@@ -403,14 +403,17 @@ fn plain_params(
         ));
     };
 
-    // Public clients MUST supply PKCE S256 (RFC 9700 / HEA-501 F-01).
-    if !client.is_confidential() && q.code_challenge.is_empty() {
+    // Every client MUST supply PKCE S256, public and confidential (RFC 9700
+    // §2.1.1, spec `oidc-provider`). Refuse here, with an error redirect to
+    // the validated URI: code issuance refuses it too, but only after
+    // consent, and as a server error (#639).
+    if q.code_challenge.is_empty() {
         return Err(authorization_error_redirect(
             state,
             realm,
             &error_return,
             "invalid_request",
-            "public clients must use PKCE with code_challenge_method=S256",
+            "PKCE is required: send code_challenge with code_challenge_method=S256",
         ));
     }
 

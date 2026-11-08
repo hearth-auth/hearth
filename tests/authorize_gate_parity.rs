@@ -1101,6 +1101,64 @@ async fn plain_request_error_uses_the_fragment_response_mode() {
     assert_fragment_error(&location(&resp), "invalid_request", "plain-state");
 }
 
+/// A confidential client's plain request without PKCE is refused at the front
+/// door with an `invalid_request` error redirect, before consent and code
+/// issuance (#639). PKCE is required for every client (`oidc-provider` spec).
+/// The front door used to check only public clients, so a confidential
+/// client's request went on to code issuance, which refused it with a server
+/// error page instead of an error redirect to the client.
+#[tokio::test]
+async fn plain_confidential_request_without_pkce_is_refused_with_an_error_redirect() {
+    let rig = rig().await;
+    let client = rig
+        .identity
+        .register_client(
+            &rig.realm_id,
+            &RegisterClientRequest {
+                client_name: "Confidential gate parity app".to_string(),
+                redirect_uris: vec![REDIRECT.to_string()],
+                client_secret: Some("confidential-gate-parity-secret".to_string()),
+                grant_types: vec!["authorization_code".to_string()],
+                trust_level: hearth::identity::ClientTrustLevel::FirstParty,
+                ..Default::default()
+            },
+        )
+        .expect("register client");
+    assert!(
+        client.is_confidential(),
+        "the test needs a confidential client"
+    );
+    let uri = format!(
+        "/ui/oauth/authorize?client_id={}&redirect_uri=https%3A%2F%2Fapp.example.com%2Fcb\
+         &response_type=code&scope=openid&state=no-pkce-state&nonce=n-1",
+        client.client_id().as_uuid(),
+    );
+    // A first-party client: without the front-door check the request goes
+    // straight on to code issuance. A consent client would stop at the
+    // consent prompt first.
+    let resp = get(&rig, &uri, &session_cookie(&rig)).await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let loc = location(&resp);
+    assert!(
+        loc.starts_with(REDIRECT),
+        "expected the client redirect, got {loc}"
+    );
+    assert_eq!(
+        redirect_param(&loc, "error", false).as_deref(),
+        Some("invalid_request"),
+        "got {loc}"
+    );
+    assert_eq!(
+        redirect_param(&loc, "state", false).as_deref(),
+        Some("no-pkce-state"),
+        "got {loc}"
+    );
+    assert!(
+        redirect_param(&loc, "code", false).is_none(),
+        "no code; got {loc}"
+    );
+}
+
 /// The realm-scoped authorize URI for a plain request (the URI the realm's
 /// discovery document leads a browser to).
 fn scoped_plain_uri(rig: &Rig, client: &OAuthClient, extra: &str) -> String {
