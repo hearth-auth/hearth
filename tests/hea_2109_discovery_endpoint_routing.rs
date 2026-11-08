@@ -120,3 +120,49 @@ async fn device_authorization_endpoint_is_served() {
         "POST {path} (advertised device_authorization_endpoint) must accept POST, got 405"
     );
 }
+
+/// OIDC Discovery 1.0 §3: `request_uri_parameter_supported` defaults to
+/// `true` and `request_parameter_supported` to `false` when they are left out.
+/// Hearth accepts a signed `request` object (RFC 9101) and does not fetch a
+/// `request_uri` by reference: it accepts only the `request_uri` that its own
+/// PAR endpoint returned (RFC 9126). Both documents MUST say so, so a relying
+/// party does not send a request by reference that Hearth refuses (#639,
+/// `oidcc-request-uri-signed-rs256`).
+#[tokio::test]
+async fn discovery_states_which_request_parameters_are_supported() {
+    let h = common::TestHarness::server().await.expect("server harness");
+    let base = h.base_url().expect("base_url");
+    let realm = format!("disc-{}", uuid::Uuid::new_v4().simple());
+    h.identity()
+        .create_realm(&hearth::identity::CreateRealmRequest {
+            name: realm.clone(),
+            config: None,
+        })
+        .expect("create realm");
+
+    let realm_doc = reqwest::Client::new()
+        .get(format!(
+            "{base}/realms/{realm}/.well-known/openid-configuration"
+        ))
+        .send()
+        .await
+        .expect("GET realm discovery document")
+        .json::<serde_json::Value>()
+        .await
+        .expect("realm discovery document is valid JSON");
+    for (which, doc) in [
+        ("server", served_discovery(base).await),
+        ("realm", realm_doc),
+    ] {
+        assert_eq!(
+            doc["request_parameter_supported"],
+            serde_json::Value::Bool(true),
+            "{which} document: request_parameter_supported"
+        );
+        assert_eq!(
+            doc["request_uri_parameter_supported"],
+            serde_json::Value::Bool(false),
+            "{which} document: request_uri_parameter_supported"
+        );
+    }
+}

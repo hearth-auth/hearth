@@ -6118,6 +6118,8 @@ impl EmbeddedIdentityEngine {
                 "ES256".to_string(),
                 "EdDSA".to_string(),
             ],
+            request_parameter_supported: true,
+            request_uri_parameter_supported: false,
         }
     }
 

@@ -1444,6 +1444,16 @@ pub struct OidcDiscoveryDocument {
     /// on `/authorize` and `/as/par`. Clients MUST use one of these algorithms.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub request_object_signing_alg_values_supported: Vec<String>,
+    /// Whether `/authorize` accepts a `request` object (OIDC Discovery 1.0
+    /// §3; RFC 9101). Omitted, the field means `false`.
+    #[serde(default)]
+    pub request_parameter_supported: bool,
+    /// Whether `/authorize` fetches a `request_uri` by reference (OIDC
+    /// Discovery 1.0 §3). Omitted, the field means `true`, so it is always
+    /// sent. Hearth sets `false`: it accepts only the `request_uri` that its
+    /// PAR endpoint returned (RFC 9126) and never fetches one.
+    #[serde(default)]
+    pub request_uri_parameter_supported: bool,
 }
 
 // ===== JWT Authorization Requests — RFC 9101 (JAR) =====
@@ -2399,6 +2409,8 @@ mod tests {
             pushed_authorization_request_endpoint: None,
             dpop_signing_alg_values_supported: Vec::new(),
             request_object_signing_alg_values_supported: Vec::new(),
+            request_parameter_supported: true,
+            request_uri_parameter_supported: false,
         };
 
         let json = serde_json::to_string(&doc).expect("serialize");
