@@ -31,8 +31,10 @@
 
 ## 2. External OIDC conformance
 
-- [ ] 2.1 `scripts/conformance-oidf.sh` and `make conformance-oidf`: pinned suite tag, Docker stack, `serve -c` with TLS and a real KEK, refuses `--dev`, exits non-zero on any failed condition
-- [ ] 2.2 Run Config OP; confirm the RS256 failure from 2026-09-21 is gone
+- [x] 2.1 `scripts/conformance-oidf.sh` and `make conformance-oidf`: pinned suite tag, Docker stack, `serve -c` with TLS and a real KEK, refuses `--dev`, exits non-zero on any failed condition
+  - Suite `release-v5.3.4` (commit `23353b36`). Guard self-test `scripts/tests/conformance-oidf.test.sh` runs in ci.yml's filter job (#639).
+- [x] 2.2 Run Config OP; confirm the RS256 failure from 2026-09-21 is gone
+  - 2026-11-08: 39 conditions passed, 0 failed, 1 warning (`resource_indicators_supported`, task 2.4). `OIDCCCheckDiscEndpointIdTokenSigningAlgValuesSupported` passes (#639).
 - [ ] 2.3 Run Basic OP and Dynamic OP; fix each failure with a red test first
 - [ ] 2.4 Record each warning and its decision (design Open Question 1 for `resource_indicators_supported`)
 - [ ] 2.5 Write the run report under `reports/`, and update `docs/dev/TESTING.md` §7

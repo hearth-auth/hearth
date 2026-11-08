@@ -1,0 +1,17 @@
+{
+  "alias": "hearth",
+  "description": "Hearth Basic OP: static clients, production mode",
+  "server": {
+    "discoveryUrl": "https://hearth:8420/realms/conformance/.well-known/openid-configuration",
+    "login_hint": "oidf-user@example.com"
+  },
+  "client": {
+    "client_id": "${OIDF_CLIENT_ID}",
+    "client_secret": "${OIDF_CLIENT_SECRET}"
+  },
+  "client2": {
+    "client_id": "${OIDF_CLIENT2_ID}",
+    "client_secret": "${OIDF_CLIENT2_SECRET}"
+  },
+  "browser": "@browser.json"
+}

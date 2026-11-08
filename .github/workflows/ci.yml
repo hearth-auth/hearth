@@ -540,6 +540,16 @@ jobs:
       - name: Pentest scope — guard self-test
         run: bash scripts/tests/check-pentest-scope.test.sh
 
+      # #639: the OpenID Foundation conformance run is a release gate. It needs
+      # Docker and runs per release (docs/release-runbook.md), so here only its
+      # guards run: the script must refuse dev mode and a stack without TLS or
+      # with a KEK in the file, and its verdict must be FAIL on a failed
+      # condition, on a plan that did not report and on an undecided warning.
+      - name: OIDF conformance script — guard self-test
+        run: |
+          bash scripts/conformance-oidf.sh --check-config
+          bash scripts/tests/conformance-oidf.test.sh
+
       # Task 26.27 / audit https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/cold-first-run-2026-09-21.md C-7: the
       # `quickstart` block POST /admin/bootstrap hands a brand-new operator
       # hard-coded port 8420 and cited docs/guides/getting-started.md, which

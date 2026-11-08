@@ -1,0 +1,67 @@
+# Hearth configuration for scripts/conformance-oidf.sh (the OpenID Foundation
+# conformance suite). Hearth runs in production mode (`serve -c`, not
+# `--dev`): TLS on, a real KEK and host key, fsync on.
+#
+# The script puts every ${VAR} below in the container environment, with
+# fresh random values for each run. Hearth expands them at startup.
+#
+# One key differs from the defaults: realms.conformance.auth.mfa_required is
+# false. MFA is not part of OpenID Connect Core 1.0, and the suite's browser
+# cannot enter a TOTP code. docs/dev/TESTING.md §7 records this decision.
+
+server:
+  bind_address: "0.0.0.0"
+  port: 8420
+  tls_cert_path: "/conformance/tls/hearth.crt"
+  tls_key_path: "/conformance/tls/hearth.key"
+
+storage:
+  data_dir: "/var/lib/hearth/data"
+
+oidc:
+  # The suite reaches Hearth on its Docker network as `hearth`.
+  issuer: "https://hearth:8420"
+
+email:
+  transport: log
+  # The suite reads no mail. Without this key, production mode refuses the
+  # `log` transport.
+  allow_log_transport_in_production: true
+
+realms:
+  conformance:
+    auth:
+      mfa_required: false
+      # The Dynamic OP plan registers its own clients (RFC 7591).
+      dcr:
+        mode: open
+    applications:
+      # The Basic OP plan uses two static clients. Their client IDs are
+      # derived from "<realm>/<slug>" (src/identity/reconcile.rs,
+      # deterministic_client_id); plans/basic.json names them.
+      oidf-client:
+        name: "OIDF conformance client 1"
+        redirect_uris:
+          - "https://localhost.emobix.co.uk:8443/test/a/hearth/callback"
+        post_logout_redirect_uris:
+          - "https://localhost.emobix.co.uk:8443/test/a/hearth/post_logout_redirect"
+        grant_types: [authorization_code, refresh_token]
+        confidential: true
+        client_secret: "${OIDF_CLIENT_SECRET}"
+        # The OpenID Connect default. The suite verifies RS256 ID tokens.
+        id_token_signed_response_alg: RS256
+      oidf-client2:
+        name: "OIDF conformance client 2"
+        redirect_uris:
+          - "https://localhost.emobix.co.uk:8443/test/a/hearth/callback"
+        post_logout_redirect_uris:
+          - "https://localhost.emobix.co.uk:8443/test/a/hearth/post_logout_redirect"
+        grant_types: [authorization_code, refresh_token]
+        confidential: true
+        client_secret: "${OIDF_CLIENT2_SECRET}"
+        id_token_signed_response_alg: RS256
+    seed_users:
+      - email: "oidf-user@example.com"
+        display_name: "OIDF Conformance User"
+        password: "${OIDF_USER_PASSWORD}"
+        email_verified: true
