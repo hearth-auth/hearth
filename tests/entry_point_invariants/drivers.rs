@@ -134,12 +134,12 @@ async fn follow(b: &mut Browser, mut resp: Response, mut path: String) -> (Strin
                 path = next;
             }
             _ => {
-                assert_eq!(resp.status(), StatusCode::OK, "page at {path}");
+                assert_eq!(resp.status(), StatusCode::OK, "a redirect ends on a page");
                 return (path, body_text(resp).await);
             }
         }
     }
-    panic!("redirect loop at {path}");
+    panic!("the redirects do not end");
 }
 
 /// Opens the realm's login page and submits the password. Returns the POST
@@ -372,7 +372,7 @@ async fn email_otp_step(fx: &Fx, v: Option<Violation>) -> bool {
     let (path, html) = password_to_second_factor(fx, &mut b).await;
     assert!(
         path.starts_with("/ui/mfa-otp-challenge"),
-        "OTP page: {path}"
+        "the login asks for the email OTP"
     );
     let mut fields = hidden_fields(&html, "/ui/mfa-otp-challenge");
     fields.push(("code".to_string(), six_digit_code(&fx.outbox.last())));
@@ -387,7 +387,7 @@ async fn passkey_step(fx: &Fx, v: Option<Violation>) -> bool {
     let (path, _) = password_to_second_factor(fx, &mut b).await;
     assert!(
         path.starts_with("/ui/mfa-passkey-challenge"),
-        "passkey page: {path}"
+        "the login asks for the passkey"
     );
     let csrf = b
         .cookie("hearth_ui_csrf")
