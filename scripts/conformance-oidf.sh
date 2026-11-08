@@ -31,12 +31,17 @@
 # Environment: OIDF_SUITE_DIR (suite checkout cache, default
 # ${XDG_CACHE_HOME:-$HOME/.cache}/hearth/oidf-suite/<tag>), OIDF_HOST_PORT
 # (suite UI port on 127.0.0.1, default 8443), OIDF_CONFIG_DIR (stack files,
-# default scripts/conformance-oidf; the self-test points it at bad copies).
+# default scripts/conformance-oidf; the self-test points it at bad copies),
+# OIDF_MAX_CONSECUTIVE_FAILURES (the runner stops a plan after this many test
+# modules in a row do not finish; default 3; raise it to see every module of
+# a broken run).
 #
 # Warnings: the runner treats a warning as a failure unless
 # scripts/conformance-oidf/expected-warnings.json lists it. Each entry there
 # is a decision recorded in the run report (reports/oidf-conformance-*.md).
-# Add an entry only with a reason in that report.
+# Add an entry only with a reason in that report. The same applies to a
+# skipped test module and scripts/conformance-oidf/expected-skips.json: a
+# recorded skip must name one module, and its result must be SKIPPED.
 
 set -euo pipefail
 
@@ -73,7 +78,8 @@ info() { echo "conformance-oidf: $*"; }
 check_config() {
     local compose="${CONFIG_DIR}/compose.yaml" yaml="${CONFIG_DIR}/hearth.yaml" f
     for f in "$compose" "$yaml" "${CONFIG_DIR}/runner.Dockerfile" "${CONFIG_DIR}/render-plans.py" "${CONFIG_DIR}/check-export.py" \
-             "${CONFIG_DIR}/expected-warnings.json" "${CONFIG_DIR}/plans/browser.json"; do
+             "${CONFIG_DIR}/expected-warnings.json" "${CONFIG_DIR}/expected-skips.json" \
+             "${CONFIG_DIR}/plans/browser.json" "${CONFIG_DIR}/plans/overrides.json"; do
         [[ -f "$f" ]] || die "missing stack file: ${f}"
     done
     for f in "${PLAN_ORDER[@]}"; do
@@ -348,6 +354,7 @@ set +e
 compose --profile runner run --rm -T runner python -u /suite/scripts/run-test-plan.py \
     --export-dir /run-dir/export --verbose \
     --expected-failures-file /run-dir/plans/expected-warnings.json \
+    --expected-skips-file /run-dir/plans/expected-skips.json \
     "${runner_args[@]}" > "$log" 2>&1
 runner_rc=$?
 set -e
@@ -361,6 +368,7 @@ info "results: ${results}"
 verdict=0
 judge_log "$log" "${#plans[@]}" "$runner_rc" || verdict=1
 python3 -I "${CONFIG_DIR}/check-export.py" --export "${results}/export" \
-    --expected "${run_dir}/plans/expected-warnings.json" | tee "${results}/results.txt" \
+    --expected "${run_dir}/plans/expected-warnings.json" \
+    --expected-skips "${run_dir}/plans/expected-skips.json" | tee "${results}/results.txt" \
     || verdict=1
 exit "$verdict"

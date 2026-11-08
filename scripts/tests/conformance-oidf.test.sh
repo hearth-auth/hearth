@@ -7,8 +7,12 @@
 #     TLS, with a KEK in the file, or with a demo seeder;
 #   * the verdict is FAIL on any failed condition, on a plan that did not
 #     report, and on a runner failure;
-#   * a recorded warning decision covers only the properties it names, and
-#     expected-warnings.json can hold only warnings, each with a decision.
+#   * a recorded warning decision covers only the properties (or ID token
+#     claims) it names, and expected-warnings.json can hold only warnings,
+#     each with a decision;
+#   * a recorded skip names one test module and has a decision, and a module
+#     with a recorded skip that does not skip fails the check;
+#   * the per-test browser overrides resolve, and a test is in one group only.
 #
 # Usage: bash scripts/tests/conformance-oidf.test.sh
 
@@ -122,6 +126,30 @@ expect "an expected failure is refused" 1 "warnings only" render "$d"
 d="$(stack_copy no-decision)"
 python3 -I -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); [e.pop("decision") for e in d]; json.dump(d, open(p, "w"))' "${d}/expected-warnings.json"
 expect "a warning with no decision is refused" 1 "no decision" render "$d"
+d="$(stack_copy skip-no-decision)"
+python3 -I -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); [e.pop("decision") for e in d]; json.dump(d, open(p, "w"))' "${d}/expected-skips.json"
+expect "a skip with no decision is refused" 1 "has no decision" render "$d"
+d="$(stack_copy skip-pattern)"
+python3 -I -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d[0]["test-name"]="oidcc-*"; json.dump(d, open(p, "w"))' "${d}/expected-skips.json"
+expect "a skip for a pattern is refused" 1 "one test module" render "$d"
+
+echo "== per-test browser overrides =="
+render "$STACK" >/dev/null 2>&1
+if python3 -I - "${TMP}/out/basic.json" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+steps = doc["override"]["oidcc-response-type-missing"]["browser"][0]["tasks"]
+assert steps[0]["task"] == "Login", steps[0]
+assert steps[1]["task"] == "Expect the error page", steps[1]
+assert "${OIDF_" not in json.dumps(doc["override"]), "a placeholder is left in the overrides"
+PY
+then pass "overrides resolve @task: and fill placeholders"; else fail "overrides do not resolve"; fi
+d="$(stack_copy override-unknown-task)"
+sed -i 's/"@task:Consent"/"@task:No such task"/' "${d}/plans/overrides.json"
+expect "an override names an unknown task" 1 "unknown task" render "$d"
+d="$(stack_copy override-twice)"
+python3 -I -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["reauthentication"]["tests"].append(d["error_page"]["tests"][0]); json.dump(d, open(p, "w"))' "${d}/plans/overrides.json"
+expect "a test in two override groups" 1 "two override groups" render "$d"
 
 # export_zip <file> <property...>: one exported plan with one metadata warning.
 export_zip() {
@@ -141,12 +169,41 @@ mkdir -p "${TMP}/export-ok" "${TMP}/export-extra"
 export_zip "${TMP}/export-ok/oidcc-config-certification-test-plan--x.zip" resource_indicators_supported
 export_zip "${TMP}/export-extra/oidcc-config-certification-test-plan--x.zip" resource_indicators_supported new_unregistered_name
 expect "warning names only the decided property" 0 "WARNING 1" \
-    python3 -I "${STACK}/check-export.py" --export "${TMP}/export-ok" --expected "${STACK}/expected-warnings.json"
+    python3 -I "${STACK}/check-export.py" --export "${TMP}/export-ok" --expected "${STACK}/expected-warnings.json" --expected-skips "${STACK}/expected-skips.json"
 expect "warning names a property with no decision" 1 "new_unregistered_name" \
-    python3 -I "${STACK}/check-export.py" --export "${TMP}/export-extra" --expected "${STACK}/expected-warnings.json"
+    python3 -I "${STACK}/check-export.py" --export "${TMP}/export-extra" --expected "${STACK}/expected-warnings.json" --expected-skips "${STACK}/expected-skips.json"
+
+# module_zip <file> <test-name> <result> [claim...]: one exported module.
+module_zip() {
+    python3 -I - "$@" <<'PY'
+import json, sys, zipfile
+zip_path, name, result, claims = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
+log = {"testInfo": {"testName": name, "result": result},
+       "results": [{"src": "EnsureIdTokenDoesNotContainNonRequestedClaims", "result": "WARNING",
+                    "msg": f"id_token contains non-requested claim '{c}'"} for c in claims]}
+with zipfile.ZipFile(zip_path, "w") as z:
+    z.writestr(f"test-log-{name}-x.json", json.dumps(log))
+PY
+}
+check() {
+    python3 -I "${STACK}/check-export.py" --export "$1" \
+        --expected "${STACK}/expected-warnings.json" --expected-skips "${STACK}/expected-skips.json"
+}
+first_skip() { python3 -I -c 'import json,sys; e=json.load(open(sys.argv[1]))[0]; print(e["test-name"] if sys.argv[2] == "name" else e["configuration-filename"].split("/")[-1][:-5])' "${STACK}/expected-skips.json" "$1"; }
+skip_name="$(first_skip name)"
+skip_plan="$(first_skip plan)"
+mkdir -p "${TMP}/export-skip" "${TMP}/export-skip-failed" "${TMP}/export-claims" "${TMP}/export-claim-extra"
+module_zip "${TMP}/export-skip/oidcc-${skip_plan}-certification-test-plan-x.zip" "$skip_name" SKIPPED
+module_zip "${TMP}/export-skip-failed/oidcc-${skip_plan}-certification-test-plan-x.zip" "$skip_name" FAILED
+expect "a recorded skip that skips" 0 "SKIPPED 1" check "${TMP}/export-skip"
+expect "a recorded skip that fails" 1 "records a skip" check "${TMP}/export-skip-failed"
+module_zip "${TMP}/export-claims/oidcc-basic-certification-test-plan-x.zip" oidcc-server WARNING token_type tid scope
+module_zip "${TMP}/export-claim-extra/oidcc-basic-certification-test-plan-x.zip" oidcc-server WARNING token_type address
+expect "ID token claims with a decision" 0 "WARNING 3" check "${TMP}/export-claims"
+expect "an ID token claim with no decision" 1 "the claim address" check "${TMP}/export-claim-extra"
 mkdir -p "${TMP}/export-none"
 expect "no export at all" 1 "no exported plan results" \
-    python3 -I "${STACK}/check-export.py" --export "${TMP}/export-none" --expected "${STACK}/expected-warnings.json"
+    python3 -I "${STACK}/check-export.py" --export "${TMP}/export-none" --expected "${STACK}/expected-warnings.json" --expected-skips "${STACK}/expected-skips.json"
 
 echo
 if [[ "$failures" -gt 0 ]]; then

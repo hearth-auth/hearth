@@ -1,0 +1,56 @@
+[
+  {
+    "test-name": "oidcc-scope-address",
+    "variant": "*",
+    "configuration-filename": "/run-dir/plans/basic.json",
+    "decision": "ACCEPT. Hearth has no address claim, so scopes_supported does not list the address scope. OIDC Core 5.4: the address scope is optional."
+  },
+  {
+    "test-name": "oidcc-scope-phone",
+    "variant": "*",
+    "configuration-filename": "/run-dir/plans/basic.json",
+    "decision": "ACCEPT. Hearth has no phone claims, so scopes_supported does not list the phone scope. OIDC Core 5.4: the phone scope is optional."
+  },
+  {
+    "test-name": "oidcc-scope-all",
+    "variant": "*",
+    "configuration-filename": "/run-dir/plans/basic.json",
+    "decision": "ACCEPT. The module requests the address and phone scopes, which Hearth does not have (see oidcc-scope-address and oidcc-scope-phone)."
+  },
+  {
+    "test-name": "oidcc-ensure-request-object-with-redirect-uri",
+    "variant": "*",
+    "configuration-filename": "/run-dir/plans/basic.json",
+    "decision": "ACCEPT. The module sends an unsigned (alg none) request object. The spec oidc-provider requires a request object signed with a key from the client's JWKS, so request_object_signing_alg_values_supported does not list none."
+  },
+  {
+    "test-name": "oidcc-unsigned-request-object-supported-correctly-or-rejected-as-unsupported",
+    "variant": "*",
+    "configuration-filename": "/run-dir/plans/basic.json",
+    "decision": "ACCEPT. Same reason as oidcc-ensure-request-object-with-redirect-uri: Hearth accepts only signed request objects."
+  },
+  {
+    "test-name": "oidcc-ensure-request-object-with-redirect-uri",
+    "variant": "*",
+    "configuration-filename": "/run-dir/plans/dynamic.json",
+    "decision": "ACCEPT. Same reason as in the Basic OP plan: Hearth accepts only signed request objects."
+  },
+  {
+    "test-name": "oidcc-idtoken-unsigned",
+    "variant": "*",
+    "configuration-filename": "/run-dir/plans/dynamic.json",
+    "decision": "ACCEPT. Hearth never issues an unsigned (alg none) token. The suite says that this is acceptable for certification."
+  },
+  {
+    "test-name": "oidcc-registration-sector-uri",
+    "variant": "*",
+    "configuration-filename": "/run-dir/plans/dynamic.json",
+    "decision": "ACCEPT. Hearth supports the public subject type only (subject_types_supported), not pairwise, so sector_identifier_uri does not apply."
+  },
+  {
+    "test-name": "oidcc-registration-sector-bad",
+    "variant": "*",
+    "configuration-filename": "/run-dir/plans/dynamic.json",
+    "decision": "ACCEPT. Same reason as oidcc-registration-sector-uri: no pairwise subject type."
+  }
+]

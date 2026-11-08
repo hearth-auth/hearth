@@ -1,13 +1,89 @@
 [
   {
-    "test-name": "*",
+    "test-name": "oidcc-discovery-endpoint-verification",
     "variant": "*",
-    "configuration-filename": "*",
+    "configuration-filename": "/run-dir/plans/config.json",
     "current-block": "*",
     "condition": "CheckForUnexpectedParametersInServerMetadata",
     "expected-result": "warning",
     "unknown-properties": ["resource_indicators_supported"],
     "decision": "KEEP (trusted-core-confidence design decision 3, Open Question 1 open for the owner). openspec/specs/agent-identity/spec.md requires resource_indicators_supported: true in the discovery document. A rename changes the wire format.",
     "comment": "Hearth extension: an unregistered metadata name. scripts/conformance-oidf/check-export.py fails the run if this warning names any other property."
+  },
+  {
+    "test-name": "oidcc-discovery-endpoint-verification",
+    "variant": "*",
+    "configuration-filename": "/run-dir/plans/dynamic.json",
+    "current-block": "*",
+    "condition": "CheckForUnexpectedParametersInServerMetadata",
+    "expected-result": "warning",
+    "unknown-properties": ["resource_indicators_supported"],
+    "decision": "KEEP. Same decision as in the Config OP plan (Open Question 1).",
+    "comment": "The Dynamic OP plan checks the metadata in this module only."
+  },
+  {
+    "test-name": "oidcc-server",
+    "variant": "*",
+    "configuration-filename": "/run-dir/plans/basic.json",
+    "current-block": "*",
+    "condition": "EnsureIdTokenDoesNotContainNonRequestedClaims",
+    "expected-result": "warning",
+    "non-requested-claims": ["token_type", "tid", "scope"],
+    "decision": "KEEP. token_type is the token-type guard: the spec oidc-provider makes the ID-token signer refuse any other token_type, and each validator checks it. tid names the realm (spec rbac-token-claims). scope is the granted scope. OIDC Core 2 allows other claims in the ID token, and a removal changes the wire format.",
+    "comment": "check-export.py fails the run if this warning names any other claim."
+  },
+  {
+    "test-name": "oidcc-scope-email",
+    "variant": "*",
+    "configuration-filename": "/run-dir/plans/basic.json",
+    "current-block": "*",
+    "condition": "EnsureIdTokenDoesNotContainEmailForScopeEmail",
+    "expected-result": "warning",
+    "decision": "KEEP. Hearth puts email and email_verified in the ID token when the email scope is granted, so a relying party does not need a UserInfo call. OIDC Core 5.4 does not forbid it. A removal changes the wire format."
+  },
+  {
+    "test-name": "oidcc-alternate-happy-flow",
+    "variant": "*",
+    "configuration-filename": "/run-dir/plans/basic.json",
+    "current-block": "*",
+    "condition": "EnsureIdTokenDoesNotContainEmailForScopeEmail",
+    "expected-result": "warning",
+    "decision": "KEEP. Same decision as for oidcc-scope-email."
+  },
+  {
+    "test-name": "oidcc-scope-profile",
+    "variant": "*",
+    "configuration-filename": "/run-dir/plans/basic.json",
+    "current-block": "*",
+    "condition": "VerifyScopesReturnedInUserInfoClaims",
+    "expected-result": "warning",
+    "decision": "KEEP. The test user has a display name only, and Hearth has no store for most profile claims (middle_name, nickname, picture, website, gender, birthdate, zoneinfo, locale, updated_at). OIDC Core 5.3.2: a claim with no value is omitted."
+  },
+  {
+    "test-name": "oidcc-claims-essential",
+    "variant": "*",
+    "configuration-filename": "/run-dir/plans/basic.json",
+    "current-block": "*",
+    "condition": "EnsureUserInfoContainsName",
+    "expected-result": "warning",
+    "decision": "KEEP. Hearth does not support the claims request parameter (OIDC Core 5.5 is optional, and discovery does not advertise claims_parameter_supported). The module asks for name with that parameter only."
+  },
+  {
+    "test-name": "oidcc-ensure-request-with-acr-values-succeeds",
+    "variant": "*",
+    "configuration-filename": "/run-dir/plans/basic.json",
+    "current-block": "*",
+    "condition": "ValidateIdTokenACRClaimAgainstAcrValuesRequest",
+    "expected-result": "warning",
+    "decision": "KEEP. Hearth does not support acr_values and issues no acr claim; the ID token carries amr. OIDC Core 3.1.2.1: acr_values is a voluntary claim request, and the acr claim is a SHOULD."
+  },
+  {
+    "test-name": "oidcc-userinfo-post-body",
+    "variant": "*",
+    "configuration-filename": "/run-dir/plans/basic.json",
+    "current-block": "*",
+    "condition": "UserInfoEndpointWithAccessTokenInBodyNotSupported",
+    "expected-result": "warning",
+    "decision": "KEEP. UserInfo takes the access token in the Authorization header only. RFC 6750 2.2 (the token in the form body) is a MAY, and a token in a body is easier to log by mistake."
   }
 ]

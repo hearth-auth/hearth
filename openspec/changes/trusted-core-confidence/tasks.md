@@ -36,9 +36,13 @@
 - [x] 2.2 Run Config OP; confirm the RS256 failure from 2026-09-21 is gone
   - 2026-11-08: 39 conditions passed, 0 failed, 1 warning (`resource_indicators_supported`, task 2.4). `OIDCCCheckDiscEndpointIdTokenSigningAlgValuesSupported` passes (#639).
 - [ ] 2.3 Run Basic OP and Dynamic OP; fix each failure with a red test first
-- [ ] 2.4 Record each warning and its decision (design Open Question 1 for `resource_indicators_supported`)
-- [ ] 2.5 Write the run report under `reports/`, and update `docs/dev/TESTING.md` §7
-- [ ] 2.6 Add the run to `docs/release-runbook.md` as a release step
+  - 2026-11-08: both plans run (Basic OP only with the PKCE check off, in a diagnostic image). Fixed: #778, #779, #786 and #787. Open: PKCE decision #780, form POST #781, `max_age` / `prompt=login` #782, code reuse #783, Dynamic OP scope #784, assertion without `client_id` #785.
+- [x] 2.4 Record each warning and its decision (design Open Question 1 for `resource_indicators_supported`)
+  - `scripts/conformance-oidf/expected-warnings.json` and `expected-skips.json`; each entry has a decision. `resource_indicators_supported`: KEEP, Open Question 1 stays open for the owner.
+- [x] 2.5 Write the run report under `reports/`, and update `docs/dev/TESTING.md` §7
+  - `reports/oidf-conformance-2026-11-08.md`.
+- [x] 2.6 Add the run to `docs/release-runbook.md` as a release step
+  - Config OP must exit 0; Basic OP and Dynamic OP are regression checks until the owner decides (#780, #784).
 
 ## 3. Entry-point invariant registry
 

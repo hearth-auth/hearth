@@ -54,6 +54,9 @@ services:
     environment:
       CONFORMANCE_SERVER: https://localhost.emobix.co.uk:8443/
       CONFORMANCE_DEV_MODE: "1"
+      # The runner stops a plan after this many test modules in a row do not
+      # finish. Raise it to see every module of a broken run.
+      CONFORMANCE_MAX_CONSECUTIVE_FAILURES: ${OIDF_MAX_CONSECUTIVE_FAILURES:-3}
     volumes:
       - ${OIDF_SUITE_DIR:?set OIDF_SUITE_DIR}:/suite:ro
       - ${OIDF_CONFIG_DIR}:/hearth:ro

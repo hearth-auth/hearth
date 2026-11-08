@@ -1,0 +1,78 @@
+{
+  "comment": "Per-test browser steps for the tests that expect an error page or a second sign-in. The suite saves the page as the test's image placeholder: such a test ends in REVIEW (a human looks at the image), which the runner accepts. \"@task:<name>\" is the task of that name in browser.json.",
+  "error_page": {
+    "tests": [
+      "oidcc-ensure-registered-redirect-uri",
+      "oidcc-ensure-redirect-uri-in-authorization-request",
+      "oidcc-redirect-uri-query-added",
+      "oidcc-redirect-uri-query-mismatch",
+      "oidcc-response-type-missing"
+    ],
+    "browser": [
+      {
+        "comment": "Hearth shows its error page, after the sign-in when the browser has no session (RFC 6749 4.1.2.1: no redirect to a URI that is not registered).",
+        "match": "https://hearth:8420/realms/conformance/authorize*",
+        "tasks": [
+          "@task:Login",
+          {
+            "task": "Expect the error page",
+            "match": "https://hearth:8420/ui/realms/conformance/oauth/authorize*",
+            "commands": [
+              ["wait", "xpath", "//*", 10, "invalid redirect_uri|response_type", "update-image-placeholder"]
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "reauthentication": {
+    "tests": ["oidcc-prompt-login", "oidcc-max-age-1"],
+    "browser": [
+      {
+        "comment": "The second authorization must show the sign-in page again.",
+        "match": "https://hearth:8420/realms/conformance/authorize*",
+        "tasks": [
+          {
+            "task": "Login",
+            "optional": true,
+            "match": "https://hearth:8420/ui/realms/conformance/login*",
+            "commands": [
+              ["wait", "xpath", "//h1", 10, ".", "update-image-placeholder-optional"],
+              ["text", "id", "email", "oidf-user@example.com"],
+              ["text", "id", "password", "${OIDF_USER_PASSWORD}"],
+              ["click", "xpath", "//form[.//input[@id='password']]//button[@type='submit']"]
+            ]
+          },
+          "@task:Consent",
+          "@task:Verify Complete"
+        ]
+      }
+    ]
+  },
+  "client_metadata_page": {
+    "tests": [
+      "oidcc-registration-logo-uri",
+      "oidcc-registration-policy-uri",
+      "oidcc-registration-tos-uri"
+    ],
+    "browser": [
+      {
+        "comment": "The consent page shows the client's registered metadata.",
+        "match": "https://hearth:8420/realms/conformance/authorize*",
+        "tasks": [
+          "@task:Login",
+          {
+            "task": "Consent",
+            "optional": true,
+            "match": "https://hearth:8420/ui/*consent*",
+            "commands": [
+              ["wait", "xpath", "//button[@name='decision' and @value='approve']", 10, ".", "update-image-placeholder"],
+              ["click", "xpath", "//button[@name='decision' and @value='approve']"]
+            ]
+          },
+          "@task:Verify Complete"
+        ]
+      }
+    ]
+  }
+}
