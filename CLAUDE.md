@@ -103,7 +103,7 @@ Six modules with strict downward dependency flow:
 Hot path = `validate_token()`, `lookup_session()`, `lookup_user()` when data is in hot tier. Authorization is NOT on the hot path (permissions are embedded in the JWT at issue time).
 
 Hot path code MUST obey ALL of:
-1. **Zero heap allocations** — no `Box::new`, `Vec::new`, `String::from`, `format!()`, `to_string()`. One exception: `EpochCell`'s epoch-collector bookkeeping while cells are being written (at most 1 allocation per 1,024 loads per thread; see `docs/dev/ARCHITECTURE.md` §3.2). No other allocation, amortised or not.
+1. **Zero heap allocations** — no `Box::new`, `Vec::new`, `String::from`, `format!()`, `to_string()`. One exception: `EpochCell`'s epoch-collector bookkeeping while cells are being written (at most 1 allocation per 1,024 loads per thread; see `docs/dev/ARCHITECTURE.md` §3.2). Second exception: `lookup_user()` returns an owned copy of the user record and may allocate for it; its p99 budget (200 μs) applies instead. Do not add a shared user cache to avoid this (a stale entry can show a disabled user as active). No other allocation, amortised or not.
 2. **No syscalls for reads** — serve from memory-mapped structures or in-process data.
 3. **No locks on read path** — no mutexes, no `RwLock` write locks. Use epoch-based reclamation.
 4. **No yielding** — MUST NOT `.await` on I/O. Complete synchronously.

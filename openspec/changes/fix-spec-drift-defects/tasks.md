@@ -57,7 +57,8 @@
 
 - [x] 10.1 the `rbac_check` `resolve_permissions` gate times a bench-local base64 + `serde_json` decode of a forged JWT, not the RBAC engine's `resolve_permissions` for a 5-role, 10-group, 30-permission user (`benches/rbac_check.rs:157`). Test: Regression — the gate times Hearth's resolve_permissions
   - Fixed by #636: the gate times `EmbeddedRbacEngine::resolve_permissions` for the typical user on a cache miss (`benches/support/rbac_typical_user.rs`); `tests/rbac_check_gate.rs`.
-- [ ] 10.2 a warm `lookup_user()` allocates: `get_user` decodes an owned `User` from the owned `Vec<u8>` that `StorageEngine::get` returns, and `get_user_by_email` normalizes into a `String` (`src/identity/engine/mod.rs:8522`). Test: Regression — warm user lookup allocates nothing
+- [x] 10.2 a warm `lookup_user()` allocates: `get_user` decodes an owned `User` from the owned `Vec<u8>` that `StorageEngine::get` returns, and `get_user_by_email` normalizes into a `String` (`src/identity/engine/mod.rs:8522`). Test: Regression — warm user lookup allocates nothing
+  - Decision (owner, 2026-11-07): `lookup_user()` may allocate for its owned copy of the record. A zero-allocation lookup needs a shared user cache, and a stale entry can show a disabled or deleted user as active. The user lookup budget (p99 < 200 μs, `storage_gate`) applies in place of the allocation rule. The scenario is now "Warm user lookup returns an owned copy".
 - [x] 10.3 the `lookup_hot` and `lookup_cold` load-test journeys (`GET /dev/probe-user`, a user lookup) are graded against the token-issuance budget (6,000 μs) instead of the user-lookup budgets (1,200 μs hot, 6,000 μs cold) (`loadtest/src/budget.rs:112`). Test: Regression — tier-miss lookups carry the user-lookup budget
   - Fixed by #636: `lookup_hot` carries the user-lookup budget (200 μs engine, 1,200 μs HTTP), `lookup_cold` the cold-path budget (5 ms, 6,000 μs).
 
