@@ -35,6 +35,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   issued the code.
 
 ### Fixed
+- **A confidential client's authorization request without PKCE gets an error redirect** (#639):
+  `GET /ui/oauth/authorize` and `GET /ui/realms/{realm_name}/oauth/authorize` now refuse a plain
+  request without `code_challenge` from any client, public or confidential, with an
+  `invalid_request` redirect to the registered `redirect_uri` (the `state` comes back). Before,
+  only a public client got this redirect. A confidential client's request went on through consent,
+  and then the user got a server error page (`500`). PKCE is still required for every client: no
+  request without it gets a code.
+- **A `prompt=none` authorization request with no signed-in user gets `login_required`** (#639):
+  `GET /realms/{realm_name}/authorize` (and `/ui/realms/{realm_name}/oauth/authorize`) now answers
+  a plain `prompt=none` request from a browser with no session with an `error=login_required`
+  redirect to the client's registered `redirect_uri`, with the request's `state` (OIDC Core
+  §3.1.2.6). Before, the browser went to the sign-in page, which a silent request must not show. A
+  request with an unregistered `redirect_uri` gets the error page. A `prompt=none` request that
+  uses `request` or `request_uri` still goes to the sign-in page.
 - **Operators can sign in with a passkey at the operator console** (#769):
   `POST /ui/admin/login/passkey-complete` now completes the sign-in in the system realm. Before, it
   answered `400` ("Realm not resolvable") for every assertion, also a correct one, so an operator
