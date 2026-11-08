@@ -114,7 +114,7 @@ fn code_flow(rig: &Rig, scope: &str) -> OidcTokenResponse {
                 user_id: user,
                 code_challenge: Some(URL_SAFE_NO_PAD.encode(digest.as_ref())),
                 code_challenge_method: Some(CodeChallengeMethod::S256),
-                nonce: Some("n-1".to_string()),
+                nonce: Some(uuid::Uuid::new_v4().to_string()),
                 resource: None,
                 amr_values: Vec::new(),
                 response_mode: None,
