@@ -35,6 +35,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   issued the code.
 
 ### Fixed
+- **Operators can sign in with a passkey at the operator console** (#769):
+  `POST /ui/admin/login/passkey-complete` now completes the sign-in in the system realm. Before, it
+  answered `400` ("Realm not resolvable") for every assertion, also a correct one, so an operator
+  could not sign in with a passkey.
 - **Device approval refuses an archived client** (#764): `POST /ui/device` now refuses a user code
   whose client was archived (or deleted) after the device flow started, and shows the "invalid
   code" message. Before, the approval succeeded; the token endpoint still refused the device's

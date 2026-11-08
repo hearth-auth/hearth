@@ -2623,13 +2623,15 @@ pub async fn passkey_login_complete_admin(
     headers: HeaderMap,
     axum::Json(body): axum::Json<PasskeyLoginCompleteBody>,
 ) -> Response {
-    let system_realm_name = match resolve_admin_realm(&state) {
-        PreAuthRealm::Ok { realm, .. } => realm.name().to_string(),
+    // The system realm is found by its id, as the begin step finds it: the
+    // name-based pre-auth resolver does not see the system realm (#769).
+    let realm = match resolve_admin_realm(&state) {
+        PreAuthRealm::Ok { realm, .. } => realm,
         PreAuthRealm::Handled(_) => {
             return (StatusCode::BAD_REQUEST, "System realm unavailable").into_response();
         }
     };
-    passkey_login_complete_impl(state, headers, body, Some(system_realm_name), peer_addr).await
+    passkey_login_complete_with_realm(state, headers, body, realm, peer_addr).await
 }
 
 /// The client address the abuse guards count, from a built session context.
@@ -2652,14 +2654,6 @@ async fn passkey_login_complete_impl(
     path_realm: Option<String>,
     peer_addr: SocketAddr,
 ) -> Response {
-    use base64::Engine as _;
-    // `mfa_proof` is deliberately left at `None` here. Only the completed
-    // ceremony knows whether the authenticator proved user verification, so
-    // `passkey_complete_for_user` sets it from the result (audit 2026-08-28
-    // B10). Setting it up front asserted a second factor before anything had
-    // been verified.
-    let session_ctx = build_session_context(&headers, peer_addr, &state.trusted_proxies);
-
     // Resolve realm. JSON endpoint — picker/400 HTML isn't useful; return 400.
     let realm = match resolve_pre_auth_realm(&state, path_realm, true) {
         PreAuthRealm::Ok { realm, .. } => realm,
@@ -2667,6 +2661,26 @@ async fn passkey_login_complete_impl(
             return (StatusCode::BAD_REQUEST, "Realm not resolvable").into_response();
         }
     };
+    passkey_login_complete_with_realm(state, headers, body, realm, peer_addr).await
+}
+
+/// Shared body of every passkey-complete handler once the target realm has
+/// been resolved.
+#[allow(clippy::needless_pass_by_value)]
+async fn passkey_login_complete_with_realm(
+    state: Arc<WebState>,
+    headers: HeaderMap,
+    body: PasskeyLoginCompleteBody,
+    realm: Realm,
+    peer_addr: SocketAddr,
+) -> Response {
+    use base64::Engine as _;
+    // `mfa_proof` is deliberately left at `None` here. Only the completed
+    // ceremony knows whether the authenticator proved user verification, so
+    // `passkey_complete_for_user` sets it from the result (audit 2026-08-28
+    // B10). Setting it up front asserted a second factor before anything had
+    // been verified.
+    let session_ctx = build_session_context(&headers, peer_addr, &state.trusted_proxies);
 
     // A-16, before the assertion is checked. A passkey sign-in has no
     // username, so the per-username A-3 detector does not apply. A challenge

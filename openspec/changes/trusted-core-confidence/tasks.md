@@ -43,7 +43,7 @@
 - [x] 3.1 Survey every entry point that creates a session or issues a token: HTTP routes (login forms, passkey, magic link, TOTP step, social and SAML callbacks, `/token` grants, device grant, token exchange) and CLI commands
 - [x] 3.2 Write the registry and the router-walk guard in `tests/entry_point_invariants.rs`; red on a deliberately unregistered route
 - [x] 3.3 Invariants: realm status, organization status, user status, client status, MFA policy, pre-token webhook policy. One table-driven test each
-- [ ] 3.4 Fix every entry point the tests find, red test first
+- [x] 3.4 Fix every entry point the tests find, red test first
 - [ ] 3.5 Add one `ci/mutations.toml` entry per invariant (verify each with `--only <id>`)
 
 ## 4. Mutation testing
