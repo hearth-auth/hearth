@@ -207,14 +207,22 @@ pub async fn authorize_get(
 /// Realm-scoped variant at `GET /ui/realms/{realm}/oauth/authorize`.
 ///
 /// The path-scoped realm MUST match the signed-in session's realm; a
-/// mismatch returns 404 (not a bypass surface).
+/// mismatch returns 404 (not a bypass surface). With no session the browser
+/// goes to the sign-in page, except for a `prompt=none` request
+/// ([`refuse_silent_without_session`]).
 pub async fn authorize_get_scoped(
     State(state): State<Arc<WebState>>,
-    session: UiSession,
+    session: Result<UiSession, Response>,
     axum::extract::Path(realm_name): axum::extract::Path<String>,
     headers: axum::http::HeaderMap,
     Query(q): Query<AuthorizeQuery>,
 ) -> Response {
+    let session = match session {
+        Ok(session) => session,
+        Err(to_sign_in) => {
+            return refuse_silent_without_session(&state, &realm_name, &q).unwrap_or(to_sign_in);
+        }
+    };
     let Ok(Some(realm)) = state.identity.get_realm_by_name(&realm_name) else {
         return handlers_common::not_found("Realm not found");
     };
@@ -222,6 +230,46 @@ pub async fn authorize_get_scoped(
         return handlers_common::not_found("Realm not found");
     }
     authorize_get_impl(&state, &session, realm.id(), &q, &headers).await
+}
+
+/// `Some(response)` for a plain `prompt=none` request that arrives with no
+/// signed-in session: the client gets `login_required` at its registered
+/// redirect URI (OIDC Core §3.1.2.1, §3.1.2.6), because a silent request
+/// must never show the sign-in page (#639). A request that fails validation
+/// gets its validation error, which goes to the client only when the
+/// redirect URI is registered (RFC 6749 §4.1.2.1).
+///
+/// `None` sends the browser to the sign-in page, as for every other request.
+/// A request object (`request`) or a pushed request (`request_uri`) is
+/// validated only after sign-in, as before: reading either one here would
+/// spend it before the user signs in.
+fn refuse_silent_without_session(
+    state: &Arc<WebState>,
+    realm_name: &str,
+    q: &AuthorizeQuery,
+) -> Option<Response> {
+    if q.prompt != "none" || q.request.is_some() || q.request_uri.is_some() {
+        return None;
+    }
+    let Ok(Some(realm)) = state.identity.get_realm_by_name(realm_name) else {
+        return None;
+    };
+    let params = match authorize_params(state, realm.id(), q) {
+        Ok(params) => params,
+        Err(refusal) => return Some(refusal),
+    };
+    let error_return = ErrorReturn {
+        redirect_uri: &params.redirect_uri,
+        state: &params.state,
+        response_mode: params.response_mode.as_ref(),
+    };
+    Some(authorization_error_redirect(
+        state,
+        realm.id(),
+        &error_return,
+        "login_required",
+        "the user is not signed in",
+    ))
 }
 
 #[allow(clippy::unused_async)]

@@ -1101,6 +1101,77 @@ async fn plain_request_error_uses_the_fragment_response_mode() {
     assert_fragment_error(&location(&resp), "invalid_request", "plain-state");
 }
 
+/// The realm-scoped authorize URI for a plain request (the URI the realm's
+/// discovery document leads a browser to).
+fn scoped_plain_uri(rig: &Rig, client: &OAuthClient, extra: &str) -> String {
+    let realm = rig
+        .identity
+        .get_realm(&rig.realm_id)
+        .expect("realm lookup")
+        .expect("realm");
+    plain_uri(client, extra).replacen(
+        "/ui/oauth/authorize",
+        &format!("/ui/realms/{}/oauth/authorize", realm.name()),
+        1,
+    )
+}
+
+/// `prompt=none` with no signed-in session is answered `login_required` at
+/// the client's redirect URI (OIDC Core §3.1.2.1, §3.1.2.6), never with the
+/// sign-in page (#639). The OIDF Basic OP plan found the endpoint sending a
+/// silent request to the sign-in page, where a signed-in user's answer would
+/// have been a code.
+#[tokio::test]
+async fn plain_prompt_none_without_a_session_returns_login_required() {
+    let rig = rig().await;
+    let client = register(&rig, false, None);
+    let resp = get(&rig, &scoped_plain_uri(&rig, &client, "&prompt=none"), "").await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let loc = location(&resp);
+    assert!(
+        loc.starts_with(REDIRECT),
+        "expected the client redirect, got {loc}"
+    );
+    assert_eq!(
+        redirect_param(&loc, "error", false).as_deref(),
+        Some("login_required"),
+        "got {loc}"
+    );
+    assert_eq!(
+        redirect_param(&loc, "state", false).as_deref(),
+        Some("plain-state"),
+        "got {loc}"
+    );
+    assert!(
+        redirect_param(&loc, "code", false).is_none(),
+        "no code; got {loc}"
+    );
+}
+
+/// The `login_required` answer goes only to a registered redirect URI
+/// (RFC 6749 §4.1.2.1); an unregistered one gets the error page. And an
+/// interactive request with no session still goes to the sign-in page.
+#[tokio::test]
+async fn request_without_a_session_redirects_only_where_it_may() {
+    let rig = rig().await;
+    let client = register(&rig, false, None);
+    let unregistered = scoped_plain_uri(&rig, &client, "&prompt=none")
+        .replace("app.example.com%2Fcb", "evil.example.net%2Fcb");
+    let resp = get(&rig, &unregistered, "").await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        resp.headers().get(header::LOCATION).is_none(),
+        "no redirect to an unregistered URI"
+    );
+
+    let resp = get(&rig, &scoped_plain_uri(&rig, &client, ""), "").await;
+    let loc = location(&resp);
+    assert!(
+        loc.contains("/login"),
+        "an interactive request goes to the sign-in page; got {loc}"
+    );
+}
+
 /// A response mode Hearth does not support — an unknown one, or a JARM mode
 /// (removed in 3.0.0) — is refused with an error redirect, never a code.
 #[tokio::test]
