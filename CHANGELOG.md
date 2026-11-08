@@ -21,6 +21,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   was never read from a request body.
 
 ### Fixed
+- **Device approval refuses an archived client** (#764): `POST /ui/device` now refuses a user code
+  whose client was archived (or deleted) after the device flow started, and shows the "invalid
+  code" message. Before, the approval succeeded; the token endpoint still refused the device's
+  poll, so the device got no token.
 - **Realm deletes free the realm's audit state in memory** (#609): deleting a realm now also
   removes the realm's audit chain lock and its cached audit HMAC key from memory. Before, both
   stayed until the server restarted.

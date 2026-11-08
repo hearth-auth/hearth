@@ -2100,6 +2100,14 @@ impl EmbeddedIdentityEngine {
             return Err(IdentityError::InvalidAuthorizationCode);
         }
 
+        // 4a. The client must still be active (B9, #764): the user must not
+        //     approve a client archived (or deleted) since it started the
+        //     flow. The poll refuses it too; this stops the approval itself.
+        let client = self
+            .get_client(realm_id, &stored.client_id)?
+            .ok_or(IdentityError::InvalidClient)?;
+        Self::refuse_inactive_client(&client)?;
+
         // 5. Claim the decision, then approve (G6). The status check above is
         //    a local read: an approval on a node that had not applied another
         //    node's denial (or approval) overwrote it. Approve and deny claim
