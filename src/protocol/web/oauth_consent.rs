@@ -718,26 +718,6 @@ pub async fn consent_submit(
                 }
             }
 
-            // Persist consent (even if approved is empty — the user
-            // chose "approve no scopes", which still satisfies the
-            // request for an authorization code).
-            // The row is bound to the organization and the resource of the
-            // request (`scope-consent-integrity` design §5).
-            let Some(key) = pending_consent_key(&pending) else {
-                return handlers_common::bad_request("consent ticket invalid");
-            };
-            let grant = crate::identity::ConsentGrant {
-                key,
-                scopes: approved.clone(),
-                via: crate::identity::ConsentSurface::Web,
-            };
-            if let Err(e) = state.identity.grant_consent(&session.realm_id, &grant) {
-                tracing::warn!(error = %e, "grant_consent failed");
-                return handlers_common::server_error();
-            }
-            // Engine now emits ConsentGranted internally; metadata-threading
-            // for via/scopes context tracked in follow-up.
-
             // The pending record is ours (written by the consent gate), so a
             // value that no longer parses is refused rather than defaulted.
             let method = parse_method(pending.code_challenge_method.as_deref().unwrap_or(""));
@@ -778,6 +758,48 @@ pub async fn consent_submit(
                 sign_in: session.sign_in,
                 session_id: Some(session.session_id.clone()),
             };
+            // The approval must meet the MFA policy and the required actions
+            // that apply NOW (#765): the realm or the client can start to
+            // require a second factor while the consent page is open. These
+            // are the checks of the authorize request, run again before the
+            // consent is recorded.
+            if let Some(mut refusal) =
+                super::authorize_gate::mfa_use_gate(&state, &session.realm_id, &session, &params)
+                    .or_else(|| {
+                        super::required_action::required_action_intercept(
+                            &state,
+                            &session.realm_id,
+                            &session.user_id,
+                            &params,
+                            state.is_secure_request(&headers),
+                            Timestamp::from_micros(now_micros()),
+                        )
+                    })
+            {
+                append_cookie(&mut refusal, &clear_cookie);
+                return refusal;
+            }
+
+            // Persist consent (even if approved is empty — the user
+            // chose "approve no scopes", which still satisfies the
+            // request for an authorization code).
+            // The row is bound to the organization and the resource of the
+            // request (`scope-consent-integrity` design §5).
+            let Some(key) = pending_consent_key(&pending) else {
+                return handlers_common::bad_request("consent ticket invalid");
+            };
+            let grant = crate::identity::ConsentGrant {
+                key,
+                scopes: approved.clone(),
+                via: crate::identity::ConsentSurface::Web,
+            };
+            if let Err(e) = state.identity.grant_consent(&session.realm_id, &grant) {
+                tracing::warn!(error = %e, "grant_consent failed");
+                return handlers_common::server_error();
+            }
+            // Engine now emits ConsentGranted internally; metadata-threading
+            // for via/scopes context tracked in follow-up.
+
             let mut response = issue_code(
                 &state,
                 &session.realm_id,
