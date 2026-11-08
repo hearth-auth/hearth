@@ -415,9 +415,11 @@ async fn o1_refresh_token_bound_to_issuing_client() {
     let cross = h
         .identity()
         .refresh_tokens(&realm_id, &refresh, None, Some(&bind));
+    // RFC 6749 §5.2: client_b authenticated; the grant was issued to another
+    // client, so the answer is `invalid_grant` (#639).
     assert!(
-        matches!(cross, Err(IdentityError::InvalidClient)),
-        "refresh token issued to client_a must be rejected with InvalidClient when \
+        matches!(cross, Err(IdentityError::InvalidGrant { .. })),
+        "refresh token issued to client_a must be rejected with InvalidGrant when \
          redeemed by client_b, got: {cross:?}"
     );
 
@@ -464,4 +466,145 @@ async fn o1_refresh_confidential_engine_requires_authenticated_client() {
         "confidential grant family must reject refresh with InvalidClient when no \
          authenticated client is present, got: {none:?}"
     );
+}
+
+// ─── RFC 6749 §5: token-endpoint error codes and caching (#639) ─────────────
+//
+// The OpenID Foundation Basic OP plan found three token-endpoint answers that
+// RFC 6749 §5 does not allow: a reused authorization code answered
+// `"invalid authorization code"` instead of `invalid_grant`; a refresh token
+// presented by another (authenticated) client answered `401 invalid_client`
+// instead of `400 invalid_grant` (§5.2: "issued to another client"); and no
+// token response carried `Cache-Control: no-store` (§5.1).
+
+/// `POST {uri}` with a JSON body. Returns the status, the response headers and
+/// the JSON body.
+async fn post_token_at(
+    state: &Arc<AppState>,
+    uri: &str,
+    realm_id: &str,
+    body: serde_json::Value,
+) -> (StatusCode, axum::http::HeaderMap, serde_json::Value) {
+    let resp = router(Arc::clone(state))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("X-Realm-ID", realm_id)
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+    let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, headers, json)
+}
+
+/// RFC 6749 §5.1: the token response is never cached.
+fn assert_not_cached(headers: &axum::http::HeaderMap, what: &str) {
+    assert_eq!(
+        headers.get("cache-control").and_then(|v| v.to_str().ok()),
+        Some("no-store"),
+        "{what}: Cache-Control"
+    );
+    assert_eq!(
+        headers.get("pragma").and_then(|v| v.to_str().ok()),
+        Some("no-cache"),
+        "{what}: Pragma"
+    );
+}
+
+#[tokio::test]
+async fn reused_authorization_code_is_refused_with_invalid_grant() {
+    let h = common::TestHarness::in_process().await.unwrap();
+    let realm = h
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("rfc6749-{}", uuid::Uuid::new_v4()),
+            config: None,
+        })
+        .unwrap();
+    let realm_id_str = realm.id().as_uuid().to_string();
+    let user = make_user(&h, realm.id());
+    let secret = "rfc6749-secret-abcdefgh!";
+    let client = register_client(&h, realm.id(), Some(secret));
+    let (verifier, challenge) = pkce_pair();
+    let code = mint_code(&h, realm.id(), &client, &user, &challenge);
+    let state = Arc::new(AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()));
+    let exchange = serde_json::json!({
+        "grant_type": "authorization_code",
+        "client_id": client.client_id().as_uuid().to_string(),
+        "client_secret": secret,
+        "code": code,
+        "redirect_uri": REDIRECT_URI,
+        "code_verifier": verifier,
+    });
+
+    let (status, headers, body) =
+        post_token_at(&state, "/token", &realm_id_str, exchange.clone()).await;
+    assert_eq!(status, StatusCode::OK, "first exchange: {body}");
+    assert_not_cached(&headers, "code exchange");
+
+    let (status, headers, body) = post_token_at(&state, "/token", &realm_id_str, exchange).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "reused code: {body}");
+    assert_eq!(body["error"], "invalid_grant", "reused code: {body}");
+    assert_not_cached(&headers, "token error");
+}
+
+#[tokio::test]
+async fn refresh_token_of_another_client_is_refused_with_invalid_grant() {
+    let h = common::TestHarness::in_process().await.unwrap();
+    let realm_name = format!("rfc6749-{}", uuid::Uuid::new_v4());
+    let realm = h
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: realm_name.clone(),
+            config: None,
+        })
+        .unwrap();
+    let realm_id_str = realm.id().as_uuid().to_string();
+    let user = make_user(&h, realm.id());
+    let secret_a = "rfc6749-secret-a-abcdefgh!";
+    let secret_b = "rfc6749-secret-b-abcdefgh!";
+    let client_a = register_client(&h, realm.id(), Some(secret_a));
+    let client_b = register_client(&h, realm.id(), Some(secret_b));
+    let state = Arc::new(AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()));
+    let refresh =
+        issue_confidential_refresh(&h, &state, &realm_id_str, &client_a, &user, secret_a).await;
+    let realm_token = format!("/realms/{realm_name}/token");
+
+    let (status, _, body) = post_token_at(
+        &state,
+        &realm_token,
+        &realm_id_str,
+        serde_json::json!({
+            "grant_type": "refresh_token",
+            "refresh_token": refresh,
+            "client_id": client_b.client_id().as_uuid().to_string(),
+            "client_secret": secret_b,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "another client: {body}");
+    assert_eq!(body["error"], "invalid_grant", "another client: {body}");
+
+    // The refused attempt does not burn the token for its own client.
+    let (status, headers, body) = post_token_at(
+        &state,
+        &realm_token,
+        &realm_id_str,
+        serde_json::json!({
+            "grant_type": "refresh_token",
+            "refresh_token": refresh,
+            "client_id": client_a.client_id().as_uuid().to_string(),
+            "client_secret": secret_a,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the issuing client: {body}");
+    assert_not_cached(&headers, "refresh");
 }

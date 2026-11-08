@@ -70,7 +70,12 @@ pub(super) fn routes() -> axum::Router<Arc<AppState>> {
             post(pushed_authorization_request)
                 .route_layer(DefaultBodyLimit::max(super::BODY_LIMIT_SMALL)),
         )
-        .route("/token", post(token_exchange).options(token_preflight))
+        .route(
+            "/token",
+            post(token_exchange)
+                .options(token_preflight)
+                .route_layer(axum::middleware::from_fn(token_response_not_cached)),
+        )
         .route(
             "/revoke",
             post(token_revocation)
@@ -138,7 +143,9 @@ pub(super) fn realm_routes() -> axum::Router<Arc<AppState>> {
         )
         .route(
             "/token",
-            post(realm_token_exchange).options(realm_token_preflight),
+            post(realm_token_exchange)
+                .options(realm_token_preflight)
+                .route_layer(axum::middleware::from_fn(token_response_not_cached)),
         )
         .route(
             "/revoke",
@@ -1008,6 +1015,26 @@ fn multiple_auth_methods_response() -> Response {
         })),
     )
         .into_response()
+}
+
+/// RFC 6749 §5.1: every token endpoint response carries
+/// `Cache-Control: no-store` and `Pragma: no-cache`, so no cache keeps a
+/// token (#639). Success and error responses alike.
+async fn token_response_not_cached(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let mut resp = next.run(req).await;
+    let headers = resp.headers_mut();
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    headers.insert(
+        axum::http::header::PRAGMA,
+        axum::http::HeaderValue::from_static("no-cache"),
+    );
+    resp
 }
 
 /// [`identity_error_to_response`] for the token endpoint (#626). There a DPoP
