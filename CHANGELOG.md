@@ -59,6 +59,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   §3.1.2.6). Before, the browser went to the sign-in page, which a silent request must not show. A
   request with an unregistered `redirect_uri` gets the error page. A `prompt=none` request that
   uses `request` or `request_uri` still goes to the sign-in page.
+- **The UserInfo endpoint answers POST** (#639): `POST /userinfo` and
+  `POST /realms/{realm_name}/userinfo` now give the same answer as `GET` (OIDC Core §5.3.1: the
+  endpoint must support both methods). The access token goes in the `Authorization` header. Before,
+  `POST` got `405`.
+- **Profile claims with no value are left out** (#639): `name`, `given_name`, `family_name`,
+  `email` and `preferred_username` are no longer sent as empty strings in ID tokens, access tokens
+  and UserInfo responses when the user's field is empty (OIDC Core §5.3.2). Before, a user with no
+  first or last name got `"given_name": ""` and `"family_name": ""`.
 - **Operators can sign in with a passkey at the operator console** (#769):
   `POST /ui/admin/login/passkey-complete` now completes the sign-in in the system realm. Before, it
   answered `400` ("Realm not resolvable") for every assertion, also a correct one, so an operator

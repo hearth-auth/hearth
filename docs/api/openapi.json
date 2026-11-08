@@ -3888,6 +3888,24 @@
             "description": "User profile claims"
           }
         }
+      },
+      "post": {
+        "summary": "UserInfo endpoint (OIDC Core \u00a75.3.1), POST form",
+        "description": "The same answer as `GET /userinfo`. The access token goes in the `Authorization` header; a token in the request body is not read.",
+        "operationId": "userinfoPost",
+        "tags": [
+          "OIDC"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "User profile claims"
+          }
+        }
       }
     },
     "/users": {

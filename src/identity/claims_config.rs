@@ -179,13 +179,20 @@ impl ClaimMapping {
     }
 }
 
+/// A text field's claim value: `None` (the claim is left out) when the
+/// field is empty. OIDC Core §5.3.2: a claim with no value is omitted, not
+/// sent as an empty string (#639).
+fn text_claim(value: &str) -> Option<Value> {
+    (!value.is_empty()).then(|| Value::String(value.to_string()))
+}
+
 fn canonical_field_value(user: &User, field: &CanonicalUserField) -> Option<Value> {
     match field {
-        CanonicalUserField::Email => Some(Value::String(user.email().to_string())),
-        CanonicalUserField::DisplayName => Some(Value::String(user.display_name().to_string())),
-        CanonicalUserField::FirstName => Some(Value::String(user.first_name().to_string())),
-        CanonicalUserField::LastName => Some(Value::String(user.last_name().to_string())),
-        CanonicalUserField::PreferredUsername => Some(Value::String(user.email().to_string())),
+        CanonicalUserField::Email => text_claim(user.email()),
+        CanonicalUserField::DisplayName => text_claim(user.display_name()),
+        CanonicalUserField::FirstName => text_claim(user.first_name()),
+        CanonicalUserField::LastName => text_claim(user.last_name()),
+        CanonicalUserField::PreferredUsername => text_claim(user.email()),
         CanonicalUserField::Nickname => None,
         CanonicalUserField::Picture => None,
         CanonicalUserField::Website => None,

@@ -92,7 +92,8 @@ pub(super) fn routes() -> axum::Router<Arc<AppState>> {
             "/device_authorization",
             post(device_authorization).options(token_preflight),
         )
-        .route("/userinfo", get(userinfo))
+        // OIDC Core §5.3.1: the UserInfo Endpoint MUST support GET and POST.
+        .route("/userinfo", get(userinfo).post(userinfo))
         .route("/v1/me/permissions", get(me_permissions))
         .route(
             "/oauth/authorize",
@@ -163,7 +164,7 @@ pub(super) fn realm_routes() -> axum::Router<Arc<AppState>> {
             "/device_authorization",
             post(realm_device_authorization).options(realm_token_preflight),
         )
-        .route("/userinfo", get(realm_userinfo))
+        .route("/userinfo", get(realm_userinfo).post(realm_userinfo))
         .route(
             "/register",
             post(realm_register_client_dynamic)
