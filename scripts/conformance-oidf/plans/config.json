@@ -1,0 +1,11 @@
+{
+  "alias": "hearth-config",
+  "description": "Hearth Config OP: realm-scoped discovery, production mode",
+  "server": {
+    "discoveryUrl": "https://hearth:8420/realms/conformance/.well-known/openid-configuration"
+  },
+  "client": {
+    "client_id": "${OIDF_CLIENT_ID}",
+    "client_secret": "${OIDF_CLIENT_SECRET}"
+  }
+}

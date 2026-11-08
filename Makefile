@@ -13,7 +13,7 @@ BUF := buf
 ## with `--workspace`.
 DEV_FEATURES ?= --features hearth/dev-endpoints
 
-.PHONY: setup build test test-detached test-no-dev-endpoints test-heap-profile clippy fmt miri asan heap-check unsafe-check leak-check loadtest loadtest-check loadtest-smoke seed check coverage css css-check css-watch tailwind-install openapi openapi-check sdk-admin-gen sdk-admin-check sdk-conformance proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test sdk-lint test-quality abuse-check auth-discard-check mfa-resolver-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke jepsen jepsen-binary jepsen-up jepsen-down jepsen-unit ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template scratch-prune scratch-prune-dry-run scratch-timer-install
+.PHONY: setup build test test-detached test-no-dev-endpoints test-heap-profile clippy fmt miri asan heap-check unsafe-check leak-check loadtest loadtest-check loadtest-smoke seed check coverage css css-check css-watch tailwind-install openapi openapi-check sdk-admin-gen sdk-admin-check sdk-conformance proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test sdk-lint test-quality abuse-check auth-discard-check mfa-resolver-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke jepsen jepsen-binary jepsen-up jepsen-down jepsen-unit conformance-oidf conformance-oidf-check ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template scratch-prune scratch-prune-dry-run scratch-timer-install
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -695,6 +695,21 @@ TIME_LIMIT ?= 300
 jepsen: jepsen-binary jepsen-up
 	$(JEPSEN_COMPOSE) exec -T control jepsen-run suite --time-limit $(TIME_LIMIT) \
 		$(if $(TEST),--only $(TEST))
+
+## OpenID Foundation conformance suite (#639): the Config OP, Basic OP and
+## Dynamic OP plans against a production-mode Hearth (`serve -c`, TLS, a real
+## KEK) in Docker, from a pinned suite tag. Per release and on demand, not per
+## PR. `make conformance-oidf PLAN=config` runs one plan; IMAGE=<image> tests
+## that image instead of a build of the working tree. Exit 1 on any failed
+## condition. See docs/dev/TESTING.md §7.
+conformance-oidf:
+	bash scripts/conformance-oidf.sh $(if $(PLAN),--plan $(PLAN)) $(if $(IMAGE),--image $(IMAGE))
+
+## Guard: the OIDF script must refuse dev mode and must fail on a failed
+## condition. No Docker. Runs in ci.yml's filter job.
+conformance-oidf-check: ## Assert the OIDF conformance script's guards can go red
+	@bash scripts/conformance-oidf.sh --check-config
+	@bash scripts/tests/conformance-oidf.test.sh
 
 ## CI standard tier: fast + tests + SDK tests + proto breaking + perf gate + cluster route check (merge).
 ci-standard: ci-fast test proto-breaking sdk-test proto-check bench-gate cluster-route-check

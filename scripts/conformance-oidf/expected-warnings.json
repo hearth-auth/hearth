@@ -1,0 +1,13 @@
+[
+  {
+    "test-name": "*",
+    "variant": "*",
+    "configuration-filename": "*",
+    "current-block": "*",
+    "condition": "CheckForUnexpectedParametersInServerMetadata",
+    "expected-result": "warning",
+    "unknown-properties": ["resource_indicators_supported"],
+    "decision": "KEEP (trusted-core-confidence design decision 3, Open Question 1 open for the owner). openspec/specs/agent-identity/spec.md requires resource_indicators_supported: true in the discovery document. A rename changes the wire format.",
+    "comment": "Hearth extension: an unregistered metadata name. scripts/conformance-oidf/check-export.py fails the run if this warning names any other property."
+  }
+]

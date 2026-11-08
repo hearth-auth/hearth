@@ -1,0 +1,33 @@
+[
+  {
+    "comment": "Hearth's hosted sign-in: the login form, then the consent page, then the suite's callback. Each Hearth form POST ends on a short page that continues by meta refresh (src/protocol/web/continue_page.rs).",
+    "match": "https://hearth:8420/realms/conformance/authorize*",
+    "tasks": [
+      {
+        "task": "Login",
+        "optional": true,
+        "match": "https://hearth:8420/ui/realms/conformance/login*",
+        "commands": [
+          ["text", "id", "email", "oidf-user@example.com"],
+          ["text", "id", "password", "${OIDF_USER_PASSWORD}"],
+          ["click", "xpath", "//form[.//input[@id='password']]//button[@type='submit']"]
+        ]
+      },
+      {
+        "task": "Consent",
+        "optional": true,
+        "match": "https://hearth:8420/ui/*consent*",
+        "commands": [
+          ["click", "xpath", "//button[@name='decision' and @value='approve']"]
+        ]
+      },
+      {
+        "task": "Verify Complete",
+        "match": "*/test/*/callback*",
+        "commands": [
+          ["wait", "id", "submission_complete", 10]
+        ]
+      }
+    ]
+  }
+]

@@ -1,0 +1,9 @@
+{
+  "alias": "hearth",
+  "description": "Hearth Dynamic OP: RFC 7591 registration, production mode",
+  "server": {
+    "discoveryUrl": "https://hearth:8420/realms/conformance/.well-known/openid-configuration",
+    "login_hint": "oidf-user@example.com"
+  },
+  "browser": "@browser.json"
+}

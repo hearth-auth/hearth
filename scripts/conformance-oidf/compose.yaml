@@ -1,0 +1,57 @@
+# Adds Hearth and a runner to the OpenID Foundation suite's own compose file
+# (docker-compose-prebuilt.yml at the pinned tag). scripts/conformance-oidf.sh
+# merges the two files under the project name `hearth-oidf`. Do not run this
+# file alone.
+#
+# Hearth runs on the suite's Docker network with the alias `hearth`. The suite
+# reaches it at https://hearth:8420, so no host firewall rule applies.
+# The runner runs the suite's own scripts/run-test-plan.py.
+
+services:
+  mongodb:
+    # A named volume replaces the suite's ./mongo/data bind mount. Every run
+    # starts empty, and `down -v` removes it.
+    volumes: !override
+      - oidf-mongo:/data/db
+
+  nginx:
+    # The suite publishes 8443 and 8444 on every host address. The runner
+    # uses the Docker network, so publish only the web UI, on loopback, on a
+    # port the operator can change (OIDF_HOST_PORT).
+    ports: !override
+      - "127.0.0.1:${OIDF_HOST_PORT:-8443}:8443"
+
+  hearth:
+    image: ${HEARTH_IMAGE:?set HEARTH_IMAGE}
+    # Production mode: `serve -c`. scripts/conformance-oidf.sh refuses to
+    # start a stack whose Hearth command contains the dev flag.
+    command: ["serve", "-c", "/conformance/hearth.yaml"]
+    env_file:
+      - ${OIDF_RUN_DIR:?set OIDF_RUN_DIR}/hearth.env
+    volumes:
+      - ${OIDF_CONFIG_DIR:?set OIDF_CONFIG_DIR}/hearth.yaml:/conformance/hearth.yaml:ro
+      - ${OIDF_RUN_DIR}/tls:/conformance/tls:ro
+    tmpfs:
+      - /var/lib/hearth:uid=10001,gid=10001,mode=0700
+    networks:
+      default:
+        aliases:
+          - hearth
+
+  runner:
+    build:
+      context: ${OIDF_CONFIG_DIR}
+      dockerfile: runner.Dockerfile
+    image: hearth-oidf-runner:local
+    profiles: ["runner"]
+    environment:
+      CONFORMANCE_SERVER: https://localhost.emobix.co.uk:8443/
+      CONFORMANCE_DEV_MODE: "1"
+    volumes:
+      - ${OIDF_SUITE_DIR:?set OIDF_SUITE_DIR}:/suite:ro
+      - ${OIDF_CONFIG_DIR}:/hearth:ro
+      - ${OIDF_RUN_DIR}:/run-dir
+    working_dir: /run-dir
+
+volumes:
+  oidf-mongo:
