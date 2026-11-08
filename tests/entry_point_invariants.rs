@@ -1286,7 +1286,7 @@ const AGENT_TOKENS: &[&str] = &[
 ];
 
 /// Entry points that issue nothing even with no violation: `(entry, issue)`.
-const BROKEN: &[(&str, &str)] = &[("passkey-login-admin", "#769")];
+const BROKEN: &[(&str, &str)] = &[];
 
 /// Entry points that create a browser session and act for no client.
 const SESSION_ONLY: &[&str] = &[
