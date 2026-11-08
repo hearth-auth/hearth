@@ -24,7 +24,9 @@ The `rbac_check` bench, run by `make bench-gate`, SHALL exit non-zero when `reso
 - **AND** it does not time a bench-local decode of a forged JWT
 
 ### Requirement: Hot-path reads allocate nothing
-Hot-path code MUST NOT perform a heap allocation in the steady state: no `Box::new`, `Vec::new`, `String::from`, `format!()`, `to_string()` or any other allocating operation. Pre-allocated buffers and arena allocators are the alternatives. The one exception is the bookkeeping of the epoch collector. A read through `core::EpochCell` pins its thread in the cells' `crossbeam-epoch` collector, and every 128th pin on a thread runs a slice of that collector's pending work. That work SHALL allocate at most once per 1,024 loads on the thread, and only while collector work is pending. Only `EpochCell` writes, and exiting threads that used a cell, produce that work. With neither, a warm load SHALL allocate nothing. The cells SHALL have a collector of their own, so no other code's deferred work, such as `crossbeam-skiplist`'s node frees, runs or allocates in a hot-path read. Hot-path code MUST NOT add any other allocation, amortised or not.
+Hot-path code MUST NOT perform a heap allocation in the steady state: no `Box::new`, `Vec::new`, `String::from`, `format!()`, `to_string()` or any other allocating operation. Pre-allocated buffers and arena allocators are the alternatives. The one exception is the bookkeeping of the epoch collector. A read through `core::EpochCell` pins its thread in the cells' `crossbeam-epoch` collector, and every 128th pin on a thread runs a slice of that collector's pending work. That work SHALL allocate at most once per 1,024 loads on the thread, and only while collector work is pending. Only `EpochCell` writes, and exiting threads that used a cell, produce that work. With neither, a warm load SHALL allocate nothing. The cells SHALL have a collector of their own, so no other code's deferred work, such as `crossbeam-skiplist`'s node frees, runs or allocates in a hot-path read. Hot-path code MUST NOT add any other allocation, amortised or not, except in `lookup_user()`.
+
+`lookup_user()` SHALL return an owned copy of the user record. That copy, the storage key and the normalized email MAY allocate. No shared cache of user records SHALL exist for this purpose: a stale cached record can show a disabled or deleted user as active. The user lookup budget (p99 < 200 μs, enforced by the `storage_gate` bench) applies to `lookup_user()` in place of the zero-allocation rule. The other hot-path rules (no syscalls for reads, no locks on the read path, no yielding) still apply to it.
 
 `tests/epoch_cell_hot_path.rs` and the allocation gate of the `validate_token` bench (0 allocations per warm call) enforce this rule. The `session_lookup` bench's allocation gate (0 allocations per call) measures a warm `get_session` on a session with no heap-allocated fields (`SessionContext::default()`); `get_session` copies the session, so a session with an IP address, a user agent or a device label allocates on that path.
 
@@ -48,9 +50,10 @@ Hot-path code MUST NOT perform a heap allocation in the steady state: no `Box::n
 - **WHEN** other code, such as `crossbeam-skiplist`, defers work to `crossbeam-epoch`'s default collector
 - **THEN** that work never runs inside an `EpochCell` load, and never costs one an allocation
 
-#### Scenario: Regression — warm user lookup allocates nothing
+#### Scenario: Warm user lookup returns an owned copy
 - **WHEN** `lookup_user()` reads a user by ID, or by email, and the records are in the hot tier
-- **THEN** it performs zero heap allocations per call
+- **THEN** it returns an owned copy of the record read from storage, not a shared cached copy
+- **AND** it meets the user lookup budget, p99 < 200 μs
 
 ### Requirement: Load-test journeys are graded against HTTP budgets
 `make loadtest` SHALL grade each journey's HTTP p99 against the engine budget of its operation, plus a loopback envelope of 1 ms (1,000 μs). A journey SHALL pass only when its p99 is at or below that HTTP budget and its failure rate is at most 5%.
