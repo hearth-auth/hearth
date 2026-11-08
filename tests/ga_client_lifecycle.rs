@@ -401,7 +401,11 @@ async fn public_refresh_token_cannot_be_redeemed_under_another_client_id() {
         .identity()
         .refresh_tokens(&realm, &refresh, None, Some(&bind(&other)))
         .expect_err("another public client must not redeem the refresh token");
-    assert!(matches!(err, IdentityError::InvalidClient), "got {err:?}");
+    // RFC 6749 §5.2: a grant issued to another client is `invalid_grant` (#639).
+    assert!(
+        matches!(err, IdentityError::InvalidGrant { .. }),
+        "got {err:?}"
+    );
 
     // The refused attempt must not have burned the token for its owner.
     h.identity()

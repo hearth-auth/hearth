@@ -753,10 +753,11 @@ pub(crate) fn identity_error_to_response(
         // (OAuth 2.0 Security BCP §2.2).
         IdentityError::InvalidClient => (StatusCode::UNAUTHORIZED, "invalid_client"),
         IdentityError::InvalidRedirectUri => (StatusCode::BAD_REQUEST, "invalid redirect URI"),
-        IdentityError::InvalidAuthorizationCode => {
-            (StatusCode::BAD_REQUEST, "invalid authorization code")
+        // RFC 6749 §5.2: an invalid, expired, revoked or reused grant, or one
+        // issued to another client, is `invalid_grant` (#639).
+        IdentityError::InvalidAuthorizationCode | IdentityError::InvalidGrant { .. } => {
+            (StatusCode::BAD_REQUEST, "invalid_grant")
         }
-        IdentityError::InvalidGrant { .. } => (StatusCode::BAD_REQUEST, "invalid grant"),
         IdentityError::InvalidClientSecret => (StatusCode::UNAUTHORIZED, "invalid_client"),
         IdentityError::AuthorizationPending => (StatusCode::BAD_REQUEST, "authorization_pending"),
         IdentityError::SlowDown => (StatusCode::BAD_REQUEST, "slow_down"),

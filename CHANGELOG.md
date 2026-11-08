@@ -35,6 +35,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   issued the code.
 
 ### Fixed
+- **Token endpoint errors and caching follow RFC 6749 §5** (#639): at `POST /token` and
+  `POST /realms/{realm_name}/token`:
+  - an invalid, expired or reused authorization code now gets `"error": "invalid_grant"`. Before,
+    the `error` was `"invalid authorization code"` (an `InvalidGrant` error was `"invalid grant"`).
+    The status stays `400`, and `error_code` stays `HEARTH_INVALID_GRANT`.
+  - a refresh token presented by a client other than the one it was issued to now gets
+    `400 invalid_grant`. Before, it got `401 invalid_client`. A confidential client's refresh
+    without client authentication still gets `401 invalid_client`.
+  - every response now carries `Cache-Control: no-store` and `Pragma: no-cache`. Before, token
+    responses had no cache headers.
 - **A confidential client's authorization request without PKCE gets an error redirect** (#639):
   `GET /ui/oauth/authorize` and `GET /ui/realms/{realm_name}/oauth/authorize` now refuse a plain
   request without `code_challenge` from any client, public or confidential, with an

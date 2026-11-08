@@ -4246,15 +4246,21 @@ impl EmbeddedIdentityEngine {
             // are already constrained by rotation + DPoP binding. A secretless
             // client with an assertion key or a JWKS is not public: it binds
             // like a secret holder (it authenticates with `private_key_jwt`).
+            //
+            // A request that names (or authenticated as) another client gets
+            // `invalid_grant`: RFC 6749 §5.2 names a grant "issued to another
+            // client" as that error (#639). A confidential family with no
+            // authenticated client at all is a client-authentication failure.
             let authenticated = bind_ctx.and_then(|c| c.authenticated_client_id.as_ref());
-            if !client.is_public() {
-                if authenticated != Some(client_id) {
-                    return Err(IdentityError::InvalidClient);
-                }
-            } else if authenticated.is_some_and(|presented| presented != client_id) {
+            if authenticated.is_some_and(|presented| presented != client_id) {
                 // GA audit L10: a public client proves nothing, but a request
                 // that NAMES a client must name the family's own. Otherwise
                 // one public client could redeem another's refresh token.
+                return Err(IdentityError::InvalidGrant {
+                    reason: "the refresh token was issued to another client".to_string(),
+                });
+            }
+            if !client.is_public() && authenticated.is_none() {
                 return Err(IdentityError::InvalidClient);
             }
         }
