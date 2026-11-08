@@ -1417,6 +1417,19 @@ pub struct OidcDiscoveryDocument {
     /// clients only (RFC 7662 §2.1, task 26.43).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub introspection_endpoint_auth_methods_supported: Vec<String>,
+    /// JWS algorithms that the token endpoint accepts for a `private_key_jwt`
+    /// client assertion (RFC 8414 §2: present when
+    /// `token_endpoint_auth_methods_supported` lists `private_key_jwt`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub token_endpoint_auth_signing_alg_values_supported: Vec<String>,
+    /// JWS algorithms that the revocation endpoint accepts for a
+    /// `private_key_jwt` client assertion (RFC 8414 §2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revocation_endpoint_auth_signing_alg_values_supported: Vec<String>,
+    /// JWS algorithms that the introspection endpoint accepts for a
+    /// `private_key_jwt` client assertion (RFC 8414 §2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub introspection_endpoint_auth_signing_alg_values_supported: Vec<String>,
     /// Whether RFC 8707 resource indicators are supported.
     #[serde(default)]
     pub resource_indicators_supported: bool,
@@ -2401,6 +2414,9 @@ mod tests {
             introspection_endpoint: Some("https://hearth.local/introspect".to_string()),
             revocation_endpoint_auth_methods_supported: vec![],
             introspection_endpoint_auth_methods_supported: vec![],
+            token_endpoint_auth_signing_alg_values_supported: vec![],
+            revocation_endpoint_auth_signing_alg_values_supported: vec![],
+            introspection_endpoint_auth_signing_alg_values_supported: vec![],
             resource_indicators_supported: true,
             authorization_response_iss_parameter_supported: true,
             end_session_endpoint: Some("https://hearth.local/end_session".to_string()),

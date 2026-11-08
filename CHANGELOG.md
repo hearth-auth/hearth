@@ -74,6 +74,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   fields were missing. OpenID Connect Discovery reads a missing `request_uri_parameter_supported`
   as `true`, so a relying party could send a `request_uri` that Hearth then refused. Hearth
   accepts only the `request_uri` that its PAR endpoint returns, and a signed `request` object.
+- **Discovery lists the client assertion algorithms** (#639): both discovery documents now carry
+  `token_endpoint_auth_signing_alg_values_supported`, `revocation_endpoint_auth_signing_alg_values_supported`
+  and `introspection_endpoint_auth_signing_alg_values_supported`, each `["PS256", "ES256", "EdDSA"]`:
+  the algorithms that Hearth accepts for a `private_key_jwt` client assertion. RFC 8414 requires
+  them when `private_key_jwt` is listed. Before, they were missing, so a client could not know
+  that Hearth refuses `RS256` for client authentication.
 - **Operators can sign in with a passkey at the operator console** (#769):
   `POST /ui/admin/login/passkey-complete` now completes the sign-in in the system realm. Before, it
   answered `400` ("Realm not resolvable") for every assertion, also a correct one, so an operator

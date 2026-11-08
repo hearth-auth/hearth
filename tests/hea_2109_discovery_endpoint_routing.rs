@@ -166,3 +166,33 @@ async fn discovery_states_which_request_parameters_are_supported() {
         );
     }
 }
+
+/// RFC 8414 §2: `token_endpoint_auth_signing_alg_values_supported` (and its
+/// revocation and introspection twins) MUST be present when the matching
+/// `*_auth_methods_supported` lists `private_key_jwt`. Without it, OIDC
+/// Discovery 1.0 §3 lets a client assume `RS256`, which Hearth refuses for
+/// client authentication. The lists name the algorithms that Hearth accepts
+/// for a client assertion (#639, OpenID Foundation Dynamic OP).
+#[tokio::test]
+async fn discovery_lists_the_client_assertion_algorithms() {
+    let h = common::TestHarness::server().await.expect("server harness");
+    let doc = served_discovery(h.base_url().expect("base_url")).await;
+    for endpoint in [
+        "token_endpoint",
+        "revocation_endpoint",
+        "introspection_endpoint",
+    ] {
+        let methods = &doc[format!("{endpoint}_auth_methods_supported")];
+        assert!(
+            methods
+                .as_array()
+                .is_some_and(|m| m.iter().any(|v| v == "private_key_jwt")),
+            "control: {endpoint} lists private_key_jwt: {methods}"
+        );
+        assert_eq!(
+            doc[format!("{endpoint}_auth_signing_alg_values_supported")],
+            serde_json::json!(["PS256", "ES256", "EdDSA"]),
+            "{endpoint}_auth_signing_alg_values_supported"
+        );
+    }
+}
