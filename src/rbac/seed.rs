@@ -542,6 +542,24 @@ mod tests {
         assert!(names.contains(&"realm.admin"));
     }
 
+    /// An operator gives a sub-admin export rights through a seed role, not a
+    /// custom role: custom roles never hold a `hearth.*` permission.
+    #[test]
+    fn seed_hearth_export_role_holds_only_the_export_permission() {
+        let (storage, clock, realm) = setup();
+        seed_realm(&storage, &clock, &realm).expect("seed");
+        let k = keys::encode_role_name(&realm, "hearth.export");
+        assert!(
+            storage.get(&realm, &k).expect("get").is_some(),
+            "a new realm must have a seed role named hearth.export"
+        );
+        let role = load_role_by_name(&storage, &realm, "hearth.export");
+        let names: Vec<&str> = role.permissions.iter().map(Permission::as_str).collect();
+        assert_eq!(names, vec!["hearth.export"]);
+        assert!(role.parent_roles.is_empty());
+        assert_eq!(role.scope_kind, RoleScopeKind::Realm);
+    }
+
     fn load_role_by_name(storage: &Arc<dyn StorageEngine>, realm: &RealmId, name: &str) -> Role {
         let k = keys::encode_role_name(realm, name);
         let v = storage.get(realm, &k).expect("get").expect("some");
