@@ -130,10 +130,14 @@ struct SeedRoleSpec {
 /// and `realm.member` are standalone; `org.member` is parent of
 /// `org.admin`, which is parent of `org.owner`.
 ///
-/// Three sub-admin roles (`hearth.users.admin`, `hearth.clients.admin`,
-/// `hearth.realm.admin`) allow Keycloak-style delegation without granting full
-/// superuser access. Assign one of these instead of `realm.admin` to restrict
-/// a service account or operator to only the endpoints they need.
+/// Four sub-admin roles (`hearth.users.admin`, `hearth.clients.admin`,
+/// `hearth.realm.admin`, `hearth.agents.admin`) allow Keycloak-style
+/// delegation without granting full superuser access. Assign one of these
+/// instead of `realm.admin` to restrict a service account or operator to only
+/// the endpoints they need. `hearth.export` adds export rights to a sub-admin:
+/// alone it grants nothing, because every export endpoint also requires an
+/// admin permission. Custom roles never hold a `hearth.*` permission, so these
+/// seed roles are the only way to grant one.
 const SEED_ROLES: &[SeedRoleSpec] = &[
     SeedRoleSpec {
         name: "realm.admin",
@@ -180,6 +184,12 @@ const SEED_ROLES: &[SeedRoleSpec] = &[
     SeedRoleSpec {
         name: "hearth.agents.admin",
         permissions: &["hearth.agents.admin"],
+        parent_names: &[],
+        scope_kind: RoleScopeKind::Realm,
+    },
+    SeedRoleSpec {
+        name: "hearth.export",
+        permissions: &["hearth.export"],
         parent_names: &[],
         scope_kind: RoleScopeKind::Realm,
     },
@@ -556,7 +566,7 @@ mod tests {
         let role = load_role_by_name(&storage, &realm, "hearth.export");
         let names: Vec<&str> = role.permissions.iter().map(Permission::as_str).collect();
         assert_eq!(names, vec!["hearth.export"]);
-        assert!(role.parent_roles.is_empty());
+        assert_eq!(role.parent_roles, Vec::<RoleId>::new());
         assert_eq!(role.scope_kind, RoleScopeKind::Realm);
     }
 

@@ -226,7 +226,8 @@ requires `hearth.admin` (which the seeded `realm.admin` role carries) plus
 `hearth.export`, for a tenant-scoped caller too. A tenant sub-admin
 (`hearth.users.admin`, `hearth.realm.admin`, `hearth.clients.admin`,
 `hearth.agents.admin`) holding `hearth.export` may still **export** its own
-realm, but its restore is refused (`403`) before anything is read, written or
+realm (assign the seeded `hearth.export` role next to the sub-admin role; a
+custom role cannot hold a `hearth.*` permission), but its restore is refused (`403`) before anything is read, written or
 counted against the hourly quota. A tenant-scoped caller's `POST /admin/backup/restore` is authorized against
 **every** realm in the archive before its first write: an archive carrying the
 system realm, or any other realm but its own, is refused with `403`, in every

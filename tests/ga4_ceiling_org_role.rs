@@ -460,7 +460,6 @@ async fn rest_realm_sub_admin_cannot_demote_through_a_role_definition() {
                     permissions: vec![],
                     parent_roles: vec![admin_role.clone()],
                     scope_kind: Default::default(),
-                    allow_reserved_permissions: false,
                 },
             )
             .expect("child role")
@@ -477,7 +476,6 @@ async fn rest_realm_sub_admin_cannot_demote_through_a_role_definition() {
                     permissions: vec![Permission::new("docs.read").expect("perm")],
                     parent_roles: vec![],
                     scope_kind: Default::default(),
-                    allow_reserved_permissions: false,
                 },
             )
             .expect("plain role")
@@ -800,7 +798,6 @@ impl Fixture {
                     permissions: vec![Permission::new("docs.read").expect("perm")],
                     parent_roles: vec![],
                     scope_kind: Default::default(),
-                    allow_reserved_permissions: false,
                 },
             )
             .expect("role")
@@ -814,7 +811,6 @@ impl Fixture {
                     permissions: vec![],
                     parent_roles: vec![role.clone()],
                     scope_kind: Default::default(),
-                    allow_reserved_permissions: false,
                 },
             )
             .expect("child")
@@ -938,7 +934,6 @@ async fn rest_role_delete_refuses_references_or_cascades_them() {
                     permissions: vec![],
                     parent_roles: vec![],
                     scope_kind: Default::default(),
-                    allow_reserved_permissions: false,
                 },
             )
             .expect("role")
@@ -1225,7 +1220,6 @@ async fn admin_holder_set_covers_every_source_of_admin_permission() {
                 permissions: vec![],
                 parent_roles: vec![admin_role.clone()],
                 scope_kind: Default::default(),
-                allow_reserved_permissions: false,
             },
         )
         .expect("role")

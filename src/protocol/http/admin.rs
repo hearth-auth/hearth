@@ -4114,7 +4114,6 @@ async fn admin_create_role(
             permissions,
             parent_roles,
             scope_kind: crate::rbac::RoleScopeKind::Realm,
-            allow_reserved_permissions: false,
         },
     ) {
         Ok(role) => (StatusCode::CREATED, Json(role)).into_response(),
@@ -4207,7 +4206,6 @@ async fn admin_update_role(
         parent_roles,
         scope_kind: None,
         status: None,
-        allow_reserved_permissions: false,
     };
     // Removing an admin permission from the role demotes its holders
     // (GA sweep 4).
