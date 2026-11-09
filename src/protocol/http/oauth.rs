@@ -1055,6 +1055,24 @@ fn token_error_to_response(
     }
 }
 
+/// [`token_error_to_response`] for the `refresh_token` grant (#783). A refresh
+/// token that is not valid, has expired or was revoked is an
+/// `invalid_grant` (RFC 6749 §5.2): `400`, not the `401` that a bearer token
+/// gets at a resource endpoint. The stable `error_code` stays the same.
+fn refresh_error_to_response(
+    err: &crate::identity::IdentityError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    use crate::identity::IdentityError;
+    let (status, Json(mut body)) = token_error_to_response(err);
+    match err {
+        IdentityError::InvalidToken | IdentityError::TokenExpired | IdentityError::TokenRevoked => {
+            body["error"] = serde_json::Value::from("invalid_grant");
+            (StatusCode::BAD_REQUEST, Json(body))
+        }
+        _ => (status, Json(body)),
+    }
+}
+
 /// Token-endpoint grants that check the DPoP proof key against a key the grant
 /// is bound to: the grant family's key, or the subject token's `cnf.jkt`. The
 /// engine spends the proof's `jti` after that check (#624), so the endpoint
@@ -2919,7 +2937,7 @@ async fn token_exchange_impl(
                     };
                     (StatusCode::OK, Json(proto_to_rest_json(&resp))).into_response()
                 }
-                Err(e) => token_error_to_response(&e).into_response(),
+                Err(e) => refresh_error_to_response(&e).into_response(),
             }
         }
         "client_credentials" => {
@@ -4124,7 +4142,7 @@ async fn realm_token_exchange(
                     };
                     (StatusCode::OK, Json(proto_to_rest_json(&resp))).into_response()
                 }
-                Err(e) => token_error_to_response(&e).into_response(),
+                Err(e) => refresh_error_to_response(&e).into_response(),
             }
         }
         "client_credentials" => {

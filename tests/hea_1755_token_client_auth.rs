@@ -608,3 +608,161 @@ async fn refresh_token_of_another_client_is_refused_with_invalid_grant() {
     assert_eq!(status, StatusCode::OK, "the issuing client: {body}");
     assert_not_cached(&headers, "refresh");
 }
+
+// ─── RFC 6749 §4.1.2 / RFC 9700 §4.5: a reused code ends its grant (#783) ────
+//
+// A second use of an authorization code must revoke the tokens that the first
+// exchange issued: the access token and the refresh-token family. A refresh
+// token that is not valid gets `400 invalid_grant` (RFC 6749 §5.2), with the
+// stable `error_code` unchanged.
+
+/// `GET /userinfo` with `token` as the bearer. Returns the status.
+async fn userinfo_status(state: &Arc<AppState>, realm_id: &str, token: &str) -> StatusCode {
+    router(Arc::clone(state))
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/userinfo")
+                .header("X-Realm-ID", realm_id)
+                .header("Authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+}
+
+/// RFC 7662: whether introspection reports `token` as active.
+fn introspected_active(
+    h: &common::TestHarness,
+    realm: &RealmId,
+    client: &hearth::identity::OAuthClient,
+    token: &str,
+) -> bool {
+    h.identity()
+        .introspect_token(
+            realm,
+            &hearth::identity::TokenIntrospectionRequest {
+                token: token.to_string(),
+                token_type_hint: None,
+                introspecting_client_id: Some(client.client_id().clone()),
+            },
+        )
+        .unwrap()
+        .active
+}
+
+#[tokio::test]
+async fn reused_authorization_code_revokes_the_tokens_of_the_first_exchange() {
+    let h = common::TestHarness::in_process().await.unwrap();
+    let realm = h
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("codereuse-{}", uuid::Uuid::new_v4()),
+            config: None,
+        })
+        .unwrap();
+    let realm_id_str = realm.id().as_uuid().to_string();
+    let user = make_user(&h, realm.id());
+    let secret = format!("s-{}", uuid::Uuid::new_v4());
+    let client = register_client(&h, realm.id(), Some(&secret));
+    let (verifier, challenge) = pkce_pair();
+    let code = mint_code(&h, realm.id(), &client, &user, &challenge);
+    let state = Arc::new(AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()));
+    let exchange = serde_json::json!({
+        "grant_type": "authorization_code",
+        "client_id": client.client_id().as_uuid().to_string(),
+        "client_secret": secret,
+        "code": code,
+        "redirect_uri": REDIRECT_URI,
+        "code_verifier": verifier,
+    });
+
+    let (status, _, first) = post_token_at(&state, "/token", &realm_id_str, exchange.clone()).await;
+    assert_eq!(status, StatusCode::OK, "first exchange: {first}");
+    let access = first["access_token"].as_str().unwrap().to_string();
+    let refresh = first["refresh_token"].as_str().unwrap().to_string();
+    // The tokens work before the reuse, so the checks below are not vacuous.
+    assert_eq!(
+        userinfo_status(&state, &realm_id_str, &access).await,
+        StatusCode::OK,
+        "userinfo before the reuse"
+    );
+    assert!(
+        introspected_active(&h, realm.id(), &client, &access),
+        "introspection before the reuse"
+    );
+
+    let (status, _, body) = post_token_at(&state, "/token", &realm_id_str, exchange).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "reused code: {body}");
+    assert_eq!(body["error"], "invalid_grant", "reused code: {body}");
+
+    assert_eq!(
+        userinfo_status(&state, &realm_id_str, &access).await,
+        StatusCode::UNAUTHORIZED,
+        "userinfo with the access token of the first exchange, after the reuse"
+    );
+    assert!(
+        !introspected_active(&h, realm.id(), &client, &access),
+        "introspection of the access token of the first exchange, after the reuse"
+    );
+    let (status, _, body) = post_token_at(
+        &state,
+        "/token",
+        &realm_id_str,
+        serde_json::json!({
+            "grant_type": "refresh_token",
+            "refresh_token": refresh,
+            "client_id": client.client_id().as_uuid().to_string(),
+            "client_secret": secret,
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "refresh token of the first exchange, after the reuse: {body}"
+    );
+    assert_eq!(
+        body["error"], "invalid_grant",
+        "refresh after the reuse: {body}"
+    );
+}
+
+#[tokio::test]
+async fn refresh_token_that_is_not_valid_gets_invalid_grant() {
+    let h = common::TestHarness::in_process().await.unwrap();
+    let realm_name = format!("badrefresh-{}", uuid::Uuid::new_v4());
+    let realm = h
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: realm_name.clone(),
+            config: None,
+        })
+        .unwrap();
+    let realm_id_str = realm.id().as_uuid().to_string();
+    let secret = format!("s-{}", uuid::Uuid::new_v4());
+    let client = register_client(&h, realm.id(), Some(&secret));
+    let state = Arc::new(AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()));
+    let realm_token = format!("/realms/{realm_name}/token");
+
+    for uri in ["/token", realm_token.as_str()] {
+        let (status, headers, body) = post_token_at(
+            &state,
+            uri,
+            &realm_id_str,
+            serde_json::json!({
+                "grant_type": "refresh_token",
+                "refresh_token": uuid::Uuid::new_v4().to_string(),
+                "client_id": client.client_id().as_uuid().to_string(),
+                "client_secret": secret,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
+        assert_eq!(body["error"], "invalid_grant", "{uri}: {body}");
+        assert_eq!(body["error_code"], "HEARTH_TOKEN_INVALID", "{uri}: {body}");
+        assert_not_cached(&headers, uri);
+    }
+}

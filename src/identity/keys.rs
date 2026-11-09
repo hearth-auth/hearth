@@ -2236,6 +2236,18 @@ pub(crate) fn encode_consumed_code(code_hash: &str) -> Vec<u8> {
     encode_consumed("code", code_hash)
 }
 
+/// Reuse mark for an authorization code, keyed by its SHA-256 hex (#783).
+///
+/// A redemption that loses the single-use claim writes this mark. The
+/// exchange that won the claim reads it after it records its grant, and ends
+/// that grant if the mark is there: a reuse that arrives while the first
+/// exchange is still issuing its tokens cannot find a grant to revoke.
+///
+/// Format: `consumed:codereuse:{sha256_hex}`
+pub(crate) fn encode_consumed_code_reuse(code_hash: &str) -> Vec<u8> {
+    encode_consumed("codereuse", code_hash)
+}
+
 /// Single-use marker for a device code, keyed by its SHA-256 hex.
 ///
 /// Format: `consumed:device:{sha256_hex}`

@@ -1036,6 +1036,7 @@ mod tests {
         let code = StoredAuthorizationCode {
             org_id: None,
             authorizing_session_id: None,
+            issued_session_id: None,
             code_hash: "hash1".into(),
             client_id: crate::core::ClientId::generate(),
             user_id: crate::core::UserId::generate(),
@@ -1070,6 +1071,7 @@ mod tests {
         let code = StoredAuthorizationCode {
             org_id: None,
             authorizing_session_id: None,
+            issued_session_id: None,
             code_hash: "hash2".into(),
             client_id: crate::core::ClientId::generate(),
             user_id: crate::core::UserId::generate(),
@@ -1381,6 +1383,7 @@ mod tests {
             let code = StoredAuthorizationCode {
                 org_id: None,
                 authorizing_session_id: None,
+                issued_session_id: None,
                 code_hash: format!("expired_hash_{i}"),
                 client_id: crate::core::ClientId::generate(),
                 user_id: crate::core::UserId::generate(),

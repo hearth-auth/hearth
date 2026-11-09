@@ -33,6 +33,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   factor while the consent page is open, a session that proved no second factor gets
   `login_required` (or the enrolment page, if the user has no factor yet). Before, the approval
   issued the code.
+- **A reused authorization code ends the grant of its first exchange** (#783): when an
+  authorization code is presented a second time at `POST /token` or
+  `POST /realms/{realm_name}/token`, Hearth now revokes the tokens that the first exchange issued
+  (RFC 6749 §4.1.2, RFC 9700 §4.5). The access token then fails at UserInfo and introspection, and
+  the refresh token gets `invalid_grant`. The second request still gets `400 invalid_grant`.
+  Hearth keeps the record of an exchanged code until the code expires
+  (`oidc.authorization_code_ttl`), so a reuse after that time is refused but revokes nothing.
+  Before, the tokens of the first exchange stayed valid.
 
 ### Fixed
 - **Token endpoint errors and caching follow RFC 6749 §5** (#639): at `POST /token` and
@@ -45,6 +53,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
     without client authentication still gets `401 invalid_client`.
   - every response now carries `Cache-Control: no-store` and `Pragma: no-cache`. Before, token
     responses had no cache headers.
+- **A refresh token that is not valid gets `400 invalid_grant`** (#783): at `POST /token` and
+  `POST /realms/{realm_name}/token`, a refresh token that is not valid, has expired or was revoked
+  now gets `400` with `"error": "invalid_grant"` (RFC 6749 §5.2). Before, it got `401` with
+  `"error": "invalid token"`, `"token expired"` or `"token revoked"`. The `error_code` stays
+  `HEARTH_TOKEN_INVALID`, `HEARTH_TOKEN_EXPIRED` or `HEARTH_TOKEN_REVOKED`.
 - **A confidential client's authorization request without PKCE gets an error redirect** (#639):
   `GET /ui/oauth/authorize` and `GET /ui/realms/{realm_name}/oauth/authorize` now refuse a plain
   request without `code_challenge` from any client, public or confidential, with an
