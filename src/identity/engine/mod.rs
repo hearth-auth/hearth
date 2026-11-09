@@ -23120,6 +23120,124 @@ mod tests {
         );
     }
 
+    /// Mints a PKCE authorization code for `user` at `client` (#783 tests).
+    fn mint_test_code(
+        engine: &EmbeddedIdentityEngine,
+        realm: &RealmId,
+        client: &OAuthClient,
+        user: &User,
+    ) -> String {
+        engine
+            .authorize(
+                realm,
+                &AuthorizationRequest {
+                    organization: None,
+                    client_id: client.client_id().clone(),
+                    redirect_uri: "https://app.example.com/callback".to_string(),
+                    scope: "openid".to_string(),
+                    state: "reuse-state".to_string(),
+                    response_type: "code".to_string(),
+                    user_id: user.id().clone(),
+                    code_challenge: Some(pkce_challenge(TEST_PKCE_VERIFIER)),
+                    code_challenge_method: Some(CodeChallengeMethod::S256),
+                    nonce: None,
+                    resource: None,
+                    amr_values: Vec::new(),
+                    response_mode: None,
+                    request: None,
+                },
+            )
+            .expect("authorize")
+            .code()
+            .to_string()
+    }
+
+    fn test_code_exchange(client: &OAuthClient, code: &str) -> TokenExchangeRequest {
+        TokenExchangeRequest {
+            client_id: client.client_id().clone(),
+            code: code.to_string(),
+            redirect_uri: "https://app.example.com/callback".to_string(),
+            code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+            dpop_jkt: None,
+            client_assertion_type: None,
+            client_assertion: None,
+            resource: None,
+        }
+    }
+
+    /// #783: a reuse that arrives while the first exchange still issues its
+    /// tokens finds no grant to revoke. It leaves a reuse mark, and the first
+    /// exchange ends its own grant when it sees that mark.
+    #[test]
+    fn code_exchange_that_sees_a_reuse_mark_ends_its_own_grant() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let client = register_test_client(&engine, &realm);
+        let user = create_test_user(&engine, &realm);
+        let code = mint_test_code(&engine, &realm, &client, &user);
+        let code_hash = EmbeddedIdentityEngine::sha256_hex(code.as_bytes());
+        // A reuse marked the code while this exchange was in progress.
+        engine
+            .storage
+            .put(
+                &realm,
+                &keys::encode_consumed_code_reuse(&code_hash),
+                &[0u8; 8],
+            )
+            .expect("reuse mark");
+
+        let result =
+            engine.exchange_authorization_code(&realm, &test_code_exchange(&client, &code));
+        assert!(
+            matches!(result, Err(IdentityError::InvalidAuthorizationCode)),
+            "an exchange that sees a reuse mark must refuse, got: {:?}",
+            result.as_ref().map(|_| "tokens issued")
+        );
+        let sessions = engine
+            .list_sessions_by_user(&realm, user.id(), &crate::core::PageRequest::new(0, 100))
+            .expect("sessions");
+        assert!(
+            sessions.items.iter().all(Session::is_revoked),
+            "the session the exchange opened must be revoked"
+        );
+    }
+
+    /// #783: a redemption that loses the single-use claim (the first exchange
+    /// is still in progress, on this node or another) writes the reuse mark.
+    #[test]
+    fn code_redemption_that_loses_the_claim_writes_a_reuse_mark() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let client = register_test_client(&engine, &realm);
+        let user = create_test_user(&engine, &realm);
+        let code = mint_test_code(&engine, &realm, &client, &user);
+        let code_hash = EmbeddedIdentityEngine::sha256_hex(code.as_bytes());
+        // The first exchange has claimed the code and is still issuing.
+        assert!(engine
+            .claim_single_use(
+                &realm,
+                &keys::encode_consumed_code(&code_hash),
+                engine.clock.now(),
+            )
+            .expect("claim"));
+
+        let result =
+            engine.exchange_authorization_code(&realm, &test_code_exchange(&client, &code));
+        assert!(
+            matches!(result, Err(IdentityError::InvalidAuthorizationCode)),
+            "a redemption that loses the claim must refuse, got: {:?}",
+            result.as_ref().map(|_| "tokens issued")
+        );
+        assert!(
+            engine
+                .storage
+                .get(&realm, &keys::encode_consumed_code_reuse(&code_hash))
+                .expect("get")
+                .is_some(),
+            "the losing redemption must leave a reuse mark"
+        );
+    }
+
     // ===== Adversarial Test 2: Open redirect via non-registered URI rejected =====
 
     #[test]

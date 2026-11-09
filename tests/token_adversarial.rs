@@ -1411,10 +1411,15 @@ async fn id_token_on_introspect_returns_inactive() {
 /// Vulnerability class: TOCTOU on authorization code single-use (OAUTH-06 /
 /// HEA-SEC-22).
 ///
-/// Two goroutines race to exchange the same authorization code. The
-/// delete-on-use fix (atomically delete the storage entry as the first write)
-/// guarantees exactly one winner — the concurrent second request finds no
-/// entry and returns `InvalidAuthorizationCode`.
+/// Two threads race to exchange the same authorization code. The single-use
+/// claim (one replicated put-if-absent as the first write) gives at most one
+/// winner — the concurrent second request loses the claim and returns
+/// `InvalidAuthorizationCode`.
+///
+/// The second request is a second use of the code, so it also ends the grant
+/// of the first exchange (RFC 6749 §4.1.2, #783): when the two overlap, the
+/// winner sees the reuse mark and refuses too; when they do not, the winner's
+/// tokens are revoked. No token of the code stays valid.
 ///
 /// Historically the code set `used = true` after all token-issuance work,
 /// giving a race window where both requests could pass the check before
@@ -1488,22 +1493,24 @@ async fn concurrent_auth_code_exchange_only_one_succeeds() {
         .collect();
 
     let ok_count = results.iter().filter(|r| r.is_ok()).count();
-    let err_count = results.iter().filter(|r| r.is_err()).count();
-
-    assert_eq!(
-        ok_count, 1,
-        "exactly one exchange must succeed; got {ok_count} successes"
-    );
-    assert_eq!(
-        err_count, 1,
-        "exactly one exchange must fail; got {err_count} failures"
-    );
-    let failed = results
-        .iter()
-        .find(|r| r.is_err())
-        .expect("one result must be Err");
     assert!(
-        matches!(failed, Err(IdentityError::InvalidAuthorizationCode)),
-        "losing thread must get InvalidAuthorizationCode, got: {failed:?}"
+        ok_count <= 1,
+        "at most one exchange may succeed; got {ok_count} successes"
     );
+    for r in &results {
+        match r {
+            // The winner's tokens do not survive the second use (#783).
+            Ok(tokens) => assert!(
+                harness
+                    .identity()
+                    .validate_token(&realm, tokens.access_token())
+                    .is_err(),
+                "the access token of a code used twice must be revoked"
+            ),
+            Err(e) => assert!(
+                matches!(e, IdentityError::InvalidAuthorizationCode),
+                "a refused exchange must get InvalidAuthorizationCode, got: {e:?}"
+            ),
+        }
+    }
 }

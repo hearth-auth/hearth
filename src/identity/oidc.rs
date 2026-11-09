@@ -1341,6 +1341,14 @@ pub(crate) struct StoredAuthorizationCode {
     /// (`rp-initiated-logout`). A code stored without it decodes as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) authorizing_session_id: Option<crate::core::SessionId>,
+    /// The session that the exchange of this code opened (#783). Every
+    /// token of the exchange names it as `sid`, and its refresh-token family
+    /// is indexed under it, so revoking it ends the whole grant. The exchange
+    /// writes it back to the code row, which stays until the code expires, so
+    /// a second use of the code can end that grant (RFC 6749 §4.1.2,
+    /// RFC 9700 §4.5). `None` until the code is exchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) issued_session_id: Option<crate::core::SessionId>,
 }
 
 /// Context from the refresh request that binds it to its grant family.
@@ -2337,6 +2345,7 @@ mod tests {
             mfa_proof: crate::identity::MfaProof::None,
             scope_narrowed: false,
             authorizing_session_id: Some(crate::core::SessionId::generate()),
+            issued_session_id: None,
         };
 
         let json = serde_json::to_string(&code).expect("serialize");
@@ -2371,6 +2380,7 @@ mod tests {
             mfa_proof: crate::identity::MfaProof::None,
             scope_narrowed: false,
             authorizing_session_id: None,
+            issued_session_id: None,
         };
         let json = serde_json::to_string(&code).expect("serialize");
         assert!(

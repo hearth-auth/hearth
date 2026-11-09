@@ -693,6 +693,7 @@ impl EmbeddedIdentityEngine {
             scope_narrowed: granted.scope_narrowed,
             org_id,
             authorizing_session_id,
+            issued_session_id: None,
         };
 
         // 9. Persist the code
@@ -769,23 +770,25 @@ impl EmbeddedIdentityEngine {
 
             // The single use is decided HERE, as the first write: one
             // replicated put-if-absent the Raft state machine evaluates (G4).
-            // The delete below cannot decide it across nodes — a delete of an
-            // absent key succeeds, so a redemption that read the code before
-            // another node spent it, and wrote after leadership moved to its
-            // own node, used to be served too. The lock above still queues
-            // same-node racers so they do not each propose a Raft write.
-            if !self.claim_single_use(
-                realm_id,
-                &keys::encode_consumed_code(&code_hash),
-                code.expires_at,
-            )? {
+            // A delete of the code row cannot decide it across nodes — a
+            // delete of an absent key succeeds, so a redemption that read the
+            // code before another node spent it, and wrote after leadership
+            // moved to its own node, used to be served too. The lock above
+            // still queues same-node racers so they do not each propose a
+            // Raft write.
+            //
+            // The code row stays until its sweep: the exchange records in it
+            // the grant it issues, so a second use can end that grant (#783).
+            if code.issued_session_id.is_some()
+                || !self.claim_single_use(
+                    realm_id,
+                    &keys::encode_consumed_code(&code_hash),
+                    code.expires_at,
+                )?
+            {
+                self.end_reused_code_grant(realm_id, &code_hash, &code);
                 return Err(IdentityError::InvalidAuthorizationCode);
             }
-
-            // The code row itself goes too; its sweep would reclaim it anyway.
-            self.storage
-                .delete(realm_id, &code_key)
-                .map_err(Self::storage_err)?;
 
             code
         }; // inner per-code lock released here
@@ -1161,6 +1164,32 @@ impl EmbeddedIdentityEngine {
             .put(realm_id, &sfam_key, &[])
             .map_err(Self::storage_err)?;
 
+        // 12b. Record the grant in the code row, so a second use of the code
+        //      can end it (RFC 6749 §4.1.2, RFC 9700 §4.5; #783). Then look
+        //      for a reuse mark: a reuse that lost the claim while this
+        //      exchange was issuing found no grant to revoke, so this exchange
+        //      ends its own grant and refuses.
+        let spent_code = StoredAuthorizationCode {
+            issued_session_id: Some(session.id().clone()),
+            ..stored_code.clone()
+        };
+        let spent_bytes =
+            serde_json::to_vec(&spent_code).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        self.storage
+            .put(realm_id, &code_key, &spent_bytes)
+            .map_err(Self::storage_err)?;
+        if self
+            .storage
+            .get(realm_id, &keys::encode_consumed_code_reuse(&code_hash))
+            .map_err(Self::storage_err)?
+            .is_some()
+        {
+            self.revoke_code_grant(realm_id, &request.client_id, session.id());
+            return Err(IdentityError::InvalidAuthorizationCode);
+        }
+
         // 13. Issue ID token (OIDC-specific, nonce echoed per OIDC Core §2)
         // iss MUST match the discovery document's issuer (OIDC Core §2)
         let id_token_claims = TokenClaims {
@@ -1222,6 +1251,73 @@ impl EmbeddedIdentityEngine {
             access_ttl_secs,
             refresh_token,
         ))
+    }
+
+    /// Handles a second use of an authorization code (RFC 6749 §4.1.2,
+    /// RFC 9700 §4.5; #783): ends the grant that the first exchange issued.
+    ///
+    /// When the code row does not name that grant yet, the first exchange is
+    /// still in progress (on this node or another) or it failed. This call
+    /// then writes the reuse mark, which an exchange in progress reads after
+    /// it records its grant, and reads the code row again, in case the
+    /// exchange recorded its grant after the first read. Best effort: a
+    /// failure is logged, and the caller refuses the code in all cases.
+    fn end_reused_code_grant(
+        &self,
+        realm_id: &RealmId,
+        code_hash: &str,
+        code: &StoredAuthorizationCode,
+    ) {
+        let issued = match code.issued_session_id.clone() {
+            Some(session_id) => Some(session_id),
+            None => {
+                if let Err(e) = self.claim_single_use(
+                    realm_id,
+                    &keys::encode_consumed_code_reuse(code_hash),
+                    code.expires_at,
+                ) {
+                    tracing::warn!(error = %e, "authorization code reuse mark not written");
+                }
+                self.storage
+                    .get(realm_id, &keys::encode_oauth_code(code_hash))
+                    .ok()
+                    .flatten()
+                    .and_then(|bytes| {
+                        serde_json::from_slice::<StoredAuthorizationCode>(&bytes).ok()
+                    })
+                    .and_then(|row| row.issued_session_id)
+            }
+        };
+        if let Some(session_id) = issued {
+            self.revoke_code_grant(realm_id, &code.client_id, &session_id);
+        }
+    }
+
+    /// Revokes the session that an authorization-code exchange opened, and
+    /// with it every token of that exchange: the access and ID tokens name
+    /// the session as `sid`, and the session revocation cascades into its
+    /// refresh-token families (#783). The revocation is the normal replicated
+    /// session revocation, so every node sees it.
+    ///
+    /// A session that is no longer live is left as it is, so a code that is
+    /// used again and again costs reads, not writes.
+    fn revoke_code_grant(&self, realm_id: &RealmId, client_id: &ClientId, session_id: &SessionId) {
+        match self.get_session(realm_id, session_id) {
+            Ok(Some(_)) => {}
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(error = %e, "authorization code reuse: session not read");
+                return;
+            }
+        }
+        tracing::warn!(
+            realm_id = %realm_id,
+            client_id = %client_id,
+            "authorization code used more than once; the grant of its first exchange is revoked"
+        );
+        if let Err(e) = self.revoke_session(realm_id, session_id) {
+            tracing::warn!(error = %e, "authorization code reuse: grant not revoked");
+        }
     }
 
     pub(super) fn oidc_discovery_inner(&self) -> OidcDiscoveryDocument {
