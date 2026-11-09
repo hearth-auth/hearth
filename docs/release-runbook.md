@@ -57,6 +57,30 @@ semantic-release computes the "next" version by looking at the most recent git t
 
 End-to-end time: CI gates → merge → the next daily release run (~5 min) → publish run (~10 min).
 
+## OpenID Foundation conformance run
+
+The OIDF suite needs Docker and about 15 minutes for all three plans (plus the Hearth image
+build), so CI does not run it. Run it on `main` before the daily release when the unreleased
+changes touch OAuth, OIDC, discovery, client registration or the token, UserInfo or
+authorization endpoints, and before each manual release:
+
+```bash
+make conformance-oidf-check        # the script's own guards (seconds, no Docker)
+make conformance-oidf PLAN=config  # MUST exit 0
+make conformance-oidf PLAN=basic   # regression check: compare with the newest report
+make conformance-oidf PLAN=dynamic # regression check: compare with the newest report
+```
+
+- **Config OP must exit 0.** A failed condition, or a warning or skip with no recorded decision,
+  stops the release: fix it, or record a decision in
+  `scripts/conformance-oidf/expected-warnings.json` / `expected-skips.json` in a PR.
+- **Basic OP and Dynamic OP do not pass today** (see the newest `reports/oidf-conformance-*.md`).
+  Compare the failures in `results.txt` with that report. A new failure is a regression: open an
+  issue before the release. Whether these plans become a release gate is an owner decision
+  (#780, #784).
+- Results go to `target/conformance-oidf/<timestamp>/` (`results.txt`, the suite's export and
+  the Hearth log). The script stops its own Compose project (`hearth-oidf`) at the end.
+
 ## How to cut a backport (maintenance branches)
 
 Maintenance branches are named `1.x`, `2.x`, etc., and map to semantic-release release channels of the same name.

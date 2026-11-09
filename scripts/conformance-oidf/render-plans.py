@@ -3,10 +3,14 @@
 Reads plans/<plan>.json from the config dir, replaces each ${NAME} with a
 value from the run's env file (or a derived value below), puts the shared
 browser steps (plans/browser.json) where a plan says "@browser.json", and
-writes the result to the output dir. It also writes expected-warnings.json
-with only the entries for the plans of this run: the suite's runner fails a
-run when an entry matches no test, and that check must stay on for the plans
-that run.
+writes the result to the output dir. A plan that says "@overrides.json"
+gets the per-test browser steps of plans/overrides.json, where
+"@task:<name>" stands for the browser.json task of that name.
+
+It also writes expected-warnings.json and expected-skips.json with only the
+entries for the plans of this run: the suite's runner fails a run when an
+entry matches no test, and that check must stay on for the plans that run.
+Each entry must have a decision. An expected skip must name one test module.
 
 Run with `python3 -I`. Standard library only.
 """
@@ -52,6 +56,31 @@ def substitute(node, values):
     return node
 
 
+def overrides(cfg, browser):
+    tasks = {t["task"]: t for entry in browser for t in entry["tasks"]}
+
+    def resolve(task):
+        if isinstance(task, str) and task.startswith("@task:"):
+            name = task[len("@task:"):]
+            if name not in tasks:
+                sys.exit(f"render-plans: overrides.json names an unknown task {name}")
+            return tasks[name]
+        return task
+
+    groups = json.loads((cfg / "plans" / "overrides.json").read_text())
+    result = {}
+    for name, group in groups.items():
+        if name == "comment":
+            continue
+        steps = [dict(entry, tasks=[resolve(t) for t in entry["tasks"]])
+                 for entry in group["browser"]]
+        for test in group["tests"]:
+            if test in result:
+                sys.exit(f"render-plans: {test} is in two override groups")
+            result[test] = {"browser": steps}
+    return result
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config-dir", required=True)
@@ -71,6 +100,8 @@ def main():
         doc = json.loads((cfg / "plans" / f"{plan}.json").read_text())
         if doc.get("browser") == "@browser.json":
             doc["browser"] = browser
+        if doc.get("override") == "@overrides.json":
+            doc["override"] = overrides(cfg, browser)
         doc = substitute(doc, values)
         (out / f"{plan}.json").write_text(json.dumps(doc, indent=2) + "\n")
 
@@ -86,6 +117,16 @@ def main():
     kept = [e for e in expected
             if any(fnmatch.fnmatch(n, e["configuration-filename"]) for n in names)]
     (out / "expected-warnings.json").write_text(json.dumps(kept, indent=2) + "\n")
+
+    skips = json.loads((cfg / "expected-skips.json").read_text())
+    for entry in skips:
+        if not entry.get("decision"):
+            sys.exit(f"render-plans: expected skip {entry.get('test-name')} has no decision")
+        if "*" in entry.get("test-name", "*"):
+            sys.exit("render-plans: an expected skip must name one test module, not a pattern")
+    kept = [e for e in skips
+            if any(fnmatch.fnmatch(n, e["configuration-filename"]) for n in names)]
+    (out / "expected-skips.json").write_text(json.dumps(kept, indent=2) + "\n")
 
 
 if __name__ == "__main__":

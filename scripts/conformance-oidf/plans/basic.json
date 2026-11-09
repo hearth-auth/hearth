@@ -9,9 +9,14 @@
     "client_id": "${OIDF_CLIENT_ID}",
     "client_secret": "${OIDF_CLIENT_SECRET}"
   },
+  "client_secret_post": {
+    "client_id": "${OIDF_CLIENT_ID}",
+    "client_secret": "${OIDF_CLIENT_SECRET}"
+  },
   "client2": {
     "client_id": "${OIDF_CLIENT2_ID}",
     "client_secret": "${OIDF_CLIENT2_SECRET}"
   },
-  "browser": "@browser.json"
+  "browser": "@browser.json",
+  "override": "@overrides.json"
 }

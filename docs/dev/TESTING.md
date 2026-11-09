@@ -173,42 +173,31 @@ the certifying bodies' own harnesses:
 
 These run in the ordinary `nextest` workspace suite and are therefore required-pass on merge.
 
-#### External suites — what has actually been run (2026-09-21)
+#### External suites — what has been run (2026-11-08)
 
-One official suite has now been executed. Earlier revisions of this section promised all three
-"when the protocol layer is implemented"; all three layers shipped and none of the suites
-followed. What follows is the state after the first real run. Full write-up:
-[`reports/conformance-suite-run-2026-09-21.md`](https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/conformance-suite-run-2026-09-21.md).
+`make conformance-oidf` (`scripts/conformance-oidf.sh`) runs the OpenID Foundation conformance
+suite (`gitlab.com/openid/conformance-suite`, pinned tag `release-v5.3.4`) in Docker against a
+production-mode Hearth: `serve -c`, TLS on, a real KEK, never `--dev`. `PLAN=config|basic|dynamic`
+runs one plan. The script exits non-zero on a failed condition, on a warning or a skipped module
+with no recorded decision (`scripts/conformance-oidf/expected-warnings.json`,
+`expected-skips.json`), and when a plan does not export. `make conformance-oidf-check` runs the
+script's own guards and self-tests (`scripts/tests/conformance-oidf.test.sh`). Full write-up:
+[`reports/oidf-conformance-2026-11-08.md`](../../reports/oidf-conformance-2026-11-08.md).
 
 | Suite | Status |
 |---|---|
-| **OpenID Foundation conformance suite** (`gitlab.com/openid/conformance-suite`, `release-v5.3.1`) | **Run 2026-09-21.** `oidcc-config-certification-test-plan` (the **Config OP** certification profile) executed against a production-mode Hearth — `serve -c`, TLS on, real KEK, **not** `--dev`. Run twice, against the global and the realm-scoped discovery documents; identical both times. **Result: 38 conditions passed, 1 failed, 1 warned — the plan FAILED.** |
-| OIDF authorization-flow profiles (Basic / Implicit / Hybrid OP) | **Not run.** They would fail on the same single defect below, which every OP profile checks. |
+| **OIDF Config OP** (`oidcc-config-certification-test-plan`) | **Passes** (2026-11-08): 39 conditions passed, 0 failed, 1 warning (`resource_indicators_supported`, recorded as KEEP). The RS256 failure of 2026-09-21 is gone. A release step (`docs/release-runbook.md`). |
+| **OIDF Basic OP** | **Fails.** The plan sends most requests without PKCE, which Hearth requires (owner decision #780). With the PKCE check off (diagnostic image only): 6 failures, from `max_age` / `prompt=login` (#782) and form POST to `/authorize` (#781). |
+| **OIDF Dynamic OP** | **Fails.** Most failures are design choices: code flow only, no `jwks_uri`, no signed UserInfo, no `request_uri` by reference, no RS256 client assertions (owner decision #784), and #785. |
+| OIDF Implicit / Hybrid OP | **Not run.** Hearth supports the code flow only. |
 | SCIM compliance suite | **Not run — and none exists to run.** The IETF operates no SCIM certification programme. The available options are Microsoft's hosted Entra SCIM Validator (needs a publicly reachable endpoint) and third-party checkers such as `scim2-tester`; neither is a certifying body's harness. |
 | SAML interop suite | **Not run.** The OASIS interop programme is dormant; the practical options are hosted services requiring public ingress. |
 
-**The one failure is a Hearth defect, not a configuration artefact.**
-`OIDCCCheckDiscEndpointIdTokenSigningAlgValuesSupported` fails because Hearth advertises
-`id_token_signing_alg_values_supported: ["EdDSA"]`. OpenID Connect Discovery 1.0 §3 requires
-that RS256 **MUST** be included, and OpenID Connect Core 1.0 §15.1 independently requires OPs to
-support signing ID tokens with RS256. Hearth's Ed25519-only signing policy is deliberate
-(`CLAUDE.md`, `openspec/specs/oidc-provider/spec.md`), but the consequence must be stated plainly:
-
-> **While Hearth signs ID tokens with EdDSA alone it cannot pass *any* OpenID Connect Core
-> certification profile** — including the discovery-only Config OP profile. Every OP profile runs
-> this same condition.
-
-The one warning (`CheckForUnexpectedParametersInServerMetadata`) is also a real, if minor,
-deviation: `resource_indicators_supported` is not a registered OAuth Authorization Server Metadata
-parameter. It is mandated by `openspec/specs/agent-identity/spec.md` and is a Hearth extension published under
-an unprefixed, unregistered name.
-
 > **Hearth is NOT certified, and MUST NOT be represented as certified, "OpenID Certified",
-> conformant, or as "passing the OpenID conformance suite".** This run *failed* the one profile it
-> executed. Even a passing local run would not be certification: that requires an OpenID Foundation
-> membership and certification agreement, a submitted passing test log, and OIDF acceptance. None
-> of that has happened. The same applies to SCIM and SAML, for which nothing external has been run
-> at all.
+> conformant, or as "passing the OpenID conformance suite".** Only the Config OP plan passes, and
+> a local run is not certification: that requires an OpenID Foundation certification agreement,
+> a submitted passing test log, and OIDF acceptance. None of that has happened. The same applies
+> to SCIM and SAML, for which nothing external has been run at all.
 
 ### 8. Benchmarks (`criterion`)
 
