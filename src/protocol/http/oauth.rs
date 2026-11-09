@@ -421,7 +421,9 @@ struct HttpTokenRequest {
     /// RFC 6749 §3.2.1: REQUIRED only "if the client is not authenticating
     /// with the authorization server" — a strict `client_secret_basic` client
     /// omits it, so the handlers backfill it from the Basic username via
-    /// [`backfill_client_id_from_basic`] before any dispatch (HEA-2112).
+    /// [`backfill_client_id`] before any dispatch (HEA-2112). A
+    /// `private_key_jwt` client may omit it too: it is then taken from the
+    /// assertion (#785).
     #[serde(default)]
     client_id: String,
     #[serde(default)]
@@ -531,7 +533,9 @@ struct HttpRevocationBody {
 // A-47 exception: RFC 6749 §3.1 — unknown request parameters are ignored, not refused.
 #[derive(Debug, Deserialize)]
 struct HttpDeviceAuthorizationBody {
-    #[serde(alias = "clientId")]
+    /// Optional when the client authenticates (Basic or an assertion): it is
+    /// then backfilled by [`backfill_client_id`] (RFC 8628 §3.1, #785).
+    #[serde(default, alias = "clientId")]
     client_id: String,
     #[serde(default)]
     scope: Option<String>,
@@ -726,14 +730,8 @@ async fn verify_endpoint_client(
     let (raw_id, secret) =
         match resolve_client_credentials(headers, body_client_id, body_client_secret)? {
             (Some(id), secret) => (id, secret),
-            (None, _) => {
-                return Err((
-                    StatusCode::UNAUTHORIZED,
-                    [("www-authenticate", "Basic realm=\"hearth\"")],
-                    Json(serde_json::json!({"error": "client_id required"})),
-                )
-                    .into_response())
-            }
+            // No credential names a client (RFC 6749 §5.2).
+            (None, _) => return Err(invalid_client_response()),
         };
 
     // RFC 6749 §5.2: the `error` field MUST be a registered code. Use
@@ -1149,11 +1147,16 @@ fn verify_assertion_client(
         return Err(invalid_client_response());
     };
     // The assertion's `iss`/`sub` must equal this id — the engine checks it.
-    let client_id = body_client_id
-        .and_then(non_empty_credential)
-        .and_then(|raw| raw.parse::<uuid::Uuid>().ok())
-        .map(ClientId::new)
-        .ok_or_else(invalid_client_response)?;
+    // With no body `client_id`, the assertion names the client (RFC 7523 §3,
+    // #785); that unverified name only selects whose keys verify it.
+    let client_id = match body_client_id.and_then(non_empty_credential) {
+        Some(raw) => raw.parse::<uuid::Uuid>().ok().map(ClientId::new),
+        None => crate::identity::client_auth::assertion_named_client(
+            Some(crate::identity::client_auth::CLIENT_ASSERTION_TYPE_JWT_BEARER),
+            Some(assertion),
+        ),
+    }
+    .ok_or_else(invalid_client_response)?;
     state
         .identity
         .verify_client_assertion(realm_id, &client_id, assertion)
@@ -1161,20 +1164,35 @@ fn verify_assertion_client(
         .map_err(|_| invalid_client_response())
 }
 
-/// Backfills an absent or empty body `client_id` from the Basic Auth username.
+/// Backfills an absent or empty body `client_id` from the Basic Auth
+/// username, else from the `private_key_jwt` assertion's `sub`.
 ///
 /// RFC 6749 §3.2.1 requires body `client_id` only when the client is not
 /// authenticating with the authorization server; a strictly compliant
 /// `client_secret_basic` client carries its identity solely in the
-/// Authorization header. Running this before dispatch gives per-client rate
-/// limiting, CORS, client-auth enforcement, and every grant arm one effective
-/// client identity. The §2.3.1 disagreement checks downstream are unaffected:
-/// a backfilled id always equals the Basic username.
-fn backfill_client_id_from_basic(headers: &HeaderMap, body: &mut HttpTokenRequest) {
-    if body.client_id.trim().is_empty() {
-        if let Some((basic_id, _)) = parse_basic_auth(headers) {
-            body.client_id = basic_id;
-        }
+/// Authorization header, and an assertion client in the assertion's `sub`
+/// (RFC 7521 §4.2, RFC 7523 §3; #785). Running this before dispatch gives
+/// per-client rate limiting, CORS, client-auth enforcement, and every grant
+/// arm one effective client identity. The §2.3.1 disagreement checks
+/// downstream are unaffected: a backfilled id always equals the Basic
+/// username. An id taken from the assertion is not trusted: it only selects
+/// whose keys verify the assertion, which is then verified in full (`iss` and
+/// `sub` must equal this id).
+fn backfill_client_id(
+    headers: &HeaderMap,
+    client_id: &mut String,
+    assertion_type: Option<&str>,
+    assertion: Option<&str>,
+) {
+    if !client_id.trim().is_empty() {
+        return;
+    }
+    if let Some((basic_id, _)) = parse_basic_auth(headers) {
+        *client_id = basic_id;
+    } else if let Some(named) =
+        crate::identity::client_auth::assertion_named_client(assertion_type, assertion)
+    {
+        *client_id = named.as_uuid().to_string();
     }
 }
 
@@ -2637,7 +2655,12 @@ async fn token_exchange(
     // (RFC 6749 §3.2.1) — adopt the Basic username before anything keys off
     // the client identity, including the CORS lookup and, inside the impl,
     // the per-client token rate limit.
-    backfill_client_id_from_basic(&headers, &mut body);
+    backfill_client_id(
+        &headers,
+        &mut body.client_id,
+        body.client_assertion_type.as_deref(),
+        body.client_assertion.as_deref(),
+    );
 
     // Parse client_id and realm_id before dispatch so CORS can be applied to
     // every response path, including grant-type-specific error branches.
@@ -2835,13 +2858,9 @@ async fn token_exchange_impl(
 
             let mut request = match proto_token_exchange_to_domain(&proto_req) {
                 Ok(r) => r,
-                Err(msg) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error": msg})),
-                    )
-                        .into_response();
-                }
+                // The only conversion failure is a `client_id` that is not a
+                // client id: the client is not identified (RFC 6749 §5.2).
+                Err(_) => return invalid_client_response(),
             };
             // RFC 8707: the token request's resource is checked by the grant.
             request.resource.clone_from(&body.resource);
@@ -2963,13 +2982,9 @@ async fn token_exchange_impl(
 
             let mut request = match proto_client_creds_to_domain(&proto_req) {
                 Ok(r) => r,
-                Err(msg) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error": msg})),
-                    )
-                        .into_response();
-                }
+                // The only conversion failure is a `client_id` that is not a
+                // client id: the client is not identified (RFC 6749 §5.2).
+                Err(_) => return invalid_client_response(),
             };
             // RFC 8707: the token request's resource is checked by the grant.
             request.resource.clone_from(&body.resource);
@@ -3042,13 +3057,7 @@ async fn token_exchange_impl(
 
             let oauth_client_id = match body.client_id.parse::<uuid::Uuid>() {
                 Ok(u) => ClientId::new(u),
-                Err(_) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error": "invalid client_id UUID"})),
-                    )
-                        .into_response();
-                }
+                Err(_) => return invalid_client_response(),
             };
 
             match state.identity.poll_device_token(
@@ -3085,13 +3094,7 @@ async fn token_exchange_impl(
             };
             let oauth_client_id = match body.client_id.parse::<uuid::Uuid>() {
                 Ok(u) => ClientId::new(u),
-                Err(_) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error": "invalid client_id UUID"})),
-                    )
-                        .into_response();
-                }
+                Err(_) => return invalid_client_response(),
             };
             let request = JwtBearerRequest {
                 client_id: oauth_client_id,
@@ -3426,22 +3429,22 @@ async fn oauth_decide_permission(
 async fn device_authorization(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    JsonOrForm(body): JsonOrForm<HttpDeviceAuthorizationBody>,
+    JsonOrForm(mut body): JsonOrForm<HttpDeviceAuthorizationBody>,
 ) -> impl IntoResponse {
     let realm_id = match extract_realm_id(&headers) {
         Ok(t) => t,
         Err(e) => return e.into_response(),
     };
 
+    backfill_client_id(
+        &headers,
+        &mut body.client_id,
+        body.client_assertion_type.as_deref(),
+        body.client_assertion.as_deref(),
+    );
     let client_id = match body.client_id.parse::<uuid::Uuid>() {
         Ok(u) => ClientId::new(u),
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid client_id UUID"})),
-            )
-                .into_response();
-        }
+        Err(_) => return invalid_client_response(),
     };
     if let Err(resp) = check_token_rate_limit(&state, &realm_id, &client_id) {
         return resp;
@@ -3904,7 +3907,12 @@ async fn realm_token_exchange(
     // A strict `client_secret_basic` client omits body `client_id`
     // (RFC 6749 §3.2.1) — adopt the Basic username before the rate limiter
     // and grant dispatch key off the client identity.
-    backfill_client_id_from_basic(&headers, &mut body);
+    backfill_client_id(
+        &headers,
+        &mut body.client_id,
+        body.client_assertion_type.as_deref(),
+        body.client_assertion.as_deref(),
+    );
 
     // Real peer threaded from the outer handler; FALLBACK_PEER only in tests
     // without ConnectInfo. Resolved before the rate limiter so a request with
@@ -4062,13 +4070,9 @@ async fn realm_token_exchange(
             };
             let mut request = match proto_token_exchange_to_domain(&proto_req) {
                 Ok(r) => r,
-                Err(msg) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error": msg})),
-                    )
-                        .into_response()
-                }
+                // The only conversion failure is a `client_id` that is not a
+                // client id: the client is not identified (RFC 6749 §5.2).
+                Err(_) => return invalid_client_response(),
             };
             // RFC 8707: the token request's resource is checked by the grant.
             request.resource.clone_from(&body.resource);
@@ -4163,13 +4167,9 @@ async fn realm_token_exchange(
             };
             let mut request = match proto_client_creds_to_domain(&proto_req) {
                 Ok(r) => r,
-                Err(msg) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error": msg})),
-                    )
-                        .into_response()
-                }
+                // The only conversion failure is a `client_id` that is not a
+                // client id: the client is not identified (RFC 6749 §5.2).
+                Err(_) => return invalid_client_response(),
             };
             // RFC 8707: the token request's resource is checked by the grant.
             request.resource.clone_from(&body.resource);
@@ -4229,13 +4229,7 @@ async fn realm_token_exchange(
             };
             let oauth_client_id = match body.client_id.parse::<uuid::Uuid>() {
                 Ok(u) => ClientId::new(u),
-                Err(_) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error": "invalid client_id UUID"})),
-                    )
-                        .into_response()
-                }
+                Err(_) => return invalid_client_response(),
             };
             match state.identity.poll_device_token(
                 &realm_id,
@@ -4261,13 +4255,7 @@ async fn realm_token_exchange(
             };
             let oauth_client_id = match body.client_id.parse::<uuid::Uuid>() {
                 Ok(u) => ClientId::new(u),
-                Err(_) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error": "invalid client_id UUID"})),
-                    )
-                        .into_response();
-                }
+                Err(_) => return invalid_client_response(),
             };
             let request = JwtBearerRequest {
                 client_id: oauth_client_id,
@@ -4582,25 +4570,20 @@ async fn realm_device_authorization(
         Ok(id) => id,
         Err(e) => return e,
     };
-    let client_id_str = match body.get("client_id").and_then(|v| v.as_str()) {
-        Some(s) => s.to_string(),
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "client_id required"})),
-            )
-                .into_response()
-        }
-    };
+    let mut client_id_str = body
+        .get("client_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    backfill_client_id(
+        &headers,
+        &mut client_id_str,
+        body.get("client_assertion_type").and_then(|v| v.as_str()),
+        body.get("client_assertion").and_then(|v| v.as_str()),
+    );
     let client_id = match client_id_str.parse::<uuid::Uuid>() {
         Ok(u) => ClientId::new(u),
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid client_id UUID"})),
-            )
-                .into_response()
-        }
+        Err(_) => return invalid_client_response(),
     };
     if let Err(resp) = check_token_rate_limit(&state, &realm_id, &client_id) {
         return resp;

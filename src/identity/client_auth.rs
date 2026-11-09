@@ -74,6 +74,48 @@ pub fn presented_client_assertion<'a>(
     }
 }
 
+/// The client that a `private_key_jwt` assertion names, read WITHOUT
+/// verification (RFC 7521 §4.2, RFC 7523 §3).
+///
+/// A client that authenticates with an assertion can omit `client_id`: the
+/// client is then the assertion's `sub`, which must equal its `iss`. This
+/// gives `Some` only for a presented jwt-bearer assertion (see
+/// [`presented_client_assertion`]) whose payload has `iss` equal to `sub` in
+/// the issued client-id form. The result only selects whose registered keys
+/// verify the assertion: the caller MUST then verify it in full
+/// (`IdentityEngine::verify_client_assertion` or the engine's grant), which
+/// checks the signature, `iss`, `sub`, `aud`, `exp` and `jti` again.
+#[must_use]
+pub fn assertion_named_client(
+    assertion_type: Option<&str>,
+    assertion: Option<&str>,
+) -> Option<ClientId> {
+    use base64::Engine as _;
+
+    /// The two claims that name the client; everything else is ignored here.
+    #[derive(serde::Deserialize)]
+    struct Named {
+        iss: String,
+        sub: String,
+    }
+
+    let jwt = presented_client_assertion(assertion_type, assertion).ok()??;
+    let mut parts = jwt.split('.');
+    let (Some(_), Some(payload), Some(_), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let named: Named = serde_json::from_slice(&bytes).ok()?;
+    if named.iss != named.sub {
+        return None;
+    }
+    crate::identity::tokens::parse_issued_client_id(&named.sub)
+}
+
 /// How often one entry-point call re-verifies after the stored hash changed
 /// under it before shedding.
 const MAX_SECRET_DISPATCHES: usize = 3;
@@ -440,5 +482,61 @@ mod tests {
             inline_argon2, 0,
             "Argon2id must never run inline on the calling (worker) thread"
         );
+    }
+
+    /// An unsigned JWT shape with the given payload (the signature part is
+    /// not read by [`assertion_named_client`]).
+    fn jwt_with(payload: &serde_json::Value) -> String {
+        use base64::Engine as _;
+        let enc = |v: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v);
+        format!(
+            "{}.{}.{}",
+            enc(r#"{"alg":"EdDSA"}"#),
+            enc(&payload.to_string()),
+            enc("sig")
+        )
+    }
+
+    /// #785: the assertion names the client only when `iss` equals `sub` in
+    /// the issued form, and only for the jwt-bearer type.
+    #[test]
+    fn assertion_named_client_reads_sub_when_it_equals_iss() {
+        let client = ClientId::generate();
+        let id = client.as_uuid().to_string();
+        let other = ClientId::generate().as_uuid().to_string();
+        let jwt = jwt_with(&serde_json::json!({"iss": id, "sub": id}));
+        let bearer = Some(CLIENT_ASSERTION_TYPE_JWT_BEARER);
+
+        assert_eq!(assertion_named_client(bearer, Some(&jwt)), Some(client));
+
+        let cases = [
+            (
+                bearer,
+                jwt_with(&serde_json::json!({"iss": other, "sub": id})),
+            ),
+            (bearer, jwt_with(&serde_json::json!({"sub": id}))),
+            (
+                bearer,
+                jwt_with(
+                    &serde_json::json!({"iss": format!("client_{id}"), "sub": format!("client_{id}")}),
+                ),
+            ),
+            (
+                bearer,
+                jwt_with(&serde_json::json!({"iss": "x", "sub": "x"})),
+            ),
+            (bearer, "a.b.c".to_string()),
+            (bearer, format!("{jwt}.extra")),
+            (Some("urn:x"), jwt.clone()),
+            (None, jwt.clone()),
+        ];
+        for (i, (kind, assertion)) in cases.iter().enumerate() {
+            assert_eq!(
+                assertion_named_client(*kind, Some(assertion)),
+                None,
+                "case {i} must name no client"
+            );
+        }
+        assert_eq!(assertion_named_client(bearer, None), None);
     }
 }
