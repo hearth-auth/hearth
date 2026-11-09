@@ -1417,6 +1417,19 @@ pub struct OidcDiscoveryDocument {
     /// clients only (RFC 7662 §2.1, task 26.43).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub introspection_endpoint_auth_methods_supported: Vec<String>,
+    /// JWS algorithms that the token endpoint accepts for a `private_key_jwt`
+    /// client assertion (RFC 8414 §2: present when
+    /// `token_endpoint_auth_methods_supported` lists `private_key_jwt`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub token_endpoint_auth_signing_alg_values_supported: Vec<String>,
+    /// JWS algorithms that the revocation endpoint accepts for a
+    /// `private_key_jwt` client assertion (RFC 8414 §2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revocation_endpoint_auth_signing_alg_values_supported: Vec<String>,
+    /// JWS algorithms that the introspection endpoint accepts for a
+    /// `private_key_jwt` client assertion (RFC 8414 §2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub introspection_endpoint_auth_signing_alg_values_supported: Vec<String>,
     /// Whether RFC 8707 resource indicators are supported.
     #[serde(default)]
     pub resource_indicators_supported: bool,
@@ -1444,6 +1457,16 @@ pub struct OidcDiscoveryDocument {
     /// on `/authorize` and `/as/par`. Clients MUST use one of these algorithms.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub request_object_signing_alg_values_supported: Vec<String>,
+    /// Whether `/authorize` accepts a `request` object (OIDC Discovery 1.0
+    /// §3; RFC 9101). Omitted, the field means `false`.
+    #[serde(default)]
+    pub request_parameter_supported: bool,
+    /// Whether `/authorize` fetches a `request_uri` by reference (OIDC
+    /// Discovery 1.0 §3). Omitted, the field means `true`, so it is always
+    /// sent. Hearth sets `false`: it accepts only the `request_uri` that its
+    /// PAR endpoint returned (RFC 9126) and never fetches one.
+    #[serde(default)]
+    pub request_uri_parameter_supported: bool,
 }
 
 // ===== JWT Authorization Requests — RFC 9101 (JAR) =====
@@ -2391,6 +2414,9 @@ mod tests {
             introspection_endpoint: Some("https://hearth.local/introspect".to_string()),
             revocation_endpoint_auth_methods_supported: vec![],
             introspection_endpoint_auth_methods_supported: vec![],
+            token_endpoint_auth_signing_alg_values_supported: vec![],
+            revocation_endpoint_auth_signing_alg_values_supported: vec![],
+            introspection_endpoint_auth_signing_alg_values_supported: vec![],
             resource_indicators_supported: true,
             authorization_response_iss_parameter_supported: true,
             end_session_endpoint: Some("https://hearth.local/end_session".to_string()),
@@ -2399,6 +2425,8 @@ mod tests {
             pushed_authorization_request_endpoint: None,
             dpop_signing_alg_values_supported: Vec::new(),
             request_object_signing_alg_values_supported: Vec::new(),
+            request_parameter_supported: true,
+            request_uri_parameter_supported: false,
         };
 
         let json = serde_json::to_string(&doc).expect("serialize");

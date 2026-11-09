@@ -6041,6 +6041,12 @@ impl EmbeddedIdentityEngine {
     }
 
     fn build_discovery_document(&self, issuer: &str) -> OidcDiscoveryDocument {
+        let client_assertion_algs = || {
+            client_jwks::CLIENT_ASSERTION_ALGS
+                .iter()
+                .map(|alg| (*alg).to_string())
+                .collect::<Vec<_>>()
+        };
         OidcDiscoveryDocument {
             issuer: issuer.to_string(),
             authorization_endpoint: format!("{issuer}/authorize"),
@@ -6105,6 +6111,11 @@ impl EmbeddedIdentityEngine {
                 "client_secret_post".to_string(),
                 "private_key_jwt".to_string(),
             ],
+            // The algorithms that a `private_key_jwt` assertion may use, at
+            // every endpoint that accepts one (RFC 8414 §2).
+            token_endpoint_auth_signing_alg_values_supported: client_assertion_algs(),
+            revocation_endpoint_auth_signing_alg_values_supported: client_assertion_algs(),
+            introspection_endpoint_auth_signing_alg_values_supported: client_assertion_algs(),
             resource_indicators_supported: true,
             authorization_response_iss_parameter_supported: true,
             end_session_endpoint: Some(format!("{issuer}/end_session")),
@@ -6118,6 +6129,8 @@ impl EmbeddedIdentityEngine {
                 "ES256".to_string(),
                 "EdDSA".to_string(),
             ],
+            request_parameter_supported: true,
+            request_uri_parameter_supported: false,
         }
     }
 
