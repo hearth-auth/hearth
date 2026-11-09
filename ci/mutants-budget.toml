@@ -1,0 +1,25 @@
+# Survivor budget for the nightly cargo-mutants run (#641).
+#
+# OpenSpec trusted-core-confidence, design decision 5. The scheduled mutation
+# run (task 4.1) runs cargo-mutants on each module below, in parallel shards.
+# A survivor is a mutant that no test catches. scripts/check-mutants-budget.py
+# adds the survivors of all shards of a module and FAILS when the sum is more
+# than `survivors`.
+#
+# The budget only goes down:
+# - More survivors than the budget: the run fails. Add a test that catches the
+#   new survivor, or an exclusion with a reason in .cargo/mutants.toml.
+# - Fewer survivors: the run passes and tells you to lower the budget here.
+# - No `survivors` key: the run fails. The first run gives the count to record
+#   (design Open Question 3: the budget starts at the first-run count).
+#
+# `files` are cargo-mutants `--file` globs.
+
+[modules.identity]
+files = ["src/identity/**"]
+
+[modules.rbac]
+files = ["src/rbac/**"]
+
+[modules.protocol-http]
+files = ["src/protocol/http/**"]

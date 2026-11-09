@@ -593,6 +593,18 @@ jobs:
       - name: Mutation spot-check runner — self-test
         run: bash scripts/tests/mutation-spot-check.test.sh
 
+      # #641: the cheap half of the cargo-mutants survivor budget. The budget
+      # file must parse and each module glob must match a source file. Builds
+      # nothing; the mutation run itself is too long for a PR.
+      - name: Mutants budget file is live (check-mutants-budget.py --check-config)
+        run: python3 -I scripts/check-mutants-budget.py --check-config
+
+      # Proof the budget check can go red: it must fail when a module has more
+      # survivors than its budget, when no budget is recorded, and when a shard
+      # is missing, did not finish, or has a failed baseline.
+      - name: Mutants budget check — self-test
+        run: bash scripts/tests/check-mutants-budget.test.sh
+
       # Audit blockers B2 (§4.8#1) and B6 (§4.12#1): the container image, the
       # Helm chart and seven SDK releases published from a commit whose suite was
       # red, because only the binary channel was gated. The v1.6.11 image and

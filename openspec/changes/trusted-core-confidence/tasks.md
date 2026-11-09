@@ -56,7 +56,8 @@
 
 - [ ] 4.1 Nightly `cargo-mutants` workflow on `src/identity/`, `src/rbac/`, `src/protocol/http/`, sharded
 - [ ] 4.2 First run; write `ci/mutants-budget.toml` (design Open Question 3)
-- [ ] 4.3 Budget check script with a self-test that proves it can fail
+- [x] 4.3 Budget check script with a self-test that proves it can fail
+  - `scripts/check-mutants-budget.py`, self-test `scripts/tests/check-mutants-budget.test.sh`, budget file `ci/mutants-budget.toml` with no counts yet (a module with no count fails). Both run in the `ci.yml` filter job.
 - [ ] 4.4 Triage the survivors in the token-issuance and session code: a test, or an exclusion with a reason
 
 ## 5. External pentest
