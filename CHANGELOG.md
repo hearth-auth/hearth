@@ -58,6 +58,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   now gets `400` with `"error": "invalid_grant"` (RFC 6749 §5.2). Before, it got `401` with
   `"error": "invalid token"`, `"token expired"` or `"token revoked"`. The `error_code` stays
   `HEARTH_TOKEN_INVALID`, `HEARTH_TOKEN_EXPIRED` or `HEARTH_TOKEN_REVOKED`.
+- **A `private_key_jwt` client can omit `client_id`** (#785): at `POST /token`,
+  `POST /device_authorization`, `POST /as/par`, `POST /introspect`, `POST /revoke` and their
+  `/realms/{realm_name}/…` twins, a request that authenticates with `client_assertion` and has no
+  `client_id` now uses the client that the assertion names in `sub` (it must equal `iss`; RFC 7521
+  §4.2, RFC 7523 §3). Hearth then verifies the assertion in full, as before. Before, `/token` and
+  `/device_authorization` refused such a request with `400`. `POST /device_authorization` also
+  accepts a client that sends its `client_id` only in the HTTP Basic header, as `/token` does.
+- **A client that Hearth cannot identify gets `401 invalid_client`** (#785): at `POST /token`,
+  `POST /device_authorization`, `POST /revoke` and their `/realms/{realm_name}/…` twins, a request
+  with no `client_id`, or with a `client_id` that is not a client id, now gets `401` with
+  `"error": "invalid_client"` and `WWW-Authenticate: Basic` (RFC 6749 §5.2). Before, it got `400`
+  with `"error": "invalid client_id UUID"` or `"client_id required"`, or `401` with
+  `"error": "client_id required"`.
 - **A confidential client's authorization request without PKCE gets an error redirect** (#639):
   `GET /ui/oauth/authorize` and `GET /ui/realms/{realm_name}/oauth/authorize` now refuse a plain
   request without `code_challenge` from any client, public or confidential, with an

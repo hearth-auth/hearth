@@ -33,7 +33,7 @@ fn make_realm(harness: &common::TestHarness) -> String {
 
 /// RFC 7009 §2.1 — `POST /realms/{realm}/revoke` MUST accept a form body.
 /// The route requires client authentication (audit 2026-08-28 §4.1#3), so an
-/// anonymous form body yields 401 `client_id required` — reaching that check
+/// anonymous form body yields 401 `invalid_client` — reaching that check
 /// proves the form parsed (previously 415).
 #[tokio::test]
 async fn realm_revoke_accepts_form_encoded_body() {
