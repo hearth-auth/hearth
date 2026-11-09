@@ -404,6 +404,12 @@ pentest-scope-check: ## Assert the pentest scope names only real paths and route
 	@python3 scripts/check-pentest-scope.py
 	@bash scripts/tests/check-pentest-scope.test.sh
 
+## Guard: the cargo-mutants survivor budget file is live, and the budget check
+## can fail (#641). Runs in ci.yml's filter job. The mutation run is nightly.
+mutants-budget-check: ## Assert the mutants budget file is live and its check can go red
+	@python3 -I scripts/check-mutants-budget.py --check-config
+	@bash scripts/tests/check-mutants-budget.test.sh
+
 ## Guard: the SLSA provenance generator must still be the commit we reviewed
 ## (audit 2026-08-28 §4.8#13). Upstream refuses a @<sha> reference, so the pin
 ## lives in .github/slsa-generator.pin. Needs network. Runs in ci.yml's filter

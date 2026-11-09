@@ -14,6 +14,7 @@ exists to catch — a guard that only ever exits 0 is indistinguishable from a s
 | `release-pr.test.sh` | `scripts/release-bump.sh`, `scripts/changelog_cut.py` and `scripts/release-pr.sh` (the release PR, and its `--refresh`) |
 | `check-publish-gating.test.sh` | `scripts/check-publish-gating.sh` (audit B2/B6) |
 | `await-green-commit.test.sh` | `scripts/await-green-commit.sh` (audit B2/B6) |
+| `check-mutants-budget.test.sh` | `scripts/check-mutants-budget.py`, the cargo-mutants survivor budget (#641) |
 
 Run one locally:
 
