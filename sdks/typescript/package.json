@@ -37,7 +37,7 @@
     "format:check": "prettier --check ."
   },
   "dependencies": {
-    "jose": "^6.2.14",
+    "jose": "^6.2.15",
     "openapi-fetch": "^0.17.0"
   },
   "peerDependencies": {
