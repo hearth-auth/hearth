@@ -81,6 +81,28 @@ Your app (step 3) needs three values: the **realm slug** — `dev-realm` in `--d
 `/admin/bootstrap` returns `404 Not Found` outside `--dev` mode. In production, create realms and register clients via `hearth.yaml` or the Admin API — never bootstrap.
 :::
 
+### The first admin in production
+
+A new production data directory has no admin. Until one exists, the server logs a `WARN` at
+every start:
+
+```
+WARN first-run setup required: open this URL and supply the token from the
+     token file in the data directory  setup_url=https://auth.example.com/ui/setup
+     token_file=".setup_token"
+```
+
+The token is not logged in production. Read it from the data directory and add it to the URL.
+`/ui/setup` without a `token` answers `404`, so nobody can find the flow by browsing:
+
+```bash
+SETUP_TOKEN=$(cat /var/lib/hearth/data/.setup_token)
+echo "https://auth.example.com/ui/setup?token=$SETUP_TOKEN"
+```
+
+Open that URL once and create the operator account. The token works one time, and the admin is
+created in the system realm. Then set `onboarding.enabled: false` to close the flow for good.
+
 ---
 
 ## 3. Add login to your app
@@ -945,9 +967,9 @@ For browser SPA and BFF token-storage patterns, see [Browser / SPA token handlin
 | Browser / SPA token storage (XSS vs CSRF trade-offs) | [Browser / SPA token handling](browser-spa-tokens.md) |
 | Local dev, mailcatcher email inbox | [Local dev guide](local-dev.md) |
 | Realms, RBAC, and token lifecycle explained | [Conceptual model](concepts.md) |
-| Create roles, assign permissions, manage groups | [RBAC guide](rbac.md) |
-| B2B multi-tenancy within a realm | [Organizations guide](organizations.md) |
-| Production config, TLS, email | [Configuration reference](../../README.md#configuration) |
+| Create roles, assign permissions, manage groups | [RBAC guide](rbac.mdx) |
+| B2B multi-tenancy within a realm | [Organizations guide](organizations.mdx) |
+| Production config, TLS, email | [Configuration reference](configuration-reference.md) |
 | Import from Keycloak | [Migration guide](migrating-from-keycloak.md) |
 | Upgrade to a new Hearth version | [Upgrading guide](upgrading.md) |
 | Client SDKs (TypeScript, Go, Python, PHP) | [SDK overview](/docs/sdks/overview) |

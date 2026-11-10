@@ -204,7 +204,7 @@ Apache 2.0, self-hosted, no per-seat pricing, no vendor lock-in, no phone-home t
 - Claims-based RBAC: roles, nested groups, per-realm and per-org role assignments
 - Effective permissions resolved at token-issue time and embedded in the JWT (`roles`, `groups`, `permissions`)
 - `GET /v1/me/permissions` for live introspection; SDK helpers for local `hasPermission` / `hasRole` checks
-- Three permission-delivery modes per client: `embedded` (default, stateless), `introspection` (live RBAC via `/introspect`), `decision` (per-request allow/deny via `POST /oauth/authorize`) — see [Permission-delivery modes guide](docs/guides/permission-delivery.md)
+- Three permission-delivery modes per client: `embedded` (default, stateless), `introspection` (live RBAC via `/introspect`), `decision` (per-request allow/deny via `POST /oauth/authorize`) — see [Permission-delivery modes guide](docs/guides/permission-delivery.mdx)
 
 **Multi-tenancy**
 - Realm-isolated keyspace (every key prefixed with `RealmId`)
@@ -259,26 +259,19 @@ We publish no competitor comparison. These figures are for one server size and o
 
 ## How we build it
 
-Identity infrastructure has zero tolerance for data loss and low tolerance for inconsistency. Hearth backs that with eight testing layers, all runnable locally and wired into CI:
+Hearth has eight testing layers: unit, black box, property, fuzz, crash-recovery simulation,
+adversarial, conformance and benchmarks. All of them run locally and in CI.
+[`docs/dev/TESTING.md`](docs/dev/TESTING.md) describes each layer. The storage engine must
+survive `kill -9` at any point, and every WAL invariant has a crash-recovery test.
 
-1. **Unit** — inline `#[cfg(test)]`, TDD-first. A failing test precedes every feature.
-2. **Integration / black box** — a `TestHarness` runs the same suite in embedded *and* HTTP server modes.
-3. **Property** — `proptest`, 256 cases locally, 10,000+ in CI.
-4. **Fuzz** — `cargo-fuzz` against wire parsers (CBOR, protobuf, JWT, authenticator data).
-5. **Crash-recovery simulation** — real-thread tests against real temp directories with oracle-checked invariants and a `FaultFs` I/O fault hook: [`realm_crash`](simulation/src/tests/realm_crash.rs), [`audit_crash`](simulation/src/tests/audit_crash.rs), [`realm_concurrent_io`](simulation/src/tests/realm_concurrent_io.rs), [`rbac_concurrent_assignments`](simulation/src/tests/rbac_concurrent_assignments.rs).
-6. **Adversarial** — timing attacks, brute-force lockout, enumeration resistance, TLS downgrade, privilege escalation.
-7. **Conformance** — in-repo suites for OIDC Core 1.0, Discovery 1.0, Dynamic Client Registration, PAR/JAR/DPoP, RFC 8693/8707/9728, and the WebAuthn Level 2 ceremony. These are Hearth's own tests read against the specs. The OpenID Foundation conformance suite (`v5.3.1`, Config OP profile) was run locally on 2026-09-21 and **failed**: 38 conditions passed, 1 failed (a Discovery 1.0 §3 deviation), 1 warned; the authorization-flow profiles were not run ([`reports/conformance-suite-run-2026-09-21.md`](https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/reports/conformance-suite-run-2026-09-21.md)). **Hearth is not certified** against any standard.
-8. **Benchmarks** — `criterion`, with regression gating in CI.
+Every test suite and the SDK conformance check are in the `needs:` list of the
+`required-summary` job in [`.github/workflows/ci.yml`](.github/workflows/ci.yml), so a red suite
+blocks a merge. This README does not claim a green result for a commit. Look at the CI badge
+above, or at the `validation-summary.txt` asset of a release.
 
-**Crash-survival is part of the spec.** The storage engine must survive `kill -9` at any point and recover to a consistent state. Every WAL invariant has a crash-recovery scenario that exercises it.
-
-**CI tiers:** Fast (every commit) · Standard (merge) · Extended (nightly) · Full (weekly).
-
-**Current status.** Phase 0 (148/148 scenarios) and Phase 1 (134/135 scenarios). **The full Rust suite (`make test`, `hearth` lib + bin, `tests/` and the `hearth-simulation` crash-recovery crate) ran 6,056 tests at `060d4541`, plus 14 `#[ignore]` tests that do not run by default** (seven live-LDAP cases, since removed with LDAP support in 3.0.0; two waiting on an abuse facade, two on external attestation, a manual WAL measurement, a slow restore baseline and the unfinished tenant-enumeration acceptance test). The count moves with every PR — reproduce it with `cargo nextest list --workspace --features hearth/dev-endpoints` rather than taking the number on faith.
-
-The Rust suite, the seven SDK suites and the SDK conformance check are all in the `needs:` list of the `required-summary` job in [`.github/workflows/ci.yml`](.github/workflows/ci.yml), so a red suite blocks merge. This README does not assert a green result for any particular commit: look at the CI badge above, or at the `validation-summary.txt` asset on a given release.
-
-> **1 Phase 1 scenario open** (not yet covered by tests): pbjson int64-as-string coercion — [`docs/specs/TEST_SCENARIOS.md`](https://github.com/hearth-auth/hearth/blob/4d9dda1f5b514891e90dadeffb03d1a026af4e51/docs/specs/TEST_SCENARIOS.md) §Proto & API Contract Validation › Unit. Coverage tracked in HEA-1836.
+**Hearth is not certified** against any standard. The OpenID Foundation conformance suite runs
+locally: the latest run (2026-11-08) passes the Config OP profile and fails the Basic OP and
+Dynamic OP profiles ([`reports/oidf-conformance-2026-11-08.md`](reports/oidf-conformance-2026-11-08.md)).
 
 ---
 
@@ -302,7 +295,7 @@ cargo build --release
 
 That is a production build. The dev-only surface — `POST /admin/bootstrap`, the `/dev/seed-*`
 routes and the hard-coded dev admin password — is behind the `dev-endpoints` cargo feature,
-which is **not** on by default. To use the bootstrap flow below, build with
+which is **not** on by default. To use the bootstrap flow, build with
 `cargo build --release --features dev-endpoints` (or just run `make dev`). `serve --dev` on a
 featureless binary still starts, and logs that bootstrap is unavailable.
 
@@ -344,254 +337,41 @@ See [`examples/`](examples/) for the full list of runnable demos.
 
 ## Bootstrap an Admin (dev mode only)
 
-Dev mode exposes a convenience endpoint that creates a realm, an admin user, a session, assigns the `realm.admin` role (which carries the `hearth.admin` permission), and issues tokens — everything you need to try the OAuth flow locally:
+Under `--dev`, `POST /admin/bootstrap` creates a realm, an admin user and tokens. It also
+creates the console operator `admin@hearth.test` in the system realm. The first call alone
+returns the passwords and the TOTP secrets. In production the route answers `404`.
+[`docs/dev/DEVELOPMENT.md`](docs/dev/DEVELOPMENT.md) describes the dev accounts, the response
+and re-bootstrap. [Getting Started](docs/guides/getting-started.mdx) uses it to register an app.
+To create the first admin in production, see
+[Getting Started → the first admin in production](docs/guides/getting-started.mdx#the-first-admin-in-production).
 
-```bash
-curl -fsS -X POST http://127.0.0.1:8420/admin/bootstrap
-```
-
-Response (JSON):
-
-```json
-{
-  "realm_id":            "<uuid>",
-  "user_id":             "<uuid>",
-  "access_token":        "<jwt>",
-  "refresh_token":       "<jwt>",
-  "quickstart":          "<shell snippet with realm_id and token interpolated>",
-  "admin_password":      "<randomly generated — non-empty on first call only>",
-  "system_access_token": "<jwt scoped to the system realm for cross-realm admin ops>",
-  "system_realm_id":     "00000000-0000-0000-0000-000000000000",
-  "totp_secret":         "<base32 TOTP secret for admin@dev.local — first call only>",
-  "admin_totp_secret":   "<base32 TOTP secret for admin@hearth.test — first call only>"
-}
-```
-
-`admin_password` is returned **only on the first bootstrap call**. Store it securely — subsequent re-bootstrap calls return JSON `null` for that field. Re-bootstrap (after server restart or token expiry) requires a valid `Authorization: Bearer <access_token>` header from the initial bootstrap; without it the call answers `401`.
-
-Bootstrap creates **two** admin identities that share the returned `admin_password`:
-
-| Identity | Realm | Used for |
-|---|---|---|
-| `admin@dev.local` | the `dev-realm` it just created | the REST/OIDC walkthrough below — this is the `sub` behind `access_token` |
-| `admin@hearth.test` | the system realm (`00000000-…-0000`) | the browser admin console at `/ui/admin/login` |
-
-Bootstrap enrols TOTP for both identities on the first call. `totp_secret` belongs to `admin@dev.local`. `admin_totp_secret` belongs to `admin@hearth.test`. Both are empty on re-bootstrap, so store them with the password.
-
-Signing in at `/ui/admin/login` as `admin@dev.local` answers `401`: operators live in the system realm, so use `admin@hearth.test`. The system realm always requires MFA, so the console asks for a TOTP code after the password. Add `admin_totp_secret` to an authenticator app, or compute a code with `oathtool --totp -b "$ADMIN_TOTP_SECRET"`. A successful login answers `303` to `/ui`; `/ui/admin` then redirects to `/ui/admin/realms`. There is no `/admin` HTML page — that prefix is the JSON admin API.
-
-Every `/admin/*` JSON route is realm-scoped and requires an **`X-Realm-ID` header** alongside the bearer token. Without it the call answers `400 {"error":"missing X-Realm-ID header"}`, not `401`:
-
-```bash
-curl -fsS -H "Authorization: Bearer $ADMIN_TOKEN" \
-     -H "X-Realm-ID: $REALM_ID" \
-     http://127.0.0.1:8420/admin/realms | jq .
-```
-
-In production mode the endpoint returns `404 Not Found`.
-
-### Creating the first admin outside `--dev`
-
-`/admin/bootstrap` does not exist in production. A fresh production data directory has no admin at all, and the server logs a `WARN` on every boot until one exists:
-
-```
-WARN first-run setup required: open this URL and supply the token from the
-     token file in the data directory  setup_url=https://auth.example.com/ui/setup
-     token_file=".setup_token"
-```
-
-The token itself is deliberately **not** logged in production. Read it from the data directory and append it as a query parameter — `/ui/setup` with no `token` answers `404`, by design, so the flow is not discoverable:
-
-```bash
-SETUP_TOKEN=$(cat /var/lib/hearth/data/.setup_token)
-echo "https://auth.example.com/ui/setup?token=$SETUP_TOKEN"
-```
-
-Open that URL once and create the operator account. The token is single-use and the admin lands in the system realm. Set `onboarding.enabled: false` afterwards to close the flow permanently.
+Every `/admin/*` JSON route needs an `X-Realm-ID` header with the bearer token. Without it the
+call answers `400`, not `401`.
 
 ---
 
 ## Configuration
 
-`hearth serve` resolves configuration in this order:
+`hearth serve` reads `-c <path>`, else `./hearth.yaml`, else the built-in defaults; `--dev`
+overrides all of them. Copy [`hearth.example.yaml`](hearth.example.yaml), which lists every key,
+and run `hearth config validate hearth.yaml`. Secrets come from the environment:
+`HEARTH_MASTER_KEY` and `HEARTH_KEK` are required in production.
+`branding.theme` selects one of six UI themes, and `branding.custom_css` overrides its
+`--ht-*` CSS variables.
 
-1. `--dev` flag → in-memory dev defaults (overrides everything else).
-2. `-c, --config <path>` → load the specified YAML file.
-3. Otherwise, `./hearth.yaml` if it exists in the working directory.
-4. Otherwise, built-in production defaults.
-
-CLI flags `--port` and `--bind` override any of the above.
-
-YAML files support `${VAR_NAME}` environment variable substitution (`src/config/env.rs`); a missing variable is a hard error. Substitution runs over the **raw file text before the YAML parse**, so a `${VAR}` inside a `#` comment is expanded too and an unset variable there fails the whole config. Delete commented-out `${…}` placeholders you are not using, or write them as `${VAR:-}` to declare the empty value intentional.
-
-Copy [`hearth.example.yaml`](hearth.example.yaml) to `hearth.yaml` and edit. Every section is `#[serde(default)]`, so you can omit anything you don't want to change — but the example is a **catalogue, not a starting config**: it is not valid as copied, because of the commented `${…}` placeholders above and because production requires a KEK and an HTTPS decision. Run `hearth config validate hearth.yaml` after editing and work through the errors; the smallest config that validates is:
-
-```yaml
-server:
-  bind_address: "0.0.0.0"
-  port: 443
-  tls_cert_path: "/etc/hearth/tls/server.crt"   # or trust_forwarded_proto + trusted_proxies
-  tls_key_path:  "/etc/hearth/tls/server.key"
-storage:
-  data_dir: "/var/lib/hearth/data"
-oidc:
-  issuer: "https://auth.example.com"
-```
-
-plus `HEARTH_KEK` and `HEARTH_MASTER_KEY` in the environment. **`hearth config validate` does not check either environment variable**, so a config it calls valid can still abort `serve` with `HEARTH_MASTER_KEY is not set and auto-generation is disabled in production mode`. Validate, then do a real `serve` on the target host before cutting over.
-
-### Config reference
-
-| Section | Field | Type | Default | Notes |
-|---|---|---|---|---|
-| `server` | `bind_address` | string | `127.0.0.1` | |
-| `server` | `port` | u16 | `8420` | |
-| `server` | `tls_cert_path` | path? | — | Requires `tls_key_path` |
-| `server` | `tls_key_path` | path? | — | Requires `tls_cert_path` |
-| `server` | `tls_client_ca_path` | path? | — | For mTLS |
-| `server` | `tls_require_client_cert` | bool | `false` | Requires `tls_client_ca_path` |
-| `server` | `default_realm` | string? | — | Realm name used for bare `/ui/*` URLs on multi-realm deployments. See [Web UI realm routing](#web-ui-realm-routing). Must name an existing realm; validated at startup. |
-| `storage` | `data_dir` | string | `./data` | |
-| `storage` | `wal_max_size_bytes` | u64 | `268435456` | 256 MiB |
-| `storage` | `memtable_flush_bytes` | u64 | `67108864` | 64 MiB |
-| `storage` | `hot_tier_capacity` | usize | `10000` | |
-| `storage` | `fsync` | bool | `true` | **MUST be true in production** |
-| `observability` | `log_level` | string | `info` | `trace` \| `debug` \| `info` \| `warn` \| `error` |
-| `observability` | `log_format` | string | `text` | `text` \| `json` |
-| `operational` | `request_timeout_secs` | u64 | `30` | |
-| `operational` | `shutdown_timeout_secs` | u64 | `10` | |
-| `operational` | `max_connections` | u32 | `1024` | |
-| `operational` | `queue_depth` | u32 | `4096` | |
-| `email` | `transport` | string | `log` | `log` \| `smtp` \| `sendgrid` \| `postmark` \| `mailgun` \| `mailtrap` |
-| `email` | `from` | string? | — | `From:` header; required for all transports except `log` |
-| `email.smtp` | `host` | string | — | SMTP server hostname; required when `transport: smtp` |
-| `email.smtp` | `port` | u16 | — | SMTP server port (e.g. `587`, `465`, `1025`) |
-| `email.smtp` | `encryption` | string | `starttls` | `none` \| `starttls` \| `tls` |
-| `email.smtp` | `username` | string? | — | SMTP AUTH username (pair with `password`) |
-| `email.smtp` | `password` | string? | — | SMTP AUTH password (pair with `username`) |
-| `email.sendgrid` | `api_key` | string | — | SendGrid v3 API key; required when `transport: sendgrid` |
-| `email.postmark` | `server_token` | string | — | Postmark server token; required when `transport: postmark` |
-| `email.mailgun` | `api_key` | string | — | Mailgun API key; required when `transport: mailgun` |
-| `email.mailgun` | `domain` | string | — | Mailgun sending domain |
-| `email.mailgun` | `region` | string | `us` | `us` \| `eu` |
-| `email.mailtrap` | `api_token` | string | — | Mailtrap Sending API token; required when `transport: mailtrap` |
-| `metrics` | `enabled` | bool | `false` | Set `true` to expose the `/metrics` Prometheus scrape endpoint. Disabled by default — enable only with a `bearer_token` or network-layer access control. |
-| `metrics` | `bearer_token` | string? | — | Bearer token required to access `/metrics` (constant-time compare). When absent, the endpoint is unauthenticated — operators SHOULD firewall it or bind to loopback. |
-
-### Environment variables
-
-Secrets are supplied through the environment rather than the YAML file so they never land on disk. `hearth serve` reads the following directly (independently of the `${VAR}` substitution used inside `hearth.yaml`):
-
-| Variable | Required? | Format | Generate | Purpose |
-|---|---|---|---|---|
-| `HEARTH_MASTER_KEY` | **Required in production** | 64 lowercase hex chars (32 bytes) | `openssl rand -hex 32` | Host key that encrypts every realm's Key Encryption Key (KEK) at rest. The **only** host-key source in production: without it **startup aborts** with `HEARTH_MASTER_KEY is not set. Production takes the storage host key only from HEARTH_MASTER_KEY …`, and a `${data_dir}/hearth.host_key` file is ignored even when present (that file is generated and read only under `--dev`). `hearth config validate` warns when it is unset but still exits 0. |
-| `HEARTH_PREVIOUS_MASTER_KEY` | Rotation only | 64 lowercase hex chars (32 bytes) | *(the prior key)* | The previous `HEARTH_MASTER_KEY` value, set **only during a master-key rotation** so the existing KEKs in `hearth.keys` can be re-encrypted under the new key. Remove it once the next clean start succeeds. |
-| `HEARTH_KEK` | Optional | 64 lowercase hex chars (32 bytes / AES-256) | `openssl rand -hex 32` | Storage key-encryption key; overrides `security.key_encryption_key`. Must not be the all-zero key. |
-| `HEARTH_TURNSTILE_SECRET_KEY` | With Turnstile | Cloudflare secret string | *(Cloudflare dashboard)* | Cloudflare Turnstile secret; overrides `abuse.captcha.turnstile.secret_key`. When Turnstile is enabled and this is unset, every challenge is rejected. |
-| `HEARTH_DEV_DATA_DIR` | Dev only | filesystem path | — | Overrides the data directory used under `--dev` (env > config `storage.data_dir` > temp dir). Ignored outside dev mode. |
-| `HEARTH_MAILCATCHER_PASSWORD` | Dev only | string | `openssl rand -base64 24` | Password for the in-process mailcatcher UI (`/dev/mail`) when `email.transport: mailcatcher`. Auto-generated (and logged) if unset. |
-
-See [`docs/guides/security-hardening.md`](docs/guides/security-hardening.md) for master-key rotation and per-realm secret provisioning.
-
----
-
-## Theming the Admin UI
-
-Hearth's admin UI is fully themeable via CSS custom properties. Six named themes ship built in; operators can also supply arbitrary CSS to override any token.
-
-### Named themes
-
-Configure with `branding.theme` in `hearth.yaml`:
-
-| Name | Mode | Description |
-|---|---|---|
-| `ember` | dark | Default — amber/orange brand on cool graphite |
-| `ocean` | dark | Teal/cyan brand on deep graphite |
-| `midnight` | dark | Violet/purple brand on deep graphite |
-| `forest` | dark | Emerald/green brand on deep graphite |
-| `cloud` | light | Blue brand on near-white surfaces |
-| `slate` | light | Steel-blue brand on cool blue-gray surfaces |
-
-```yaml
-branding:
-  theme: slate
-```
-
-An unknown theme name is a config error at startup.
-
-### Custom CSS
-
-Append a CSS file after the named theme to override any `--ht-*` variable or add custom rules. The file is read once at startup:
-
-```yaml
-branding:
-  theme: ember
-  custom_css: /etc/hearth/brand.css
-```
-
-### Per-realm themes
-
-Each realm can override the global theme independently:
-
-```yaml
-realms:
-  acme:
-    web:
-      theme: cloud
-      custom_css: /etc/hearth/realms/acme.css
-```
-
-The per-realm theme CSS is served from `GET /ui/static/realm-theme/{realm_id}` and is cached with `ETag` support.
-
-### CSS custom property API
-
-All theme tokens are `--ht-*` CSS custom properties. A custom CSS file need only override the variables it changes; unset variables fall back to the `ember` defaults. Key variables:
-
-```css
-:root {
-  --ht-surface-base:      /* page background (RGB triple, no alpha) */
-  --ht-surface-raised:    /* sidebar / panel background */
-  --ht-surface-elevated:  /* card / modal background */
-  --ht-content-primary:   /* primary text */
-  --ht-content-secondary: /* secondary text */
-  --ht-content-muted:     /* muted / placeholder text */
-  --ht-content-brand:     /* brand-colored text and icons */
-  --ht-content-on-brand:  /* text on top of brand gradient buttons */
-  --ht-brand-from:        /* gradient start color */
-  --ht-brand-via:         /* gradient midpoint */
-  --ht-brand-deep:        /* gradient end / hover state */
-}
-```
-
-For the full token list and design rationale see [`docs/dev/THEME.md`](docs/dev/THEME.md).
+The [configuration reference](docs/guides/configuration-reference.md) has every key, the
+smallest production config, the environment variables and the themes.
+[`docs/dev/THEME.md`](docs/dev/THEME.md) lists the CSS tokens.
 
 ---
 
 ## Local Development
 
-Run directly with Cargo — no Docker required:
-
-```bash
-make dev          # cargo run --features dev-endpoints -- serve --dev
-# or
-cargo run --features dev-endpoints -- serve --dev
-```
-
-`--dev` binds to `http://127.0.0.1:8420` and auto-enables the built-in **mailcatcher** email transport. `make dev` keeps its store in `./data/dev`, so data survives restarts; `make dev-reset` wipes it. Every outbound email (verification links, password resets, setup notifications) is captured in-process and visible in a browser UI at **http://127.0.0.1:8420/dev/mail** — no external mail server or Docker needed.
-
-The inbox password is printed to the terminal at startup:
-
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  MailcatcherSender active
-  Inbox:    http://127.0.0.1:8420/dev/mail
-  Password: <random 16-char password>
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-```
-
-> **Migrating from Docker Compose?** If your `hearth.yaml` has `email.transport: smtp`, `--dev` automatically overrides it to mailcatcher and logs a warning. You can silence it by removing the smtp block or setting `transport: mailcatcher` explicitly.
-
-Production deployment (containerised, persistent storage, real email) lives in [`deploy/`](deploy/).
+`make dev` runs `cargo run --features dev-endpoints -- serve --dev` on `127.0.0.1:8420`, with
+its data in `./data/dev` (`make dev-reset` wipes it). Open `/dev` to sign in with one click.
+Every outbound email goes to the built-in mailcatcher at `/dev/mail`. See
+[`docs/dev/DEVELOPMENT.md`](docs/dev/DEVELOPMENT.md). Production deployment (container,
+persistent storage, real email) is in [`deploy/`](deploy/).
 
 ---
 
@@ -628,351 +408,59 @@ Run `hearth <command> --help` for the authoritative flag list; the block above i
 - **`serve`** starts the HTTP(S) server. `--dev` implies a throwaway data directory, relaxed validation, and the bootstrap endpoint.
 - **`realm create`** prints `{"realm_id": "<uuid>"}` on stdout. It's a pure UUID generator and does not require a running server.
 - **`app create`** registers an OAuth 2.0 client by POSTing to `/clients` on a running Hearth server. The server URL must be reachable over HTTP. `--token` is **mandatory** — client registration is a privileged operation, so pass an admin bearer token carrying `hearth.clients.admin` (or `hearth.admin`); in dev mode, the `access_token` from `POST /admin/bootstrap`.
-- **`migrate keycloak` / `migrate auth0`** import a realm export directly into the embedded store. Both operate on the data directory offline (no running server needed) — see [Migrating from Keycloak](#migrating-from-keycloak).
+- **`migrate keycloak` / `migrate auth0`** import a realm export directly into the embedded store. Both operate on the data directory offline (no running server needed) — see [Migrating from Keycloak or Auth0](#migrating-from-keycloak-or-auth0).
 - **`config validate`** parses the YAML and validates every realm's permission registry without starting the server; exits 1 on any error. It does **not** check the `HEARTH_*` environment prerequisites — a config it accepts can still be refused by `serve` (for example when `HEARTH_MASTER_KEY` is unset on a fresh production data directory).
 - **`admin token`** prints a short-lived token for the system realm (the nil UUID) for an operator-console account holding `hearth.admin` — the production source of the `$SYSTEM_TOKEN` the realm and cluster admin API need. The token goes to stdout only and its issuance is audited. A cluster node's data directory is refused; see [System-realm tokens](docs/guides/clustering.md#system-realm-tokens).
 - **`backup` / `rbac orphans` / `migrate` / `admin token`** all open the store directly, so the server **must be stopped first** — the data directory carries an exclusive `LOCK`. See the [Backup guide](docs/guides/backup.md).
 
 ---
 
-## End-to-End curl Walkthrough
+## End-to-End OAuth flow
 
-**Prerequisites:** `curl` + `jq` + `openssl` + a Rust toolchain.
-Time to first token: under 30 minutes from a clean clone.
-
-### 0. Start Hearth
-
-```bash
-make dev
-# or: cargo run --features dev-endpoints -- serve --dev
-```
-
-Binds to `http://127.0.0.1:8420` with in-memory storage.
-
-### 1. Bootstrap realm + admin user (dev only)
-
-```bash
-BOOTSTRAP=$(curl -fsS -X POST http://127.0.0.1:8420/admin/bootstrap)
-REALM_ID=$(echo "$BOOTSTRAP" | jq -r .realm_id)
-USER_ID=$(echo "$BOOTSTRAP" | jq -r .user_id)
-ADMIN_TOKEN=$(echo "$BOOTSTRAP" | jq -r .access_token)
-
-echo "Realm: $REALM_ID"
-echo "User:  $USER_ID"
-```
-
-The bootstrap endpoint is available only in `--dev` mode. It creates a realm, an admin user, assigns the `realm.admin` role (which carries the `hearth.admin` permission), and returns short-lived tokens. The `admin_password`, `totp_secret` and `admin_totp_secret` fields are **non-empty on the first call only** — store them securely. Re-bootstrap (to refresh expired tokens) requires `Authorization: Bearer <access_token>` from the initial bootstrap. In production it returns `404 Not Found`.
-
-### 2. Register a client
-
-`POST /clients` **accepts** a `client_secret` and never returns one. You generate
-the secret, send it, and keep your copy — the response body carries only
-`client_id`, `client_name`, `created_at`, `grant_types` and `redirect_uris`.
-Reading `.client_secret` off the response yields `null`.
-
-```bash
-CLIENT_SECRET=$(openssl rand -base64 32)
-
-CLIENT=$(curl -fsS -X POST http://127.0.0.1:8420/clients \
-  -H "X-Realm-ID: $REALM_ID" \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"client_name\":    \"my-app\",
-    \"redirect_uris\":  [\"https://myapp.example.com/callback\"],
-    \"client_secret\":  \"$CLIENT_SECRET\"
-  }")
-
-CLIENT_ID=$(echo "$CLIENT" | jq -r .client_id)
-
-echo "Client ID:     $CLIENT_ID"
-echo "Client secret: $CLIENT_SECRET"   # your value — store it now
-```
-
-Omit `client_secret` to register a public client. A public client must then omit
-`client_secret` from the `/token` calls in steps 5 and 9 as well; PKCE is what
-protects it.
-
-### 3. Generate PKCE verifier and challenge
-
-PKCE prevents authorization code interception. Generate a verifier locally; send only the challenge to the server.
-
-```bash
-CODE_VERIFIER=$(openssl rand -hex 32)
-CODE_CHALLENGE=$(printf '%s' "$CODE_VERIFIER" \
-  | openssl dgst -sha256 -binary \
-  | openssl base64 -A \
-  | tr '+/' '-_' \
-  | tr -d '=')
-
-echo "Verifier:  $CODE_VERIFIER"
-echo "Challenge: $CODE_CHALLENGE"
-```
-
-### 4. Start an authorization request
-
-The `/authorize` endpoint requires a valid Bearer token — the user's identity is taken from the token's `sub` claim, not from a caller-supplied field.
-
-```bash
-AUTH=$(curl -fsS -X POST http://127.0.0.1:8420/authorize \
-  -H "X-Realm-ID: $REALM_ID" \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"client_id\":             \"$CLIENT_ID\",
-    \"redirect_uri\":          \"https://myapp.example.com/callback\",
-    \"response_type\":         \"code\",
-    \"scope\":                 \"openid profile email\",
-    \"state\":                 \"$(openssl rand -hex 16)\",
-    \"code_challenge\":        \"$CODE_CHALLENGE\",
-    \"code_challenge_method\": \"S256\"
-  }")
-
-CODE=$(echo "$AUTH" | jq -r .code)
-echo "Authorization code: $CODE"
-```
-
-### 5. Exchange the code for tokens
-
-```bash
-TOKENS=$(curl -fsS -X POST http://127.0.0.1:8420/token \
-  -H "X-Realm-ID: $REALM_ID" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  --data-urlencode "grant_type=authorization_code" \
-  --data-urlencode "code=$CODE" \
-  --data-urlencode "client_id=$CLIENT_ID" \
-  --data-urlencode "client_secret=$CLIENT_SECRET" \
-  --data-urlencode "redirect_uri=https://myapp.example.com/callback" \
-  --data-urlencode "code_verifier=$CODE_VERIFIER")
-
-ACCESS_TOKEN=$(echo "$TOKENS" | jq -r .access_token)
-REFRESH_TOKEN=$(echo "$TOKENS" | jq -r .refresh_token)
-EXPIRES_IN=$(echo "$TOKENS" | jq -r .expires_in)
-
-echo "Access token (first 60 chars): ${ACCESS_TOKEN:0:60}..."
-echo "Expires in: ${EXPIRES_IN}s"
-```
-
-### 6. Inspect the token claims
-
-```bash
-# Decode the JWT payload (base64url → JSON) — no signature verification
-echo "$ACCESS_TOKEN" \
-  | cut -d. -f2 \
-  | tr '_-' '/+' \
-  | awk '{ pad = (4 - length($0) % 4) % 4; for(i=0;i<pad;i++) $0=$0"="; print }' \
-  | base64 -d \
-  | jq .
-```
-
-Always present:
-- `sub` — stable user identifier
-- `roles` — array of role names assigned to the user
-- `permissions` — effective permission set resolved at issuance time
-- `exp`, `iat`, `iss`, `aud` — standard JWT claims
-- `sid`, `tid`, `jti`, `fid`, `token_type` — session, realm (tenant), token id,
-  refresh-family id, and token kind
-
-Present only when the user has them — **absent** from the token this walkthrough
-mints, because the bootstrap admin belongs to no group and no organization:
-- `groups` — array of group slugs
-- `oid` — organization ID
-
-`/v1/me/permissions` (step 8) always returns `groups`, as an empty array when
-there are none, so use it rather than the token to test group membership.
-
-### 7. Fetch user info (scope-filtered claims)
-
-```bash
-curl -fsS http://127.0.0.1:8420/userinfo \
-  -H "X-Realm-ID: $REALM_ID" \
-  -H "Authorization: Bearer $ACCESS_TOKEN" \
-  | jq .
-```
-
-Returns OIDC claims filtered by the granted scopes: `sub` always; `profile` → `name`; `email` → `email`, `email_verified`.
-
-### 8. Check live permissions
-
-```bash
-curl -fsS http://127.0.0.1:8420/v1/me/permissions \
-  -H "X-Realm-ID: $REALM_ID" \
-  -H "Authorization: Bearer $ACCESS_TOKEN" \
-  | jq .
-```
-
-Returns the freshly-resolved RBAC claim set from the server — reflects any role or group changes made since the token was issued.
-
-### 9. Refresh the access token
-
-```bash
-NEW_TOKENS=$(curl -fsS -X POST http://127.0.0.1:8420/token \
-  -H "X-Realm-ID: $REALM_ID" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  --data-urlencode "grant_type=refresh_token" \
-  --data-urlencode "refresh_token=$REFRESH_TOKEN" \
-  --data-urlencode "client_id=$CLIENT_ID" \
-  --data-urlencode "client_secret=$CLIENT_SECRET")
-
-echo "$NEW_TOKENS" | jq '{access_token: .access_token[:60], expires_in}'
-```
-
-Refresh tokens rotate on use. Presenting an already-rotated refresh token triggers theft detection and revokes the entire grant family, invalidating all tokens issued under it.
+[Getting Started](docs/guides/getting-started.mdx) takes you from a clean clone to a signed
+token. Its `curl` tab does the PKCE authorization-code flow with `curl`, `jq` and `openssl`.
+[`docs/guides/concepts.md`](docs/guides/concepts.md) explains refresh-token rotation and grant
+families.
 
 ---
 
 ## External IdP Federation (social login)
 
-Hearth also acts as an OIDC **relying party**: users can sign in with Google, Microsoft / Azure AD, Apple, GitHub, or any OIDC Core 1.0–compliant provider. Connectors are declared per realm in `hearth.yaml`; at login time Hearth renders a "Sign in with Google" button next to the password form and brokers the standard OIDC code flow against the upstream.
-
-### Minimum config
-
-```yaml
-realms:
-  customer-portal:
-    federation:
-      # How external identities attach to existing local users when the
-      # upstream asserts a verified email that matches a Hearth user.
-      # Default is `confirm` (Keycloak-equivalent safety posture).
-      link_existing_accounts: confirm
-      providers:
-        google:
-          type: google                 # preset — fills in issuer + endpoints + scopes
-          client_id: ${GOOGLE_CLIENT_ID}
-          client_secret: ${GOOGLE_CLIENT_SECRET}
-```
-
-That's enough. Restart Hearth and the realm's login page shows a "Sign in with Google" button. `${VAR_NAME}` substitution comes from `src/config/env.rs` — missing values are a hard startup error.
-
-### Provider types
-
-| `type` | Protocol | What the preset fills in |
-|---|---|---|
-| `google` | OIDC | Issuer, authorize / token / userinfo / JWKS URLs, scopes `openid email profile` |
-| `microsoft` | OIDC | Azure AD `common` tenant v2.0 endpoints (override `issuer` for single-tenant deployments) |
-| `apple` | OIDC | Apple Sign-In endpoints; no userinfo (claims inline in the ID token) |
-| `github` | OAuth2 | `/login/oauth/authorize` + `/login/oauth/access_token` + `/user`; email via `/user/emails` when private |
-| `oidc` | OIDC | No preset — operator supplies `issuer`, `authorization_endpoint`, `token_endpoint`, `jwks_uri`, `scopes` explicitly |
-| `saml` | SAML 2.0 | No preset — operator supplies `entity_id`, `sso_url`, `certificate`; Hearth acts as SP. See the [Federation guide](docs/guides/federation.md) for full config |
-
-`type: oidc` is the escape hatch for any OIDC/OAuth2 provider not in the preset list (Okta, Auth0, Keycloak, Zitadel, on-prem Azure AD B2C, …). `type: saml` federates to enterprise IdPs (Okta, Azure AD, ADFS, PingFederate) over SAML 2.0.
-
-### Account linking
-
-`link_existing_accounts` governs what happens when an external login's verified email matches an existing Hearth user:
-
-| Mode | Behavior | Security posture |
-|---|---|---|
-| `disabled` | Never link. Always JIT-provision a new user per external identity. | Safest against IdP email spoofing; duplicate accounts are visible and expected |
-| `confirm` *(default)* | Redirect to `/ui/federation/confirm-link`; user must authenticate to the local account (password or passkey) before the link attaches. | Matches Keycloak's default First Broker Login flow |
-| `auto` | Silent link on `email_verified=true` email match. | **Account-takeover risk** — trusts the IdP entirely; only use when the realm federates to a single high-trust provider |
-
-> ⚠️ **`auto` can hand an existing account to an upstream provider.** Hearth attaches the
-> upstream identity to whatever local account holds that email address, with no local
-> re-authentication, so every local account is only as safe as the weakest connector in the
-> realm. An IdP that does not verify email — GitHub's public profile email, or any generic
-> `type: oidc` IdP that can be made to assert `email_verified: true` — lets an attacker
-> register upstream with a victim's address and sign straight into the victim's Hearth
-> account with its roles and permissions. Keep `confirm` unless the realm federates to
-> exactly one IdP that verifies email addresses.
-
-Users can list and unlink their external identities at `/ui/account/linked-accounts`.
-
-### Configuration is YAML-only, permanently
-
-Federation connectors are **system configuration**, not data. Hearth deliberately separates the two:
-
-- **Data** (users, organizations, linked external identities, sessions) — managed through the admin UI and APIs. Changes at runtime, per user, driven by user action.
-- **System configuration** (realms, OAuth clients, email transports, **federation connectors**, themes) — YAML-only, reconciled at startup, version-controlled alongside the rest of the deployment.
-
-There will never be an admin UI for adding federation connectors. This is Infrastructure-as-Code by design: connector credentials, issuer URLs, and scopes belong in git next to the rest of your deployment, not in a database that can silently drift from what operators think they deployed.
-
-### Try it
-
-An end-to-end walkthrough with a local OIDC upstream lives at [`examples/federation-flow/`](examples/federation-flow/) — two processes (Hearth + a `node-oidc-provider`-based upstream) that reproduce JIT provisioning, confirm-to-link, auto-link, and self-service unlinking without any external credentials.
-
-For the full feature spec see [`docs/dev/ARCHITECTURE.md`](docs/dev/ARCHITECTURE.md).
+Hearth is also an OIDC and SAML **relying party**. Users can sign in with Google, Microsoft,
+Apple, GitHub, any OIDC provider (`type: oidc`) or a SAML 2.0 IdP (`type: saml`). Connectors are
+declared per realm in `hearth.yaml`, and never through an admin UI.
+`federation.link_existing_accounts` (`disabled`, `confirm` (the default) or `auto`) controls how
+an external login attaches to a local user with the same email. **`auto` is an account-takeover
+risk** unless the realm federates to exactly one IdP that verifies email.
+See the [federation guide](docs/guides/federation.md) and
+[`examples/federation-flow/`](examples/federation-flow/).
 
 ---
 
 ## API Endpoints
 
-| Group | Method | Path | Purpose |
-|---|---|---|---|
-| Discovery | `GET` | `/health` | Liveness probe |
-| Discovery | `GET` | `/.well-known/openid-configuration` | OIDC Discovery 1.0 metadata |
-| Discovery | `GET` | `/jwks` | Per-realm public signing keys (aliases: `/certs`, `/.well-known/jwks.json`) |
-| OAuth/OIDC | `GET`/`POST` | `/authorize` | Authorization request — `GET` is the browser redirect entry point, `POST` the form-post variant |
-| OAuth/OIDC | `POST` | `/token` | Token exchange (code / refresh / client_credentials / device_code) |
-| OAuth/OIDC | `POST` | `/revoke` | RFC 7009 revocation |
-| OAuth/OIDC | `POST` | `/introspect` | RFC 7662 introspection |
-| OAuth/OIDC | `GET` | `/userinfo` | OIDC UserInfo |
-| OAuth/OIDC | `POST` | `/device_authorization` | RFC 8628 device code start |
-| OAuth/OIDC | `POST` | `/register` | RFC 7591 dynamic client registration |
-| OAuth/OIDC | `POST` | `/clients` | Static client registration (used by `hearth app create`) |
-| OAuth/OIDC | `GET`/`POST` | `/end_session` | OIDC RP-initiated logout; fans out to back-channel and front-channel URIs |
-| Admin | `GET`/`POST` | `/admin/users` | List / create users |
-| Admin | `POST` | `/admin/users/bulk` | Bulk user creation (max 10,000 users per request) |
-| Admin | `POST` | `/admin/users/import` | Import users from JSON (max 10,000 users per request) |
-| Admin | `GET` | `/admin/users/export` | Export users as JSON |
-| Admin | `GET`/`PATCH`/`DELETE` | `/admin/users/{id}` | Read / partially update / delete a user |
-| Admin | `GET`/`POST` | `/admin/users/{id}/roles` | List / assign roles to a user |
-| Admin | `GET` | `/admin/users/{id}/consents` | List a user's active OAuth consents |
-| Admin | `DELETE` | `/admin/users/{id}/consents/{client_id}` | Revoke a user's consent for a client |
-| Admin | `GET` | `/admin/users/{id}/effective-permissions` | Resolved permission set for a user |
-| Admin | `DELETE` | `/admin/assignments/{id}` | Remove a role assignment |
-| Admin | `GET` | `/admin/realms` | List realms (`POST` answers `405` — realms are declared in `hearth.yaml`) |
-| Admin | `GET`/`DELETE` | `/admin/realms/{id}` | Read a realm; delete one that is already `Archived` (`PATCH` answers `405` — realms are declared in `hearth.yaml`) |
-| Admin | `GET`/`POST` | `/admin/applications` | List / register OAuth clients |
-| Admin | `GET`/`PATCH`/`DELETE` | `/admin/applications/{id}` | Read / partially update / delete a client |
-| Admin | `GET`/`POST` | `/admin/roles` | List / create RBAC roles |
-| Admin | `GET`/`PATCH`/`DELETE` | `/admin/roles/{id}` | Read / partially update / delete a role |
-| Admin | `GET`/`POST` | `/admin/groups` | List / create groups |
-| Admin | `GET`/`PATCH`/`DELETE` | `/admin/groups/{id}` | Read / partially update / delete a group |
-| Admin | `GET`/`POST` | `/admin/groups/{id}/members` | List / add group members |
-| Admin | `DELETE` | `/admin/groups/{id}/members/{member_id}` | Remove a group member |
-| Admin | `GET` | `/admin/audit` | Query the audit log |
-| Admin | `GET`/`POST` | `/admin/webhooks` | List / create webhook subscriptions |
-| Admin | `GET`/`PUT`/`DELETE` | `/admin/webhooks/{id}` | CRUD a webhook subscription |
-| Admin | `GET` | `/admin/webhooks/{id}/deliveries` | Delivery log for a subscription (default 50, max 200 per page) |
-| Admin | `POST` | `/admin/bootstrap` | Dev-only bootstrap — returns 404 in production |
-| Self-service | `GET` | `/v1/me/permissions` | Caller's live RBAC claim set |
-| Self-service | `GET` | `/oauth/consents` | List the caller's granted OAuth consents |
-| Self-service | `DELETE` | `/oauth/consents/{client_id}` | Revoke consent for a specific client |
-| WebAuthn | `POST` | `/webauthn/register/begin` | Start passkey registration ceremony |
-| WebAuthn | `POST` | `/webauthn/register/complete` | Complete passkey registration |
-| WebAuthn | `POST` | `/webauthn/auth/begin` | Start passkey authentication ceremony |
-| WebAuthn | `POST` | `/webauthn/auth/complete` | Complete passkey authentication |
-| WebAuthn | `GET` | `/webauthn/credentials` | List the caller's registered credentials |
-| WebAuthn | `DELETE` | `/webauthn/credentials/{credential_id}` | Remove a passkey credential |
-| SCIM 2.0 | `GET` | `/realms/{realm_name}/scim/v2/ServiceProviderConfig` | SCIM capability advertisement |
-| SCIM 2.0 | `GET` | `/realms/{realm_name}/scim/v2/ResourceTypes` | Supported SCIM resource types |
-| SCIM 2.0 | `GET` | `/realms/{realm_name}/scim/v2/Schemas` | SCIM schema definitions |
-| SCIM 2.0 | `GET`/`POST` | `/realms/{realm_name}/scim/v2/Users` | List / provision users |
-| SCIM 2.0 | `GET`/`PUT`/`PATCH`/`DELETE` | `/realms/{realm_name}/scim/v2/Users/{id}` | CRUD / partial update a SCIM user |
-| SCIM 2.0 | `GET`/`POST` | `/realms/{realm_name}/scim/v2/Groups` | List / provision groups |
-| SCIM 2.0 | `GET`/`PUT`/`PATCH`/`DELETE` | `/realms/{realm_name}/scim/v2/Groups/{id}` | CRUD / partial update a SCIM group |
-| Observability | `GET` | `/healthz` | Kubernetes liveness probe |
-| Observability | `GET` | `/readyz` | Kubernetes readiness probe (storage + engine checks) |
-| Observability | `GET` | `/metrics` | Prometheus-compatible metrics |
+The OAuth/OIDC endpoints are at the root with an `X-Realm-ID` header, or under
+`/realms/{realm_name}/` without one. The admin API is under `/admin/*`; every route needs a token
+with `hearth.admin` for the target realm. A running server serves the OpenAPI spec at `/openapi.json`
+and a Swagger UI at `/docs`.
 
-All `/admin/*` routes require a bearer token whose `permissions` claim contains `hearth.admin` for the target realm (typically via the seed `realm.admin` role). SCIM routes use a realm-scoped bearer token. The path names the realm, so an IdP needs only the base URL `/realms/{realm_name}/scim/v2` and the token. The same SCIM routes are also served under `/scim/v2`, where the `X-Realm-ID` header selects the realm (see the [SCIM Provisioning guide](docs/guides/scim-provisioning.md)).
-
-Per-realm variants of the core OAuth/OIDC endpoints are available at `/realms/{realm_name}/{endpoint}` for multi-realm deployments where callers cannot send `X-Realm-ID`.
+- [Route map](docs/guides/api-reference.md#route-map): every endpoint group, with its paths.
+- [Admin API guide](docs/guides/admin-api.md): the admin routes, with examples.
+- [SCIM provisioning](docs/guides/scim-provisioning.md): SCIM 2.0 at `/realms/{realm_name}/scim/v2`.
 
 ---
 
 ## Client SDKs
 
 Four first-party SDKs live under [`sdks/`](sdks): TypeScript (browser and Node.js, including
-Express, Fastify and Next.js helpers), Go, Python and PHP. Registry status, checked 2026-09-28 — not every SDK is installable from its
-registry yet, and the published versions lag the source tree:
+Express, Fastify and Next.js helpers), Go, Python and PHP. The published versions can lag the
+source tree; check the registry for the current version.
 
-| SDK | Package | Registry status |
+| SDK | Package | Registry |
 |---|---|---|
-| TypeScript | `@hearth-auth/sdk` | npm, **1.6.2** |
-| Go | `github.com/hearth-auth/hearth/sdks/go/v4` | Go module proxy, from v4.0.0 (`.../sdks/go/v3` holds the 3.x releases from 2026-10-13; the old path `.../sdks/go` stops at **v1.6.11**) |
-| Python | `hearth-sdk` | PyPI, **1.6.8** |
+| TypeScript | `@hearth-auth/sdk` | npm |
+| Go | `github.com/hearth-auth/hearth/sdks/go/v4` | Go module proxy, from v4.0.0 (`.../sdks/go/v3` holds the 3.x releases; the old path `.../sdks/go` stops at v1.6.11) |
+| Python | `hearth-sdk` | PyPI |
 | PHP | `hearth-auth/php-sdk` | Packagist, **`dev-main` only** (no tagged release) |
 
 See [docs/guides/sdks/overview.md](docs/guides/sdks/overview.md) for per-SDK install notes.
@@ -1066,60 +554,15 @@ Admins administer tenant realms via a `?realm=<name>` query parameter on admin U
 
 ---
 
-## Migrating from Keycloak
+## Migrating from Keycloak or Auth0
 
-Hearth reads Keycloak realm exports natively and imports them into the embedded store offline — no running server required, no HTTP body limits, no forced password reset for end users whose hashes Hearth can verify directly.
-
-### Validate an export
-
-Run `--dry-run` first to parse the export, validate every record, and print a report of what *would* be written:
-
-```bash
-./target/release/hearth migrate keycloak \
-  --file /path/to/realm-export.json \
-  --dry-run
-```
-
-### Import into a data directory
-
-Drop `--dry-run` and point `--data-dir` at the directory `hearth serve` will later use:
-
-```bash
-./target/release/hearth migrate keycloak \
-  --file /path/to/realm-export.json \
-  --data-dir ./data
-```
-
-Optionally pass `--realm <uuid>` to force a specific Hearth `RealmId` (defaults to the realm's own UUID from the export).
-
-### What gets imported
-
-| Keycloak                     | Hearth                                                     |
-|------------------------------|------------------------------------------------------------|
-| realm (`id`, `realm`)        | realm                                                     |
-| user (`id`, `email`, …)      | user (Keycloak UUID preserved when valid)                  |
-| user → `realmRoles`          | RBAC role assignment per role name, scoped to the realm     |
-| client + `secret`            | `OAuthClient` (secret re-hashed with Argon2id on import)   |
-| password — PBKDF2-SHA256     | PHC string; verifies natively, no password reset required  |
-| password — PBKDF2-SHA512     | *Skipped* with a warning; user must reset password         |
-
-### What's not imported (yet)
-
-Groups, composite roles, client roles, federated identity providers, and required actions are out of scope for the initial importer. Users affected by unsupported credentials land in the store with no password set and appear in the report's `warnings` list so operators can reconcile.
-
-See the [full Keycloak migration guide](docs/guides/migrating-from-keycloak.md) for a complete conceptual mapping, export procedure, post-migration checklist, and rollback plan.
-
-## Migrating from Auth0
-
-```bash
-hearth migrate auth0 \
-  --file auth0-bundle.json \
-  --data-dir /var/lib/hearth
-```
-
-Auth0 does not provide a single-endpoint export. A reference bundler script at [`examples/auth0-migration-bundler/`](examples/auth0-migration-bundler/) assembles the bundle from the Auth0 Management API. Run `--dry-run` first to validate.
-
-See the [full Auth0 migration guide](docs/guides/migrating-from-auth0.md) for bundle assembly steps, a complete conceptual mapping, and the post-migration checklist.
+`hearth migrate keycloak --file <realm-export.json>` and `hearth migrate auth0 --file <bundle.json>`
+import into the data directory offline, with the server stopped. Run each with `--dry-run`
+first. Keycloak PBKDF2-SHA256 password hashes verify without a reset. Auth0 has no single
+export, so [`examples/auth0-migration-bundler/`](examples/auth0-migration-bundler/) builds the
+bundle. The guides have the full mapping, what is not imported, and the checklists:
+[from Keycloak](docs/guides/migrating-from-keycloak.md) and
+[from Auth0](docs/guides/migrating-from-auth0.md).
 
 ---
 
@@ -1157,12 +600,12 @@ See the [full Auth0 migration guide](docs/guides/migrating-from-auth0.md) for bu
 | Protocol | `src/protocol/` | Stateless wire adapters (REST, OIDC, SAML, SCIM). |
 | Identity | `src/identity/` | Users, credentials, sessions, realms, tokens. |
 | RBAC | `src/rbac/` | Roles, groups, assignments, permission resolution into JWT claims. |
-| Cluster | `src/cluster/` | Raft consensus (`openraft`). Invisible in single-node mode. **Experimental in 1.x — not production-supported.** |
+| Cluster | `src/cluster/` | Raft consensus (`openraft`). Invisible in single-node mode. **Experimental — not production-supported.** |
 | Storage | `src/storage/` | WAL, memtable, SSTs, tiered storage. Leaf layer. |
 
 Dependencies flow strictly downward; `identity/` is the only layer allowed to call `rbac/` (to resolve permissions at token-issue time).
 
-**Guides:** [Getting Started](docs/guides/getting-started.md) · [Concepts](docs/guides/concepts.md) · [RBAC](docs/guides/rbac.md) · [Federation & Social Login](docs/guides/federation.md) · [SCIM Provisioning](docs/guides/scim-provisioning.md) · [Webhooks](docs/guides/webhooks.md) · [Organizations](docs/guides/organizations.md) · [Client-Scoped Roles](docs/guides/client-scoped-roles.md) · [Clustering (Experimental)](docs/guides/clustering.md) · [Troubleshooting](docs/guides/troubleshooting.md) · [Migrating from Keycloak](docs/guides/migrating-from-keycloak.md) · [Migrating from Auth0](docs/guides/migrating-from-auth0.md)
+**Guides:** [Getting Started](docs/guides/getting-started.mdx) · [Concepts](docs/guides/concepts.md) · [RBAC](docs/guides/rbac.mdx) · [Federation & Social Login](docs/guides/federation.md) · [SCIM Provisioning](docs/guides/scim-provisioning.md) · [Webhooks](docs/guides/webhooks.mdx) · [Organizations](docs/guides/organizations.mdx) · [Client-Scoped Roles](docs/guides/client-scoped-roles.md) · [Clustering (Experimental)](docs/guides/clustering.md) · [Troubleshooting](docs/guides/troubleshooting.md) · [Migrating from Keycloak](docs/guides/migrating-from-keycloak.md) · [Migrating from Auth0](docs/guides/migrating-from-auth0.md)
 
 ---
 

@@ -2,7 +2,9 @@
 
 ## Purpose
 Every live abuse guard, by its A-N or P-N identifier: limits, defaults, configuration and failure behaviour. `scripts/check-abuse-coverage.sh` requires a `tests/abuse_*.rs` test for every A-N id in this spec.
+
 ## Requirements
+
 ### Requirement: Abuse guards are opt-in and run before password hashing
 The guards listed below, except A-12, SHALL be off by default. A-12 SHALL always be on for `POST /ui/device`. A disabled guard SHALL be constructed in its no-op form and SHALL allow every request, so upgrading changes no behaviour until an operator enables a guard. The login-form guards SHALL run before a permit is taken from the Argon2 admission gate, so rejected traffic consumes no hashing capacity. Every refusal by a login-form guard SHALL render the one generic sign-in failure page, so no guard is an account-enumeration oracle. One exception applies: when a CAPTCHA provider is configured, a caller that A-3 or A-16 challenges SHALL see the login page again with the provider's widget (see A-16). That page SHALL be the same whether or not the submitted address has an account.
 
@@ -235,7 +237,7 @@ Each realm SHALL be able to restrict WebAuthn registration with `realms.<name>.a
 - **THEN** the registration is refused and no credential is stored
 
 ### Requirement: A-14 Per-realm TTL hard caps
-Configuration load SHALL refuse a realm whose `auth.token.password_reset_token_ttl` exceeds 1 hour or whose `auth.token.magic_link_ttl` exceeds 30 minutes, unless `auth.token.allow_unsafe_ttl: true` is also set. The keys SHALL apply per realm under `realms.<name>` and globally under `auth.token`.
+Configuration load SHALL refuse a realm whose `auth.token.password_reset_token_ttl` exceeds 1 hour, whose `auth.token.set_password_token_ttl` exceeds 7 days, or whose `auth.token.magic_link_ttl` exceeds 30 minutes, unless `auth.token.allow_unsafe_ttl: true` is also set. The keys SHALL apply per realm under `realms.<name>` and globally under `auth.token`.
 
 #### Scenario: Unsafe reset TTL
 - **WHEN** a realm sets `password_reset_token_ttl: 2h` without `allow_unsafe_ttl`
@@ -244,6 +246,10 @@ Configuration load SHALL refuse a realm whose `auth.token.password_reset_token_t
 #### Scenario: Unsafe TTL accepted on opt-in
 - **WHEN** the same realm also sets `allow_unsafe_ttl: true`
 - **THEN** the configuration loads
+
+#### Scenario: Unsafe set-password TTL
+- **WHEN** a realm sets `set_password_token_ttl: 30d` without `allow_unsafe_ttl`
+- **THEN** startup fails with a validation error naming the field
 
 ### Requirement: A-16 CAPTCHA-of-last-resort challenge
 The server SHALL count failed authentications per IP and SHALL put an IP into a challenge state for `challenge_ttl_secs` once `challenge_threshold` failures occur inside `window_secs`. A solved CAPTCHA, or expiry of the window, SHALL return the IP to `Allow`.
@@ -865,4 +871,3 @@ CI SHALL extract every `A-<number>` identifier from this capability and SHALL fa
 #### Scenario: The escape hatch
 - **WHEN** `SKIP_ABUSE_COVERAGE_CHECK=1` is set
 - **THEN** the gate passes and prints a visible warning
-

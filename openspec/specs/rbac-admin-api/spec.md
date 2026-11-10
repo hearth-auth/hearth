@@ -2,7 +2,9 @@
 
 ## Purpose
 The admin HTTP API for permissions, roles, groups and assignments, its authorization, and the bootstrap seed data of a realm.
+
 ## Requirements
+
 ### Requirement: RBAC admin endpoints require an admin permission
 Every RBAC admin endpoint SHALL require, in the caller's access token, either the endpoint's sub-admin permission or `hearth.admin`. The role, group, membership, assignment, role-member and direct-permission endpoints SHALL require `hearth.realm.admin`. `GET /admin/groups/{id}` and `GET /admin/groups/{id}/members` SHALL also accept `hearth.users.admin`. `GET /admin/users/{user_id}/effective-permissions` SHALL require `hearth.users.admin`. A caller without the required permission SHALL receive `403` with `{"error": "forbidden", "error_description": "<permission> or hearth.admin permission required"}` and no data.
 
@@ -92,7 +94,7 @@ Hearth SHALL serve group membership over HTTP:
 | Method and path | Effect |
 |-----------------|--------|
 | `GET /admin/groups/{id}/members?cursor=...&limit=...` | List members: users and nested groups. |
-| `POST /admin/groups/{id}/members` | Add a member. The body is `{"type": "user", "id": "user_..."}` or `{"type": "group", "id": "group_..."}`. |
+| `POST /admin/groups/{id}/members` | Add a member. The body is `{"type": "user", "id": "<user uuid>"}` or `{"type": "group", "id": "<group uuid>"}`. The endpoint SHALL also accept the `user_` and `group_` prefixed forms that earlier releases returned. |
 | `DELETE /admin/groups/{id}/members/{member_id}?type=user` or `?type=group` | Remove a member. Without `type`, the member is a user. |
 
 #### Scenario: Nest a group
@@ -316,4 +318,3 @@ Operators MAY declare roles, permissions, groups and scope mappings in realm YAM
 - **WHEN** an admin updates or deletes, through the admin API or the console, a group declared in `hearth.yaml`
 - **THEN** the request is refused with an error that points to `hearth.yaml`
 - **AND** the group and its members remain
-

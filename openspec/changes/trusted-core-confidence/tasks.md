@@ -1,6 +1,6 @@
 ## 0. Freeze and order
 
-- [ ] 0.1 Archive `scope-trim-trusted-core` first
+- [x] 0.1 Archive `scope-trim-trusted-core` first — done: `scope-trim-trusted-core` archived
 - [x] 0.2 Add the feature-freeze rule and its end condition to `CONTRIBUTING.md` (design decision 1)
   - Done during `scope-trim-trusted-core` task 14.4.
 - [ ] 0.3 `README.md` and `docs/STATUS.md`: say Hearth is not yet production-ready, and name the open gates (the "A gate is open" scenario)
@@ -63,7 +63,7 @@
 
 ## 5. External pentest
 
-- [ ] 5.1 Rewrite `docs/security-audit/pentest-scope.md` from the router and `docs/STATUS.md`; a check fails on a named path that does not exist
+- [x] 5.1 Rewrite `docs/security-audit/pentest-scope.md` from the router and `docs/STATUS.md`; a check fails on a named path that does not exist — done in `6aad2cc8` (#668), guard `scripts/check-pentest-scope.py`
 - [ ] 5.2 Owner: choose the firm and the budget (design Open Question 2)
 - [ ] 5.3 Engagement against a tagged build
 - [ ] 5.4 Fix every Critical and High finding with a regression test; firm re-test

@@ -179,7 +179,6 @@ const config = {
               { label: 'Go', to: 'docs/sdks/go' },
               { label: 'Python', to: 'docs/sdks/python' },
               { label: 'PHP', to: 'docs/sdks/php' },
-              { label: 'Migrate from Keycloak', to: 'docs/sdks/migration-from-keycloak' },
             ],
           },
           {

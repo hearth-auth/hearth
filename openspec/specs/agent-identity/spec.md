@@ -2,13 +2,16 @@
 
 ## Purpose
 The agent entity: registration, credentials, lifecycle, the agent card, and agent audit events.
+
 ## Requirements
+
 ### Requirement: An agent is its own entity type
 Hearth SHALL model an agent as an entity type separate from users and from OAuth clients. An agent SHALL have its own identity lifecycle, credential set, capability declarations and audit trail. Every agent MUST belong to exactly one realm.
 
 #### Scenario: An agent is created
 - **WHEN** an operator creates an agent in a realm
-- **THEN** the agent has its own `agt_`-prefixed identifier
+- **THEN** the agent has its own identifier, a UUID, which the agent API returns bare
+- **AND** a token whose subject is the agent carries `sub` = `agt_<uuid>`
 - **AND** it is not listed as a user or as an OAuth client
 
 ### Requirement: The agent record
@@ -16,7 +19,7 @@ An agent record MUST contain the fields below, with these limits.
 
 | Field | Type | Rule |
 |---|---|---|
-| `agent_id` | `AgentId` (UUID, prefix `agt_`) | Unique identifier. |
+| `agent_id` | `AgentId` (UUID) | Unique identifier. The API returns it as a bare UUID, and accepts the `agt_` prefixed form too. As a token `sub` it is `agt_<uuid>`. |
 | `realm_id` | `RealmId` | Owning realm. |
 | `owner_id` | `UserId` or `OrganizationId` | The human or organization that registered the agent. |
 | `display_name` | String | 1–256 characters. |
@@ -279,4 +282,3 @@ When Hearth suspends an agent because of its request rate, the agent SHALL enter
 - **WHEN** an agent exceeds its rate threshold and Hearth suspends it
 - **THEN** its status is `Suspended`
 - **AND** its next AAT validation or approval request is refused
-

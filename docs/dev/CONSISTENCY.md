@@ -1,9 +1,10 @@
 # Cluster Consistency
 
 Status: **Reference. Cluster mode is incomplete.** The normative promises — the ones Hearth
-meets today — are delta specs of four active OpenSpec changes, under
-`openspec/changes/{cluster-jepsen-harness,cluster-read-fencing,cluster-local-state-and-clock,cluster-audit-chain}/specs/cluster-consistency/spec.md`.
-They move to `openspec/specs/cluster-consistency/spec.md` when those changes are archived.
+meets today — are in `openspec/specs/cluster-consistency/spec.md`. Three parked OpenSpec
+changes propose more promises, under
+`openspec/parked/{cluster-read-fencing,cluster-local-state-and-clock,cluster-audit-chain}/`.
+They are not part of the contract until they move back to `openspec/changes/`.
 The Jepsen harness that tests them is described in [`jepsen/README.md`](../../jepsen/README.md).
 This document keeps the target model, the evidence for each status and the open items (G1–G9).
 Requirement levels follow RFC 2119 (MUST / SHOULD / MAY).

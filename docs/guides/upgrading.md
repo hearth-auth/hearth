@@ -350,8 +350,8 @@ only that the older binary can open the files; it does not prove it can decode t
   v1.6.11 — and postcard stores the variant *index*, so an older binary cannot decode a record the
   newer one wrote with a new variant. There is no downgrade guard that refuses to start; the failure
   surfaces when the unreadable record is read.
-- In **cluster mode** (experimental), the release after v1.6.11 also changes the Raft log format, so
-  a cluster node cannot roll back in place either ([Cluster upgrades](#cluster-full-restart)).
+- In **cluster mode** (experimental), a release can also change the Raft log format, so a cluster
+  node cannot roll back in place either ([Cluster upgrades](#cluster-upgrades)).
 
 The rollback path is therefore the same whether or not the WAL version moved: stop the new binary,
 keep a copy of the post-upgrade data directory, reinstall the old binary and restore the archive you
@@ -434,118 +434,23 @@ helm rollback hearth -n hearth
 
 ## Known upgrade notes
 
-This section lists configuration or behavior changes that require operator action on upgrade. Entries are appended for each Hearth minor or major release.
+Read the `CHANGELOG.md` entries between your version and the target version before you upgrade.
+A change that needs operator action is marked `**Breaking:**`, under `### Changed` or
+`### Removed`.
 
-### Copied-from-example configs: `*_lifetime_secs`
-
-If your `hearth.yaml` was derived from `examples/auth0-migration/` or `examples/keycloak-migration/`,
-it may contain `access_token_lifetime_secs` / `refresh_token_lifetime_secs`. **These were never valid
-Hearth config keys** — they were stale placeholders in the example files (corrected in HEA-2143).
-
-They were silently ignored by older binaries, so token TTLs quietly fell back to defaults rather than
-the values you set. Replace them with the real keys, which take duration strings:
-
-```yaml
-token:
-  access_token_ttl: "15m"    # default: 15 minutes
-  refresh_token_ttl: "7d"    # default: 7 days
-```
-
-Once `deny_unknown_fields` lands (see below), leaving them in place becomes a hard startup error
-instead of a silent no-op.
-
-<a id="v16-v17"></a>
-
-### v1.6 → v1.7
-
-> These changes currently sit under `## [Unreleased]` in `CHANGELOG.md` — they ship in the first
-> release after v1.6.9. Re-check the changelog at the moment you upgrade.
-
-All config structs now carry `#[serde(deny_unknown_fields)]`. Previously, a misspelled or removed key was silently discarded; it is now a hard startup error. The following keys formerly appeared in documentation but were never implemented — remove or rename them before upgrading:
-
-| Old key | Action |
-|---|---|
-| `auth.audit_log_retention` | Remove — not yet implemented |
-| `security.bearer_token` | Move to `metrics.bearer_token` (under the top-level `metrics:` section) |
-| `security.password.pepper.active_version` | Rename to `security.password.pepper.version` |
-| `security.password.pepper.active_hex` | Rename to `security.password.pepper.key_hex` |
-| `security.password.pepper.previous_hex` | Rename to `security.password.pepper.previous_key_hex` |
-| `roles[].display_name` | Remove — role entries use `name` and `description`; there is no display-name field |
-| `realms[].display_name` (realm-level key) | Remove — not a supported top-level realm key |
-
-The `metrics.bearer_token` rename is particularly important: operators who had `security.bearer_token` set believed `/metrics` was protected. It was not. After the rename, set the correct key under `metrics:` and verify the endpoint requires authentication.
-
-#### Production startup now fails closed on three insecure configurations (HEA-2166)
-
-Outside `--dev`, the server now **refuses to start** — instead of silently running insecurely —
-when any of the following holds. If your deployment currently relies on one of these, it was
-running with a real vulnerability; fix the configuration before upgrading:
-
-| Condition | Previous behavior | Required action |
-|---|---|---|
-| No key-encryption key configured | Realm signing keys (Ed25519 private keys) were written to storage **in plaintext**, with no warning | Set the `HEARTH_KEK` env var (recommended) or `security.key_encryption_key` to a random 64-hex-char value: `openssl rand -hex 32` |
-| Neither `server.tls_cert_path` nor `server.trust_forwarded_proto: true` set | An `error!` line was logged and startup continued; session cookies were issued **without the `Secure` attribute** | Configure direct TLS (`server.tls_cert_path` + `server.tls_key_path`), or set `server.trust_forwarded_proto: true` if TLS terminates at a reverse proxy |
-| `demo.enabled: true` | The mass demo seeder ran in production — every seeded account shares a single, publicly documented default password | Remove the `demo:` block from production configs |
-
-Each violation aborts startup with an error naming the offending key and the fix. `--dev`
-behavior is unchanged: the developer loop still requires none of these.
-
-Relatedly, `hearth serve` with **no config file** previously booted a production server from
-compiled-in defaults without running validation at all. The defaults now pass through the same
-gates, so a bare `hearth serve` refuses to start until a config satisfying the production
-checklist is provided (or `--dev` is passed for local development).
-
-**Key encryption:** setting `HEARTH_KEK` for the first time on an existing data directory is safe.
-The first KEK-configured start re-encrypts every signing key already on disk — the server-wide key,
-every realm's active key, and every retiring key — logs how many it re-wrapped, and marks the store
-enrolled. From then on an unenveloped signing key is **refused**, not silently accepted, so an
-attacker who strips the envelope cannot downgrade the deployment. No rotation is needed to supersede
-the plaintext copies, and no tokens are invalidated. Take a backup before the first KEK-enabled boot,
-as with any in-place key migration.
-
-Earlier releases encrypted only *subsequent* writes and accepted unenveloped keys indefinitely; the
-previous advice here — rotate every realm's key after the upgrade — is no longer necessary.
-
-### v1.6.x → later
-
-Check the `CHANGELOG.md` `## [Unreleased]` section for in-flight breaking changes before upgrading from a release candidate or a development build.
+Every config struct uses `deny_unknown_fields`, so an unknown or misspelled key stops startup.
+A key of a feature that Hearth removed stops startup with an error that names the feature
+(`src/config/removed.rs`).
 
 ---
 
 ## Cluster upgrades
 
-<a id="cluster-full-restart"></a>
-
-> **The release after v1.6.11 needs a full-cluster restart, not a rolling upgrade.** It adds a Raft
-> log command (`IncrementU64`, the atomic control-epoch bump) that older builds cannot decode, and
-> it changes the peer transport from JSON to CBOR (and adds the `ForwardWrite` RPC followers use
-> to send writes to the leader), so an older and a newer node cannot exchange any Raft message at
-> all:
->
-> - an older follower refuses every `AppendEntries` that carries the new command, so replication to
->   it stalls for good (not just for that entry);
-> - a new-build leader over a majority of older followers cannot commit anything, so every write
->   times out;
-> - an older build cannot read a Raft log (`raft.db`) that contains the new command, so **rolling a
->   node back needs a copy of its data directory taken before the upgrade** — the in-place
->   rollback below does not apply to this release in cluster mode.
->
-> A new-build node logs `peer cannot decode this node's Raft log: it runs an older Hearth build`
-> (once per peer) when it meets such a node. There is no safe fallback: the older write path read
-> the counter on one node and wrote its successor, which is exactly the race the new command
-> closes, so the new build does not fall back to it.
->
-> To upgrade a **young** cluster — one whose Raft logs have not been purged yet: take a backup on
-> the leader, **stop every node**, copy each node's whole data directory (including `raft.db`)
-> aside, install the new binary on every node, then start them all. Expect a write outage for the
-> length of the restart. Single-node deployments are unaffected. To roll back, stop every node,
-> put each node's copied data directory back, and start the older binary: a young node's log
-> still holds every entry, so the older build can restart it.
->
-> **A cluster whose Raft logs were purged cannot be upgraded in place** — and that is nearly every
-> cluster in production: with the default snapshot policy a node takes its first snapshot, and
-> purges its log, once it has applied about 5,000 entries. Follow
-> [Upgrading a cluster whose Raft logs were purged](#cluster-purged-log-upgrade) instead.
+Cluster mode is experimental. A release that changes the Raft log format or the peer transport
+needs a full-cluster restart, not a rolling upgrade: an older and a newer node cannot exchange
+Raft messages. The `CHANGELOG.md` entry of such a release says so. Before a full-cluster
+restart, copy each node's whole data directory (including `raft.db`) aside, so that you can roll
+back.
 
 <a id="cluster-purged-log-upgrade"></a>
 

@@ -2483,45 +2483,13 @@ async fn run_serve(
 
     // Background daily audit log pruning sweep (A-24, A-25). Per realm, see
     // `hearth::identity::audit_prune::prune_realm_audit`.
-    {
-        let prune_audit = Arc::clone(&raw_audit);
-        let prune_identity = Arc::clone(&identity_engine);
-        let prune_storage = Arc::clone(&storage);
-        tokio::spawn(async move {
-            // 24-hour interval; first tick fires at startup + 24h.
-            let mut interval = tokio::time::interval(Duration::from_secs(24 * 60 * 60));
-            interval.tick().await; // skip first immediate tick
-            loop {
-                interval.tick().await;
-                let batch = hearth::core::MAX_PAGE_LIMIT;
-                let mut prune_offset = 0u64;
-                loop {
-                    let page = match prune_identity
-                        .list_realms(&hearth::core::PageRequest::new(prune_offset, batch))
-                    {
-                        Ok(p) => p,
-                        Err(e) => {
-                            warn!(error = %e, "audit prune: realm enumeration failed");
-                            break;
-                        }
-                    };
-                    let prune_n = page.items.len() as u64;
-                    for realm in &page.items {
-                        hearth::identity::audit_prune::prune_realm_audit(
-                            prune_audit.as_ref(),
-                            prune_storage.as_ref(),
-                            realm,
-                            hearth::core::Timestamp::now(),
-                        );
-                    }
-                    if prune_n == 0 || prune_offset + prune_n >= page.total {
-                        break;
-                    }
-                    prune_offset += prune_n;
-                }
-            }
-        });
-    }
+    tokio::spawn(hearth::identity::audit_prune::run_audit_pruner(
+        Arc::clone(&raw_audit),
+        Arc::clone(&identity_engine),
+        Arc::clone(&storage) as Arc<dyn StorageEngine>,
+        Arc::clone(&clock),
+        hearth::identity::audit_prune::PruneSchedule::default(),
+    ));
 
     let onboarding_service = Arc::new(
         OnboardingService::new(

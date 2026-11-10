@@ -549,6 +549,11 @@ impl TestHarness {
         self.engine.as_ref()
     }
 
+    /// Returns an `Arc<dyn StorageEngine>`.
+    pub fn storage_arc(&self) -> Arc<dyn StorageEngine> {
+        self.engine.clone() as Arc<dyn StorageEngine>
+    }
+
     /// Returns a reference to the RBAC engine.
     pub fn rbac(&self) -> &dyn RbacEngine {
         self.rbac_engine.as_ref()

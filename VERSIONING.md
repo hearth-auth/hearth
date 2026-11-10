@@ -1,50 +1,50 @@
 # Versioning Policy
 
-Hearth follows [Semantic Versioning 2.0.0](https://semver.org/). This document defines what constitutes a breaking change for each public surface, how long the 1.x line is supported, and how deprecations are communicated before a breaking change ships.
+Hearth follows [Semantic Versioning 2.0.0](https://semver.org/). This document defines what is a
+breaking change for each public surface, and which releases get fixes.
 
 ## Status: normative
 
-**1.0 GA shipped on 2026-06-21** (`## [1.0.0]` in [`CHANGELOG.md`](CHANGELOG.md); tag `v1.0.0`). The
-current release line is 1.6.x. The rules in this document are therefore **normative today** — they
-are not aspirational, and they are not deferred to a future GA milestone.
+The current release line is 4.x. Releases are automatic: `semantic-release` reads the
+Conventional Commit messages on `main` and picks the next version (see
+[`docs/dev/DEVELOPMENT.md`](docs/dev/DEVELOPMENT.md)).
 
-Two consequences follow, and they bind every PR:
+Hearth has no production users yet. Thus:
 
-- On-disk format changes must **not** silently corrupt data. If a format is incompatible, Hearth
-  must fail at startup with a clear error. (Not yet met for a *rollback* to an older binary: record
-  encodings carry no version, so an older binary fails when it reads an unknown record rather than
-  at startup — see [On-disk storage format](#on-disk-storage-format-wal-sst).)
-- A change that is breaking under the definitions below requires a **major version bump**. It may
-  not ship in a 1.x minor or patch release merely because it carries a `**Breaking:**` CHANGELOG
-  entry. A CHANGELOG entry documents a break; it does not authorize one.
+- A breaking change is allowed. It MUST carry a `!` or a `BREAKING CHANGE:` footer, so that
+  the release is a major version bump. A CHANGELOG entry records a break; it does not
+  authorize one in a minor or patch release.
+- Hearth removes an old surface. It does not deprecate it first. There is no deprecation
+  window, no `### Deprecated` CHANGELOG entry and no compatibility shim. The `### Removed` or
+  `### Changed` entry names the replacement.
+- On-disk format changes MUST NOT silently corrupt data. If a format is incompatible, Hearth
+  MUST fail at startup with a clear error. (Not yet met for a *rollback* to an older binary:
+  see [On-disk storage format](#on-disk-storage-format-wal-sst).)
+
+This policy changes when Hearth has production users. The change will be announced in the
+CHANGELOG and in this file.
 
 ---
 
 ## What constitutes a breaking change
 
-Different surfaces carry different stability commitments. A change is breaking for a given surface if an operator or integrator following documented behaviour would need to update their configuration, code, or tooling for their system to continue working correctly.
+A change is breaking for a surface if an operator or integrator who follows the documented
+behaviour must update their configuration, code or tooling to keep their system working.
 
 ### REST HTTP API
 
-The REST surface is not uniformly version-prefixed today. These route families exist, and the
-versioning commitment differs per family:
-
 | Route family | Prefix | Versioning |
 |---|---|---|
-| URL-versioned API | `/v1/…` | URL-versioned. Covers agents, AATs, approval requests, cross-realm policies, SPIFFE mappings, transaction tokens, tool invocation, `/v1/me/permissions`, and `/v1/{realm}/auth/magic-link`. A breaking change ships under `/v2/…`. |
-| Admin API | `/admin/…` | Unprefixed. Versioned by the release version; breaking changes follow the deprecation policy below. |
+| URL-versioned API | `/v1/…` | URL-versioned. Covers agents, approval requests, tool invocation, `/v1/me/permissions` and the other `/v1` routes. A breaking change ships under `/v2/…`. |
+| Admin API | `/admin/…` | Unprefixed. Versioned by the Hearth release version. |
 | OIDC / OAuth 2.0 per-realm | `/realms/{realm}/…` | Shape is pinned by the OIDC and OAuth 2.0 specifications, not by Hearth's version. |
-| SCIM 2.0 | `/scim/v2/…` | `v2` is the SCIM protocol version (RFC 7644), not a Hearth API version. |
-| Discovery / operational | `/.well-known/…`, `/health` | Unprefixed. Discovery document shapes are pinned by their respective specs (OIDC Discovery, RFC 9728); `/health` is operational and stable. |
+| SCIM 2.0 | `/realms/{realm}/scim/v2/…`, `/scim/v2/…` | `v2` is the SCIM protocol version (RFC 7644), not a Hearth API version. |
+| Discovery / operational | `/.well-known/…`, `/health` | Unprefixed. Discovery document shapes are pinned by their specs (OIDC Discovery, RFC 9728). `/health` is operational and stable. |
 
-Browser-facing (`/ui/…`) and dev-only (`/dev/…`) routes are **not** a public API surface and carry no
-compatibility commitment. `/dev/…` routes are registered only when the server runs in dev mode, so they
-are absent from the production route table entirely (regression-guarded by
-`dev_seed_password_absent_in_production_mode`); they must never be exposed in production.
-
-Extending the `/v1/` prefix to the admin surface is itself a breaking change and is therefore a 2.0 candidate, tracked as a migration-guide item.
-
-The table below defines what counts as breaking for **every** committed family above:
+Browser-facing (`/ui/…`) and dev-only (`/dev/…`) routes are **not** a public API surface and
+carry no compatibility commitment. `/dev/…` routes are registered only when the server runs in
+dev mode, so they are absent from the production route table (regression-guarded by
+`dev_seed_password_absent_in_production_mode`).
 
 | Change | Breaking? |
 |---|---|
@@ -52,17 +52,17 @@ The table below defines what counts as breaking for **every** committed family a
 | Remove or rename a request field | Yes |
 | Add a required request field | Yes |
 | Change the meaning or type of a response field | Yes |
+| Change an HTTP status code | Yes |
 | Add an optional request field with a safe default | No |
 | Add fields to a response body | No |
 | Add a new endpoint | No |
 | Change an error message string | No (codes are stable) |
-| Change an HTTP status code | Yes |
 
-For a URL-versioned family, a breaking change requires a new prefix (`/v2/…`) and the previous version must be served for at least one full major release. For an unprefixed family, a breaking change requires a major version bump of Hearth itself plus the deprecation notice period below. Concurrent support of two active versions will be documented in [`docs/dev/ARCHITECTURE.md`](docs/dev/ARCHITECTURE.md) § 4.3 and the CHANGELOG.
+### Protocol buffers
 
-### gRPC API
-
-Hearth 3.0.0 removed the public gRPC API. The `proto/` files still define the message types that the REST API serialises, so a change to a message is a REST change and follows the REST rules above. The cluster's internal Raft transport also uses gRPC; it is not a public surface.
+Hearth 3.0.0 removed the public gRPC API. The `proto/` files still define the message types
+that the REST API serialises, so a change to a message is a REST change and follows the REST
+rules above. The cluster's internal Raft transport also uses gRPC; it is not a public surface.
 
 ### Configuration (`hearth.yaml`)
 
@@ -75,107 +75,45 @@ Hearth 3.0.0 removed the public gRPC API. The `proto/` files still define the me
 | Add a new optional key | No |
 | Change a default value | Yes if the old default was the only safe choice; No otherwise |
 
-Config structs carry `#[serde(deny_unknown_fields)]` from the 1.7 release onward (see the v1.6 → v1.7 entry in [`docs/guides/upgrading.md`](docs/guides/upgrading.md)). Keys that were formerly silently ignored now produce a hard startup error. Check the `### Changed` / `### Removed` section of CHANGELOG before upgrading.
-
-> **Open conflict — `deny_unknown_fields` in 1.7.** Under the table above, tightening validation on an
-> existing key is breaking, and under the status section a breaking change requires a major bump. The
-> `deny_unknown_fields` change is therefore scheduled to ship in a **minor** release (1.7) in violation
-> of this policy. It is arguably a defect fix rather than a break — a silently-discarded key was never
-> a supported surface — but the operator-visible effect is a server that refuses to start after an
-> upgrade that SemVer says is safe, which is the exact harm this policy exists to prevent. Ship it in
-> 1.7 as a declared exception, or hold it for 2.0. That decision is tracked in **HEA-2206** and is not
-> settled by this document.
+Config structs carry `#[serde(deny_unknown_fields)]`, so an unknown key stops startup. A key
+that Hearth removed stops startup with an error that names it (`src/config/removed.rs`).
 
 ### On-disk storage format (WAL, SST)
 
-- A Hearth binary must be able to read storage formats (WAL, SST files) written by the immediately preceding minor version.
-- Format version bumps are announced as `**Breaking:**` entries in CHANGELOG and are always one-directional: a newer binary reads old data; an older binary refuses new data with a clear error.
-- **In-place binary rollback is NOT guaranteed safe, even between patch releases.** The WAL and SST
-  *headers* are versioned and have stayed at version `1` throughout 1.x, but the records inside them
-  are `postcard`-encoded (`src/codec.rs`) with no per-record version, and the stored types change
-  between releases (for example `AuditAction` gained three invitation variants after v1.6.11; postcard
-  stores the variant index). An older binary cannot decode such a record, and nothing refuses to start
-  first. **Known gap against the startup-detection rule above:** until records carry a schema version
-  and the data directory carries a minimum-reader marker checked at open, the supported rollback is
-  restoring the pre-upgrade backup ([upgrading guide](docs/guides/upgrading.md#rollback-procedure)).
+- A Hearth binary MUST read the storage formats (WAL, SST files) that the preceding minor
+  version wrote.
+- A format version bump is a `**Breaking:**` CHANGELOG entry and is one-directional: a newer
+  binary reads old data; an older binary refuses new data with a clear error.
+- **In-place binary rollback is NOT guaranteed safe, even between patch releases.** The WAL and
+  SST *headers* are versioned, but the records inside them are `postcard`-encoded
+  (`src/codec.rs`) with no per-record version, and the stored types change between releases.
+  An older binary cannot decode such a record, and nothing refuses to start first. **Known
+  gap:** until records carry a schema version and the data directory carries a minimum-reader
+  marker checked at open, the supported rollback is to restore the pre-upgrade backup
+  ([upgrading guide](docs/guides/upgrading.md#rollback-procedure)).
 
 ### SDK public API
 
-Hearth ships seven SDKs (`sdks/`: `go`, `kotlin`, `node`, `php`, `python`, `rust`, `typescript`).
+Hearth ships four SDKs under `sdks/`: `go`, `php`, `python` and `typescript`. Their public
+types, method signatures and exported symbols are the stability surface. Removing or renaming
+one is breaking. Each SDK's own `CHANGELOG.md` records its removals in sync with the server
+release.
 
-| Language | Stability surface |
-|---|---|
-| Go, Kotlin, Node, PHP, Python, Rust, TypeScript | Public types, method signatures, exported symbols |
-
-An SDK method that calls a server route the server does not implement is a defect, not a stability commitment — such methods are removed without a deprecation period (precedent: `createRealm`, removed from all seven SDKs in HEA-2171 because `POST /admin/realms` has always returned `405`).
-
-Removed or renamed SDK methods are breaking. Methods annotated with `@deprecated` (or the language equivalent) are supported for one major release after the deprecation annotation ships. The CHANGELOG for each SDK records deprecations and removals in sync with the server release.
+An SDK method that calls a server route the server does not implement is a defect, not a
+stability commitment. It is removed as a fix.
 
 ---
 
-## Support window for the 1.x line
+## Supported versions
 
-The 1.x support window is anchored to the **1.0 GA date of 2026-06-21**, giving these concrete dates:
-
-| Phase | Window | Ends | What ships |
-|---|---|---|---|
-| Active support | 18 months from 1.0 GA | **2027-12-21** | Feature releases, bug fixes, security fixes |
-| Security-only | 6 months after active support ends | **2028-06-21** | Security fixes only; no new features or non-security bug fixes |
-| End-of-life | 24 months from 1.0 GA | **2028-06-21** | No further patches; migrate to 2.x |
-
-These dates are a **minimum commitment**. They may be extended by announcement, never shortened.
-
-If a 2.0 release ships before 2027-12-21, the 1.x line still receives security fixes through
-2028-06-21; a 2.0 release does not accelerate 1.x EOL.
-
-**Security fixes** during the security-only phase are released as patch versions (e.g., 1.x.y → 1.x.z). They are back-ported from the 2.x main branch where feasible.
-
----
-
-## Deprecation policy
-
-Before removing or renaming any endpoint, config key, CLI flag, or SDK method:
-
-1. **Announce** — add a `### Deprecated` entry to CHANGELOG listing the item, the recommended replacement, and the target version of removal.
-2. **Notice period** — the deprecated item ships in at least one minor release before removal. For breaking HTTP changes, the notice period is one full major version.
-3. **Remove** — the item is removed in the announced target version, with a `### Removed` or `**Breaking:**` CHANGELOG entry.
-
-Deprecation annotations in source code:
-- Rust: `#[deprecated(since = "1.x.0", note = "...")]`
-- Go, PHP, Python, TypeScript: language-native deprecation annotation
-
-### The 3.0.0 exception: no deprecation window
-
-Hearth 3.0.0 removes features without a deprecation window or a migration guide. It removes the SAML Identity Provider side, the public gRPC API, LDAP, JARM, the FAPI 2.0 profile, SMS codes, risk scoring, the ROPC and step-up MFA grants, the abuse extras, and the Kotlin, Rust and Node.js SDKs. The reason: Hearth had no production users, so nobody had to migrate. The rules in this document apply again from 3.0.0 on.
-
----
-
-## Shipping a 2.0
-
-A major version bump is the only mechanism for landing a breaking change once 1.0 GA ships. Every 2.0 release must satisfy all four of the following before the tag is pushed:
-
-1. **Deprecation notice already served.** Every surface being removed or changed in 2.0 shipped a `### Deprecated` CHANGELOG entry in a 1.x minor release at least **one full minor release** before the 2.0 tag, naming the replacement and `2.0.0` as the removal target. A breaking change with no prior 1.x deprecation entry does not ship in 2.0 — it waits for 3.0.
-2. **Migration guide published.** `docs/guides/migrating-1x-to-2x.md` must exist and must contain, for every breaking change: the old behaviour, the new behaviour, the concrete edit an operator or integrator makes, and whether the change is detected at startup or silently at runtime. A breaking change absent from the migration guide blocks the release.
-3. **Startup detection where possible.** Any breaking config or on-disk format change must fail closed at startup with an error naming the migration guide, rather than degrading at runtime. Changes that cannot be detected at startup must be called out explicitly in the migration guide as silent.
-4. **1.x support window honoured.** The 1.x line continues to receive fixes on the schedule in the support-window table above; a 2.0 release does not shorten it.
-
-The migration guide is linked from the 2.0 CHANGELOG heading, the release notes, and the EOL notice below.
-
----
-
-## EOL communication
-
-End-of-life for the 1.x line will be announced:
-- As a pinned GitHub issue on the `hearth-auth/hearth` repository, at least **6 months** before the EOL date.
-- As a `### Deprecated` entry in CHANGELOG at the same time.
-- As a `WARN`-level log message emitted at startup once the binary's minor version is within the security-only phase.
-
-The GitHub issue will link to a migration guide for the 2.x line.
+Only the latest release gets fixes. A fix lands on `main` and ships in the next release. There
+are no back-port branches.
 
 ---
 
 ## Cross-references
 
-- [CHANGELOG.md](CHANGELOG.md) — per-release record of breaking changes, deprecations, and removals
-- [docs/guides/upgrading.md](docs/guides/upgrading.md) — upgrade procedure and per-version operator notes
-- [docs/dev/ARCHITECTURE.md](docs/dev/ARCHITECTURE.md) § 4.3 API Versioning and § 6.4 Format Versioning — structural rules enforced at the code level
+- [CHANGELOG.md](CHANGELOG.md): per-release record of breaking changes and removals
+- [docs/guides/upgrading.md](docs/guides/upgrading.md): upgrade procedure and operator notes
+- [docs/dev/ARCHITECTURE.md](docs/dev/ARCHITECTURE.md) § 4.3 API Versioning and § 6.4 Format
+  Versioning: structural rules enforced at the code level

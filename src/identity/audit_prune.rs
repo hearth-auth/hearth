@@ -1,16 +1,105 @@
 //! The daily audit prune of one realm: A-25 `retention_days` and `max_rows`,
 //! and the A-24 quotas `max_audit_rows` and `max_disk_bytes`.
 //!
-//! The server runs [`prune_realm_audit`] for every realm once per day.
+//! The server runs [`run_audit_pruner`], which calls [`prune_realm_audit`] for
+//! every realm on the [`PruneSchedule`].
 
 use std::ops::ControlFlow;
+use std::sync::Arc;
+use std::time::Duration;
 
 use tracing::{info, warn};
 
 use crate::audit::AuditEngine;
-use crate::core::Timestamp;
-use crate::identity::Realm;
+use crate::core::{Clock, PageRequest, Timestamp, MAX_PAGE_LIMIT};
+use crate::identity::{IdentityEngine, Realm};
 use crate::storage::StorageEngine;
+
+/// When the audit pruner runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PruneSchedule {
+    /// The time from the start of the pruner to its first sweep.
+    pub first_delay: Duration,
+    /// The time between two sweeps.
+    pub interval: Duration,
+}
+
+/// The time from server startup to the first sweep (#645).
+///
+/// Before, the first sweep ran 24 h after startup, so a server that restarted
+/// more often than once a day never pruned. A sweep is cheap when there is
+/// nothing to delete (it counts keys), and it deletes in bounded batches that
+/// each hold the realm's chain lock only briefly (#735). So each restart can
+/// sweep once. The delay keeps the sweep out of the startup work.
+pub const FIRST_SWEEP_DELAY: Duration = Duration::from_secs(60);
+
+/// The time between two sweeps.
+pub const SWEEP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+
+impl Default for PruneSchedule {
+    /// The server schedule: the first sweep [`FIRST_SWEEP_DELAY`] after
+    /// startup, then every [`SWEEP_INTERVAL`].
+    fn default() -> Self {
+        Self {
+            first_delay: FIRST_SWEEP_DELAY,
+            interval: SWEEP_INTERVAL,
+        }
+    }
+}
+
+/// Runs the audit prune sweep of every realm on `schedule`, for ever.
+///
+/// Each sweep reads the realm list page by page and calls
+/// [`prune_realm_audit`] for each realm at `clock.now()`.
+pub async fn run_audit_pruner(
+    audit: Arc<dyn AuditEngine>,
+    identity: Arc<dyn IdentityEngine>,
+    storage: Arc<dyn StorageEngine>,
+    clock: Arc<dyn Clock>,
+    schedule: PruneSchedule,
+) {
+    let start = tokio::time::Instant::now() + schedule.first_delay;
+    let mut interval = tokio::time::interval_at(start, schedule.interval);
+    loop {
+        interval.tick().await;
+        prune_all_realms(
+            audit.as_ref(),
+            identity.as_ref(),
+            storage.as_ref(),
+            clock.now(),
+        );
+    }
+}
+
+/// Runs [`prune_realm_audit`] for every realm at `now`. Returns the number of
+/// realms swept.
+pub fn prune_all_realms(
+    audit: &dyn AuditEngine,
+    identity: &dyn IdentityEngine,
+    storage: &dyn StorageEngine,
+    now: Timestamp,
+) -> u64 {
+    let mut offset = 0u64;
+    let mut swept = 0u64;
+    loop {
+        let page = match identity.list_realms(&PageRequest::new(offset, MAX_PAGE_LIMIT)) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(error = %e, "audit prune: realm enumeration failed");
+                return swept;
+            }
+        };
+        let n = page.items.len() as u64;
+        for realm in &page.items {
+            prune_realm_audit(audit, storage, realm, now);
+        }
+        swept += n;
+        if n == 0 || offset + n >= page.total {
+            return swept;
+        }
+        offset += n;
+    }
+}
 
 /// What one realm's daily audit prune did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
