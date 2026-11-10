@@ -1860,7 +1860,11 @@ impl Wal {
             // sync covering its bytes returns.
             let t_fsync = Instant::now();
             file.sync_data()?;
-            let fsync_ns = elapsed_ns(t_fsync);
+            let fsync_elapsed = t_fsync.elapsed();
+            let fsync_ns = u64::try_from(fsync_elapsed.as_nanos()).unwrap_or(u64::MAX);
+            crate::metrics::metrics()
+                .storage_wal_fsync_duration_seconds
+                .observe(fsync_elapsed.as_secs_f64());
             self.sync_count.fetch_add(1, Ordering::Relaxed);
 
             let p = &self.commit_profile;

@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 ## [Unreleased]
 
 ### Added
+- **Storage metrics for alerts** (#648): `/metrics` now has
+  `hearth_storage_wal_fsync_duration_seconds` (WAL fsync latency),
+  `hearth_storage_compactions_total{kind,outcome}`, `hearth_storage_compaction_duration_seconds{kind}`,
+  `hearth_storage_compaction_last_success_timestamp_seconds`, and
+  `hearth_storage_data_dir_available_bytes` and `hearth_storage_data_dir_total_bytes` (the free and
+  total space of the file system that holds `storage.data_dir`, read at each scrape). See the
+  metrics table in the configuration reference.
 - **A `hearth.export` seed role** (#637): every new realm now has a `hearth.export` role that holds
   only the `hearth.export` permission. Assign it next to a sub-admin role (for example
   `hearth.users.admin`) to let that sub-admin export its realm. Alone it grants nothing, because
@@ -48,6 +55,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   its first pass 24 hours after startup. A server that restarted more often than once a day never
   pruned, so its audit log grew without limit. The first sweep now runs 60 seconds after startup,
   then once every 24 hours.
+- **The storage sizing guide named metrics that do not exist** (#648): it told operators to alert
+  on `storage_hot_tier_hits` and `storage_hot_tier_misses`. It now gives the hot-tier hit rate from
+  `hearth_storage_get_total{outcome}`. A new test fails when the docs or the shipped deploy files
+  name a metric that Hearth does not export.
 - **Token endpoint errors and caching follow RFC 6749 §5** (#639): at `POST /token` and
   `POST /realms/{realm_name}/token`:
   - an invalid, expired or reused authorization code now gets `"error": "invalid_grant"`. Before,

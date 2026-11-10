@@ -27,6 +27,46 @@ use prometheus::{
     Counter, CounterVec, Gauge, GaugeVec, Histogram, HistogramOpts, HistogramVec, Opts, Registry,
 };
 
+/// The `kind` label of `hearth_storage_compactions_total` and
+/// `hearth_storage_compaction_duration_seconds`. A closed set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionKindLabel {
+    /// A merge of every SST file into one.
+    Full,
+    /// A merge of one run of SST files.
+    Partial,
+}
+
+impl CompactionKindLabel {
+    /// Every label value, for pre-creating the series.
+    pub const ALL: [Self; 2] = [Self::Full, Self::Partial];
+
+    /// The Prometheus label value.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Partial => "partial",
+        }
+    }
+}
+
+/// WAL fsync latency histogram buckets (seconds).
+///
+/// Range: 50 µs → 1 s. A local NVMe disk syncs in tens of µs to a few ms; a
+/// network disk syncs in ms; a sync above 100 ms is a disk problem.
+const WAL_FSYNC_BUCKETS: &[f64] = &[
+    0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 1.0,
+];
+
+/// Compaction duration histogram buckets (seconds).
+///
+/// Range: 10 ms → 15 min. A compaction merges all the data of the store, so
+/// its time grows with the data size.
+const COMPACTION_BUCKETS: &[f64] = &[
+    0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 300.0, 900.0,
+];
+
 /// HTTP request latency histogram buckets (seconds).
 ///
 /// Range: 1 ms → 2.5 s, covering sub-millisecond hot-path responses
@@ -271,6 +311,25 @@ pub struct Metrics {
     /// `storage_sst_files`, off the hot path, whenever the reader set is
     /// swapped. The SST file mappings are not heap and are not counted.
     pub storage_sst_reader_bytes: Gauge,
+
+    // ── Storage operations an operator alerts on (#648) ─────────────────────
+    /// WAL group-commit fsync (`fdatasync`) latency in seconds. One
+    /// observation per commit batch, off the hot path. A slow disk shows here
+    /// first.
+    pub storage_wal_fsync_duration_seconds: Histogram,
+
+    /// SST compactions that merged files, by `kind` (`full`, `partial`) and
+    /// `outcome` (`ok`, `error`). A pass that found nothing to merge is not
+    /// counted. All four series are present at 0 from the first scrape.
+    pub storage_compactions_total: CounterVec,
+
+    /// Duration in seconds of the compactions counted `ok` in
+    /// `storage_compactions_total`, by `kind`.
+    pub storage_compaction_duration_seconds: HistogramVec,
+
+    /// Unix time in seconds of the last compaction that merged files and
+    /// succeeded. `0` until the first one.
+    pub storage_compaction_last_success_timestamp_seconds: Gauge,
 
     // ── Storage size gauges (#450) ──────────────────────────────────────────
     /// Entries held by the storage memtable, by state.
@@ -794,6 +853,62 @@ impl Metrics {
             .register(Box::new(storage_sst_reader_bytes.clone()))
             .expect("metric registration succeeds on a fresh registry");
 
+        let storage_wal_fsync_duration_seconds = Histogram::with_opts(
+            HistogramOpts::new(
+                "hearth_storage_wal_fsync_duration_seconds",
+                "WAL group-commit fsync latency in seconds, one observation per commit batch",
+            )
+            .buckets(WAL_FSYNC_BUCKETS.to_vec()),
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(storage_wal_fsync_duration_seconds.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
+        let storage_compactions_total = CounterVec::new(
+            Opts::new(
+                "hearth_storage_compactions_total",
+                "SST compactions that merged files, by kind and outcome",
+            ),
+            &["kind", "outcome"],
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(storage_compactions_total.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+        for kind in CompactionKindLabel::ALL {
+            for outcome in ["ok", "error"] {
+                let _ = storage_compactions_total.with_label_values(&[kind.as_str(), outcome]);
+            }
+        }
+
+        let storage_compaction_duration_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "hearth_storage_compaction_duration_seconds",
+                "Duration in seconds of the SST compactions that merged files and succeeded",
+            )
+            .buckets(COMPACTION_BUCKETS.to_vec()),
+            &["kind"],
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(storage_compaction_duration_seconds.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+        for kind in CompactionKindLabel::ALL {
+            let _ = storage_compaction_duration_seconds.with_label_values(&[kind.as_str()]);
+        }
+
+        let storage_compaction_last_success_timestamp_seconds = Gauge::new(
+            "hearth_storage_compaction_last_success_timestamp_seconds",
+            "Unix time in seconds of the last SST compaction that merged files and succeeded",
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(
+                storage_compaction_last_success_timestamp_seconds.clone(),
+            ))
+            .expect("metric registration succeeds on a fresh registry");
+
         let storage_memtable_entries = GaugeVec::new(
             Opts::new(
                 "hearth_storage_memtable_entries",
@@ -1055,6 +1170,10 @@ impl Metrics {
             storage_hot_tier_stale_fills_discarded_total,
             storage_sst_files,
             storage_sst_reader_bytes,
+            storage_wal_fsync_duration_seconds,
+            storage_compactions_total,
+            storage_compaction_duration_seconds,
+            storage_compaction_last_success_timestamp_seconds,
             storage_memtable_entries,
             storage_memtable_bytes,
             memtable_entries_by_state,
@@ -1243,6 +1362,109 @@ impl Metrics {
     ) -> prometheus::Result<()> {
         self.registry
             .register(Box::new(AllocatorCollector::new(source)))
+    }
+}
+
+impl Metrics {
+    /// Records one compaction pass of `kind` that took `elapsed` (#648).
+    ///
+    /// `merged` is what the pass returned: `Ok(0)` (nothing to merge) records
+    /// nothing; `Ok(n)` counts an `ok` compaction, observes its duration and
+    /// sets the last-success time; `Err` counts an `error` compaction.
+    pub fn record_compaction(
+        &self,
+        kind: CompactionKindLabel,
+        merged: Result<usize, ()>,
+        elapsed: std::time::Duration,
+    ) {
+        match merged {
+            Ok(0) => {}
+            Ok(_) => {
+                self.storage_compactions_total
+                    .with_label_values(&[kind.as_str(), "ok"])
+                    .inc();
+                self.storage_compaction_duration_seconds
+                    .with_label_values(&[kind.as_str()])
+                    .observe(elapsed.as_secs_f64());
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default();
+                self.storage_compaction_last_success_timestamp_seconds
+                    .set(now.as_secs_f64());
+            }
+            Err(()) => self
+                .storage_compactions_total
+                .with_label_values(&[kind.as_str(), "error"])
+                .inc(),
+        }
+    }
+
+    /// Exports the free and total space of the file system that holds
+    /// `data_dir` on every scrape (#648): the
+    /// `hearth_storage_data_dir_{available,total}_bytes` gauges.
+    ///
+    /// Each scrape reads the space with one `statvfs` call, off the hot path.
+    /// At a scrape where the read fails, the gauges are absent: a `0` would
+    /// read as a full disk.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the gauges are already exported.
+    pub fn export_data_dir_space(&self, data_dir: std::path::PathBuf) -> prometheus::Result<()> {
+        self.registry
+            .register(Box::new(DataDirSpaceCollector::new(data_dir)))
+    }
+}
+
+/// The `hearth_storage_data_dir_*_bytes` gauges, read at each scrape.
+struct DataDirSpaceCollector {
+    data_dir: std::path::PathBuf,
+    available: Gauge,
+    total: Gauge,
+}
+
+impl DataDirSpaceCollector {
+    fn new(data_dir: std::path::PathBuf) -> Self {
+        let gauge =
+            |name: &str, help: &str| Gauge::new(name, help).expect("metric descriptor is valid");
+        Self {
+            data_dir,
+            available: gauge(
+                "hearth_storage_data_dir_available_bytes",
+                "Bytes free for Hearth on the file system that holds the data directory",
+            ),
+            total: gauge(
+                "hearth_storage_data_dir_total_bytes",
+                "Size in bytes of the file system that holds the data directory",
+            ),
+        }
+    }
+}
+
+impl Collector for DataDirSpaceCollector {
+    fn desc(&self) -> Vec<&Desc> {
+        [&self.available, &self.total]
+            .into_iter()
+            .flat_map(Collector::desc)
+            .collect()
+    }
+
+    fn collect(&self) -> Vec<MetricFamily> {
+        let (Ok(available), Ok(total)) = (
+            fs2::available_space(&self.data_dir),
+            fs2::total_space(&self.data_dir),
+        ) else {
+            return Vec::new();
+        };
+        #[allow(clippy::cast_precision_loss)] // exact below 2^53 bytes
+        {
+            self.available.set(available as f64);
+            self.total.set(total as f64);
+        }
+        [&self.available, &self.total]
+            .into_iter()
+            .flat_map(Collector::collect)
+            .collect()
     }
 }
 

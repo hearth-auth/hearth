@@ -1250,7 +1250,22 @@ impl EmbeddedStorageEngine {
     ///
     /// Leaked old files are otherwise harmless orphans, cleaned up by the next
     /// compaction.
+    ///
+    /// Each pass that merges files, or fails, is recorded in the
+    /// `hearth_storage_compaction*` metrics (#648).
     pub fn compact_ssts(&self, min_sst_count: usize) -> Result<usize, StorageError> {
+        let started = std::time::Instant::now();
+        let result = self.compact_ssts_unrecorded(min_sst_count);
+        crate::metrics::metrics().record_compaction(
+            crate::metrics::CompactionKindLabel::Full,
+            result.as_ref().map(|merged| *merged).map_err(|_| ()),
+            started.elapsed(),
+        );
+        result
+    }
+
+    /// The body of [`Self::compact_ssts`], without the metrics.
+    fn compact_ssts_unrecorded(&self, min_sst_count: usize) -> Result<usize, StorageError> {
         // Release any reader list an earlier flush or compaction replaced while
         // a reader was pinned, merge or no merge: every wake of the compaction
         // task passes here, so an idle engine does not keep merged-away files
@@ -1460,7 +1475,22 @@ impl EmbeddedStorageEngine {
     /// (which writers contend on) is held only for the brief commit phase, never
     /// across the merge I/O (HEA-1931). Like [`Self::compact_ssts`], async callers
     /// should wrap it in `spawn_blocking`.
+    ///
+    /// Each pass that merges files, or fails, is recorded in the
+    /// `hearth_storage_compaction*` metrics (#648).
     pub fn compact_partial(&self) -> Result<usize, StorageError> {
+        let started = std::time::Instant::now();
+        let result = self.compact_partial_unrecorded();
+        crate::metrics::metrics().record_compaction(
+            crate::metrics::CompactionKindLabel::Partial,
+            result.as_ref().map(|merged| *merged).map_err(|_| ()),
+            started.elapsed(),
+        );
+        result
+    }
+
+    /// The body of [`Self::compact_partial`], without the metrics.
+    fn compact_partial_unrecorded(&self) -> Result<usize, StorageError> {
         // As in `compact_ssts`: release what earlier writes left retired.
         self.sst_readers.reclaim();
 
