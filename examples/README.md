@@ -11,12 +11,25 @@ outside"* — not exhaustive coverage, not a template starter kit.
 |---|---|---|
 | [`oauth-consent-flow/`](./oauth-consent-flow/) | Browser-facing OAuth 2.0 / OIDC authorization code flow with the consent screen, per-scope approval, trusted-client bypass, and user-driven revocation. Hearth as an OIDC **provider**. | Node.js 18+ / TypeScript |
 | [`federation-flow/`](./federation-flow/) | External IdP federation (social login): Hearth as an OIDC **relying party**. Local upstream built on `node-oidc-provider`, walkthrough of JIT provisioning, confirm-to-link, auto-link, and self-service unlinking. | Node.js 18+ / TypeScript |
-| [`saml-flow/`](./saml-flow/) | SAML 2.0 both ways. A Node driver impersonates an external IdP (signs a `<Response>` and POSTs it to Hearth's ACS, including a replay-rejection check) and then impersonates an external SP (POSTs an `<AuthnRequest>` to Hearth's IdP SSO endpoint and verifies the signed response against Hearth's published metadata cert). Single-command runner. | Node.js 18+ (plain ESM) |
-| [`grpc-admin-flow/`](./grpc-admin-flow/) | End-to-end tour of the gRPC management API: admin CRUD, authorization engine with live `Watch` streaming, audit log, health, reflection. Single-command runner (`./run.sh`) boots Hearth and tears it down when the demo exits. | Node.js 18+ (plain ESM) |
-| [`scim-provisioning/`](./scim-provisioning/) | SCIM 2.0 (RFC 7643 + 7644) user and group provisioning against Hearth's `/scim/v2/*` surface: discovery, user CRUD with `externalId` idempotency, filter, pagination, PATCH, group membership reconciliation, and the resulting `Scim*` audit trail. Single-command runner. | Node.js 18+ (plain ESM, zero deps) |
+| [`saml-flow/`](./saml-flow/) | SAML 2.0 with Hearth as a **Service Provider**. A Node driver acts as an external IdP: it signs a `<Response>`, POSTs it to Hearth's ACS, and checks that a replay is refused. Single-command runner. | Node.js 18+ (plain ESM) |
+| [`scim-provisioning/`](./scim-provisioning/) | SCIM 2.0 (RFC 7643 + 7644) user and group provisioning: discovery, user CRUD with `externalId` idempotency, filter, pagination, PATCH, group membership reconciliation, and the resulting `Scim*` audit trail. Single-command runner. | Node.js 18+ (plain ESM, zero deps) |
+| [`full-stack-demo/`](./full-stack-demo/) | Hearth as the identity layer of a full-stack app: a Vite/React SPA and a Go + Gin API server. | Node.js 18+, Go |
+| [`go-gin/`](./go-gin/) | A minimal Gin server that verifies Hearth JWTs through the JWKS endpoint. | Go |
+| [`typescript-nextjs/`](./typescript-nextjs/) | A minimal Next.js 14 (App Router) app with the OIDC authorization code flow and PKCE. | Node.js 18+ / TypeScript |
+| [`large-scale-demo/`](./large-scale-demo/) | A multi-million-user Hearth instance on a laptop, with several realms, to see the storage model at scale. | Rust (`hearth` CLI) |
 | [`auth0-migration-bundler/`](./auth0-migration-bundler/) | Auth0 → Hearth migration tooling: assembles a tenant from the Auth0 Management API (users, clients, organizations with members, roles with assignments) into a single JSON bundle that `hearth migrate auth0` can import. Covers the password-hash export caveat explicitly. | Node.js 18+ (`auth0` SDK) |
-| [`keycloak-migration/`](./keycloak-migration/) | Keycloak → Hearth migration end-to-end: a committed sample realm export (3 users, 2 roles, 1 client), annotated `hearth.yaml` with Keycloak → Hearth key mappings, and a single `./run.sh` that migrates, boots Hearth on the migrated store, and verifies roles + JWKS via `verify.mjs`. | Node.js 18+ (zero deps) |
 | [`auth0-migration/`](./auth0-migration/) | Auth0 → Hearth migration end-to-end (consume bundle): hand-authored `sample-bundle.json` (3 users with bcrypt/pending/blocked states, 2 clients, 1 org, 2 roles), annotated `hearth.yaml` with Auth0 → Hearth config mappings, and `./run.sh` that migrates, boots Hearth, and verifies login + permissions + JWKS via `verify.mjs`. Pairs with `auth0-migration-bundler/` for live tenants. | Node.js 18+ (zero deps) |
+| [`keycloak-migration/`](./keycloak-migration/) | Keycloak → Hearth migration end-to-end: a committed sample realm export (3 users, 2 roles, 1 client), annotated `hearth.yaml` with Keycloak → Hearth key mappings, and a single `./run.sh` that migrates, boots Hearth on the migrated store, and verifies roles + JWKS via `verify.mjs`. | Node.js 18+ (zero deps) |
+| [`agent-auth-smoke/`](./agent-auth-smoke/) | Smoke test of the agent-auth surface: agent CRUD, DPoP-bound tokens, RFC 8693 token exchange. `scripts/sdk-smoke-local.sh` runs it. | Bash, Node.js 18+, jq |
+| [`rbac-smoke-test/`](./rbac-smoke-test/) | Smoke test of the RBAC lifecycle against a `--dev` server. | Bash |
+
+### Rust probes
+
+The `.rs` files at the top of `examples/` are Cargo examples of the `hearth` crate, not
+demos. They are perf probes that the code or the tests cite: `hot_tier_cost.rs`,
+`http_delta.rs` (with `support/hostenv.rs`, which `tests/perf_quiescence_gate.rs` tests),
+`http_saturation.rs` and `saturation_throughput.rs`. Run one with
+`cargo run --release --example <name>`.
 
 Contributions welcome — see [Adding a new example](#adding-a-new-example) below.
 
@@ -30,7 +43,7 @@ Contributions welcome — see [Adding a new example](#adding-a-new-example) belo
 
 2. **Out of the Cargo workspace.** Hearth's workspace
    (`[workspace] members = [".", "simulation"]` in the root `Cargo.toml`)
-   does not include `examples/`. That keeps `cargo check` / `cargo build`
+   does not include the example directories. That keeps `cargo check` / `cargo build`
    / `cargo nextest` fast regardless of how many examples exist, and it
    lets each example pick whatever runtime fits the scenario — Node, Go,
    Python, Rust, Docker Compose — without polluting the main build.
@@ -64,7 +77,7 @@ Every new importer must ship a runnable example directory containing:
 - [ ] `verify.mjs` — Node ESM, zero-dep; non-zero exit on any assertion failure
 - [ ] CHANGELOG entry under `### Added`
 
-Before merging, loop in SecurityAuditor to review credential import messaging.
+Before merging, have a security review check the credential import messages.
 
 ## Adding a new example
 

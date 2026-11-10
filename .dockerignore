@@ -35,8 +35,6 @@ docs/
 !docs/api/openapi.supplement.yaml
 CONTRIBUTING.md
 
-# Bruno API request collection — dev-time only
-bruno/
 
 # SDK build artefacts (sources are kept so SDK tests could run via docker
 # buildkit secondary stages in future; dist/build/node_modules never needed)

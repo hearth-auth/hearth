@@ -21,8 +21,9 @@
 #   R1  At least one active ruleset targets refs/heads/main at all.
 #   R2  A `pull_request` rule exists — changes reach main only through a PR.
 #   R3  A `required_status_checks` rule exists and includes the context
-#       `required-summary` (the always-reporting aggregate in ci.yml; see
-#       scripts/ci-required-checks-migrate.sh for why only that context).
+#       `required-summary` (the always-reporting aggregate in ci.yml; it is the
+#       only required context, so a job that a path filter skips cannot leave a
+#       required check pending).
 #   R4  The ruleset carrying those rules has NO bypass actors. `always` mode is
 #       the audited defect verbatim; `pull_request` mode still offers a
 #       "merge without waiting for requirements" button, which is the same

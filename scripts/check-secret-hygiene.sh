@@ -2,7 +2,7 @@
 # scripts/check-secret-hygiene.sh — CI guard for accidentally committed secret material.
 #
 # Tracks: HEA-858. Scope: catches the most common foot-gun — a developer pastes a real
-# value into hearth.example.yaml, hearth-defaults.yaml, deploy/helm/**/values.yaml, or any
+# value into hearth.example.yaml, deploy/helm/**/values.yaml, or any
 # tracked YAML/Markdown/Shell file and forgets to revert before committing.
 #
 # This is a STATIC source scan. Runtime log scrubbing is a separate concern handled per
