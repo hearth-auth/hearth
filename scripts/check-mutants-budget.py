@@ -54,7 +54,9 @@ is the only place that defines a module.
 
 cargo-mutants 27.1.0 does not apply `--re` to "delete field" mutants. A
 mutant in a module's files that matches no `re` of any module is not in the
-module: it is counted apart and not checked against the budget.
+module: it is counted apart and not checked against the budget. The same
+applies to a "delete field" mutant (genre StructField) that is in another
+module: only that module counts it.
 
 Timeouts are not survivors. They are counted and shown, but no budget
 applies to them.
@@ -260,10 +262,17 @@ def main():
             path = mutant.get("file", "")
             mutant_name = mutant.get("name", "")
             owners = modules_of(path, mutant_name, modules)
-            if not owners and file_in(path, modules[module]):
+            delete_field = mutant.get("genre") == "StructField"
+            if (
+                module not in owners
+                and file_in(path, modules[module])
+                and (not owners or delete_field)
+            ):
                 # cargo-mutants 27.1.0 does not apply `--re` to "delete field"
                 # mutants, so the run tests some mutants outside the module's
-                # `re`. They are not in the module: count them apart.
+                # `re`, also some of another module's functions. They are not
+                # in this module: count them apart. The other module's run
+                # tests and counts its own.
                 outside_re[module] += 1
                 continue
             if owners != [module]:
