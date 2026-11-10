@@ -77,7 +77,7 @@ tests = [
     "token_session_mfa_proof",
 ]
 shards = 2
-survivors = 77
+survivors = 73
 
 [modules.rbac-resolver]
 files = [

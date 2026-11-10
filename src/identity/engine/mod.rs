@@ -4841,12 +4841,10 @@ impl EmbeddedIdentityEngine {
                 self.session_cache_fill(realm_id, &arc, gen_before_read);
                 Ok(Some(arc))
             }
-            Some(s) if s.is_valid(now) => {
-                // Policy-expired (A-18): reject fail-closed. Eviction is
-                // deferred to the background GC sweep (C-5) — no storage write
-                // on the read path.
-                Ok(None)
-            }
+            // Missing, revoked or expired, or policy-expired (A-18): reject
+            // fail-closed. The eviction of a policy-expired session is
+            // deferred to the background GC sweep (C-5): no storage write on
+            // the read path.
             _ => Ok(None),
         }
     }
@@ -25211,6 +25209,56 @@ mod tests {
         assert!(
             !engine.session_cache.load().contains_key(&key),
             "expired session must be lazily evicted after get_session"
+        );
+    }
+
+    /// #641 (cargo-mutants survivors): `session_cache_insert` warms the cache
+    /// only with a session that is still valid and not policy-expired. A row
+    /// that has expired, or that is past its idle timeout, is evicted, not
+    /// cached.
+    #[test]
+    fn session_cache_insert_evicts_a_session_that_is_no_longer_live() {
+        // Expired: past the session TTL (default 7 days).
+        let (_dir, engine, clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm_id);
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("create session");
+        let key = (realm_id.clone(), session.id().clone());
+        assert!(engine.session_cache.load().contains_key(&key));
+
+        clock.advance(8 * 24 * 60 * 60 * 1_000_000);
+        engine.session_cache_insert(&realm_id, &session);
+        assert!(
+            !engine.session_cache.load().contains_key(&key),
+            "an expired session must be evicted, not cached"
+        );
+
+        // Policy-expired: valid by TTL, but past the realm's idle timeout.
+        let realm_id = engine
+            .create_realm(&CreateRealmRequest {
+                name: format!("test-realm-{}", uuid::Uuid::new_v4()),
+                config: Some(RealmConfig {
+                    idle_timeout_secs: Some(300),
+                    ..RealmConfig::default()
+                }),
+            })
+            .expect("create realm")
+            .id()
+            .clone();
+        let user = create_test_user(&engine, &realm_id);
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("create session");
+        let key = (realm_id.clone(), session.id().clone());
+        assert!(engine.session_cache.load().contains_key(&key));
+
+        clock.advance(10 * 60 * 1_000_000);
+        engine.session_cache_insert(&realm_id, &session);
+        assert!(
+            !engine.session_cache.load().contains_key(&key),
+            "a session past its idle timeout must be evicted, not cached"
         );
     }
 
