@@ -63,7 +63,9 @@ async fn wait_for_trim(
         if audit.count_events(realm).expect("count") == ROW_LIMIT {
             return Some(start.elapsed());
         }
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        // Move the paused clock 10 s; the pruner task runs while this yields.
+        tokio::time::advance(Duration::from_secs(10)).await;
+        tokio::task::yield_now().await;
     }
     None
 }
