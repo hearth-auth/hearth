@@ -561,6 +561,10 @@ impl EmbeddedStorageEngine {
             Err(e) => return Err(StorageError::Io(e)),
         }
 
+        // #646: refuse a store that another on-disk layout wrote, before any
+        // record, WAL frame or key is read.
+        super::format::check_or_init(&config.data_dir, fs.as_ref())?;
+
         // Load key registry (host key from HEARTH_MASTER_KEY; dev: file/auto-gen)
         let key_registry = Arc::new(KeyRegistry::load_with_fs(
             &config.data_dir,

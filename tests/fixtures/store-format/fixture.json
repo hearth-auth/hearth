@@ -1,0 +1,42 @@
+{
+  "store_format": 1,
+  "realm_id": "0e0cd869-ca88-46fb-b450-3d90247cd9cd",
+  "users": [
+    [
+      "user0@fixture.example",
+      "e6c048d9-a500-4e1d-bd24-e098e981bce1"
+    ],
+    [
+      "user1@fixture.example",
+      "f25497dd-b541-4752-a92d-f7be53760c25"
+    ],
+    [
+      "user2@fixture.example",
+      "9e284ef5-a247-435e-b462-620680a01930"
+    ]
+  ],
+  "session_id": "a7b04e34-78f5-a644-1c77-5540f8987f98",
+  "kids": [
+    "zZQfXILWvpgkKx-NYbqXJQ"
+  ],
+  "audit_events": 11,
+  "admin_permissions": [
+    "hearth.admin",
+    "hearth.agents.admin",
+    "hearth.clients.admin",
+    "hearth.export",
+    "hearth.realm.admin",
+    "hearth.sv_feed",
+    "hearth.users.admin",
+    "org.admin",
+    "org.billing",
+    "org.read",
+    "org.write",
+    "realm.admin",
+    "realm.read",
+    "realm.write",
+    "user.impersonate",
+    "user.read",
+    "user.write"
+  ]
+}

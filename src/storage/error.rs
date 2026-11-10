@@ -104,6 +104,20 @@ pub enum StorageError {
         snapshot_id: String,
     },
 
+    /// The data directory's `FORMAT` file names a store format that this build
+    /// does not read (#646), or cannot be parsed.
+    ///
+    /// The build refuses the directory before it reads a record, so it never
+    /// misreads data that another on-disk layout wrote.
+    UnsupportedStoreFormat {
+        /// The data directory.
+        data_dir: PathBuf,
+        /// What the `FORMAT` file holds (trimmed, at most 64 bytes).
+        found: String,
+        /// The format this build reads.
+        supported: u32,
+    },
+
     /// A range scan was requested with `start > end`.
     ///
     /// The half-open interval `[start, end)` is only meaningful when
@@ -285,6 +299,17 @@ impl fmt::Display for StorageError {
                     marker_path.display()
                 )
             }
+            Self::UnsupportedStoreFormat {
+                data_dir,
+                found,
+                supported,
+            } => write!(
+                f,
+                "the FORMAT file of data directory '{}' says {found:?}; this build reads only \
+                 store format {supported}. Run the build that wrote it, or see \
+                 docs/guides/upgrading.md",
+                data_dir.display()
+            ),
         }
     }
 }
@@ -307,6 +332,7 @@ impl std::error::Error for StorageError {
             | Self::ClusterUnavailable { .. }
             | Self::ClusterWriteOutcomeUnknown { .. }
             | Self::TornSnapshotRestore { .. }
+            | Self::UnsupportedStoreFormat { .. }
             | Self::WalMidSegmentCorruption { .. } => None,
         }
     }

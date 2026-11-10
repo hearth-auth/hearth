@@ -9,9 +9,11 @@
 ///
 /// `postcard` encodes structs in declaration order with no field names and
 /// compact integer encoding (ULEB128). The format is NOT self-describing:
-/// the schema is implicit in the Rust type. Hearth has no backward-compat
-/// obligation for on-disk formats (see CLAUDE.md §Greenfield), so the
-/// encoding can be changed freely between versions.
+/// the schema is implicit in the Rust type, and a record carries no version.
+/// A change that makes this build misread a record an earlier build wrote
+/// MUST bump `crate::storage::format::STORE_FORMAT_VERSION` in the same
+/// change. The fixture test `tests/store_format_fixture.rs` fails until it
+/// does. Hearth does not migrate stores between format versions.
 use serde::{de::DeserializeOwned, Serialize};
 
 /// Encodes `value` using `postcard` into a `Vec<u8>`.
