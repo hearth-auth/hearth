@@ -92,6 +92,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
+    # The Rust extractor loads the workspace with `cfg(test)` on, so it reads
+    # the `#[cfg(test)]` unit-test modules inside src/ as production code (58
+    # alerts there were dismissed as "used in tests"). `-test` turns that cfg
+    # off, as a release build does. Extractor option `cargo_cfg_overrides`
+    # (github/codeql rust/codeql-extractor.yml). Other extractors ignore it.
+    env:
+      CODEQL_EXTRACTOR_RUST_OPTION_CARGO_CFG_OVERRIDES: "-test"
+
     # HEA-696: SARIF upload requires security-events:write. Scoped per-job so a
     # supply-chain-compromised action in any other job cannot mint findings.
     permissions:
