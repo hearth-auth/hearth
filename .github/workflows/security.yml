@@ -103,8 +103,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Rust supports only `none`: the extractor loads the Cargo workspace
+          # itself, so cargo and protoc stay on PATH. An earlier manual
+          # `cargo build` step gave the extractor nothing and cost ~3.5 min.
           - language: rust
-            build-mode: manual
+            build-mode: none
           - language: go
             build-mode: autobuild
           - language: javascript-typescript
@@ -117,7 +120,7 @@ jobs:
         with:
           persist-credentials: false
 
-      # Rust autobuild needs cargo + protoc on PATH before CodeQL invokes it.
+      # The Rust extractor needs cargo + protoc on PATH to load the workspace.
       # Other languages use CodeQL's bundled tracers, so we skip the Rust setup
       # for non-rust matrix legs to avoid wasted runner minutes.
       - name: Setup Rust toolchain + protoc (HEA-676 reusable)
@@ -131,34 +134,42 @@ jobs:
         uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           languages: ${{ matrix.language }}
-          # HEA-690: effective for interpreted legs (JS/TS, Python) only.
-          # CodeQL for compiled languages (Rust, Go) traces the compiler
-          # invocation rather than individual files, so paths-ignore is a no-op
-          # for those legs — Rust test scope is controlled by the build command
-          # below (no --all-targets), and Go autobuild inherits the same limit.
-          # Keeping this block anyway so interpreted legs remain scoped to
-          # production code (fixtures/tests flood false positives for JS/Python).
-          paths-ignore: |
-            tests/**
-            benches/**
-            simulation/**
-            fuzz/**
-            examples/**
-            **/tests/**
-            **/__tests__/**
-            **/*.test.ts
-            **/*.test.js
-            **/*.test.go
-            **/*.test.py
-            **/*.test.rs
-            **/*.spec.ts
-            **/*.spec.js
-            sdks/*/tests/**
-            sdks/*/test/**
-            # The shared conformance harness's per-SDK runners: test tooling that
-            # reads its case file and configures an SDK client from it.
-            sdks/*/conformance/**
-            sdks/conformance/**
+          # Go keeps its explicit Autobuild step below, so it passes no mode
+          # here (its default is autobuild).
+          build-mode: ${{ matrix.build-mode != 'autobuild' && matrix.build-mode || '' }}
+          # HEA-690: scan production code only. Test code does not ship, and
+          # its fixtures and fake credentials flood the results with false
+          # positives.
+          #
+          # The list MUST be in `config`. The init action has no `paths-ignore`
+          # input: until 2026-11-09 the list was an input here, the action
+          # ignored it, and every leg scanned tests/ (289 Rust alerts there).
+          # GitHub applies `paths-ignore` to interpreted languages and to
+          # compiled languages that it analyses without a build. Rust has only
+          # that mode (`none`), so the list applies to the Rust leg too. Go uses
+          # autobuild, where the list has no effect.
+          config: |
+            paths-ignore:
+              - tests/**
+              - benches/**
+              - simulation/**
+              - fuzz/**
+              - examples/**
+              - "**/tests/**"
+              - "**/__tests__/**"
+              - "**/*.test.ts"
+              - "**/*.test.js"
+              - "**/*.test.go"
+              - "**/*.test.py"
+              - "**/*.test.rs"
+              - "**/*.spec.ts"
+              - "**/*.spec.js"
+              - sdks/*/tests/**
+              - sdks/*/test/**
+              # The shared conformance harness's per-SDK runners: test tooling
+              # that reads its case file and configures an SDK client from it.
+              - sdks/*/conformance/**
+              - sdks/conformance/**
           queries: security-extended
 
       # Go autobuild calls `go get` to resolve module imports. Without git
@@ -177,21 +188,6 @@ jobs:
       - name: Autobuild
         if: matrix.build-mode == 'autobuild'
         uses: github/codeql-action/autobuild@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
-
-      - name: Free disk space for Rust CodeQL build
-        if: matrix.language == 'rust'
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup
-          df -h
-
-      - name: Manual build for CodeQL (Rust)
-        if: matrix.language == 'rust'
-        shell: bash
-        # HEA-1381: omit --all-targets so cfg(test) is never enabled and test
-        # code is not compiled into the CodeQL database. Production lib + bins
-        # are still fully in scope; --all-targets was the only reason test
-        # modules (hardcoded fixtures, fake creds) surfaced as findings.
-        run: cargo build --workspace --all-features --locked
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
