@@ -828,6 +828,14 @@ fn backup_create_lock_failure_reports_the_reason() {
         output.contains("locked"),
         "a lock failure must name the lock, got: {output:?}"
     );
+    assert_eq!(
+        hearth::backup::marker::last_success(
+            &data_dir,
+            hearth::backup::marker::BackupSource::Offline
+        ),
+        None,
+        "a failed backup must not record a success (#648)"
+    );
 }
 
 // ===== §4.13#5: security.backup.verify_key must reach the server =====

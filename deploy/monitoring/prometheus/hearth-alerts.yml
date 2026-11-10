@@ -121,6 +121,19 @@ groups:
           summary: "Hearth {{ $labels.instance }} refuses storage writes (503)"
           description: "storage.max_writes_in_flight writes were already in progress. A slow disk is the usual cause; see HearthWalFsyncSlow."
 
+  - name: hearth-backup
+    rules:
+      - alert: HearthBackupTooOld
+        expr: |
+          time() - max by (job) (hearth_backup_last_success_timestamp_seconds{job="hearth"})
+            > 26 * 3600
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No successful Hearth backup for more than 26 hours"
+          description: "The newest backup (online or offline, on any instance) is {{ $value | humanizeDuration }} old. A value of 0 for the metric means that no backup ever completed. Check the backup job."
+
   - name: hearth-security
     rules:
       - alert: HearthAuditIntegrityFailure

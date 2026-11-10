@@ -157,3 +157,44 @@ fn the_data_dir_free_space_is_read_at_each_scrape() {
         "no data-dir gauges when the data dir cannot be read"
     );
 }
+
+/// #648: `hearth_backup_last_success_timestamp_seconds{source}` reads the
+/// backup markers in the data directory at each scrape. A source with no
+/// backup reads 0, so a backup-age alert also fires when no backup ever ran.
+#[test]
+fn the_backup_time_gauge_reads_the_markers_at_each_scrape() {
+    use hearth::backup::marker::{record_success, BackupSource};
+    const ONLINE: &str = "hearth_backup_last_success_timestamp_seconds{source=\"online\"}";
+    const OFFLINE: &str = "hearth_backup_last_success_timestamp_seconds{source=\"offline\"}";
+
+    assert!(
+        sample(&metrics().render(), ONLINE).is_none(),
+        "no backup gauge before a data dir is installed"
+    );
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    metrics()
+        .export_backup_status(dir.path().to_path_buf())
+        .expect("first install");
+
+    let rendered = metrics().render();
+    assert_eq!(sample(&rendered, ONLINE), Some(0.0), "no online backup yet");
+    assert_eq!(
+        sample(&rendered, OFFLINE),
+        Some(0.0),
+        "no offline backup yet"
+    );
+
+    let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000);
+    record_success(dir.path(), BackupSource::Offline, at).expect("record");
+    let rendered = metrics().render();
+    assert_eq!(sample(&rendered, OFFLINE), Some(1_800_000_000.0));
+    assert_eq!(sample(&rendered, ONLINE), Some(0.0));
+
+    assert!(
+        metrics()
+            .export_backup_status(dir.path().to_path_buf())
+            .is_err(),
+        "a second install must fail, not export the gauge twice"
+    );
+}

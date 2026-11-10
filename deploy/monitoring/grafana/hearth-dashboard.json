@@ -74,7 +74,7 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
+        "w": 5,
         "x": 0,
         "y": 1
       },
@@ -118,8 +118,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 6,
+        "w": 5,
+        "x": 5,
         "y": 1
       },
       "fieldConfig": {
@@ -162,8 +162,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 12,
+        "w": 5,
+        "x": 10,
         "y": 1
       },
       "fieldConfig": {
@@ -206,8 +206,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 18,
+        "w": 5,
+        "x": 15,
         "y": 1
       },
       "fieldConfig": {
@@ -232,6 +232,67 @@
           "refId": "A",
           "expr": "min(hearth_storage_data_dir_available_bytes{job=\"hearth\",instance=~\"$instance\"} / hearth_storage_data_dir_total_bytes{job=\"hearth\",instance=~\"$instance\"})",
           "legendFormat": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Newest backup age",
+      "id": 28,
+      "description": "Time since the newest successful backup, online or offline (hearth_backup_last_success_timestamp_seconds). The alert HearthBackupTooOld fires above 26 h.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 93600
+              },
+              {
+                "color": "red",
+                "value": 172800
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - max(hearth_backup_last_success_timestamp_seconds{job=\"hearth\",instance=~\"$instance\"})",
+          "legendFormat": "age",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"

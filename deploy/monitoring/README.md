@@ -42,10 +42,11 @@ The thresholds are starting points. Tune them to your traffic and hardware.
 | `HearthCompactionFailing` | warning | A compaction failed in the last hour. | Read the server log for the compaction error. If compaction stops, the SST file count and the read latency grow. |
 | `HearthSstFilesHigh` | warning | More than 36 SST files for 30 min (3 times the default `storage.compaction.max_sst_count`). | Compaction does not keep up. Check `HearthCompactionFailing` and the compaction settings. |
 | `HearthStorageWritesShed` | warning | The server refused storage writes (503) because `storage.max_writes_in_flight` writes were in progress. | A slow disk is the usual cause: see `HearthWalFsyncSlow`. |
+| `HearthBackupTooOld` | warning | For 30 min, the newest successful backup (online or offline, on any instance) is more than 26 h old, or no backup ever completed. | Check the backup job's log and exit status. Run a backup. See the [backup guide](../../docs/guides/backup.md#monitoring-backups). |
 | `HearthAuditIntegrityFailure` | critical | An audit chain verification failed. | The audit log was changed outside Hearth, or the store is damaged. Keep a copy of the data directory before you change anything, and investigate. |
 | `HearthControlEpochBumpsOwed` | critical | For 10 min, a control (such as a token or session revocation) is not announced to the other cluster nodes. | The other nodes do not enforce that revocation yet. Check the cluster's health and the server log. |
 | `HearthRateLimitersDisabled` | warning | The server runs with rate limiters off. | This is for load tests only. Remove the setting that disables the limiters. |
 | `HearthKdfShedding` | warning | The server refused password checks (503) for 10 min because the Argon2id queue was full. | Add CPU, or raise `security.password.kdf.max_in_flight` if CPU is free. |
 | `HearthUserCreateShedding` | warning | The server refused user creates (503) for 10 min. | Raise `operational.user_create.max_in_flight` if CPU is free. |
 
-There is no alert on backups yet. Check your backup job's own exit status and age.
+`HearthBackupTooOld` sees that the server built an archive. It does not see that your job stored it. Also monitor the exit status of the backup job.
