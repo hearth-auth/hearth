@@ -75,7 +75,7 @@ jobs:
     name: mutants ${{ matrix.module }} ${{ matrix.shard }}/${{ matrix.shards }}
     needs: plan
     runs-on: ubuntu-latest
-    # A shard is sized for about 3 hours (ci/mutants-budget.toml). The limit
+    # A shard takes at most about 4 hours (ci/mutants-budget.toml). The limit
     # gives room for a slow runner and stays under the 6-hour job limit of
     # GitHub-hosted runners. A shard that times out has no result, and the
     # budget job then fails.

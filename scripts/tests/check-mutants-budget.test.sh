@@ -44,8 +44,9 @@ budget() {
 
 # shard <results dir> <module> <k> <n> <outcome...> — one shard directory.
 # An outcome is <summary>:<file>, for example MissedMutant:src/alpha/a.rs.
-# The special outcome NOEND writes no end_time (a shard that did not finish);
-# BASELINE-FAIL writes a failed baseline.
+# A summary that ends in +field writes a "delete field" mutant (genre
+# StructField). The special outcome NOEND writes no end_time (a shard that did
+# not finish); BASELINE-FAIL writes a failed baseline.
 shard() {
     local results="$1" module="$2" k="$3" n="$4"
     shift 4
@@ -59,7 +60,11 @@ shard() {
             BASELINE-FAIL) baseline='Failure'; continue ;;
         esac
         i=$((i + 1))
-        items+="${sep}{\"scenario\":{\"Mutant\":{\"name\":\"${o#*:}:${i}:1: replace f\",\"file\":\"${o#*:}\"}},\"summary\":\"${o%%:*}\"}"
+        local summary="${o%%:*}" change="replace f" genre="FnValue"
+        if [[ "$summary" == *+field ]]; then
+            summary="${summary%+field}" change="delete field x" genre="StructField"
+        fi
+        items+="${sep}{\"scenario\":{\"Mutant\":{\"name\":\"${o#*:}:${i}:1: ${change}\",\"file\":\"${o#*:}\",\"genre\":\"${genre}\"}},\"summary\":\"${summary}\"}"
         sep=","
     done
     printf '{"outcomes":[{"scenario":"Baseline","summary":"%s"}%s%s],"end_time":%s}\n' \
@@ -177,6 +182,16 @@ shard "$d/r" alpha 0 2 MissedMutant:src/alpha/a.rs
 shard "$d/r" alpha 1 2 MissedMutant:src/alpha/a.rs MissedMutant:src/alpha/other.rs
 shard "$d/r" beta 0 1 MissedMutant:src/alpha/b.rs
 expect passes "a mutant in the files that matches no re is not counted" "$d/b.toml" "$d/r" \
+    "note: alpha: 1 mutants outside \`re\` are not counted"
+
+# A "delete field" mutant of another module's function is in this module's
+# files too. cargo-mutants tests it in both runs, because it ignores --re for
+# it. It is counted in the other module only, and is not an error.
+d="$(case_dir)"; re_budget "$d/b.toml"
+shard "$d/r" alpha 0 2 MissedMutant:src/alpha/a.rs
+shard "$d/r" alpha 1 2 MissedMutant:src/alpha/a.rs MissedMutant+field:src/alpha/b.rs
+shard "$d/r" beta 0 1 MissedMutant+field:src/alpha/b.rs
+expect passes "a delete-field mutant in another module's re is counted there only" "$d/b.toml" "$d/r" \
     "note: alpha: 1 mutants outside \`re\` are not counted"
 
 d="$(case_dir)"; budget "$d/b.toml" 2 1; sed -i 's#src/beta/\*\*#src/beta/**", "src/alpha/a.rs#' "$d/b.toml"

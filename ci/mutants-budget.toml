@@ -18,12 +18,15 @@
 # - No `survivors` key: the run fails. The first run gives the count to record
 #   (design Open Question 3: the budget starts at the first-run count).
 #
-# Shards: one shard is sized for about 3 hours on a GitHub-hosted runner, at
-# about 1 minute for each mutant. That is an estimate: a 12-core host took
-# about 32 s for each mutant on 2026-11-09. The first run gives the real
-# time, and the shard counts follow it. The 13 shards run
-# at the same time, in the US Eastern night, and leave 7 of the 20 runners of
-# the GitHub Free plan to PR CI.
+# Budgets: the counts of the first run, 2026-11-10 (run 42741969394, report
+# in reports/mutants-first-run-2026-11-10.md).
+#
+# Shards: in the first run, the mean time of one mutant was 77 s to 121 s
+# on a GitHub-hosted runner (about 80 % of it is the build). With 6 shards,
+# a token-issuance shard took up to 5 hours, too near the 330-minute job
+# limit, so token-issuance now has 8. Each shard then takes at most about
+# 4 hours. The 15 shards run at the same time, in the US Eastern night, and
+# leave 5 of the 20 runners of the GitHub Free plan to PR CI.
 #
 # Keys: `files` are cargo-mutants `--file` globs. `re` (optional) are
 # cargo-mutants `--re` regexes on the mutant name; they select functions in a
@@ -51,7 +54,8 @@ tests = [
     "pre_token_webhook",
     "resource_aud_refresh",
 ]
-shards = 6
+shards = 8
+survivors = 238
 
 [modules.sessions]
 files = [
@@ -73,6 +77,7 @@ tests = [
     "token_session_mfa_proof",
 ]
 shards = 2
+survivors = 77
 
 [modules.rbac-resolver]
 files = [
@@ -89,6 +94,7 @@ tests = [
     "me_permissions",
 ]
 shards = 3
+survivors = 131
 
 [modules.permission-check]
 files = [
@@ -104,3 +110,4 @@ tests = [
     "third_party_client_permissions",
 ]
 shards = 2
+survivors = 96
