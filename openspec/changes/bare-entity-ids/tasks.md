@@ -28,5 +28,5 @@
 
 - [x] 4.1 Update the guides, SDK READMEs and examples that show prefixed IDs as Hearth output.
 - [x] 4.2 `CHANGELOG.md` entry under `Changed` (**BREAKING**).
-- [ ] 4.3 `make check` and `make test-detached`.
-- [ ] 4.4 `make ci-local-fast`.
+- [x] 4.3 `make check` and `make test-detached`. — done: CI green on #518 (`41a9c3a9`)
+- [x] 4.4 `make ci-local-fast`. — done: CI green on #518 (`41a9c3a9`)

@@ -12,5 +12,5 @@
 ## 3. Close-out
 
 - [x] 3.1 `CHANGELOG.md` `Fixed` entry.
-- [ ] 3.2 Full-stack demo: the dashboard shows the user's roles (in the demo-repair PR).
+- [x] 3.2 Full-stack demo: the dashboard shows the user's roles (in the demo-repair PR). — done in the demo-repair PR, `62c1ae5d` (#517)
 - [x] 3.3 `make ci-local-fast`.

@@ -11,4 +11,4 @@
 ## 3. Close-out
 
 - [x] 3.1 `CHANGELOG.md` `Fixed` entry.
-- [ ] 3.2 Full-stack demo integration suite: flows 3, 5 and 6 pass (in the demo-repair PR).
+- [x] 3.2 Full-stack demo integration suite: flows 3, 5 and 6 pass (in the demo-repair PR). — done in the demo-repair PR, `62c1ae5d` (#517)

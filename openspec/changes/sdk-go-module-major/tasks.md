@@ -15,5 +15,5 @@
 ## 3. Close out
 
 - [x] 3.1 `CHANGELOG.md` entry under `Fixed`, with the new import path.
-- [ ] 3.2 `make ci-local-fast`.
-- [ ] 3.3 After the release: `go get github.com/hearth-auth/hearth/sdks/go/v3@<tag>` resolves in a scratch module.
+- [x] 3.2 `make ci-local-fast`. — done: CI green on #511 (`afc352cb`)
+- [x] 3.3 After the release: `go get github.com/hearth-auth/hearth/sdks/go/v3@<tag>` resolves in a scratch module. — done: `sdks/go/v3.5.x` tags resolved; the module is now `/v4`

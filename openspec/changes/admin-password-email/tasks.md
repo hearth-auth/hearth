@@ -18,5 +18,5 @@
 ## 3. Close out
 
 - [x] 3.1 `CHANGELOG.md` entries.
-- [ ] 3.2 `make check`, `make test-detached`, `make ci-local-fast`.
-- [ ] 3.3 `make ui-test-smoke` and `make ui-test-accessibility` against a dev server on a free port.
+- [x] 3.2 `make check`, `make test-detached`, `make ci-local-fast`. — done: CI green on #526 (`7c465f45`)
+- [x] 3.3 `make ui-test-smoke` and `make ui-test-accessibility` against a dev server on a free port. — done: UI smoke and accessibility suites green on #526
