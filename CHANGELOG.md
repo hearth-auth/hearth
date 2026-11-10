@@ -43,6 +43,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   Before, the tokens of the first exchange stayed valid.
 
 ### Fixed
+- **The audit prune now runs soon after startup** (#645): the daily sweep that applies the audit
+  `retention_days` and `max_rows` and the realm quotas `max_audit_rows` and `max_disk_bytes` ran
+  its first pass 24 hours after startup. A server that restarted more often than once a day never
+  pruned, so its audit log grew without limit. The first sweep now runs 60 seconds after startup,
+  then once every 24 hours.
 - **Token endpoint errors and caching follow RFC 6749 §5** (#639): at `POST /token` and
   `POST /realms/{realm_name}/token`:
   - an invalid, expired or reused authorization code now gets `"error": "invalid_grant"`. Before,
