@@ -57,6 +57,11 @@ When no front-channel page is served and no `post_logout_redirect_uri` survives 
 - **THEN** the session is revoked
 - **AND** the browser is not redirected to that URI
 
+#### Scenario: A redirect without client_id
+- **WHEN** a client calls `/end_session` with a valid `id_token_hint` that has more than one `aud` and no `azp`, a `post_logout_redirect_uri`, and no `client_id`
+- **THEN** the session is revoked
+- **AND** the browser is not redirected to that URI
+
 #### Scenario: A browser with no redirect
 - **WHEN** a browser calls `/realms/{realm}/end_session` with `Accept: text/html` and a valid `id_token_hint`, and no redirect survives validation
 - **THEN** the response is `200` with an HTML page that tells the user they are signed out

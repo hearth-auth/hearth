@@ -62,4 +62,4 @@ Each checker first gets a unit test on a hand-written history with a planted vio
 ## 8. Follow-up changes (propose only, after task 5.6)
 
 - [x] 8.1 Propose `cluster-local-state-and-clock` (G3, G6, G8), `cluster-read-fencing` (G1, G2) and `cluster-audit-chain` (G4), each naming the tests it flips to `pass` (design decision 10)
-- [x] 8.2 After `trusted-core-confidence` is archived: propose `cluster-write-idempotency` (G7) and `cluster-membership` (G5, G9) — moved to the follow-up list in GitHub issues; not part of this change
+- [x] 8.2 After `trusted-core-confidence` is archived: propose `cluster-write-idempotency` (G7) and `cluster-membership` (G5, G9) — moved to #804; not part of this change

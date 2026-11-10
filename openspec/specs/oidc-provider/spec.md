@@ -2,7 +2,9 @@
 
 ## Purpose
 Hearth's OIDC and OAuth 2.0 authorization-server profile: endpoints, PKCE, JAR, PAR, response modes, discovery, resource indicators, and the request encodings it accepts.
+
 ## Requirements
+
 ### Requirement: Supported OIDC and OAuth 2.0 specifications
 Hearth SHALL implement OpenID Connect Core 1.0 and the related specifications in the table below.
 
@@ -432,3 +434,54 @@ Endpoints that act with the user's full authority over their own account, or rea
 - **WHEN** a locked-out account attempts a passkey removal with a step-up proof
 - **THEN** the response is `429 too_many_attempts` with `Retry-After`
 
+### Requirement: A hosted form submission never ends in a redirect off Hearth's origin
+The UI `Content-Security-Policy` SHALL set `form-action 'self'`, in dev and in production, with no extra origins. Browsers apply `form-action` to every redirect that follows a form submission. So when one of these hosted form POSTs would answer `303 See Other`, Hearth SHALL answer `200` with a continue page instead:
+
+- the sign-in form: realm, realm-scoped and admin
+- the TOTP, email-OTP and required-MFA-enrolment second-factor forms
+- the required-action forms
+- the consent form, approve and deny
+
+The continue page SHALL navigate to the redirect target with a `Refresh: 0;url=…` header and a matching `<meta http-equiv="refresh" content="0;url=…">`. It SHALL show a link to the same target. It SHALL NOT carry a `Location` header. The response SHALL keep every `Set-Cookie` header of the redirect it replaces. A `GET` to these routes, and any response that is not `303`, SHALL be unchanged.
+
+#### Scenario: Sign-in for a client on another origin
+- **WHEN** a user submits the sign-in form during an authorization request for a client whose `redirect_uri` is on another origin
+- **THEN** the response is `200` with a continue page whose target is the UI authorize URL
+- **AND** a browser that follows the page reaches the client's `redirect_uri` with an authorization code
+
+#### Scenario: Consent is approved
+- **WHEN** a user approves the consent form
+- **THEN** the response is `200` with a continue page whose target is the client's `redirect_uri` with `code` and `state`
+
+#### Scenario: Consent is denied
+- **WHEN** a user denies the consent form
+- **THEN** the response is `200` with a continue page whose target is the client's `redirect_uri` with `error=access_denied`
+
+#### Scenario: The session cookie survives
+- **WHEN** a sign-in form submission succeeds
+- **THEN** the continue page response sets the session cookie and the CSRF cookie
+
+#### Scenario: Dev mode keeps the strict directive
+- **WHEN** Hearth runs with `--dev` and a browser loads a `/ui` page
+- **THEN** the CSP `form-action` directive is exactly `'self'`
+
+### Requirement: Public metadata answers cross-origin reads
+Hearth SHALL send `Access-Control-Allow-Origin: *` on every response of these routes, so that a browser page on any origin can read them:
+
+- `/.well-known/openid-configuration` and `/realms/{realm}/.well-known/openid-configuration`
+- `/.well-known/jwks.json`, `/jwks`, `/certs` and `/realms/{realm}/.well-known/jwks.json`
+- `/.well-known/oauth-protected-resource`
+
+Hearth SHALL NOT send `Access-Control-Allow-Credentials` on these responses. Hearth SHALL NOT add `Access-Control-Allow-Origin: *` to any other route.
+
+#### Scenario: An SPA on another origin reads the realm JWKS
+- **WHEN** a page on `https://app.example.com` sends `GET /realms/acme/.well-known/jwks.json` to Hearth on another origin
+- **THEN** the response carries `Access-Control-Allow-Origin: *` and no `Access-Control-Allow-Credentials`
+
+#### Scenario: An SPA on another origin reads discovery
+- **WHEN** a page on another origin sends `GET /realms/acme/.well-known/openid-configuration`
+- **THEN** the response carries `Access-Control-Allow-Origin: *`
+
+#### Scenario: A credentialed endpoint stays closed
+- **WHEN** a page on another origin sends `GET /userinfo` with an `Origin` header
+- **THEN** the response carries no `Access-Control-Allow-Origin`

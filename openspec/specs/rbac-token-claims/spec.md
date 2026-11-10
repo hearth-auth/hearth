@@ -2,7 +2,9 @@
 
 ## Purpose
 The authorization claims in issued tokens: the claim schema, scope narrowing, permission-delivery modes, session-version (`sv`) revocation, and the permissions of delegated (`act`) tokens.
+
 ## Requirements
+
 ### Requirement: Access tokens carry identity and RBAC claims
 An access token SHALL carry the claims `sub`, `iss`, `aud`, `exp`, `iat`, `sid`, `tid`, `token_type`, `jti` and `scope`, and, in `embedded` mode, `roles`, `groups` and `permissions`. Refresh tokens carry them where applicable. `tid` (the realm ID) SHALL always be present; every permission check is implicitly bound to it. `oid` (the organization ID) SHALL be present only when the token was issued in an organization context; its presence MAY enable organization-scoped role assignments. `roles` and `groups` SHALL carry names (role names and group slugs), not IDs; they are informational. `permissions` SHALL carry the resolved flat set, and it is the authoritative claim: client-side permission checks read exclusively from it. A `client_credentials` token has no user: it SHALL carry no `roles`, `groups` or `permissions`.
 
@@ -68,7 +70,9 @@ Every OAuth client SHALL carry an `access_token_authorization` field that decide
 | `introspection` | `INTROSPECTION` | none | `POST /realms/{realm}/introspect` |
 | `decision` | `DECISION` | none | `POST /oauth/authorize` |
 
-`embedded` MUST be the mode of every client whose `access_token_authorization` is omitted. An admin SHALL set the mode on the client record through the admin API, at registration (`POST /admin/applications`) or later (`PATCH /admin/applications/{id}`).
+`embedded` MUST be the mode of every client whose `access_token_authorization` is omitted. An admin SHALL set the mode of a client registered at runtime through the admin API, at registration (`POST /admin/applications`) or later (`PATCH /admin/applications/{id}`).
+
+An operator SHALL set the mode of an application declared in `hearth.yaml` with the application's `access_token_authorization` key: `embedded`, `introspection` or `decision`. `hearth.yaml` SHALL own that mode. Every reconcile SHALL apply the declared mode, and SHALL apply `embedded` when the key is omitted. Config load SHALL refuse any other value. The admin API SHALL refuse a request that changes the mode of a `hearth.yaml`-declared application with `409`, and SHALL leave the client unchanged. A request that names the mode the client already has SHALL NOT be refused for that field.
 
 #### Scenario: A client registered without the field
 - **WHEN** an admin registers a client and omits `access_token_authorization`
@@ -77,6 +81,19 @@ Every OAuth client SHALL carry an `access_token_authorization` field that decide
 #### Scenario: A client switched to introspection
 - **WHEN** an admin sends `PATCH /admin/applications/{id}` with `{ "access_token_authorization": "introspection" }`
 - **THEN** later tokens for that client carry no `roles`, `groups` or `permissions` claims
+
+#### Scenario: A resource server declared in hearth.yaml
+- **WHEN** `hearth.yaml` declares an application with `access_token_authorization: introspection`
+- **THEN** after reconcile the client's mode is `introspection`
+- **AND** the client can introspect a user-session token with no `azp` that another client of the realm obtained
+
+#### Scenario: The key is removed from hearth.yaml
+- **WHEN** the operator removes `access_token_authorization` from a YAML-declared application and Hearth reconciles again
+- **THEN** the client's mode is `embedded`
+
+#### Scenario: An admin changes the mode of a hearth.yaml application
+- **WHEN** an admin sends `PATCH /admin/applications/{id}` with a mode that differs from the mode `hearth.yaml` declares for that application
+- **THEN** the response is `409`, the message names `hearth.yaml`, and the client's mode does not change
 
 ### Requirement: Embedded mode resolves RBAC into the token
 In `embedded` mode Hearth SHALL resolve RBAC at token issuance and embed the claim set in the JWT. Resource servers verify the signature locally and read claims from the token, with no network call at authorization time. Permission changes SHALL take effect at the next token refresh, bounded by `access_token_ttl`. The token-size bounds apply, and issuance SHALL fail when the resolved set exceeds them. Validating an `embedded` token SHALL need zero heap allocations, no syscalls and no network calls.
@@ -262,3 +279,26 @@ When Hearth issues a delegated token by RFC 8693 token exchange (`urn:ietf:param
 - **WHEN** a refresh family was issued with `oid` for `acme`, and the user's membership in `acme` is removed
 - **THEN** the next refresh fails with `invalid_grant`
 
+### Requirement: Entity IDs are bare UUIDs
+Every entity ID that Hearth issues SHALL be the bare, lowercase, hyphenated UUID: in token claims (`sid`, `tid`, `oid`), in API and SCIM responses, in webhook payloads, in audit records, in logout tokens and in backup manifests. A token's `sub` SHALL name its subject in one of three forms:
+
+| Subject | `sub` |
+|---|---|
+| A user | the user's bare UUID, equal to the user's `id` in the admin API and SCIM |
+| An OAuth client (a sessionless `client_credentials` or JWT-bearer token) | `client_<uuid>` |
+| An agent | `agt_<uuid>` |
+
+A `sub` with the `client_` or `agt_` prefix SHALL NOT be read as a user. When Hearth parses an ID or a claim, it SHALL also accept the prefixed forms earlier releases issued (`user_`, `session_`, `realm_`, `org_` and the others), so a token issued before an upgrade stays valid until it expires.
+
+#### Scenario: A user's token subject is their API id
+- **WHEN** a client creates a user through SCIM, and the user then signs in through that client
+- **THEN** the access token's `sub` equals the SCIM `id`
+- **AND** its `sid` and `tid` are bare UUIDs
+
+#### Scenario: A client token keeps its subject namespace
+- **WHEN** a client obtains a token with the `client_credentials` grant
+- **THEN** the token's `sub` is `client_<uuid>`, and Hearth does not read it as a user
+
+#### Scenario: A token issued before the upgrade
+- **WHEN** a request presents an unexpired access token whose `sub` is `user_<uuid>` and whose `sid` is `session_<uuid>`
+- **THEN** Hearth accepts it as it accepts a token with bare IDs

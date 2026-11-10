@@ -2,7 +2,9 @@
 
 ## Purpose
 The common contract every supported Hearth SDK (TypeScript, Go, Python, PHP) satisfies: configuration, token verification, claims, OAuth flows, errors, middleware, and the admin client.
+
 ## Requirements
+
 ### Requirement: SDK client configuration
 Every SDK SHALL expose one primary entry point, configured as below.
 
@@ -209,15 +211,25 @@ Each supported SDK SHALL ship under the package name and primary entry point bel
 | SDK | Package | Role | Primary entry point |
 |---|---|---|---|
 | TypeScript | `@hearth-auth/sdk` | Browser SPA, Node.js server, Next.js | `HearthClient` |
-| Go | `github.com/hearth-auth/hearth/sdks/go` (package `hearth`) | Server, service | `NewClient()` returning `*Client` |
+| Go | module `github.com/hearth-auth/hearth/sdks/go/vN`, package `hearth` at `…/vN/hearth` | Server, service | `NewClient()` returning `*Client` |
 | PHP | `hearth-auth/php-sdk` | Server (PSR-18) | `HearthClient` |
 | Python | `hearth-sdk` | Server (sync HTTP) | `HearthClient` |
 
 The TypeScript package SHALL serve browser and Node.js code. `HearthApiClient` is its lower-level client, kept for backwards compatibility.
 
+In the Go module path, `N` SHALL be the major version of the release, as Go's module rules require for a major version of 2 or higher. A Go SDK release whose major version does not match the module path SHALL fail before it creates its tag.
+
 #### Scenario: One TypeScript package for browser and server
 - **WHEN** a developer installs `@hearth-auth/sdk`
 - **THEN** `HearthClient` works in browser code and in Node.js code
+
+#### Scenario: Go resolves the current major version
+- **WHEN** the latest Go SDK tag is `sdks/go/v3.x.y`, and a developer runs `go get github.com/hearth-auth/hearth/sdks/go/v3@latest`
+- **THEN** Go resolves that tag
+
+#### Scenario: A major bump without a module path change
+- **WHEN** the Go SDK's next release is `4.0.0`, and its module path still ends in `/v3`
+- **THEN** the release fails before it creates the `sdks/go/v4.0.0` tag
 
 ### Requirement: SDK capability registry
 Every SDK SHALL ship every capability below that applies to it, unless a platform exception in this specification exempts it. An SDK that lacks an applicable capability, with no exception, is non-conforming.
@@ -758,6 +770,7 @@ The TypeScript browser SDK SHALL implement, through `createHearthAuth(config)`:
 
 - **PKCE authorization code flow** (RFC 7636): `startLogin()` redirects; `handleCallback()` exchanges the code for tokens.
 - **Silent refresh**: renew the token through a hidden iframe before expiry. The lead time is configurable; default 60 s before `exp`.
+- **One refresh at a time**: concurrent calls to `refreshAccessToken()` SHALL share one token request and its result. Hearth rotates the refresh token on each use, and it treats a second use of the same token as replay and revokes the whole token family. So two parallel requests with one token sign the user out.
 - **Logout**: clear the local session, and redirect to RP-initiated logout.
 - **Storage abstraction**: default `sessionStorage`; pluggable (`localStorage`, in-memory, custom). The storage key prefix is configurable.
 - **Cross-tab state sync**: optional. The SDK SHOULD sync login and logout across tabs through a broadcast channel or storage events.
@@ -779,6 +792,11 @@ The TypeScript browser SDK SHALL implement, through `createHearthAuth(config)`:
 #### Scenario: The refresh token is not kept in `localStorage`
 - **WHEN** a single-page app uses `createHearthAuth` with no storage option, and signs in
 - **THEN** the SDK writes no token to `localStorage`; its state lives in `sessionStorage`
+
+#### Scenario: Two refresh calls at the same time
+- **WHEN** an app calls `refreshAccessToken()` twice before the first call completes (for example, from an effect that React's `StrictMode` runs twice)
+- **THEN** the SDK sends one refresh-token request, both calls complete with its result, and the rotated refresh token is stored
+- **AND** a call after that request completes sends a new request
 
 ### Requirement: Session-version cache
 An SDK MAY ship a session-version cache. One that does SHALL poll `GET /oauth/session-versions/snapshot?realm={realm}` once, then `GET /oauth/session-versions?since={seq}&realm={realm}`, to detect revoked sessions without introspection. It SHALL accept a configurable `pollIntervalMs` and `staleThresholdMs`, and SHALL release its background goroutine or thread on `stop()` or `close()`. The TypeScript `SessionVersionCache` and the Go `WithSessionVersions` option ship one.
@@ -915,7 +933,7 @@ Every `AdminClient` SHALL provide at least these operations:
 
 | Entity | Methods | Routes |
 |---|---|---|
-| Users | `createUser(params)`, `getUser(id)`, `updateUser(id, params)`, `deleteUser(id)`, `listUsers(options)` | `POST /admin/users`, `GET /admin/users/{id}`, `PATCH /admin/users/{id}`, `DELETE /admin/users/{id}`, `GET /admin/users?limit=N&cursor=C` |
+| Users | `createUser(params)`, `getUser(id)`, `updateUser(id, params)`, `deleteUser(id)`, `listUsers(options)`, `sendPasswordEmail(id)` | `POST /admin/users`, `GET /admin/users/{id}`, `PATCH /admin/users/{id}`, `DELETE /admin/users/{id}`, `GET /admin/users?limit=N&cursor=C`, `POST /admin/users/{id}/password-email` |
 | Realms | `getRealm(id)`, `deleteRealm(id)` (archived realms only), `listRealms(options)` | `GET /admin/realms/{id}`, `DELETE /admin/realms/{id}`, `GET /admin/realms?limit=N&cursor=C` |
 | OAuth clients | create, get, update, delete, list | `/admin/applications` |
 | Roles | create, get, update, delete, list | `/admin/roles` |
@@ -927,6 +945,7 @@ Every `AdminClient` SHALL provide at least these operations:
 - `PATCH /admin/applications/{id}` takes `client_name`, with `trust_level` (`first_party`, `third_party`) and `access_token_authorization` (`embedded`, `introspection`, `decision`) as snake_case strings. It ignores unknown keys, so an SDK that sends `name` gets `200` and the client is not renamed.
 - Every client route answers with the proto `OAuthClient`: `client_id`, `client_name`, `redirect_uris`, `grant_types`, `created_at`, and `access_token_authorization` as a proto enum name, omitted when it is `EMBEDDED`.
 - No client route sends or reads `id` or `name`.
+- `sendPasswordEmail(id)` returns the email `kind` that the server reports: `PASSWORD_EMAIL_KIND_SETUP` or `PASSWORD_EMAIL_KIND_RESET`.
 - Role assignment is not CRUD-shaped: `POST /admin/users/{id}/roles` with a `{ "role_id": ..., "org_id"?: ... }` body creates an assignment, `GET /admin/users/{id}/roles` lists them, and `DELETE /admin/assignments/{id}` removes one.
 
 #### Scenario: Users CRUD
@@ -976,3 +995,13 @@ Every `AdminClient` list method SHALL accept an optional `limit` (integer; serve
 - **WHEN** an admin call answers `409`
 - **THEN** the TypeScript, Go and Python SDKs raise a typed error whose status is `409`, and the PHP SDK raises a `RuntimeException` whose message names HTTP `409`
 
+### Requirement: Supported SDK set
+The project SHALL publish and test exactly four SDKs: TypeScript (`@hearth-auth/sdk`), Go, Python and PHP. The Kotlin, Rust and Node (`@hearth-auth/node`) SDKs SHALL NOT be published or tested in CI.
+
+#### Scenario: CI runs the supported set
+- **WHEN** CI runs on a pull request that touches `sdks/`
+- **THEN** the TypeScript, Go, Python and PHP SDK jobs run, and no Kotlin, Rust or Node SDK job exists
+
+#### Scenario: Node features live in the TypeScript SDK
+- **WHEN** a developer uses the Express/Fastify middleware, Next.js helpers, or discovery from `@hearth-auth/sdk`
+- **THEN** each of these is available there, with the behaviour the Node SDK had
