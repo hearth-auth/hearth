@@ -40,15 +40,17 @@ Read these before writing code. They are the canonical source of truth.
 What Hearth MUST do lives in `openspec/specs/<capability>/spec.md`, one capability per folder
 (`openspec list --specs`). Change a spec only through an OpenSpec change (`/opsx:propose`); the
 change's delta specs merge into `openspec/specs/` when it is archived. Until then, the delta
-specs of the active changes in `openspec/changes/` are part of the contract too.
+specs of the active changes in `openspec/changes/` are part of the contract too. Changes in
+`openspec/parked/` are paused and are NOT part of the contract.
 
 | Area | Capabilities |
 |------|--------------|
-| Authorization | `rbac-model`, `rbac-token-claims`, `rbac-admin-api`, `custom-permissions`, `credential-hashing` |
-| OAuth 2.0 / OIDC | `oidc-provider`, `client-authentication`, `dpop`, `rp-initiated-logout` |
+| Identity | `credential-hashing`, `mfa-policy`, `password-email`, `scim-provisioning` |
+| Authorization | `rbac-model`, `rbac-token-claims`, `rbac-admin-api`, `custom-permissions` |
+| OAuth 2.0 / OIDC | `oidc-provider`, `client-authentication`, `dpop`, `rp-initiated-logout`, `pre-token-webhook-failure` |
 | Agent auth | `agent-identity`, `mcp-authorization`, `delegated-authorization`, `tool-permissions`, `agent-approvals` |
 | Cluster | `cluster-consistency`, `cluster-fault-testing` |
-| Other | `saml-sp-profile`, `sdk-support-contract`, `abuse-prevention`, `ui-routing`, `performance-budgets` |
+| Other | `trusted-core-surface`, `saml-sp-profile`, `sdk-support-contract`, `abuse-prevention`, `ui-routing`, `performance-budgets` |
 
 ### Contributor docs
 
