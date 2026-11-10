@@ -1,10 +1,15 @@
 # Survivor budget for the nightly cargo-mutants run (#641).
 #
-# OpenSpec trusted-core-confidence, design decision 5. The scheduled mutation
-# run (task 4.1) runs cargo-mutants on each module below, in parallel shards.
-# A survivor is a mutant that no test catches. scripts/check-mutants-budget.py
-# adds the survivors of all shards of a module and FAILS when the sum is more
-# than `survivors`.
+# OpenSpec trusted-core-confidence, design decision 5, with the scope that the
+# owner chose on 2026-11-09: the core high-risk code only (token issuance,
+# sessions, the RBAC resolver, and the permission check of the admin API). The full three
+# directories have about 8,800 mutants, which do not fit in one night.
+#
+# .github/workflows/mutants-nightly.yml runs cargo-mutants on each module
+# below, in `shards` parallel jobs. Each mutant runs the lib tests and the
+# `tests` integration binaries of its module. A survivor is a mutant that no
+# test catches. scripts/check-mutants-budget.py adds the survivors of all
+# shards of a module and FAILS when the sum is more than `survivors`.
 #
 # The budget only goes down:
 # - More survivors than the budget: the run fails. Add a test that catches the
@@ -13,13 +18,89 @@
 # - No `survivors` key: the run fails. The first run gives the count to record
 #   (design Open Question 3: the budget starts at the first-run count).
 #
-# `files` are cargo-mutants `--file` globs.
+# Shards: one shard is sized for about 3 hours on a GitHub-hosted runner, at
+# about 1 minute for each mutant. That is an estimate: a 12-core host took
+# about 32 s for each mutant on 2026-11-09. The first run gives the real
+# time, and the shard counts follow it. The 13 shards run
+# at the same time, in the US Eastern night, and leave 7 of the 20 runners of
+# the GitHub Free plan to PR CI.
+#
+# Keys: `files` are cargo-mutants `--file` globs. `re` (optional) are
+# cargo-mutants `--re` regexes on the mutant name; they select functions in a
+# file that also holds other code. `tests` are binaries in tests/. The modules
+# must not share a mutant: the check fails on a mutant in two modules.
 
-[modules.identity]
-files = ["src/identity/**"]
+[modules.token-issuance]
+files = [
+    "src/identity/tokens.rs",
+    "src/identity/engine/oauth.rs",
+    "src/identity/engine/mod.rs",
+]
+re = [
+    '^src/identity/(tokens|engine/oauth)\.rs:',
+    '^src/identity/engine/mod\.rs:.*[: ](issue_tokens_with_context|refresh_tokens_for_resource|rotate_grant_family|revoke_replayed_family|rfc8693_token_exchange|effective_token_ttl_secs|apply_claim_profile|claim_profile_overrides|validate_claim_payload|fire_pre_token_webhook|validate_token|verify_token_signature_for_realm|verify_token_signature_for_realm_detailed|refresh_token_matches_hash|is_token_jti_revoked|verify_client_credentials_token)( |$)',
+]
+tests = [
+    "tokens",
+    "oauth",
+    "identity_oauth",
+    "token_adversarial",
+    "token_exchange",
+    "issue_token_rbac",
+    "entry_point_invariants",
+    "pre_token_webhook",
+    "resource_aud_refresh",
+]
+shards = 6
 
-[modules.rbac]
-files = ["src/rbac/**"]
+[modules.sessions]
+files = [
+    "src/identity/sessions.rs",
+    "src/identity/session_version.rs",
+    "src/identity/types/session.rs",
+    "src/identity/engine/mod.rs",
+]
+re = [
+    '^src/identity/(sessions|session_version|types/session)\.rs:',
+    '^src/identity/engine/mod\.rs:.*[: ](create_session_gated|create_derived_session|refresh_session|get_session|get_session_arc|get_session_sv|revoke_session|revoke_all_user_sessions|bulk_revoke_sessions|sweep_expired_sessions|cascade_user_sessions_and_memberships|persist_session|persist_session_with|serialize_session|deserialize_session|load_session_raw|session_cache_insert|session_cache_fill|session_cache_evict|session_cache_invalidate|evict_session_by_policy|parse_session_id_claim|sv_bump_session|bump_user_sessions)( |$)',
+]
+tests = [
+    "sessions",
+    "session_version",
+    "session_limits",
+    "hea_1752_session_invalidation",
+    "logout_ends_sso_session",
+    "token_session_mfa_proof",
+]
+shards = 2
 
-[modules.protocol-http]
-files = ["src/protocol/http/**"]
+[modules.rbac-resolver]
+files = [
+    "src/rbac/resolve.rs",
+    "src/rbac/resolution_cache.rs",
+    "src/rbac/engine.rs",
+]
+tests = [
+    "rbac_engine",
+    "rbac_p0_scenarios",
+    "issue_token_rbac",
+    "live_rbac_token_authority",
+    "rbac_check_gate",
+    "me_permissions",
+]
+shards = 3
+
+[modules.permission-check]
+files = [
+    "src/protocol/admin_auth.rs",
+    "src/protocol/http/auth.rs",
+]
+tests = [
+    "admin_rbac_auth",
+    "admin_effective_permissions",
+    "admin_roles_rbac",
+    "admin_assignments_rbac",
+    "access_token_authorization",
+    "third_party_client_permissions",
+]
+shards = 2

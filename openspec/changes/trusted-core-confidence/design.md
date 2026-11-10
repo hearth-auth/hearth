@@ -59,12 +59,22 @@ confidence tool at the start of this change (2026-10-02):
    Alternative considered: one test file per entry point. Rejected: that is the current state,
    and it is how a skipped check went unnoticed.
 
-5. **`cargo-mutants` scope.** The scope is `src/identity/` (which holds the SAML SP code), `src/rbac/` and
-   `src/protocol/http/`. Storage and Raft are out: their correctness tools are the
-   simulation crate and the Jepsen harness. The first run records the number of surviving
-   mutants per module in `ci/mutants-budget.toml`. CI fails when a module's count goes up.
-   Each reviewed survivor gets a test, or an entry in an exclusion list with a reason.
-   `ci/mutations.toml` stays: its entries prove specific guards, which a budget does not.
+5. **`cargo-mutants` scope.** The scope is the core high-risk code: token issuance, sessions,
+   the RBAC resolver, and the permission check of the admin API. `ci/mutants-budget.toml`
+   names the files (and, in `src/identity/engine/mod.rs`, the functions) of each module, and
+   the integration test binaries that each mutant runs with the lib tests. Storage and Raft
+   are out: their correctness tools are the simulation crate and the Jepsen harness. The
+   first run records the number of surviving mutants per module in `ci/mutants-budget.toml`.
+   CI fails when a module's count goes up. Each reviewed survivor gets a test, or an entry
+   in an exclusion list with a reason. `ci/mutations.toml` stays: its entries prove specific
+   guards, which a budget does not.
+   Owner decision of 2026-11-09 (#641): the first scope was all of `src/identity/`,
+   `src/rbac/` and `src/protocol/http/`. That is about 8,800 mutants. With the lib tests
+   only, one run is about 150 to 200 runner-hours, and the lib tests do not test most of
+   that code (only the integration tests in `tests/` do). With all of `tests/` (more than
+   400 binaries), one mutant takes more than 4 minutes to build. Neither fits in one night
+   on the GitHub Free plan. The smaller scope with a fixed list of integration binaries per
+   module does.
 
 6. **Pentest gate.** The scope document is rewritten first, from the router and
    `docs/STATUS.md`. The firm tests a tagged build. Every Critical and High finding is
@@ -78,7 +88,14 @@ confidence tool at the start of this change (2026-10-02):
 - [The router walk can miss an entry point that is not a route, such as a CLI command that mints
   a token] → The registry also lists CLI commands. Task 3.1 surveys them by hand first.
 - [`cargo-mutants` on these modules can take hours] → It runs nightly with `--shard`. The budget
-  is per module, so a shard can fail on its own.
+  is per module, so a shard can fail on its own. The full three directories do not fit in a
+  night, so the scope is the core high-risk code only (decision 5, owner decision of
+  2026-11-09). The rest of those directories has no mutation budget. A survivor there is not
+  found by this run.
+- [A fixed list of integration binaries per module can miss a test that catches a mutant] →
+  The count is then too high, not too low: the budget is safe, but a triaged survivor can be
+  one that another binary catches. Triage adds that binary to the module's `tests` before it
+  adds a test.
 - [The pentest needs a budget and a vendor] → It is a human task. The release gate waits for it.
   Everything else can finish first.
 - [The freeze slows features] → That is the purpose. Fixes are still allowed.

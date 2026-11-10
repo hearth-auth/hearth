@@ -4,6 +4,8 @@
 Usage:
     python3 scripts/check-mutants-budget.py [--budget FILE] [--summary FILE] RESULTS_DIR
     python3 scripts/check-mutants-budget.py [--budget FILE] --check-config
+    python3 scripts/check-mutants-budget.py [--budget FILE] --matrix
+    python3 scripts/check-mutants-budget.py [--budget FILE] --mutants-args MODULE
 
 The scheduled mutation run (#641, OpenSpec trusted-core-confidence task 4.1)
 runs `cargo mutants` on each module of `ci/mutants-budget.toml`, in shards.
@@ -24,14 +26,35 @@ sum with the module's `survivors` budget:
   the budget starts at the first-run count).
 
 The check also FAILS when a result cannot be trusted: a module has no
-result, a shard is missing or reported twice, the shards of a module disagree
-on the shard count, a shard did not finish, a shard's baseline (the unmutated
-tree) failed, or a mutant is in a file that no module names. A missing shard
+result, a shard is missing or reported twice, a shard count is not the one
+in the budget file, a shard did not finish, a shard's baseline (the unmutated
+tree) failed, or a mutant is not in its module or is in two modules. A missing shard
 must not look like fewer survivors.
 
-`--check-config` reads only the budget file: it must parse, and the `files`
-globs of each module must match at least one file in this repository. This
-is the cheap half that runs on every PR; it needs no mutation run.
+A module in the budget file has these keys:
+
+- `files`: cargo-mutants `--file` globs.
+- `re` (optional): cargo-mutants `--re` regexes. A mutant is in the module
+  only when its name (`<file>:<line>:<col>: <change>`) matches one of them.
+  Use plain regex syntax that Rust and Python read the same way.
+- `tests` (optional): integration test binaries (`tests/<name>.rs`). Each
+  mutant runs the lib tests and these binaries.
+- `shards`: the number of parallel jobs for the module.
+- `survivors`: the budget. Absent until the first run.
+
+`--check-config` reads only the budget file: it must parse, the `files` globs
+of each module must match a file in this repository, each `re` must compile,
+and each `tests` binary must exist. This is the cheap half that runs on every
+PR; it needs no mutation run.
+
+`--matrix` prints the GitHub Actions matrix (`{"include": [...]}`, one entry
+for each shard). `--mutants-args MODULE` prints the cargo-mutants arguments
+for the module, one on each line. The workflow uses both, so the budget file
+is the only place that defines a module.
+
+cargo-mutants 27.1.0 does not apply `--re` to "delete field" mutants. A
+mutant in a module's files that matches no `re` of any module is not in the
+module: it is counted apart and not checked against the budget.
 
 Timeouts are not survivors. They are counted and shown, but no budget
 applies to them.
@@ -41,11 +64,14 @@ import argparse
 import fnmatch
 import json
 import os
+import re
 import sys
 import tomllib
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_BUDGET = os.path.join(REPO_ROOT, "ci", "mutants-budget.toml")
+# A nextest filterset: the tests that each mutant runs.
+LIB_TEST_FILTER = "not (kind(lib) and test(/^(storage|cluster)::/))"
 
 
 def load_budget(path):
@@ -59,9 +85,21 @@ def load_budget(path):
     if not isinstance(modules, dict) or not modules:
         sys.exit(f"FAIL: {path} has no [modules.<name>] tables")
     for name, cfg in modules.items():
-        files = cfg.get("files")
-        if not isinstance(files, list) or not files or not all(isinstance(f, str) for f in files):
-            sys.exit(f"FAIL: module {name}: `files` must be a non-empty list of globs")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", name):
+            sys.exit(f"FAIL: module {name}: the name must be lower-case letters, digits and -")
+        for key, required in (("files", True), ("re", False), ("tests", False)):
+            value = cfg.get(key)
+            if value is None and not required:
+                continue
+            if not isinstance(value, list) or not value or not all(isinstance(v, str) for v in value):
+                sys.exit(f"FAIL: module {name}: `{key}` must be a non-empty list of strings")
+        try:
+            cfg["_re"] = [re.compile(r) for r in cfg.get("re", [])]
+        except re.error as exc:
+            sys.exit(f"FAIL: module {name}: a `re` does not compile: {exc}")
+        shards = cfg.get("shards")
+        if not isinstance(shards, int) or isinstance(shards, bool) or shards < 1:
+            sys.exit(f"FAIL: module {name}: `shards` must be a positive integer")
         if "survivors" in cfg:
             s = cfg["survivors"]
             if not isinstance(s, int) or isinstance(s, bool) or s < 0:
@@ -69,29 +107,77 @@ def load_budget(path):
     return modules
 
 
-def module_of(path, modules):
-    """Return the module whose `files` globs match path, or None."""
-    for name, cfg in modules.items():
-        for pattern in cfg["files"]:
-            prefix = pattern[:-3] if pattern.endswith("/**") else None
-            if (prefix and path.startswith(prefix + "/")) or fnmatch.fnmatchcase(path, pattern):
-                return name
-    return None
+def file_in(path, cfg):
+    """True when path matches one of the module's `files` globs."""
+    for pattern in cfg["files"]:
+        prefix = pattern[:-3] if pattern.endswith("/**") else None
+        if (prefix and path.startswith(prefix + "/")) or fnmatch.fnmatchcase(path, pattern):
+            return True
+    return False
+
+
+def modules_of(path, mutant_name, modules):
+    """Return the names of the modules that hold this mutant."""
+    return [
+        name
+        for name, cfg in modules.items()
+        if file_in(path, cfg) and (not cfg["_re"] or any(r.search(mutant_name) for r in cfg["_re"]))
+    ]
 
 
 def check_config(modules):
-    """Fail when a module's `files` globs match no file in the repository."""
+    """Fail when a module names a source file or a test binary that does not exist."""
     sources = []
     for root, dirs, files in os.walk(os.path.join(REPO_ROOT, "src")):
         dirs.sort()
         rel = os.path.relpath(root, REPO_ROOT)
         sources.extend(os.path.join(rel, f).replace(os.sep, "/") for f in files)
-    bad = [n for n in modules if not any(module_of(p, {n: modules[n]}) for p in sources)]
-    for name in bad:
-        print(f"FAIL: module {name}: `files` matches no file under src/")
+    bad = 0
+    for name, cfg in modules.items():
+        if not any(file_in(p, cfg) for p in sources):
+            print(f"FAIL: module {name}: `files` matches no file under src/")
+            bad += 1
+        for test in cfg.get("tests", []):
+            if not os.path.isfile(os.path.join(REPO_ROOT, "tests", f"{test}.rs")):
+                print(f"FAIL: module {name}: test binary tests/{test}.rs does not exist")
+                bad += 1
     if bad:
         return 1
-    print(f"PASS: {len(modules)} modules, each `files` glob matches a source file")
+    print(f"PASS: {len(modules)} modules; every `files` glob and `tests` binary exists")
+    return 0
+
+
+def matrix(modules):
+    """Print the GitHub Actions matrix: one entry for each shard of each module."""
+    include = [
+        {"module": name, "shard": k, "shards": cfg["shards"]}
+        for name, cfg in modules.items()
+        for k in range(cfg["shards"])
+    ]
+    print(json.dumps({"include": include}, separators=(",", ":")))
+    return 0
+
+
+def mutants_args(modules, name):
+    """Print the cargo-mutants arguments for one module, one on each line."""
+    if name not in modules:
+        print(f"FAIL: module {name} is not in the budget file")
+        return 1
+    cfg = modules[name]
+    args = []
+    for pattern in cfg["files"]:
+        args += ["--file", pattern]
+    for regex in cfg.get("re", []):
+        args += ["--re", regex]
+    args += ["--cargo-arg=--lib"]
+    for test in cfg.get("tests", []):
+        args += ["--cargo-arg=--test", f"--cargo-arg={test}"]
+    # The storage and cluster layers sit below identity and rbac and must not
+    # import them (docs/dev/ARCHITECTURE.md), so their lib tests cannot catch
+    # a mutant in these modules. Skipping them saves about a third of the
+    # test time of each mutant.
+    args += ["--", "-E", LIB_TEST_FILTER]
+    print("\n".join(args))
     return 0
 
 
@@ -114,20 +200,26 @@ def main():
     parser.add_argument("--budget", default=DEFAULT_BUDGET)
     parser.add_argument("--summary", help="append a Markdown table to this file")
     parser.add_argument("--check-config", action="store_true", help="check the budget file only")
+    parser.add_argument("--matrix", action="store_true", help="print the shard matrix")
+    parser.add_argument("--mutants-args", metavar="MODULE", help="print cargo-mutants arguments")
     parser.add_argument("results_dir", nargs="?")
     args = parser.parse_args()
 
     modules = load_budget(args.budget)
     if args.check_config:
         return check_config(modules)
+    if args.matrix:
+        return matrix(modules)
+    if args.mutants_args:
+        return mutants_args(modules, args.mutants_args)
     if args.results_dir is None:
-        parser.error("RESULTS_DIR is required without --check-config")
+        parser.error("RESULTS_DIR is required without --check-config, --matrix or --mutants-args")
     errors = []
     seen = {name: {} for name in modules}
-    shard_counts = {name: set() for name in modules}
     missed = {name: [] for name in modules}
     timeouts = {name: 0 for name in modules}
     tested = {name: 0 for name in modules}
+    outside_re = {name: 0 for name in modules}
 
     for shard_dir, module, k, n in find_shards(args.results_dir):
         if module is None:
@@ -139,7 +231,11 @@ def main():
         if k >= n:
             errors.append(f"{shard_dir}: shard {k}/{n} of {module} is out of range")
             continue
-        shard_counts[module].add(n)
+        if n != modules[module]["shards"]:
+            errors.append(
+                f"{module}: shard {k}/{n}, but the budget file says {modules[module]['shards']} shards"
+            )
+            continue
         if k in seen[module]:
             errors.append(f"{module}: shard {k}/{n} is reported twice")
             continue
@@ -162,25 +258,29 @@ def main():
                 continue
             mutant = scenario.get("Mutant", {}) if isinstance(scenario, dict) else {}
             path = mutant.get("file", "")
-            owner = module_of(path, modules)
-            if owner != module:
-                errors.append(f"{module}: shard {k}/{n}: mutant in {path!r}, not in this module")
+            mutant_name = mutant.get("name", "")
+            owners = modules_of(path, mutant_name, modules)
+            if not owners and file_in(path, modules[module]):
+                # cargo-mutants 27.1.0 does not apply `--re` to "delete field"
+                # mutants, so the run tests some mutants outside the module's
+                # `re`. They are not in the module: count them apart.
+                outside_re[module] += 1
+                continue
+            if owners != [module]:
+                where = " and ".join(owners) if owners else "no module"
+                errors.append(f"{module}: shard {k}/{n}: mutant {mutant_name!r} is in {where}")
                 continue
             tested[module] += 1
             if summary == "MissedMutant":
-                missed[module].append(mutant.get("name", path))
+                missed[module].append(mutant_name)
             elif summary == "Timeout":
                 timeouts[module] += 1
 
-    for name in modules:
-        counts = shard_counts[name]
-        if not counts:
+    for name, cfg in modules.items():
+        if not seen[name]:
             errors.append(f"{name}: no shard reported a result")
             continue
-        if len(counts) > 1:
-            errors.append(f"{name}: shards disagree on the shard count: {sorted(counts)}")
-            continue
-        n = counts.pop()
+        n = cfg["shards"]
         absent = sorted(set(range(n)) - set(seen[name]))
         if absent:
             errors.append(
@@ -216,6 +316,10 @@ def main():
     for name, tested_n, count, budget, timeout_n, verdict in rows:
         print(f"{name}: tested {tested_n}, survivors {count}, budget {budget}, "
               f"timeouts {timeout_n}: {verdict}")
+        if outside_re[name]:
+            print(f"note: {name}: {outside_re[name]} mutants outside `re` are not counted")
+        for mutant_name in missed[name]:
+            print(f"  survivor: {mutant_name}")
 
     if args.summary:
         with open(args.summary, "a", encoding="utf-8") as fh:
