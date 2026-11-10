@@ -1551,6 +1551,12 @@ async fn run_serve(
         mark_production_data_dir(std::path::Path::new(&config.storage.data_dir))?;
         (engine, storage_config)
     };
+    // #648: the data directory's free space on `/metrics`, read at each scrape.
+    if let Err(e) =
+        hearth::metrics::metrics().export_data_dir_space(app_storage_config.data_dir.clone())
+    {
+        warn!(error = %e, "the data directory's free space is not on /metrics");
+    }
 
     // Build cluster-aware storage: wraps inner_storage in ClusterEngine so
     // all writes (put / delete / put_batch) go through Raft quorum commit

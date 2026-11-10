@@ -228,9 +228,13 @@ Hearth node where the total on-disk dataset is approximately 10× physical RAM.
    This requires `madvise(MADV_HUGEPAGE)` patched into `HotTier::new`; file a
    feature request if needed.
 
-4. **Monitor hot-tier hit rate.** Hearth exposes `storage_hot_tier_hits` and
-   `storage_hot_tier_misses` Prometheus counters. A miss rate above 30% suggests
-   the hot-tier capacity is undersized for the active working set.
+4. **Monitor hot-tier hit rate.** Hearth counts every storage read in the
+   `hearth_storage_get_total` Prometheus counter, labelled by the tier that
+   answered it: `outcome="hot_hit"`, `"memtable_hit"`, `"sst_hit"` or `"miss"`.
+   The hot-tier hit rate is
+   `sum(rate(hearth_storage_get_total{outcome="hot_hit"}[5m])) / sum(rate(hearth_storage_get_total[5m]))`.
+   A hit rate below 70% suggests the hot-tier capacity is undersized for the
+   active working set.
 
 5. **Run the demotion benchmark.** `PROTOC=protoc cargo bench --bench demotion_latency`
    measures pre/post-demotion p99 on your hardware and validates the 500 µs
