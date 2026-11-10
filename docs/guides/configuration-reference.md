@@ -6,8 +6,12 @@ Hearth is configured via a single YAML file. Every field has a default, so an em
 
 Hearth looks for configuration in this order:
 
-1. `--config` / `-c` CLI flag: `hearth serve -c /etc/hearth/config.yaml`
-2. `hearth.yaml` in the current working directory (auto-detected)
+1. `--dev` flag: the dev defaults, which override everything else.
+2. `--config` / `-c` CLI flag: `hearth serve -c /etc/hearth/config.yaml`
+3. `hearth.yaml` in the current working directory (auto-detected)
+
+The `serve` flags `--port` and `--bind` override the port and the bind address from any of
+these sources.
 
 If no config file is found, all defaults apply — and in production those defaults
 are still run through `validate()`, so a bare `hearth serve` with no config file
@@ -20,6 +24,26 @@ below rather than booting an unprotected server.
 
 `hearth config validate [FILE]` takes the path as a **positional argument**
 (default `hearth.yaml`), not a flag. Its only option is `--help`.
+
+[`hearth.example.yaml`](../../hearth.example.yaml) is a catalogue of every key, not a starting
+config: it does not validate as copied. The smallest config that validates is:
+
+```yaml
+server:
+  bind_address: "0.0.0.0"
+  port: 443
+  tls_cert_path: "/etc/hearth/tls/server.crt"   # or trust_forwarded_proto + trusted_proxies
+  tls_key_path:  "/etc/hearth/tls/server.key"
+storage:
+  data_dir: "/var/lib/hearth/data"
+oidc:
+  issuer: "https://auth.example.com"
+```
+
+It also needs `HEARTH_KEK` and `HEARTH_MASTER_KEY` in the environment (see the table below).
+`hearth config validate` does not stop on a missing environment variable: it only warns when
+`HEARTH_MASTER_KEY` is unset, and it exits `0`. A config that it accepts can still stop `serve`.
+Run a real `serve` on the target host before you cut over.
 
 ## Mandatory in Production
 
@@ -45,6 +69,8 @@ key:
 | `HEARTH_PREVIOUS_MASTER_KEY` | Only during a host-key rotation | Previous host key value. Set it when startup fails with `HostKeyMismatch` after rotating `HEARTH_MASTER_KEY`; remove it once every realm KEK has been re-wrapped. |
 | `HEARTH_KEK` | One of this or `security.key_encryption_key` | Key-encryption key for realm signing keys at rest. 64 lowercase hex characters (`openssl rand -hex 32`). |
 | `HEARTH_TURNSTILE_SECRET_KEY` | Only when `security.captcha.provider: turnstile` | Cloudflare Turnstile secret. Preferred over writing `security.captcha.turnstile.secret_key` into the file. |
+| `HEARTH_DEV_DATA_DIR` | Dev only | The data directory under `--dev` (this variable, else a non-default `storage.data_dir`, else a temp directory). Ignored outside `--dev`. |
+| `HEARTH_MAILCATCHER_PASSWORD` | Dev only | Password for the mailcatcher inbox at `/dev/mail` when `email.transport: mailcatcher`. When it is unset, Hearth generates one and prints it at startup. |
 
 > `dev_mode` is **not** a config-file key. A YAML file containing `dev_mode: true` is
 > rejected at startup — dev mode is armed only by `hearth serve --dev`.
