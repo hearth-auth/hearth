@@ -7,6 +7,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 ## [Unreleased]
 
 ### Added
+- **Prometheus alert rules and a Grafana dashboard** (#648): `deploy/monitoring/` ships
+  `prometheus/hearth-alerts.yml` (15 alerts: instance down, 5xx rate, WAL write fence, low and
+  filling data disk, slow WAL fsync, failed compaction, SST file count, refused writes, audit chain
+  failure, unannounced revocations, rate limiters off, Argon2id and user-create shedding), their
+  `promtool` unit tests, and `grafana/hearth-dashboard.json`. `deploy/monitoring/README.md` explains
+  each alert and what to do. `make monitoring-check` checks them.
 - **Storage metrics for alerts** (#648): `/metrics` now has
   `hearth_storage_wal_fsync_duration_seconds` (WAL fsync latency),
   `hearth_storage_compactions_total{kind,outcome}`, `hearth_storage_compaction_duration_seconds{kind}`,

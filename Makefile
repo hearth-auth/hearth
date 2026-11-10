@@ -13,7 +13,7 @@ BUF := buf
 ## with `--workspace`.
 DEV_FEATURES ?= --features hearth/dev-endpoints
 
-.PHONY: setup build test test-detached test-no-dev-endpoints test-heap-profile clippy fmt miri asan heap-check unsafe-check leak-check test-lsan-excluded loadtest loadtest-check loadtest-smoke seed check coverage css css-check css-watch tailwind-install openapi openapi-check sdk-admin-gen sdk-admin-check sdk-conformance proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test sdk-lint test-quality abuse-check auth-discard-check mfa-resolver-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke jepsen jepsen-binary jepsen-up jepsen-down jepsen-unit conformance-oidf conformance-oidf-check ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template scratch-prune scratch-prune-dry-run scratch-timer-install
+.PHONY: setup build test test-detached test-no-dev-endpoints test-heap-profile clippy fmt miri asan heap-check unsafe-check leak-check test-lsan-excluded loadtest loadtest-check loadtest-smoke seed check coverage css css-check css-watch tailwind-install openapi openapi-check sdk-admin-gen sdk-admin-check sdk-conformance proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test sdk-lint test-quality abuse-check auth-discard-check mfa-resolver-check security-gate notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke jepsen jepsen-binary jepsen-up jepsen-down jepsen-unit conformance-oidf conformance-oidf-check ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template monitoring-check scratch-prune scratch-prune-dry-run scratch-timer-install
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -453,6 +453,13 @@ scanner-coverage-check: ## Assert every scanner gate and suppression is live
 compose-env-check: ## Assert shipped compose files source only scoped env files
 	@bash scripts/check-compose-env-scope.sh
 	@bash scripts/tests/check-compose-env-scope.test.sh
+
+## Guard: the shipped alert rules pass their promtool unit tests, and every
+## dashboard query parses (#648). Runs in ci.yml's filter job. Needs promtool
+## on PATH (or $PROMTOOL), or Docker for the pinned Prometheus image.
+monitoring-check: ## Check deploy/monitoring alert rules and dashboard with promtool
+	@bash scripts/check-monitoring.sh
+	@bash scripts/tests/check-monitoring.test.sh
 
 ## Guard: every verification job must reach the one required check
 ## (audit 2026-08-28 §4.12#12). Runs in ci.yml's filter job.

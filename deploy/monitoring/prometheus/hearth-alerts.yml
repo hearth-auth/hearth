@@ -1,0 +1,169 @@
+# Prometheus alert rules for Hearth (#648).
+#
+# Load this file with `rule_files:` in prometheus.yml, or wrap the `groups:`
+# list in a PrometheusRule resource for the Prometheus Operator.
+#
+# The rules select the scrape job `hearth`. If your scrape job has another
+# name, replace `job="hearth"` in every expression.
+#
+# The thresholds are starting points. Tune them to your traffic and hardware.
+# deploy/monitoring/README.md explains each alert and what to do.
+#
+# tests/metric_names_in_docs.rs fails if this file names a metric that Hearth
+# does not export. deploy/monitoring/prometheus/hearth-alerts.test.yml holds
+# the promtool unit tests (`make monitoring-check`).
+
+groups:
+  - name: hearth-availability
+    rules:
+      - alert: HearthDown
+        expr: up{job="hearth"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Hearth instance {{ $labels.instance }} is down"
+          description: "Prometheus could not scrape {{ $labels.instance }} for 2 minutes."
+
+      - alert: HearthHighErrorRate
+        expr: |
+          sum by (instance) (rate(hearth_http_request_duration_seconds_count{job="hearth",status=~"5.."}[5m]))
+            /
+          sum by (instance) (rate(hearth_http_request_duration_seconds_count{job="hearth"}[5m]))
+            > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Hearth {{ $labels.instance }} answers more than 5% of requests with 5xx"
+          description: "{{ $value | humanizePercentage }} of requests failed with a 5xx status in the last 5 minutes."
+
+  - name: hearth-storage
+    rules:
+      - alert: HearthWalWriteFenced
+        expr: max by (instance, reason) (hearth_wal_write_fenced{job="hearth"}) == 1
+        labels:
+          severity: critical
+        annotations:
+          summary: "Hearth {{ $labels.instance }} refuses every write (WAL fence: {{ $labels.reason }})"
+          description: "A WAL write failed, and the server fenced the WAL so that it does not acknowledge data that a restart would lose. Every write fails until the server restarts. Check the disk, then restart."
+
+      - alert: HearthDiskSpaceLow
+        expr: |
+          hearth_storage_data_dir_available_bytes{job="hearth"}
+            / hearth_storage_data_dir_total_bytes{job="hearth"} < 0.15
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Hearth {{ $labels.instance }} data disk has less than 15% free"
+          description: "{{ $value | humanizePercentage }} of the file system that holds storage.data_dir is free."
+
+      - alert: HearthDiskSpaceCritical
+        expr: |
+          hearth_storage_data_dir_available_bytes{job="hearth"}
+            / hearth_storage_data_dir_total_bytes{job="hearth"} < 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Hearth {{ $labels.instance }} data disk has less than 5% free"
+          description: "{{ $value | humanizePercentage }} free. A compaction needs free space for its output, and a full disk stops all writes."
+
+      - alert: HearthDiskWillFillIn24h
+        expr: |
+          predict_linear(hearth_storage_data_dir_available_bytes{job="hearth"}[6h], 24 * 3600) < 0
+            and
+          hearth_storage_data_dir_available_bytes{job="hearth"}
+            / hearth_storage_data_dir_total_bytes{job="hearth"} < 0.40
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Hearth {{ $labels.instance }} data disk will be full within 24 hours"
+          description: "At the rate of the last 6 hours, the file system that holds storage.data_dir fills within 24 hours."
+
+      - alert: HearthWalFsyncSlow
+        expr: |
+          histogram_quantile(0.99,
+            sum by (instance, le) (rate(hearth_storage_wal_fsync_duration_seconds_bucket{job="hearth"}[5m]))
+          ) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Hearth {{ $labels.instance }} WAL fsync p99 is above 50 ms"
+          description: "p99 WAL fsync latency is {{ $value | humanizeDuration }}. Every write waits for this sync, so write latency is at least this high. Check the disk."
+
+      - alert: HearthCompactionFailing
+        expr: increase(hearth_storage_compactions_total{job="hearth",outcome="error"}[1h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Hearth {{ $labels.instance }} SST compaction failed"
+          description: "{{ $value }} {{ $labels.kind }} compaction(s) failed in the last hour. Read the server log for the error. If compaction stops, the SST file count and read latency grow."
+
+      - alert: HearthSstFilesHigh
+        expr: hearth_storage_sst_files{job="hearth"} > 36
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Hearth {{ $labels.instance }} has {{ $value }} SST files"
+          description: "Compaction does not keep up: the default storage.compaction.max_sst_count is 12. Each SST file adds work to a read that misses the hot tier."
+
+      - alert: HearthStorageWritesShed
+        expr: increase(hearth_storage_writes_shed_total{job="hearth"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Hearth {{ $labels.instance }} refuses storage writes (503)"
+          description: "storage.max_writes_in_flight writes were already in progress. A slow disk is the usual cause; see HearthWalFsyncSlow."
+
+  - name: hearth-security
+    rules:
+      - alert: HearthAuditIntegrityFailure
+        expr: increase(hearth_audit_integrity_failures_total{job="hearth"}[15m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Hearth {{ $labels.instance }} found a break in the audit chain"
+          description: "An audit chain verification failed. The audit log was changed outside Hearth, or the store is damaged. Preserve the data directory and investigate."
+
+      - alert: HearthControlEpochBumpsOwed
+        expr: max by (instance) (hearth_control_epoch_bumps_owed{job="hearth"}) > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Hearth {{ $labels.instance }} has revocations that other nodes do not enforce"
+          description: "{{ $value }} control(s), such as a token or session revocation, are not yet announced to the other cluster nodes."
+
+      - alert: HearthRateLimitersDisabled
+        expr: max by (instance, reason) (hearth_rate_limiters_disabled{job="hearth"}) == 1
+        labels:
+          severity: warning
+        annotations:
+          summary: "Hearth {{ $labels.instance }} runs with rate limiters off ({{ $labels.reason }})"
+          description: "Login and token rate limits do not apply. This is for load tests only."
+
+  - name: hearth-capacity
+    rules:
+      - alert: HearthKdfShedding
+        expr: increase(hearth_kdf_shed_total{job="hearth"}[5m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Hearth {{ $labels.instance }} refuses password checks (503)"
+          description: "The Argon2id queue is full. Add CPU, or raise security.password.kdf.max_in_flight if CPU is free."
+
+      - alert: HearthUserCreateShedding
+        expr: increase(hearth_user_create_shed_total{job="hearth"}[5m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Hearth {{ $labels.instance }} refuses user creates (503)"
+          description: "The user-create admission limit (operational.user_create.max_in_flight) is full."

@@ -1,0 +1,146 @@
+# promtool unit tests for hearth-alerts.yml (#648).
+# Run: make monitoring-check
+
+rule_files:
+  - hearth-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # HearthDown fires after 2 minutes without a scrape, not before.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="hearth",instance="a"}'
+        values: '1 1 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: HearthDown
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: HearthDown
+        exp_alerts:
+          - exp_labels: {severity: critical, job: hearth, instance: a}
+            exp_annotations:
+              summary: "Hearth instance a is down"
+              description: "Prometheus could not scrape a for 2 minutes."
+
+  # Free space: 10% free fires the warning only; 3% free fires both.
+  - interval: 1m
+    input_series:
+      - series: 'hearth_storage_data_dir_total_bytes{job="hearth",instance="a"}'
+        values: '1000x30'
+      - series: 'hearth_storage_data_dir_available_bytes{job="hearth",instance="a"}'
+        values: '100x14 30x15'
+      - series: 'hearth_storage_data_dir_total_bytes{job="hearth",instance="b"}'
+        values: '1000x30'
+      - series: 'hearth_storage_data_dir_available_bytes{job="hearth",instance="b"}'
+        values: '500x30'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: HearthDiskSpaceLow
+        exp_alerts:
+          - exp_labels: {severity: warning, job: hearth, instance: a}
+            exp_annotations:
+              summary: "Hearth a data disk has less than 15% free"
+              description: "10% of the file system that holds storage.data_dir is free."
+      - eval_time: 12m
+        alertname: HearthDiskSpaceCritical
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: HearthDiskSpaceCritical
+        exp_alerts:
+          - exp_labels: {severity: critical, job: hearth, instance: a}
+            exp_annotations:
+              summary: "Hearth a data disk has less than 5% free"
+              description: "3% free. A compaction needs free space for its output, and a full disk stops all writes."
+
+  # A fenced WAL fires at once; an unfenced one does not.
+  - interval: 1m
+    input_series:
+      - series: 'hearth_wal_write_fenced{job="hearth",instance="a",reason="group_commit_write_fault"}'
+        values: '1x5'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: HearthWalWriteFenced
+        exp_alerts:
+          - exp_labels: {severity: critical, instance: a, reason: group_commit_write_fault}
+            exp_annotations:
+              summary: "Hearth a refuses every write (WAL fence: group_commit_write_fault)"
+              description: "A WAL write failed, and the server fenced the WAL so that it does not acknowledge data that a restart would lose. Every write fails until the server restarts. Check the disk, then restart."
+
+  # fsync p99: every sync in the 0.1 s bucket fires; every sync in 1 ms does not.
+  - interval: 1m
+    input_series:
+      - series: 'hearth_storage_wal_fsync_duration_seconds_bucket{job="hearth",instance="slow",le="0.001"}'
+        values: '0x20'
+      - series: 'hearth_storage_wal_fsync_duration_seconds_bucket{job="hearth",instance="slow",le="0.1"}'
+        values: '0+100x20'
+      - series: 'hearth_storage_wal_fsync_duration_seconds_bucket{job="hearth",instance="slow",le="+Inf"}'
+        values: '0+100x20'
+      - series: 'hearth_storage_wal_fsync_duration_seconds_bucket{job="hearth",instance="fast",le="0.001"}'
+        values: '0+100x20'
+      - series: 'hearth_storage_wal_fsync_duration_seconds_bucket{job="hearth",instance="fast",le="0.1"}'
+        values: '0+100x20'
+      - series: 'hearth_storage_wal_fsync_duration_seconds_bucket{job="hearth",instance="fast",le="+Inf"}'
+        values: '0+100x20'
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: HearthWalFsyncSlow
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: slow}
+            exp_annotations:
+              summary: "Hearth slow WAL fsync p99 is above 50 ms"
+              description: "p99 WAL fsync latency is 99.01ms. Every write waits for this sync, so write latency is at least this high. Check the disk."
+
+  # One failed compaction fires; ok compactions do not.
+  - interval: 1m
+    input_series:
+      - series: 'hearth_storage_compactions_total{job="hearth",instance="a",kind="full",outcome="error"}'
+        values: '0 0 0 1 1 1'
+      - series: 'hearth_storage_compactions_total{job="hearth",instance="a",kind="full",outcome="ok"}'
+        values: '0 1 2 3 4 5'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: HearthCompactionFailing
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: HearthCompactionFailing
+        exp_alerts:
+          - exp_labels: {severity: warning, job: hearth, instance: a, kind: full, outcome: error}
+            exp_annotations:
+              summary: "Hearth a SST compaction failed"
+              description: "1 full compaction(s) failed in the last hour. Read the server log for the error. If compaction stops, the SST file count and read latency grow."
+
+  # One audit chain failure fires at once.
+  - interval: 1m
+    input_series:
+      - series: 'hearth_audit_integrity_failures_total{job="hearth",instance="a"}'
+        values: '0 0 1 1'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: HearthAuditIntegrityFailure
+        exp_alerts:
+          - exp_labels: {severity: critical, job: hearth, instance: a}
+            exp_annotations:
+              summary: "Hearth a found a break in the audit chain"
+              description: "An audit chain verification failed. The audit log was changed outside Hearth, or the store is damaged. Preserve the data directory and investigate."
+
+  # 10% 5xx for 10 minutes fires; 1% does not.
+  - interval: 1m
+    input_series:
+      - series: 'hearth_http_request_duration_seconds_count{job="hearth",instance="bad",method="POST",route="/token",status="200"}'
+        values: '0+90x30'
+      - series: 'hearth_http_request_duration_seconds_count{job="hearth",instance="bad",method="POST",route="/token",status="500"}'
+        values: '0+10x30'
+      - series: 'hearth_http_request_duration_seconds_count{job="hearth",instance="good",method="POST",route="/token",status="200"}'
+        values: '0+99x30'
+      - series: 'hearth_http_request_duration_seconds_count{job="hearth",instance="good",method="POST",route="/token",status="503"}'
+        values: '0+1x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: HearthHighErrorRate
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: bad}
+            exp_annotations:
+              summary: "Hearth bad answers more than 5% of requests with 5xx"
+              description: "10% of requests failed with a 5xx status in the last 5 minutes."
