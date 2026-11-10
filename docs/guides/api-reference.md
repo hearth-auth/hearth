@@ -204,6 +204,76 @@ a valid token receive `401 Unauthorized`, not `404`.
 
 ---
 
+## Route map
+
+The main endpoint groups. The OpenAPI spec is the full list: a running server serves it at
+`/openapi.json`, and a Swagger UI at `/docs`.
+
+| Group | Method | Path | Purpose |
+|---|---|---|---|
+| Discovery | `GET` | `/health` | Liveness probe |
+| Discovery | `GET` | `/.well-known/openid-configuration` | OIDC Discovery 1.0 metadata |
+| Discovery | `GET` | `/jwks` | Per-realm public signing keys (aliases: `/certs`, `/.well-known/jwks.json`) |
+| OAuth/OIDC | `GET`/`POST` | `/authorize` | Authorization request — `GET` is the browser redirect entry point, `POST` the form-post variant |
+| OAuth/OIDC | `POST` | `/token` | Token exchange (code / refresh / client_credentials / device_code) |
+| OAuth/OIDC | `POST` | `/revoke` | RFC 7009 revocation |
+| OAuth/OIDC | `POST` | `/introspect` | RFC 7662 introspection |
+| OAuth/OIDC | `GET` | `/userinfo` | OIDC UserInfo |
+| OAuth/OIDC | `POST` | `/device_authorization` | RFC 8628 device code start |
+| OAuth/OIDC | `POST` | `/register` | RFC 7591 dynamic client registration |
+| OAuth/OIDC | `POST` | `/clients` | Static client registration (used by `hearth app create`) |
+| OAuth/OIDC | `GET`/`POST` | `/end_session` | OIDC RP-initiated logout; fans out to back-channel and front-channel URIs |
+| Admin | `GET`/`POST` | `/admin/users` | List / create users |
+| Admin | `POST` | `/admin/users/bulk` | Bulk user creation (max 10,000 users per request) |
+| Admin | `POST` | `/admin/users/import` | Import users from JSON (max 10,000 users per request) |
+| Admin | `GET` | `/admin/users/export` | Export users as JSON |
+| Admin | `GET`/`PATCH`/`DELETE` | `/admin/users/{id}` | Read / partially update / delete a user |
+| Admin | `GET`/`POST` | `/admin/users/{id}/roles` | List / assign roles to a user |
+| Admin | `GET` | `/admin/users/{id}/consents` | List a user's active OAuth consents |
+| Admin | `DELETE` | `/admin/users/{id}/consents/{client_id}` | Revoke a user's consent for a client |
+| Admin | `GET` | `/admin/users/{id}/effective-permissions` | Resolved permission set for a user |
+| Admin | `DELETE` | `/admin/assignments/{id}` | Remove a role assignment |
+| Admin | `GET` | `/admin/realms` | List realms (`POST` answers `405` — realms are declared in `hearth.yaml`) |
+| Admin | `GET`/`DELETE` | `/admin/realms/{id}` | Read a realm; delete one that is already `Archived` (`PATCH` answers `405` — realms are declared in `hearth.yaml`) |
+| Admin | `GET`/`POST` | `/admin/applications` | List / register OAuth clients |
+| Admin | `GET`/`PATCH`/`DELETE` | `/admin/applications/{id}` | Read / partially update / delete a client |
+| Admin | `GET`/`POST` | `/admin/roles` | List / create RBAC roles |
+| Admin | `GET`/`PATCH`/`DELETE` | `/admin/roles/{id}` | Read / partially update / delete a role |
+| Admin | `GET`/`POST` | `/admin/groups` | List / create groups |
+| Admin | `GET`/`PATCH`/`DELETE` | `/admin/groups/{id}` | Read / partially update / delete a group |
+| Admin | `GET`/`POST` | `/admin/groups/{id}/members` | List / add group members |
+| Admin | `DELETE` | `/admin/groups/{id}/members/{member_id}` | Remove a group member |
+| Admin | `GET` | `/admin/audit` | Query the audit log |
+| Admin | `GET`/`POST` | `/admin/webhooks` | List / create webhook subscriptions |
+| Admin | `GET`/`PUT`/`DELETE` | `/admin/webhooks/{id}` | CRUD a webhook subscription |
+| Admin | `GET` | `/admin/webhooks/{id}/deliveries` | Delivery log for a subscription (default 50, max 200 per page) |
+| Admin | `POST` | `/admin/bootstrap` | Dev-only bootstrap — returns 404 in production |
+| Self-service | `GET` | `/v1/me/permissions` | Caller's live RBAC claim set |
+| Self-service | `GET` | `/oauth/consents` | List the caller's granted OAuth consents |
+| Self-service | `DELETE` | `/oauth/consents/{client_id}` | Revoke consent for a specific client |
+| WebAuthn | `POST` | `/webauthn/register/begin` | Start passkey registration ceremony |
+| WebAuthn | `POST` | `/webauthn/register/complete` | Complete passkey registration |
+| WebAuthn | `POST` | `/webauthn/auth/begin` | Start passkey authentication ceremony |
+| WebAuthn | `POST` | `/webauthn/auth/complete` | Complete passkey authentication |
+| WebAuthn | `GET` | `/webauthn/credentials` | List the caller's registered credentials |
+| WebAuthn | `DELETE` | `/webauthn/credentials/{credential_id}` | Remove a passkey credential |
+| SCIM 2.0 | `GET` | `/realms/{realm_name}/scim/v2/ServiceProviderConfig` | SCIM capability advertisement |
+| SCIM 2.0 | `GET` | `/realms/{realm_name}/scim/v2/ResourceTypes` | Supported SCIM resource types |
+| SCIM 2.0 | `GET` | `/realms/{realm_name}/scim/v2/Schemas` | SCIM schema definitions |
+| SCIM 2.0 | `GET`/`POST` | `/realms/{realm_name}/scim/v2/Users` | List / provision users |
+| SCIM 2.0 | `GET`/`PUT`/`PATCH`/`DELETE` | `/realms/{realm_name}/scim/v2/Users/{id}` | CRUD / partial update a SCIM user |
+| SCIM 2.0 | `GET`/`POST` | `/realms/{realm_name}/scim/v2/Groups` | List / provision groups |
+| SCIM 2.0 | `GET`/`PUT`/`PATCH`/`DELETE` | `/realms/{realm_name}/scim/v2/Groups/{id}` | CRUD / partial update a SCIM group |
+| Observability | `GET` | `/healthz` | Kubernetes liveness probe |
+| Observability | `GET` | `/readyz` | Kubernetes readiness probe (storage + engine checks) |
+| Observability | `GET` | `/metrics` | Prometheus-compatible metrics |
+
+All `/admin/*` routes require a bearer token whose `permissions` claim contains `hearth.admin` for the target realm (typically via the seed `realm.admin` role). SCIM routes use a realm-scoped bearer token. The path names the realm, so an IdP needs only the base URL `/realms/{realm_name}/scim/v2` and the token. The same SCIM routes are also served under `/scim/v2`, where the `X-Realm-ID` header selects the realm (see the [SCIM Provisioning guide](scim-provisioning.md)).
+
+Per-realm variants of the core OAuth/OIDC endpoints are available at `/realms/{realm_name}/{endpoint}` for multi-realm deployments where callers cannot send `X-Realm-ID`.
+
+---
+
 ## Files at a glance
 
 ```

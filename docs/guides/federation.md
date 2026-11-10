@@ -479,6 +479,9 @@ any address from pre-creating — and keeping a way into — an account on someo
 > "Detect Existing Account" and "Confirm Link Existing Account" steps maps to Hearth's
 > `link_existing_accounts: confirm`.
 
+A signed-in user lists and unlinks their external identities at
+`/ui/account/linked-accounts`.
+
 ---
 
 ## Custom claim mappings
