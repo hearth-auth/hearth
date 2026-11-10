@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.9.0] — 2026-11-10
+
 ### Added
 - **Prometheus alert rules and a Grafana dashboard** (#648): `deploy/monitoring/` ships
   `prometheus/hearth-alerts.yml` (15 alerts: instance down, 5xx rate, WAL write fence, low and
