@@ -42,7 +42,7 @@ A registry SHALL list every entry point that creates a session or issues a token
 - **THEN** the registry row marks it not applicable, with a reason, and the test skips only that pair
 
 ### Requirement: Mutation testing with a budget that only goes down
-`cargo-mutants` SHALL run nightly on `src/identity/`, `src/rbac/` and `src/protocol/http/`. A committed budget SHALL hold the number of surviving mutants per module. CI SHALL fail when a module's count is higher than its budget. Each security invariant in the registry SHALL also have an entry in `ci/mutations.toml`.
+`cargo-mutants` SHALL run nightly on the core high-risk code: token issuance, sessions, the RBAC resolver, and the permission check of the admin API. A committed budget SHALL hold the number of surviving mutants per module. CI SHALL fail when a module's count is higher than its budget. Each security invariant in the registry SHALL also have an entry in `ci/mutations.toml`.
 
 #### Scenario: A change lets more mutants survive
 - **WHEN** the nightly run finds more surviving mutants in a module than its budget

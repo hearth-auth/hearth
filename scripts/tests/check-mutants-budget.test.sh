@@ -25,17 +25,19 @@ failures=0
 pass() { echo "  ok   — $*"; }
 fail() { echo "  FAIL — $*"; failures=$((failures + 1)); }
 
-# budget <file> <alpha survivors or ""> <beta survivors or ""> — two modules.
-# An empty value leaves `survivors` out.
+# budget <file> <alpha survivors or ""> <beta survivors or ""> — two modules,
+# alpha in 2 shards, beta in 1. An empty value leaves `survivors` out.
 budget() {
     local file="$1" a="$2" b="$3"
     {
         echo '[modules.alpha]'
         echo 'files = ["src/alpha/**"]'
+        echo 'shards = 2'
         [[ -n "$a" ]] && echo "survivors = ${a}"
         echo
         echo '[modules.beta]'
         echo 'files = ["src/beta/**"]'
+        echo 'shards = 1'
         [[ -n "$b" ]] && echo "survivors = ${b}"
     } > "$file"
 }
@@ -137,8 +139,8 @@ expect fails "a shard reported twice fails" "$d/b.toml" "$d/r" "beta: shard 0/1 
 
 d="$(case_dir)"; budget "$d/b.toml" 2 1; full_results "$d/r"
 shard "$d/r" alpha 2 3 MissedMutant:src/alpha/b.rs
-expect fails "shards that disagree on the shard count fail" "$d/b.toml" "$d/r" \
-    "alpha: shards disagree on the shard count: [2, 3]"
+expect fails "a shard count that is not the budget file's fails" "$d/b.toml" "$d/r" \
+    "alpha: shard 2/3, but the budget file says 2 shards"
 
 d="$(case_dir)"; budget "$d/b.toml" 2 1; full_results "$d/r"; rm -rf "$d/r/mutants-beta-0"
 expect fails "a module with no result at all fails" "$d/b.toml" "$d/r" \
@@ -146,7 +148,40 @@ expect fails "a module with no result at all fails" "$d/b.toml" "$d/r" \
 
 d="$(case_dir)"; budget "$d/b.toml" 2 1; full_results "$d/r"
 shard "$d/r" beta 0 1 MissedMutant:src/gamma/x.rs
-expect fails "a mutant outside its module fails" "$d/b.toml" "$d/r" "not in this module"
+expect fails "a mutant outside its module fails" "$d/b.toml" "$d/r" \
+    "beta: shard 0/1: mutant 'src/gamma/x.rs:1:1: replace f' is in no module"
+
+# `re`: a mutant must match the module's regex, not only its files.
+re_budget() {
+    printf '[modules.alpha]\nfiles = ["src/alpha/**"]\nre = ["^src/alpha/a\\\\.rs:"]\nshards = 2\nsurvivors = 2\n' > "$1"
+    printf '\n[modules.beta]\nfiles = ["src/beta/**", "src/alpha/b.rs"]\nshards = 1\nsurvivors = 1\n' >> "$1"
+}
+d="$(case_dir)"; re_budget "$d/b.toml"
+shard "$d/r" alpha 0 2 MissedMutant:src/alpha/a.rs
+shard "$d/r" alpha 1 2 MissedMutant:src/alpha/a.rs
+shard "$d/r" beta 0 1 MissedMutant:src/alpha/b.rs
+expect passes "a mutant that matches its module's re counts" "$d/b.toml" "$d/r" \
+    "alpha: tested 2, survivors 2, budget 2"
+
+d="$(case_dir)"; re_budget "$d/b.toml"
+shard "$d/r" alpha 0 2 MissedMutant:src/alpha/a.rs
+shard "$d/r" alpha 1 2 MissedMutant:src/alpha/b.rs
+shard "$d/r" beta 0 1 MissedMutant:src/beta/c.rs
+expect fails "a mutant in the module's files but in another module's re fails" "$d/b.toml" "$d/r" \
+    "alpha: shard 1/2: mutant 'src/alpha/b.rs:1:1: replace f' is in beta"
+
+# cargo-mutants 27.1.0 does not apply --re to "delete field" mutants. A mutant
+# in the files that matches no re is not counted, and is not an error.
+d="$(case_dir)"; re_budget "$d/b.toml"
+shard "$d/r" alpha 0 2 MissedMutant:src/alpha/a.rs
+shard "$d/r" alpha 1 2 MissedMutant:src/alpha/a.rs MissedMutant:src/alpha/other.rs
+shard "$d/r" beta 0 1 MissedMutant:src/alpha/b.rs
+expect passes "a mutant in the files that matches no re is not counted" "$d/b.toml" "$d/r" \
+    "note: alpha: 1 mutants outside \`re\` are not counted"
+
+d="$(case_dir)"; budget "$d/b.toml" 2 1; sed -i 's#src/beta/\*\*#src/beta/**", "src/alpha/a.rs#' "$d/b.toml"
+full_results "$d/r"
+expect fails "a mutant in two modules fails" "$d/b.toml" "$d/r" "is in alpha and beta"
 
 d="$(case_dir)"; printf 'x = 1\n' > "$d/b.toml"; full_results "$d/r"
 expect fails "a budget file with no modules fails" "$d/b.toml" "$d/r" "has no [modules.<name>] tables"
@@ -156,13 +191,44 @@ out="$(python3 -I "$CHECK" --check-config --budget "${SCRIPT_DIR}/../ci/mutants-
     && pass "--check-config accepts the real budget file" \
     || fail "--check-config refuses the real budget file: ${out}"
 
-d="$(case_dir)"; printf '[modules.alpha]\nfiles = ["src/no-such-dir/**"]\n' > "$d/b.toml"
-out="$(python3 -I "$CHECK" --check-config --budget "$d/b.toml" 2>&1)"
-if [[ $? -ne 0 && "$out" == *"matches no file"* ]]; then
-    pass "--check-config refuses a module whose files glob matches nothing"
-else
-    fail "--check-config accepted a glob that matches nothing: ${out}"
-fi
+# expect_mode <passes|fails> <name> <budget body> <needle> <args...>
+expect_mode() {
+    local want="$1" name="$2" body="$3" needle="$4" d out rc
+    shift 4
+    d="$(case_dir)"; printf '%b' "$body" > "$d/b.toml"
+    out="$(python3 -I "$CHECK" --budget "$d/b.toml" "$@" 2>&1)"
+    rc=$?
+    if [[ "$want" == fails && $rc -eq 0 ]] || [[ "$want" == passes && $rc -ne 0 ]]; then
+        fail "${name}: exit ${rc}: ${out}"
+    elif [[ "$out" != *"$needle"* ]]; then
+        fail "${name}: the output does not contain '${needle}': ${out}"
+    else
+        pass "$name"
+    fi
+}
+
+expect_mode fails "--check-config refuses a files glob that matches nothing" \
+    '[modules.alpha]\nfiles = ["src/no-such-dir/**"]\nshards = 1\n' "matches no file" --check-config
+expect_mode fails "--check-config refuses a test binary that does not exist" \
+    '[modules.alpha]\nfiles = ["src/rbac/**"]\ntests = ["no_such_test"]\nshards = 1\n' \
+    "tests/no_such_test.rs does not exist" --check-config
+expect_mode fails "a re that does not compile fails" \
+    '[modules.alpha]\nfiles = ["src/rbac/**"]\nre = ["("]\nshards = 1\n' "does not compile" --check-config
+expect_mode fails "a module with no shards fails" \
+    '[modules.alpha]\nfiles = ["src/rbac/**"]\n' "\`shards\` must be a positive integer" --check-config
+
+# --matrix and --mutants-args: what the workflow runs comes from the budget file.
+expect_mode passes "--matrix gives one entry for each shard" \
+    '[modules.alpha]\nfiles = ["src/a/**"]\nshards = 2\n[modules.beta]\nfiles = ["src/b/**"]\nshards = 1\n' \
+    '{"include":[{"module":"alpha","shard":0,"shards":2},{"module":"alpha","shard":1,"shards":2},{"module":"beta","shard":0,"shards":1}]}' \
+    --matrix
+expect_mode passes "--mutants-args gives the files, the re and the test binaries" \
+    '[modules.alpha]\nfiles = ["src/a.rs"]\nre = ["^src/a"]\ntests = ["t1"]\nshards = 1\n' \
+    "$(printf -- '--file\nsrc/a.rs\n--re\n^src/a\n--cargo-arg=--lib\n--cargo-arg=--test\n--cargo-arg=t1\n--\n-E\nnot (kind(lib) and test(/^(storage|cluster)::/))')" \
+    --mutants-args alpha
+expect_mode fails "--mutants-args refuses a module that is not in the budget file" \
+    '[modules.alpha]\nfiles = ["src/a.rs"]\nshards = 1\n' "module gamma is not in the budget file" \
+    --mutants-args gamma
 
 echo
 if [[ $failures -ne 0 ]]; then

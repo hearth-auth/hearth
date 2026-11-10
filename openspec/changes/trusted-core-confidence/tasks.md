@@ -54,7 +54,8 @@
 
 ## 4. Mutation testing
 
-- [ ] 4.1 Nightly `cargo-mutants` workflow on `src/identity/`, `src/rbac/`, `src/protocol/http/`, sharded
+- [x] 4.1 Nightly `cargo-mutants` workflow on `src/identity/`, `src/rbac/`, `src/protocol/http/`, sharded
+  - `.github/workflows/mutants-nightly.yml`. Owner decision of 2026-11-09: the scope is the core high-risk code only (token issuance, sessions, the RBAC resolver, the admin API permission check), with a fixed list of integration binaries per module. The full three directories do not fit in one night (design decision 5).
 - [ ] 4.2 First run; write `ci/mutants-budget.toml` (design Open Question 3)
 - [x] 4.3 Budget check script with a self-test that proves it can fail
   - `scripts/check-mutants-budget.py`, self-test `scripts/tests/check-mutants-budget.test.sh`, budget file `ci/mutants-budget.toml` with no counts yet (a module with no count fails). Both run in the `ci.yml` filter job.
