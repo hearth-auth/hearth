@@ -68,6 +68,7 @@ ui/tailwindcss
 # Integration-suite run credentials (written by demo.sh after first bootstrap;
 # contains a live admin token — must never be committed).
 examples/full-stack-demo/.hearth-run-env
+examples/full-stack-demo/frontend/dist/
 
 .codex
 

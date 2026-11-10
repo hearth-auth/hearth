@@ -21,9 +21,6 @@ Hearth MUST NOT claim production readiness until this work is done.
 
 ## What Changes
 
-- **Feature freeze.** From v3.0.0 until this change is archived, the server accepts no new
-  features. Allowed work: defect fixes, removals, tests, docs, tooling, and the
-  `sdk-standard-libraries` change.
 - **External conformance.** A scripted run of the OpenID Foundation conformance suite (Basic OP,
   Config OP, Dynamic OP) against a production-mode Hearth. Every plan passes with zero failures
   before release. Each warning has a recorded decision.
@@ -36,7 +33,7 @@ Hearth MUST NOT claim production readiness until this work is done.
 - **External pentest.** The scope document is rewritten for the 3.0.0 surface. An external
   firm tests it. Every Critical and High finding is fixed and re-tested before release.
 - **Known defects.** The defects found during the scope trim are fixed here (listed in
-  `tasks.md` group 1), because the freeze allows fixes.
+  `tasks.md` group 1).
 - **Production-readiness claim.** The README and `docs/STATUS.md` may claim production
   readiness only when every gate above passes.
 
@@ -44,7 +41,7 @@ Hearth MUST NOT claim production readiness until this work is done.
 
 ### New Capabilities
 
-- `release-assurance`: the feature freeze, the external conformance gate, the entry-point
+- `release-assurance`: the external conformance gate, the entry-point
   invariant registry, the mutation budget, the pentest gate, and the rule for the
   production-readiness claim.
 
@@ -58,8 +55,7 @@ None.
   `make conformance-oidf` target and its script, a nightly `cargo-mutants` workflow and its
   budget file.
 - Changed: `ci/mutations.toml`, `docs/security-audit/pentest-scope.md`,
-  `docs/dev/TESTING.md` (§7 and the phase checklist), `docs/STATUS.md`, `README.md`,
-  `CONTRIBUTING.md` (the freeze rule).
+  `docs/dev/TESTING.md` (§7 and the phase checklist), `docs/STATUS.md`, `README.md`.
 - The defect fixes touch `src/identity/` and `src/protocol/http/` (see `tasks.md` group 1).
 - No new runtime dependency. `cargo-mutants` and the conformance suite are tools, not
   dependencies of the binary.

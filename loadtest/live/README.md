@@ -308,8 +308,9 @@ The flatness test says whether memory grows; heaptrack says what holds it. `HEAP
 each plan line's Hearth under heaptrack (setup and the import run without it) and ends each
 soak with `kill -9`. The trace's "leaked" memory is then the live heap at that moment, by call
 site, and `round.sh` fetches the trace as `heaptrack.zst`. Compare a 2-hour run with a 12-hour
-run (`plans/2026-10-12-c7i-large-445-heaptrack-*.txt`): a call site whose live heap grows
-between them, and is not a capped cache or the SST readers, is a leak.
+run of the same plan. The #445 pair, `plans/2026-10-12-c7i-large-445-heaptrack-{2h,12h}.txt`,
+is in git history at `53550749`. A call site whose live heap grows between the two runs, and is
+not a capped cache or the SST readers, is a leak.
 
 heaptrack needs a binary with symbols, and a binary that allocates through glibc's `malloc`:
 heaptrack hooks only that, and the release binary allocates through jemalloc (#445).

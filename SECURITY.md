@@ -2,18 +2,14 @@
 
 ## Supported Versions
 
-Hearth 1.0.0 shipped on 2026-06-21. Support follows the 1.x window in
-[VERSIONING.md](VERSIONING.md#support-window-for-the-1x-line):
+Only the latest release gets fixes (see [VERSIONING.md](VERSIONING.md#supported-versions)).
+The current line is 4.x. A fix lands on `main` first and ships in the next release. There are
+no back-port branches.
 
-| Version | Supported | Until |
-|---|---|---|
-| 1.x (latest release, currently 1.6.x) | ✅ Active support — bug and security fixes | 2027-12-21 |
-| 1.x (security-only phase) | ✅ Security fixes only | 2028-06-21 |
-| < 1.0 (pre-release) | ❌ | — |
-
-Fixes land on `main` first and ship in the next 1.x release; there are no back-port branches for
-older 1.x minors. **Note:** the newest installable server release, v1.6.10, predates the security
-fixes merged in PR #358 — until the next release is cut, those fixes exist only on `main`.
+| Version | Supported |
+|---|---|
+| Latest 4.x release | ✅ Bug and security fixes |
+| Older releases | ❌ Upgrade to the latest release |
 
 ## Reporting a Vulnerability
 
@@ -89,9 +85,9 @@ We will not pursue civil or criminal action against researchers who:
 
 | Audit type | Status | Notes |
 |------------|--------|-------|
-| Internal assessments | 🔄 Findings open | Internal audits are not clean. The 2026-08-12 production-readiness audit reported critical findings, and the 2026-09-28 GA-readiness audit of `main` at `060d4541` reported high-severity blockers (consent bypass on refresh and device grants, second-factor bypasses, an unauthenticated connection-exhaustion DoS, a revocation race). Remediation is in progress; the verdict at the time of writing is **not GA-ready**. |
-| Third-party penetration test | 🔄 In procurement | Scope document at `docs/security-audit/pentest-scope.md`; board budget approval pending (HEA-1244) |
-| Independent threat model review | ⏳ Pending pentest | Blocked on HEA-1244 completion (HEA-1243) |
+| Internal assessments | 🔄 Findings open | Hearth is **not yet production-ready**. The open defects from the internal audits are tracked in `openspec/changes/fix-spec-drift-defects`. The gates before a production-readiness claim are in `openspec/changes/trusted-core-confidence`. |
+| Third-party penetration test | ⏳ Not started | Scope document at `docs/security-audit/pentest-scope.md`. The firm and the budget are an owner decision (`trusted-core-confidence` task 5.2). |
+| Independent threat model review | ⏳ Pending pentest | Follows the penetration test. |
 
 This page will be updated with the pentest report summary and firm name once the engagement concludes. The redacted full report will be stored at `docs/security-audit/pentest-YYYY-MM-DD-summary.md`.
 
@@ -107,7 +103,7 @@ each with its rationale.
 
 ## Encryption at Rest
 
-Encryption at rest is **active** in Hearth 1.0. All data written to disk — WAL records and SST file sections — is encrypted using a three-tier key hierarchy:
+Encryption at rest is **active**. All data written to disk — WAL records and SST file sections — is encrypted using a three-tier key hierarchy:
 
 1. **Host Key (32 B)** — loaded from the `HEARTH_MASTER_KEY` env var (64 hex chars, e.g. `openssl rand -hex 32`). In production that variable is the **only** key source: if it is unset, Hearth **refuses to start**, and it never reads a `hearth.host_key` file from the data directory even when one exists (`src/storage/key_registry.rs`). Only `--dev` mode auto-generates a key, persists it to `hearth.host_key`, and reads that file back on a later `--dev` start. Protects the KEKs in `hearth.keys`.
 2. **KEK (32 B)** — stored encrypted in `hearth.keys`; wraps per-file DEKs. The key registry is realm-keyed, but only the system realm's KEK is provisioned, so **one KEK covers every realm**. Size your key-compromise blast radius accordingly: recovering that one KEK exposes every realm's data, not one tenant's.
@@ -128,7 +124,7 @@ Every Hearth release binary and SBOM is signed via **cosign keyless signing** us
 | `--certificate-oidc-issuer` | `https://token.actions.githubusercontent.com` |
 | `--certificate-identity-regexp` | `^https://github\.com/hearth-auth/hearth/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$` |
 
-Every release also ships a **SLSA provenance document** (`multiple.intoto.jsonl`, one document covering every binary and the SBOM — the asset name on v1.6.10) and a **CycloneDX SBOM** (`hearth-sbom.cdx.json`).
+Every release also ships a **SLSA provenance document** (`multiple.intoto.jsonl`, one document covering every binary and the SBOM) and a **CycloneDX SBOM** (`hearth-sbom.cdx.json`).
 
 See [docs/guides/verify-release.md](docs/guides/verify-release.md) for full verification instructions including `cosign verify-blob`, `slsa-verifier`, and SBOM inspection.
 

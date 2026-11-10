@@ -79,4 +79,4 @@ The JWKS can also carry an `RSA` key with `alg: RS256`: it signs **ID tokens** o
 
 ## Migrating from Keycloak?
 
-The [SDK migration guide](./migration-from-keycloak.md) covers concept mapping, the `hearth migrate keycloak` CLI, and side-by-side code comparisons for TypeScript and Go. For the full operator migration see [Migrating from Keycloak](/docs/migrating-from-keycloak).
+[Migrating from Keycloak](/docs/migrating-from-keycloak) covers the `hearth migrate keycloak` CLI, the concept mapping, and side-by-side code for the TypeScript and Go SDKs.

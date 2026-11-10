@@ -392,8 +392,6 @@ These rules are binding. `loadtest/src/report.rs` enforces rule 3.
 4. **Ratios are not costs.** Only the *slope* of a multi-point regression yields a per-unit cost.
 5. **A run that touched swap is void.**
 
-`loadtest/baseline/steady-baseline.json` (schema 2) is the committed steady-state baseline.
-
 ## Reading the report
 
 Every run writes two artifacts into `--report-dir` (default `loadtest/reports/`,
@@ -472,11 +470,9 @@ block is simply absent. Sampling is Linux-only and loopback-by-construction; the
 1 s interval keeps it off the hot path. CPU% assumes the kernel `USER_HZ` of
 `100` (universal on Linux) rather than pulling in `libc` for one `sysconf` call.
 
-A nightly diff consumes these the same way it consumes the latency rows: compare
-`resources.rss_peak_bytes` and `resources.cpu_mean_pct` against the committed
-baseline and flag a regression (e.g. peak RSS up >20%, or mean CPU crossing a
-headroom threshold) even when latency stayed in budget — a memory leak or a
-CPU-hungry regression shows up here before it shows up as a p99 breach.
+To compare two runs, compare `resources.rss_peak_bytes` and `resources.cpu_mean_pct`
+as well as the latency rows. A memory leak or a CPU-hungry regression shows up here
+before it shows up as a p99 breach.
 
 > **Flush-stall / tier-churn signals** are **out of scope** here: the server
 > does not currently expose storage flush-stall or tier-promotion counters via a
@@ -540,8 +536,7 @@ at microsecond resolution); ordinary loopback scheduling jitter puts observed p9
 2–3 ms, which exceeds the sub-ms `session`/`user`/`validate` budgets even though
 the engine itself is well under target. `issuance` likewise blows its 6 ms
 budget because the HTTP path runs a **real Argon2id** password hash (10–22 ms)
-that the in-process engine bench does not. The committed
-[baseline](#the-committed-baseline) is a clean, zero-failure run that still
+that the in-process engine bench does not. A clean, zero-failure run still
 reports `pass:false` for exactly these reasons — the budgets are an aspirational
 engine-level ceiling, and this HTTP harness is a **drift detector and capacity
 probe**, not a sub-ms pass gate. Sub-ms verification lives in the in-process
@@ -620,14 +615,6 @@ got is the *server's* ceiling or the *load generator's*:
 - `load_generator_or_headroom` — no breach, failures negligible: the server kept
   up. You have **not** found the server ceiling — raise `USERS`.
 
-> The archived reports under `reports/hea1812/` and `reports/hea1871/` predate
-> that ordering: `steady-600u.json` through `steady-5000u.json` carry
-> `"failure_rate": 1.0` **and** `"ceiling": "server"`, which the same README's
-> ["Failure onset"](#failure-onset-bisected-hea-1813--it-is-a-test-harness-ceiling-not-a-hearth-ceiling)
-> section correctly explains was a *generator* collapse (server CPU fell to
-> 5.8%). Re-running those sweeps today produces `generator_saturated`. Do not
-> read `ceiling` out of those archived files.
-
 ### Load-generator tuning (so the generator isn't the bottleneck)
 
 A single box driving tens of thousands of connections to itself needs OS tuning,
@@ -650,67 +637,6 @@ taskset -c 4-15 hearth-loadtest run --users 10000 ...              # goose: core
 For a realistic *high-throughput* run the token cap (now disabled) is no longer
 the constraint; spread live tokens across many subjects via the multi-subject
 attach path below for a more representative corpus.
-
-## Measured single-node ceiling (HEA-1812 / HEA-1813)
-
-Measured by sweeping `steady` concurrency against the large demo corpus with a
-**fine bisect of the failure onset** and reading `summary.failure_rate` **plus
-per-step server RSS/CPU** (`resources`, HEA-1811) at each step. **These are
-single-node limits and are hardware-sensitive** — multi-node/Raft horizontal
-scale is a separate axis and is *not* measured here.
-
-There are **two independent ceilings — keep them separate:**
-
-| Ceiling | Value | What it means |
-|---------|-------|---------------|
-| **Hot-path read throughput** | **≈ 1677 RPS @ 500 users, p99 = 1 ms, 0 failures** | `validate` / `session_lookup` / `user_lookup` / `revoke_revalidate` stay p99 = 1–2 ms, well inside their 1.1–1.5 ms budgets. Server CPU here is **178% mean / 292% peak of 1600% available** — nowhere near saturated. |
-| **Argon2id login budget** | `issuance` / `revoke` / `revoke_mint` p99 = **4–7 s @ 500u** | These do a **real Argon2id** password hash (deliberately expensive, **off the hot path**). They breach the 6 ms HTTP budget **by design** — this is the *only* reason the run reports `pass:false`. It is a CPU-cost property of Argon2id, **not** hot-path latency and **not** server saturation. |
-
-- **Hardware:** AMD Ryzen 7 7840HS, 16 vCPU, 55 GiB RAM — server **and** the Goose
-  load generator co-resident on one loopback host.
-- **Corpus:** `resident_corpus=300000` seeded users (5 realms; sessions + revoked
-  per realm; `seed=1`).
-
-### Failure onset (bisected, HEA-1813) — it is a *test-harness* ceiling, not a Hearth ceiling
-
-The old "collapse by 1000u" number conflated a load-generator artifact with server
-saturation. The bisect (`500 600 700 800 900 1000 1500 2000 u`, each with
-`--server-pid` RSS/CPU attribution) locates the onset **between 500u and 600u** and
-shows it is **not** the server hitting a wall:
-
-| Users | RPS | Failures | Server CPU (mean) |
-|-------|-----|----------|-------------------|
-| 500 | 1677 | **0%** | 178% |
-| 600 | ~13 | **100%** | **5.8%** ← collapses |
-| 700 | ~30 | 100% | **~0%** |
-| 800–2000 | — | 100% | ~0% |
-
-- **The server goes *idle* at the cliff, not saturated.** A CPU-bound server would
-  peg near 1600%; instead `cpu_mean` drops 178% → 5.8% → ~0% while RSS holds flat
-  (~3.9 GB, process alive). Requests are failing client-side (`error sending request
-  for url .../introspect`) at the 60 s client timeout — they never reach the server.
-- **Cause: co-resident load-generator starvation.** Once ~600 closed-loop Goose
-  users contend with the server for the same 16 vCPUs, the generator can't service
-  its connection pool and every request times out. This is a limit of the
-  single-host test rig, **not** of Hearth.
-- **To measure the true server cliff,** re-run with the Goose generator on a
-  **separate host** so the two don't share CPUs. Until then, treat ≥600u on this rig
-  as unmeasurable, not as a server ceiling.
-
-All of the above is carried in the committed baseline JSON under
-[`single_node_ceiling`](baseline/steady-baseline.json) (`hot_path`,
-`argon2id_login_budget`, `failure_onset`).
-
-**Reproduce:**
-
-```bash
-# Full bisected curve (boots the 300k corpus once, sweeps 500..2000u with
-# per-step RSS/CPU attribution):
-bash loadtest/scripts/hea1812-curve.sh
-# Or the two anchor points by hand:
-make loadtest MODE=steady USERS=500 RUN_TIME=45s HATCH_RATE=500   # clean, hot path sub-ms
-make loadtest MODE=steady USERS=600 RUN_TIME=45s HATCH_RATE=500   # onset (load-gen-bound)
-```
 
 ## ⚠️ Security warnings (read before running)
 
@@ -768,63 +694,6 @@ Wiring per-subject ROPC across the demo users (so live tokens span many
 subjects) is a follow-up; the deterministic per-user credential API
 (`SeedParams::user_password`) already exists for it.
 
-## The committed baseline
-
-[`baseline/steady-baseline.json`](baseline/steady-baseline.json) is a committed
-`report.json` from a clean, zero-failure `steady` run so a future nightly diff
-has a reference to compare against. It lives outside the git-ignored
-`reports/` directory precisely so it can be tracked.
-
-> **Note (HEA-1812 / HEA-1813):** the committed baseline is the **500-user clean**
-> run — the max hot-path point (≈1677 RPS, 0 failures, hot path sub-ms) on the
-> `resident_corpus=300000` demo corpus. It carries the reframed single-node
-> ceilings — separate `hot_path`, `argon2id_login_budget`, and bisected
-> `failure_onset` blocks — under a top-level `single_node_ceiling` key (see
-> [Measured single-node ceiling](#measured-single-node-ceiling-hea-1812--hea-1813)); the
-> nightly diff ignores that block and unknown keys, comparing `journeys[]`
-> percentiles as before. It is `schema:2`; the runtime schema is now `3` (`3`
-> adds the server `resources` block), and the nightly diff refuses to compare
-> across schema versions by design — re-capture at the current schema with the
-> steps below when an intended perf change moves the numbers.
-
-How it is captured (reproducible — the pipeline sets `load_test_unthrottled`
-itself, so no manual config or settle wait):
-
-```bash
-# Boot + seed + run + report in one shot, unthrottled:
-make loadtest MODE=steady USERS=200 RUN_TIME=90s HATCH_RATE=50
-# Copy the fresh report over the baseline (zero out volatile metadata):
-#   cp loadtest/reports/report.json loadtest/baseline/steady-baseline.json
-#   then set metadata.timestamp_unix to 0 and metadata.git_sha to the capture commit.
-```
-
-### Updating the baseline
-
-Re-capture with the steps above whenever an **intended** perf change moves the
-numbers (and note why in the commit). Normalise the two volatile metadata fields
-before committing so the diff stays clean:
-
-- `metadata.timestamp_unix` → `0`
-- `metadata.git_sha` → the short SHA the baseline was captured at
-
-Everything else (journey percentiles, budgets, `pass`) is the signal.
-
-### Nightly CI consumption + diff sketch (out of scope to wire here)
-
-The intended (not-yet-wired) nightly job would:
-
-1. Boot a dev instance + seed a fixed `--seed` corpus (deterministic).
-2. Run `make loadtest ARGS="run --mode steady …"`, producing `report.json`.
-3. Diff the fresh `report.json` against `baseline/steady-baseline.json`,
-   **ignoring** `metadata.timestamp_unix` and `metadata.git_sha`, comparing
-   `journeys[].{p50,p95,p99}_ms` per journey and flagging a regression when a
-   percentile grows beyond a tolerance (e.g. `p99` up > 25% or > 1 ms). Refuse
-   to compare if `schema` differs.
-4. Post the delta as a nightly report; **it is advisory**, not a PR gate.
-
-A minimal diff is a `jq`/small-script comparison — no bespoke tooling. Wiring
-the CI job itself is deliberately out of scope for this crate (see below).
-
 ## Explicitly out of scope
 
 - **Not a per-PR gate.** `make loadtest` needs a booted, seeded instance and
@@ -834,16 +703,5 @@ the CI job itself is deliberately out of scope for this crate (see below).
 - **Budgets are sourced, not tuned here.** They come verbatim from
   `docs/dev/TESTING.md` + a fixed loopback envelope (see
   [src/budget.rs](src/budget.rs)); this crate does not invent or relax them.
-- **No CI wiring.** The nightly job + baseline-diff automation above is a
-  sketch; wiring it into GitHub Actions is a separate ticket.
 - **No production/remote targets.** Loopback dev only; the seed refuses
   non-loopback targets without an explicit opt-in.
-
-## Status — DoD (HEA-1792)
-
-Seed (HEA-1789), the five closed-loop journeys + weighting (HEA-1790), and run
-modes + JSON/HTML reporters + sourced budgets (HEA-1791) are all implemented.
-DoD verified: `make loadtest` runs clean end-to-end (seed → steady run →
-`report.json` + HTML, zero request failures), the baseline is committed, and the
-crate is `clippy`/`fmt` clean. The workspace `cargo nextest run` is unaffected
-because this crate is workspace-excluded.

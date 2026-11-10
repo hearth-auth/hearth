@@ -23,9 +23,6 @@ name: Semantic Release
 #                          repo + workflow scopes.  GITHUB_TOKEN cannot be used
 #                          because tags pushed by it do NOT trigger other
 #                          workflows (GitHub security model).
-#
-# Bootstrap (run once before the first live release):
-#   See docs/release-runbook.md § "Bootstrapping — anchor tags"
 
 on:
   # 11:17 UTC = 6:17 AM EST (7:17 AM EDT). Off the hour, because GitHub delays

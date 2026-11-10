@@ -1,16 +1,5 @@
 ## ADDED Requirements
 
-### Requirement: Feature freeze until the confidence work is done
-From v3.0.0 until this change is archived, the project SHALL accept no new server feature. Defect fixes, removals, tests, documentation, tooling and the `sdk-standard-libraries` change SHALL remain allowed. `CONTRIBUTING.md` SHALL state the rule and its end condition.
-
-#### Scenario: A feature is proposed during the freeze
-- **WHEN** a change proposes a new endpoint, config key, grant or login method during the freeze
-- **THEN** the review refuses it, and the reason cites the freeze in `CONTRIBUTING.md`
-
-#### Scenario: A defect fix during the freeze
-- **WHEN** a change fixes a defect in an existing surface during the freeze
-- **THEN** the freeze does not block it
-
 ### Requirement: External OIDC conformance passes
 Before a release, the OpenID Foundation conformance suite SHALL run the Basic OP, Config OP and Dynamic OP plans against a production-mode Hearth (`serve -c`, TLS, a real KEK, not `--dev`). Every plan SHALL finish with zero failed conditions. Each warning SHALL have a recorded decision in the run report.
 

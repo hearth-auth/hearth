@@ -30,14 +30,12 @@ confidence tool at the start of this change (2026-10-02):
   business decision, out of scope here. This change makes a certification run possible.
 - The Raft Jepsen harness. The owner plans it separately.
 - SDK confidence work. `sdk-standard-libraries` owns the SDK conformance harness.
-- New features of any kind (the freeze).
 
 ## Decisions
 
-1. **The freeze lives in `CONTRIBUTING.md` and in this change's spec.** `CONTRIBUTING.md` is what
-   a contributor reads. The spec makes the rule reviewable. The freeze ends when this change is
-   archived. Alternative considered: a CI check on commit types (`feat:`). Rejected: a commit
-   type is easy to mislabel, and the review is the real gate.
+1. **No feature freeze.** This change first declared a feature freeze until it is archived.
+   The owner ended the freeze on 2026-11-09. New features may land while the gates are open.
+   The gates still block the production-readiness claim.
 
 2. **OIDF plans: Basic OP, Config OP, Dynamic OP.** Hearth ships the code flow, discovery and
    dynamic registration (RFC 7591). Implicit and Hybrid OP are out: Hearth supports only
@@ -98,7 +96,6 @@ confidence tool at the start of this change (2026-10-02):
   adds a test.
 - [The pentest needs a budget and a vendor] → It is a human task. The release gate waits for it.
   Everything else can finish first.
-- [The freeze slows features] → That is the purpose. Fixes are still allowed.
 
 ## Open Questions
 

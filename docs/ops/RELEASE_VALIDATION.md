@@ -1,9 +1,9 @@
 # Release Validation Runbook
 
-**Audience:** Release engineer running the pre-release validation pass before tagging a Hearth release.
-**Goal:** Confirm the release commit passes the full test matrix and benchmark gate before the signed binary and SBOM are published.
+**Audience:** Anyone who debugs a release gate, or checks a commit of `main` before the daily release.
+**Goal:** List the gates that a release commit must pass before the signed binaries and SBOM are published, and how to run each gate by hand.
 
-This runbook must be completed on the release commit (the commit that bumps `Cargo.toml` version and replaces `## [Unreleased]` in `CHANGELOG.md`). Do not run it on an unrelated working commit.
+Releases are automatic: do not tag by hand (see [`docs/dev/DEVELOPMENT.md`](../dev/DEVELOPMENT.md#release-cut-procedure) § Release-cut procedure). The release commit is the head of `main` at the daily release run. The `validation` job of `release.yml` runs steps 1–3, 7 and 9 on that commit (see [CI automation](#ci-automation)). `Cargo.toml` and the `CHANGELOG.md` version heading change after the tag, in the release PR.
 
 ---
 
@@ -173,36 +173,20 @@ PASS  Step 7 — Benchmark gate (no >20% regression)
 PASS  Step 8 — SDK smoke tests (TS + Go)
 PASS  Step 9 — Security gate (cargo audit + cargo deny)
 
-All 9 steps passed. Release is cleared to tag and publish.
+All 9 steps passed.
 EOF
 cat /tmp/validation-summary.txt
 ```
 
-Replace any `PASS` with `FAIL: <reason>` for any step that did not pass. A summary with any `FAIL` lines means the release is **not cleared to publish**.
+Replace any `PASS` with `FAIL: <reason>` for any step that did not pass.
 
-> **Note:** you do not need to upload this file by hand. Once the tag is pushed, the
-> `validation` job in `release.yml` generates its own `validation-summary.txt` for the
-> gates it runs and attaches it to the GitHub Release (see
-> [CI automation](#ci-automation-hea-1264) below). Keep this manual summary as your record
-> of the steps CI does **not** cover — 5, 6, and 8.
+> **Note:** you do not need to upload this file. The `validation` job in `release.yml`
+> generates its own `validation-summary.txt` for the gates it runs and attaches it to the
+> GitHub Release (see [CI automation](#ci-automation) below).
 
 ---
 
-## Release tag command
-
-After all steps pass:
-
-```bash
-VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
-git tag -s "v$VERSION" -m "Release v$VERSION"
-git push origin "v$VERSION"
-```
-
-The `release.yml` workflow fires on the new tag and builds the signed binaries, SBOM, SLSA provenance, and publishes the GitHub Release automatically.
-
----
-
-## CI automation (HEA-1264)
+## CI automation
 
 The `validation` job in `.github/workflows/release.yml` runs a subset of this runbook
 automatically on the tagged release commit, so the §13.4 evidence is produced without
@@ -250,9 +234,8 @@ the run was cancelled, timed out, or failed to build. It is never printed for a 
 that ran and failed (audit §4.8#6, §4.12#9). `scripts/tests/summarize-nextest.test.sh`
 guards both readings, and CI runs it on every PR.
 
-**Steps you must still run manually** before tagging: 5, 6, and 8 (and 4 if you are
-tagging a commit that never went through PR CI). The manual summary in Step 10 remains
-useful for recording those.
+Steps 4, 5 and 6 are gated on every PR, and step 8 runs in `sdk-smoke.yml`. Every commit
+on `main` came through a PR, so no step needs a manual run before a release.
 
 ---
 
