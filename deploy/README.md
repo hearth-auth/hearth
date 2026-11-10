@@ -503,6 +503,10 @@ kubectl delete pvc -n hearth -l app.kubernetes.io/name=hearth
 
 ---
 
+## Monitoring
+
+[`monitoring/`](monitoring/README.md) holds Prometheus alert rules and a Grafana dashboard for every deployment method. Scrape `/metrics`, load `monitoring/prometheus/hearth-alerts.yml`, and import `monitoring/grafana/hearth-dashboard.json`. The README there explains each alert and what to do.
+
 ## Configuration reference
 
 All three deployment methods consume the same `hearth.yaml` format. See [`hearth.example.yaml`](../hearth.example.yaml) for the full annotated reference, or run:

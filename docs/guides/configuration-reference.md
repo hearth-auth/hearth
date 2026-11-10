@@ -310,6 +310,8 @@ metrics:
   bearer_token: "${HEARTH_METRICS_TOKEN}"
 ```
 
+Prometheus alert rules and a Grafana dashboard for these metrics ship in [`deploy/monitoring/`](../../deploy/monitoring/README.md).
+
 The `/metrics` endpoint returns metrics in Prometheus text exposition format (`text/plain; version=0.0.4`). It includes the following metric families:
 
 | Metric | Type | Labels | Description |
