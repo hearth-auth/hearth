@@ -2,6 +2,7 @@
 
 > **Re-derived from repo state on 2026-10-02 (OpenSpec `scope-trim-trusted-core`, task 13.3),
 > checked against [`3e382f87`](https://github.com/hearth-auth/hearth/commit/3e382f87).
+> The Client SDKs section and the first Roadmap row were updated on 2026-11-09.
 > Update this file when new surfaces ship.**
 >
 > This document is a reference, not a roadmap. It lists only what exists in the repository.
@@ -116,6 +117,9 @@ All transports live in `src/identity/email/`.
 | Python | ✅ Shipped | `sdks/python/` |
 | Node.js (`@hearth-auth/node`) | ❌ Removed in 3.0.0 | Merged into `@hearth-auth/sdk` (OpenSpec `scope-trim-trusted-core`) |
 | Kotlin, Rust | ❌ Removed in 3.0.0 | No longer supported (OpenSpec `scope-trim-trusted-core`) |
+| Token validation on standard JOSE libraries (jose, go-jose, PyJWT, lcobucci/jwt) | ✅ Shipped | OpenSpec `sdk-standard-libraries` |
+| Admin clients generated from `docs/api/openapi.json` | ✅ Shipped | `sdks/go/generated/`, `sdks/php/generated/`, `sdks/python/src/hearth/generated/`, `sdks/typescript/src/generated/` |
+| SDK conformance harness | ✅ Shipped | `sdks/conformance/` |
 
 ---
 
@@ -137,8 +141,7 @@ Features removed in 3.0.0 are not roadmap items.
 
 | Feature | Evidence it is absent | Design doc |
 |---------|----------------------|------------|
-| Confidence gates before the production-readiness claim: OpenID Foundation conformance (Basic, Config, Dynamic OP), entry-point invariant tests, mutation budget, external pentest. The server is in a feature freeze until they pass | Planned, not started | OpenSpec [`trusted-core-confidence`](../openspec/changes/trusted-core-confidence/proposal.md) |
-| SDKs on standard JOSE/OIDC libraries, OpenAPI-generated admin clients, SDK conformance harness | Planned, not started | OpenSpec [`sdk-standard-libraries`](../openspec/changes/sdk-standard-libraries/proposal.md) |
+| Confidence gates before the production-readiness claim. **Hearth is not yet production-ready.** Done: OpenID Foundation Config OP passes (`reports/oidf-conformance-2026-11-08.md`), the entry-point invariant registry (`tests/entry_point_invariants.rs`), the nightly `cargo-mutants` run (`.github/workflows/mutants-nightly.yml`). Open: Basic OP and Dynamic OP, the mutation budget, the external pentest | In progress | OpenSpec [`trusted-core-confidence`](../openspec/changes/trusted-core-confidence/proposal.md) |
 | RFC 7592 Dynamic Client Registration **management** (`GET`/`PUT`/`DELETE /register/{client_id}`) | No `/register/{client_id}` route is registered; registration (`POST /register`, RFC 7591) ships | [openspec/specs/oidc-provider/spec.md](../openspec/specs/oidc-provider/spec.md) §1 |
 | SAML encrypted assertions / encrypted NameIDs (`EncryptedAssertion`, `EncryptedID`) | No decryption path; neither name appears in `src/` | [openspec/specs/saml-sp-profile/spec.md](../openspec/specs/saml-sp-profile/spec.md) §7 |
 | SAML HTTP-Artifact and SOAP/PAOS (ECP) bindings | No artifact-resolution or SOAP endpoint; the strings `artifact`, `PAOS` and `SOAP` appear nowhere under `src/identity/federation/saml/` | [openspec/specs/saml-sp-profile/spec.md](../openspec/specs/saml-sp-profile/spec.md) §2 |

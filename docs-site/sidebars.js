@@ -106,7 +106,6 @@ const sidebars = {
           link: { type: 'doc', id: 'sdks/php' },
           items: ['sdks/php-laravel'],
         },
-        'sdks/migration-from-keycloak',
       ],
     },
     {
