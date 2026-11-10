@@ -862,16 +862,32 @@ jobs:
       # leaves the local TDD loop on the fail-fast default where it belongs.
       # clippy, fmt and test-quality, the other gates of `make check`, run in
       # the `lint` job.
+      #
+      # One suite run per PR (owner decision 2026-11-09): on a pull request the
+      # whole suite runs once, in `leak-check` (LeakSanitizer, pinned nightly),
+      # and this job runs only what leak-check cannot: `make test-lsan-excluded`
+      # (the glibc-allocator tests LSan leaves out) and `make heap-check`. The
+      # `lint` job's `make clippy --all-targets` type-checks every hearth
+      # target on stable, so a stable-only compile error still fails the PR. On main, this step runs the whole suite on
+      # stable as before, so a stable-only test failure shows after the merge.
       - name: make test (nextest --workspace)
+        if: github.event_name != 'pull_request'
         env:
           NEXTEST_PROFILE: ci
         run: make test
 
+      - name: make test-lsan-excluded (the tests leak-check leaves out)
+        if: github.event_name == 'pull_request'
+        env:
+          NEXTEST_PROFILE: ci
+        run: make test-lsan-excluded
+
       # docs/dev/ARCHITECTURE.md §9.2, the hearth-side half of the `unsafe-code` job
       # below: EpochCell's tests and those of every cell built on it — hot
       # tier, block cache, memtable, flush-vs-read, identity caches — under
-      # glibc heap checking, three passes. It runs here because `make check`
-      # has just built the test binaries it needs, and it reuses them only
+      # glibc heap checking, three passes. It runs here because `make test`
+      # (or, on a PR, `make test-lsan-excluded`) has just built most of the
+      # test binaries it needs, and it reuses them only
       # because `make heap-check` selects them with `--workspace` and
       # `dev-endpoints`, as `make test` does: the simulation crate turns on
       # hearth's `test-hooks` feature, and a hearth-only selection would compile
@@ -1570,6 +1586,8 @@ jobs:
   # 12-hour soak cannot see a leak below about 2 MiB/h; this sees one block.
   # The first run found the RBAC/identity engine reference cycle (#523).
   # Without debug info the test binaries take about 22 GiB.
+  # On a pull request this is the ONLY run of the whole suite: `quality` runs
+  # just the tests that LSan leaves out (see its `make test` step).
   leak-check:
     name: leak-check (LeakSanitizer, whole suite)
     needs: filter

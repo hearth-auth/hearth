@@ -426,6 +426,8 @@ watch = ["src"]
 
 **Fast** (every commit): Runs `cargo nextest run` with the default profile. This covers all `#[cfg(test)]` unit tests and all non-ignored integration tests. Developers should be able to run this locally in under 5 minutes.
 
+On a pull request, CI runs the whole suite once: in the `leak-check` job, under LeakSanitizer on the pinned nightly. The `quality` job then runs only the tests that LeakSanitizer leaves out (`make test-lsan-excluded`) and `make heap-check`, on stable. The `lint` job type-checks every target on stable. On `main`, `quality` also runs the whole suite on stable (`make test`), and the `coverage` workflow measures coverage. A test that fails only on stable therefore shows on `main`, after the merge.
+
 `unsafe` code (ARCHITECTURE.md §9.2) is checked in this tier too. CI's `unsafe-code` job runs `make miri` and `make asan` over `unsafe-check/`, and `quality` runs `make heap-check`. `make unsafe-check` runs all three locally. CI's `leak-check` job runs `make leak-check`, the whole suite under LeakSanitizer (#445). With the crossbeam-skiplist `range` walk of #445 put back in the memtable, it fails; its first run found the reference cycle between the RBAC and identity engines (#523). Each was seen red against a seeded bug — `EpochCell` with its grace period removed — before it was trusted: Miri reports data races between a read and the deallocation, ASan heap-use-after-free, and under heap checking the hot-tier, block-cache, shard-map and flush-race tests crash with SIGSEGV in every pass. `tests/unsafe_check_harness.rs` fails if a file in `src/` gains `unsafe` that `unsafe-check/` does not compile.
 
 **Standard** (merge to main): Adds benchmark gates. For RBAC, CI runs `make bench-gate`

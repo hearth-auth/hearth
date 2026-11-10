@@ -1,8 +1,13 @@
 # Coverage measurement — report only, no gate (HEA-2159).
 #
-# Publishes LLVM-based line/branch/function coverage numbers for every PR and
+# Publishes LLVM-based line/branch/function coverage numbers for every
 # main-branch push that touches Rust source. Results appear in the GitHub
 # Actions Step Summary and as downloadable HTML + LCOV artifacts.
+#
+# No `pull_request` trigger (owner decision 2026-11-09): the job runs the whole
+# suite a third time, takes 18-22 min of runner time and gates nothing, and on
+# the Free plan's 20 concurrent jobs it made PR jobs wait in the queue. To see
+# a PR's coverage, run this workflow on the PR branch with workflow_dispatch.
 #
 # Tool choice: cargo-llvm-cov
 #   • Uses LLVM's native -C instrument-coverage flag — no ptrace, no Docker
@@ -25,15 +30,6 @@ name: coverage
 
 on:
   push:
-    branches: [main]
-    paths:
-      - "src/**"
-      - "simulation/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - ".github/workflows/coverage.yml"
-      - ".github/actions/setup-rust/**"
-  pull_request:
     branches: [main]
     paths:
       - "src/**"
