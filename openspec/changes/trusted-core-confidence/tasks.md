@@ -60,7 +60,8 @@
   - Run 42741969394, 2026-11-09 21:19 to 2026-11-10 02:25 EST. Budgets: token-issuance 238, sessions 77, rbac-resolver 131, permission-check 96 survivors. token-issuance has 8 shards (the longest of 6 shards took 5 h 06 min). Report: `reports/mutants-first-run-2026-11-10.md`.
 - [x] 4.3 Budget check script with a self-test that proves it can fail
   - `scripts/check-mutants-budget.py`, self-test `scripts/tests/check-mutants-budget.test.sh`, budget file `ci/mutants-budget.toml` with no counts yet (a module with no count fails). Both run in the `ci.yml` filter job.
-- [ ] 4.4 Triage the survivors in the token-issuance and session code: a test, or an exclusion with a reason
+- [x] 4.4 Triage the survivors in the token-issuance and session code: a test, or an exclusion with a reason
+  - Tests for the survivors in security checks (#816, #822), a fix for a session sweep that stopped after the first page (#815), the integration binaries that catch 3 or more survivors (#817), and unreachable code removed (#823). Run 42988291937 (2026-11-11): token-issuance 238 to 103, sessions 73 to 25 survivors. The remaining survivors, and those of rbac-resolver and permission-check, are in #824. One lib test, `verify_nonexistent_user_takes_comparable_time`, is left out of the mutants run: it measures time, and on a mutant it can fail or pass at random.
 
 ## 5. External pentest
 
