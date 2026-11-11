@@ -19,15 +19,18 @@
 #   (design Open Question 3: the budget starts at the first-run count).
 #
 # Budgets: the counts of the first run, 2026-11-10 (run 42741969394, report
-# in reports/mutants-first-run-2026-11-10.md).
+# in reports/mutants-first-run-2026-11-10.md). After the triage of #641
+# (tests, unreachable code removed, more integration binaries), the run of
+# 2026-11-11 (run 42988291937, main d801de75) lowered token-issuance to 103
+# and sessions to 25. Issue #824 tracks the survivors that remain.
 #
 # Shards: in the first run, the mean time of one mutant was 77 s to 121 s
 # on a GitHub-hosted runner (about 80 % of it is the build). With 6 shards,
 # a token-issuance shard took up to 5 hours, too near the 330-minute job
 # limit. With 8 shards (run 42826584242), each shard took at most 244
 # minutes. The 13 binaries added to token-issuance (#641) make the build of
-# each mutant about 30 % longer, so token-issuance now has 10 shards, at
-# about 250 minutes each. The 17 shards run at the same time, in the US
+# each mutant about 30 % longer, so token-issuance now has 10 shards. In run
+# 42988291937, the longest shard took 270 minutes. The 17 shards run at the same time, in the US
 # Eastern night, and leave 3 of the 20 runners of the GitHub Free plan to
 # PR CI.
 #
@@ -72,7 +75,7 @@ tests = [
     "userinfo_client_claim_gates",
 ]
 shards = 10
-survivors = 238
+survivors = 103
 
 [modules.sessions]
 files = [
@@ -96,7 +99,7 @@ tests = [
     "entry_point_invariants",
 ]
 shards = 2
-survivors = 73
+survivors = 25
 
 [modules.rbac-resolver]
 files = [

@@ -3128,7 +3128,15 @@ async fn admin_list_audit(
         tool: None,
     };
 
-    match state.audit.query(&query) {
+    // With no start time, the page holds the newest events, newest first,
+    // and reads only recent time windows (#644). A start time keeps the
+    // forward order, so a client can read the log page by page.
+    let result = if query.start_time.is_none() {
+        state.audit.recent(&query)
+    } else {
+        state.audit.query(&query)
+    };
+    match result {
         Ok(events) => (
             StatusCode::OK,
             Json(serde_json::json!({ "events": events })),
