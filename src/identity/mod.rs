@@ -999,17 +999,6 @@ pub trait IdentityEngine: Send + Sync {
         request: &JwtBearerRequest,
     ) -> Result<ClientCredentialsResponse, IdentityError>;
 
-    /// Authenticates an OAuth confidential client using its client secret.
-    ///
-    /// Returns `Ok(())` only when the client exists in the target realm,
-    /// is confidential, and the provided secret matches the stored hash.
-    fn authenticate_oauth_client(
-        &self,
-        realm_id: &RealmId,
-        client_id: &ClientId,
-        client_secret: &str,
-    ) -> Result<(), IdentityError>;
-
     /// Verifies a `private_key_jwt` client assertion per RFC 7523 §2.2.
     ///
     /// Validates signature, `iss == sub == client_id`, `exp` in the future,
