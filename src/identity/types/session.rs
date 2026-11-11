@@ -770,6 +770,21 @@ mod tests {
         assert!(!session.is_valid(Timestamp::from_micros(2_000_000_000)));
     }
 
+    /// Only a WebAuthn assertion that proved user verification satisfies
+    /// `webauthn_required`.
+    #[test]
+    fn only_a_user_verified_passkey_satisfies_webauthn_required() {
+        for (proof, satisfies) in [
+            (MfaProof::None, false),
+            (MfaProof::Proved, false),
+            (MfaProof::ProvedWebAuthn, true),
+            (MfaProof::PasskeyPossession, false),
+            (MfaProof::EmailOtp, false),
+        ] {
+            assert_eq!(proof.satisfies_webauthn_required(), satisfies, "{proof:?}");
+        }
+    }
+
     /// The eviction reason names the deadline reached: none before either,
     /// `idle_timeout` from the idle deadline, `absolute_timeout` from the
     /// absolute deadline once the idle window was refreshed past it.

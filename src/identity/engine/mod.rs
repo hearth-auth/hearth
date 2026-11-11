@@ -28208,6 +28208,779 @@ mod tests {
         );
     }
 
+    // #641 (cargo-mutants survivors that only integration binaries outside
+    // the nightly lists caught): lib tests for the same behaviour.
+
+    /// Records `user`'s consent to `client` for the `openid` scope.
+    fn grant_openid_consent(
+        engine: &EmbeddedIdentityEngine,
+        realm_id: &RealmId,
+        user: &User,
+        client: &OAuthClient,
+    ) {
+        engine
+            .grant_consent(
+                realm_id,
+                &crate::identity::ConsentGrant {
+                    key: crate::identity::ConsentKey {
+                        user_id: user.id().clone(),
+                        client_id: client.client_id().clone(),
+                        org_id: None,
+                        resource: None,
+                    },
+                    scopes: vec!["openid".to_string()],
+                    via: crate::identity::ConsentSurface::Web,
+                },
+            )
+            .expect("grant consent");
+    }
+
+    /// A refresh token of a DPoP-bound grant family refreshes only with the
+    /// key it is bound to.
+    #[test]
+    fn refresh_tokens_of_a_dpop_bound_family_requires_the_bound_key() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let client = register_test_client(&engine, &realm_id);
+        let user = create_test_user(&engine, &realm_id);
+        grant_openid_consent(&engine, &realm_id, &user, &client);
+        let code = mint_test_code(&engine, &realm_id, &client, &user);
+        let tokens = engine
+            .exchange_authorization_code(
+                &realm_id,
+                &TokenExchangeRequest {
+                    dpop_jkt: Some("bound-key-thumbprint".to_string()),
+                    ..test_code_exchange(&client, &code)
+                },
+            )
+            .expect("exchange");
+
+        assert!(
+            matches!(
+                engine.refresh_tokens(
+                    &realm_id,
+                    tokens.refresh_token(),
+                    Some("another-key-thumbprint"),
+                    None
+                ),
+                Err(IdentityError::DPopBindingMismatch)
+            ),
+            "a refresh with another key must be refused"
+        );
+        engine
+            .refresh_tokens(
+                &realm_id,
+                tokens.refresh_token(),
+                Some("bound-key-thumbprint"),
+                None,
+            )
+            .expect("a refresh with the bound key must succeed");
+    }
+
+    /// The access token of a refresh carries the user's permissions when the
+    /// client embeds them (the default mode).
+    #[test]
+    fn refreshed_access_token_carries_the_permissions_of_an_embedded_client() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm_id);
+        let role = engine
+            .rbac
+            .create_role(
+                &realm_id,
+                &crate::rbac::CreateRoleRequest {
+                    name: "refresh-embed-role".to_string(),
+                    description: None,
+                    permissions: vec![
+                        crate::rbac::Permission::new("docs.read").expect("valid permission")
+                    ],
+                    parent_roles: vec![],
+                    ..Default::default()
+                },
+            )
+            .expect("create role");
+        engine
+            .rbac
+            .assign_role(
+                &realm_id,
+                &crate::rbac::AssignRoleRequest {
+                    subject: crate::rbac::Subject::User(user.id().clone()),
+                    role_id: role.id.clone(),
+                    scope: crate::rbac::Scope::Realm,
+                    assigned_by: None,
+                },
+            )
+            .expect("assign role");
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("session");
+        let issued = engine
+            .issue_tokens(&realm_id, user.id(), session.id())
+            .expect("issue tokens");
+        let permissions = |token: &str| {
+            tokens::decode_claims_unverified(token)
+                .expect("decode")
+                .permissions
+        };
+        assert!(
+            permissions(issued.access_token()).contains(&"docs.read".to_string()),
+            "setup: the issued access token carries the permission"
+        );
+
+        let refreshed = engine
+            .refresh_tokens(&realm_id, issued.refresh_token(), None, None)
+            .expect("refresh");
+        assert!(
+            permissions(refreshed.access_token()).contains(&"docs.read".to_string()),
+            "the refreshed access token must carry the permission"
+        );
+    }
+
+    /// A retired signing key still verifies the tokens it signed until its
+    /// grace deadline, and not after it.
+    #[test]
+    fn a_retired_signing_key_verifies_tokens_until_its_grace_deadline() {
+        let (_dir, engine, clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm_id);
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("session");
+        let token = engine
+            .issue_tokens(&realm_id, user.id(), session.id())
+            .expect("issue tokens")
+            .access_token()
+            .to_string();
+
+        engine
+            .rotate_realm_signing_key(&realm_id, 600)
+            .expect("rotate with a 600 s grace period");
+        engine
+            .verify_token_signature_for_realm(&realm_id, &token)
+            .expect("the retired key verifies inside its grace period");
+
+        clock.advance(601 * 1_000_000);
+        assert!(
+            engine
+                .verify_token_signature_for_realm(&realm_id, &token)
+                .is_err(),
+            "the retired key must not verify after its grace deadline"
+        );
+    }
+
+    /// `revoke_all_user_sessions` with `keep` revokes every other session of
+    /// the user and keeps that one.
+    #[test]
+    fn revoke_all_user_sessions_keeps_only_the_named_session() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm_id);
+        let kept = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("session");
+        let other = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("session");
+
+        let revoked = engine
+            .revoke_all_user_sessions(&realm_id, user.id(), Some(kept.id()))
+            .expect("revoke all");
+        assert_eq!(revoked, 1, "only the other session is revoked");
+        let live = |id: &SessionId| {
+            engine
+                .get_session(&realm_id, id)
+                .expect("get session")
+                .is_some_and(|s| s.is_valid(engine.clock.now()))
+        };
+        assert!(live(kept.id()), "the named session must be kept");
+        assert!(!live(other.id()), "every other session must be revoked");
+    }
+
+    /// A token in the context of an organization is refused once the
+    /// organization is suspended.
+    #[test]
+    fn an_organization_context_token_is_refused_once_the_organization_is_suspended() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm_id);
+        let org = engine
+            .create_organization(
+                &realm_id,
+                &CreateOrganizationRequest {
+                    name: "Suspend Me".to_string(),
+                    slug: "suspend-me".to_string(),
+                    ..CreateOrganizationRequest::default()
+                },
+            )
+            .expect("create organization");
+        engine
+            .add_member(&realm_id, org.id(), user.id(), OrganizationRole::Member)
+            .expect("add member");
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("session");
+        let in_org = TokenIssuanceContext {
+            oid: Some(org.id().to_string()),
+            ..TokenIssuanceContext::default()
+        };
+        engine
+            .issue_tokens_with_context(&realm_id, user.id(), session.id(), &in_org)
+            .expect("setup: an active organization issues");
+
+        engine
+            .update_organization(
+                &realm_id,
+                org.id(),
+                &UpdateOrganizationRequest {
+                    status: Some(crate::identity::OrganizationStatus::Suspended),
+                    ..UpdateOrganizationRequest::default()
+                },
+            )
+            .expect("suspend organization");
+        assert!(
+            matches!(
+                engine.issue_tokens_with_context(&realm_id, user.id(), session.id(), &in_org),
+                Err(IdentityError::OrganizationSuspended)
+            ),
+            "a suspended organization must not be the context of a token"
+        );
+    }
+
+    /// In a realm that requires MFA, a new session needs a proved second
+    /// factor.
+    #[test]
+    fn create_session_needs_a_second_factor_in_a_realm_that_requires_mfa() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = engine
+            .create_realm(&CreateRealmRequest {
+                name: format!("test-realm-{}", uuid::Uuid::new_v4()),
+                config: Some(RealmConfig {
+                    mfa_required: Some(true),
+                    ..RealmConfig::default()
+                }),
+            })
+            .expect("create realm")
+            .id()
+            .clone();
+        let user = create_test_user(&engine, &realm_id);
+
+        assert!(
+            matches!(
+                engine.create_session(&realm_id, user.id(), &SessionContext::default()),
+                Err(IdentityError::MfaRequired)
+            ),
+            "a session without a second factor must be refused"
+        );
+        engine
+            .create_session(
+                &realm_id,
+                user.id(),
+                &SessionContext {
+                    mfa_proof: crate::identity::MfaProof::Proved,
+                    ..SessionContext::default()
+                },
+            )
+            .expect("a session with a proved second factor is allowed");
+    }
+
+    /// A user who holds a second factor needs to prove it for a new session,
+    /// whatever the realm's policy.
+    #[test]
+    fn create_session_needs_the_second_factor_that_the_user_holds() {
+        let (_dir, engine, clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm_id);
+        enrol_totp(&engine, &clock, &realm_id, user.id());
+
+        assert!(
+            matches!(
+                engine.create_session(&realm_id, user.id(), &SessionContext::default()),
+                Err(IdentityError::MfaRequired)
+            ),
+            "a session without the held factor must be refused"
+        );
+        engine
+            .create_session(
+                &realm_id,
+                user.id(),
+                &SessionContext {
+                    mfa_proof: crate::identity::MfaProof::Proved,
+                    ..SessionContext::default()
+                },
+            )
+            .expect("a session with the factor proved is allowed");
+    }
+
+    /// `mfa_required_roles` requires MFA for a user who holds a listed role,
+    /// and only for that user.
+    #[test]
+    fn mfa_required_roles_applies_only_to_a_user_with_a_listed_role() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = engine
+            .create_realm(&CreateRealmRequest {
+                name: format!("test-realm-{}", uuid::Uuid::new_v4()),
+                config: Some(RealmConfig {
+                    mfa_required_roles: Some(vec!["admins".to_string()]),
+                    ..RealmConfig::default()
+                }),
+            })
+            .expect("create realm")
+            .id()
+            .clone();
+        let user_with_role = |role_name: &str| {
+            let user = create_test_user(&engine, &realm_id);
+            let role = engine
+                .rbac
+                .create_role(
+                    &realm_id,
+                    &crate::rbac::CreateRoleRequest {
+                        name: role_name.to_string(),
+                        description: None,
+                        permissions: vec![],
+                        parent_roles: vec![],
+                        ..Default::default()
+                    },
+                )
+                .expect("create role");
+            engine
+                .rbac
+                .assign_role(
+                    &realm_id,
+                    &crate::rbac::AssignRoleRequest {
+                        subject: crate::rbac::Subject::User(user.id().clone()),
+                        role_id: role.id,
+                        scope: crate::rbac::Scope::Realm,
+                        assigned_by: None,
+                    },
+                )
+                .expect("assign role");
+            user
+        };
+        let admin = user_with_role("admins");
+        let staff = user_with_role("staff");
+
+        assert!(
+            engine
+                .effective_mfa_requirement(&realm_id, admin.id(), None)
+                .expect("mfa"),
+            "a user with a listed role must need MFA"
+        );
+        assert!(
+            !engine
+                .effective_mfa_requirement(&realm_id, staff.id(), None)
+                .expect("mfa"),
+            "a user with no listed role must not need MFA"
+        );
+    }
+
+    /// Issues a token pair to `client` for a new user, through a session.
+    fn client_token_pair(
+        engine: &EmbeddedIdentityEngine,
+        realm_id: &RealmId,
+        client: &OAuthClient,
+    ) -> TokenPair {
+        let user = create_test_user(engine, realm_id);
+        grant_openid_consent(engine, realm_id, &user, client);
+        let session = engine
+            .create_session(realm_id, user.id(), &SessionContext::default())
+            .expect("session");
+        engine
+            .issue_tokens_with_context(
+                realm_id,
+                user.id(),
+                session.id(),
+                &TokenIssuanceContext {
+                    client_id: Some(client.client_id().clone()),
+                    granted_scopes: BTreeSet::from(["openid".to_string()]),
+                    ..TokenIssuanceContext::default()
+                },
+            )
+            .expect("issue tokens")
+    }
+
+    /// An update that does not archive a client keeps the client's grants.
+    /// The update that archives it revokes them.
+    #[test]
+    fn update_client_revokes_the_client_grants_only_when_it_archives_the_client() {
+        use crate::identity::oidc::UpdateClientRequest;
+
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let client = register_test_client(&engine, &realm_id);
+        let pair = client_token_pair(&engine, &realm_id, &client);
+
+        engine
+            .update_client(
+                &realm_id,
+                client.client_id(),
+                &UpdateClientRequest {
+                    client_name: Some("Renamed App".to_string()),
+                    ..UpdateClientRequest::default()
+                },
+            )
+            .expect("rename client");
+        let pair = engine
+            .refresh_tokens(&realm_id, pair.refresh_token(), None, None)
+            .expect("a rename must keep the client's grants");
+
+        engine
+            .update_client(
+                &realm_id,
+                client.client_id(),
+                &UpdateClientRequest {
+                    status: Some(crate::identity::oidc::ApplicationStatus::Archived),
+                    ..UpdateClientRequest::default()
+                },
+            )
+            .expect("archive client");
+        assert!(
+            engine
+                .refresh_tokens(&realm_id, pair.refresh_token(), None, None)
+                .is_err(),
+            "archiving the client must revoke its grants"
+        );
+    }
+
+    /// A revocation by the client that a token was issued to takes effect,
+    /// for an access token and for a refresh token.
+    #[test]
+    fn revoke_token_by_the_client_it_was_issued_to_takes_effect() {
+        use crate::identity::oidc::TokenRevocationRequest;
+
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let client = register_test_client(&engine, &realm_id);
+        let revoke = |token: &str, hint: &str| {
+            engine
+                .revoke_token(
+                    &realm_id,
+                    &TokenRevocationRequest {
+                        token: token.to_string(),
+                        token_type_hint: Some(hint.to_string()),
+                        revoking_client_id: Some(client.client_id().clone()),
+                    },
+                )
+                .expect("revoke");
+        };
+
+        let pair = client_token_pair(&engine, &realm_id, &client);
+        revoke(pair.access_token(), "access_token");
+        assert!(
+            engine
+                .validate_token(&realm_id, pair.access_token())
+                .is_err(),
+            "the access token must be revoked"
+        );
+
+        let pair = client_token_pair(&engine, &realm_id, &client);
+        revoke(pair.refresh_token(), "refresh_token");
+        assert!(
+            engine
+                .refresh_tokens(&realm_id, pair.refresh_token(), None, None)
+                .is_err(),
+            "the refresh token must be revoked"
+        );
+    }
+
+    /// A registration that lists the ROPC `password` grant is refused.
+    #[test]
+    fn register_client_refuses_the_password_grant() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let result = engine.register_client(
+            &realm_id,
+            &RegisterClientRequest {
+                client_name: "ROPC App".to_string(),
+                redirect_uris: vec!["https://app.example.com/callback".to_string()],
+                grant_types: vec!["authorization_code".to_string(), "password".to_string()],
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(result, Err(IdentityError::InvalidInput { .. })),
+            "the password grant must be refused"
+        );
+    }
+
+    /// An assertion key must be a base64url-encoded 32-byte Ed25519 public
+    /// key.
+    #[test]
+    fn check_assertion_public_key_accepts_only_a_32_byte_key() {
+        assert!(EmbeddedIdentityEngine::check_assertion_public_key(
+            &URL_SAFE_NO_PAD.encode([7u8; 32])
+        )
+        .is_ok());
+        for bad in [
+            URL_SAFE_NO_PAD.encode([7u8; 31]),
+            URL_SAFE_NO_PAD.encode([7u8; 33]),
+            "not base64url!".to_string(),
+        ] {
+            assert!(
+                matches!(
+                    EmbeddedIdentityEngine::check_assertion_public_key(&bad),
+                    Err(IdentityError::InvalidInput { .. })
+                ),
+                "{bad:?} must be refused"
+            );
+        }
+    }
+
+    /// The jwt-bearer grant accepts an assertion that expires exactly 600
+    /// seconds from now and refuses one that expires 601 seconds from now.
+    #[test]
+    fn jwt_bearer_accepts_an_assertion_lifetime_of_exactly_600_seconds() {
+        use crate::identity::oidc::UpdateClientRequest;
+        use crate::identity::tokens::{Audience, JwtAssertionClaims};
+
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        declare_test_scopes(&engine, &realm_id, &["read"]);
+        let assertion_key = SigningKey::generate().expect("generate key");
+        let client = engine
+            .register_client(
+                &realm_id,
+                &RegisterClientRequest {
+                    client_name: "JWT Bearer App".to_string(),
+                    redirect_uris: vec![],
+                    grant_types: vec!["urn:ietf:params:oauth:grant-type:jwt-bearer".to_string()],
+                    ..Default::default()
+                },
+            )
+            .expect("register client");
+        engine
+            .update_client(
+                &realm_id,
+                client.client_id(),
+                &UpdateClientRequest {
+                    assertion_public_key: Some(Some(
+                        URL_SAFE_NO_PAD.encode(assertion_key.public_key_bytes()),
+                    )),
+                    ..UpdateClientRequest::default()
+                },
+            )
+            .expect("set assertion key");
+        let client_id = client.client_id().as_uuid().to_string();
+        let now_secs = engine.clock.now().as_micros() / 1_000_000;
+        let grant = |lifetime: i64| {
+            let assertion = assertion_key
+                .issue_assertion_jwt(&JwtAssertionClaims {
+                    iss: client_id.clone(),
+                    sub: client_id.clone(),
+                    aud: Audience::single(engine.realm_issuer_url(&realm_id)),
+                    exp: now_secs + lifetime,
+                    jti: Some(uuid::Uuid::new_v4().to_string()),
+                    iat: Some(now_secs),
+                })
+                .expect("sign assertion");
+            engine.jwt_bearer_token(
+                &realm_id,
+                &crate::identity::JwtBearerRequest {
+                    client_id: client.client_id().clone(),
+                    assertion,
+                    scope: Some("read".to_string()),
+                    dpop_jkt: None,
+                },
+            )
+        };
+
+        grant(600).expect("a lifetime of exactly 600 s must be accepted");
+        assert!(
+            matches!(
+                grant(601),
+                Err(IdentityError::JwtBearerAssertionInvalid { .. })
+            ),
+            "a lifetime of 601 s must be refused"
+        );
+    }
+
+    /// Revoking a delegation also revokes the delegations exchanged onward
+    /// from its token.
+    #[test]
+    fn revoking_a_delegation_revokes_the_delegations_exchanged_from_it() {
+        use crate::identity::{Rfc8693Request, TokenIssuanceContext};
+
+        let (_dir, engine, clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm_id);
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("session");
+        let subject_token = engine
+            .issue_tokens_with_context(
+                &realm_id,
+                user.id(),
+                session.id(),
+                &TokenIssuanceContext {
+                    granted_scopes: BTreeSet::from(["openid".to_string()]),
+                    ..TokenIssuanceContext::default()
+                },
+            )
+            .expect("issue subject token")
+            .access_token()
+            .to_string();
+        let client_id =
+            engine
+                .register_client(
+                    &realm_id,
+                    &RegisterClientRequest {
+                        client_name: "delegation-chain-exchanger".to_string(),
+                        redirect_uris: vec!["https://client.example.com/cb".to_string()],
+                        client_secret: Some("delegation-chain-secret!".to_string()),
+                        grant_types: vec![
+                            "urn:ietf:params:oauth:grant-type:token-exchange".to_string()
+                        ],
+                        require_consent: false,
+                        ..Default::default()
+                    },
+                )
+                .expect("register exchange client")
+                .client_id()
+                .clone();
+        let exchange = |subject_token: String| {
+            engine
+                .rfc8693_token_exchange(
+                    &realm_id,
+                    &Rfc8693Request {
+                        client_id: client_id.clone(),
+                        subject_token,
+                        subject_token_type: "urn:ietf:params:oauth:token-type:access_token"
+                            .to_string(),
+                        actor_token: None,
+                        actor_token_type: None,
+                        requested_token_type: None,
+                        scope: Some("openid".to_string()),
+                        resource: None,
+                        audience: None,
+                        dpop_jti: None,
+                        dpop_jkt: None,
+                    },
+                )
+                .expect("token exchange")
+                .access_token
+        };
+        let first = exchange(subject_token);
+        clock.advance(1_000_000);
+        let second = exchange(first.clone());
+
+        let user_sub = user.id().to_string();
+        let mut grants = engine
+            .list_delegation_grants(&realm_id, &user_sub)
+            .expect("list delegation grants");
+        assert_eq!(
+            grants.len(),
+            2,
+            "setup: two delegations, one from the other"
+        );
+        grants.sort_by_key(|g| g.created_at.as_micros());
+        engine
+            .validate_token(&realm_id, &second)
+            .expect("setup: the onward token is valid");
+
+        engine
+            .revoke_delegation_grant(&realm_id, &grants[0].delegation_id, &user_sub)
+            .expect("revoke the first delegation");
+        assert!(
+            engine
+                .list_delegation_grants(&realm_id, &user_sub)
+                .expect("list delegation grants")
+                .is_empty(),
+            "the onward delegation must be revoked with the first"
+        );
+        assert!(
+            engine.validate_token(&realm_id, &second).is_err(),
+            "the onward token must be revoked with the first delegation"
+        );
+    }
+
+    /// A revocation of an ID token by the client it was issued to (its
+    /// `azp`) ends the session behind it.
+    #[test]
+    fn revoke_id_token_by_its_authorized_party_ends_the_session() {
+        use crate::identity::oidc::TokenRevocationRequest;
+
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let client = register_test_client(&engine, &realm_id);
+        let user = create_test_user(&engine, &realm_id);
+        grant_openid_consent(&engine, &realm_id, &user, &client);
+        let code = mint_test_code(&engine, &realm_id, &client, &user);
+        let tokens = engine
+            .exchange_authorization_code(&realm_id, &test_code_exchange(&client, &code))
+            .expect("exchange");
+        engine
+            .validate_token(&realm_id, tokens.access_token())
+            .expect("setup: the access token must be valid before the revocation");
+
+        engine
+            .revoke_token(
+                &realm_id,
+                &TokenRevocationRequest {
+                    token: tokens.id_token().to_string(),
+                    token_type_hint: None,
+                    revoking_client_id: Some(client.client_id().clone()),
+                },
+            )
+            .expect("revoke");
+        assert!(
+            engine
+                .validate_token(&realm_id, tokens.access_token())
+                .is_err(),
+            "revoking the ID token must end the session of its access token"
+        );
+    }
+
+    /// A sessionless client token whose `aud` names no client is visible
+    /// to introspection by the client it was issued to (its subject), and
+    /// not by a different client.
+    #[test]
+    fn only_the_owning_client_introspects_its_sessionless_token() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let owner = register_test_client(&engine, &realm_id);
+        let other = register_test_client(&engine, &realm_id);
+        let (base, _now_secs) = access_claims_now(&engine, &realm_id);
+        let mut custom = base.custom.clone();
+        custom.remove(tokens::CLIENT_ID_CLAIM);
+        let claims = TokenClaims {
+            sub: format!("client_{}", tokens::issued_client_id(owner.client_id())),
+            sid: "none".to_string(),
+            azp: None,
+            custom,
+            ..base
+        };
+        for client in [owner.client_id(), other.client_id()] {
+            assert!(
+                !claims
+                    .aud
+                    .contains(tokens::issued_client_id(client).as_str()),
+                "setup: the token's aud must not name a client"
+            );
+        }
+        let token = resign_for_realm(&engine, &realm_id, &claims);
+        let introspect = |client: &OAuthClient| {
+            engine
+                .introspect_token(
+                    &realm_id,
+                    &crate::identity::oidc::TokenIntrospectionRequest {
+                        token: token.clone(),
+                        token_type_hint: Some("access_token".to_string()),
+                        introspecting_client_id: Some(client.client_id().clone()),
+                    },
+                )
+                .expect("introspection")
+                .active
+        };
+
+        assert!(
+            introspect(&owner),
+            "the owning client must see its own token as active"
+        );
+        assert!(
+            !introspect(&other),
+            "a different client must see the token as inactive"
+        );
+    }
+
     /// Introspection is a token-accepting path too: RFC 7662 `active` must be
     /// false for a token that has not yet become valid.
     #[test]

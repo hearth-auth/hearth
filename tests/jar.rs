@@ -121,15 +121,25 @@ fn sign_jar(
     jti: Option<&str>,
     nbf: Option<i64>,
 ) -> String {
-    let alg = override_alg.unwrap_or("EdDSA");
-    let aud = override_aud.unwrap_or(issuer);
-    let exp = override_exp.unwrap_or(EPOCH_MICROS / 1_000_000 + 3600);
-    let iat = EPOCH_MICROS / 1_000_000;
+    let mut claims = jar_claims(client_id, issuer, jti);
+    if let Some(aud) = override_aud {
+        claims["aud"] = serde_json::Value::String(aud.to_string());
+    }
+    if let Some(exp) = override_exp {
+        claims["exp"] = serde_json::Value::Number(exp.into());
+    }
+    if let Some(n) = nbf {
+        claims["nbf"] = serde_json::Value::Number(n.into());
+    }
+    sign_jar_claims(pkcs8_bytes, override_alg.unwrap_or("EdDSA"), &claims)
+}
 
-    let header = serde_json::json!({
-        "alg": alg,
-        "kid": TEST_KID
-    });
+/// The claims of a valid request object for `client_id`: `aud` is `issuer`,
+/// `exp` is one hour after the fake clock's "now", and there is no `nbf`.
+/// `jti` as in [`sign_jar`].
+fn jar_claims(client_id: &str, issuer: &str, jti: Option<&str>) -> serde_json::Value {
+    let exp = EPOCH_MICROS / 1_000_000 + 3600;
+    let iat = EPOCH_MICROS / 1_000_000;
     let pkce_challenge = {
         use data_encoding::BASE64URL_NOPAD;
         BASE64URL_NOPAD
@@ -137,7 +147,7 @@ fn sign_jar(
     };
     let mut claims = serde_json::json!({
         "iss": client_id,
-        "aud": aud,
+        "aud": issuer,
         "exp": exp,
         "iat": iat,
         "client_id": client_id,
@@ -151,10 +161,16 @@ fn sign_jar(
     if let Some(j) = jti {
         claims["jti"] = serde_json::Value::String(j.to_string());
     }
-    if let Some(n) = nbf {
-        claims["nbf"] = serde_json::Value::Number(n.into());
-    }
+    claims
+}
 
+/// Signs `claims` as a request object with the Ed25519 key in `pkcs8_bytes`,
+/// with `alg` in the header.
+fn sign_jar_claims(pkcs8_bytes: &[u8], alg: &str, claims: &serde_json::Value) -> String {
+    let header = serde_json::json!({
+        "alg": alg,
+        "kid": TEST_KID
+    });
     let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).expect("serialize header"));
     let claims_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("serialize claims"));
     let signing_input = format!("{header_b64}.{claims_b64}");
@@ -539,6 +555,64 @@ fn jar_nbf_in_future_rejected() {
     assert!(
         matches!(err, IdentityError::InvalidJar { .. }),
         "expected InvalidJar for future nbf, got {err:?}"
+    );
+}
+
+/// `nbf` equal to "now" is accepted: the request object is valid from that
+/// second on.
+#[test]
+fn jar_nbf_equal_to_now_accepted() {
+    let env = setup();
+    let (pkcs8, pub_bytes) = generate_ed25519();
+    let client = register_client_with_jwks(&env, &jwks_json(&pub_bytes));
+    let client_id = client.client_id().clone();
+    let cid_str = client_id.as_uuid().to_string();
+
+    let jar = sign_jar(
+        &pkcs8,
+        &cid_str,
+        &env.issuer,
+        None,
+        None,
+        None,
+        Some("jti-nbf-now-1"),
+        Some(EPOCH_MICROS / 1_000_000),
+    );
+    env.engine
+        .push_authorization_request(&env.realm, &par_with_jar(client_id, jar))
+        .expect("JAR with nbf equal to now must be accepted");
+}
+
+/// An `aud` array is accepted when one of its entries is the issuer, and
+/// rejected when none is.
+#[test]
+fn jar_aud_array_must_contain_the_issuer() {
+    let env = setup();
+    let (pkcs8, pub_bytes) = generate_ed25519();
+    let client = register_client_with_jwks(&env, &jwks_json(&pub_bytes));
+    let client_id = client.client_id().clone();
+    let cid_str = client_id.as_uuid().to_string();
+    let push = |aud: serde_json::Value, jti: &str| {
+        let mut claims = jar_claims(&cid_str, &env.issuer, Some(jti));
+        claims["aud"] = aud;
+        let jar = sign_jar_claims(&pkcs8, "EdDSA", &claims);
+        env.engine
+            .push_authorization_request(&env.realm, &par_with_jar(client_id.clone(), jar))
+    };
+
+    push(
+        serde_json::json!(["https://other.example.com", env.issuer]),
+        "jti-aud-array-1",
+    )
+    .expect("an aud array that contains the issuer must be accepted");
+    let err = push(
+        serde_json::json!(["https://other.example.com"]),
+        "jti-aud-array-2",
+    )
+    .expect_err("an aud array without the issuer must be rejected");
+    assert!(
+        matches!(err, IdentityError::InvalidJar { .. }),
+        "expected InvalidJar for an aud array without the issuer, got {err:?}"
     );
 }
 
