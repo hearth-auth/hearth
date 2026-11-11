@@ -297,7 +297,7 @@ The backup passphrase is **not** `HEARTH_MASTER_KEY`. Keep them apart:
   away from the hosts, so that a restore after the loss of a host still works.
 - A leaked passphrase opens the archives, but not a data directory.
 
-Archives written before this change (Hearth 4.9 and earlier) used the value of
+Archives written before this change (Hearth 4.10 and earlier) used the value of
 `HEARTH_MASTER_KEY` as the passphrase. To restore one, set
 `HEARTH_BACKUP_PASSPHRASE` to that old master key value for the restore.
 
