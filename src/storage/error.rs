@@ -128,6 +128,10 @@ pub enum StorageError {
     /// bound from a request MUST validate it themselves as well.
     InvalidRange,
 
+    /// A write reached a read-only storage snapshot (#643). A backup reads
+    /// such a snapshot; nothing in it may write.
+    ReadOnlySnapshot,
+
     /// The operation was not served and **nothing was written** — cluster
     /// mode: no Raft leader could be reached, the leader refused a forwarded
     /// write because it was at its limit, or this follower's reads are fenced
@@ -231,6 +235,7 @@ impl fmt::Display for StorageError {
                 f,
                 "invalid scan range: the start key is greater than the end key"
             ),
+            Self::ReadOnlySnapshot => f.write_str("a write reached a read-only storage snapshot"),
             Self::ClusterUnavailable { cause, reason } => {
                 write!(f, "cluster unavailable ({cause}): {reason}")
             }
@@ -329,6 +334,7 @@ impl std::error::Error for StorageError {
             | Self::CorruptedKeks { .. }
             | Self::AlreadyLocked { .. }
             | Self::InvalidRange
+            | Self::ReadOnlySnapshot
             | Self::ClusterUnavailable { .. }
             | Self::ClusterWriteOutcomeUnknown { .. }
             | Self::TornSnapshotRestore { .. }

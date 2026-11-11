@@ -243,7 +243,21 @@ impl Memtable {
         realm_id: &RealmId,
         entries: &[(Vec<u8>, Vec<u8>)],
     ) -> Result<(), StorageError> {
-        if entries.is_empty() {
+        self.apply_batch(realm_id, entries, &[])
+    }
+
+    /// Inserts `puts`, then tombstones `deletes`, under a single write-lock
+    /// hold.
+    ///
+    /// The flush swap takes the same lock, so a flush, and with it a storage
+    /// snapshot, holds all of the batch or none of it (#643).
+    pub(crate) fn apply_batch(
+        &self,
+        realm_id: &RealmId,
+        entries: &[(Vec<u8>, Vec<u8>)],
+        deletes: &[Vec<u8>],
+    ) -> Result<(), StorageError> {
+        if entries.is_empty() && deletes.is_empty() {
             return Ok(());
         }
 
@@ -262,6 +276,20 @@ impl Memtable {
                 key: key.clone(),
             };
             let new_value = MemtableValue::Data(value.clone());
+
+            new_total += Self::entry_size(key, &new_value);
+            old_total += map
+                .get(&composite)
+                .map_or(0, |old| Self::entry_size(key, old.value()));
+
+            map.insert(composite, new_value);
+        }
+        for key in deletes {
+            let composite = CompositeKey {
+                realm_id: realm_id.clone(),
+                key: key.clone(),
+            };
+            let new_value = MemtableValue::Tombstone;
 
             new_total += Self::entry_size(key, &new_value);
             old_total += map

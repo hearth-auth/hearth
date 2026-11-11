@@ -48,7 +48,7 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::{Arc, LazyLock, Mutex, RwLock};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use fs2::FileExt as _;
 
@@ -368,21 +368,6 @@ pub struct EmbeddedStorageEngine {
     ///
     /// Wrapped in `Arc` so the WAL's pre-rotate flush callback can share it.
     flush_lock: Arc<Mutex<()>>,
-    /// Process-wide backup-consistency barrier (HEA-2167).
-    ///
-    /// Every mutating operation (`put`, `delete`, `put_batch`, `write_batch`,
-    /// `enqueue_batch`, `await_batch_durable`) acquires this as a *reader*
-    /// (shared) while it applies its change to the memtable. A backup export
-    /// acquires it as a *writer* (exclusive) and holds it across the whole of a
-    /// realm's read pass. Because concurrent writers share the read side,
-    /// normal write concurrency is unaffected — the only contention is during
-    /// an active export, when writers block until the export's consistent read
-    /// pass completes. Reads (`get`/`scan`) never touch this lock, so the hot
-    /// path and the export's own scans are never blocked.
-    ///
-    /// `RwLock<()>` guards no data — it is a pure barrier — so a poisoned lock
-    /// carries no meaning and is always recovered via `into_inner()`.
-    backup_barrier: Arc<RwLock<()>>,
     /// Serializes compaction operations against each other.
     ///
     /// Held for the *whole* of [`Self::compact_partial`] / [`Self::compact_ssts`]
@@ -473,8 +458,9 @@ pub struct EmbeddedStorageEngine {
     ///
     /// A simulation test parks one writer here while a second writer to the
     /// same key completes, which is the interleaving behind audit GA
-    /// 2026-09-28 M1 (memtable order differing from WAL order).
-    #[cfg(feature = "test-hooks")]
+    /// 2026-09-28 M1 (memtable order differing from WAL order). Unit tests
+    /// park writers here to fill the write limit (#596).
+    #[cfg(any(test, feature = "test-hooks"))]
     pre_wal_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Test-only hook fired inside `enqueue_batch` immediately after the
     /// record is queued for group commit, before `enqueue_batch` returns.
@@ -804,7 +790,6 @@ impl EmbeddedStorageEngine {
             hot_tier,
             data_dir: config.data_dir,
             flush_lock,
-            backup_barrier: Arc::new(RwLock::new(())),
             compaction_lock: Mutex::new(()),
             put_if_absent_lock: Mutex::new(()),
             counter_lock: Mutex::new(()),
@@ -821,7 +806,7 @@ impl EmbeddedStorageEngine {
             post_ack_hook: Mutex::new(None),
             #[cfg(feature = "test-hooks")]
             pre_promote_hook: Mutex::new(None),
-            #[cfg(feature = "test-hooks")]
+            #[cfg(any(test, feature = "test-hooks"))]
             pre_wal_hook: Mutex::new(None),
             #[cfg(feature = "test-hooks")]
             post_enqueue_hook: Mutex::new(None),
@@ -856,7 +841,7 @@ impl EmbeddedStorageEngine {
     }
 
     /// Installs the test-only pre-WAL hook (see the `pre_wal_hook` field).
-    #[cfg(feature = "test-hooks")]
+    #[cfg(any(test, feature = "test-hooks"))]
     pub fn set_pre_wal_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
         if let Ok(mut slot) = self.pre_wal_hook.lock() {
             *slot = Some(hook);
@@ -873,7 +858,7 @@ impl EmbeddedStorageEngine {
     }
 
     /// Runs the hook installed in `slot`, if any, outside the slot's lock.
-    #[cfg(feature = "test-hooks")]
+    #[cfg(any(test, feature = "test-hooks"))]
     fn run_hook(slot: &Mutex<Option<Arc<dyn Fn() + Send + Sync>>>) {
         let hook = slot
             .lock()
@@ -951,7 +936,11 @@ impl EmbeddedStorageEngine {
         if only_if_full && !self.active_memtable.should_flush() {
             return Ok(());
         }
+        self.flush_holding_lock()
+    }
 
+    /// The body of [`Self::flush_active`]. Callers MUST hold `flush_lock`.
+    fn flush_holding_lock(&self) -> Result<(), StorageError> {
         let flushed = self.active_memtable.flush_streaming(|map| {
             // Generate sequential SST filename
             let sst_num = self
@@ -1206,21 +1195,6 @@ fn load_sst_readers(
 }
 
 impl EmbeddedStorageEngine {
-    /// Acquires the backup-consistency barrier for a mutating operation.
-    ///
-    /// Mutating operations take the *shared* (reader) side, so they never block
-    /// one another. A backup export takes the *exclusive* (writer) side, so
-    /// while an export is in progress this call blocks the caller until the
-    /// export's consistent read pass completes (HEA-2167). Reads never call
-    /// this, so the hot path is unaffected.
-    ///
-    /// The barrier guards no data; a poisoned lock is always recovered.
-    fn enter_write(&self) -> std::sync::RwLockReadGuard<'_, ()> {
-        self.backup_barrier
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
     /// Compacts all current SST files into a single output SST.
     ///
     /// Returns the number of SSTs compacted (0 if the count is below
@@ -1859,8 +1833,6 @@ impl StorageEngine for EmbeddedStorageEngine {
     }
 
     fn put(&self, realm_id: &RealmId, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
-        // Block while a backup export holds the consistency barrier (HEA-2167).
-        let _barrier = self.enter_write();
         let _timer = crate::metrics::metrics()
             .storage_operation_duration_seconds
             .with_label_values(&["put"])
@@ -1874,7 +1846,7 @@ impl StorageEngine for EmbeddedStorageEngine {
             value: value.to_vec(),
         };
 
-        #[cfg(feature = "test-hooks")]
+        #[cfg(any(test, feature = "test-hooks"))]
         Self::run_hook(&self.pre_wal_hook);
 
         // 1. Memtable insert + hot-tier invalidate, inside the WAL critical
@@ -1904,8 +1876,6 @@ impl StorageEngine for EmbeddedStorageEngine {
     }
 
     fn delete(&self, realm_id: &RealmId, key: &[u8]) -> Result<(), StorageError> {
-        // Block while a backup export holds the consistency barrier (HEA-2167).
-        let _barrier = self.enter_write();
         let _timer = crate::metrics::metrics()
             .storage_operation_duration_seconds
             .with_label_values(&["delete"])
@@ -1919,7 +1889,7 @@ impl StorageEngine for EmbeddedStorageEngine {
             value: vec![],
         };
 
-        #[cfg(feature = "test-hooks")]
+        #[cfg(any(test, feature = "test-hooks"))]
         Self::run_hook(&self.pre_wal_hook);
 
         // Memtable tombstone + hot-tier invalidate in WAL order, before the
@@ -1958,8 +1928,6 @@ impl StorageEngine for EmbeddedStorageEngine {
             return Ok(());
         }
 
-        // Block while a backup export holds the consistency barrier (HEA-2167).
-        let _barrier = self.enter_write();
         let _timer = crate::metrics::metrics()
             .storage_operation_duration_seconds
             .with_label_values(&["put_batch"])
@@ -1985,7 +1953,7 @@ impl StorageEngine for EmbeddedStorageEngine {
             key: Vec::new(),
             value: payload,
         };
-        #[cfg(feature = "test-hooks")]
+        #[cfg(any(test, feature = "test-hooks"))]
         Self::run_hook(&self.pre_wal_hook);
 
         // 2. Apply all sub-entries to the in-memory state in WAL order and
@@ -2029,10 +1997,6 @@ impl StorageEngine for EmbeddedStorageEngine {
             ));
         }
 
-        // Block while a backup export holds the consistency barrier (HEA-2167).
-        // The memtable apply happens here in both sync modes, so no memtable
-        // mutation lands while an export's read pass is in flight.
-        let _barrier = self.enter_write();
         let sub_entries: Vec<BatchEntry> = entries
             .iter()
             .map(|(k, v)| BatchEntry {
@@ -2105,10 +2069,6 @@ impl StorageEngine for EmbeddedStorageEngine {
             StorageDurabilityHandleKind::Immediate => return Ok(()),
             StorageDurabilityHandleKind::Pending(p) => p,
         };
-
-        // Block while a backup export holds the consistency barrier, so the
-        // flush check below cannot run mid-snapshot (HEA-2167).
-        let _barrier = self.enter_write();
 
         // Run the group-commit leader loop (or wait as a follower) until the
         // WAL entry is covered by a sync_all.
@@ -2199,8 +2159,6 @@ impl StorageEngine for EmbeddedStorageEngine {
             return Ok(());
         }
 
-        // Block while a backup export holds the consistency barrier (HEA-2167).
-        let _barrier = self.enter_write();
         let _timer = crate::metrics::metrics()
             .storage_operation_duration_seconds
             .with_label_values(&["write_batch"])
@@ -2233,7 +2191,7 @@ impl StorageEngine for EmbeddedStorageEngine {
             key: Vec::new(),
             value: payload,
         };
-        #[cfg(feature = "test-hooks")]
+        #[cfg(any(test, feature = "test-hooks"))]
         Self::run_hook(&self.pre_wal_hook);
 
         // 2. Apply puts, then deletes (tombstones), to in-memory state in WAL
@@ -2242,12 +2200,13 @@ impl StorageEngine for EmbeddedStorageEngine {
         self.wal.append_applying(
             &wal_entry,
             || {
-                self.active_memtable.put_batch(realm_id, puts)?;
+                // One memtable call for the whole batch, so a flush, and
+                // with it a storage snapshot, never holds half of it (#643).
+                self.active_memtable.apply_batch(realm_id, puts, deletes)?;
                 for (key, _value) in puts {
                     self.hot_tier.invalidate(realm_id, key);
                 }
                 for key in deletes {
-                    self.active_memtable.delete(realm_id, key)?;
                     self.hot_tier.invalidate(realm_id, key);
                 }
                 Ok(())
@@ -2513,8 +2472,32 @@ impl StorageEngine for EmbeddedStorageEngine {
         Ok(())
     }
 
-    fn backup_barrier(&self) -> Option<Arc<RwLock<()>>> {
-        Some(Arc::clone(&self.backup_barrier))
+    /// Flushes the memtable and keeps the SST list of that moment (#643).
+    ///
+    /// The cut is the flush swap. Writes apply to the memtable under its
+    /// write lock in WAL order, and the swap takes the same lock, so the
+    /// flushed SST holds every write applied before the swap and none after
+    /// it. A write batch applies in one hold of that lock, so the cut never
+    /// splits it. `flush_lock` stays held until the list is loaded, so no
+    /// other flush and no compaction commit can change the list in between.
+    ///
+    /// Writes wait only for the swap itself, as for any flush. The view then
+    /// waits until the WAL makes every record applied before the cut durable,
+    /// so it holds no write that a commit fault could still fail.
+    fn read_snapshot(&self) -> Result<Option<Arc<dyn StorageEngine>>, StorageError> {
+        let readers = {
+            let Ok(_guard) = self.flush_lock.lock() else {
+                return Err(StorageError::Io(std::io::Error::other(
+                    "flush mutex poisoned",
+                )));
+            };
+            self.flush_holding_lock()?;
+            self.sst_readers.load_full()
+        };
+        self.wal.await_applied_durable(|| self.trigger_flush())?;
+        Ok(Some(Arc::new(super::snapshot::SnapshotStorage::new(
+            readers,
+        ))))
     }
 
     fn flush_memtable(&self) -> Result<(), StorageError> {
@@ -2731,67 +2714,216 @@ mod tests {
         assert_eq!(leftover, 0, "orphaned staging files must be swept at open");
     }
 
-    // HEA-2167: while a backup export holds the consistency barrier in write
-    // mode, all mutating operations must block; they resume the instant the
-    // barrier is released. Reads are never blocked (asserted separately below).
+    /// The live entries of `[start, end)` that `storage` reads with `scan`,
+    /// `scan_keys`, `visit_keys` and `visit_entries`; the test fails if the
+    /// four disagree.
+    fn read_all_four_ways(
+        storage: &dyn StorageEngine,
+        realm: &RealmId,
+        start: &[u8],
+        end: &[u8],
+    ) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let scanned: Vec<(Vec<u8>, Vec<u8>)> = storage
+            .scan(realm, start, end)
+            .expect("scan")
+            .into_iter()
+            .map(|e| (e.key, e.value))
+            .collect();
+        let keys = storage.scan_keys(realm, start, end).expect("scan_keys");
+        let mut visited_keys = Vec::new();
+        storage
+            .visit_keys(realm, start, end, &mut |k| {
+                visited_keys.push(k.to_vec());
+                std::ops::ControlFlow::Continue(())
+            })
+            .expect("visit_keys");
+        let mut visited = Vec::new();
+        storage
+            .visit_entries(realm, start, end, &mut |k, v| {
+                visited.push((k.to_vec(), v.to_vec()));
+                std::ops::ControlFlow::Continue(())
+            })
+            .expect("visit_entries");
+        let scanned_keys: Vec<Vec<u8>> = scanned.iter().map(|(k, _)| k.clone()).collect();
+        assert_eq!(keys, scanned_keys, "scan_keys agrees with scan");
+        assert_eq!(visited_keys, scanned_keys, "visit_keys agrees with scan");
+        assert_eq!(visited, scanned, "visit_entries agrees with scan");
+        scanned
+    }
+
+    fn sst_file_names(dir: &std::path::Path) -> std::collections::BTreeSet<String> {
+        std::fs::read_dir(dir)
+            .expect("read dir")
+            .filter_map(std::result::Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "sst"))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    // #643: a backup reads a snapshot while writes continue. The snapshot
+    // must hold the state of the moment it was taken — in the memtable and in
+    // the SSTs — and none of the writes after it.
     #[test]
-    fn backup_barrier_blocks_writes_until_released() {
+    fn a_snapshot_holds_its_moment_and_no_later_write() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        engine.put(&realm, b"k/flushed", b"sst").expect("put");
+        engine.put(&realm, b"k/gone", b"sst").expect("put");
+        engine.flush_memtable().expect("flush");
+        engine.put(&realm, b"k/fresh", b"memtable").expect("put");
+        engine.delete(&realm, b"k/gone").expect("delete");
+
+        let snapshot = engine
+            .read_snapshot()
+            .expect("snapshot")
+            .expect("the embedded engine makes snapshots");
+
+        engine
+            .put(&realm, b"k/flushed", b"later")
+            .expect("later put");
+        engine.put(&realm, b"k/new", b"later").expect("later put");
+        engine.delete(&realm, b"k/fresh").expect("later delete");
+        engine.put(&realm, b"k/gone", b"back").expect("later put");
+
+        let expected = vec![
+            (b"k/flushed".to_vec(), b"sst".to_vec()),
+            (b"k/fresh".to_vec(), b"memtable".to_vec()),
+        ];
+        assert_eq!(
+            read_all_four_ways(&*snapshot, &realm, b"k/", b"k0"),
+            expected
+        );
+        assert_eq!(
+            snapshot.get(&realm, b"k/flushed").expect("get"),
+            Some(b"sst".to_vec())
+        );
+        assert_eq!(snapshot.get(&realm, b"k/gone").expect("get"), None);
+        assert_eq!(snapshot.get(&realm, b"k/new").expect("get"), None);
+        assert_eq!(snapshot.list_realms().expect("realms"), vec![realm.clone()]);
+
+        // The live engine has every later write.
+        assert_eq!(
+            engine.get(&realm, b"k/flushed").expect("get"),
+            Some(b"later".to_vec())
+        );
+        assert_eq!(engine.get(&realm, b"k/fresh").expect("get"), None);
+    }
+
+    #[test]
+    fn a_snapshot_refuses_every_write() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        engine.put(&realm, b"k", b"v").expect("put");
+        let snapshot = engine.read_snapshot().expect("snapshot").expect("some");
+
+        assert!(matches!(
+            snapshot.put(&realm, b"k", b"w"),
+            Err(StorageError::ReadOnlySnapshot)
+        ));
+        assert!(matches!(
+            snapshot.delete(&realm, b"k"),
+            Err(StorageError::ReadOnlySnapshot)
+        ));
+        assert!(matches!(
+            snapshot.write_batch(&realm, &[(b"k".to_vec(), b"w".to_vec())], &[]),
+            Err(StorageError::ReadOnlySnapshot)
+        ));
+        assert!(!snapshot.accepts_writes());
+        assert_eq!(
+            snapshot.get(&realm, b"k").expect("get"),
+            Some(b"v".to_vec())
+        );
+    }
+
+    // #643: compaction replaces and removes SST files while a backup reads
+    // its snapshot. The snapshot keeps the readers, and so the data, of the
+    // files it was taken from.
+    #[test]
+    fn a_snapshot_reads_its_data_after_compaction_removes_its_files() {
+        let (dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        for round in 0..3u8 {
+            for i in 0..20u8 {
+                engine.put(&realm, &[b'k', i], &[round, i]).expect("put");
+            }
+            engine.flush_memtable().expect("flush");
+        }
+        let snapshot = engine.read_snapshot().expect("snapshot").expect("some");
+        let before = read_all_four_ways(&*snapshot, &realm, b"k", b"l");
+        assert_eq!(before.len(), 20);
+        let files_at_snapshot = sst_file_names(dir.path());
+
+        for i in 0..20u8 {
+            engine.put(&realm, &[b'k', i], b"rewritten").expect("put");
+        }
+        engine.flush_memtable().expect("flush");
+        let compacted = engine.compact_ssts(2).expect("compact");
+        assert!(compacted >= 2, "compaction merged the SSTs ({compacted})");
+        let files_now = sst_file_names(dir.path());
+        assert!(
+            files_at_snapshot.iter().any(|f| !files_now.contains(f)),
+            "precondition: compaction removed a file of the snapshot \
+             ({files_at_snapshot:?} -> {files_now:?})"
+        );
+
+        assert_eq!(read_all_four_ways(&*snapshot, &realm, b"k", b"l"), before);
+        assert_eq!(
+            snapshot.get(&realm, &[b'k', 7]).expect("get"),
+            Some(vec![2, 7])
+        );
+        assert_eq!(
+            engine.get(&realm, &[b'k', 7]).expect("get"),
+            Some(b"rewritten".to_vec())
+        );
+    }
+
+    // #643: a write batch is one write. Each batch below moves a token from
+    // one key to the other (a put and a delete), so every state that a batch
+    // boundary allows holds exactly one of the two keys. A snapshot taken
+    // while the batches run must hold exactly one, never both and never none.
+    #[test]
+    fn a_snapshot_never_holds_half_a_write_batch() {
         use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
-        use std::time::Duration;
 
         let (_dir, engine) = setup_engine();
         let engine = Arc::new(engine);
         let realm = RealmId::generate();
-        engine.put(&realm, b"k", b"before").expect("seed");
-
-        let barrier = engine
-            .backup_barrier()
-            .expect("embedded engine has a barrier");
-        // Take the exclusive (export) side.
-        let guard = barrier
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        let write_done = Arc::new(AtomicBool::new(false));
+        engine.put(&realm, b"t/a", b"0").expect("seed");
+        let stop = Arc::new(AtomicBool::new(false));
         let writer = {
-            let engine = Arc::clone(&engine);
-            let realm = realm.clone();
-            let write_done = Arc::clone(&write_done);
+            let (engine, realm, stop) = (Arc::clone(&engine), realm.clone(), Arc::clone(&stop));
             std::thread::spawn(move || {
-                // This blocks until the export barrier is released.
-                engine.put(&realm, b"k", b"after").expect("blocked put");
-                write_done.store(true, Ordering::SeqCst);
+                let mut n: u64 = 0;
+                while !stop.load(Ordering::SeqCst) {
+                    n += 1;
+                    let (to, from): (&[u8], &[u8]) = if n % 2 == 1 {
+                        (b"t/b", b"t/a")
+                    } else {
+                        (b"t/a", b"t/b")
+                    };
+                    engine
+                        .write_batch(
+                            &realm,
+                            &[(to.to_vec(), n.to_le_bytes().to_vec())],
+                            &[from.to_vec()],
+                        )
+                        .expect("batch");
+                }
+                n
             })
         };
-
-        // Give the writer ample time to reach and block on the barrier. It must
-        // NOT have completed while we hold the exclusive side.
-        std::thread::sleep(Duration::from_millis(200));
-        assert!(
-            !write_done.load(Ordering::SeqCst),
-            "put must block while the backup barrier is held exclusively"
-        );
-        // Reads proceed while the barrier is held — the writer is blocked, so we
-        // still observe the pre-barrier value.
-        assert_eq!(
-            engine.get(&realm, b"k").expect("read during barrier"),
-            Some(b"before".to_vec()),
-            "reads must not be blocked by the backup barrier"
-        );
-
-        // Release the export side; the blocked write must now complete.
-        drop(guard);
-        writer.join().expect("writer thread");
-        assert!(
-            write_done.load(Ordering::SeqCst),
-            "put must resume after release"
-        );
-        assert_eq!(
-            engine.get(&realm, b"k").expect("read after release"),
-            Some(b"after".to_vec()),
-            "the previously-blocked write must land after the barrier is released"
-        );
+        for _ in 0..200 {
+            let snapshot = engine.read_snapshot().expect("snapshot").expect("some");
+            let held = read_all_four_ways(&*snapshot, &realm, b"t/", b"t0");
+            assert_eq!(
+                held.len(),
+                1,
+                "a snapshot holds exactly one token key: {held:?}"
+            );
+        }
+        stop.store(true, Ordering::SeqCst);
+        let batches = writer.join().expect("writer");
+        assert!(batches > 0, "the writer ran");
     }
 
     /// `increment_u64` hands every concurrent caller a distinct value and

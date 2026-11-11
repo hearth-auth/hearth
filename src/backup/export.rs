@@ -26,6 +26,8 @@
 //!     let path = Path::new("backup.hearth-backup");
 //!     let mut writer = BackupArchive::create(path).unwrap();
 //!     let exporter = BackupExporter::new(identity, audit, rbac, webhooks);
+//!     // One storage snapshot for the whole backup.
+//!     let exporter = exporter.snapshot().unwrap();
 //!     let dek = BackupExporter::generate_dek().unwrap();
 //!     let opts = ExportOptions::default();
 //!     let realm_manifest = exporter.export_realm(realm_id, &mut writer, &opts, &dek).unwrap();
@@ -81,6 +83,44 @@ pub struct BackupExporter {
     audit: Arc<dyn AuditEngine>,
     rbac: Arc<dyn RbacEngine>,
     webhooks: Arc<dyn WebhookEngine>,
+}
+
+/// A [`BackupExporter`] that reads one storage snapshot, from
+/// [`BackupExporter::snapshot`] (#643).
+///
+/// Only this type exports a realm, so no export reads the live engines while
+/// writes change them.
+pub struct SnapshotExporter(BackupExporter);
+
+impl SnapshotExporter {
+    /// Exports all entities for `realm_id` into `writer`.
+    ///
+    /// Writes one encrypted JSON/NDJSON file per entity type (users,
+    /// credentials, MFA factors, clients, roles, groups, group memberships,
+    /// permissions, scopes, assignments, organizations, organization
+    /// memberships, consents) plus an AES-256-GCM encrypted
+    /// `signing_key.json` and, when `opts.include_audit` is true, an
+    /// encrypted `audit.ndjson` file.
+    ///
+    /// ALL sections are encrypted with `dek`. The DEK itself must be wrapped
+    /// (via [`BackupExporter::wrap_dek`]) and stored in the manifest before
+    /// calling [`ArchiveWriter::finish`].
+    ///
+    /// Returns a [`RealmManifest`] with record counts that the caller embeds
+    /// into [`BackupManifest::realms`].
+    ///
+    /// # Errors
+    ///
+    /// Any engine, serialisation, encryption or archive error.
+    pub fn export_realm(
+        &self,
+        realm_id: &RealmId,
+        writer: &mut ArchiveWriter,
+        opts: &ExportOptions,
+        dek: &[u8; 32],
+    ) -> Result<RealmManifest, BackupError> {
+        self.0.export_realm(realm_id, writer, opts, dek)
+    }
 }
 
 impl BackupExporter {
@@ -218,6 +258,64 @@ impl BackupExporter {
         Ok(Zeroizing::new(dek))
     }
 
+    /// Returns an exporter that reads one storage snapshot of this moment
+    /// (#643).
+    ///
+    /// Call it once per backup and export every realm through the result: the
+    /// archive is then one point in time across all its realms, and no write
+    /// waits for the export. The snapshot holds the disk space of SST files
+    /// that compaction replaces until the returned exporter is dropped.
+    ///
+    /// When the storage cannot make a snapshot (test doubles), the result
+    /// reads the live engines, and a write during the export can tear the
+    /// archive.
+    ///
+    /// # Errors
+    ///
+    /// [`BackupError::Engine`] when the snapshot cannot be made, or when an
+    /// engine cannot read it.
+    pub fn snapshot(&self) -> Result<SnapshotExporter, BackupError> {
+        let Some(storage) = self
+            .identity
+            .read_snapshot()
+            .map_err(|e| BackupError::Engine(e.to_string()))?
+        else {
+            tracing::warn!("storage makes no snapshot; the export reads the live engines");
+            return Ok(SnapshotExporter(Self {
+                identity: Arc::clone(&self.identity),
+                audit: Arc::clone(&self.audit),
+                rbac: Arc::clone(&self.rbac),
+                webhooks: Arc::clone(&self.webhooks),
+            }));
+        };
+        let unsupported = |engine: &str| {
+            BackupError::Engine(format!("the {engine} engine cannot read a snapshot"))
+        };
+        let rbac = self
+            .rbac
+            .read_view(Arc::clone(&storage))
+            .ok_or_else(|| unsupported("RBAC"))?;
+        let audit = self
+            .audit
+            .read_view(Arc::clone(&storage))
+            .ok_or_else(|| unsupported("audit"))?;
+        let webhooks = self
+            .webhooks
+            .read_view(Arc::clone(&storage))
+            .ok_or_else(|| unsupported("webhook"))?;
+        let identity = self
+            .identity
+            .read_view(storage, Arc::clone(&rbac), Arc::clone(&audit))
+            .map_err(|e| BackupError::Engine(e.to_string()))?
+            .ok_or_else(|| unsupported("identity"))?;
+        Ok(SnapshotExporter(Self {
+            identity,
+            audit,
+            rbac,
+            webhooks,
+        }))
+    }
+
     /// Exports all entities for `realm_id` into `writer`.
     ///
     /// Writes one encrypted JSON/NDJSON file per entity type (users, credentials,
@@ -234,39 +332,19 @@ impl BackupExporter {
     /// into [`BackupManifest::realms`].
     #[instrument(skip(self, writer, opts, dek), fields(realm = %realm_id))]
     #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
-    pub fn export_realm(
+    fn export_realm(
         &self,
         realm_id: &RealmId,
         writer: &mut ArchiveWriter,
         opts: &ExportOptions,
         dek: &[u8; 32],
     ) -> Result<RealmManifest, BackupError> {
-        // Phase 1 — the consistent read pass. Acquire the snapshot barrier so
-        // no write can interleave between the per-entity reads below
-        // (HEA-2167). While this guard is held, all storage writes block;
-        // reads — including ours — proceed. Every entity read below therefore
-        // reflects a single point in time, so the archive cannot be torn (e.g.
-        // a group membership referencing a user the archive omits). The
-        // embedded engine owns the barrier and `serve`'s ClusterStorageAdapter
-        // forwards it; only test doubles return `None`, and then the export
-        // proceeds without isolation.
-        //
-        // Every read below must complete without waiting for another thread.
-        // Each write that arrives meanwhile parks a Tokio blocking-pool thread
-        // on this barrier; a read that queued for a pool thread would wait on
-        // writers that wait on us, so enough of them stopped the whole server
-        // (GA audit 3 F-7). The storage adapter therefore serves reads on the
-        // calling thread (`ClusterEngine::read_inline`).
-        //
-        // The pass only reads and serialises into memory (`members`); the
-        // guard is released before phase 2 encrypts, compresses and writes
-        // the archive. Holding it through that I/O stalled every write on the
-        // node — logins, refreshes, audit appends — for as long as the backup
-        // destination took (audit GA 2026-09-28 M4).
-        let barrier = self.identity.backup_barrier();
-        let snapshot = barrier
-            .as_ref()
-            .map(|b| b.write().unwrap_or_else(std::sync::PoisonError::into_inner));
+        // Phase 1 — the read pass. An exporter from `snapshot()` reads one
+        // storage snapshot, so every read below sees the same point in time
+        // (no group membership names a user the archive omits) and no write
+        // waits for this pass (#643). The pass only reads and serialises into
+        // memory (`members`); phase 2 encrypts, compresses and writes the
+        // archive.
         // Plaintext archive members, zeroed on drop: credentials and key
         // material pass through here.
         let mut members: Vec<(String, Zeroizing<Vec<u8>>)> = Vec::new();
@@ -665,8 +743,7 @@ impl BackupExporter {
             }
         }
 
-        // Phase 2 — the archive I/O, outside the barrier.
-        drop(snapshot);
+        // Phase 2 — the archive I/O.
         for (path, plaintext) in &members {
             let encrypted = encrypt_bytes(plaintext, dek)?;
             writer.add_file(path, &encrypted)?;
@@ -1087,17 +1164,13 @@ mod tests {
         fn complete_snapshot_restore(&self) -> Result<(), StorageError> {
             self.inner.complete_snapshot_restore()
         }
-
-        fn backup_barrier(&self) -> Option<Arc<std::sync::RwLock<()>>> {
-            self.inner.backup_barrier()
-        }
     }
 
     /// A backup reads each user record a bounded number of times. The export
     /// read users a page of 200 at a time, and each page walked every user key
     /// in the realm to count them. At 1,000,000 users that is 5,000 walks of
-    /// 1,000,000 keys, and every write on the node waits on the backup barrier
-    /// until the reads end: 36 minutes in the restore drill (#695).
+    /// 1,000,000 keys: 36 minutes in the restore drill, while a write barrier
+    /// held every write on the node (#695).
     #[test]
     fn export_reads_each_user_record_a_bounded_number_of_times() {
         use crate::audit::EmbeddedAuditEngine;
@@ -1171,7 +1244,9 @@ mod tests {
                 .expect("create user");
         }
 
-        let exporter = BackupExporter::new(identity, audit, rbac, webhooks);
+        let exporter = BackupExporter::new(identity, audit, rbac, webhooks)
+            .snapshot()
+            .expect("snapshot");
         let archive = tempfile::NamedTempFile::new().expect("tempfile");
         let mut writer = crate::backup::BackupArchive::create(archive.path()).expect("archive");
         let dek = BackupExporter::generate_dek().expect("generate DEK");

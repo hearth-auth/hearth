@@ -846,11 +846,12 @@ impl ClusterEngine {
     /// [`ClusterStorageAdapter`]'s reads use this rather than the async
     /// `get`/`scan`, which hop to the Tokio blocking pool. The adapter's
     /// caller is already off the executor, so the hop bought nothing and made
-    /// every read wait for a free pool thread. A backup export reads while it
-    /// holds the storage write barrier, and each write that arrives meanwhile
-    /// parks a pool thread on that barrier: once they filled the pool, the
-    /// export's next read waited for a thread only the export could free, and
-    /// the whole server stopped for good (GA audit 3 F-7).
+    /// every read wait for a free pool thread. A backup export used to read
+    /// while it held a storage write barrier, and each write that arrived
+    /// meanwhile parked a pool thread on that barrier: once they filled the
+    /// pool, the export's next read waited for a thread only the export could
+    /// free, and the whole server stopped for good (GA audit 3 F-7). The
+    /// export now reads a snapshot and holds no barrier (#643).
     fn read_inline<T>(
         &self,
         read: impl FnOnce(&EmbeddedStorageEngine) -> Result<T, crate::storage::StorageError>,
@@ -1381,13 +1382,19 @@ impl ClusterEngine {
             .map_err(ClusterError::Storage)
     }
 
-    /// The inner engine's backup consistency barrier.
+    /// A read-only snapshot of the inner engine (#643).
     ///
     /// `serve` installs a [`ClusterStorageAdapter`] as the app-layer storage
-    /// handle in every topology, so the barrier has to reach through both
-    /// wrappers or a backup export takes no barrier at all (§4.9#4).
-    pub fn backup_barrier(&self) -> Option<Arc<std::sync::RwLock<()>>> {
-        self.inner.backup_barrier()
+    /// handle in every topology, so the call has to reach through both
+    /// wrappers, or a backup export reads the live engine (§4.9#4).
+    ///
+    /// # Errors
+    ///
+    /// The inner engine's error making the snapshot.
+    pub fn read_snapshot(
+        &self,
+    ) -> Result<Option<Arc<dyn StorageEngine>>, crate::storage::StorageError> {
+        self.inner.read_snapshot()
     }
 
     /// Conditionally insert a key-value pair only if the key is absent.
@@ -2259,8 +2266,10 @@ impl StorageEngine for ClusterStorageAdapter {
         .map_err(cluster_to_storage_err)
     }
 
-    fn backup_barrier(&self) -> Option<Arc<std::sync::RwLock<()>>> {
-        self.engine.backup_barrier()
+    fn read_snapshot(
+        &self,
+    ) -> Result<Option<Arc<dyn StorageEngine>>, crate::storage::StorageError> {
+        self.engine.read_snapshot()
     }
 
     fn put_if_absent(
@@ -2471,29 +2480,60 @@ mod tests {
         while adapter.writes_in_flight.load(Ordering::SeqCst) < count {
             assert!(
                 std::time::Instant::now() < deadline,
-                "{count} writes never reached the backup barrier"
+                "{count} writes never parked"
             );
             std::thread::yield_now();
         }
     }
 
+    /// Holds every write that reaches `inner`'s WAL until it is dropped.
+    struct ParkedWrites(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+
+    impl ParkedWrites {
+        fn install(inner: &EmbeddedStorageEngine) -> Self {
+            let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+            let hook_gate = Arc::clone(&gate);
+            inner.set_pre_wal_hook(Arc::new(move || {
+                let (open, cv) = &*hook_gate;
+                let mut open = open
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                while !*open {
+                    open = cv
+                        .wait(open)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+            }));
+            Self(gate)
+        }
+    }
+
+    impl Drop for ParkedWrites {
+        fn drop(&mut self) {
+            let (open, cv) = &*self.0;
+            *open
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+            cv.notify_all();
+        }
+    }
+
     /// #596: on a single node, a write over the write limit is refused before
     /// it starts, so it takes no thread and writes nothing. The writes that
-    /// hold the limit (here: parked on a backup export's barrier) finish, and
-    /// then a write succeeds again.
+    /// hold the limit (here: parked before the WAL) finish, and then a write
+    /// succeeds again.
     #[test]
     #[allow(clippy::unwrap_used)]
     fn a_single_node_write_over_the_limit_is_refused_before_it_starts() {
         let dir = tempdir().unwrap();
         let inner = open_engine(dir.path().join("data").as_path());
-        let barrier = inner.backup_barrier().unwrap();
+        let parked_writes = ParkedWrites::install(&inner);
         let adapter = Arc::new(ClusterStorageAdapter::with_max_writes_in_flight(
             Arc::new(ClusterEngine::single_node(inner)),
             2,
         ));
         let realm = RealmId::generate();
 
-        let export = barrier.write().unwrap();
         let parked: Vec<_> = (0..2u8)
             .map(|i| {
                 let (adapter, realm) = (Arc::clone(&adapter), realm.clone());
@@ -2519,7 +2559,7 @@ mod tests {
             "a refused write is a 503: nothing was written"
         );
 
-        drop(export);
+        drop(parked_writes);
         for writer in parked {
             writer.join().unwrap().expect("a parked write completes");
         }
@@ -2538,7 +2578,7 @@ mod tests {
     fn a_wait_for_a_queued_write_is_not_refused_at_the_limit() {
         let dir = tempdir().unwrap();
         let inner = open_engine(dir.path().join("data").as_path());
-        let barrier = inner.backup_barrier().unwrap();
+        let inner_handle = Arc::clone(&inner);
         let adapter = Arc::new(ClusterStorageAdapter::with_max_writes_in_flight(
             Arc::new(ClusterEngine::single_node(inner)),
             1,
@@ -2548,7 +2588,7 @@ mod tests {
             .enqueue_batch(&realm, &[(b"queued".to_vec(), b"v".to_vec())])
             .unwrap();
 
-        let export = barrier.write().unwrap();
+        let parked_writes = ParkedWrites::install(&inner_handle);
         let parked = {
             let (adapter, realm) = (Arc::clone(&adapter), realm.clone());
             std::thread::spawn(move || adapter.put(&realm, b"parked", b"v"))
@@ -2559,32 +2599,37 @@ mod tests {
             .await_batch_durable(queued)
             .expect("a wait for a queued write must not be refused");
 
-        drop(export);
+        drop(parked_writes);
         parked.join().unwrap().expect("the parked write completes");
         assert_eq!(adapter.writes_in_flight.load(Ordering::SeqCst), 0);
         assert_eq!(adapter.get(&realm, b"queued").unwrap(), Some(b"v".to_vec()));
     }
 
     /// `serve` always installs a `ClusterStorageAdapter`, single-node included.
-    /// The adapter answered `None` for the backup consistency barrier, so the
-    /// export took no barrier and every mutating write ran straight through it.
+    /// If the adapter answered `None` for a snapshot, a backup export would
+    /// read the live engine, and a write during the export could tear the
+    /// archive (#643, §4.9#4).
     #[tokio::test]
     #[allow(clippy::unwrap_used)]
-    async fn adapter_exposes_the_inner_backup_barrier() {
+    async fn adapter_forwards_the_inner_read_snapshot() {
         let dir = tempdir().unwrap();
         let inner = open_engine(dir.path().join("data").as_path());
-        let inner_barrier = inner
-            .backup_barrier()
-            .expect("embedded engine has a barrier");
-        let adapter = ClusterStorageAdapter::new(Arc::new(ClusterEngine::single_node(inner)));
+        let realm = RealmId::generate();
+        inner.put(&realm, b"before", b"v").unwrap();
+        let adapter =
+            ClusterStorageAdapter::new(Arc::new(ClusterEngine::single_node(Arc::clone(&inner))));
 
-        let adapter_barrier = adapter
-            .backup_barrier()
-            .expect("the adapter must expose the barrier, not swallow it");
-        assert!(
-            Arc::ptr_eq(&inner_barrier, &adapter_barrier),
-            "the adapter must expose the SAME barrier the export blocks on"
+        let snapshot = adapter
+            .read_snapshot()
+            .unwrap()
+            .expect("the adapter must forward the snapshot, not swallow it");
+        inner.put(&realm, b"after", b"v").unwrap();
+
+        assert_eq!(
+            snapshot.get(&realm, b"before").unwrap(),
+            Some(b"v".to_vec())
         );
+        assert_eq!(snapshot.get(&realm, b"after").unwrap(), None);
     }
 
     /// `serve` always installs a `ClusterStorageAdapter`, and the audit engine

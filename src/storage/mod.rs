@@ -25,6 +25,7 @@ pub(crate) mod key_registry;
 pub(crate) mod memtable;
 pub mod migrations;
 mod paging;
+mod snapshot;
 #[allow(dead_code)]
 pub(crate) mod sst;
 #[allow(dead_code)]
@@ -515,28 +516,23 @@ pub trait StorageEngine: Send + Sync {
     /// there is no silent default (HEA-2135).
     fn complete_snapshot_restore(&self) -> Result<(), StorageError>;
 
-    /// Returns the process-wide backup-consistency barrier, or `None` if this
-    /// engine does not support consistent snapshots (HEA-2167).
+    /// Returns a read-only view of this engine at one point in time, or `None`
+    /// if the engine cannot make one (#643).
     ///
-    /// A backup export acquires the returned lock in **write** mode and holds
-    /// it across its per-entity read pass. While held, every mutating
-    /// operation (`put`, `delete`, `put_batch`, `write_batch`,
-    /// `enqueue_batch`, `await_batch_durable`) blocks, so the export observes a
-    /// single point-in-time view and cannot capture a *torn* archive — e.g. a
-    /// group membership referencing a user the archive omits. Reads
-    /// (`get`/`scan`) are never blocked, so the hot path and the export's own
-    /// scans proceed freely.
+    /// The view holds every write acknowledged before the call and no write
+    /// that starts after it. A write in progress during the call is in the
+    /// view whole or not at all. Writes to this engine continue while the
+    /// view is alive. Every write to the view fails with
+    /// [`StorageError::ReadOnlySnapshot`].
     ///
-    /// **Write-availability impact**: while an export holds the barrier, writes
-    /// to this node block until the export's read pass completes. Operators
-    /// scheduling backups against a live server must account for this window.
+    /// The default returns `None`: correct for test doubles. Wrappers forward
+    /// the call to the engine they wrap.
     ///
-    /// The default returns `None` (no barrier) — correct for test doubles and
-    /// wrappers that do not provide snapshot isolation; callers that receive
-    /// `None` fall back to a non-isolated export. [`EmbeddedStorageEngine`]
-    /// overrides this with a real reader-writer barrier.
-    fn backup_barrier(&self) -> Option<std::sync::Arc<std::sync::RwLock<()>>> {
-        None
+    /// # Errors
+    ///
+    /// The error of the flush or of the WAL commit that the view waits for.
+    fn read_snapshot(&self) -> Result<Option<std::sync::Arc<dyn StorageEngine>>, StorageError> {
+        Ok(None)
     }
 
     /// Writes the in-memory write buffer out to a durable file.

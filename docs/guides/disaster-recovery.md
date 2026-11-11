@@ -806,10 +806,9 @@ a lost disk.
 Cluster mode is experimental and is not a recovery plan: there is no
 supported way to replace a failed node, so plan your RPO on backups alone.
 
-Each realm in an archive reflects one point in time, because the exporter
-holds a per-realm consistency barrier, but different realms reflect
-different points within the run — see [Referential
-consistency](./backup.md#referential-consistency--each-realm-is-snapshotted-hea-2167).
+An archive reflects one point in time across all its realms: the exporter
+reads one storage snapshot, taken when the backup starts — see [Referential
+consistency](./backup.md#referential-consistency--one-snapshot-per-backup).
 
 ### Recovery Time Objective (RTO) — how long recovery takes
 
