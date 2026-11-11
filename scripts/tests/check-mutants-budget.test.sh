@@ -239,7 +239,7 @@ expect_mode passes "--matrix gives one entry for each shard" \
     --matrix
 expect_mode passes "--mutants-args gives the files, the re and the test binaries" \
     '[modules.alpha]\nfiles = ["src/a.rs"]\nre = ["^src/a"]\ntests = ["t1"]\nshards = 1\n' \
-    "$(printf -- '--file\nsrc/a.rs\n--re\n^src/a\n--cargo-arg=--lib\n--cargo-arg=--test\n--cargo-arg=t1\n--\n-E\nnot (kind(lib) and test(/^(storage|cluster)::/))')" \
+    "$(printf -- '--file\nsrc/a.rs\n--re\n^src/a\n--cargo-arg=--lib\n--cargo-arg=--test\n--cargo-arg=t1\n--\n-E\nnot (kind(lib) and (test(/^(storage|cluster)::/) or test(=identity::engine::tests::verify_nonexistent_user_takes_comparable_time)))')" \
     --mutants-args alpha
 expect_mode fails "--mutants-args refuses a module that is not in the budget file" \
     '[modules.alpha]\nfiles = ["src/a.rs"]\nshards = 1\n' "module gamma is not in the budget file" \
