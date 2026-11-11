@@ -6,6 +6,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Fixed
+- **Session cleanup sweep evicts every expired session in one pass**: expired sessions past the
+  first page were evicted on later cleanup ticks, so `SessionEvicted` events and session-version
+  bumps came late. Such sessions were already refused on read.
+
 ## [4.9.0] — 2026-11-10
 
 ### Added
