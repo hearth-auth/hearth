@@ -132,7 +132,13 @@ soaks on the same servers. A round on AWS takes 2–3 hours and costs a few doll
    ```
 2. **Create the AWS identity.** The owner runs `aws login` (an admin session). Right after it, run
    `loadtest/live/aws-iam.sh up`. The admin session can expire within minutes.
-3. **Write a plan.** Start from the newest file in `plans/`.
+3. **Write a plan.** Start from the newest file in `plans/`. Besides `ramp` and `soak`, a plan
+   can time a restart (`restart`), a `kill -9` under load with a check for lost writes
+   (`crash`), a backup under load (`backup`) and the restore drill (`drill`). The header of
+   `round.sh` gives their arguments. A `drill` line replaces the server's data: put it last.
+   With 10M users, set `USERS=10000000` and give the server a larger disk, for example
+   `AWS_DISK_GB=150`: the store, its copy, a backup archive and the drill's store each take
+   about 12 GB at 10M.
 4. **Start the round detached.** It runs for hours, and the agent's background-task monitor can
    kill a long background command:
    ```bash

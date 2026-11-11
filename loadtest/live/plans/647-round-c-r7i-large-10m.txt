@@ -1,0 +1,19 @@
+# #647 round C: server r7i.large (2 vCPU, 16 GB), 2 c7i.xlarge generators, 10M users in one
+# realm. Run with SETUP=1 USERS=10000000 SERVER_SIZE=r7i.large AWS_DISK_GB=150.
+# Pass marks: https://github.com/hearth-auth/hearth/issues/647 (set before the run).
+# Rates are totals over both generators.
+#    name           journey       start step  steps hold_s
+ramp ramp-mix          mix           250   50    10    90
+ramp ramp-login        login         20    10    9     90
+ramp ramp-refresh      refresh       200   100   13    90
+ramp ramp-userinfo     userinfo      2000  2000  6     60
+ramp ramp-admin_lookup admin_lookup  2000  2000  6     60
+ramp ramp-introspect   introspect    1500  1500  6     60
+#       name
+restart restart-10m
+#     name      journey rate seconds kill_at_s k6 settings
+crash crash-10m mix     120  900     300       MIX=refresh:60,login:15,userinfo:15,admin_lookup:5,create_user:5
+#      name       journey rate hold_s
+backup backup-10m mix     120  900
+#     name      users (replaces the server's data: last line)
+drill drill-10m 10000000
