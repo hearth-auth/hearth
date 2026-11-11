@@ -2342,82 +2342,26 @@ impl EmbeddedIdentityEngine {
             return Ok(());
         }
 
+        // The list of stored keys covers the system-realm signing, SAML and
+        // ID-token key families and the per-realm keys (DPoP nonce secret,
+        // MFA data key, audit chain key). The per-realm keys live in each
+        // tenant realm's own namespace, so a system-realm scan never sees
+        // them (§25.9, §25.21). The audit chain key is load-bearing: both
+        // audit read paths use `unwrap_key_strict` (§25.21), so a plaintext
+        // chain key left out of the sweep would make every append and every
+        // integrity check fail on a store that enabled a KEK after the fact.
         let mut rewrapped = 0_usize;
-        // Re-wrap the single global key, then each prefix family.
-        let global = keys::encode_global_signing_key();
-        if let Some(raw) = storage
-            .get(&sys_realm, &global)
-            .map_err(|e| IdentityError::Storage(Box::new(e)))?
-        {
-            if !crate::identity::key_encryption::is_enveloped(&raw) {
-                let wrapped = crate::identity::key_encryption::wrap_key(&raw, Some(kek))?;
-                storage
-                    .put(&sys_realm, &global, &wrapped)
-                    .map_err(|e| IdentityError::Storage(Box::new(e)))?;
-                rewrapped += 1;
-            }
-        }
-
-        for prefix in [
-            keys::realm_signing_key_scan_prefix(),
-            keys::realm_retiring_key_all_scan_prefix(),
-            keys::realm_saml_key_scan_prefix(),
-            keys::realm_id_token_rsa_key_scan_prefix(),
-            keys::realm_id_token_rsa_retiring_all_scan_prefix(),
-        ] {
-            let end = keys::prefix_end(&prefix);
-            let entries = storage
-                .scan(&sys_realm, &prefix, &end)
-                .map_err(|e| IdentityError::Storage(Box::new(e)))?;
-            for entry in entries {
-                if crate::identity::key_encryption::is_enveloped(&entry.value) {
-                    continue;
-                }
-                let wrapped = crate::identity::key_encryption::wrap_key(&entry.value, Some(kek))?;
-                storage
-                    .put(&sys_realm, &entry.key, &wrapped)
-                    .map_err(|e| IdentityError::Storage(Box::new(e)))?;
-                rewrapped += 1;
-            }
-        }
-
-        // Per-realm key material. Unlike the signing keys these are written
-        // into the tenant realm's own namespace, so a system-realm scan never
-        // sees them and they stayed in plaintext forever once a KEK was
-        // switched on over an existing store (§25.9, §25.21). Each is a
-        // single well-known key, so this is three point reads per realm.
-        //
-        // The audit chain HMAC key belongs here for the same reason the DPoP
-        // nonce secret does, and it is load-bearing: both audit read paths
-        // now use `unwrap_key_strict` (§25.21), so leaving a legacy plaintext
-        // chain key out of the sweep would make every append and every
-        // integrity verification fail on a store that enabled a KEK after the
-        // fact.
-        let realms = storage
-            .list_realms()
+        let stored = crate::identity::kek_rotation::stored_keys(storage.as_ref())
             .map_err(|e| IdentityError::Storage(Box::new(e)))?;
-        let per_realm_keys = [
-            keys::dpop_nonce_secret_key(),
-            keys::mfa_dek_key(),
-            crate::audit::keys::audit_hmac_key(),
-        ];
-        for realm in &realms {
-            for storage_key in &per_realm_keys {
-                let Some(raw) = storage
-                    .get(realm, storage_key)
-                    .map_err(|e| IdentityError::Storage(Box::new(e)))?
-                else {
-                    continue;
-                };
-                if crate::identity::key_encryption::is_enveloped(&raw) {
-                    continue;
-                }
-                let wrapped = crate::identity::key_encryption::wrap_key(&raw, Some(kek))?;
-                storage
-                    .put(realm, storage_key, &wrapped)
-                    .map_err(|e| IdentityError::Storage(Box::new(e)))?;
-                rewrapped += 1;
+        for entry in stored {
+            if crate::identity::key_encryption::is_enveloped(&entry.value) {
+                continue;
             }
+            let wrapped = crate::identity::key_encryption::wrap_key(&entry.value, Some(kek))?;
+            storage
+                .put(&entry.realm, &entry.key, &wrapped)
+                .map_err(|e| IdentityError::Storage(Box::new(e)))?;
+            rewrapped += 1;
         }
 
         // Written last: a crash mid-sweep leaves the marker absent, so the

@@ -1685,6 +1685,26 @@ async fn run_serve(
     // by identity_config (it is moved on the non-dev_mode path).
     let audit_kek: Option<[u8; 32]> = storage_kek.as_ref().map(|k| *k.as_bytes());
 
+    // #649: a changed HEARTH_KEK with the old value in HEARTH_PREVIOUS_KEK
+    // wraps every stored key again under the new KEK before any engine reads
+    // one. Without HEARTH_PREVIOUS_KEK the same call only checks that every
+    // stored key opens under HEARTH_KEK, and it writes nothing.
+    let previous_kek = resolve_previous_kek(storage_kek.as_ref())?;
+    if previous_kek.is_some() && config.cluster.is_some() {
+        return Err(format!(
+            "{} is set, but a KEK rotation is supported on a single node only",
+            hearth::identity::kek_rotation::PREVIOUS_KEK_ENV
+        )
+        .into());
+    }
+    if let Some(kek) = storage_kek.as_ref() {
+        hearth::identity::kek_rotation::rotate_key_encryption_key(
+            &storage,
+            kek,
+            previous_kek.as_ref(),
+        )?;
+    }
+
     // Resolve the optional Argon2id server-side pepper from
     // `security.password.pepper`. Absent → `None` (unchanged default). The hex,
     // length, all-zero, and rotation-pairing checks already ran in
@@ -4454,6 +4474,57 @@ fn run_migrate_rotate_pepper(
 /// Tuning comes from the `[storage]` defaults, so a CLI run behaves like a
 /// default-configured server. A migration importer's throwaway temp directory
 /// keeps the dev config on purpose: nothing in it outlives the command.
+/// Resolves `HEARTH_PREVIOUS_KEK`, the KEK before a rotation (#649).
+///
+/// Returns `None` when the variable is not set. See [`parse_previous_kek`].
+fn resolve_previous_kek(
+    current: Option<&hearth::identity::key_encryption::StorageKek>,
+) -> Result<Option<hearth::identity::key_encryption::StorageKek>, Box<dyn std::error::Error>> {
+    parse_previous_kek(
+        std::env::var(hearth::identity::kek_rotation::PREVIOUS_KEK_ENV),
+        current,
+    )
+    .map_err(Into::into)
+}
+
+/// Parses a read of `HEARTH_PREVIOUS_KEK`. It has the format of `HEARTH_KEK`
+/// (64 hex characters), it needs a current KEK, and it must not equal it.
+/// The error messages never hold the value.
+fn parse_previous_kek(
+    read: Result<String, std::env::VarError>,
+    current: Option<&hearth::identity::key_encryption::StorageKek>,
+) -> Result<Option<hearth::identity::key_encryption::StorageKek>, String> {
+    use subtle::ConstantTimeEq as _;
+    let name = hearth::identity::kek_rotation::PREVIOUS_KEK_ENV;
+    let hex = match read {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(format!("{name} is set but is not valid UTF-8"));
+        }
+    };
+    let Some(current) = current else {
+        return Err(format!(
+            "{name} is set, but there is no HEARTH_KEK or security.key_encryption_key to \
+             rotate to"
+        ));
+    };
+    let bytes = hex::decode(&hex).map_err(|_| format!("{name} is not valid hex"))?;
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| format!("{name} must be exactly 64 hex characters (32 bytes)"))?;
+    if arr == [0_u8; 32] {
+        return Err(format!("{name} must not be the all-zero key"));
+    }
+    if bool::from(arr.ct_eq(current.as_bytes())) {
+        return Err(format!(
+            "{name} is equal to HEARTH_KEK: set HEARTH_KEK to the new key and {name} to the \
+             old one"
+        ));
+    }
+    Ok(Some(hearth::identity::key_encryption::StorageKek::new(arr)))
+}
+
 /// Resolves the storage key-encryption key (KEK) from the environment or config.
 ///
 /// `HEARTH_KEK` wins; `config_kek` is `security.key_encryption_key`. Accepted
@@ -6483,6 +6554,58 @@ fn print_migration_report(report: &hearth::identity::MigrationReport) {
 
 #[cfg(test)]
 mod tests {
+    /// #649: `HEARTH_PREVIOUS_KEK` parsing.
+    mod previous_kek {
+        use super::super::parse_previous_kek;
+        use hearth::identity::key_encryption::StorageKek;
+        use std::env::VarError;
+
+        fn current() -> StorageKek {
+            StorageKek::new([0x5a_u8; 32])
+        }
+
+        #[test]
+        fn an_unset_previous_kek_is_none() {
+            assert!(matches!(
+                parse_previous_kek(Err(VarError::NotPresent), Some(&current())),
+                Ok(None)
+            ));
+        }
+
+        #[test]
+        fn a_valid_previous_kek_is_returned() {
+            let got = parse_previous_kek(Ok("42".repeat(32)), Some(&current()))
+                .expect("valid")
+                .expect("some");
+            assert_eq!(got.as_bytes(), &[0x42_u8; 32]);
+        }
+
+        #[test]
+        fn a_previous_kek_without_a_current_kek_is_refused() {
+            let err = parse_previous_kek(Ok("42".repeat(32)), None).expect_err("no current");
+            assert!(err.contains("HEARTH_KEK"), "{err}");
+        }
+
+        #[test]
+        fn a_previous_kek_equal_to_the_current_kek_is_refused() {
+            let err = parse_previous_kek(Ok("5a".repeat(32)), Some(&current())).expect_err("equal");
+            assert!(err.contains("equal"), "{err}");
+        }
+
+        #[test]
+        fn a_malformed_or_all_zero_previous_kek_is_refused_without_its_value() {
+            for bad in ["zz".repeat(32), "42".repeat(16), "0".repeat(64)] {
+                let err =
+                    parse_previous_kek(Ok(bad.clone()), Some(&current())).expect_err("malformed");
+                assert!(err.contains("HEARTH_PREVIOUS_KEK"), "{err}");
+                assert!(
+                    !err.contains(&bad),
+                    "the message must not hold the value: {err}"
+                );
+            }
+        }
+    }
+
     use super::*;
     use hearth::config::{Config, EmailTransport};
 
