@@ -20,6 +20,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   while the server was stopped also counts. `deploy/monitoring/` adds the `HearthBackupTooOld`
   alert (no backup for more than 26 hours) and a backup-age panel on the dashboard.
 
+### Changed
+- **Breaking:** **Store format 2, with an exact user count** (#644): the storage engine now keeps
+  the number of users of each realm and changes it in the same write as the user record, so the
+  count stays exact after a crash and on every cluster node. The user list of the admin API and
+  the admin UI reads its total from this count and reads only the requested page, so a first
+  page no longer reads every user of the realm. A build with this change refuses a data
+  directory of store format 1 at startup: restore a backup archive into a new, empty data
+  directory (see `docs/guides/upgrading.md`).
+
 ### Fixed
 - **Writes continue during a backup** (#643): `POST /admin/backup` no longer holds the node's
   writes while it reads a realm. Before, every write (sign-ins, token refreshes, sign-ups, admin

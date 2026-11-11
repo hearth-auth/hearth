@@ -18,6 +18,7 @@ pub mod error;
 pub mod format;
 pub mod fs;
 mod heap;
+mod key_count;
 mod key_merge;
 #[allow(dead_code)]
 pub(crate) mod key_registry;

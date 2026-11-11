@@ -99,7 +99,7 @@ Work through this list for every upgrade, including patch releases.
 
   ```bash
   cat /var/lib/hearth/data/FORMAT
-  # → hearth-store-format 1
+  # → hearth-store-format 2
   ```
 
   A Hearth build reads and writes exactly one store format version. At startup it compares
