@@ -22491,6 +22491,298 @@ mod tests {
         );
     }
 
+    // #641 (cargo-mutants survivors): session policy eviction, the realm
+    // session TTL, and bulk revocation and sweep past the first page.
+
+    /// A realm with the given idle and absolute session timeouts.
+    fn create_realm_with_session_policy(
+        engine: &EmbeddedIdentityEngine,
+        idle_timeout_secs: Option<u32>,
+        absolute_timeout_secs: Option<u32>,
+    ) -> RealmId {
+        engine
+            .create_realm(&CreateRealmRequest {
+                name: format!("test-realm-{}", uuid::Uuid::new_v4()),
+                config: Some(RealmConfig {
+                    idle_timeout_secs,
+                    absolute_timeout_secs,
+                    ..RealmConfig::default()
+                }),
+            })
+            .expect("create realm")
+            .id()
+            .clone()
+    }
+
+    /// The realm's audit events with `action`.
+    fn audit_events(
+        audit: &EmbeddedAuditEngine,
+        realm_id: &RealmId,
+        action: AuditAction,
+    ) -> Vec<crate::audit::AuditEvent> {
+        let mut query = crate::audit::AuditQuery::for_realm(realm_id.clone());
+        query.action = Some(action);
+        audit.query(&query).expect("query audit")
+    }
+
+    /// The `reason` metadata of the realm's one `SessionEvicted` event for
+    /// `session`.
+    fn eviction_reason(
+        audit: &EmbeddedAuditEngine,
+        realm_id: &RealmId,
+        session: &Session,
+    ) -> String {
+        let events = audit_events(audit, realm_id, AuditAction::SessionEvicted);
+        assert_eq!(events.len(), 1, "exactly one SessionEvicted event expected");
+        assert_eq!(events[0].resource_id, session.id().as_uuid().to_string());
+        events[0]
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("reason"))
+            .and_then(serde_json::Value::as_str)
+            .expect("SessionEvicted carries a reason")
+            .to_string()
+    }
+
+    /// A refresh exactly at the idle deadline evicts the session: it is
+    /// revoked and audited with the reason `idle_timeout`.
+    #[test]
+    fn refresh_session_at_the_idle_deadline_evicts_with_reason_idle_timeout() {
+        let (_dir, engine, clock, audit) = setup_engine_with_audit();
+        let realm_id = create_realm_with_session_policy(&engine, Some(300), None);
+        let user = create_test_user(&engine, &realm_id);
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("create session");
+
+        clock.advance(300 * 1_000_000);
+        assert!(matches!(
+            engine.refresh_session(&realm_id, session.id()),
+            Err(IdentityError::SessionNotFound)
+        ));
+        assert_eq!(eviction_reason(&audit, &realm_id, &session), "idle_timeout");
+        let stored = engine
+            .load_session_raw(&realm_id, session.id())
+            .expect("load")
+            .expect("the evicted row is kept, revoked");
+        assert!(stored.is_revoked(), "an evicted session must be revoked");
+    }
+
+    /// A refresh exactly at the absolute deadline evicts the session with the
+    /// reason `absolute_timeout`.
+    #[test]
+    fn refresh_session_at_the_absolute_deadline_evicts_with_reason_absolute_timeout() {
+        let (_dir, engine, clock, audit) = setup_engine_with_audit();
+        let realm_id = create_realm_with_session_policy(&engine, None, Some(600));
+        let user = create_test_user(&engine, &realm_id);
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("create session");
+
+        clock.advance(600 * 1_000_000);
+        assert!(matches!(
+            engine.refresh_session(&realm_id, session.id()),
+            Err(IdentityError::SessionNotFound)
+        ));
+        assert_eq!(
+            eviction_reason(&audit, &realm_id, &session),
+            "absolute_timeout"
+        );
+    }
+
+    /// A revoked session past its idle deadline is refused, but it is not
+    /// evicted again: eviction applies only to a session that is still valid.
+    #[test]
+    fn refresh_session_of_a_revoked_session_records_no_eviction() {
+        let (_dir, engine, clock, audit) = setup_engine_with_audit();
+        let realm_id = create_realm_with_session_policy(&engine, Some(300), None);
+        let user = create_test_user(&engine, &realm_id);
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("create session");
+        engine
+            .revoke_session(&realm_id, session.id())
+            .expect("revoke");
+
+        clock.advance(300 * 1_000_000);
+        assert!(matches!(
+            engine.refresh_session(&realm_id, session.id()),
+            Err(IdentityError::SessionNotFound)
+        ));
+        assert!(
+            audit_events(&audit, &realm_id, AuditAction::SessionEvicted).is_empty(),
+            "a revoked session must not be evicted"
+        );
+    }
+
+    /// `revoke_all_user_sessions` revokes every session, past the first page.
+    #[test]
+    fn revoke_all_user_sessions_revokes_past_the_first_page() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm_id);
+        let count = crate::core::MAX_PAGE_LIMIT + 1;
+        let mut ids = Vec::new();
+        for _ in 0..count {
+            ids.push(
+                engine
+                    .create_session(&realm_id, user.id(), &SessionContext::default())
+                    .expect("create session")
+                    .id()
+                    .clone(),
+            );
+        }
+
+        assert_eq!(
+            engine
+                .revoke_all_user_sessions(&realm_id, user.id(), None)
+                .expect("revoke all"),
+            count
+        );
+        for id in &ids {
+            assert!(
+                engine.get_session(&realm_id, id).expect("get").is_none(),
+                "every session must be revoked, across pages"
+            );
+        }
+    }
+
+    /// `revoke_all_user_sessions` records one `SessionsRevoked` event when it
+    /// revokes sessions, and none when there is nothing to revoke.
+    #[test]
+    fn revoke_all_user_sessions_audits_only_a_non_empty_revocation() {
+        let (_dir, engine, _clock, audit) = setup_engine_with_audit();
+        let realm_id = create_test_realm(&engine);
+        let idle_user = create_test_user(&engine, &realm_id);
+        assert_eq!(
+            engine
+                .revoke_all_user_sessions(&realm_id, idle_user.id(), None)
+                .expect("revoke all"),
+            0
+        );
+        assert!(
+            audit_events(&audit, &realm_id, AuditAction::SessionsRevoked).is_empty(),
+            "revoking no session must record no SessionsRevoked event"
+        );
+
+        let user = create_test_user(&engine, &realm_id);
+        for _ in 0..2 {
+            engine
+                .create_session(&realm_id, user.id(), &SessionContext::default())
+                .expect("create session");
+        }
+        engine
+            .revoke_all_user_sessions(&realm_id, user.id(), None)
+            .expect("revoke all");
+        let events = audit_events(&audit, &realm_id, AuditAction::SessionsRevoked);
+        assert_eq!(events.len(), 1, "one SessionsRevoked event expected");
+        assert_eq!(
+            events[0].metadata.as_ref().and_then(|m| m.get("count")),
+            Some(&serde_json::json!(2))
+        );
+    }
+
+    /// A positive realm `session_ttl_micros` sets the session lifetime; a zero
+    /// or negative one is ignored and the engine default applies.
+    #[test]
+    fn create_session_honours_a_positive_realm_session_ttl_only() {
+        let (_dir, engine, clock) = setup_engine();
+        let default_ttl = engine.config.session.ttl_micros;
+        for (realm_ttl, expected) in [
+            (3_600_000_000, 3_600_000_000),
+            (0, default_ttl),
+            (-1, default_ttl),
+        ] {
+            let realm_id = engine
+                .create_realm(&CreateRealmRequest {
+                    name: format!("test-realm-{}", uuid::Uuid::new_v4()),
+                    config: Some(RealmConfig {
+                        session_ttl_micros: Some(realm_ttl),
+                        ..RealmConfig::default()
+                    }),
+                })
+                .expect("create realm")
+                .id()
+                .clone();
+            let user = create_test_user(&engine, &realm_id);
+            let session = engine
+                .create_session(&realm_id, user.id(), &SessionContext::default())
+                .expect("create session");
+            assert_eq!(
+                session.expires_at().as_micros() - clock.now().as_micros(),
+                expected,
+                "realm session_ttl_micros = {realm_ttl}"
+            );
+        }
+    }
+
+    /// `cascade_user_sessions_and_memberships` reports whether it found a row:
+    /// `false` for a user with none, `true` for each kind of row alone, and
+    /// `false` again once the cascade removed that row.
+    #[test]
+    fn cascade_user_sessions_and_memberships_reports_each_kind_of_row() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let user = UserId::generate();
+        let cascade = || {
+            engine
+                .cascade_user_sessions_and_memberships(&realm_id, &user)
+                .expect("cascade")
+        };
+        assert!(!cascade(), "a user with no rows must report none found");
+
+        for (kind, key) in [
+            (
+                "session index",
+                keys::encode_user_session(&user, &SessionId::generate()),
+            ),
+            (
+                "organization membership",
+                keys::encode_membership_by_user(&user, &OrganizationId::generate()),
+            ),
+            (
+                "OAuth consent",
+                keys::encode_consent_prefix_for_client(&user, &ClientId::generate()),
+            ),
+        ] {
+            engine.storage.put(&realm_id, &key, b"row").expect("put");
+            assert!(cascade(), "a {kind} row alone must be reported found");
+            assert!(!cascade(), "the {kind} row must be gone after the cascade");
+        }
+    }
+
+    /// The `sv` claim carries the session's current version, not the
+    /// initial one.
+    #[test]
+    fn issued_access_token_carries_the_current_session_version() {
+        let (_dir, engine, _clock) = setup_engine();
+        let mut config = RealmConfig::default();
+        config.session_version.enabled = true;
+        let realm_id = engine
+            .create_realm(&CreateRealmRequest {
+                name: format!("test-realm-{}", uuid::Uuid::new_v4()),
+                config: Some(config),
+            })
+            .expect("create realm")
+            .id()
+            .clone();
+        let user = create_test_user(&engine, &realm_id);
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("session");
+        let bumped = engine
+            .sv_store
+            .bump(&realm_id, session.id(), 3600)
+            .expect("bump");
+        assert!(bumped > 1, "setup: the bump must move the version past 1");
+
+        let tokens = engine
+            .issue_tokens(&realm_id, user.id(), session.id())
+            .expect("issue tokens");
+        let claims = tokens::decode_claims_unverified(tokens.access_token()).expect("decode");
+        assert_eq!(claims.sv, Some(bumped));
+    }
+
     // ===== Delete cascades to sessions =====
 
     #[test]
