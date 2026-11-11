@@ -786,3 +786,58 @@ async fn audit_list_renders_a_multibyte_name_id_without_crashing() {
 
     assert_eq!(resp.status(), StatusCode::OK);
 }
+
+/// The audit page lists the newest event first (#644), and each row's
+/// "Previous hash" is the hash of the older event before it in the chain.
+#[tokio::test]
+async fn audit_list_shows_the_newest_first_with_the_older_event_as_previous_hash() {
+    let rig = build_rig();
+    let csrf = "csrf-order";
+    let cookie = admin_cookie(&rig, csrf);
+    let realm = &rig.tenant_realm_name;
+
+    let append = |resource_id: &str| {
+        rig.audit
+            .append(&CreateAuditEvent {
+                realm_id: rig.tenant_realm_id.clone(),
+                actor: "system".to_string(),
+                action: AuditAction::UserUpdated,
+                resource_type: "test".to_string(),
+                resource_id: resource_id.to_string(),
+                metadata: None,
+            })
+            .expect("audit event")
+    };
+    let older = append("older-event");
+    let newer = append("newer-event");
+
+    let resp = rig
+        .app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/ui/admin/realms/{realm}/audit"))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .expect("test invariant"),
+        )
+        .await
+        .expect("test invariant");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("test invariant");
+    let html = String::from_utf8_lossy(&bytes);
+
+    let older_hash = &older.integrity_hash;
+    let newer_hash = &newer.integrity_hash;
+    let first_older = html.find(older_hash.as_str()).expect("older hash shown");
+    let last_older = html.rfind(older_hash.as_str()).expect("older hash shown");
+    let first_newer = html.find(newer_hash.as_str()).expect("newer hash shown");
+    // Newest first: the newer row (previous hash = older hash, then its own
+    // hash) comes before the older row (its own hash).
+    assert!(
+        first_older < first_newer && first_newer < last_older,
+        "expected the newer row first, with the older hash as its previous hash"
+    );
+}

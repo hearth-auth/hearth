@@ -1125,7 +1125,9 @@ pub async fn admin_audit_list(
         tool: None,
     };
 
-    match state.audit.query(&query) {
+    // The page shows the newest events first and reads only recent time
+    // windows (#644).
+    match state.audit.recent(&query) {
         Ok(events) => {
             // Per-request resolution caches so the same actor / resource
             // doesn't hit the identity engine N times when an event burst
@@ -1138,8 +1140,12 @@ pub async fn admin_audit_list(
             > = std::collections::HashMap::new();
             let mut prev_hash = String::new();
             let realm_name = target.0.name().to_string();
-            let rows: Vec<AuditRow> = events
+            // The events come newest first. Build the rows oldest first, so
+            // each row's previous hash is the hash of the older event, then
+            // put them back in newest-first order.
+            let mut rows: Vec<AuditRow> = events
                 .into_iter()
+                .rev()
                 .map(|e| {
                     let (actor_display, actor_url) = resolve_audit_actor(
                         &state,
@@ -1190,6 +1196,7 @@ pub async fn admin_audit_list(
                     }
                 })
                 .collect();
+            rows.reverse();
             if htmx.0 {
                 render(&AuditRowsTemplate { events: rows })
             } else {
@@ -1345,7 +1352,14 @@ pub async fn admin_api_audit_events(
         tool: None,
     };
 
-    match state.audit.query(&query) {
+    // As `GET /admin/audit`: newest first with no start date (#644), else
+    // oldest first from the start date.
+    let result = if query.start_time.is_none() {
+        state.audit.recent(&query)
+    } else {
+        state.audit.query(&query)
+    };
+    match result {
         Ok(events) => {
             let count = events.len();
             axum::response::Json(serde_json::json!({

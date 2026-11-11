@@ -113,6 +113,13 @@ impl NotifyingAuditEngine {
 }
 
 impl crate::audit::AuditEngine for NotifyingAuditEngine {
+    fn recent(
+        &self,
+        query: &crate::audit::AuditQuery,
+    ) -> Result<Vec<crate::audit::AuditEvent>, crate::audit::AuditError> {
+        self.inner.recent(query)
+    }
+
     /// The view reads only, so it has no event to broadcast: the inner
     /// engine's view is enough.
     fn read_view(
