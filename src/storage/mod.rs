@@ -15,6 +15,7 @@ pub(crate) mod block_cache;
 pub mod encryption;
 mod engine;
 pub mod error;
+pub mod format;
 pub mod fs;
 mod heap;
 mod key_merge;

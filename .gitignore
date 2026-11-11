@@ -51,6 +51,8 @@ ui/tailwindcss
 # Binary symlink at repo root (not the helm chart subdirectory)
 /hearth
 *.wal
+# The store-format fixture (#646) is a data directory, WAL included.
+!tests/fixtures/store-format/*.wal
 
 # Local runtime data (compose named volume + `cargo run` default path)
 /data/

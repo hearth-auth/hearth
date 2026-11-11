@@ -7,6 +7,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 ## [Unreleased]
 
 ### Added
+- **Store format version** (#646): the data directory now holds a `FORMAT` file with the store
+  format version (`hearth-store-format 1`). Hearth writes it when it opens a data directory that
+  has none. A build refuses at startup a data directory with a different store format version,
+  before it reads a record, and the error names `docs/guides/upgrading.md`. Hearth does not
+  migrate a data directory between store format versions: to move to a release with a new
+  store format, restore a backup archive into an empty data directory (see the upgrade guide).
 - **A backup metric and alert** (#648): `/metrics` now has
   `hearth_backup_last_success_timestamp_seconds{source}`, the time of the last successful
   `online` (`POST /admin/backup`) and `offline` (`hearth backup create`) backup, or `0` if none.

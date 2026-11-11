@@ -82,8 +82,8 @@ Work through this list for every upgrade, including patch releases.
   #   realms (2): …
   ```
 
-  `format version` is the **archive** format (currently `2`) and is unrelated to the WAL format
-  version checked below.
+  `format version` is the **archive** format (currently `2`). It is unrelated to the store format
+  and the WAL format versions checked below.
 
   The `signing key DEK` line reports `present (passphrase-protected)` on every archive this
   build writes, whether or not `--encrypt` was passed — it is not a reliable signal for "was
@@ -93,6 +93,40 @@ Work through this list for every upgrade, including patch releases.
 
   **`checksummed files: 0` or an empty `realms` list means the archive is empty** — re-check the
   `--data-dir` path and take it again.
+
+- [ ] **Check the store format version.** The file `FORMAT` in the data directory holds the
+  store format version of the whole data directory:
+
+  ```bash
+  cat /var/lib/hearth/data/FORMAT
+  # → hearth-store-format 1
+  ```
+
+  A Hearth build reads and writes exactly one store format version. At startup it compares
+  `FORMAT` with its own version and refuses a data directory with a different version, before it
+  reads a record:
+
+  ```
+  the FORMAT file of data directory '/var/lib/hearth/data' says "hearth-store-format 1"; this
+  build reads only store format 2. Run the build that wrote it, or see docs/guides/upgrading.md
+  ```
+
+  A data directory without `FORMAT` (a new directory, or one from a build before this check) gets
+  the version of the build that opens it.
+
+  **Hearth does not migrate a data directory from one store format version to another.** A
+  release that changes the store format says so in `CHANGELOG.md` with `**Breaking:**`. To move to
+  that release, use the backup archive: it is a logical export of the records, not a copy of the
+  store files, so it does not depend on the store format.
+
+  1. Take a backup with the old build (the pre-upgrade backup above).
+  2. Install the new build.
+  3. Restore the backup into a new, empty data directory with `hearth backup restore`.
+  4. Start the new build on that directory.
+
+  The restore works only when the new build accepts the archive format version (see
+  `hearth backup inspect` above). A release that changes the archive format also says so in
+  `CHANGELOG.md`.
 
 - [ ] **Check the WAL format version.** The WAL header layout is `[4B magic "HWAL"][2B version, little-endian]`. Read the current version directly:
 
@@ -109,8 +143,9 @@ Work through this list for every upgrade, including patch releases.
   events are encoded with `postcard` (`src/codec.rs`), which is not self-describing and carries no
   per-record version, and those types change between releases — for example `AuditAction` gained
   `InvitationCreated`, `InvitationAccepted` and `InvitationRevoked` after v1.6.11. An older binary
-  cannot decode a record that uses a variant or field it does not know. See
-  [Rollback](#rollback-procedure).
+  cannot decode a record that uses a variant or field it does not know. The store format version
+  does not change for such an addition, because the newer build still reads the older records.
+  See [Rollback](#rollback-procedure).
 
   When a bump *does* occur it is one-way: upgrading rewrites the file to the new version on startup,
   and the older binary will then refuse to start with `WAL format version N is not supported by this
@@ -348,8 +383,10 @@ only that the older binary can open the files; it does not prove it can decode t
 - Those types change between releases. An enum that gains a variant is the common case —
   `AuditAction` gained `InvitationCreated`, `InvitationAccepted` and `InvitationRevoked` after
   v1.6.11 — and postcard stores the variant *index*, so an older binary cannot decode a record the
-  newer one wrote with a new variant. There is no downgrade guard that refuses to start; the failure
-  surfaces when the unreadable record is read.
+  newer one wrote with a new variant. Such a change keeps the store format version, so the
+  store format check does not stop the older binary; the failure surfaces when the unreadable
+  record is read. The store format check refuses only a data directory with a different store
+  format version.
 - In **cluster mode** (experimental), a release can also change the Raft log format, so a cluster
   node cannot roll back in place either ([Cluster upgrades](#cluster-upgrades)).
 
