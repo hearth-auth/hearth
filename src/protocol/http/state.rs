@@ -60,6 +60,10 @@ pub struct AppState {
     /// carries a valid `detached_signature_b64` in its manifest. Fail-closed:
     /// archives without a valid signature are rejected.
     pub backup_verify_key_bytes: Option<[u8; 32]>,
+    /// The data directory where `POST /admin/backup` records its last success
+    /// for the `hearth_backup_last_success_timestamp_seconds` gauge (#648).
+    /// `None` records nothing (test harnesses without a data directory).
+    pub backup_marker_dir: Option<std::path::PathBuf>,
     /// Trusted reverse proxies (addresses and CIDR ranges) for `X-Forwarded-For` extraction.
     ///
     /// When non-empty, the OWASP "rightmost non-trusted" algorithm is applied
@@ -153,6 +157,7 @@ impl AppState {
             par_rate_limiter: Arc::new(TokenRateLimiter::new()),
             export_rate_limiter: Arc::new(ExportRateLimiter::new()),
             backup_verify_key_bytes: None,
+            backup_marker_dir: None,
             trusted_proxies: crate::core::TrustedProxies::default(),
             cluster: None,
             // zero key is overridden in production via with_dpop_nonce_secret
@@ -190,6 +195,7 @@ impl AppState {
             par_rate_limiter: Arc::new(TokenRateLimiter::new()),
             export_rate_limiter: Arc::new(ExportRateLimiter::new()),
             backup_verify_key_bytes: None,
+            backup_marker_dir: None,
             trusted_proxies: crate::core::TrustedProxies::default(),
             cluster: None,
             dpop: Arc::new(crate::identity::dpop::DPopProcessor::new([0u8; 32])),
@@ -264,6 +270,14 @@ impl AppState {
     /// a valid signature. Pass `None` to disable signature verification.
     pub fn with_backup_verify_key(mut self, key_bytes: Option<[u8; 32]>) -> Self {
         self.backup_verify_key_bytes = key_bytes;
+        self
+    }
+
+    /// Sets the data directory where a successful `POST /admin/backup` records
+    /// its time (#648, [`crate::backup::marker`]).
+    #[must_use]
+    pub fn with_backup_marker_dir(mut self, data_dir: Option<std::path::PathBuf>) -> Self {
+        self.backup_marker_dir = data_dir;
         self
     }
 

@@ -1416,6 +1416,63 @@ impl Metrics {
     }
 }
 
+impl Metrics {
+    /// Exports `hearth_backup_last_success_timestamp_seconds{source}` (#648):
+    /// the time of the last successful online and offline backup, read from
+    /// the markers in `data_dir` ([`crate::backup::marker`]) at each scrape.
+    /// A source with no backup reads `0`.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the gauge is already exported.
+    pub fn export_backup_status(&self, data_dir: std::path::PathBuf) -> prometheus::Result<()> {
+        self.registry
+            .register(Box::new(BackupStatusCollector::new(data_dir)))
+    }
+}
+
+/// The `hearth_backup_last_success_timestamp_seconds{source}` gauge, read
+/// from the backup markers at each scrape.
+struct BackupStatusCollector {
+    data_dir: std::path::PathBuf,
+    last_success: GaugeVec,
+}
+
+impl BackupStatusCollector {
+    fn new(data_dir: std::path::PathBuf) -> Self {
+        Self {
+            data_dir,
+            last_success: GaugeVec::new(
+                Opts::new(
+                    "hearth_backup_last_success_timestamp_seconds",
+                    "Unix time of the last successful backup, by source (online: POST \
+                     /admin/backup, offline: hearth backup create); 0 if none",
+                ),
+                &["source"],
+            )
+            .expect("metric descriptor is valid"),
+        }
+    }
+}
+
+impl Collector for BackupStatusCollector {
+    fn desc(&self) -> Vec<&Desc> {
+        self.last_success.desc()
+    }
+
+    fn collect(&self) -> Vec<MetricFamily> {
+        use crate::backup::marker::{last_success, BackupSource};
+        for source in BackupSource::ALL {
+            #[allow(clippy::cast_precision_loss)] // exact below 2^53 seconds
+            let secs = last_success(&self.data_dir, source).map_or(0.0, |s| s as f64);
+            self.last_success
+                .with_label_values(&[source.as_str()])
+                .set(secs);
+        }
+        self.last_success.collect()
+    }
+}
+
 /// The `hearth_storage_data_dir_*_bytes` gauges, read at each scrape.
 struct DataDirSpaceCollector {
     data_dir: std::path::PathBuf,

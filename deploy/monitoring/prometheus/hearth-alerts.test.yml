@@ -144,3 +144,44 @@ tests:
             exp_annotations:
               summary: "Hearth bad answers more than 5% of requests with 5xx"
               description: "10% of requests failed with a 5xx status in the last 5 minutes."
+
+  # No backup ever: the gauge reads 0, so the alert fires after 26 h + 30 min.
+  - interval: 1m
+    input_series:
+      - series: 'hearth_backup_last_success_timestamp_seconds{job="hearth",instance="a",source="online"}'
+        values: '0x1700'
+      - series: 'hearth_backup_last_success_timestamp_seconds{job="hearth",instance="a",source="offline"}'
+        values: '0x1700'
+    alert_rule_test:
+      - eval_time: 25h
+        alertname: HearthBackupTooOld
+        exp_alerts: []
+      - eval_time: 28h
+        alertname: HearthBackupTooOld
+        exp_alerts:
+          - exp_labels: {severity: warning, job: hearth}
+            exp_annotations:
+              summary: "No successful Hearth backup for more than 26 hours"
+              description: "The newest backup (online or offline, on any instance) is 1d 4h 0m 0s old. A value of 0 for the metric means that no backup ever completed. Check the backup job."
+
+  # An offline backup at 20 h counts: no alert at 28 h, an alert 26 h later.
+  # A node with no backup (instance b) does not fire while another node has one.
+  - interval: 1m
+    input_series:
+      - series: 'hearth_backup_last_success_timestamp_seconds{job="hearth",instance="a",source="online"}'
+        values: '0x2900'
+      - series: 'hearth_backup_last_success_timestamp_seconds{job="hearth",instance="a",source="offline"}'
+        values: '0x1199 72000x1700'
+      - series: 'hearth_backup_last_success_timestamp_seconds{job="hearth",instance="b",source="online"}'
+        values: '0x2900'
+    alert_rule_test:
+      - eval_time: 28h
+        alertname: HearthBackupTooOld
+        exp_alerts: []
+      - eval_time: 47h
+        alertname: HearthBackupTooOld
+        exp_alerts:
+          - exp_labels: {severity: warning, job: hearth}
+            exp_annotations:
+              summary: "No successful Hearth backup for more than 26 hours"
+              description: "The newest backup (online or offline, on any instance) is 1d 3h 0m 0s old. A value of 0 for the metric means that no backup ever completed. Check the backup job."

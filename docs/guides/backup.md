@@ -836,6 +836,27 @@ An unverified backup is not a backup. Fold the `verify` step into the same
 scheduled job so a corrupt archive fails the run loudly instead of sitting
 undetected until a restore.
 
+### Monitoring backups
+
+`/metrics` exports `hearth_backup_last_success_timestamp_seconds{source}`: the
+Unix time of the last successful backup of each source. The value is `0` if no
+backup of that source completed.
+
+| `source` | Set by | Stored in |
+|---|---|---|
+| `online` | a `POST /admin/backup` that built its archive | `<data_dir>/backup-last-success-online` |
+| `offline` | a `hearth backup create` that wrote its archive | `<data_dir>/backup-last-success-offline` |
+
+The server reads both files at each scrape, so a backup that the CLI took while
+the server was stopped shows after the next start. The alert
+`HearthBackupTooOld` in `deploy/monitoring/` fires when the newest backup of
+either source is more than 26 hours old (see
+[deploy/monitoring/README.md](../../deploy/monitoring/README.md)).
+
+The `online` time records that the server built the archive. It does not
+record that your job downloaded, verified, signed and stored it. Monitor the
+exit status of the backup job too.
+
 ### Restoring to a new node
 
 ```bash

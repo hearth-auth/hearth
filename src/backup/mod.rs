@@ -67,6 +67,7 @@ mod encryption;
 mod error;
 mod export;
 mod import;
+pub mod marker;
 mod signature;
 mod types;
 
