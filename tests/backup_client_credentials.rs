@@ -106,7 +106,9 @@ fn export_and_restore(
         src.audit_arc(),
         src.rbac_arc(),
         src.webhooks_arc(),
-    );
+    )
+    .snapshot()
+    .expect("snapshot");
     let dek = BackupExporter::generate_dek().expect("dek");
     let realm_manifest = exporter
         .export_realm(realm, &mut writer, &ExportOptions::default(), &dek)

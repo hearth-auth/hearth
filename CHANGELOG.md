@@ -21,9 +21,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   alert (no backup for more than 26 hours) and a backup-age panel on the dashboard.
 
 ### Fixed
+- **Writes continue during a backup** (#643): `POST /admin/backup` no longer holds the node's
+  writes while it reads a realm. Before, every write (sign-ins, token refreshes, sign-ups, admin
+  changes, audit records) waited for the read pass, and once `storage.max_writes_in_flight`
+  writes waited, the next ones failed with `503`. A backup now reads one storage snapshot, taken
+  at its start, for all its realms, so the archive is also one point in time across realms (it
+  was one point in time per realm). While a backup runs, the node keeps the SST files that the
+  snapshot reads, so compaction frees their disk space only when the backup ends. Each backup
+  adds one SST file.
 - **Session cleanup sweep evicts every expired session in one pass**: expired sessions past the
   first page were evicted on later cleanup ticks, so `SessionEvicted` events and session-version
   bumps came late. Such sessions were already refused on read.
+
+### Security
+- **rustix 1.1.6** (RUSTSEC-2026-0486): the lockfiles move from rustix 1.1.4, which the advisory
+  marks unsound in its `xattr` functions, to 1.1.6.
 
 ## [4.9.0] — 2026-11-10
 

@@ -1626,6 +1626,27 @@ impl EmbeddedIdentityEngine {
         // paths refuse unenveloped material (audit 2026-08-28 §4.15#7).
         Self::enroll_store_in_key_encryption(&storage, kek)?;
         let signing_key = Arc::new(Self::load_or_persist_global_signing_key(&storage, kek)?);
+        let mut engine =
+            Self::assemble(storage, clock, config, rbac, audit, dummy_hash, signing_key);
+        engine.purge_legacy_oidc_rsa_keys();
+        engine.seed_system_realm_if_absent()?;
+        engine.restore_attempt_trackers_from_wal()?;
+        engine.control.reload()?;
+        engine.control_worker = engine.control.start();
+        Ok(engine)
+    }
+
+    /// The engine's fields over `storage`, with empty caches and no control
+    /// worker. [`Self::with_rbac`] and [`Self::read_view`] build on it.
+    fn assemble(
+        storage: Arc<dyn StorageEngine>,
+        clock: Arc<dyn Clock>,
+        config: IdentityConfig,
+        rbac: Arc<dyn crate::rbac::RbacEngine>,
+        audit: Arc<dyn AuditEngine>,
+        dummy_hash: String,
+        signing_key: Arc<SigningKey>,
+    ) -> Self {
         let sv_store = Arc::new(SessionVersionStore::new(
             Arc::clone(&storage),
             Arc::clone(&clock),
@@ -1633,7 +1654,7 @@ impl EmbeddedIdentityEngine {
         let caches = control::ControlCaches::new(config.token.claims_cache_max);
         let control =
             control::ControlPlane::new(Arc::clone(&storage), Arc::clone(&clock), caches.clone());
-        let mut engine = Self {
+        Self {
             storage,
             clock,
             config,
@@ -1710,12 +1731,44 @@ impl EmbeddedIdentityEngine {
             agent_rate_monitor: crate::abuse::agent_monitor::AgentRateMonitor::new(
                 crate::abuse::agent_monitor::AgentRateConfig::default(),
             ),
-        };
-        engine.purge_legacy_oidc_rsa_keys();
-        engine.seed_system_realm_if_absent()?;
-        engine.restore_attempt_trackers_from_wal()?;
+        }
+    }
+
+    /// A read-only copy of this engine over `storage`, a storage snapshot
+    /// (#643). `rbac` and `audit` MUST read the same snapshot.
+    ///
+    /// A backup export reads through it while writes continue on the live
+    /// engine. The copy has empty caches, so every read comes from the
+    /// snapshot, the signing key included. It runs no start-up write and no
+    /// control worker.
+    ///
+    /// # Errors
+    ///
+    /// A storage error reading the signing key or the control state, or a
+    /// missing signing key (the snapshot refuses the write that would create
+    /// one).
+    pub fn read_view(
+        &self,
+        storage: Arc<dyn StorageEngine>,
+        rbac: Arc<dyn crate::rbac::RbacEngine>,
+        audit: Arc<dyn AuditEngine>,
+    ) -> Result<Self, IdentityError> {
+        let kek = self
+            .config
+            .key_encryption_key
+            .as_ref()
+            .map(|k| k.as_bytes());
+        let signing_key = Arc::new(Self::load_or_persist_global_signing_key(&storage, kek)?);
+        let engine = Self::assemble(
+            storage,
+            Arc::clone(&self.clock),
+            self.config.clone(),
+            rbac,
+            audit,
+            self.dummy_hash.clone(),
+            signing_key,
+        );
         engine.control.reload()?;
-        engine.control_worker = engine.control.start();
         Ok(engine)
     }
 
@@ -17369,8 +17422,21 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.import_retiring_id_token_rsa_key_inner(realm_id, key, overwrite)
     }
 
-    fn backup_barrier(&self) -> Option<std::sync::Arc<std::sync::RwLock<()>>> {
-        self.storage.backup_barrier()
+    fn read_snapshot(&self) -> Result<Option<Arc<dyn StorageEngine>>, IdentityError> {
+        self.storage
+            .read_snapshot()
+            .map_err(|e| IdentityError::Storage(Box::new(e)))
+    }
+
+    fn read_view(
+        &self,
+        storage: Arc<dyn StorageEngine>,
+        rbac: Arc<dyn crate::rbac::RbacEngine>,
+        audit: Arc<dyn AuditEngine>,
+    ) -> Result<Option<Arc<dyn IdentityEngine>>, IdentityError> {
+        Ok(Some(Arc::new(EmbeddedIdentityEngine::read_view(
+            self, storage, rbac, audit,
+        )?)))
     }
 
     fn initiate_logout(

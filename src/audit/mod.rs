@@ -99,6 +99,17 @@ pub struct AuditImportOutcome {
 }
 
 pub trait AuditEngine: Send + Sync {
+    /// A read-only copy of this engine that reads `storage`, a storage
+    /// snapshot, or `None` if this engine cannot make one (#643). A backup
+    /// export reads through it while writes continue on the live engine.
+    ///
+    /// The default returns `None`: correct for test doubles.
+    fn read_view(
+        &self,
+        _storage: std::sync::Arc<dyn crate::storage::StorageEngine>,
+    ) -> Option<std::sync::Arc<dyn AuditEngine>> {
+        None
+    }
     /// Appends a new audit event to the log.
     ///
     /// The engine assigns the event ID, timestamp, and integrity hash.

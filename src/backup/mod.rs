@@ -73,7 +73,9 @@ mod types;
 
 pub use encryption::{decrypt_archive, encrypt_archive};
 pub use error::BackupError;
-pub use export::{decrypt_bytes, unwrap_dek, wrap_dek, BackupExporter, ExportOptions};
+pub use export::{
+    decrypt_bytes, unwrap_dek, wrap_dek, BackupExporter, ExportOptions, SnapshotExporter,
+};
 pub use import::{
     BackupImporter, Conflict, EntityCounts, ImportOptions, ImportReport, RestoreMode,
 };

@@ -699,44 +699,43 @@ lives in the data directory alongside the data, and it is truncated in place
 when it rotates rather than being retained as history. It is not a recovery
 source beyond the current segment, and it is never shipped off-host.
 
-### Referential consistency — each realm is snapshotted (HEA-2167)
+### Referential consistency — one snapshot per backup
 
 An export reads each entity type at a different moment during the run (users
-first, then credentials, clients, roles, and so on). To stop a concurrent write
-from tearing the archive — for example a role assignment referring to a user
-created *after* `users.ndjson` was written — the exporter holds a per-node
-**consistency barrier** across the whole of a single realm's read pass. Every
-entity in a realm's archive therefore reflects one point in time, and every
+first, then credentials, clients, roles, and so on). A concurrent write could
+tear the archive: for example, a role assignment that refers to a user created
+*after* the export read the users. To prevent this, `POST /admin/backup` takes
+one **storage snapshot** at its start and reads every realm from it (#643).
+The archive is therefore one point in time across all its realms, and every
 reference (an assignment's subject, a credential's user) resolves within the
 same archive.
 
-**Write-availability impact — know this before you schedule backups.** While an
-export holds the barrier, **every write to that node waits** until the export's
-read pass for the current realm completes. This includes writes of data that the
-archive does not carry:
+The snapshot holds every write that was acknowledged before the backup started,
+and no write that started after it. A write that runs at the moment the backup
+starts is in the archive whole or not at all.
 
-- a sign-in, because it writes a session;
-- a token refresh, a sign-up and an MFA enrollment;
-- an admin change and an audit record.
+**Writes continue during a backup.** No write waits for the export: sign-ins,
+token refreshes, sign-ups, admin changes and audit records go on as usual, and
+the backup refuses none of them. Reads continue too. To take the snapshot, the
+server writes its in-memory write buffer to a new SST file. Writes wait for
+that only as long as for any other buffer flush: the swap of the buffer, not
+the file write.
 
-Reads do **not** wait: token validation, introspection, and session and user
-lookups continue during a backup. A request that waits longer than the request
-timeout (`operational.request_timeout_secs`, 30 s by default) fails. The wait
-increases with realm size (the time to read the realm's entities into memory). In
-the [restore drill](#restore-drill), the whole `POST /admin/backup` of a realm with
-1,000,000 users took 9.7 s, and the read pass is only a part of it. For very
-large realms, prefer a low-write window. The barrier
-covers only that read pass: it is released before the realm's sections are
-encrypted, compressed and written to the archive, so a slow or remote backup
-destination does not stall writes. The cost is memory — the exporter holds one
-realm's serialised sections in RAM between the two steps. The barrier is also
-released between realms, so a multi-realm backup does not hold all writes for
-the whole run.
+**Costs.**
 
-This barrier is **single-node**. Multi-node export consistency is not provided
-(clustering is EXPERIMENTAL — see the clustering guide). The offline CLI
-(`hearth backup create` against a stopped node's data directory) has no
-concurrent writer and so is trivially consistent.
+- **Disk.** The snapshot keeps the SST files that it reads. If compaction
+  replaces them during the backup, the server frees their disk space only when
+  the backup ends. Keep free disk space for at least one more copy of the data
+  directory's SST files while a backup runs.
+- **Memory.** The exporter holds one realm's serialised sections in RAM before
+  it encrypts and writes them, as before.
+- **One extra SST file** per backup, which normal compaction merges.
+
+The snapshot is **single-node**: it is the state of the node that runs the
+backup. Multi-node export consistency is not provided (clustering is
+EXPERIMENTAL — see the clustering guide). The offline CLI (`hearth backup
+create` against a stopped node's data directory) reads a snapshot in the same
+way; it has no concurrent writer.
 
 ### Roadmap
 

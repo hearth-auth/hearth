@@ -103,7 +103,9 @@ fn export(h: &common::TestHarness, realms: &[RealmId]) -> NamedTempFile {
         h.audit_arc(),
         h.rbac_arc(),
         h.webhooks_arc(),
-    );
+    )
+    .snapshot()
+    .expect("snapshot");
     let dek = BackupExporter::generate_dek().expect("DEK");
     let mut manifests = Vec::new();
     for realm in realms {
@@ -899,7 +901,9 @@ fn decrypted_members(
         h.audit_arc(),
         h.rbac_arc(),
         h.webhooks_arc(),
-    );
+    )
+    .snapshot()
+    .expect("snapshot");
     let dek = BackupExporter::generate_dek().expect("DEK");
     let manifest = exporter
         .export_realm(realm, &mut writer, &ExportOptions::default(), &dek)

@@ -12,20 +12,22 @@ use tempfile::NamedTempFile;
 use hearth::audit::AuditQuery;
 use hearth::backup::{
     decrypt_archive, encrypt_archive, BackupArchive, BackupExporter, BackupImporter,
-    BackupManifest, ExportOptions, ImportOptions, RestoreMode,
+    BackupManifest, ExportOptions, ImportOptions, RestoreMode, SnapshotExporter,
 };
 use hearth::identity::{CleartextPassword, CreateUserRequest, SessionContext};
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-/// Builds a `BackupExporter` from a harness.
-fn make_exporter(h: &common::TestHarness) -> BackupExporter {
+/// Builds an exporter over one storage snapshot of a harness.
+fn make_exporter(h: &common::TestHarness) -> SnapshotExporter {
     BackupExporter::new(
         h.identity_arc(),
         h.audit_arc(),
         h.rbac_arc(),
         h.webhooks_arc(),
     )
+    .snapshot()
+    .expect("snapshot")
 }
 
 /// Builds a `BackupImporter` from a harness.
@@ -1505,8 +1507,9 @@ fn decrypt_ndjson_lines(
 /// assignment (read late) but not its user (created after the users were read).
 ///
 /// Demonstrated red at `af4edb59` (export paginated live reads with no
-/// snapshot): without the storage consistency barrier this fails within a few
-/// export iterations. With the barrier, every archive resolves.
+/// snapshot): an export that reads the live engines fails this within a few
+/// export iterations. An export that reads one storage snapshot (#643; a
+/// write barrier before it) resolves every archive.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::too_many_lines)] // seed + writer thread + export/verify loop
 async fn export_is_referentially_consistent_under_concurrent_writes() {
@@ -3209,16 +3212,17 @@ async fn a_deleted_realm_is_not_restored_with_a_key_it_revoked() {
     }
 }
 
-// ── export barrier scope (audit GA 2026-09-28 M4) ─────────────────────────────
+// ── writes during the archive I/O (audit GA 2026-09-28 M4) ────────────────────
 
-/// M4: an export must hold the storage write barrier only for its consistent
-/// read pass, not while it encrypts, compresses and writes the archive.
+/// M4: no write may wait while an export encrypts, compresses and writes the
+/// archive.
 ///
 /// The archive is written into a named pipe whose reader stops reading after
 /// the first byte, so the export stalls mid-write — the shape of a slow or
 /// full backup destination. A write issued meanwhile must complete. Before the
-/// fix the export held `backup_barrier.write()` until it returned, so every
+/// M4 fix the export held a storage write barrier until it returned, so every
 /// login, refresh and audit append on the node blocked behind the archive I/O.
+/// Since #643 the export holds no barrier at all: it reads a snapshot.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn export_releases_the_write_barrier_before_writing_the_archive() {
@@ -3284,6 +3288,7 @@ async fn export_releases_the_write_barrier_before_writing_the_archive() {
             let mut writer = BackupArchive::create(&fifo).expect("archive on the pipe");
             let dek = BackupExporter::generate_dek().expect("dek");
             BackupExporter::new(identity, audit, rbac, webhooks)
+                .snapshot()?
                 .export_realm(&realm, &mut writer, &ExportOptions::default(), &dek)
                 .map(|_| ())
         })
@@ -3325,8 +3330,7 @@ async fn export_releases_the_write_barrier_before_writing_the_archive() {
 
     assert!(
         wrote_while_stalled,
-        "a write blocked while the export was stalled writing its archive: the export held \
-         the storage write barrier through encryption and archive I/O"
+        "a write blocked while the export was stalled writing its archive"
     );
 }
 
@@ -3448,19 +3452,28 @@ async fn restore_keeps_revoked_jtis_and_blocked_dpop_keys() {
     );
 }
 
-// ── export vs a saturated blocking pool (GA audit 3 F-7) ─────────────────────
+// ── writes during an export (#643; GA audit 3 F-7) ───────────────────────────
 
-/// F-7: an export holds the storage write barrier through its read pass, and
-/// in `hearth serve` every read goes through the `ClusterStorageAdapter`.
-/// Each write that arrives meanwhile parks a blocking-pool thread on that
-/// barrier. The adapter served each read by hopping to the same blocking pool
-/// (`spawn_blocking`), so once parked writers filled the pool the export's
-/// next read waited for a thread that only the export could free: the whole
-/// server stopped, for ever, while `/healthz` kept answering 200.
-mod export_under_blocking_pool_pressure {
+/// #643: an export reads one storage snapshot, so no write waits for it.
+///
+/// Before, the export held a storage write barrier through its read pass.
+/// Every write that arrived meanwhile waited for the whole pass. In `hearth
+/// serve` the writes go through the `ClusterStorageAdapter`, so once
+/// `storage.max_writes_in_flight` writes waited, the adapter refused the next
+/// ones: logins and refreshes failed while a backup ran. The waiting writes
+/// also held blocking-pool threads, which once stopped the whole server
+/// (GA audit 3 F-7).
+///
+/// The test parks the export inside its read pass and writes meanwhile from
+/// two threads, with a write limit of 2 and a blocking pool of 4 threads.
+/// Every write must finish, without a refusal, while the export is still
+/// parked. A user that
+/// is created meanwhile must not be in the archive: the archive is the state
+/// at the start of the export.
+mod writes_during_an_export {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{mpsc, Arc, Mutex};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
     use hearth::backup::{BackupArchive, BackupExporter, ExportOptions};
@@ -3476,18 +3489,17 @@ mod export_under_blocking_pool_pressure {
     };
 
     const WAIT: Duration = Duration::from_secs(20);
+    const WRITES_PER_WRITER: usize = 8;
+    const USERS: usize = 5;
 
-    /// Forwards every call to `inner`, but holds the first read issued while
-    /// armed until the test releases it — a known point inside the export's
-    /// read pass, with the barrier held.
-    struct PauseFirstRead {
-        inner: Arc<dyn StorageEngine>,
+    /// The pause point that every copy of [`PauseFirstRead`] shares.
+    struct Gate {
         armed: AtomicBool,
         entered: Mutex<Option<mpsc::Sender<()>>>,
         release: Mutex<Option<mpsc::Receiver<()>>>,
     }
 
-    impl PauseFirstRead {
+    impl Gate {
         fn pause_if_armed(&self) {
             if !self.armed.swap(false, Ordering::SeqCst) {
                 return;
@@ -3502,9 +3514,17 @@ mod export_under_blocking_pool_pressure {
         }
     }
 
+    /// Forwards every call to `inner`, but holds the first read issued while
+    /// the gate is armed until the test releases it. A snapshot of it is
+    /// gated by the same gate, so the export parks wherever it reads.
+    struct PauseFirstRead {
+        inner: Arc<dyn StorageEngine>,
+        gate: Arc<Gate>,
+    }
+
     impl StorageEngine for PauseFirstRead {
         fn get(&self, realm_id: &RealmId, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
-            self.pause_if_armed();
+            self.gate.pause_if_armed();
             self.inner.get(realm_id, key)
         }
 
@@ -3516,13 +3536,22 @@ mod export_under_blocking_pool_pressure {
             self.inner.delete(realm_id, key)
         }
 
+        fn write_batch(
+            &self,
+            realm_id: &RealmId,
+            puts: &[(Vec<u8>, Vec<u8>)],
+            deletes: &[Vec<u8>],
+        ) -> Result<(), StorageError> {
+            self.inner.write_batch(realm_id, puts, deletes)
+        }
+
         fn scan(
             &self,
             realm_id: &RealmId,
             start: &[u8],
             end: &[u8],
         ) -> Result<Vec<ScanEntry>, StorageError> {
-            self.pause_if_armed();
+            self.gate.pause_if_armed();
             self.inner.scan(realm_id, start, end)
         }
 
@@ -3537,6 +3566,15 @@ mod export_under_blocking_pool_pressure {
         fn complete_snapshot_restore(&self) -> Result<(), StorageError> {
             self.inner.complete_snapshot_restore()
         }
+
+        fn read_snapshot(&self) -> Result<Option<Arc<dyn StorageEngine>>, StorageError> {
+            Ok(self.inner.read_snapshot()?.map(|snapshot| {
+                Arc::new(Self {
+                    inner: snapshot,
+                    gate: Arc::clone(&self.gate),
+                }) as Arc<dyn StorageEngine>
+            }))
+        }
     }
 
     /// Runs `f` on the runtime's blocking pool, where the storage adapter may
@@ -3550,26 +3588,58 @@ mod export_under_blocking_pool_pressure {
             let _ = tx.send(f());
         });
         rx.recv_timeout(WAIT)
-            .map_err(|_| "a setup step on the blocking pool never finished".to_string())
+            .map_err(|_| "a step on the blocking pool never finished".to_string())
     }
 
     struct Wiring {
         storage: Arc<dyn StorageEngine>,
+        identity: Arc<dyn IdentityEngine>,
         exporter: BackupExporter,
-        gate: Arc<PauseFirstRead>,
+        gate: Arc<Gate>,
         realm: RealmId,
     }
 
-    /// `serve`'s wiring: identity, RBAC and audit over one
-    /// `ClusterStorageAdapter` (single node). The exporter's RBAC engine reads
-    /// through `PauseFirstRead`, which forwards to that same adapter.
-    fn wire(data_dir: std::path::PathBuf, users: usize) -> Result<Wiring, String> {
+    fn create_user(
+        identity: &dyn IdentityEngine,
+        realm: &RealmId,
+        email: String,
+    ) -> Result<(), String> {
+        identity
+            .create_user(
+                realm,
+                &CreateUserRequest {
+                    email,
+                    display_name: "Pool".into(),
+                    first_name: "Pool".into(),
+                    last_name: "User".into(),
+                    attributes: Default::default(),
+                },
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    /// `serve`'s wiring with a write limit of 2: identity, RBAC, audit and
+    /// webhooks over one `ClusterStorageAdapter` (single node), seen through
+    /// `PauseFirstRead`.
+    fn wire(data_dir: std::path::PathBuf) -> Result<Wiring, String> {
         let inner = Arc::new(
             EmbeddedStorageEngine::open(StorageConfig::dev(data_dir)).map_err(|e| e.to_string())?,
         );
-        let storage: Arc<dyn StorageEngine> = Arc::new(ClusterStorageAdapter::new(Arc::new(
-            ClusterEngine::single_node(inner),
-        )));
+        let adapter: Arc<dyn StorageEngine> =
+            Arc::new(ClusterStorageAdapter::with_max_writes_in_flight(
+                Arc::new(ClusterEngine::single_node(inner)),
+                2,
+            ));
+        let gate = Arc::new(Gate {
+            armed: AtomicBool::new(false),
+            entered: Mutex::new(None),
+            release: Mutex::new(None),
+        });
+        let storage: Arc<dyn StorageEngine> = Arc::new(PauseFirstRead {
+            inner: Arc::clone(&adapter),
+            gate: Arc::clone(&gate),
+        });
         let clock = Arc::new(SystemClock) as Arc<dyn Clock>;
         let rbac = Arc::new(EmbeddedRbacEngine::new(
             Arc::clone(&storage),
@@ -3579,7 +3649,7 @@ mod export_under_blocking_pool_pressure {
             Arc::clone(&storage),
             Arc::clone(&clock),
         ));
-        let identity = Arc::new(
+        let identity: Arc<dyn IdentityEngine> = Arc::new(
             EmbeddedIdentityEngine::with_rbac(
                 Arc::clone(&storage),
                 Arc::clone(&clock),
@@ -3601,63 +3671,38 @@ mod export_under_blocking_pool_pressure {
             .id()
             .clone();
         rbac.seed_realm(&realm).map_err(|e| e.to_string())?;
-        for i in 0..users {
-            identity
-                .create_user(
-                    &realm,
-                    &CreateUserRequest {
-                        email: format!("f7-{i}@pool.example"),
-                        display_name: "Pool".into(),
-                        first_name: "Pool".into(),
-                        last_name: "User".into(),
-                        attributes: Default::default(),
-                    },
-                )
-                .map_err(|e| e.to_string())?;
+        for i in 0..USERS {
+            create_user(&*identity, &realm, format!("f7-{i}@pool.example"))?;
         }
-        let gate = Arc::new(PauseFirstRead {
-            inner: Arc::clone(&storage),
-            armed: AtomicBool::new(false),
-            entered: Mutex::new(None),
-            release: Mutex::new(None),
-        });
-        let export_rbac = Arc::new(EmbeddedRbacEngine::new(
-            Arc::clone(&gate) as Arc<dyn StorageEngine>,
-            clock,
-        ));
         let exporter = BackupExporter::new(
-            identity as Arc<dyn IdentityEngine>,
+            Arc::clone(&identity),
             audit,
-            export_rbac as Arc<dyn RbacEngine>,
+            rbac as Arc<dyn RbacEngine>,
             Arc::new(hearth::webhook::EmbeddedWebhookEngine::new(
                 Arc::clone(&storage),
-                Arc::new(hearth::core::SystemClock),
+                clock,
             )),
         );
         Ok(Wiring {
-            storage,
+            storage: adapter,
+            identity,
             exporter,
             gate,
             realm,
         })
     }
 
-    /// Returns the exported user count and the number of writes that
-    /// completed, or why the scenario could not finish.
-    #[allow(clippy::too_many_lines)]
-    fn export_while_writers_fill_the_pool(
-        handle: &tokio::runtime::Handle,
-        writers: usize,
-        users: usize,
-    ) -> Result<(u64, usize), String> {
+    /// Returns the exported user count, or why the scenario failed.
+    fn write_while_the_export_is_parked(handle: &tokio::runtime::Handle) -> Result<u64, String> {
         let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
         let data_dir = dir.path().join("data");
         let Wiring {
             storage,
+            identity,
             exporter,
             gate,
             realm,
-        } = on_pool(handle, move || wire(data_dir, users))??;
+        } = on_pool(handle, move || wire(data_dir))??;
 
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel::<()>();
@@ -3674,6 +3719,7 @@ mod export_under_blocking_pool_pressure {
             handle.spawn_blocking(move || {
                 let result = BackupArchive::create(&archive).and_then(|mut writer| {
                     let dek = BackupExporter::generate_dek()?;
+                    let exporter = exporter.snapshot()?;
                     exporter.export_realm(&realm, &mut writer, &ExportOptions::default(), &dek)
                 });
                 let _ = export_tx.send(
@@ -3683,76 +3729,73 @@ mod export_under_blocking_pool_pressure {
                 );
             });
         }
+        // Release the export whatever happens below, so a failure never
+        // leaves it parked.
+        let release = ReleaseOnDrop(Some(release_tx));
         entered_rx
             .recv_timeout(WAIT)
-            .map_err(|_| "the export never reached its RBAC read pass".to_string())?;
-        let barrier = storage
-            .backup_barrier()
-            .ok_or("the adapter exposes no backup barrier")?;
-        if barrier.try_read().is_ok() {
-            return Err("precondition: the export does not hold the write barrier".into());
-        }
+            .map_err(|_| "the export never reached its read pass".to_string())?;
 
-        // Writers park on the barrier, each holding blocking-pool threads.
+        // Two writers, the write limit: the limit refuses no write of theirs
+        // unless writes wait for the export.
         let (write_tx, write_rx) = mpsc::channel();
-        for i in 0..writers {
-            let (storage, realm, tx) = (Arc::clone(&storage), realm.clone(), write_tx.clone());
+        for writer in 0..2 {
+            let (storage, identity, realm, tx) = (
+                Arc::clone(&storage),
+                Arc::clone(&identity),
+                realm.clone(),
+                write_tx.clone(),
+            );
             handle.spawn_blocking(move || {
-                let key = format!("f7/writer/{i}");
-                let _ = tx.send(storage.put(&realm, key.as_bytes(), b"v"));
+                for i in 0..WRITES_PER_WRITER {
+                    let key = format!("f7/writer/{writer}/{i}");
+                    let put = storage
+                        .put(&realm, key.as_bytes(), b"v")
+                        .map_err(|e| e.to_string());
+                    if tx.send(put).is_err() {
+                        return;
+                    }
+                }
+                if writer == 0 {
+                    let _ = tx.send(create_user(&*identity, &realm, "late@pool.example".into()));
+                }
             });
         }
         drop(write_tx);
-
-        // Wait until no blocking-pool thread is left: a no-op task stops
-        // being picked up.
-        let deadline = Instant::now() + WAIT;
-        loop {
-            let (probe_tx, probe_rx) = mpsc::channel();
-            handle.spawn_blocking(move || {
-                let _ = probe_tx.send(());
-            });
-            if probe_rx.recv_timeout(Duration::from_millis(250)).is_err() {
-                break;
-            }
-            if Instant::now() > deadline {
-                return Err("precondition: the writers never filled the blocking pool".into());
-            }
-        }
-        if write_rx.try_recv().is_ok() {
-            return Err("precondition: a write completed while the export held the barrier".into());
-        }
-
-        let _ = release_tx.send(());
-        let users = export_rx
-            .recv_timeout(WAIT)
-            .map_err(|_| {
-                "DEADLOCK: the export never finished its read pass once writers parked on its \
-                 barrier filled the blocking pool — its next storage read queued for a pool \
-                 thread that only the export itself could free"
-                    .to_string()
-            })?
-            .map_err(|e| format!("export failed: {e}"))?;
-
-        let mut completed = 0;
-        for _ in 0..writers {
+        for _ in 0..=2 * WRITES_PER_WRITER {
             write_rx
                 .recv_timeout(WAIT)
-                .map_err(|_| "a write parked on the barrier never completed".to_string())?
-                .map_err(|e| format!("a parked write failed: {e}"))?;
-            completed += 1;
+                .map_err(|_| {
+                    "a write did not finish while the export was in its read pass".to_string()
+                })?
+                .map_err(|e| format!("a write failed while the export ran: {e}"))?;
         }
-        Ok((users, completed))
+        if export_rx.try_recv().is_ok() {
+            return Err("precondition: the export finished before it was released".into());
+        }
+
+        drop(release);
+        export_rx
+            .recv_timeout(WAIT)
+            .map_err(|_| "the export never finished once released".to_string())?
+            .map_err(|e| format!("export failed: {e}"))
+    }
+
+    struct ReleaseOnDrop(Option<mpsc::Sender<()>>);
+
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            if let Some(tx) = self.0.take() {
+                let _ = tx.send(());
+            }
+        }
     }
 
     #[test]
-    fn export_completes_while_writers_parked_on_its_barrier_fill_the_blocking_pool() {
-        const WRITERS: usize = 16;
-        const USERS: usize = 5;
+    fn writes_are_neither_refused_nor_held_while_an_export_reads() {
         let (done_tx, done_rx) = mpsc::channel();
-        // The runtime lives on its own thread so a deadlock is reported as a
-        // failure instead of wedging the test process. 2 workers + 4 blocking
-        // threads stands in for the default 512: 16 parked writers exceed it.
+        // The runtime lives on its own thread so a hang is reported as a
+        // failure instead of wedging the test process.
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
@@ -3760,28 +3803,25 @@ mod export_under_blocking_pool_pressure {
                 .enable_all()
                 .build()
                 .expect("runtime");
-            let outcome = export_while_writers_fill_the_pool(rt.handle(), WRITERS, USERS);
+            let outcome = write_while_the_export_is_parked(rt.handle());
             let finished = outcome.is_ok();
             let _ = done_tx.send(outcome);
-            // Dropping a deadlocked runtime blocks for ever, so the verdict is
-            // sent first and a runtime that did not finish is leaked.
+            // Dropping a runtime with a stuck task blocks for ever, so the
+            // verdict is sent first and a runtime that did not finish is leaked.
             if finished {
                 drop(rt);
             } else {
                 std::mem::forget(rt);
             }
         });
-        let (exported_users, completed_writes) = done_rx
+        let exported_users = done_rx
             .recv_timeout(Duration::from_secs(120))
             .expect("the scenario never reported")
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(
             exported_users, USERS as u64,
-            "the archive carries every user that existed when the export began"
-        );
-        assert_eq!(
-            completed_writes, WRITERS,
-            "every write parked on the barrier completes once the export releases it"
+            "the archive holds the users that existed when the export began, and not the \
+             user created during the export"
         );
     }
 }
