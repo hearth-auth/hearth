@@ -24,9 +24,12 @@
 # Shards: in the first run, the mean time of one mutant was 77 s to 121 s
 # on a GitHub-hosted runner (about 80 % of it is the build). With 6 shards,
 # a token-issuance shard took up to 5 hours, too near the 330-minute job
-# limit, so token-issuance now has 8. Each shard then takes at most about
-# 4 hours. The 15 shards run at the same time, in the US Eastern night, and
-# leave 5 of the 20 runners of the GitHub Free plan to PR CI.
+# limit. With 8 shards (run 42826584242), each shard took at most 244
+# minutes. The 13 binaries added to token-issuance (#641) make the build of
+# each mutant about 30 % longer, so token-issuance now has 10 shards, at
+# about 250 minutes each. The 17 shards run at the same time, in the US
+# Eastern night, and leave 3 of the 20 runners of the GitHub Free plan to
+# PR CI.
 #
 # Keys: `files` are cargo-mutants `--file` globs. `re` (optional) are
 # cargo-mutants `--re` regexes on the mutant name; they select functions in a
@@ -53,8 +56,22 @@ tests = [
     "entry_point_invariants",
     "pre_token_webhook",
     "resource_aud_refresh",
+    # Each of these catches 3 or more survivors of the first run (#641).
+    "access_token_authorization",
+    "dpop_token_endpoint_jti_order",
+    "ga_client_lifecycle",
+    "ga_introspection_audience",
+    "ga_token_exchange_policy",
+    "introspect_resource_server",
+    "jar",
+    "logout_ends_sso_session",
+    "oidc_issuer_and_logout_claims",
+    "revoke_client_ownership",
+    "token_client_id_claims",
+    "token_exchange_yaml_protected_resources",
+    "userinfo_client_claim_gates",
 ]
-shards = 8
+shards = 10
 survivors = 238
 
 [modules.sessions]
@@ -75,6 +92,8 @@ tests = [
     "hea_1752_session_invalidation",
     "logout_ends_sso_session",
     "token_session_mfa_proof",
+    # Catches 4 survivors of the first run (#641).
+    "entry_point_invariants",
 ]
 shards = 2
 survivors = 73

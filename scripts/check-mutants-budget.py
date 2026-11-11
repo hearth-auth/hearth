@@ -73,7 +73,17 @@ import tomllib
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_BUDGET = os.path.join(REPO_ROOT, "ci", "mutants-budget.toml")
 # A nextest filterset: the tests that each mutant runs.
-LIB_TEST_FILTER = "not (kind(lib) and test(/^(storage|cluster)::/))"
+#
+# Not in it:
+# - The storage and cluster lib tests (see mutants_args).
+# - verify_nonexistent_user_takes_comparable_time. It compares two password
+#   checks by wall-clock time, and under the load of a mutants run it fails
+#   for about 1 mutant in 30 that it cannot catch (#641). Each such failure
+#   counts as caught, so it hides survivors at random.
+LIB_TEST_FILTER = (
+    "not (kind(lib) and (test(/^(storage|cluster)::/)"
+    " or test(=identity::engine::tests::verify_nonexistent_user_takes_comparable_time)))"
+)
 
 
 def load_budget(path):
