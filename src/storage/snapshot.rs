@@ -46,7 +46,7 @@ impl SnapshotStorage {
         if start > end {
             return Err(StorageError::InvalidRange);
         }
-        let mut cursors: Vec<Box<dyn KeyCursor + '_>> = Vec::with_capacity(self.readers.len());
+        let mut cursors: Vec<Box<dyn KeyCursor + '_>> = Vec::new();
         for reader in self.readers.iter() {
             cursors.push(Box::new(reader.uncached_cursor(realm_id, start, end)?));
         }
