@@ -27257,6 +27257,350 @@ mod tests {
             .expect("an nbf inside the clock-skew window must be accepted");
     }
 
+    // #641 (cargo-mutants survivors): the edges of the time checks in
+    // `validate_token`, and the issuer check. Each test re-signs a genuine
+    // access token with one claim changed.
+
+    /// A genuine access token's claims, and the engine's current time in
+    /// seconds.
+    fn access_claims_now(
+        engine: &EmbeddedIdentityEngine,
+        realm_id: &RealmId,
+    ) -> (TokenClaims, i64) {
+        let user = create_test_user(engine, realm_id);
+        let session = engine
+            .create_session(realm_id, user.id(), &SessionContext::default())
+            .expect("session");
+        let tokens = engine
+            .issue_tokens(realm_id, user.id(), session.id())
+            .expect("issue tokens");
+        let claims = tokens::decode_claims_unverified(tokens.access_token()).expect("decode");
+        (claims, engine.clock.now().as_micros() / 1_000_000)
+    }
+
+    /// `iat` exactly at the end of the clock-skew window is accepted; one
+    /// second past it is not.
+    #[test]
+    fn validate_token_accepts_iat_at_the_clock_skew_edge() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let (base, now_secs) = access_claims_now(&engine, &realm_id);
+
+        let at_edge = TokenClaims {
+            iat: now_secs + CLOCK_SKEW_SECS,
+            ..base.clone()
+        };
+        engine
+            .validate_token(&realm_id, &resign_for_realm(&engine, &realm_id, &at_edge))
+            .expect("an iat at the clock-skew edge must be accepted");
+
+        let past_edge = TokenClaims {
+            iat: now_secs + CLOCK_SKEW_SECS + 1,
+            ..base
+        };
+        assert!(
+            matches!(
+                engine.validate_token(&realm_id, &resign_for_realm(&engine, &realm_id, &past_edge)),
+                Err(IdentityError::InvalidToken)
+            ),
+            "an iat past the clock-skew window must be rejected"
+        );
+    }
+
+    /// `iat == exp` is coherent and accepted; `iat > exp` is not.
+    #[test]
+    fn validate_token_accepts_iat_equal_to_exp_and_rejects_iat_after_exp() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let (base, now_secs) = access_claims_now(&engine, &realm_id);
+
+        let equal = TokenClaims {
+            iat: now_secs + 10,
+            exp: now_secs + 10,
+            ..base.clone()
+        };
+        engine
+            .validate_token(&realm_id, &resign_for_realm(&engine, &realm_id, &equal))
+            .expect("a token with iat == exp must be accepted");
+
+        let after = TokenClaims {
+            iat: now_secs + 11,
+            exp: now_secs + 10,
+            ..base
+        };
+        assert!(
+            matches!(
+                engine.validate_token(&realm_id, &resign_for_realm(&engine, &realm_id, &after)),
+                Err(IdentityError::InvalidToken)
+            ),
+            "a token with iat after exp must be rejected"
+        );
+    }
+
+    /// `nbf` exactly at the end of the clock-skew window is accepted; one
+    /// second past it is not.
+    #[test]
+    fn validate_token_accepts_nbf_at_the_clock_skew_edge() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let (base, now_secs) = access_claims_now(&engine, &realm_id);
+
+        let at_edge = TokenClaims {
+            nbf: Some(now_secs + CLOCK_SKEW_SECS),
+            ..base.clone()
+        };
+        engine
+            .validate_token(&realm_id, &resign_for_realm(&engine, &realm_id, &at_edge))
+            .expect("an nbf at the clock-skew edge must be accepted");
+
+        let past_edge = TokenClaims {
+            nbf: Some(now_secs + CLOCK_SKEW_SECS + 1),
+            ..base
+        };
+        assert!(
+            matches!(
+                engine.validate_token(&realm_id, &resign_for_realm(&engine, &realm_id, &past_edge)),
+                Err(IdentityError::InvalidToken)
+            ),
+            "an nbf past the clock-skew window must be rejected"
+        );
+    }
+
+    /// A token signed with the realm's key but naming a foreign issuer is
+    /// rejected (RFC 7519 §4.1.1). The configured `token.issuer` is accepted.
+    #[test]
+    fn validate_token_rejects_a_foreign_issuer() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let (base, _now_secs) = access_claims_now(&engine, &realm_id);
+
+        let configured = TokenClaims {
+            iss: engine.config.token.issuer.clone(),
+            ..base.clone()
+        };
+        engine
+            .validate_token(
+                &realm_id,
+                &resign_for_realm(&engine, &realm_id, &configured),
+            )
+            .expect("the configured token.issuer must be accepted");
+
+        let foreign = TokenClaims {
+            iss: "https://foreign.example".to_string(),
+            ..base
+        };
+        assert!(
+            matches!(
+                engine.validate_token(&realm_id, &resign_for_realm(&engine, &realm_id, &foreign)),
+                Err(IdentityError::InvalidToken)
+            ),
+            "a token that names a foreign issuer must be rejected"
+        );
+    }
+
+    /// A genuine refresh token for a new user and session.
+    fn genuine_refresh_token(engine: &EmbeddedIdentityEngine, realm_id: &RealmId) -> String {
+        let user = create_test_user(engine, realm_id);
+        let session = engine
+            .create_session(realm_id, user.id(), &SessionContext::default())
+            .expect("session");
+        engine
+            .issue_tokens(realm_id, user.id(), session.id())
+            .expect("issue tokens")
+            .refresh_token()
+            .to_string()
+    }
+
+    /// The refresh grant applies the same `iat` clock-skew edge as
+    /// `validate_token`. The token is genuine; the clock moves back so that
+    /// its `iat` is just past, then exactly at, the edge. The rejection comes
+    /// from the claim checks, before any rotation state changes.
+    #[test]
+    fn refresh_tokens_accepts_iat_at_the_clock_skew_edge() {
+        let (_dir, engine, clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let refresh = genuine_refresh_token(&engine, &realm_id);
+
+        clock.advance(-(CLOCK_SKEW_SECS + 1) * 1_000_000);
+        assert!(
+            matches!(
+                engine.refresh_tokens(&realm_id, &refresh, None, None),
+                Err(IdentityError::InvalidToken)
+            ),
+            "a refresh token with an iat past the clock-skew window must be rejected"
+        );
+
+        clock.advance(1_000_000);
+        engine
+            .refresh_tokens(&realm_id, &refresh, None, None)
+            .expect("a refresh token with an iat at the clock-skew edge must be accepted");
+    }
+
+    /// The refresh grant accepts `iat == exp` and rejects `iat > exp` at the
+    /// claim checks. A re-signed token does not match the grant family's
+    /// current token, so a token that passes the claim checks is refused
+    /// later as `TokenRevoked`; a token the claim checks refuse is
+    /// `InvalidToken`.
+    #[test]
+    fn refresh_tokens_claim_checks_accept_iat_equal_to_exp_and_reject_iat_after_exp() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let base = tokens::decode_claims_unverified(&genuine_refresh_token(&engine, &realm_id))
+            .expect("decode");
+        let now_secs = engine.clock.now().as_micros() / 1_000_000;
+
+        let after = TokenClaims {
+            iat: now_secs + 11,
+            exp: now_secs + 10,
+            ..base.clone()
+        };
+        let after = resign_for_realm(&engine, &realm_id, &after);
+        assert!(
+            matches!(
+                engine.refresh_tokens(&realm_id, &after, None, None),
+                Err(IdentityError::InvalidToken)
+            ),
+            "a refresh token with iat after exp must fail the claim checks"
+        );
+
+        let equal = TokenClaims {
+            iat: now_secs + 10,
+            exp: now_secs + 10,
+            ..base
+        };
+        let equal = resign_for_realm(&engine, &realm_id, &equal);
+        assert!(
+            matches!(
+                engine.refresh_tokens(&realm_id, &equal, None, None),
+                Err(IdentityError::TokenRevoked)
+            ),
+            "a refresh token with iat == exp must pass the claim checks and reach the \
+             grant-family check"
+        );
+    }
+
+    /// RFC 7662 `active` for `claims`, re-signed with the realm key and
+    /// introspected by `client` (or by no client).
+    fn introspect_resigned(
+        engine: &EmbeddedIdentityEngine,
+        realm_id: &RealmId,
+        claims: &TokenClaims,
+        client: Option<&ClientId>,
+    ) -> bool {
+        use crate::identity::oidc::TokenIntrospectionRequest;
+
+        engine
+            .introspect_token(
+                realm_id,
+                &TokenIntrospectionRequest {
+                    token: resign_for_realm(engine, realm_id, claims),
+                    token_type_hint: Some("access_token".to_string()),
+                    introspecting_client_id: client.cloned(),
+                },
+            )
+            .expect("introspection")
+            .active
+    }
+
+    /// Introspection applies the `iat` and `nbf` clock-skew edges and the
+    /// `iat <= exp` coherence rule exactly as `validate_token` does.
+    #[test]
+    fn introspection_applies_the_time_claim_edges() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let (base, now_secs) = access_claims_now(&engine, &realm_id);
+        let active = |claims: &TokenClaims| introspect_resigned(&engine, &realm_id, claims, None);
+
+        let iat_at_edge = TokenClaims {
+            iat: now_secs + CLOCK_SKEW_SECS,
+            ..base.clone()
+        };
+        assert!(
+            active(&iat_at_edge),
+            "an iat at the clock-skew edge must be active"
+        );
+        let iat_past_edge = TokenClaims {
+            iat: now_secs + CLOCK_SKEW_SECS + 1,
+            ..base.clone()
+        };
+        assert!(
+            !active(&iat_past_edge),
+            "an iat past the clock-skew window must be inactive"
+        );
+
+        let iat_equal_exp = TokenClaims {
+            iat: now_secs + 10,
+            exp: now_secs + 10,
+            ..base.clone()
+        };
+        assert!(
+            active(&iat_equal_exp),
+            "a token with iat == exp must be active"
+        );
+        let iat_after_exp = TokenClaims {
+            iat: now_secs + 11,
+            exp: now_secs + 10,
+            ..base.clone()
+        };
+        assert!(
+            !active(&iat_after_exp),
+            "a token with iat after exp must be inactive"
+        );
+
+        let nbf_at_edge = TokenClaims {
+            nbf: Some(now_secs + CLOCK_SKEW_SECS),
+            ..base.clone()
+        };
+        assert!(
+            active(&nbf_at_edge),
+            "an nbf at the clock-skew edge must be active"
+        );
+        let nbf_past_edge = TokenClaims {
+            nbf: Some(now_secs + CLOCK_SKEW_SECS + 1),
+            ..base
+        };
+        assert!(
+            !active(&nbf_past_edge),
+            "an nbf past the clock-skew window must be inactive"
+        );
+    }
+
+    /// RFC 7662 §2: a client may introspect a token whose `azp` names it,
+    /// even when `aud` does not, and may not introspect a token whose `azp`
+    /// names another client.
+    #[test]
+    fn introspection_by_a_client_follows_the_token_azp() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let (base, _now_secs) = access_claims_now(&engine, &realm_id);
+        let caller = ClientId::generate();
+        let other = ClientId::generate();
+        assert!(
+            !base
+                .aud
+                .contains(tokens::issued_client_id(&caller).as_str()),
+            "the caller must not be in aud, or the azp rule is not what decides"
+        );
+
+        let own = TokenClaims {
+            azp: Some(tokens::issued_client_id(&caller)),
+            ..base.clone()
+        };
+        assert!(
+            introspect_resigned(&engine, &realm_id, &own, Some(&caller)),
+            "the client that azp names must see the token active"
+        );
+
+        let foreign = TokenClaims {
+            azp: Some(tokens::issued_client_id(&other)),
+            ..base
+        };
+        assert!(
+            !introspect_resigned(&engine, &realm_id, &foreign, Some(&caller)),
+            "a client that neither azp nor aud names must see the token inactive"
+        );
+    }
+
     /// Introspection is a token-accepting path too: RFC 7662 `active` must be
     /// false for a token that has not yet become valid.
     #[test]
