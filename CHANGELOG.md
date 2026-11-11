@@ -29,6 +29,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   was one point in time per realm). While a backup runs, the node keeps the SST files that the
   snapshot reads, so compaction frees their disk space only when the backup ends. Each backup
   adds one SST file.
+- **`prompt=login` and `max_age` force a new sign-in, and ID tokens carry `auth_time`** (#782):
+  a browser authorization request with `prompt=login`, or with a `max_age` that is less than the
+  time since the last sign-in, now shows the sign-in page before it issues a code (OIDC Core
+  §3.1.2.1). Before, Hearth issued the code from the current session. With `prompt=none` such a
+  request gets `login_required`. The new sign-in opens a new session and revokes the old one, as
+  every sign-in does. Every ID token from a browser sign-in now has `auth_time`, the time the
+  sign-in (with any second factor) completed. A `max_age` that is not a non-negative integer gets
+  `invalid_request`. `max_age` is read from the query string only, not from a request object or
+  a pushed request.
 - **Session cleanup sweep evicts every expired session in one pass**: expired sessions past the
   first page were evicted on later cleanup ticks, so `SessionEvicted` events and session-version
   bumps came late. Such sessions were already refused on read.

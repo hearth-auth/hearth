@@ -667,13 +667,18 @@ impl EmbeddedIdentityEngine {
         // non-interactive surfaces, the browser session otherwise. A browser
         // session that is gone or is not the requesting user's is not
         // recorded: logout must never end another user's session.
-        let authorizing_session_id = match (bearer_session, browser_session) {
-            (Some(sid), _) => Some(sid),
+        // The browser session also gives the code its `auth_time`: the time
+        // its interactive sign-in completed (#782). A bearer token's session
+        // is not a sign-in, so its code has none.
+        let (authorizing_session_id, auth_time) = match (bearer_session, browser_session) {
+            (Some(sid), _) => (Some(sid), None),
             (None, Some(sid)) => self
                 .get_session(realm_id, sid)?
                 .filter(|s| s.user_id() == &request.user_id)
-                .map(|s| s.id().clone()),
-            (None, None) => None,
+                .map_or((None, None), |s| {
+                    (Some(s.id().clone()), Some(s.created_at()))
+                }),
+            (None, None) => (None, None),
         };
 
         let stored_code = StoredAuthorizationCode {
@@ -694,6 +699,7 @@ impl EmbeddedIdentityEngine {
             org_id,
             authorizing_session_id,
             issued_session_id: None,
+            auth_time,
         };
 
         // 9. Persist the code
@@ -951,7 +957,7 @@ impl EmbeddedIdentityEngine {
             &access_groups,
             &access_permissions,
         )?;
-        let (id_roles, id_groups, id_permissions, id_custom) = self.apply_claim_profile(
+        let (id_roles, id_groups, id_permissions, mut id_custom) = self.apply_claim_profile(
             realm_id,
             &user,
             &client,
@@ -961,6 +967,16 @@ impl EmbeddedIdentityEngine {
             ClaimTarget::IdToken,
         );
         validate_claim_payload(ClaimTarget::IdToken, &id_roles, &id_groups, &id_permissions)?;
+        // OIDC Core §2: `auth_time` is the time of the end-user's sign-in, in
+        // seconds. It is REQUIRED for a request with `max_age`; Hearth sends
+        // it whenever a browser sign-in is behind the code (#782). A claim
+        // profile cannot set it: it is a reserved claim.
+        if let Some(auth_time) = stored_code.auth_time {
+            id_custom.insert(
+                "auth_time".to_string(),
+                serde_json::Value::from(auth_time.as_micros().div_euclid(1_000_000)),
+            );
+        }
 
         // 8c. Pre-token enrichment webhook: fire before signing, merge extra claims
         //     into the access token's custom map.
