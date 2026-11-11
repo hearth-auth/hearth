@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Added
+- **Rotation of `HEARTH_KEK`** (#649): to rotate the key-encryption key, restart Hearth once
+  with the new value in `HEARTH_KEK` and the old value in the new `HEARTH_PREVIOUS_KEK`. Before
+  the engines start, Hearth wraps every stored key again under the new KEK (signing, retiring,
+  SAML and ID-token keys, and the MFA data key, DPoP nonce secret and audit chain key of each
+  realm). The keys keep their values. A wrong `HEARTH_PREVIOUS_KEK` changes nothing, and a
+  changed `HEARTH_KEK` without it now fails at startup with an error that names it. Single node
+  only. The procedure is in `docs/guides/config-migration.md`.
+
 ### Changed
 - **The audit list shows the newest events first** (#644): `GET /admin/audit`,
   `GET /admin/api/realms/{realm}/audit/events` and the admin audit page now return the newest
@@ -35,13 +44,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   Each backup writes its time to a small file in `storage.data_dir`, so a backup that the CLI took
   while the server was stopped also counts. `deploy/monitoring/` adds the `HearthBackupTooOld`
   alert (no backup for more than 26 hours) and a backup-age panel on the dashboard.
-- **Rotation of `HEARTH_KEK`** (#649): to rotate the key-encryption key, restart Hearth once
-  with the new value in `HEARTH_KEK` and the old value in the new `HEARTH_PREVIOUS_KEK`. Before
-  the engines start, Hearth wraps every stored key again under the new KEK (signing, retiring,
-  SAML and ID-token keys, and the MFA data key, DPoP nonce secret and audit chain key of each
-  realm). The keys keep their values. A wrong `HEARTH_PREVIOUS_KEK` changes nothing, and a
-  changed `HEARTH_KEK` without it now fails at startup with an error that names it. Single node
-  only. The procedure is in `docs/guides/config-migration.md`.
 
 ### Fixed
 - **Writes continue during a backup** (#643): `POST /admin/backup` no longer holds the node's
