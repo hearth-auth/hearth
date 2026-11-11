@@ -28,6 +28,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   page no longer reads every user of the realm. A build with this change refuses a data
   directory of store format 1 at startup: restore a backup archive into a new, empty data
   directory (see `docs/guides/upgrading.md`).
+- **The audit list shows the newest events first** (#644): `GET /admin/audit`,
+  `GET /admin/api/realms/{realm}/audit/events` and the admin audit page now return the newest
+  events, newest first, when the request has no start time. They read back in growing time
+  windows (1 hour, 1 day, 7 days, 30 days, 365 days, then the rest of the log) and stop when the
+  page is full, so a large audit log no longer slows the page or takes memory from sign-ins.
+  Before, they loaded the whole log and returned its oldest events. With a start time, events
+  still come oldest first from it, and the read now stops when the page is full.
 
 ### Fixed
 - **Writes continue during a backup** (#643): `POST /admin/backup` no longer holds the node's
@@ -38,9 +45,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   was one point in time per realm). While a backup runs, the node keeps the SST files that the
   snapshot reads, so compaction frees their disk space only when the backup ends. Each backup
   adds one SST file.
+- **Audit queries apply every filter**: a query with both an actor and an action filter ignored
+  the action, and a query with an actor or action filter and an `agent_id` or `tool` filter
+  counted events toward the limit before it filtered them, so a page could be short.
 - **Session cleanup sweep evicts every expired session in one pass**: expired sessions past the
   first page were evicted on later cleanup ticks, so `SessionEvicted` events and session-version
   bumps came late. Such sessions were already refused on read.
+
+### Security
+- **rustix 1.1.6** (RUSTSEC-2026-0486): the lockfiles move from rustix 1.1.4, which the advisory
+  marks unsound in its `xattr` functions, to 1.1.6.
 
 ## [4.9.0] — 2026-11-10
 

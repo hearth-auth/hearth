@@ -118,6 +118,19 @@ pub(crate) fn event_scan_end(timestamp: Timestamp) -> Vec<u8> {
     event_scan_start(timestamp)
 }
 
+/// Returns `prefix` followed by the 8 big-endian bytes of `timestamp`.
+///
+/// Event keys and index keys both put the timestamp right after their
+/// prefix, so this key sorts before every entry at or after `timestamp` and
+/// after every entry before it. It is the inclusive start, or the exclusive
+/// end, of a time window over that prefix.
+pub(crate) fn time_bound(prefix: &[u8], timestamp: Timestamp) -> Vec<u8> {
+    let mut key = Vec::with_capacity(prefix.len() + 8);
+    key.extend_from_slice(prefix);
+    key.extend_from_slice(&timestamp_bytes(timestamp));
+    key
+}
+
 /// Encodes the actor index key for an audit event.
 ///
 /// Format: `audit:actor:{actor}:{ts_8be}{uuid_16raw}`
