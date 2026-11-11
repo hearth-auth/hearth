@@ -4980,17 +4980,24 @@ impl EmbeddedIdentityEngine {
             let page = self
                 .list_sessions_by_realm(realm_id, &crate::core::PageRequest::new(offset, batch))?;
             let n = page.items.len() as u64;
+            let mut evicted_in_page: u64 = 0;
             for session in &page.items {
                 if session.is_valid(now) && session.is_policy_expired(now) {
                     if self.evict_session_by_policy(realm_id, session, now).is_ok() {
-                        evicted += 1;
+                        evicted_in_page += 1;
                     }
                 }
             }
+            evicted += evicted_in_page;
             if n == 0 || offset + n >= page.total {
                 break;
             }
-            offset += n;
+            // An evicted session is revoked, and the listing leaves revoked
+            // sessions out: the sessions after this page move up by the
+            // number evicted in it. Advancing by the full page length skipped
+            // them until a later sweep. A session that another caller revokes
+            // between two pages can still be skipped; the next sweep evicts it.
+            offset += n - evicted_in_page;
         }
         Ok(evicted)
     }
@@ -22781,6 +22788,87 @@ mod tests {
             .expect("issue tokens");
         let claims = tokens::decode_claims_unverified(tokens.access_token()).expect("decode");
         assert_eq!(claims.sv, Some(bumped));
+    }
+
+    /// One sweep evicts every policy-expired session in the realm, also past
+    /// the first page. Each eviction drops a session from the listing, so
+    /// the sweep must not skip the sessions that move up into the page
+    /// it already read.
+    #[test]
+    fn sweep_expired_sessions_evicts_every_expired_session_past_the_first_page() {
+        let (_dir, engine, clock) = setup_engine();
+        let realm_id = engine
+            .create_realm(&CreateRealmRequest {
+                name: format!("test-realm-{}", uuid::Uuid::new_v4()),
+                config: Some(RealmConfig {
+                    absolute_timeout_secs: Some(600),
+                    ..RealmConfig::default()
+                }),
+            })
+            .expect("create realm")
+            .id()
+            .clone();
+        let user = create_test_user(&engine, &realm_id);
+        let count = 2 * u64::from(crate::core::MAX_PAGE_LIMIT) + 1;
+        for _ in 0..count {
+            engine
+                .create_session(&realm_id, user.id(), &SessionContext::default())
+                .expect("create session");
+        }
+
+        clock.advance(600 * 1_000_000);
+        assert_eq!(
+            engine.sweep_expired_sessions(&realm_id).expect("sweep"),
+            count,
+            "one sweep must evict every policy-expired session"
+        );
+        let left = engine
+            .list_sessions_by_realm(&realm_id, &crate::core::PageRequest::new(0, 1))
+            .expect("list");
+        assert_eq!(left.total, 0, "no policy-expired session may stay live");
+    }
+
+    /// The sweep evicts only the policy-expired sessions, also when live
+    /// sessions sit between them on every page.
+    #[test]
+    fn sweep_expired_sessions_keeps_live_sessions_between_expired_ones() {
+        let (_dir, engine, clock) = setup_engine();
+        let realm_id = engine
+            .create_realm(&CreateRealmRequest {
+                name: format!("test-realm-{}", uuid::Uuid::new_v4()),
+                config: Some(RealmConfig {
+                    absolute_timeout_secs: Some(600),
+                    ..RealmConfig::default()
+                }),
+            })
+            .expect("create realm")
+            .id()
+            .clone();
+        let user = create_test_user(&engine, &realm_id);
+        let each = u64::from(crate::core::MAX_PAGE_LIMIT) + 50;
+        let create = || {
+            for _ in 0..each {
+                engine
+                    .create_session(&realm_id, user.id(), &SessionContext::default())
+                    .expect("create session");
+            }
+        };
+        // Session IDs are random, so the older and the newer sessions
+        // interleave in the listing.
+        create();
+        clock.advance(300 * 1_000_000);
+        create();
+        clock.advance(300 * 1_000_000);
+
+        assert_eq!(
+            engine.sweep_expired_sessions(&realm_id).expect("sweep"),
+            each,
+            "the sweep must evict exactly the older, policy-expired sessions"
+        );
+        let left = engine
+            .list_sessions_by_realm(&realm_id, &crate::core::PageRequest::new(0, 1))
+            .expect("list");
+        assert_eq!(left.total, each, "the newer sessions must stay live");
     }
 
     // ===== Delete cascades to sessions =====
