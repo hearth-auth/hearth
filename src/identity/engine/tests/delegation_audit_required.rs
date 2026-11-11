@@ -24,6 +24,13 @@ fn refuse_delegation(action: &AuditAction) -> Result<(), AuditError> {
 }
 
 impl AuditEngine for FailsDelegationAudit {
+    fn recent(
+        &self,
+        query: &crate::audit::AuditQuery,
+    ) -> Result<Vec<crate::audit::AuditEvent>, crate::audit::AuditError> {
+        self.inner.recent(query)
+    }
+
     fn append(
         &self,
         event: &crate::audit::CreateAuditEvent,

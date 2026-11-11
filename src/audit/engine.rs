@@ -712,6 +712,64 @@ impl EmbeddedAuditEngine {
     }
 }
 
+/// The growing windows of [`AuditEngine::recent`], in microseconds back from
+/// the upper bound: 1 hour, 1 day, 7 days, 30 days and 365 days. The remaining
+/// log is the last window.
+const RECENT_WINDOWS_MICROS: [i64; 5] = [
+    3_600_000_000,
+    86_400_000_000,
+    7 * 86_400_000_000,
+    30 * 86_400_000_000,
+    365 * 86_400_000_000,
+];
+
+/// The number of index entries that the first index read collects before it
+/// reads their events. Each later read doubles it, up to [`INDEX_CHUNK_MAX`],
+/// so a small page reads a small part of the index.
+const INDEX_CHUNK_FIRST: usize = 16;
+
+/// The largest number of index entries that one index read collects.
+const INDEX_CHUNK_MAX: usize = 1024;
+
+/// Where a query reads its events from.
+enum EventSource {
+    /// The primary event keys, `audit:evt:{ts}{seq}{uuid}`.
+    Primary,
+    /// The actor index, `audit:actor:{actor}:{ts}{uuid}`; holds the prefix.
+    ActorIndex(Vec<u8>),
+    /// The action index, `audit:action:{action}:{ts}{uuid}`; holds the prefix.
+    ActionIndex(Vec<u8>),
+}
+
+impl EventSource {
+    /// The actor index when the query names an actor, else the action index
+    /// when it names an action, else the primary keys.
+    fn for_query(query: &AuditQuery) -> Self {
+        if let Some(actor) = &query.actor {
+            Self::ActorIndex(keys::actor_scan_prefix(actor))
+        } else if let Some(action) = &query.action {
+            Self::ActionIndex(keys::action_scan_prefix(action.as_str()))
+        } else {
+            Self::Primary
+        }
+    }
+
+    /// The storage window `[start, end)` that holds this source's entries
+    /// with a timestamp in `[lower, upper)`. A `None` bound is open.
+    fn bounds(&self, lower: Option<Timestamp>, upper: Option<Timestamp>) -> (Vec<u8>, Vec<u8>) {
+        let prefix = match self {
+            Self::Primary => keys::event_scan_prefix(),
+            Self::ActorIndex(p) | Self::ActionIndex(p) => p.clone(),
+        };
+        let start = lower.map_or_else(|| prefix.clone(), |ts| keys::time_bound(&prefix, ts));
+        let end = upper.map_or_else(
+            || keys::prefix_end(&prefix),
+            |ts| keys::time_bound(&prefix, ts),
+        );
+        (start, end)
+    }
+}
+
 impl AuditEngine for EmbeddedAuditEngine {
     /// Drops this realm's cached chain head when the persisted head arrives
     /// from another node (task 26.47).
@@ -1119,49 +1177,68 @@ impl AuditEngine for EmbeddedAuditEngine {
             }
         }
 
-        // Determine if we're scanning by actor, action, or just time range
-        if let Some(ref actor) = query.actor {
-            let mut events = self.query_by_actor(query, actor)?;
-            events = Self::apply_metadata_filters(events, query);
-            return Ok(events);
-        }
-        if let Some(ref action) = query.action {
-            let mut events = self.query_by_action(query, action)?;
-            events = Self::apply_metadata_filters(events, query);
-            return Ok(events);
-        }
-
-        // Default: scan primary event keys by time range
-        let start = match query.start_time {
-            Some(ts) => keys::event_scan_start(ts),
-            None => keys::event_scan_prefix(),
-        };
-        let end = match query.end_time {
-            Some(ts) => keys::event_scan_end(ts),
-            None => keys::prefix_end(&keys::event_scan_prefix()),
-        };
-
-        let entries = self.storage.scan(&query.realm_id, &start, &end)?;
+        let source = EventSource::for_query(query);
+        let limit = query.limit.unwrap_or(usize::MAX);
         let mut events = Vec::new();
-
-        for entry in entries {
-            let event = decode_event(&entry.value)?;
-
-            // Apply agent_id / tool metadata filters before counting toward limit.
-            if !Self::event_matches_metadata_filters(&event, query) {
-                continue;
-            }
-
-            events.push(event);
-
-            if let Some(limit) = query.limit {
+        if limit == 0 {
+            return Ok(events);
+        }
+        self.visit_matching_ascending(
+            query,
+            &source,
+            query.start_time,
+            query.end_time,
+            &mut |event| {
+                events.push(event);
                 if events.len() >= limit {
-                    break;
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
                 }
+            },
+        )?;
+        Ok(events)
+    }
+
+    fn recent(&self, query: &AuditQuery) -> Result<Vec<AuditEvent>, AuditError> {
+        if let (Some(start), Some(end)) = (query.start_time, query.end_time) {
+            if start > end {
+                return Err(AuditError::InvalidQuery {
+                    reason: "start_time must not be greater than end_time".to_string(),
+                });
             }
         }
-
-        Ok(events)
+        let limit = query.limit.unwrap_or(usize::MAX);
+        let mut newest_first: Vec<AuditEvent> = Vec::new();
+        if limit == 0 {
+            return Ok(newest_first);
+        }
+        let source = EventSource::for_query(query);
+        // Read back from `top` in growing windows. Each window reads only the
+        // part that the window before did not read, so no event is read twice.
+        let top = query.end_time.unwrap_or_else(|| self.clock.now());
+        let floor = query.start_time;
+        let mut upper = top;
+        for window in RECENT_WINDOWS_MICROS.iter().map(Some).chain([None]) {
+            let lower =
+                window.map(|width| Timestamp::from_micros(top.as_micros().saturating_sub(*width)));
+            // Clamp the window to the caller's lower bound.
+            let (lower, last) = match (lower, floor) {
+                (Some(l), Some(f)) if l <= f => (Some(f), true),
+                (None, f) => (f, true),
+                (l, _) => (l, false),
+            };
+            let need = limit - newest_first.len();
+            let found = self.newest_in(query, &source, lower, Some(upper), need)?;
+            newest_first.extend(found);
+            if newest_first.len() >= limit || last {
+                break;
+            }
+            if let Some(l) = lower {
+                upper = l;
+            }
+        }
+        Ok(newest_first)
     }
 
     fn verify_integrity(
@@ -1346,21 +1423,6 @@ impl AuditEngine for EmbeddedAuditEngine {
 }
 
 impl EmbeddedAuditEngine {
-    /// Applies `agent_id` and `tool` post-scan filters (§12.4 MUST).
-    ///
-    /// These filters match against the JSON `metadata` object attached to
-    /// each audit event, which is cheaper to scan post-hoc than maintaining
-    /// additional secondary indexes for every metadata key.
-    fn apply_metadata_filters(events: Vec<AuditEvent>, query: &AuditQuery) -> Vec<AuditEvent> {
-        if query.agent_id.is_none() && query.tool.is_none() {
-            return events;
-        }
-        events
-            .into_iter()
-            .filter(|e| Self::event_matches_metadata_filters(e, query))
-            .collect()
-    }
-
     fn event_matches_metadata_filters(event: &AuditEvent, query: &AuditQuery) -> bool {
         if let Some(ref agent_id) = query.agent_id {
             let found = event
@@ -1389,89 +1451,164 @@ impl EmbeddedAuditEngine {
         true
     }
 
-    /// Queries events by actor using the actor index.
-    fn query_by_actor(
-        &self,
-        query: &AuditQuery,
-        actor: &str,
-    ) -> Result<Vec<AuditEvent>, AuditError> {
-        let prefix = keys::actor_scan_prefix(actor);
-        let end = keys::prefix_end(&prefix);
-        let index_entries = self.storage.scan(&query.realm_id, &prefix, &end)?;
-
-        let mut events = Vec::new();
-        for index_entry in index_entries {
-            // The index value is the primary event key
-            let event_value = self.storage.get(&query.realm_id, &index_entry.value)?;
-
-            if let Some(value) = event_value {
-                let event = decode_event(&value)?;
-
-                // Apply time range filter
-                if let Some(start) = query.start_time {
-                    if event.timestamp < start {
-                        continue;
-                    }
-                }
-                if let Some(end_time) = query.end_time {
-                    if event.timestamp >= end_time {
-                        continue;
-                    }
-                }
-
-                events.push(event);
-
-                if let Some(limit) = query.limit {
-                    if events.len() >= limit {
-                        break;
-                    }
-                }
-            }
+    /// True when `event` passes every filter of `query` that the event
+    /// source does not already apply: the time bounds, the action (when the
+    /// actor index is the source) and the metadata filters.
+    fn event_matches(event: &AuditEvent, query: &AuditQuery, source: &EventSource) -> bool {
+        if query
+            .start_time
+            .is_some_and(|start| event.timestamp < start)
+        {
+            return false;
         }
-
-        Ok(events)
+        if query.end_time.is_some_and(|end| event.timestamp >= end) {
+            return false;
+        }
+        if matches!(source, EventSource::ActorIndex(_))
+            && query.action.as_ref().is_some_and(|a| *a != event.action)
+        {
+            return false;
+        }
+        Self::event_matches_metadata_filters(event, query)
     }
 
-    /// Queries events by action type using the action index.
-    fn query_by_action(
+    /// Visits, oldest first, the events in `[lower, upper)` that match
+    /// `query`, until `visit` breaks.
+    ///
+    /// The primary source decodes each event inside the storage walk. An
+    /// index source reads its index in chunks and then reads each event, so
+    /// no storage read runs inside another storage walk.
+    fn visit_matching_ascending(
         &self,
         query: &AuditQuery,
-        action: &AuditAction,
-    ) -> Result<Vec<AuditEvent>, AuditError> {
-        let prefix = keys::action_scan_prefix(action.as_str());
-        let end = keys::prefix_end(&prefix);
-        let index_entries = self.storage.scan(&query.realm_id, &prefix, &end)?;
-
-        let mut events = Vec::new();
-        for index_entry in index_entries {
-            let event_value = self.storage.get(&query.realm_id, &index_entry.value)?;
-
-            if let Some(value) = event_value {
+        source: &EventSource,
+        lower: Option<Timestamp>,
+        upper: Option<Timestamp>,
+        visit: &mut dyn FnMut(AuditEvent) -> ControlFlow<()>,
+    ) -> Result<(), AuditError> {
+        let (mut start, end) = source.bounds(lower, upper);
+        if start > end {
+            return Ok(());
+        }
+        let realm_id = &query.realm_id;
+        if matches!(source, EventSource::Primary) {
+            let mut failure = None;
+            self.storage
+                .visit_entries(
+                    realm_id,
+                    &start,
+                    &end,
+                    &mut |_key, value| match decode_event(value) {
+                        Ok(event) if Self::event_matches(&event, query, source) => visit(event),
+                        Ok(_) => ControlFlow::Continue(()),
+                        Err(e) => {
+                            failure = Some(e);
+                            ControlFlow::Break(())
+                        }
+                    },
+                )?;
+            return failure.map_or(Ok(()), Err);
+        }
+        let mut chunk_size = INDEX_CHUNK_FIRST;
+        loop {
+            let chunk =
+                Self::index_chunk(self.storage.as_ref(), realm_id, &start, &end, chunk_size)?;
+            for entry in &chunk {
+                let Some(value) = self.storage.get(realm_id, &entry.value)? else {
+                    continue;
+                };
                 let event = decode_event(&value)?;
-
-                // Apply time range filter
-                if let Some(start) = query.start_time {
-                    if event.timestamp < start {
-                        continue;
-                    }
+                if Self::event_matches(&event, query, source) && visit(event).is_break() {
+                    return Ok(());
                 }
-                if let Some(end_time) = query.end_time {
-                    if event.timestamp >= end_time {
-                        continue;
-                    }
+            }
+            let Some(last) = chunk.last() else {
+                return Ok(());
+            };
+            if chunk.len() < chunk_size {
+                return Ok(());
+            }
+            start = last.key.clone();
+            start.push(0);
+            chunk_size = (chunk_size * 2).min(INDEX_CHUNK_MAX);
+        }
+    }
+
+    /// Reads at most `size` index entries from `[start, end)`. Each entry's
+    /// value is the key of its event.
+    fn index_chunk(
+        storage: &dyn StorageEngine,
+        realm_id: &RealmId,
+        start: &[u8],
+        end: &[u8],
+        size: usize,
+    ) -> Result<Vec<ScanEntry>, AuditError> {
+        let mut chunk = Vec::new();
+        storage.visit_entries(realm_id, start, end, &mut |key, value| {
+            chunk.push(ScanEntry {
+                key: key.to_vec(),
+                value: value.to_vec(),
+            });
+            if chunk.len() >= size {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })?;
+        Ok(chunk)
+    }
+
+    /// Returns, newest first, at most `need` events in `[lower, upper)` that
+    /// match `query`.
+    fn newest_in(
+        &self,
+        query: &AuditQuery,
+        source: &EventSource,
+        lower: Option<Timestamp>,
+        upper: Option<Timestamp>,
+        need: usize,
+    ) -> Result<Vec<AuditEvent>, AuditError> {
+        let (start, end) = source.bounds(lower, upper);
+        if start > end || need == 0 {
+            return Ok(Vec::new());
+        }
+        let realm_id = &query.realm_id;
+        if matches!(source, EventSource::Primary) {
+            // Keys sort by time, but storage has no reverse walk: keep the
+            // last `need` matches of a forward walk over the window.
+            let mut tail: std::collections::VecDeque<AuditEvent> =
+                std::collections::VecDeque::new();
+            self.visit_matching_ascending(query, source, lower, upper, &mut |event| {
+                if tail.len() == need {
+                    tail.pop_front();
                 }
-
-                events.push(event);
-
-                if let Some(limit) = query.limit {
-                    if events.len() >= limit {
-                        break;
-                    }
+                tail.push_back(event);
+                ControlFlow::Continue(())
+            })?;
+            return Ok(tail.into_iter().rev().collect());
+        }
+        // An index entry is small: read the window's index, then read events
+        // newest first until `need` of them match.
+        let mut event_keys = Vec::new();
+        self.storage
+            .visit_entries(realm_id, &start, &end, &mut |_key, value| {
+                event_keys.push(value.to_vec());
+                ControlFlow::Continue(())
+            })?;
+        let mut found = Vec::new();
+        for event_key in event_keys.iter().rev() {
+            let Some(value) = self.storage.get(realm_id, event_key)? else {
+                continue;
+            };
+            let event = decode_event(&value)?;
+            if Self::event_matches(&event, query, source) {
+                found.push(event);
+                if found.len() >= need {
+                    break;
                 }
             }
         }
-
-        Ok(events)
+        Ok(found)
     }
 
     /// Encodes an [`AuditEvent`] into its postcard storage format.
@@ -3491,5 +3628,439 @@ mod import_concurrency_tests {
     #[test]
     fn a_live_audit_write_is_not_blocked_by_an_import_into_an_empty_chain() {
         live_write_during_import(false);
+    }
+}
+
+/// #644: the audit list reads only what one page needs.
+#[cfg(test)]
+mod bounded_read_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::core::FakeClock;
+    use crate::storage::{EmbeddedStorageEngine, EntryVisitor, StorageConfig, StorageError};
+
+    const HOUR: i64 = 3_600_000_000;
+    const DAY: i64 = 24 * HOUR;
+
+    /// Counts every entry that a read returns: one per `get`, one per
+    /// scanned or visited entry. Writes go to the inner engine unchanged.
+    struct EntryCountingStorage {
+        inner: Arc<dyn StorageEngine>,
+        entries_read: AtomicUsize,
+    }
+
+    impl EntryCountingStorage {
+        fn add(&self, n: usize) {
+            self.entries_read.fetch_add(n, Ordering::SeqCst);
+        }
+        fn take(&self) -> usize {
+            self.entries_read.swap(0, Ordering::SeqCst)
+        }
+    }
+
+    impl StorageEngine for EntryCountingStorage {
+        fn get(&self, realm_id: &RealmId, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+            self.add(1);
+            self.inner.get(realm_id, key)
+        }
+        fn get_uncached(
+            &self,
+            realm_id: &RealmId,
+            key: &[u8],
+        ) -> Result<Option<Vec<u8>>, StorageError> {
+            self.add(1);
+            self.inner.get_uncached(realm_id, key)
+        }
+        fn put(&self, realm_id: &RealmId, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+            self.inner.put(realm_id, key, value)
+        }
+        fn delete(&self, realm_id: &RealmId, key: &[u8]) -> Result<(), StorageError> {
+            self.inner.delete(realm_id, key)
+        }
+        fn scan(
+            &self,
+            realm_id: &RealmId,
+            start: &[u8],
+            end: &[u8],
+        ) -> Result<Vec<ScanEntry>, StorageError> {
+            let entries = self.inner.scan(realm_id, start, end)?;
+            self.add(entries.len());
+            Ok(entries)
+        }
+        fn scan_keys(
+            &self,
+            realm_id: &RealmId,
+            start: &[u8],
+            end: &[u8],
+        ) -> Result<Vec<Vec<u8>>, StorageError> {
+            let keys = self.inner.scan_keys(realm_id, start, end)?;
+            self.add(keys.len());
+            Ok(keys)
+        }
+        fn visit_keys(
+            &self,
+            realm_id: &RealmId,
+            start: &[u8],
+            end: &[u8],
+            visit: &mut dyn FnMut(&[u8]) -> ControlFlow<()>,
+        ) -> Result<(), StorageError> {
+            self.inner.visit_keys(realm_id, start, end, &mut |key| {
+                self.add(1);
+                visit(key)
+            })
+        }
+        fn visit_entries(
+            &self,
+            realm_id: &RealmId,
+            start: &[u8],
+            end: &[u8],
+            visit: &mut EntryVisitor<'_>,
+        ) -> Result<(), StorageError> {
+            self.inner
+                .visit_entries(realm_id, start, end, &mut |key, value| {
+                    self.add(1);
+                    visit(key, value)
+                })
+        }
+        fn put_batch(
+            &self,
+            realm_id: &RealmId,
+            entries: &[(Vec<u8>, Vec<u8>)],
+        ) -> Result<(), StorageError> {
+            self.inner.put_batch(realm_id, entries)
+        }
+        fn write_batch(
+            &self,
+            realm_id: &RealmId,
+            puts: &[(Vec<u8>, Vec<u8>)],
+            deletes: &[Vec<u8>],
+        ) -> Result<(), StorageError> {
+            self.inner.write_batch(realm_id, puts, deletes)
+        }
+        fn list_realms(&self) -> Result<Vec<RealmId>, StorageError> {
+            self.inner.list_realms()
+        }
+        fn begin_snapshot_restore(&self, snapshot_id: &str) -> Result<(), StorageError> {
+            self.inner.begin_snapshot_restore(snapshot_id)
+        }
+        fn complete_snapshot_restore(&self) -> Result<(), StorageError> {
+            self.inner.complete_snapshot_restore()
+        }
+    }
+
+    struct Fixture {
+        engine: EmbeddedAuditEngine,
+        storage: Arc<EntryCountingStorage>,
+        clock: Arc<FakeClock>,
+        realm: RealmId,
+        _dir: tempfile::TempDir,
+    }
+
+    fn fixture() -> Fixture {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let inner = Arc::new(
+            EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().to_path_buf()))
+                .expect("storage"),
+        ) as Arc<dyn StorageEngine>;
+        let storage = Arc::new(EntryCountingStorage {
+            inner,
+            entries_read: AtomicUsize::new(0),
+        });
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+        let engine = EmbeddedAuditEngine::new(
+            Arc::clone(&storage) as Arc<dyn StorageEngine>,
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        );
+        Fixture {
+            engine,
+            storage,
+            clock,
+            realm: RealmId::generate(),
+            _dir: dir,
+        }
+    }
+
+    impl Fixture {
+        /// Appends one event at `at`, by `actor`, and returns its timestamp.
+        fn append_at(&self, at: i64, actor: &str, action: AuditAction) -> Timestamp {
+            self.clock.set(Timestamp::from_micros(at));
+            self.engine
+                .append(&CreateAuditEvent {
+                    realm_id: self.realm.clone(),
+                    actor: actor.to_string(),
+                    action,
+                    resource_type: "user".to_string(),
+                    resource_id: format!("u-{at}"),
+                    metadata: None,
+                })
+                .expect("append")
+                .timestamp
+        }
+
+        /// 30 days of events, 4 per hour (2,880 events). Actors and actions
+        /// alternate. Returns the timestamps in append order and leaves the
+        /// clock just after the last event.
+        fn thirty_busy_days(&self) -> Vec<Timestamp> {
+            let start = 400 * DAY;
+            let mut stamps = Vec::new();
+            for i in 0..(30 * 24 * 4) {
+                let (actor, action) = if i % 2 == 0 {
+                    ("alice", AuditAction::UserCreated)
+                } else {
+                    ("bob", AuditAction::UserUpdated)
+                };
+                stamps.push(self.append_at(start + i * (HOUR / 4), actor, action));
+            }
+            let last = stamps.last().expect("events").as_micros();
+            self.clock.set(Timestamp::from_micros(last + 1));
+            self.storage.take();
+            stamps
+        }
+
+        fn query(&self) -> AuditQuery {
+            AuditQuery::for_realm(self.realm.clone())
+        }
+    }
+
+    fn newest_first(stamps: &[Timestamp], n: usize) -> Vec<Timestamp> {
+        stamps.iter().rev().take(n).copied().collect()
+    }
+
+    fn stamps_of(events: &[AuditEvent]) -> Vec<Timestamp> {
+        events.iter().map(|e| e.timestamp).collect()
+    }
+
+    #[test]
+    fn recent_returns_the_newest_page_and_reads_only_one_day() {
+        let f = fixture();
+        let stamps = f.thirty_busy_days();
+
+        let events = f
+            .engine
+            .recent(&AuditQuery {
+                limit: Some(50),
+                ..f.query()
+            })
+            .expect("recent");
+        let read = f.storage.take();
+
+        assert_eq!(stamps_of(&events), newest_first(&stamps, 50));
+        // The 1-hour window holds 4 events and the 1-day window 96, so the
+        // page comes from the last day: 96 entries, not 2,880.
+        assert!(
+            read <= 120,
+            "one page of 50 read {read} entries of a 2,880-event log"
+        );
+    }
+
+    #[test]
+    fn recent_by_actor_reads_only_recent_index_entries() {
+        let f = fixture();
+        let stamps = f.thirty_busy_days();
+        let alice: Vec<Timestamp> = stamps.iter().step_by(2).copied().collect();
+
+        let events = f
+            .engine
+            .recent(&AuditQuery {
+                actor: Some("alice".to_string()),
+                limit: Some(20),
+                ..f.query()
+            })
+            .expect("recent");
+        let read = f.storage.take();
+
+        assert_eq!(stamps_of(&events), newest_first(&alice, 20));
+        assert!(events.iter().all(|e| e.actor == "alice"));
+        // One day holds 48 index entries of alice; each hit adds one event read.
+        assert!(read <= 120, "an actor page of 20 read {read} entries");
+    }
+
+    #[test]
+    fn recent_by_action_reads_only_recent_index_entries() {
+        let f = fixture();
+        let stamps = f.thirty_busy_days();
+        let updates: Vec<Timestamp> = stamps.iter().skip(1).step_by(2).copied().collect();
+
+        let events = f
+            .engine
+            .recent(&AuditQuery {
+                action: Some(AuditAction::UserUpdated),
+                limit: Some(20),
+                ..f.query()
+            })
+            .expect("recent");
+        let read = f.storage.take();
+
+        assert_eq!(stamps_of(&events), newest_first(&updates, 20));
+        assert!(read <= 120, "an action page of 20 read {read} entries");
+    }
+
+    #[test]
+    fn recent_keeps_to_the_start_and_end_bounds() {
+        let f = fixture();
+        let stamps: Vec<Timestamp> = (1..=10)
+            .map(|h| f.append_at(h * HOUR, "alice", AuditAction::UserCreated))
+            .collect();
+        f.clock.set(Timestamp::from_micros(20 * HOUR));
+
+        let events = f
+            .engine
+            .recent(&AuditQuery {
+                start_time: Some(stamps[2]),
+                end_time: Some(stamps[7]),
+                limit: Some(100),
+                ..f.query()
+            })
+            .expect("recent");
+
+        // [stamps[2], stamps[7]) newest first: events 7..=3 by number.
+        let expected: Vec<Timestamp> = stamps[2..7].iter().rev().copied().collect();
+        assert_eq!(stamps_of(&events), expected);
+    }
+
+    #[test]
+    fn recent_in_a_quiet_realm_reaches_events_older_than_a_year() {
+        let f = fixture();
+        let stamps: Vec<Timestamp> = (0..3)
+            .map(|i| f.append_at(DAY + i * HOUR, "alice", AuditAction::UserCreated))
+            .collect();
+        f.clock.set(Timestamp::from_micros(800 * DAY));
+
+        let events = f
+            .engine
+            .recent(&AuditQuery {
+                limit: Some(50),
+                ..f.query()
+            })
+            .expect("recent");
+
+        assert_eq!(stamps_of(&events), newest_first(&stamps, 3));
+    }
+
+    #[test]
+    fn recent_fills_a_page_across_window_edges_without_repeats() {
+        let f = fixture();
+        // One event in each window: 30 min, 12 h, 3 days, 20 days, 200 days
+        // and 600 days before now.
+        let now = 1_000 * DAY;
+        let ages = [600 * DAY, 200 * DAY, 20 * DAY, 3 * DAY, 12 * HOUR, HOUR / 2];
+        let stamps: Vec<Timestamp> = ages
+            .iter()
+            .map(|age| f.append_at(now - age, "alice", AuditAction::UserCreated))
+            .collect();
+        f.clock.set(Timestamp::from_micros(now));
+
+        let events = f
+            .engine
+            .recent(&AuditQuery {
+                limit: Some(50),
+                ..f.query()
+            })
+            .expect("recent");
+
+        assert_eq!(stamps_of(&events), newest_first(&stamps, 6));
+    }
+
+    #[test]
+    fn an_actor_and_an_action_filter_both_apply() {
+        let f = fixture();
+        f.append_at(HOUR, "alice", AuditAction::UserCreated);
+        let wanted = f.append_at(2 * HOUR, "alice", AuditAction::UserUpdated);
+        f.append_at(3 * HOUR, "bob", AuditAction::UserUpdated);
+        f.clock.set(Timestamp::from_micros(4 * HOUR));
+        let query = AuditQuery {
+            actor: Some("alice".to_string()),
+            action: Some(AuditAction::UserUpdated),
+            ..f.query()
+        };
+
+        let forward = f.engine.query(&query).expect("query");
+        let newest = f.engine.recent(&query).expect("recent");
+
+        assert_eq!(stamps_of(&forward), [wanted]);
+        assert_eq!(stamps_of(&newest), [wanted]);
+    }
+
+    #[test]
+    fn a_metadata_filter_applies_before_the_limit() {
+        let f = fixture();
+        for i in 0..6 {
+            f.clock.set(Timestamp::from_micros((i + 1) * HOUR));
+            f.engine
+                .append(&CreateAuditEvent {
+                    realm_id: f.realm.clone(),
+                    actor: "alice".to_string(),
+                    action: AuditAction::UserUpdated,
+                    resource_type: "user".to_string(),
+                    resource_id: format!("u-{i}"),
+                    metadata: Some(serde_json::json!({
+                        "tool": if i % 3 == 0 { "deploy" } else { "other" }
+                    })),
+                })
+                .expect("append");
+        }
+        f.clock.set(Timestamp::from_micros(10 * HOUR));
+        let query = AuditQuery {
+            actor: Some("alice".to_string()),
+            tool: Some("deploy".to_string()),
+            limit: Some(2),
+            ..f.query()
+        };
+
+        let forward = f.engine.query(&query).expect("query");
+        let newest = f.engine.recent(&query).expect("recent");
+
+        // Events 0 and 3 carry the tool. A limit applied before the filter
+        // would keep events 0 and 1 and return only event 0.
+        let ids = |events: &[AuditEvent]| -> Vec<String> {
+            events.iter().map(|e| e.resource_id.clone()).collect()
+        };
+        assert_eq!(ids(&forward), ["u-0", "u-3"]);
+        assert_eq!(ids(&newest), ["u-3", "u-0"]);
+    }
+
+    #[test]
+    fn query_from_a_start_time_reads_only_up_to_its_limit() {
+        let f = fixture();
+        let stamps = f.thirty_busy_days();
+
+        let events = f
+            .engine
+            .query(&AuditQuery {
+                start_time: Some(stamps[100]),
+                limit: Some(10),
+                ..f.query()
+            })
+            .expect("query");
+        let read = f.storage.take();
+
+        assert_eq!(stamps_of(&events), stamps[100..110].to_vec());
+        assert!(
+            read <= 20,
+            "a page of 10 from a start time read {read} entries"
+        );
+    }
+
+    #[test]
+    fn query_by_actor_from_a_start_time_reads_only_up_to_its_limit() {
+        let f = fixture();
+        let stamps = f.thirty_busy_days();
+        let alice: Vec<Timestamp> = stamps.iter().step_by(2).copied().collect();
+
+        let events = f
+            .engine
+            .query(&AuditQuery {
+                start_time: Some(alice[100]),
+                actor: Some("alice".to_string()),
+                limit: Some(10),
+                ..f.query()
+            })
+            .expect("query");
+        let read = f.storage.take();
+
+        assert_eq!(stamps_of(&events), alice[100..110].to_vec());
+        assert!(read <= 30, "an actor page of 10 read {read} entries");
     }
 }

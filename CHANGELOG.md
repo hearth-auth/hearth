@@ -20,7 +20,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   while the server was stopped also counts. `deploy/monitoring/` adds the `HearthBackupTooOld`
   alert (no backup for more than 26 hours) and a backup-age panel on the dashboard.
 
+### Changed
+- **The audit list shows the newest events first** (#644): `GET /admin/audit`,
+  `GET /admin/api/realms/{realm}/audit/events` and the admin audit page now return the newest
+  events, newest first, when the request has no start time. They read back in growing time
+  windows (1 hour, 1 day, 7 days, 30 days, 365 days, then the rest of the log) and stop when the
+  page is full, so a large audit log no longer slows the page or takes memory from sign-ins.
+  Before, they loaded the whole log and returned its oldest events. With a start time, events
+  still come oldest first from it, and the read now stops when the page is full.
+
 ### Fixed
+- **Audit queries apply every filter**: a query with both an actor and an action filter ignored
+  the action, and a query with an actor or action filter and an `agent_id` or `tool` filter
+  counted events toward the limit before it filtered them, so a page could be short.
 - **Session cleanup sweep evicts every expired session in one pass**: expired sessions past the
   first page were evicted on later cleanup ticks, so `SessionEvicted` events and session-version
   bumps came late. Such sessions were already refused on read.

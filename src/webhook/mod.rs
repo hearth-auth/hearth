@@ -102,6 +102,13 @@ impl NotifyingAuditEngine {
 }
 
 impl crate::audit::AuditEngine for NotifyingAuditEngine {
+    fn recent(
+        &self,
+        query: &crate::audit::AuditQuery,
+    ) -> Result<Vec<crate::audit::AuditEvent>, crate::audit::AuditError> {
+        self.inner.recent(query)
+    }
+
     fn append(
         &self,
         event: &crate::audit::CreateAuditEvent,
