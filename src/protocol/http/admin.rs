@@ -5454,12 +5454,16 @@ async fn admin_backup_create(
         let tmp = tempfile::NamedTempFile::new().map_err(|e| format!("tempfile: {e}"))?;
         let tmp_path = tmp.path().to_path_buf();
 
+        // One storage snapshot for every realm of this backup: the archive
+        // is one point in time, and writes continue meanwhile (#643).
         let exporter = BackupExporter::new(
             Arc::clone(&identity),
             Arc::clone(&audit_engine),
             Arc::clone(&rbac),
             webhooks,
-        );
+        )
+        .snapshot()
+        .map_err(|e| format!("snapshot: {e}"))?;
         let dek = BackupExporter::generate_dek().map_err(|e| format!("generate_dek: {e}"))?;
         let opts = ExportOptions {
             include_audit,

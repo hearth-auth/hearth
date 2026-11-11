@@ -26,6 +26,10 @@ impl EmbeddedWebhookEngine {
 }
 
 impl WebhookEngine for EmbeddedWebhookEngine {
+    fn read_view(&self, storage: Arc<dyn StorageEngine>) -> Option<Arc<dyn WebhookEngine>> {
+        Some(Arc::new(Self::new(storage, Arc::clone(&self.clock))))
+    }
+
     fn create(&self, req: &CreateWebhookRequest) -> Result<WebhookSubscription, WebhookError> {
         if req.secret.len() < MIN_SECRET_LEN {
             return Err(WebhookError::SecretTooShort);

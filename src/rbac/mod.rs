@@ -67,6 +67,17 @@ pub trait SvBumper: Send + Sync {
 /// first parameter and MUST NOT read or write state in another realm.
 /// See openspec/specs/rbac-model/spec.md for the multi-tenancy invariants.
 pub trait RbacEngine: Send + Sync {
+    /// A read-only copy of this engine that reads `storage`, a storage
+    /// snapshot, or `None` if this engine cannot make one (#643). A backup
+    /// export reads through it while writes continue on the live engine.
+    ///
+    /// The default returns `None`: correct for test doubles.
+    fn read_view(
+        &self,
+        _storage: std::sync::Arc<dyn crate::storage::StorageEngine>,
+    ) -> Option<std::sync::Arc<dyn RbacEngine>> {
+        None
+    }
     // ------- Permission resolution -------
 
     /// Resolves the effective permission set for a user at token-issue time.

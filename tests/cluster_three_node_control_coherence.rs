@@ -1320,8 +1320,8 @@ impl StorageEngine for IncrementFault {
     ) -> Result<(), StorageError> {
         self.inner.write_batch(r, puts, deletes)
     }
-    fn backup_barrier(&self) -> Option<Arc<std::sync::RwLock<()>>> {
-        self.inner.backup_barrier()
+    fn read_snapshot(&self) -> Result<Option<Arc<dyn StorageEngine>>, StorageError> {
+        self.inner.read_snapshot()
     }
     fn put_if_absent(&self, r: &RealmId, k: &[u8], v: &[u8]) -> Result<bool, StorageError> {
         self.inner.put_if_absent(r, k, v)
@@ -1855,8 +1855,8 @@ impl StorageEngine for GatedReads {
     ) -> Result<(), StorageError> {
         self.inner.write_batch(r, puts, deletes)
     }
-    fn backup_barrier(&self) -> Option<Arc<std::sync::RwLock<()>>> {
-        self.inner.backup_barrier()
+    fn read_snapshot(&self) -> Result<Option<Arc<dyn StorageEngine>>, StorageError> {
+        self.inner.read_snapshot()
     }
     fn put_if_absent(&self, r: &RealmId, k: &[u8], v: &[u8]) -> Result<bool, StorageError> {
         self.inner.put_if_absent(r, k, v)

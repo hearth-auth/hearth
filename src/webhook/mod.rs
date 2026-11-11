@@ -42,6 +42,17 @@ use crate::core::WebhookId;
 /// path lives in [`dispatcher`] and calls back into this trait to log
 /// outcomes.
 pub trait WebhookEngine: Send + Sync {
+    /// A read-only copy of this engine that reads `storage`, a storage
+    /// snapshot, or `None` if this engine cannot make one (#643). A backup
+    /// export reads through it while writes continue on the live engine.
+    ///
+    /// The default returns `None`: correct for test doubles.
+    fn read_view(
+        &self,
+        _storage: std::sync::Arc<dyn crate::storage::StorageEngine>,
+    ) -> Option<std::sync::Arc<dyn WebhookEngine>> {
+        None
+    }
     /// Creates a new webhook subscription.
     fn create(&self, req: &CreateWebhookRequest) -> Result<WebhookSubscription, WebhookError>;
 
@@ -107,6 +118,15 @@ impl crate::audit::AuditEngine for NotifyingAuditEngine {
         query: &crate::audit::AuditQuery,
     ) -> Result<Vec<crate::audit::AuditEvent>, crate::audit::AuditError> {
         self.inner.recent(query)
+    }
+
+    /// The view reads only, so it has no event to broadcast: the inner
+    /// engine's view is enough.
+    fn read_view(
+        &self,
+        storage: std::sync::Arc<dyn crate::storage::StorageEngine>,
+    ) -> Option<std::sync::Arc<dyn crate::audit::AuditEngine>> {
+        self.inner.read_view(storage)
     }
 
     fn append(

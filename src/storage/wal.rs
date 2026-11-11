@@ -1469,6 +1469,42 @@ impl Wal {
         self.await_ticket_or_lead(ticket, &mut pre_rotate)
     }
 
+    /// Blocks until every record already applied to the memtable is durable
+    /// (#643).
+    ///
+    /// A storage snapshot calls this after its cut, so it holds no write that
+    /// a later commit fault could still un-acknowledge. Records are applied
+    /// and given their tickets in one critical section of the group mutex
+    /// (see [`Self::enqueue_slot`]), so the newest ticket issued now covers
+    /// every applied record. Without `SyncMode::EveryWrite` no ticket is
+    /// issued and there is nothing to wait for.
+    ///
+    /// `pre_rotate` has the role it has for a writer: this thread may have to
+    /// lead the group commit.
+    ///
+    /// # Errors
+    ///
+    /// The commit fault of a record at or below that ticket.
+    pub(crate) fn await_applied_durable<F>(&self, pre_rotate: F) -> Result<(), StorageError>
+    where
+        F: FnOnce() -> Result<(), StorageError>,
+    {
+        if self.config.sync_mode != SyncMode::EveryWrite {
+            return Ok(());
+        }
+        let newest = {
+            let gs = self
+                .group
+                .lock()
+                .map_err(|_| StorageError::Io(std::io::Error::other("WAL group mutex poisoned")))?;
+            gs.next_ticket.saturating_sub(1)
+        };
+        if newest == 0 {
+            return Ok(());
+        }
+        self.await_ticket_or_lead(newest, &mut Some(pre_rotate))
+    }
+
     /// Blocks until the commit watermark covers `ticket`, then reports its
     /// outcome, leading the group commit meanwhile if leadership falls vacant.
     ///

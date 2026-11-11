@@ -999,17 +999,6 @@ pub trait IdentityEngine: Send + Sync {
         request: &JwtBearerRequest,
     ) -> Result<ClientCredentialsResponse, IdentityError>;
 
-    /// Authenticates an OAuth confidential client using its client secret.
-    ///
-    /// Returns `Ok(())` only when the client exists in the target realm,
-    /// is confidential, and the provided secret matches the stored hash.
-    fn authenticate_oauth_client(
-        &self,
-        realm_id: &RealmId,
-        client_id: &ClientId,
-        client_secret: &str,
-    ) -> Result<(), IdentityError>;
-
     /// Verifies a `private_key_jwt` client assertion per RFC 7523 §2.2.
     ///
     /// Validates signature, `iss == sub == client_id`, `exp` in the future,
@@ -3097,7 +3086,7 @@ pub trait IdentityEngine: Send + Sync {
     /// `exp` are omitted: the token they name can no longer validate
     /// anywhere.
     ///
-    /// Read-only: the exporter calls it while holding the backup barrier.
+    /// Read-only: the exporter calls it on a read-only snapshot view (#643).
     fn export_revocations(
         &self,
         realm_id: &RealmId,
@@ -3117,21 +3106,42 @@ pub trait IdentityEngine: Send + Sync {
         overwrite: bool,
     ) -> Result<ImportOutcome, IdentityError>;
 
-    /// Returns the underlying storage engine's backup-consistency barrier, or
-    /// `None` if snapshot isolation is unavailable (HEA-2167).
+    /// A read-only snapshot of this engine's storage, or `None` if the
+    /// storage cannot make one (#643).
     ///
-    /// A backup export acquires the returned lock in **write** mode and holds
-    /// it across its read pass so no write can interleave and tear the archive.
-    /// The exporter reaches the storage layer through this engine, so this is
-    /// the seam the backup module uses to obtain the barrier. See
-    /// [`StorageEngine::backup_barrier`](crate::storage::StorageEngine::backup_barrier)
-    /// for the mechanism and its write-availability impact.
+    /// A backup export reads the snapshot, so the archive is one point in
+    /// time (no group membership names a user the archive omits) and no write
+    /// waits for the export. See
+    /// [`StorageEngine::read_snapshot`](crate::storage::StorageEngine::read_snapshot).
     ///
-    /// The default returns `None` — correct for test doubles and any engine
-    /// whose storage does not support a barrier. The embedded engine overrides
-    /// it to delegate to its storage layer.
-    fn backup_barrier(&self) -> Option<std::sync::Arc<std::sync::RwLock<()>>> {
-        None
+    /// The default returns `None`: correct for test doubles. The embedded
+    /// engine forwards the call to its storage.
+    ///
+    /// # Errors
+    ///
+    /// The storage error making the snapshot.
+    fn read_snapshot(
+        &self,
+    ) -> Result<Option<std::sync::Arc<dyn crate::storage::StorageEngine>>, IdentityError> {
+        Ok(None)
+    }
+
+    /// A read-only copy of this engine that reads `storage`, a snapshot from
+    /// [`Self::read_snapshot`], or `None` if this engine cannot make one
+    /// (#643). `rbac` and `audit` MUST read the same snapshot.
+    ///
+    /// The default returns `None`: correct for test doubles.
+    ///
+    /// # Errors
+    ///
+    /// The error reading the copy's start state from the snapshot.
+    fn read_view(
+        &self,
+        _storage: std::sync::Arc<dyn crate::storage::StorageEngine>,
+        _rbac: std::sync::Arc<dyn crate::rbac::RbacEngine>,
+        _audit: std::sync::Arc<dyn crate::audit::AuditEngine>,
+    ) -> Result<Option<std::sync::Arc<dyn IdentityEngine>>, IdentityError> {
+        Ok(None)
     }
 
     // =========================================================================

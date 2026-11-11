@@ -30,6 +30,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   still come oldest first from it, and the read now stops when the page is full.
 
 ### Fixed
+- **Writes continue during a backup** (#643): `POST /admin/backup` no longer holds the node's
+  writes while it reads a realm. Before, every write (sign-ins, token refreshes, sign-ups, admin
+  changes, audit records) waited for the read pass, and once `storage.max_writes_in_flight`
+  writes waited, the next ones failed with `503`. A backup now reads one storage snapshot, taken
+  at its start, for all its realms, so the archive is also one point in time across realms (it
+  was one point in time per realm). While a backup runs, the node keeps the SST files that the
+  snapshot reads, so compaction frees their disk space only when the backup ends. Each backup
+  adds one SST file.
 - **Audit queries apply every filter**: a query with both an actor and an action filter ignored
   the action, and a query with an actor or action filter and an `agent_id` or `tool` filter
   counted events toward the limit before it filtered them, so a page could be short.
