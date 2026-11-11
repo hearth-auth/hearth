@@ -38,6 +38,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   first page were evicted on later cleanup ticks, so `SessionEvicted` events and session-version
   bumps came late. Such sessions were already refused on read.
 
+### Security
+- **rustix 1.1.6** (RUSTSEC-2026-0486): the lockfiles move from rustix 1.1.4, which the advisory
+  marks unsound in its `xattr` functions, to 1.1.6.
+
 ## [4.9.0] — 2026-11-10
 
 ### Added
