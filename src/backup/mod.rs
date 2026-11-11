@@ -68,6 +68,7 @@ mod error;
 mod export;
 mod import;
 pub mod marker;
+pub mod passphrase;
 mod signature;
 mod types;
 

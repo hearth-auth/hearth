@@ -46,6 +46,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   bumps came late. Such sessions were already refused on read.
 
 ### Security
+- **Breaking:** **Backups use their own passphrase** (#649): `hearth backup create`,
+  `hearth backup restore`, `POST /admin/backup` and `POST /admin/backup/restore` now wrap and
+  unwrap the archive key with `HEARTH_BACKUP_PASSPHRASE`, not with `HEARTH_MASTER_KEY`. A lost or
+  rotated master key no longer loses the backups, and a leaked backup passphrase does not open a
+  data directory. The HTTP routes refuse to run without the variable; the CLI asks for the
+  passphrase when the variable is not set (`backup create` only with `--encrypt`). To restore an
+  archive from an earlier build, set `HEARTH_BACKUP_PASSPHRASE` to the old `HEARTH_MASTER_KEY`.
 - **rustix 1.1.6** (RUSTSEC-2026-0486): the lockfiles move from rustix 1.1.4, which the advisory
   marks unsound in its `xattr` functions, to 1.1.6.
 

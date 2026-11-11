@@ -22,7 +22,8 @@ Hearth ships a built-in backup CLI that exports realm data to a self-contained `
 >
 > `--config` reads only `security.key_encryption_key`; it does **not** run the
 > full production validator, so a config that has drifted elsewhere still lets
-> you take a backup. `HEARTH_MASTER_KEY` must also be set, as it is for `serve`.
+> you take a backup. `HEARTH_MASTER_KEY` must also be set, as it is for `serve`, and
+> `HEARTH_BACKUP_PASSPHRASE` (see [Backup passphrase](#backup-passphrase)).
 >
 > Until task 26.21 this was impossible by any route: the command read neither the
 > environment variable nor a config file, and there was no `--config` flag, while
@@ -144,7 +145,7 @@ the omission.
 That does mean operator credentials (Argon2id hashes) and the system realm's
 signing key are in the file. They are protected exactly as every other realm's
 already were: `backup create` refuses to write an archive at all without
-`HEARTH_MASTER_KEY` or `--encrypt`, and every section is AES-256-GCM encrypted
+`HEARTH_BACKUP_PASSPHRASE` or `--encrypt`, and every section is AES-256-GCM encrypted
 under a DEK wrapped with Argon2id from that passphrase. Treat the archive and
 the passphrase as you would the data directory itself. If you want an archive
 without it, name a single realm with `--realm <name>`.
@@ -281,6 +282,24 @@ audit writes to the same realm made while a large archive is restoring wait at
 most for one chunk, and the chain keeps verifying with them interleaved: once a
 live event lands between two chunks, the rest of the import is stamped after it.
 A chunk that fails leaves the chunks before it written and verifiable.
+
+### Backup passphrase
+
+Every archive is encrypted. Its data key is wrapped with the **backup passphrase**,
+which comes from the `HEARTH_BACKUP_PASSPHRASE` environment variable (or, for the
+CLI only, from a prompt: `backup create --encrypt`, or `backup restore` when the
+variable is not set). `POST /admin/backup` and `POST /admin/backup/restore` read
+the variable from the server's environment and refuse to run without it.
+
+The backup passphrase is **not** `HEARTH_MASTER_KEY`. Keep them apart:
+
+- A rotated or lost master key does not lose the backups. Store the passphrase
+  away from the hosts, so that a restore after the loss of a host still works.
+- A leaked passphrase opens the archives, but not a data directory.
+
+Archives written before this change (Hearth 4.9 and earlier) used the value of
+`HEARTH_MASTER_KEY` as the passphrase. To restore one, set
+`HEARTH_BACKUP_PASSPHRASE` to that old master key value for the restore.
 
 ### Signed archives
 
@@ -938,8 +957,9 @@ to your production data directory.
    `GET /admin/users/{id}` records, a known user who can sign in, and the
    `client_id` and secret of a confidential client.
 2. Take a backup as your schedule does, and record how long it takes.
-3. On the spare host, use the same `hearth.yaml`, `HEARTH_MASTER_KEY` and
-   `HEARTH_KEK`. Restore into an empty data directory, and record how long the
+3. On the spare host, use the same `hearth.yaml`, `HEARTH_MASTER_KEY`,
+   `HEARTH_KEK` and `HEARTH_BACKUP_PASSPHRASE`. Restore into an empty data
+   directory, and record how long the
    restore takes.
 4. Start the server, and record the time until `/readyz` answers 200.
 5. Compare. The JWKS and the user records must be equal. The known user must sign

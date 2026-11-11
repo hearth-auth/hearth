@@ -26,6 +26,8 @@ use hearth::rbac::{AssignRoleRequest, EmbeddedRbacEngine, RbacEngine, Scope, Sub
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
 
 const MASTER_KEY: &str = "5ca1ab1e5ca1ab1e5ca1ab1e5ca1ab1e5ca1ab1e5ca1ab1e5ca1ab1e5ca1ab1e";
+/// The backup passphrase: not the master key (#649).
+const BACKUP_PASSPHRASE: &str = "the backup passphrase of the cli test";
 const OPERATOR_EMAIL: &str = "operator@hearth.test";
 const OPERATOR_PASSWORD: &str = "Operat0r-Recovery-Pa55!";
 
@@ -95,6 +97,7 @@ fn hearth(args: &[&std::ffi::OsStr]) -> (Option<i32>, String) {
         .args(args)
         .env_remove("HEARTH_KEK")
         .env("HEARTH_MASTER_KEY", MASTER_KEY)
+        .env("HEARTH_BACKUP_PASSPHRASE", BACKUP_PASSPHRASE)
         .output()
         .expect("run hearth");
     (
@@ -575,4 +578,78 @@ fn an_offline_backup_records_its_completion_time() {
         "recorded {recorded}, the backup ran from {before} to {after}"
     );
     assert_eq!(last_success(&source, BackupSource::Online), None);
+}
+
+/// `hearth backup create` wraps the archive key with `HEARTH_BACKUP_PASSPHRASE`,
+/// not with the storage master key, and refuses to run without it (#649).
+#[tokio::test]
+async fn a_cli_backup_uses_the_backup_passphrase_and_refuses_without_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let origin = dir.path().join("origin");
+    seed_source_store(&origin);
+    let source = dir.path().join("source");
+    copy_dir(&origin, &source);
+
+    let archive = dir.path().join("pass.hearth-backup");
+    let (code, out) = hearth(&[
+        os("backup"),
+        os("create"),
+        os("--data-dir"),
+        source.as_os_str(),
+        os("--output"),
+        archive.as_os_str(),
+    ]);
+    assert_eq!(code, Some(0), "backup create: {out}");
+    let reader = hearth::backup::BackupArchive::open(&archive).expect("open archive");
+    let wrapped = reader
+        .manifest
+        .wrapped_dek_b64
+        .as_deref()
+        .expect("an encrypted archive has a wrapped key");
+    let params = reader
+        .manifest
+        .dek_wrapping_params
+        .as_ref()
+        .expect("an encrypted archive has wrapping parameters");
+    let unwrap = |passphrase: &str| {
+        hearth::backup::BackupExporter::unwrap_dek(
+            wrapped,
+            params,
+            &secrecy::SecretString::from(passphrase.to_string()),
+        )
+    };
+    assert!(
+        unwrap(BACKUP_PASSPHRASE).is_ok(),
+        "the backup passphrase must open the archive"
+    );
+    assert!(
+        unwrap(MASTER_KEY).is_err(),
+        "the master key must not open the archive"
+    );
+
+    let refused = dir.path().join("refused.hearth-backup");
+    let out = Command::new(env!("CARGO_BIN_EXE_hearth"))
+        .args([os("backup"), os("create"), os("--data-dir")])
+        .arg(&source)
+        .arg("--output")
+        .arg(&refused)
+        .env_remove("HEARTH_KEK")
+        .env_remove("HEARTH_BACKUP_PASSPHRASE")
+        .env("HEARTH_MASTER_KEY", MASTER_KEY)
+        .output()
+        .expect("run hearth");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "a backup must not use the master key: {text}"
+    );
+    assert!(
+        text.contains("HEARTH_BACKUP_PASSPHRASE"),
+        "the refusal must name HEARTH_BACKUP_PASSPHRASE: {text}"
+    );
 }
