@@ -27893,6 +27893,233 @@ mod tests {
         );
     }
 
+    // #641 (cargo-mutants survivors): OAuth checks on the decision endpoint,
+    // introspection metadata, client trust level and bulk disable.
+
+    /// RFC 8707 on the decision endpoint: a token answers only for a resource
+    /// its `aud` names.
+    #[test]
+    fn decide_answers_only_for_a_resource_the_token_audience_names() {
+        use crate::identity::oidc::DecidePermissionRequest;
+
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm_id);
+        let role = engine
+            .rbac
+            .create_role(
+                &realm_id,
+                &crate::rbac::CreateRoleRequest {
+                    name: "resource-decide-role".to_string(),
+                    description: None,
+                    permissions: vec![
+                        crate::rbac::Permission::new("docs.read").expect("valid permission")
+                    ],
+                    parent_roles: vec![],
+                    ..Default::default()
+                },
+            )
+            .expect("create role");
+        engine
+            .rbac
+            .assign_role(
+                &realm_id,
+                &crate::rbac::AssignRoleRequest {
+                    subject: crate::rbac::Subject::User(user.id().clone()),
+                    role_id: role.id.clone(),
+                    scope: crate::rbac::Scope::Realm,
+                    assigned_by: None,
+                },
+            )
+            .expect("assign role");
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("session");
+        let tokens = engine
+            .issue_tokens(&realm_id, user.id(), session.id())
+            .expect("issue tokens");
+        let base = tokens::decode_claims_unverified(tokens.access_token()).expect("decode");
+        let token = resign_for_realm(
+            &engine,
+            &realm_id,
+            &TokenClaims {
+                aud: tokens::Audience::Multi(vec![
+                    engine.config.token.audience.clone(),
+                    "https://api.example".to_string(),
+                ]),
+                ..base
+            },
+        );
+
+        let decide = |resource: &str| {
+            engine
+                .decide_token_permission(
+                    &realm_id,
+                    &DecidePermissionRequest {
+                        token: token.clone(),
+                        permission: "docs.read".to_string(),
+                        organization_id: None,
+                        resource: Some(resource.to_string()),
+                    },
+                )
+                .expect("decide")
+                .allowed
+        };
+        assert!(
+            decide("https://api.example"),
+            "the resource the token's aud names must be answered"
+        );
+        assert!(
+            !decide("https://other.example"),
+            "a resource the token's aud does not name must be refused"
+        );
+    }
+
+    /// RFC 7662 §2.2: introspection reports the client of a sessionless
+    /// client token from its `client_<uuid>` subject when the token has no
+    /// `client_id` claim.
+    #[test]
+    fn introspection_reports_the_client_of_a_sessionless_client_token() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let (base, _now_secs) = access_claims_now(&engine, &realm_id);
+        let client = ClientId::generate();
+        let mut custom = base.custom.clone();
+        custom.remove(tokens::CLIENT_ID_CLAIM);
+        let claims = TokenClaims {
+            sub: format!("client_{}", tokens::issued_client_id(&client)),
+            sid: "none".to_string(),
+            custom,
+            ..base
+        };
+
+        let response = engine
+            .introspect_token(
+                &realm_id,
+                &crate::identity::oidc::TokenIntrospectionRequest {
+                    token: resign_for_realm(&engine, &realm_id, &claims),
+                    token_type_hint: Some("access_token".to_string()),
+                    introspecting_client_id: None,
+                },
+            )
+            .expect("introspection");
+        assert!(response.active, "setup: the client token must be active");
+        assert_eq!(response.client_id, Some(tokens::issued_client_id(&client)));
+    }
+
+    /// Setting a client's trust level sets whether it requires consent: a
+    /// third-party client does, a first-party client does not.
+    #[test]
+    fn update_client_trust_level_sets_require_consent() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let client = register_test_client(&engine, &realm_id);
+
+        for (level, consent) in [
+            (crate::identity::ClientTrustLevel::ThirdParty, true),
+            (crate::identity::ClientTrustLevel::FirstParty, false),
+        ] {
+            let updated = engine
+                .update_client(
+                    &realm_id,
+                    client.client_id(),
+                    &crate::identity::oidc::UpdateClientRequest {
+                        trust_level: Some(level),
+                        ..crate::identity::oidc::UpdateClientRequest::default()
+                    },
+                )
+                .expect("update client");
+            assert_eq!(updated.require_consent(), consent, "trust level {level:?}");
+        }
+    }
+
+    /// `bulk_disable_users` disables each user and reports one result per
+    /// user, in order.
+    #[test]
+    fn bulk_disable_users_disables_each_user() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let users = [
+            create_test_user(&engine, &realm_id),
+            create_test_user(&engine, &realm_id),
+        ];
+        let ids: Vec<UserId> = users.iter().map(|u| u.id().clone()).collect();
+
+        let results = engine
+            .bulk_disable_users(&realm_id, &ids)
+            .expect("bulk disable");
+        assert_eq!(results.len(), 2);
+        for (index, (result, id)) in results.iter().zip(&ids).enumerate() {
+            assert_eq!(result.index, index);
+            assert!(result.result.is_ok(), "user {index}: {:?}", result.result);
+            let user = engine
+                .get_user(&realm_id, id)
+                .expect("get user")
+                .expect("user exists");
+            assert_eq!(user.status(), UserStatus::Disabled);
+        }
+    }
+
+    /// An organization that requires MFA is found past the first page of the
+    /// user's organizations.
+    #[test]
+    fn org_requires_mfa_reads_past_the_first_page_of_organizations() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm_id);
+        let page = crate::core::MAX_PAGE_LIMIT as usize;
+        for i in 0..=page {
+            let org = engine
+                .create_organization(
+                    &realm_id,
+                    &CreateOrganizationRequest {
+                        name: format!("Org {i}"),
+                        slug: format!("org-{i:03}"),
+                        ..CreateOrganizationRequest::default()
+                    },
+                )
+                .expect("create organization");
+            engine
+                .add_member(&realm_id, org.id(), user.id(), OrganizationRole::Member)
+                .expect("add member");
+        }
+        assert!(
+            !engine.org_requires_mfa(&realm_id, user.id()).expect("mfa"),
+            "setup: no organization requires MFA yet"
+        );
+
+        let first = engine
+            .list_user_organizations(&realm_id, user.id(), None, page)
+            .expect("first page");
+        let cursor = first.next_cursor.expect("a second page");
+        let second = engine
+            .list_user_organizations(&realm_id, user.id(), Some(&cursor), page)
+            .expect("second page");
+        let on_second_page = second
+            .items
+            .last()
+            .expect("an organization on the second page")
+            .org_id()
+            .clone();
+        engine
+            .update_organization(
+                &realm_id,
+                &on_second_page,
+                &UpdateOrganizationRequest {
+                    config: Some(crate::identity::types::org::OrganizationConfig {
+                        mfa_required: true,
+                        ..crate::identity::types::org::OrganizationConfig::default()
+                    }),
+                    ..UpdateOrganizationRequest::default()
+                },
+            )
+            .expect("update organization");
+        assert!(
+            engine.org_requires_mfa(&realm_id, user.id()).expect("mfa"),
+            "an organization on the second page that requires MFA must count"
+        );
+    }
+
     /// Introspection is a token-accepting path too: RFC 7662 `active` must be
     /// false for a token that has not yet become valid.
     #[test]
