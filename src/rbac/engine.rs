@@ -762,6 +762,10 @@ struct RoleReferences {
 }
 
 impl RbacEngine for EmbeddedRbacEngine {
+    fn read_view(&self, storage: Arc<dyn StorageEngine>) -> Option<Arc<dyn RbacEngine>> {
+        Some(Arc::new(Self::new(storage, Arc::clone(&self.clock))))
+    }
+
     fn on_replicated_row(&self, realm_id: &RealmId, key: &[u8]) {
         // One prefix compare on the apply path; every non-RBAC row costs
         // nothing beyond it.

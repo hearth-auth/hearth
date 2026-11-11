@@ -4836,7 +4836,8 @@ fn run_backup_create(
         Arc::clone(&audit),
         Arc::clone(&rbac),
         cli_webhook_engine(&storage),
-    );
+    )
+    .snapshot()?;
     let dek = BackupExporter::generate_dek()?;
     let opts = ExportOptions {
         include_audit,

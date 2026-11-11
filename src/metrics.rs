@@ -460,7 +460,7 @@ pub struct Metrics {
 
     // ── Single-node write limit (#596) ───────────────────────────────────────
     /// Single-node storage writes in progress: running, or waiting for the
-    /// WAL fsync or a backup export's barrier. Each one holds a thread.
+    /// WAL fsync. Each one holds a thread.
     pub storage_writes_in_flight: Gauge,
 
     /// Configured maximum single-node storage writes in progress

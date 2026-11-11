@@ -713,6 +713,14 @@ impl EmbeddedAuditEngine {
 }
 
 impl AuditEngine for EmbeddedAuditEngine {
+    fn read_view(&self, storage: Arc<dyn StorageEngine>) -> Option<Arc<dyn AuditEngine>> {
+        Some(Arc::new(Self {
+            kek: self.kek,
+            known_realms_only: self.known_realms_only,
+            ..Self::new(storage, Arc::clone(&self.clock))
+        }))
+    }
+
     /// Drops this realm's cached chain head when the persisted head arrives
     /// from another node (task 26.47).
     ///
