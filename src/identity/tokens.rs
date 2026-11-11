@@ -2650,7 +2650,16 @@ mod tests {
     /// bug) that gets an RS256 signature over a non-ID-token payload.
     fn raw_rs256_jwt(key: &RsaIdTokenSigningKey, claims: &TokenClaims) -> String {
         let header = serde_json::json!({"alg": "RS256", "typ": "JWT", "kid": key.key_id()});
-        let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).expect("header"));
+        raw_rs256_jwt_with_header(key, &header, claims)
+    }
+
+    /// [`raw_rs256_jwt`] with a caller-chosen JOSE header.
+    fn raw_rs256_jwt_with_header(
+        key: &RsaIdTokenSigningKey,
+        header: &serde_json::Value,
+        claims: &TokenClaims,
+    ) -> String {
+        let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(header).expect("header"));
         let claims_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).expect("claims"));
         let signing_input = format!("{header_b64}.{claims_b64}");
         let pair = ring::signature::RsaKeyPair::from_pkcs8(key.pkcs8_bytes()).expect("pkcs8");
@@ -2846,6 +2855,99 @@ mod tests {
         let token = raw_rs256_jwt(&rsa, &claims);
         assert!(matches!(
             verify_rs256_id_token_signature(&token, rsa.public_key_der()),
+            Err(IdentityError::InvalidToken)
+        ));
+    }
+
+    // #641 (cargo-mutants survivors): token helpers and validation edges.
+
+    /// `nbf` exactly at the end of the clock-skew window is accepted; one
+    /// second past it is not.
+    #[test]
+    fn validate_token_with_time_accepts_nbf_at_the_clock_skew_edge() {
+        let key = test_signing_key();
+        let base_secs = 1_700_000_000_i64;
+        let now = Timestamp::from_micros(base_secs * MICROS_PER_SEC);
+
+        let mut claims = test_claims(base_secs);
+        claims.nbf = Some(base_secs + CLOCK_SKEW_SECS);
+        let at_edge = key.issue_token(&claims).expect("issue");
+        validate_token_with_time(&at_edge, key.public_key_bytes(), now)
+            .expect("an nbf at the clock-skew edge must be accepted");
+
+        claims.nbf = Some(base_secs + CLOCK_SKEW_SECS + 1);
+        let past_edge = key.issue_token(&claims).expect("issue");
+        assert!(matches!(
+            validate_token_with_time(&past_edge, key.public_key_bytes(), now),
+            Err(IdentityError::InvalidToken)
+        ));
+    }
+
+    /// The chain lists `sub`, then the actors from the earliest to the
+    /// immediate one (the example in the `delegation_chain` docs).
+    #[test]
+    fn delegation_chain_lists_sub_then_actors_earliest_first() {
+        let act = ActClaim {
+            sub: "agent:B".to_string(),
+            act: Some(Box::new(ActClaim {
+                sub: "agent:A".to_string(),
+                act: None,
+            })),
+        };
+        assert_eq!(
+            delegation_chain("user:U", Some(&act)),
+            vec!["user:U", "agent:A", "agent:B"]
+        );
+        assert_eq!(delegation_chain("user:U", None), vec!["user:U"]);
+    }
+
+    /// `Audience::resource` is the entry after the base audience, and absent
+    /// for a single audience or a list without a second entry.
+    #[test]
+    fn audience_resource_is_the_entry_after_the_base_audience() {
+        assert_eq!(Audience::single("hearth").resource(), None);
+        assert_eq!(Audience::Multi(vec!["hearth".to_string()]).resource(), None);
+        assert_eq!(
+            Audience::Multi(vec![
+                "hearth".to_string(),
+                "https://api.example/".to_string()
+            ])
+            .resource(),
+            Some("https://api.example/")
+        );
+    }
+
+    /// A 2048-bit key is the smallest RSA ID-token key that loads.
+    #[test]
+    fn rsa_id_token_key_of_the_minimum_size_loads() {
+        let pair =
+            rcgen::KeyPair::generate_rsa_for(&rcgen::PKCS_RSA_SHA256, rcgen::RsaKeySize::_2048)
+                .expect("generate RSA-2048");
+        assert_eq!(RSA_ID_TOKEN_MIN_MODULUS_BITS, 2048);
+        RsaIdTokenSigningKey::from_pkcs8(&pair.serialize_der())
+            .expect("a key of exactly the minimum size must load");
+    }
+
+    /// The RS256 verifier requires `typ: JWT` as well as `alg: RS256`.
+    #[test]
+    fn rs256_verifier_refuses_a_header_with_another_typ() {
+        let key = RsaIdTokenSigningKey::generate().expect("generate");
+        let claims = id_token_claims(1_700_000_000);
+        let control = raw_rs256_jwt_with_header(
+            &key,
+            &serde_json::json!({"alg": "RS256", "typ": "JWT", "kid": key.key_id()}),
+            &claims,
+        );
+        verify_rs256_id_token_signature(&control, key.public_key_der())
+            .expect("control: the same token with typ JWT verifies");
+
+        let other_typ = raw_rs256_jwt_with_header(
+            &key,
+            &serde_json::json!({"alg": "RS256", "typ": "at+jwt", "kid": key.key_id()}),
+            &claims,
+        );
+        assert!(matches!(
+            verify_rs256_id_token_signature(&other_typ, key.public_key_der()),
             Err(IdentityError::InvalidToken)
         ));
     }

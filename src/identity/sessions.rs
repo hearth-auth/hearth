@@ -251,3 +251,44 @@ impl SessionStore for EmbeddedSessionStore {
         Ok(Page { items, next_cursor })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::Timestamp;
+    use crate::identity::types::SessionContext;
+    use crate::storage::{EmbeddedStorageEngine, StorageConfig};
+
+    /// A saved session loads back with the same record; an unknown session
+    /// loads as `None`.
+    #[test]
+    fn embedded_session_store_round_trips_a_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Arc::new(
+            EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().to_path_buf()))
+                .expect("open"),
+        ) as Arc<dyn StorageEngine>;
+        let store = EmbeddedSessionStore::new(storage);
+        let realm = RealmId::generate();
+        let session = Session::new(
+            SessionId::generate(),
+            UserId::generate(),
+            Timestamp::from_micros(1_000_000),
+            Timestamp::from_micros(2_000_000),
+            &SessionContext::default(),
+            Some(60),
+            None,
+        );
+
+        assert!(store
+            .load_session(&realm, session.id())
+            .expect("load")
+            .is_none());
+        store.save_session(&realm, &session).expect("save");
+        let loaded = store
+            .load_session(&realm, session.id())
+            .expect("load")
+            .expect("the saved session must load");
+        assert_eq!(loaded, session);
+    }
+}

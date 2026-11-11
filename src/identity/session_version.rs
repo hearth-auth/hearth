@@ -366,3 +366,54 @@ impl SessionVersionStore {
         IdentityError::Storage(Box::new(e))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::FakeClock;
+    use crate::storage::{EmbeddedStorageEngine, StorageConfig};
+
+    fn store() -> (
+        tempfile::TempDir,
+        Arc<dyn StorageEngine>,
+        SessionVersionStore,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Arc::new(
+            EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().to_path_buf()))
+                .expect("open"),
+        ) as Arc<dyn StorageEngine>;
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+        let sv = SessionVersionStore::new(Arc::clone(&storage), clock as Arc<dyn Clock>);
+        (dir, storage, sv)
+    }
+
+    /// A version row that is not 8 bytes long reads as an untracked session
+    /// (version 1), and a bump from it gives version 2.
+    #[test]
+    fn a_malformed_version_row_reads_as_untracked() {
+        let (_dir, storage, sv) = store();
+        let realm = RealmId::generate();
+        let session = SessionId::generate();
+        storage
+            .put(&realm, &keys::encode_ssv_session(&session), &[7, 0, 0, 0])
+            .expect("put");
+
+        assert_eq!(sv.get_version(&realm, &session).expect("get"), 1);
+        assert_eq!(sv.bump(&realm, &session, 3600).expect("bump"), 2);
+    }
+
+    /// A sequence row that is not 8 bytes long reads as sequence 0, so the
+    /// next bump writes delta sequence 1.
+    #[test]
+    fn a_malformed_sequence_row_reads_as_zero() {
+        let (_dir, storage, sv) = store();
+        let realm = RealmId::generate();
+        storage
+            .put(&realm, &keys::ssv_seq_key(), &[9, 0, 0, 0])
+            .expect("put");
+
+        sv.bump(&realm, &SessionId::generate(), 3600).expect("bump");
+        assert_eq!(sv.current_seq(&realm).expect("seq"), 1);
+    }
+}
