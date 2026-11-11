@@ -29,6 +29,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   was one point in time per realm). While a backup runs, the node keeps the SST files that the
   snapshot reads, so compaction frees their disk space only when the backup ends. Each backup
   adds one SST file.
+- **The authorization endpoint accepts a form POST** (#781): a `POST /authorize` or
+  `POST /realms/{realm}/authorize` with `Content-Type: application/x-www-form-urlencoded` now
+  starts the browser sign-in flow with the same parameters and checks as a `GET` (OIDC Core
+  §3.1.2.1). It answers `303` to the UI authorize page. Before, it got `415`. A JSON `POST` keeps
+  the Hearth JSON API without change.
 - **Session cleanup sweep evicts every expired session in one pass**: expired sessions past the
   first page were evicted on later cleanup ticks, so `SessionEvicted` events and session-version
   bumps came late. Such sessions were already refused on read.
