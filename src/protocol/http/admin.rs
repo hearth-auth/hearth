@@ -5437,6 +5437,7 @@ async fn admin_backup_create(
     let include_audit = params.include_audit;
     let auth_realm_id = auth.realm_id.clone();
     let actor = auth.user_id.as_uuid().to_string();
+    let marker_dir = state.backup_marker_dir.clone();
 
     let result = tokio::task::spawn_blocking(move || {
         use crate::backup::{BackupArchive, BackupExporter, BackupManifest, ExportOptions};
@@ -5488,6 +5489,17 @@ async fn admin_backup_create(
             .map_err(|e| format!("finish archive: {e}"))?;
 
         let bytes = std::fs::read(&tmp_path).map_err(|e| format!("read archive: {e}"))?;
+        // #648: the time of this backup, for the backup-time gauge. A failed
+        // write costs the metric only, not the backup.
+        if let Some(dir) = &marker_dir {
+            if let Err(e) = crate::backup::marker::record_success(
+                dir,
+                crate::backup::marker::BackupSource::Online,
+                std::time::SystemTime::now(),
+            ) {
+                tracing::warn!(error = %e, "the backup succeeded, but its time was not recorded for /metrics");
+            }
+        }
         Ok::<Vec<u8>, String>(bytes)
     })
     .await;
