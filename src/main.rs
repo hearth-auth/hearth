@@ -1557,6 +1557,12 @@ async fn run_serve(
     {
         warn!(error = %e, "the data directory's free space is not on /metrics");
     }
+    // #648: the time of the last online and offline backup, read at each scrape.
+    if let Err(e) =
+        hearth::metrics::metrics().export_backup_status(app_storage_config.data_dir.clone())
+    {
+        warn!(error = %e, "the last backup time is not on /metrics");
+    }
 
     // Build cluster-aware storage: wraps inner_storage in ClusterEngine so
     // all writes (put / delete / put_batch) go through Raft quorum commit
@@ -2765,6 +2771,7 @@ async fn run_serve(
         .with_rate_limits(admin_rate_limit, token_rate_limit, export_rate_limit)
         .with_rate_limiters_disabled(load_test_unthrottled)
         .with_backup_verify_key(backup_verify_key)
+        .with_backup_marker_dir(Some(app_storage_config.data_dir.clone()))
         // In --dev, enable all agent-auth capability phases regardless of
         // what hearth.yaml says, so developers can exercise Phase D routes
         // without manually setting every capability flag.
@@ -2791,6 +2798,7 @@ async fn run_serve(
         .with_rate_limits(admin_rate_limit, token_rate_limit, export_rate_limit)
         .with_rate_limiters_disabled(load_test_unthrottled)
         .with_backup_verify_key(backup_verify_key)
+        .with_backup_marker_dir(Some(app_storage_config.data_dir.clone()))
         .with_agent_identity(config.agent_auth.capabilities.identity)
         .with_agent_approval(config.agent_auth.capabilities.approval)
         .with_agent_advanced(config.agent_auth.capabilities.advanced)
@@ -4983,6 +4991,15 @@ fn run_backup_create(
         // if it fails the original error is still the one the operator needs.
         let _ = std::fs::remove_file(&out_path);
         return Err(e);
+    }
+    // #648: the server's backup-time gauge reads this at each scrape. A failed
+    // write costs the metric only, not the backup.
+    if let Err(e) = hearth::backup::marker::record_success(
+        data_dir,
+        hearth::backup::marker::BackupSource::Offline,
+        std::time::SystemTime::now(),
+    ) {
+        warn!(error = %e, "the backup succeeded, but its time was not recorded for /metrics");
     }
 
     tracing::info!("Backup written to: {}", out_path.display());

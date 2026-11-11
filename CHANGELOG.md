@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Added
+- **A backup metric and alert** (#648): `/metrics` now has
+  `hearth_backup_last_success_timestamp_seconds{source}`, the time of the last successful
+  `online` (`POST /admin/backup`) and `offline` (`hearth backup create`) backup, or `0` if none.
+  Each backup writes its time to a small file in `storage.data_dir`, so a backup that the CLI took
+  while the server was stopped also counts. `deploy/monitoring/` adds the `HearthBackupTooOld`
+  alert (no backup for more than 26 hours) and a backup-age panel on the dashboard.
+
 ### Fixed
 - **Session cleanup sweep evicts every expired session in one pass**: expired sessions past the
   first page were evicted on later cleanup ticks, so `SessionEvicted` events and session-version

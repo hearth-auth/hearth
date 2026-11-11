@@ -536,3 +536,43 @@ async fn the_cli_says_when_operator_access_did_not_come_back() {
         "it must not claim the archived operators sign in: {out}"
     );
 }
+
+/// #648: `hearth backup create` records its completion time in the data
+/// directory, so the server's backup-time gauge also covers offline backups.
+#[test]
+fn an_offline_backup_records_its_completion_time() {
+    use hearth::backup::marker::{last_success, BackupSource};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let origin = dir.path().join("origin");
+    seed_source_store(&origin);
+    let source = dir.path().join("source");
+    copy_dir(&origin, &source);
+    assert_eq!(last_success(&source, BackupSource::Offline), None);
+
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+    let (code, out) = hearth(&[
+        os("backup"),
+        os("create"),
+        os("--data-dir"),
+        source.as_os_str(),
+        os("--output"),
+        dir.path().join("a.hearth-backup").as_os_str(),
+    ]);
+    assert_eq!(code, Some(0), "backup create: {out}");
+    let after = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+
+    let recorded = last_success(&source, BackupSource::Offline)
+        .expect("a successful offline backup must record its completion time");
+    assert!(
+        (before..=after).contains(&recorded),
+        "recorded {recorded}, the backup ran from {before} to {after}"
+    );
+    assert_eq!(last_success(&source, BackupSource::Online), None);
+}

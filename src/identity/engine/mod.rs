@@ -22498,6 +22498,298 @@ mod tests {
         );
     }
 
+    // #641 (cargo-mutants survivors): session policy eviction, the realm
+    // session TTL, and bulk revocation and sweep past the first page.
+
+    /// A realm with the given idle and absolute session timeouts.
+    fn create_realm_with_session_policy(
+        engine: &EmbeddedIdentityEngine,
+        idle_timeout_secs: Option<u32>,
+        absolute_timeout_secs: Option<u32>,
+    ) -> RealmId {
+        engine
+            .create_realm(&CreateRealmRequest {
+                name: format!("test-realm-{}", uuid::Uuid::new_v4()),
+                config: Some(RealmConfig {
+                    idle_timeout_secs,
+                    absolute_timeout_secs,
+                    ..RealmConfig::default()
+                }),
+            })
+            .expect("create realm")
+            .id()
+            .clone()
+    }
+
+    /// The realm's audit events with `action`.
+    fn audit_events(
+        audit: &EmbeddedAuditEngine,
+        realm_id: &RealmId,
+        action: AuditAction,
+    ) -> Vec<crate::audit::AuditEvent> {
+        let mut query = crate::audit::AuditQuery::for_realm(realm_id.clone());
+        query.action = Some(action);
+        audit.query(&query).expect("query audit")
+    }
+
+    /// The `reason` metadata of the realm's one `SessionEvicted` event for
+    /// `session`.
+    fn eviction_reason(
+        audit: &EmbeddedAuditEngine,
+        realm_id: &RealmId,
+        session: &Session,
+    ) -> String {
+        let events = audit_events(audit, realm_id, AuditAction::SessionEvicted);
+        assert_eq!(events.len(), 1, "exactly one SessionEvicted event expected");
+        assert_eq!(events[0].resource_id, session.id().as_uuid().to_string());
+        events[0]
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("reason"))
+            .and_then(serde_json::Value::as_str)
+            .expect("SessionEvicted carries a reason")
+            .to_string()
+    }
+
+    /// A refresh exactly at the idle deadline evicts the session: it is
+    /// revoked and audited with the reason `idle_timeout`.
+    #[test]
+    fn refresh_session_at_the_idle_deadline_evicts_with_reason_idle_timeout() {
+        let (_dir, engine, clock, audit) = setup_engine_with_audit();
+        let realm_id = create_realm_with_session_policy(&engine, Some(300), None);
+        let user = create_test_user(&engine, &realm_id);
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("create session");
+
+        clock.advance(300 * 1_000_000);
+        assert!(matches!(
+            engine.refresh_session(&realm_id, session.id()),
+            Err(IdentityError::SessionNotFound)
+        ));
+        assert_eq!(eviction_reason(&audit, &realm_id, &session), "idle_timeout");
+        let stored = engine
+            .load_session_raw(&realm_id, session.id())
+            .expect("load")
+            .expect("the evicted row is kept, revoked");
+        assert!(stored.is_revoked(), "an evicted session must be revoked");
+    }
+
+    /// A refresh exactly at the absolute deadline evicts the session with the
+    /// reason `absolute_timeout`.
+    #[test]
+    fn refresh_session_at_the_absolute_deadline_evicts_with_reason_absolute_timeout() {
+        let (_dir, engine, clock, audit) = setup_engine_with_audit();
+        let realm_id = create_realm_with_session_policy(&engine, None, Some(600));
+        let user = create_test_user(&engine, &realm_id);
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("create session");
+
+        clock.advance(600 * 1_000_000);
+        assert!(matches!(
+            engine.refresh_session(&realm_id, session.id()),
+            Err(IdentityError::SessionNotFound)
+        ));
+        assert_eq!(
+            eviction_reason(&audit, &realm_id, &session),
+            "absolute_timeout"
+        );
+    }
+
+    /// A revoked session past its idle deadline is refused, but it is not
+    /// evicted again: eviction applies only to a session that is still valid.
+    #[test]
+    fn refresh_session_of_a_revoked_session_records_no_eviction() {
+        let (_dir, engine, clock, audit) = setup_engine_with_audit();
+        let realm_id = create_realm_with_session_policy(&engine, Some(300), None);
+        let user = create_test_user(&engine, &realm_id);
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("create session");
+        engine
+            .revoke_session(&realm_id, session.id())
+            .expect("revoke");
+
+        clock.advance(300 * 1_000_000);
+        assert!(matches!(
+            engine.refresh_session(&realm_id, session.id()),
+            Err(IdentityError::SessionNotFound)
+        ));
+        assert!(
+            audit_events(&audit, &realm_id, AuditAction::SessionEvicted).is_empty(),
+            "a revoked session must not be evicted"
+        );
+    }
+
+    /// `revoke_all_user_sessions` revokes every session, past the first page.
+    #[test]
+    fn revoke_all_user_sessions_revokes_past_the_first_page() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm_id);
+        let count = crate::core::MAX_PAGE_LIMIT + 1;
+        let mut ids = Vec::new();
+        for _ in 0..count {
+            ids.push(
+                engine
+                    .create_session(&realm_id, user.id(), &SessionContext::default())
+                    .expect("create session")
+                    .id()
+                    .clone(),
+            );
+        }
+
+        assert_eq!(
+            engine
+                .revoke_all_user_sessions(&realm_id, user.id(), None)
+                .expect("revoke all"),
+            count
+        );
+        for id in &ids {
+            assert!(
+                engine.get_session(&realm_id, id).expect("get").is_none(),
+                "every session must be revoked, across pages"
+            );
+        }
+    }
+
+    /// `revoke_all_user_sessions` records one `SessionsRevoked` event when it
+    /// revokes sessions, and none when there is nothing to revoke.
+    #[test]
+    fn revoke_all_user_sessions_audits_only_a_non_empty_revocation() {
+        let (_dir, engine, _clock, audit) = setup_engine_with_audit();
+        let realm_id = create_test_realm(&engine);
+        let idle_user = create_test_user(&engine, &realm_id);
+        assert_eq!(
+            engine
+                .revoke_all_user_sessions(&realm_id, idle_user.id(), None)
+                .expect("revoke all"),
+            0
+        );
+        assert!(
+            audit_events(&audit, &realm_id, AuditAction::SessionsRevoked).is_empty(),
+            "revoking no session must record no SessionsRevoked event"
+        );
+
+        let user = create_test_user(&engine, &realm_id);
+        for _ in 0..2 {
+            engine
+                .create_session(&realm_id, user.id(), &SessionContext::default())
+                .expect("create session");
+        }
+        engine
+            .revoke_all_user_sessions(&realm_id, user.id(), None)
+            .expect("revoke all");
+        let events = audit_events(&audit, &realm_id, AuditAction::SessionsRevoked);
+        assert_eq!(events.len(), 1, "one SessionsRevoked event expected");
+        assert_eq!(
+            events[0].metadata.as_ref().and_then(|m| m.get("count")),
+            Some(&serde_json::json!(2))
+        );
+    }
+
+    /// A positive realm `session_ttl_micros` sets the session lifetime; a zero
+    /// or negative one is ignored and the engine default applies.
+    #[test]
+    fn create_session_honours_a_positive_realm_session_ttl_only() {
+        let (_dir, engine, clock) = setup_engine();
+        let default_ttl = engine.config.session.ttl_micros;
+        for (realm_ttl, expected) in [
+            (3_600_000_000, 3_600_000_000),
+            (0, default_ttl),
+            (-1, default_ttl),
+        ] {
+            let realm_id = engine
+                .create_realm(&CreateRealmRequest {
+                    name: format!("test-realm-{}", uuid::Uuid::new_v4()),
+                    config: Some(RealmConfig {
+                        session_ttl_micros: Some(realm_ttl),
+                        ..RealmConfig::default()
+                    }),
+                })
+                .expect("create realm")
+                .id()
+                .clone();
+            let user = create_test_user(&engine, &realm_id);
+            let session = engine
+                .create_session(&realm_id, user.id(), &SessionContext::default())
+                .expect("create session");
+            assert_eq!(
+                session.expires_at().as_micros() - clock.now().as_micros(),
+                expected,
+                "realm session_ttl_micros = {realm_ttl}"
+            );
+        }
+    }
+
+    /// `cascade_user_sessions_and_memberships` reports whether it found a row:
+    /// `false` for a user with none, `true` for each kind of row alone, and
+    /// `false` again once the cascade removed that row.
+    #[test]
+    fn cascade_user_sessions_and_memberships_reports_each_kind_of_row() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let user = UserId::generate();
+        let cascade = || {
+            engine
+                .cascade_user_sessions_and_memberships(&realm_id, &user)
+                .expect("cascade")
+        };
+        assert!(!cascade(), "a user with no rows must report none found");
+
+        for (kind, key) in [
+            (
+                "session index",
+                keys::encode_user_session(&user, &SessionId::generate()),
+            ),
+            (
+                "organization membership",
+                keys::encode_membership_by_user(&user, &OrganizationId::generate()),
+            ),
+            (
+                "OAuth consent",
+                keys::encode_consent_prefix_for_client(&user, &ClientId::generate()),
+            ),
+        ] {
+            engine.storage.put(&realm_id, &key, b"row").expect("put");
+            assert!(cascade(), "a {kind} row alone must be reported found");
+            assert!(!cascade(), "the {kind} row must be gone after the cascade");
+        }
+    }
+
+    /// The `sv` claim carries the session's current version, not the
+    /// initial one.
+    #[test]
+    fn issued_access_token_carries_the_current_session_version() {
+        let (_dir, engine, _clock) = setup_engine();
+        let mut config = RealmConfig::default();
+        config.session_version.enabled = true;
+        let realm_id = engine
+            .create_realm(&CreateRealmRequest {
+                name: format!("test-realm-{}", uuid::Uuid::new_v4()),
+                config: Some(config),
+            })
+            .expect("create realm")
+            .id()
+            .clone();
+        let user = create_test_user(&engine, &realm_id);
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("session");
+        let bumped = engine
+            .sv_store
+            .bump(&realm_id, session.id(), 3600)
+            .expect("bump");
+        assert!(bumped > 1, "setup: the bump must move the version past 1");
+
+        let tokens = engine
+            .issue_tokens(&realm_id, user.id(), session.id())
+            .expect("issue tokens");
+        let claims = tokens::decode_claims_unverified(tokens.access_token()).expect("decode");
+        assert_eq!(claims.sv, Some(bumped));
+    }
+
     /// One sweep evicts every policy-expired session in the realm, also past
     /// the first page. Each eviction drops a session from the listing, so
     /// the sweep must not skip the sessions that move up into the page
@@ -27343,6 +27635,577 @@ mod tests {
         engine
             .validate_token(&realm_id, &barely_ahead)
             .expect("an nbf inside the clock-skew window must be accepted");
+    }
+
+    // #641 (cargo-mutants survivors): the edges of the time checks in
+    // `validate_token`, and the issuer check. Each test re-signs a genuine
+    // access token with one claim changed.
+
+    /// A genuine access token's claims, and the engine's current time in
+    /// seconds.
+    fn access_claims_now(
+        engine: &EmbeddedIdentityEngine,
+        realm_id: &RealmId,
+    ) -> (TokenClaims, i64) {
+        let user = create_test_user(engine, realm_id);
+        let session = engine
+            .create_session(realm_id, user.id(), &SessionContext::default())
+            .expect("session");
+        let tokens = engine
+            .issue_tokens(realm_id, user.id(), session.id())
+            .expect("issue tokens");
+        let claims = tokens::decode_claims_unverified(tokens.access_token()).expect("decode");
+        (claims, engine.clock.now().as_micros() / 1_000_000)
+    }
+
+    /// `iat` exactly at the end of the clock-skew window is accepted; one
+    /// second past it is not.
+    #[test]
+    fn validate_token_accepts_iat_at_the_clock_skew_edge() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let (base, now_secs) = access_claims_now(&engine, &realm_id);
+
+        let at_edge = TokenClaims {
+            iat: now_secs + CLOCK_SKEW_SECS,
+            ..base.clone()
+        };
+        engine
+            .validate_token(&realm_id, &resign_for_realm(&engine, &realm_id, &at_edge))
+            .expect("an iat at the clock-skew edge must be accepted");
+
+        let past_edge = TokenClaims {
+            iat: now_secs + CLOCK_SKEW_SECS + 1,
+            ..base
+        };
+        assert!(
+            matches!(
+                engine.validate_token(&realm_id, &resign_for_realm(&engine, &realm_id, &past_edge)),
+                Err(IdentityError::InvalidToken)
+            ),
+            "an iat past the clock-skew window must be rejected"
+        );
+    }
+
+    /// `iat == exp` is coherent and accepted; `iat > exp` is not.
+    #[test]
+    fn validate_token_accepts_iat_equal_to_exp_and_rejects_iat_after_exp() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let (base, now_secs) = access_claims_now(&engine, &realm_id);
+
+        let equal = TokenClaims {
+            iat: now_secs + 10,
+            exp: now_secs + 10,
+            ..base.clone()
+        };
+        engine
+            .validate_token(&realm_id, &resign_for_realm(&engine, &realm_id, &equal))
+            .expect("a token with iat == exp must be accepted");
+
+        let after = TokenClaims {
+            iat: now_secs + 11,
+            exp: now_secs + 10,
+            ..base
+        };
+        assert!(
+            matches!(
+                engine.validate_token(&realm_id, &resign_for_realm(&engine, &realm_id, &after)),
+                Err(IdentityError::InvalidToken)
+            ),
+            "a token with iat after exp must be rejected"
+        );
+    }
+
+    /// `nbf` exactly at the end of the clock-skew window is accepted; one
+    /// second past it is not.
+    #[test]
+    fn validate_token_accepts_nbf_at_the_clock_skew_edge() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let (base, now_secs) = access_claims_now(&engine, &realm_id);
+
+        let at_edge = TokenClaims {
+            nbf: Some(now_secs + CLOCK_SKEW_SECS),
+            ..base.clone()
+        };
+        engine
+            .validate_token(&realm_id, &resign_for_realm(&engine, &realm_id, &at_edge))
+            .expect("an nbf at the clock-skew edge must be accepted");
+
+        let past_edge = TokenClaims {
+            nbf: Some(now_secs + CLOCK_SKEW_SECS + 1),
+            ..base
+        };
+        assert!(
+            matches!(
+                engine.validate_token(&realm_id, &resign_for_realm(&engine, &realm_id, &past_edge)),
+                Err(IdentityError::InvalidToken)
+            ),
+            "an nbf past the clock-skew window must be rejected"
+        );
+    }
+
+    /// A token signed with the realm's key but naming a foreign issuer is
+    /// rejected (RFC 7519 §4.1.1). The configured `token.issuer` is accepted.
+    #[test]
+    fn validate_token_rejects_a_foreign_issuer() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let (base, _now_secs) = access_claims_now(&engine, &realm_id);
+
+        let configured = TokenClaims {
+            iss: engine.config.token.issuer.clone(),
+            ..base.clone()
+        };
+        engine
+            .validate_token(
+                &realm_id,
+                &resign_for_realm(&engine, &realm_id, &configured),
+            )
+            .expect("the configured token.issuer must be accepted");
+
+        let foreign = TokenClaims {
+            iss: "https://foreign.example".to_string(),
+            ..base
+        };
+        assert!(
+            matches!(
+                engine.validate_token(&realm_id, &resign_for_realm(&engine, &realm_id, &foreign)),
+                Err(IdentityError::InvalidToken)
+            ),
+            "a token that names a foreign issuer must be rejected"
+        );
+    }
+
+    /// A genuine refresh token for a new user and session.
+    fn genuine_refresh_token(engine: &EmbeddedIdentityEngine, realm_id: &RealmId) -> String {
+        let user = create_test_user(engine, realm_id);
+        let session = engine
+            .create_session(realm_id, user.id(), &SessionContext::default())
+            .expect("session");
+        engine
+            .issue_tokens(realm_id, user.id(), session.id())
+            .expect("issue tokens")
+            .refresh_token()
+            .to_string()
+    }
+
+    /// The refresh grant applies the same `iat` clock-skew edge as
+    /// `validate_token`. The token is genuine; the clock moves back so that
+    /// its `iat` is just past, then exactly at, the edge. The rejection comes
+    /// from the claim checks, before any rotation state changes.
+    #[test]
+    fn refresh_tokens_accepts_iat_at_the_clock_skew_edge() {
+        let (_dir, engine, clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let refresh = genuine_refresh_token(&engine, &realm_id);
+
+        clock.advance(-(CLOCK_SKEW_SECS + 1) * 1_000_000);
+        assert!(
+            matches!(
+                engine.refresh_tokens(&realm_id, &refresh, None, None),
+                Err(IdentityError::InvalidToken)
+            ),
+            "a refresh token with an iat past the clock-skew window must be rejected"
+        );
+
+        clock.advance(1_000_000);
+        engine
+            .refresh_tokens(&realm_id, &refresh, None, None)
+            .expect("a refresh token with an iat at the clock-skew edge must be accepted");
+    }
+
+    /// The refresh grant accepts `iat == exp` and rejects `iat > exp` at the
+    /// claim checks. A re-signed token does not match the grant family's
+    /// current token, so a token that passes the claim checks is refused
+    /// later as `TokenRevoked`; a token the claim checks refuse is
+    /// `InvalidToken`.
+    #[test]
+    fn refresh_tokens_claim_checks_accept_iat_equal_to_exp_and_reject_iat_after_exp() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let base = tokens::decode_claims_unverified(&genuine_refresh_token(&engine, &realm_id))
+            .expect("decode");
+        let now_secs = engine.clock.now().as_micros() / 1_000_000;
+
+        let after = TokenClaims {
+            iat: now_secs + 11,
+            exp: now_secs + 10,
+            ..base.clone()
+        };
+        let after = resign_for_realm(&engine, &realm_id, &after);
+        assert!(
+            matches!(
+                engine.refresh_tokens(&realm_id, &after, None, None),
+                Err(IdentityError::InvalidToken)
+            ),
+            "a refresh token with iat after exp must fail the claim checks"
+        );
+
+        let equal = TokenClaims {
+            iat: now_secs + 10,
+            exp: now_secs + 10,
+            ..base
+        };
+        let equal = resign_for_realm(&engine, &realm_id, &equal);
+        assert!(
+            matches!(
+                engine.refresh_tokens(&realm_id, &equal, None, None),
+                Err(IdentityError::TokenRevoked)
+            ),
+            "a refresh token with iat == exp must pass the claim checks and reach the \
+             grant-family check"
+        );
+    }
+
+    /// RFC 7662 `active` for `claims`, re-signed with the realm key and
+    /// introspected by `client` (or by no client).
+    fn introspect_resigned(
+        engine: &EmbeddedIdentityEngine,
+        realm_id: &RealmId,
+        claims: &TokenClaims,
+        client: Option<&ClientId>,
+    ) -> bool {
+        use crate::identity::oidc::TokenIntrospectionRequest;
+
+        engine
+            .introspect_token(
+                realm_id,
+                &TokenIntrospectionRequest {
+                    token: resign_for_realm(engine, realm_id, claims),
+                    token_type_hint: Some("access_token".to_string()),
+                    introspecting_client_id: client.cloned(),
+                },
+            )
+            .expect("introspection")
+            .active
+    }
+
+    /// Introspection applies the `iat` and `nbf` clock-skew edges and the
+    /// `iat <= exp` coherence rule exactly as `validate_token` does.
+    #[test]
+    fn introspection_applies_the_time_claim_edges() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let (base, now_secs) = access_claims_now(&engine, &realm_id);
+        let active = |claims: &TokenClaims| introspect_resigned(&engine, &realm_id, claims, None);
+
+        let iat_at_edge = TokenClaims {
+            iat: now_secs + CLOCK_SKEW_SECS,
+            ..base.clone()
+        };
+        assert!(
+            active(&iat_at_edge),
+            "an iat at the clock-skew edge must be active"
+        );
+        let iat_past_edge = TokenClaims {
+            iat: now_secs + CLOCK_SKEW_SECS + 1,
+            ..base.clone()
+        };
+        assert!(
+            !active(&iat_past_edge),
+            "an iat past the clock-skew window must be inactive"
+        );
+
+        let iat_equal_exp = TokenClaims {
+            iat: now_secs + 10,
+            exp: now_secs + 10,
+            ..base.clone()
+        };
+        assert!(
+            active(&iat_equal_exp),
+            "a token with iat == exp must be active"
+        );
+        let iat_after_exp = TokenClaims {
+            iat: now_secs + 11,
+            exp: now_secs + 10,
+            ..base.clone()
+        };
+        assert!(
+            !active(&iat_after_exp),
+            "a token with iat after exp must be inactive"
+        );
+
+        let nbf_at_edge = TokenClaims {
+            nbf: Some(now_secs + CLOCK_SKEW_SECS),
+            ..base.clone()
+        };
+        assert!(
+            active(&nbf_at_edge),
+            "an nbf at the clock-skew edge must be active"
+        );
+        let nbf_past_edge = TokenClaims {
+            nbf: Some(now_secs + CLOCK_SKEW_SECS + 1),
+            ..base
+        };
+        assert!(
+            !active(&nbf_past_edge),
+            "an nbf past the clock-skew window must be inactive"
+        );
+    }
+
+    /// RFC 7662 §2: a client may introspect a token whose `azp` names it,
+    /// even when `aud` does not, and may not introspect a token whose `azp`
+    /// names another client.
+    #[test]
+    fn introspection_by_a_client_follows_the_token_azp() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let (base, _now_secs) = access_claims_now(&engine, &realm_id);
+        let caller = ClientId::generate();
+        let other = ClientId::generate();
+        assert!(
+            !base
+                .aud
+                .contains(tokens::issued_client_id(&caller).as_str()),
+            "the caller must not be in aud, or the azp rule is not what decides"
+        );
+
+        let own = TokenClaims {
+            azp: Some(tokens::issued_client_id(&caller)),
+            ..base.clone()
+        };
+        assert!(
+            introspect_resigned(&engine, &realm_id, &own, Some(&caller)),
+            "the client that azp names must see the token active"
+        );
+
+        let foreign = TokenClaims {
+            azp: Some(tokens::issued_client_id(&other)),
+            ..base
+        };
+        assert!(
+            !introspect_resigned(&engine, &realm_id, &foreign, Some(&caller)),
+            "a client that neither azp nor aud names must see the token inactive"
+        );
+    }
+
+    // #641 (cargo-mutants survivors): OAuth checks on the decision endpoint,
+    // introspection metadata, client trust level and bulk disable.
+
+    /// RFC 8707 on the decision endpoint: a token answers only for a resource
+    /// its `aud` names.
+    #[test]
+    fn decide_answers_only_for_a_resource_the_token_audience_names() {
+        use crate::identity::oidc::DecidePermissionRequest;
+
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm_id);
+        let role = engine
+            .rbac
+            .create_role(
+                &realm_id,
+                &crate::rbac::CreateRoleRequest {
+                    name: "resource-decide-role".to_string(),
+                    description: None,
+                    permissions: vec![
+                        crate::rbac::Permission::new("docs.read").expect("valid permission")
+                    ],
+                    parent_roles: vec![],
+                    ..Default::default()
+                },
+            )
+            .expect("create role");
+        engine
+            .rbac
+            .assign_role(
+                &realm_id,
+                &crate::rbac::AssignRoleRequest {
+                    subject: crate::rbac::Subject::User(user.id().clone()),
+                    role_id: role.id.clone(),
+                    scope: crate::rbac::Scope::Realm,
+                    assigned_by: None,
+                },
+            )
+            .expect("assign role");
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("session");
+        let tokens = engine
+            .issue_tokens(&realm_id, user.id(), session.id())
+            .expect("issue tokens");
+        let base = tokens::decode_claims_unverified(tokens.access_token()).expect("decode");
+        let token = resign_for_realm(
+            &engine,
+            &realm_id,
+            &TokenClaims {
+                aud: tokens::Audience::Multi(vec![
+                    engine.config.token.audience.clone(),
+                    "https://api.example".to_string(),
+                ]),
+                ..base
+            },
+        );
+
+        let decide = |resource: &str| {
+            engine
+                .decide_token_permission(
+                    &realm_id,
+                    &DecidePermissionRequest {
+                        token: token.clone(),
+                        permission: "docs.read".to_string(),
+                        organization_id: None,
+                        resource: Some(resource.to_string()),
+                    },
+                )
+                .expect("decide")
+                .allowed
+        };
+        assert!(
+            decide("https://api.example"),
+            "the resource the token's aud names must be answered"
+        );
+        assert!(
+            !decide("https://other.example"),
+            "a resource the token's aud does not name must be refused"
+        );
+    }
+
+    /// RFC 7662 §2.2: introspection reports the client of a sessionless
+    /// client token from its `client_<uuid>` subject when the token has no
+    /// `client_id` claim.
+    #[test]
+    fn introspection_reports_the_client_of_a_sessionless_client_token() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let (base, _now_secs) = access_claims_now(&engine, &realm_id);
+        let client = ClientId::generate();
+        let mut custom = base.custom.clone();
+        custom.remove(tokens::CLIENT_ID_CLAIM);
+        let claims = TokenClaims {
+            sub: format!("client_{}", tokens::issued_client_id(&client)),
+            sid: "none".to_string(),
+            custom,
+            ..base
+        };
+
+        let response = engine
+            .introspect_token(
+                &realm_id,
+                &crate::identity::oidc::TokenIntrospectionRequest {
+                    token: resign_for_realm(&engine, &realm_id, &claims),
+                    token_type_hint: Some("access_token".to_string()),
+                    introspecting_client_id: None,
+                },
+            )
+            .expect("introspection");
+        assert!(response.active, "setup: the client token must be active");
+        assert_eq!(response.client_id, Some(tokens::issued_client_id(&client)));
+    }
+
+    /// Setting a client's trust level sets whether it requires consent: a
+    /// third-party client does, a first-party client does not.
+    #[test]
+    fn update_client_trust_level_sets_require_consent() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let client = register_test_client(&engine, &realm_id);
+
+        for (level, consent) in [
+            (crate::identity::ClientTrustLevel::ThirdParty, true),
+            (crate::identity::ClientTrustLevel::FirstParty, false),
+        ] {
+            let updated = engine
+                .update_client(
+                    &realm_id,
+                    client.client_id(),
+                    &crate::identity::oidc::UpdateClientRequest {
+                        trust_level: Some(level),
+                        ..crate::identity::oidc::UpdateClientRequest::default()
+                    },
+                )
+                .expect("update client");
+            assert_eq!(updated.require_consent(), consent, "trust level {level:?}");
+        }
+    }
+
+    /// `bulk_disable_users` disables each user and reports one result per
+    /// user, in order.
+    #[test]
+    fn bulk_disable_users_disables_each_user() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let users = [
+            create_test_user(&engine, &realm_id),
+            create_test_user(&engine, &realm_id),
+        ];
+        let ids: Vec<UserId> = users.iter().map(|u| u.id().clone()).collect();
+
+        let results = engine
+            .bulk_disable_users(&realm_id, &ids)
+            .expect("bulk disable");
+        assert_eq!(results.len(), 2);
+        for (index, (result, id)) in results.iter().zip(&ids).enumerate() {
+            assert_eq!(result.index, index);
+            assert!(result.result.is_ok(), "user {index}: {:?}", result.result);
+            let user = engine
+                .get_user(&realm_id, id)
+                .expect("get user")
+                .expect("user exists");
+            assert_eq!(user.status(), UserStatus::Disabled);
+        }
+    }
+
+    /// An organization that requires MFA is found past the first page of the
+    /// user's organizations.
+    #[test]
+    fn org_requires_mfa_reads_past_the_first_page_of_organizations() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm_id);
+        let page = crate::core::MAX_PAGE_LIMIT as usize;
+        for i in 0..=page {
+            let org = engine
+                .create_organization(
+                    &realm_id,
+                    &CreateOrganizationRequest {
+                        name: format!("Org {i}"),
+                        slug: format!("org-{i:03}"),
+                        ..CreateOrganizationRequest::default()
+                    },
+                )
+                .expect("create organization");
+            engine
+                .add_member(&realm_id, org.id(), user.id(), OrganizationRole::Member)
+                .expect("add member");
+        }
+        assert!(
+            !engine.org_requires_mfa(&realm_id, user.id()).expect("mfa"),
+            "setup: no organization requires MFA yet"
+        );
+
+        let first = engine
+            .list_user_organizations(&realm_id, user.id(), None, page)
+            .expect("first page");
+        let cursor = first.next_cursor.expect("a second page");
+        let second = engine
+            .list_user_organizations(&realm_id, user.id(), Some(&cursor), page)
+            .expect("second page");
+        let on_second_page = second
+            .items
+            .last()
+            .expect("an organization on the second page")
+            .org_id()
+            .clone();
+        engine
+            .update_organization(
+                &realm_id,
+                &on_second_page,
+                &UpdateOrganizationRequest {
+                    config: Some(crate::identity::types::org::OrganizationConfig {
+                        mfa_required: true,
+                        ..crate::identity::types::org::OrganizationConfig::default()
+                    }),
+                    ..UpdateOrganizationRequest::default()
+                },
+            )
+            .expect("update organization");
+        assert!(
+            engine.org_requires_mfa(&realm_id, user.id()).expect("mfa"),
+            "an organization on the second page that requires MFA must count"
+        );
     }
 
     /// Introspection is a token-accepting path too: RFC 7662 `active` must be

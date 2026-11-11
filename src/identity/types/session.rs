@@ -747,4 +747,52 @@ mod tests {
             assert_eq!(before.with_proved_second_factor(), after, "from {before:?}");
         }
     }
+
+    /// A session with a 1 000 s TTL, and idle and absolute timeouts of 100 s
+    /// and 500 s, created at 1 000 s.
+    fn timed_session() -> Session {
+        Session::new(
+            SessionId::new(Uuid::new_v4()),
+            UserId::new(Uuid::new_v4()),
+            Timestamp::from_micros(1_000_000_000),
+            Timestamp::from_micros(2_000_000_000),
+            &SessionContext::default(),
+            Some(100),
+            Some(500),
+        )
+    }
+
+    /// `expires_at` is the first instant the session is no longer valid.
+    #[test]
+    fn a_session_is_valid_until_its_expiry_instant() {
+        let session = timed_session();
+        assert!(session.is_valid(Timestamp::from_micros(1_999_999_999)));
+        assert!(!session.is_valid(Timestamp::from_micros(2_000_000_000)));
+    }
+
+    /// The eviction reason names the deadline reached: none before either,
+    /// `idle_timeout` from the idle deadline, `absolute_timeout` from the
+    /// absolute deadline once the idle window was refreshed past it.
+    #[test]
+    fn policy_expiry_reason_names_the_deadline_reached() {
+        let mut session = timed_session();
+        assert_eq!(
+            session.policy_expiry_reason(Timestamp::from_micros(1_099_999_999)),
+            None
+        );
+        assert_eq!(
+            session.policy_expiry_reason(Timestamp::from_micros(1_100_000_000)),
+            Some("idle_timeout")
+        );
+
+        session.refresh(Timestamp::from_micros(1_450_000_000), 1_000_000_000);
+        assert_eq!(
+            session.policy_expiry_reason(Timestamp::from_micros(1_499_999_999)),
+            None
+        );
+        assert_eq!(
+            session.policy_expiry_reason(Timestamp::from_micros(1_500_000_000)),
+            Some("absolute_timeout")
+        );
+    }
 }

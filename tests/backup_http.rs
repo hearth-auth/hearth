@@ -2212,3 +2212,88 @@ async fn the_permission_checks_answer_before_the_export_rate_limit() {
         );
     }
 }
+
+// ===== #648: a successful backup records its time for the backup metric =====
+
+/// The backup-age alert needs the time of the last good backup. Before #648,
+/// nothing recorded it, so an operator learned of a failed backup job only at
+/// restore time.
+#[tokio::test]
+async fn an_online_backup_records_its_completion_time() {
+    use hearth::backup::marker::{last_success, BackupSource};
+
+    set_master_key();
+    let h = common::TestHarness::in_process().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = make_admin_token(&h, &realm).await;
+    let data_dir = tempfile::tempdir().expect("tempdir");
+    let app = router(Arc::new(
+        AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc())
+            .with_webhook(h.webhooks_arc())
+            .with_backup_marker_dir(Some(data_dir.path().to_path_buf())),
+    ));
+
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/backup")
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::OK, "the backup must succeed");
+    let after = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+
+    let recorded = last_success(data_dir.path(), BackupSource::Online)
+        .expect("a successful online backup must record its completion time");
+    assert!(
+        (before..=after).contains(&recorded),
+        "recorded {recorded}, the backup ran from {before} to {after}"
+    );
+    assert_eq!(
+        last_success(data_dir.path(), BackupSource::Offline),
+        None,
+        "an online backup must not set the offline marker"
+    );
+}
+
+/// A refused backup records nothing: the alert must not see a backup that
+/// never happened.
+#[tokio::test]
+async fn a_refused_online_backup_records_nothing() {
+    use hearth::backup::marker::{last_success, BackupSource};
+
+    let h = common::TestHarness::in_process().await.expect("harness");
+    let realm = h.create_realm();
+    let data_dir = tempfile::tempdir().expect("tempdir");
+    let app = router(Arc::new(
+        AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc())
+            .with_webhook(h.webhooks_arc())
+            .with_backup_marker_dir(Some(data_dir.path().to_path_buf())),
+    ));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/backup")
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(last_success(data_dir.path(), BackupSource::Online), None);
+}
