@@ -3211,29 +3211,7 @@ impl EmbeddedIdentityEngine {
             }
         }
 
-        // 5. Check grant family (if refresh token with fid)
-        if claims.token_type == "refresh" {
-            if let Some(ref fid) = claims.fid {
-                let family_key = keys::encode_grant_family(fid);
-                if let Some(family_bytes) = self
-                    .storage
-                    .get(realm_id, &family_key)
-                    .map_err(Self::storage_err)?
-                {
-                    let family: StoredGrantFamily =
-                        serde_json::from_slice(&family_bytes).map_err(|e| {
-                            IdentityError::Serialization {
-                                reason: e.to_string(),
-                            }
-                        })?;
-                    if self.grant_family_is_revoked(realm_id, &family)? {
-                        return Ok(IntrospectionResponse::inactive());
-                    }
-                }
-            }
-        }
-
-        // 6. Look up the introspecting client's authorization mode and, for
+        // 5. Look up the introspecting client's authorization mode and, for
         // Introspection/Decision clients, emit live RBAC data so resource
         // servers have a single authoritative source for permissions.
         use crate::identity::oidc::AccessTokenAuthorization;
@@ -3266,7 +3244,7 @@ impl EmbeddedIdentityEngine {
                 .unwrap_or_default()
         };
 
-        // 7. Active — return metadata. RFC 7662 §2.2 `client_id`: the client
+        // 6. Active — return metadata. RFC 7662 §2.2 `client_id`: the client
         //    the token was issued to, in its issued form.
         let introspected_client = token_client_for_introspection(&claims);
         Ok(IntrospectionResponse {
@@ -3789,46 +3767,6 @@ impl EmbeddedIdentityEngine {
                 .filter(|(key, _)| key != "email" && key != "name")
                 .collect(),
         })
-    }
-
-    pub(super) fn authenticate_oauth_client_inner(
-        &self,
-        realm_id: &RealmId,
-        client_id: &ClientId,
-        client_secret: &str,
-    ) -> Result<(), IdentityError> {
-        let client_key = keys::encode_oauth_client(client_id);
-        let client_bytes = self
-            .storage
-            .get(realm_id, &client_key)
-            .map_err(Self::storage_err)?;
-        // 22.25 (audit 2026-08-28 §4.25#3): this used to `?`-return on the
-        // missing client and again on the missing hash, both before any
-        // hashing. An unregistered `client_id` therefore answered in
-        // microseconds while a registered confidential one answered in
-        // Argon2id-milliseconds — a clean existence-and-type oracle over an
-        // unauthenticated endpoint. A secret was presented, so one
-        // verification runs on every arm before the answer is decided.
-        let existing: Option<OAuthClient> = client_bytes
-            .map(|bytes| {
-                serde_json::from_slice::<OAuthClient>(&bytes).map_err(|e| {
-                    IdentityError::Serialization {
-                        reason: e.to_string(),
-                    }
-                })
-            })
-            .transpose()?;
-        let stored_hash = existing.as_ref().and_then(OAuthClient::client_secret_hash);
-        let matched = Self::verify_presented_client_secret(stored_hash, client_secret)?;
-        // Only now is the outcome decided — every arm has already paid for the
-        // same single verification.
-        let Some(client) = existing.as_ref() else {
-            return Err(IdentityError::InvalidClient);
-        };
-        if client.client_secret_hash().is_none() || !matched {
-            return Err(IdentityError::InvalidClientSecret);
-        }
-        Ok(())
     }
 
     /// Verifies a **presented** client secret, doing the same amount of

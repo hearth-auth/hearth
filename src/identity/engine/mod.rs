@@ -12541,15 +12541,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         ))
     }
 
-    fn authenticate_oauth_client(
-        &self,
-        realm_id: &RealmId,
-        client_id: &ClientId,
-        client_secret: &str,
-    ) -> Result<(), IdentityError> {
-        self.authenticate_oauth_client_inner(realm_id, client_id, client_secret)
-    }
-
     fn list_clients(
         &self,
         realm_id: &RealmId,
