@@ -1,23 +1,23 @@
 {
-  "store_format": 2,
-  "realm_id": "f811fe78-e103-457f-ae53-ea162bf9cc79",
+  "store_format": 3,
+  "realm_id": "1d30cf16-83c1-44b0-a971-d4afbfb2fe2a",
   "users": [
     [
       "user0@fixture.example",
-      "d0f276ba-3a84-4db9-987b-838d6b1e8a31"
+      "e20b9703-b582-468d-a586-75f1caa633ad"
     ],
     [
       "user1@fixture.example",
-      "4f8fdffd-1e7a-4e12-ae15-649317683213"
+      "16cf77fc-cb28-4a49-ade6-f69690f77cb4"
     ],
     [
       "user2@fixture.example",
-      "43f75246-9bf9-45ad-87da-988ec135deea"
+      "e063ee81-95c7-4eae-86d7-fcf901a78e35"
     ]
   ],
-  "session_id": "a2a921ba-838e-9a17-a509-8aeb7206a227",
+  "session_id": "fc11a1bc-e9f9-08c9-42b8-628e5578a10e",
   "kids": [
-    "sg4wX0A6fJMd8xL3jXF9ew"
+    "qOF3d881QZ5zz35qTuxSxA"
   ],
   "audit_events": 11,
   "admin_permissions": [

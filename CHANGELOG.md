@@ -28,6 +28,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   page no longer reads every user of the realm. A build with this change refuses a data
   directory of store format 1 at startup: restore a backup archive into a new, empty data
   directory (see `docs/guides/upgrading.md`).
+- **Breaking:** **Store format 3, with user sort indexes** (#644): the storage engine now keeps
+  one index for each sort column (email, name, status, created) and direction of the admin UI
+  user list, written in the same batch as the user record. A sorted user list without search text
+  reads only the requested page instead of every user of the realm. The name sort now ignores
+  case, and users with an equal value sort by user ID. A build with this change refuses a data
+  directory of an earlier store format at startup: restore a backup archive into a new, empty
+  data directory (see `docs/guides/upgrading.md`).
 
 ### Fixed
 - **Writes continue during a backup** (#643): `POST /admin/backup` no longer holds the node's

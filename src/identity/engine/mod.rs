@@ -3751,11 +3751,11 @@ impl EmbeddedIdentityEngine {
         // together on recovery — a crash can never leave the email pointer
         // without its user, or vice versa (HEA-1896). The audit append below
         // is already a single `put_batch` inside the audit engine.
+        // The sort indexes land in the same batch (#644).
+        let mut entries = vec![(email_key, user_id_bytes), (id_key, user_bytes)];
+        entries.extend(crate::identity::user_index::index_writes(None, Some(&user)).0);
         self.storage
-            .put_batch(
-                realm_id,
-                &[(email_key, user_id_bytes), (id_key, user_bytes)],
-            )
+            .put_batch(realm_id, &entries)
             .map_err(Self::storage_err)?;
 
         self.record_audit(
@@ -3827,6 +3827,73 @@ impl EmbeddedIdentityEngine {
         crate::codec::decode::<crate::identity::types::user::UserStorageRecord>(bytes)
             .map(User::from_storage_record)
             .map_err(|reason| IdentityError::Serialization { reason })
+    }
+
+    /// Writes a changed user record and its sort index entries in one batch
+    /// (#644): every entry of the new value, and a delete of each entry of
+    /// `before` that the new value does not keep.
+    fn write_user_record(
+        &self,
+        realm_id: &RealmId,
+        before: Option<&User>,
+        user: &User,
+        record: (Vec<u8>, Vec<u8>),
+    ) -> Result<(), IdentityError> {
+        let (mut puts, deletes) = crate::identity::user_index::index_writes(before, Some(user));
+        puts.push(record);
+        self.storage
+            .write_batch(realm_id, &puts, &deletes)
+            .map_err(Self::storage_err)
+    }
+
+    /// One page of users in the order of a sort index (#644). The walk
+    /// reads `offset + limit` index keys and about `limit` user records, not
+    /// the realm. It skips an entry whose record is gone or holds a different
+    /// value (a race of two writes can leave one) and reads on to fill the
+    /// page. Positions count such entries, so a page can move by one.
+    fn sorted_user_page(
+        &self,
+        realm_id: &RealmId,
+        field: crate::identity::search::UserSortField,
+        dir: crate::identity::search::SortDir,
+        page: &crate::core::PageRequest,
+    ) -> Result<Vec<User>, IdentityError> {
+        use crate::identity::user_index;
+
+        let prefix = user_index::index_prefix(field, dir);
+        let mut items: Vec<User> = Vec::with_capacity(page.limit as usize);
+        let mut position = page.offset;
+        while (items.len() as u64) < u64::from(page.limit) {
+            #[allow(clippy::cast_possible_truncation)]
+            let want = page.limit - items.len() as u32;
+            let walk_cap = position.saturating_add(u64::from(want));
+            let (entries, _) = self
+                .storage
+                .scan_prefix_paged(realm_id, &prefix, position, want, walk_cap)
+                .map_err(Self::storage_err)?;
+            for entry in &entries {
+                let Some(user_id) = user_index::entry_user_id(field, dir, &entry.key, &entry.value)
+                else {
+                    continue;
+                };
+                let Some(bytes) = self
+                    .storage
+                    .get(realm_id, &keys::encode_user_id(&user_id))
+                    .map_err(Self::storage_err)?
+                else {
+                    continue;
+                };
+                let user = Self::deserialize_user(&bytes)?;
+                if user_index::index_key(&user, field, dir) == entry.key {
+                    items.push(user);
+                }
+            }
+            if entries.len() < want as usize {
+                break;
+            }
+            position = position.saturating_add(entries.len() as u64);
+        }
+        Ok(items)
     }
 
     /// Wraps a storage error into an `IdentityError`.
@@ -5303,9 +5370,11 @@ impl EmbeddedIdentityEngine {
         //    same atomic batch. Preserving the foreign hash verbatim lets
         //    the user authenticate with their existing password; the next
         //    successful verify will auto-upgrade to Argon2id.
-        let mut entries = Vec::with_capacity(3);
+        let mut entries = Vec::with_capacity(10);
         entries.push((email_key, user_id_bytes));
         entries.push((id_key, user_bytes));
+        // The sort indexes land in the same batch (#644).
+        entries.extend(crate::identity::user_index::index_writes(None, Some(&user)).0);
 
         if let Some(raw) = &request.credential {
             let algorithm = classify_phc_algorithm(&raw.phc_string).ok_or_else(|| {
@@ -6968,6 +7037,7 @@ impl EmbeddedIdentityEngine {
         let mut user = self
             .get_user(realm_id, user_id)?
             .ok_or(IdentityError::UserNotFound)?;
+        let before = user.clone();
 
         let old_email = user.email().to_string();
         let mut email_changed = false;
@@ -7066,12 +7136,10 @@ impl EmbeddedIdentityEngine {
         // 5. Update timestamp
         user.set_updated_at(self.clock.now());
 
-        // 6. Write updated record
+        // 6. Write updated record, with its sort index entries (#644)
         let user_bytes = Self::serialize_user(&user)?;
         let id_key = keys::encode_user_id(user_id);
-        self.storage
-            .put(realm_id, &id_key, &user_bytes)
-            .map_err(Self::storage_err)?;
+        self.write_user_record(realm_id, Some(&before), &user, (id_key, user_bytes))?;
 
         self.record_audit(
             realm_id,
@@ -7178,7 +7246,11 @@ impl EmbeddedIdentityEngine {
                     // names the user too; with the record gone no RA token
                     // for it validates anyway.
                     keys::encode_ra_generation(user_id),
-                ],
+                ]
+                .into_iter()
+                // The sort index entries go with the record (#644).
+                .chain(crate::identity::user_index::index_writes(Some(&user), None).1)
+                .collect::<Vec<_>>(),
             )
             .map_err(Self::storage_err)?;
 
@@ -12083,6 +12155,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let needs_update =
             user.status() == UserStatus::PendingVerification || !user.email_verified();
         if needs_update {
+            let before = user.clone();
             if user.status() == UserStatus::PendingVerification {
                 user.set_status(UserStatus::Active);
             }
@@ -12090,9 +12163,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             user.set_updated_at(self.clock.now());
             let user_bytes = Self::serialize_user(&user)?;
             let user_key = keys::encode_user_id(&user_id);
-            self.storage
-                .put(realm_id, &user_key, &user_bytes)
-                .map_err(Self::storage_err)?;
+            self.write_user_record(realm_id, Some(&before), &user, (user_key, user_bytes))?;
         }
 
         // Delete the token entry so it cannot be reused.
@@ -12266,14 +12337,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .map_err(Self::storage_err)?;
 
         // Update user record: new email, mark verified, bump timestamp.
+        let before = user.clone();
         user.set_email(stored.new_email.clone());
         user.set_email_verified(true);
         user.set_updated_at(self.clock.now());
         let user_bytes = Self::serialize_user(&user)?;
         let id_key = keys::encode_user_id(&user_id);
-        self.storage
-            .put(realm_id, &id_key, &user_bytes)
-            .map_err(Self::storage_err)?;
+        self.write_user_record(realm_id, Some(&before), &user, (id_key, user_bytes))?;
 
         // Consume token (single-use).
         let _ = self.storage.delete(realm_id, &key);
@@ -12426,10 +12496,28 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         sort_field: Option<crate::identity::search::UserSortField>,
         sort_dir: crate::identity::search::SortDir,
     ) -> Result<crate::core::PagedResult<User>, IdentityError> {
-        use crate::identity::search::{SearchQuery, SortDir, UserSortField};
+        use crate::identity::search::SearchQuery;
 
         let matcher = SearchQuery::compile(query);
         let prefix = keys::user_id_scan_prefix();
+
+        // A sort with no search text walks the sort index (#644): one page
+        // of records, and the exact total from the count that the storage
+        // engine keeps.
+        if let (SearchQuery::MatchAll, Some(field)) = (&matcher, sort_field) {
+            let items = self.sorted_user_page(realm_id, field, sort_dir, page)?;
+            let total = self
+                .storage
+                .count_prefix(realm_id, &prefix, 0)
+                .map_err(Self::storage_err)?;
+            return Ok(crate::core::PagedResult::new(
+                items,
+                total,
+                page.offset,
+                page.limit,
+            ));
+        }
+
         let end = keys::prefix_end(&prefix);
         let entries = self
             .storage
@@ -12446,30 +12534,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
 
         // Sort the full matching set before slicing so page N is stable
-        // regardless of storage key order.
+        // regardless of storage key order. The sort key is the key of the
+        // sort index, so a search sorts in the same order as a plain list.
         if let Some(field) = sort_field {
-            all_matching.sort_by(|a, b| {
-                let ord = match field {
-                    UserSortField::Email => a.email().cmp(b.email()),
-                    UserSortField::Name => a.display_name().cmp(b.display_name()),
-                    UserSortField::Status => {
-                        // Stable ordering: Active(0) < PendingVerification(1) < Disabled(2).
-                        fn rank(s: UserStatus) -> u8 {
-                            match s {
-                                UserStatus::Active => 0,
-                                UserStatus::PendingVerification => 1,
-                                UserStatus::Disabled => 2,
-                            }
-                        }
-                        rank(a.status()).cmp(&rank(b.status()))
-                    }
-                    UserSortField::Created => a.created_at().cmp(&b.created_at()),
-                };
-                if sort_dir == SortDir::Desc {
-                    ord.reverse()
-                } else {
-                    ord
-                }
+            all_matching.sort_by_cached_key(|user| {
+                crate::identity::user_index::index_key(user, field, sort_dir)
             });
         }
 
@@ -13189,6 +13258,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 entries.push((keys::encode_user_email(&email), id_bytes));
                 entries.push((keys::encode_user_id(&user_id), user_bytes));
                 entries.push((keys::encode_credential_key(&user_id), cred_bytes.clone()));
+                entries.extend(crate::identity::user_index::index_writes(None, Some(&user)).0);
             }
 
             // Advance the sentinel inside the same atomic batch as this chunk's

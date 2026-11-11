@@ -40,6 +40,7 @@ pub(crate) mod totp;
 mod types;
 pub mod user_code;
 pub mod user_create_gate;
+pub(crate) mod user_index;
 mod validation;
 pub(crate) mod webauthn;
 
@@ -1723,7 +1724,11 @@ pub trait IdentityEngine: Send + Sync {
     /// When `query` is non-trivial (≥ 2 characters or glob/exact syntax),
     /// filters results using the [`SearchQuery`] grammar over email +
     /// display name.  When `sort_field` is `Some`, the full matching set is
-    /// sorted before the offset slice so page navigation is stable.
+    /// sorted before the offset slice so page navigation is stable. The
+    /// order is the column (a name without case), then the user id.
+    ///
+    /// A sort with a trivial `query` walks the sort index of the column and
+    /// reads only the page (#644).
     ///
     /// When both `query` is trivial (`MatchAll`) **and** `sort_field` is
     /// `None`, callers should prefer [`Self::list_users`] for its fast
