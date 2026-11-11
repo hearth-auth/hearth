@@ -32,7 +32,7 @@ Each event carries: `id`, `timestamp` (microseconds UTC), `action`, `actor` (use
 
 ### Admin UI
 
-`GET /admin/realms/{realm}/audit` — the audit log page. Filter by actor, action, or date range. Each row expands to show full metadata.
+`GET /admin/realms/{realm}/audit` — the audit log page. Filter by actor, action, or date range. Each row expands to show full metadata. The page shows the newest events first.
 
 ### REST API
 
@@ -67,6 +67,12 @@ Returns a JSON object:
 | `start_date` | Start of date range, `YYYY-MM-DD` (inclusive) |
 | `end_date` | End of date range, `YYYY-MM-DD` (inclusive) |
 | `limit` | Max events to return (default 200, max 1 000) |
+
+**Order.** With no `start_date`, the response holds the newest events, newest first. Hearth
+reads back from the end of the range in growing time windows (1 hour, 1 day, 7 days, 30 days,
+365 days, then the rest of the log) and stops when it has `limit` events, so a busy realm reads
+only its recent events. With a `start_date`, the events come oldest first from that date, so a
+script can read the log page by page: start the next request at the timestamp of the last event.
 
 **Example:**
 
@@ -216,7 +222,7 @@ with an admin bearer token and `X-Realm-ID` rather than a console session:
 
 | Operation | Route |
 |---|---|
-| List audit events | `GET /admin/audit` |
+| List audit events | `GET /admin/audit` — with no `start_time`, the newest events first; with a `start_time` (Unix microseconds), the oldest first from it |
 | Verify the hash chain | `POST /admin/audit/verify` — answers `200` with `{"ok": <bool>, "event_count": <n>}` |
 
 ```bash

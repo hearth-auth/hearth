@@ -152,6 +152,13 @@ struct SometimesUnmerged {
 }
 
 impl AuditEngine for SometimesUnmerged {
+    fn recent(
+        &self,
+        query: &crate::audit::AuditQuery,
+    ) -> Result<Vec<crate::audit::AuditEvent>, crate::audit::AuditError> {
+        self.inner.recent(query)
+    }
+
     fn append(
         &self,
         event: &crate::audit::CreateAuditEvent,

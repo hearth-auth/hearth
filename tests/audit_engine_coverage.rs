@@ -202,6 +202,14 @@ async fn test_destructive_delete_fails_when_audit_down() {
         fn on_replicated_snapshot(&self) {}
         // No per-realm state to drop (#609).
         fn forget_realm(&self, _realm_id: &hearth::core::RealmId) {}
+        fn recent(
+            &self,
+            _query: &hearth::audit::AuditQuery,
+        ) -> Result<Vec<hearth::audit::AuditEvent>, hearth::audit::AuditError> {
+            Err(hearth::audit::AuditError::IntegrityViolation {
+                reason: "simulated".to_string(),
+            })
+        }
 
         fn append(
             &self,
