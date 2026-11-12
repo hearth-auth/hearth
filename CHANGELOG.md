@@ -16,6 +16,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   only. The procedure is in `docs/guides/config-migration.md`.
 
 ### Changed
+- **A refused single-node write names the write limit, not a cluster** (#836): the log now
+  says `storage write limit full: ... (storage.max_writes_in_flight)` and `request refused:
+  temporarily unavailable (503)`, not `cluster unavailable (write limit full)`. The `503` body's
+  `error_description` says "The server cannot serve this request right now", not "The
+  cluster". `error` (`cluster_unavailable`) and `error_code` (`HEARTH_CLUSTER_UNAVAILABLE`) do
+  not change.
 - **The audit list shows the newest events first** (#644): `GET /admin/audit`,
   `GET /admin/api/realms/{realm}/audit/events` and the admin audit page now return the newest
   events, newest first, when the request has no start time. They read back in growing time

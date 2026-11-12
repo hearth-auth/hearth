@@ -183,6 +183,19 @@ impl fmt::Display for ClusterUnavailableCause {
     }
 }
 
+/// The text of [`StorageError::ClusterUnavailable`]. A single node has no
+/// cluster, so a write-limit refusal names the write limit (#836).
+fn fmt_unavailable(
+    f: &mut fmt::Formatter<'_>,
+    cause: ClusterUnavailableCause,
+    reason: &str,
+) -> fmt::Result {
+    match cause {
+        ClusterUnavailableCause::WriteLimit => write!(f, "storage write limit full: {reason}"),
+        _ => write!(f, "cluster unavailable ({cause}): {reason}"),
+    }
+}
+
 /// How a client should treat a storage error that means "try again later"
 /// ([`StorageError::retry_class`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,9 +249,7 @@ impl fmt::Display for StorageError {
                 "invalid scan range: the start key is greater than the end key"
             ),
             Self::ReadOnlySnapshot => f.write_str("a write reached a read-only storage snapshot"),
-            Self::ClusterUnavailable { cause, reason } => {
-                write!(f, "cluster unavailable ({cause}): {reason}")
-            }
+            Self::ClusterUnavailable { cause, reason } => fmt_unavailable(f, *cause, reason),
             Self::ClusterWriteOutcomeUnknown { reason } => {
                 write!(f, "cluster write outcome unknown: {reason}")
             }
@@ -370,5 +381,26 @@ mod tests {
 
         // Verify it implements std::error::Error
         let _: &dyn std::error::Error = &err;
+    }
+
+    /// #836: a single node that refuses a write at its write limit logged
+    /// `cluster unavailable`, which sent the operator to a cluster that does
+    /// not exist. The text names the storage write limit instead.
+    #[test]
+    fn a_write_limit_refusal_names_the_write_limit_not_the_cluster() {
+        let err = StorageError::ClusterUnavailable {
+            cause: ClusterUnavailableCause::WriteLimit,
+            reason: "32 single-node writes already in progress (storage.max_writes_in_flight)"
+                .to_string(),
+        };
+        let text = err.to_string();
+        assert!(!text.contains("cluster"), "{text}");
+        assert!(text.starts_with("storage write limit full"), "{text}");
+
+        let lag = StorageError::ClusterUnavailable {
+            cause: ClusterUnavailableCause::ReplicationLag,
+            reason: "x".to_string(),
+        };
+        assert!(lag.to_string().starts_with("cluster unavailable"), "{lag}");
     }
 }
