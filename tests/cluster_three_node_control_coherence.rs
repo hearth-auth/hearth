@@ -1589,6 +1589,7 @@ fn seed_by_offline_restore(clock: &Arc<FakeClock>, root: &Path) -> (PathBuf, Rea
             .args(args)
             .env_remove("HEARTH_KEK")
             .env("HEARTH_MASTER_KEY", MASTER_KEY)
+            .env("HEARTH_BACKUP_PASSPHRASE", "backup passphrase of the tests")
             .output()
             .unwrap();
         assert!(
