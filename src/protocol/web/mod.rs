@@ -65,6 +65,7 @@ pub mod mailcatcher;
 pub mod oauth_consent;
 pub mod openapi;
 pub mod realm_resolver;
+mod reauthentication;
 pub mod required_action;
 pub mod saml;
 pub mod second_factor;
