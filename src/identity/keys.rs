@@ -2777,6 +2777,15 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
+    fn the_user_record_prefix_is_the_one_the_storage_engine_counts() {
+        assert_eq!(
+            USER_ID_PREFIX.as_bytes(),
+            crate::core::USER_RECORD_KEY_PREFIX
+        );
+        assert!(crate::core::COUNTED_KEY_PREFIXES.contains(&USER_ID_PREFIX.as_bytes()));
+    }
+
+    #[test]
     fn encode_user_id_format() {
         let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").expect("valid uuid");
         let user_id = UserId::new(uuid);
