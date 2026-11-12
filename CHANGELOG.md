@@ -26,6 +26,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 - **Audit queries apply every filter**: a query with both an actor and an action filter ignored
   the action, and a query with an actor or action filter and an `agent_id` or `tool` filter
   counted events toward the limit before it filtered them, so a page could be short.
+- **The authorization endpoint accepts a form POST** (#781): a `POST /authorize` or
+  `POST /realms/{realm}/authorize` with `Content-Type: application/x-www-form-urlencoded` now
+  starts the browser sign-in flow with the same parameters and checks as a `GET` (OIDC Core
+  §3.1.2.1). It answers `303` to the UI authorize page. Before, it got `415`. A JSON `POST` keeps
+  the Hearth JSON API without change.
 - **`prompt=login` and `max_age` force a new sign-in, and ID tokens carry `auth_time`** (#782):
   a browser authorization request with `prompt=login`, or with a `max_age` that is less than the
   time since the last sign-in, now shows the sign-in page before it issues a code (OIDC Core
