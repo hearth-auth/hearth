@@ -1349,6 +1349,13 @@ pub(crate) struct StoredAuthorizationCode {
     /// RFC 9700 §4.5). `None` until the code is exchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) issued_session_id: Option<crate::core::SessionId>,
+    /// When the interactive sign-in of the browser session that authorized
+    /// this code completed (that session's creation time). The ID token
+    /// carries it as `auth_time` (OIDC Core §2, #782). `None` for a code
+    /// with no browser session behind it, and for a code stored before this
+    /// field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) auth_time: Option<Timestamp>,
 }
 
 /// Context from the refresh request that binds it to its grant family.
@@ -2346,6 +2353,7 @@ mod tests {
             scope_narrowed: false,
             authorizing_session_id: Some(crate::core::SessionId::generate()),
             issued_session_id: None,
+            auth_time: None,
         };
 
         let json = serde_json::to_string(&code).expect("serialize");
@@ -2381,6 +2389,7 @@ mod tests {
             scope_narrowed: false,
             authorizing_session_id: None,
             issued_session_id: None,
+            auth_time: None,
         };
         let json = serde_json::to_string(&code).expect("serialize");
         assert!(

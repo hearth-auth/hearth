@@ -4952,28 +4952,29 @@ fn run_backup_create(
             realm_manifests.push(realm_manifest);
         }
 
-        // Backup encryption is mandatory: use HEARTH_MASTER_KEY env var or prompt.
-        let passphrase_str: String = if let Ok(mk) = std::env::var("HEARTH_MASTER_KEY") {
-            if mk.is_empty() {
-                return Err("HEARTH_MASTER_KEY is set but empty".into());
-            }
-            mk
-        } else if encrypt {
-            let p = rpassword::prompt_password("Enter backup passphrase: ")?;
-            let c = rpassword::prompt_password("Confirm passphrase: ")?;
-            if p != c {
-                return Err("passphrases do not match".into());
-            }
-            if p.is_empty() {
-                return Err("passphrase must not be empty".into());
-            }
-            p
-        } else {
-            return Err(
-                "backup encryption is mandatory — set HEARTH_MASTER_KEY or use --encrypt".into(),
-            );
-        };
-        let passphrase = secrecy::SecretString::from(passphrase_str);
+        // Backup encryption is mandatory: HEARTH_BACKUP_PASSPHRASE, or a prompt
+        // with --encrypt. The storage master key is never the passphrase (#649).
+        let passphrase =
+            if let Some(passphrase) = hearth::backup::passphrase::passphrase_from_env()? {
+                passphrase
+            } else if encrypt {
+                let p = rpassword::prompt_password("Enter backup passphrase: ")?;
+                let c = rpassword::prompt_password("Confirm passphrase: ")?;
+                if p != c {
+                    return Err("passphrases do not match".into());
+                }
+                if p.is_empty() {
+                    return Err("passphrase must not be empty".into());
+                }
+                secrecy::SecretString::from(p)
+            } else {
+                return Err(format!(
+                "backup encryption is mandatory: set {} or use --encrypt (HEARTH_MASTER_KEY is \
+                 not the backup passphrase)",
+                hearth::backup::passphrase::BACKUP_PASSPHRASE_ENV
+            )
+                .into());
+            };
         let (wrapped_dek_b64, wrapping_params) =
             BackupExporter::wrap_dek(&dek, &passphrase).map_err(|e| format!("DEK wrap: {e}"))?;
         let mut manifest = BackupManifest::new(realm_manifests);
@@ -5238,12 +5239,12 @@ fn run_backup_restore(
 
     let importer = BackupImporter::new(identity, rbac, audit, cli_webhook_engine(&storage));
     let dek_passphrase: Option<secrecy::SecretString> = if reader.manifest.sections_encrypted {
-        let pp = if let Ok(mk) = std::env::var("HEARTH_MASTER_KEY") {
-            mk
+        let pp = if let Some(pp) = hearth::backup::passphrase::passphrase_from_env()? {
+            pp
         } else {
-            rpassword::prompt_password("Enter backup passphrase: ")?
+            secrecy::SecretString::from(rpassword::prompt_password("Enter backup passphrase: ")?)
         };
-        Some(secrecy::SecretString::from(pp))
+        Some(pp)
     } else {
         None
     };
@@ -6826,6 +6827,7 @@ mod tests {
         // it set, `BackupArchive::create` opens `out`, the realm enumeration
         // finds nothing, and the error is raised with the file already there.
         std::env::set_var("HEARTH_MASTER_KEY", "d4".repeat(32));
+        std::env::set_var("HEARTH_BACKUP_PASSPHRASE", "backup passphrase of the tests");
         let err = run_backup_create(Some(&out), None, false, false, None, &data_dir, None)
             .expect_err("the export must fail");
         std::env::remove_var("HEARTH_MASTER_KEY");
@@ -6904,6 +6906,7 @@ mod tests {
         std::fs::create_dir_all(&data_dir).expect("data dir");
         let master_key = "c3".repeat(32);
         std::env::set_var("HEARTH_MASTER_KEY", &master_key);
+        std::env::set_var("HEARTH_BACKUP_PASSPHRASE", "backup passphrase of the tests");
 
         let system_id = hearth::core::RealmId::new(uuid::Uuid::nil());
         {
@@ -6967,7 +6970,7 @@ mod tests {
                 .dek_wrapping_params
                 .as_ref()
                 .expect("DEK wrapping params"),
-            &secrecy::SecretString::from(master_key.clone()),
+            &secrecy::SecretString::from("backup passphrase of the tests".to_string()),
         )
         .expect("unwrap DEK");
         let member = format!("realms/{}/users.ndjson", system.slug);
@@ -7025,6 +7028,7 @@ mod tests {
         let data_dir = dir.path().join("data");
         std::fs::create_dir_all(&data_dir).expect("data dir");
         std::env::set_var("HEARTH_MASTER_KEY", "e5".repeat(32));
+        std::env::set_var("HEARTH_BACKUP_PASSPHRASE", "backup passphrase of the tests");
 
         {
             let storage = Arc::new(
@@ -7122,6 +7126,7 @@ mod tests {
         let data_dir = dir.path().join("data");
         std::fs::create_dir_all(&data_dir).expect("data dir");
         std::env::set_var("HEARTH_MASTER_KEY", "e5".repeat(32));
+        std::env::set_var("HEARTH_BACKUP_PASSPHRASE", "backup passphrase of the tests");
         {
             let storage = Arc::new(
                 EmbeddedStorageEngine::open(cli_storage_config(&data_dir)).expect("open storage"),
@@ -7267,6 +7272,7 @@ mod tests {
         // on-disk key registry under the host master key. nextest gives each
         // test its own process, so setting it here cannot leak sideways.
         std::env::set_var("HEARTH_MASTER_KEY", "c3".repeat(32));
+        std::env::set_var("HEARTH_BACKUP_PASSPHRASE", "backup passphrase of the tests");
         let storage = Arc::new(
             EmbeddedStorageEngine::open(cli_storage_config(dir.path())).expect("open store"),
         );
@@ -7319,6 +7325,7 @@ mod tests {
         let data_dir = dir.path().join("data");
         std::fs::create_dir_all(&data_dir).expect("data dir");
         std::env::set_var("HEARTH_MASTER_KEY", "b2".repeat(32));
+        std::env::set_var("HEARTH_BACKUP_PASSPHRASE", "backup passphrase of the tests");
         let out = dir.path().join("empty.hearth-backup");
 
         let err = run_backup_create(Some(&out), None, false, false, None, &data_dir, None)
@@ -7361,6 +7368,7 @@ mod tests {
     fn config_validate_accepts_a_master_key_in_the_environment() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::env::set_var("HEARTH_MASTER_KEY", "cd".repeat(32));
+        std::env::set_var("HEARTH_BACKUP_PASSPHRASE", "backup passphrase of the tests");
         let mut config = Config::dev();
         config.dev_mode = false;
         config.storage.data_dir = dir.path().display().to_string();
@@ -7442,6 +7450,7 @@ mod tests {
     #[test]
     fn config_validate_still_notes_the_identical_key_rule_when_it_is_set() {
         std::env::set_var("HEARTH_MASTER_KEY", "ab".repeat(32));
+        std::env::set_var("HEARTH_BACKUP_PASSPHRASE", "backup passphrase of the tests");
         let mut config = Config::dev();
         config.dev_mode = false;
         config.cluster = Some(cluster_config_with_peers(2));
@@ -7517,6 +7526,7 @@ mod tests {
         // The production storage config needs its own master key; it is
         // unrelated to the KEK under test and just has to be present.
         std::env::set_var("HEARTH_MASTER_KEY", "b2".repeat(32));
+        std::env::set_var("HEARTH_BACKUP_PASSPHRASE", "backup passphrase of the tests");
 
         // Write a realm whose signing key is wrapped with the KEK.
         {
@@ -7659,6 +7669,7 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("tempdir");
         std::env::set_var("HEARTH_MASTER_KEY", "a7".repeat(32));
+        std::env::set_var("HEARTH_BACKUP_PASSPHRASE", "backup passphrase of the tests");
         let config = Config {
             realms: Some(std::collections::HashMap::from([(
                 "tenant".to_string(),

@@ -115,9 +115,15 @@ pub struct AuthorizeQuery {
     /// OIDC nonce — echoed into the ID token.
     #[serde(default)]
     pub nonce: String,
-    /// OIDC `prompt` parameter. Supported: `none`, `consent`, or empty.
+    /// OIDC `prompt` parameter. Supported: `none`, `login`, `consent`, or
+    /// empty.
     #[serde(default)]
     pub prompt: String,
+    /// OIDC `max_age`: the most seconds since the user's last sign-in that
+    /// the client accepts (#782). Kept as text so that a bad value gets an
+    /// `invalid_request` error redirect, not a `400` page.
+    #[serde(default)]
+    pub max_age: Option<String>,
     /// Response mode (`query` or `fragment`).
     ///
     /// Absent means default `query` mode (plain code redirect).
@@ -198,10 +204,11 @@ pub async fn authorize_get(
     State(state): State<Arc<WebState>>,
     session: UiSession,
     headers: axum::http::HeaderMap,
+    axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
     Query(q): Query<AuthorizeQuery>,
 ) -> Response {
     let realm = session.realm_id.clone();
-    authorize_get_impl(&state, &session, &realm, &q, &headers).await
+    authorize_get_impl(&state, &session, &realm, &q, raw_query.as_deref(), &headers).await
 }
 
 /// Realm-scoped variant at `GET /ui/realms/{realm}/oauth/authorize`.
@@ -215,6 +222,7 @@ pub async fn authorize_get_scoped(
     session: Result<UiSession, Response>,
     axum::extract::Path(realm_name): axum::extract::Path<String>,
     headers: axum::http::HeaderMap,
+    axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
     Query(q): Query<AuthorizeQuery>,
 ) -> Response {
     let session = match session {
@@ -229,7 +237,15 @@ pub async fn authorize_get_scoped(
     if realm.id() != &session.realm_id {
         return handlers_common::not_found("Realm not found");
     }
-    authorize_get_impl(&state, &session, realm.id(), &q, &headers).await
+    authorize_get_impl(
+        &state,
+        &session,
+        realm.id(),
+        &q,
+        raw_query.as_deref(),
+        &headers,
+    )
+    .await
 }
 
 /// `Some(response)` for a plain `prompt=none` request that arrives with no
@@ -278,6 +294,7 @@ async fn authorize_get_impl(
     session: &UiSession,
     realm: &RealmId,
     q: &AuthorizeQuery,
+    raw_query: Option<&str>,
     headers: &axum::http::HeaderMap,
 ) -> Response {
     let now = Timestamp::from_micros(now_micros());
@@ -291,6 +308,28 @@ async fn authorize_get_impl(
     params.mfa_proof = session.mfa_proof;
     params.sign_in = session.sign_in;
     params.session_id = Some(session.session_id.clone());
+    // `prompt=login` and `max_age` (OIDC Core §3.1.2.1, #782). A pushed
+    // request takes no outer parameter but `client_id` (RFC 9126 §4).
+    let max_age = if q.request_uri.is_some() {
+        None
+    } else {
+        q.max_age.as_deref()
+    };
+    let Ok(freshness) = super::reauthentication::SignInFreshness::parse(&params.prompt, max_age)
+    else {
+        return super::reauthentication::invalid_max_age(state, realm, &params);
+    };
+    if let Some(resp) = super::reauthentication::reauthentication_gate(
+        state,
+        realm,
+        session,
+        &params,
+        freshness,
+        raw_query.unwrap_or_default(),
+        now,
+    ) {
+        return resp;
+    }
     // A client or role that demands a second factor needs a session that
     // PROVED one (GA audit B5). Fresh entry only: the interstitial resumes
     // continue a request this check already admitted.

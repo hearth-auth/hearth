@@ -87,8 +87,8 @@ Work through this list for every upgrade, including patch releases.
 
   The `signing key DEK` line reports `present (passphrase-protected)` on every archive this
   build writes, whether or not `--encrypt` was passed — it is not a reliable signal for "was
-  this archive encrypted". You are prompted for a passphrase on restore only when the archive
-  was actually created with `--encrypt`; if you used that flag, make sure you still have the
+  this archive encrypted". Every archive is encrypted with the backup passphrase
+  (`HEARTH_BACKUP_PASSPHRASE`, or the prompt of `--encrypt`). Make sure you still have the
   passphrase before relying on this archive for rollback.
 
   **`checksummed files: 0` or an empty `realms` list means the archive is empty** — re-check the
@@ -548,10 +548,10 @@ from a backup.
 
 The [Backup guide](./backup.md#what-a-backup-does-not-carry) lists the rest.
 
-**Keep `HEARTH_MASTER_KEY` and the key-encryption key.** The export wraps the archive's data key
-with the exporting node's `HEARTH_MASTER_KEY`, and `hearth backup restore` unwraps it with the
-`HEARTH_MASTER_KEY` in its own environment. With any other value the restore cannot read the
-archive at all and writes nothing — `--allow-missing-signing-key` does not change that, and the HTTP
+**Keep `HEARTH_BACKUP_PASSPHRASE`, `HEARTH_MASTER_KEY` and the key-encryption key.** The export
+wraps the archive's data key with the exporting node's `HEARTH_BACKUP_PASSPHRASE`, and
+`hearth backup restore` unwraps it with the `HEARTH_BACKUP_PASSPHRASE` in its own environment (or a
+prompt). With any other value the restore cannot read the archive at all and writes nothing — `--allow-missing-signing-key` does not change that, and the HTTP
 restore has no such override. The same variable is the new store's host key, and every node of a
 cluster must share one value anyway: run the restore and the new cluster with the old cluster's
 `HEARTH_MASTER_KEY`, and with a `hearth.yaml` that carries its `security.key_encryption_key`.
