@@ -17,7 +17,8 @@
 #   ca.crt ca.key           the run's CA (the generator trusts ca.crt)
 #   server/                 copied to /opt/hearth on the server
 #     hearth.yaml
-#     hearth.env            HEARTH_MASTER_KEY, HEARTH_KEK, the seed passwords
+#     hearth.env            HEARTH_MASTER_KEY, HEARTH_KEK, HEARTH_BACKUP_PASSPHRASE,
+#                           the seed passwords
 #     tls/https.crt tls/https.key
 #   generator.env           what the k6 scripts need (base URL, passwords)
 #
@@ -121,6 +122,7 @@ rm -f "$out/server/tls/https.csr" "$out/ca.srl"
 cat > "$out/server/hearth.env" << EOF
 HEARTH_MASTER_KEY=$master_key
 HEARTH_KEK=$kek
+HEARTH_BACKUP_PASSPHRASE=$(password)
 STRESS_USER_PASSWORD=$user_password
 STRESS_ADMIN_PASSWORD=$admin_password
 STRESS_API_SECRET=$api_secret

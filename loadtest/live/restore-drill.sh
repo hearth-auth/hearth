@@ -89,8 +89,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# A hearth CLI command with the server's environment: HEARTH_MASTER_KEY unwraps the
-# archive's key and HEARTH_KEK opens the data directory (docs/guides/backup.md).
+# A hearth CLI command with the server's environment: HEARTH_BACKUP_PASSPHRASE unwraps the
+# archive's key, and HEARTH_MASTER_KEY and HEARTH_KEK open the data directory
+# (docs/guides/backup.md).
 hearth_cli() {
   (
     set -a

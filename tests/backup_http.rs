@@ -220,6 +220,7 @@ async fn backup_create_returns_archive() {
             "HEARTH_MASTER_KEY",
             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
         );
+        std::env::set_var("HEARTH_BACKUP_PASSPHRASE", "backup passphrase of the tests");
     }
     let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
@@ -299,6 +300,7 @@ async fn backup_create_realm_filter() {
             "HEARTH_MASTER_KEY",
             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
         );
+        std::env::set_var("HEARTH_BACKUP_PASSPHRASE", "backup passphrase of the tests");
     }
     let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
@@ -561,6 +563,7 @@ fn set_master_key() {
     #[allow(unused_unsafe)]
     unsafe {
         std::env::set_var("HEARTH_MASTER_KEY", TEST_MASTER_KEY);
+        std::env::set_var("HEARTH_BACKUP_PASSPHRASE", "backup passphrase of the tests");
     }
 }
 
@@ -2296,4 +2299,99 @@ async fn a_refused_online_backup_records_nothing() {
         .expect("response");
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(last_success(data_dir.path(), BackupSource::Online), None);
+}
+
+// ===== The backup passphrase is not the master key (#649) =====
+
+/// A backup passphrase that differs from the storage master key.
+const TEST_BACKUP_PASSPHRASE: &str = "a backup passphrase that is not the master key";
+
+/// Sends `POST /admin/backup` for `realm` and returns the response.
+async fn send_backup(h: &common::TestHarness, realm: &RealmId) -> axum::response::Response {
+    let token = make_admin_token(h, realm).await;
+    build_app(h)
+        .await
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/backup")
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("response")
+}
+
+#[tokio::test]
+async fn a_backup_wraps_its_key_with_the_backup_passphrase_not_the_master_key() {
+    #[allow(unused_unsafe)]
+    unsafe {
+        std::env::set_var("HEARTH_MASTER_KEY", TEST_MASTER_KEY);
+        std::env::set_var("HEARTH_BACKUP_PASSPHRASE", "backup passphrase of the tests");
+        std::env::set_var("HEARTH_BACKUP_PASSPHRASE", TEST_BACKUP_PASSPHRASE);
+    }
+    let h = common::TestHarness::in_process().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+
+    let resp = send_backup(&h, &realm).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp_bytes(resp).await;
+    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    std::fs::write(tmp.path(), &body).expect("write archive");
+    let reader = BackupArchive::open(tmp.path()).expect("open archive");
+    let wrapped = reader
+        .manifest
+        .wrapped_dek_b64
+        .as_deref()
+        .expect("an encrypted archive has a wrapped key");
+    let params = reader
+        .manifest
+        .dek_wrapping_params
+        .as_ref()
+        .expect("an encrypted archive has wrapping parameters");
+
+    let unwrap = |passphrase: &str| {
+        hearth::backup::BackupExporter::unwrap_dek(
+            wrapped,
+            params,
+            &secrecy::SecretString::from(passphrase.to_string()),
+        )
+    };
+    assert!(
+        unwrap(TEST_BACKUP_PASSPHRASE).is_ok(),
+        "the backup passphrase must open the archive"
+    );
+    assert!(
+        unwrap(TEST_MASTER_KEY).is_err(),
+        "the master key must not open the archive"
+    );
+}
+
+#[tokio::test]
+async fn a_backup_without_a_backup_passphrase_is_refused() {
+    #[allow(unused_unsafe)]
+    unsafe {
+        std::env::set_var("HEARTH_MASTER_KEY", TEST_MASTER_KEY);
+        std::env::set_var("HEARTH_BACKUP_PASSPHRASE", "backup passphrase of the tests");
+        std::env::remove_var("HEARTH_BACKUP_PASSPHRASE");
+    }
+    let h = common::TestHarness::in_process().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+
+    let resp = send_backup(&h, &realm).await;
+    let status = resp.status();
+    let body = String::from_utf8_lossy(&resp_bytes(resp).await).into_owned();
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "a backup must not use the master key"
+    );
+    assert!(
+        body.contains("HEARTH_BACKUP_PASSPHRASE"),
+        "the refusal must name HEARTH_BACKUP_PASSPHRASE, got {status}: {body}"
+    );
 }

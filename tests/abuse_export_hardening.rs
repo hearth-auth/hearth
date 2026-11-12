@@ -177,6 +177,7 @@ async fn backup_endpoint_allows_admin_with_export_capability() {
             "HEARTH_MASTER_KEY",
             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
         );
+        std::env::set_var("HEARTH_BACKUP_PASSPHRASE", "backup passphrase of the tests");
     }
     let h = common::TestHarness::server().await.expect("server harness");
     let base = h.base_url().expect("base_url");
@@ -229,6 +230,7 @@ async fn backup_endpoint_rate_limits_after_quota() {
             "HEARTH_MASTER_KEY",
             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
         );
+        std::env::set_var("HEARTH_BACKUP_PASSPHRASE", "backup passphrase of the tests");
     }
     let h = common::TestHarness::server().await.expect("server harness");
     let base = h.base_url().expect("base_url");
@@ -262,6 +264,7 @@ async fn backup_endpoint_emits_watermark_audit_event() {
             "HEARTH_MASTER_KEY",
             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
         );
+        std::env::set_var("HEARTH_BACKUP_PASSPHRASE", "backup passphrase of the tests");
     }
     let h = common::TestHarness::server().await.expect("server harness");
     let base = h.base_url().expect("base_url");

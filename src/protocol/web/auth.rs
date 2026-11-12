@@ -760,6 +760,10 @@ pub struct UiSession {
     /// How the user signed in to open this session, before any second
     /// factor. The ID token's `amr` names it (#619).
     pub sign_in: crate::identity::SignInMethod,
+    /// When the interactive sign-in that opened this session completed,
+    /// including any required second factor: the session's creation time.
+    /// `max_age` counts from it (#782).
+    pub authenticated_at: crate::core::Timestamp,
 }
 
 /// Parses and verifies the session cookie. Returns the underlying
@@ -860,6 +864,7 @@ where
             csrf: csrf_cookie_value(parts).map(ToString::to_string),
             mfa_proof: session.mfa_proof(),
             sign_in: session.sign_in(),
+            authenticated_at: session.created_at(),
         })
     }
 }

@@ -65,7 +65,8 @@ key:
 
 | Env var | Required? | Purpose |
 |---------|-----------|---------|
-| `HEARTH_MASTER_KEY` | Required in production | 32-byte host key that wraps every realm KEK on disk, and the passphrase for `hearth backup export` / `restore`. It is the only host-key source in production: when unset, startup fails, and a `{data_dir}/hearth.host_key` file is never read (only `--dev` generates and reads one). `hearth config validate` warns when it is unset. |
+| `HEARTH_MASTER_KEY` | Required in production | 32-byte host key that wraps every realm KEK on disk. It is not the backup passphrase. It is the only host-key source in production: when unset, startup fails, and a `{data_dir}/hearth.host_key` file is never read (only `--dev` generates and reads one). `hearth config validate` warns when it is unset. |
+| `HEARTH_BACKUP_PASSPHRASE` | For backups | The passphrase that wraps the data key of every backup archive: `hearth backup create` / `restore` and `POST /admin/backup` / `POST /admin/backup/restore`. Without it the HTTP routes refuse to run and the CLI asks for it. Keep it away from `HEARTH_MASTER_KEY` and from the hosts (see the [Backup guide](./backup.md#backup-passphrase)). |
 | `HEARTH_PREVIOUS_MASTER_KEY` | Only during a host-key rotation | Previous host key value. Set it when startup fails with `HostKeyMismatch` after rotating `HEARTH_MASTER_KEY`; remove it once every realm KEK has been re-wrapped. |
 | `HEARTH_KEK` | One of this or `security.key_encryption_key` | Key-encryption key for realm signing keys at rest. 64 lowercase hex characters (`openssl rand -hex 32`). |
 | `HEARTH_PREVIOUS_KEK` | Only during a KEK rotation | The old `HEARTH_KEK` value. At startup Hearth wraps every stored key again under `HEARTH_KEK`; remove it after that start. Single node only. See [Key-encryption-key rotation](./config-migration.md#key-encryption-key-hearth_kek-rotation). |
