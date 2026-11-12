@@ -12,6 +12,8 @@
 //! | Caller with no admin role ⇒ `403` | `list_events_without_admin_permission_denied` |
 //! | Granular `hearth.users.admin` without `hearth.realm.admin` ⇒ `403` | `list_events_granular_admin_without_realm_admin_denied` |
 //! | A foreign `realm_id` query parameter is ignored | `list_events_ignores_a_foreign_realm_id_parameter` |
+//! | With no `start_time`, the newest events come first (#644) | `list_events_without_a_start_time_returns_the_newest_first` |
+//! | With a `start_time`, events come oldest first from it | `list_events_from_a_start_time_returns_the_oldest_first` |
 
 mod common;
 
@@ -229,4 +231,53 @@ async fn list_events_ignores_a_foreign_realm_id_parameter() {
         actors(&body).iter().any(|a| a == "actor-0"),
         "events must resolve against X-Realm-ID: {body}"
     );
+}
+
+/// The admin list opens on the latest activity: with no `start_time`, the
+/// page holds the newest events, newest first (#644).
+#[tokio::test]
+async fn list_events_without_a_start_time_returns_the_newest_first() {
+    let ctx = Ctx::new().await;
+    let admin = ctx.token(Some("realm.admin"));
+    ctx.seed_events(&[
+        AuditAction::UserCreated,
+        AuditAction::UserUpdated,
+        AuditAction::SessionCreated,
+        AuditAction::UserDeleted,
+    ]);
+
+    let (status, body) = ctx.list("/admin/audit?limit=3", Some(&admin)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(actors(&body), ["actor-3", "actor-2", "actor-1"], "{body}");
+}
+
+/// A `start_time` keeps the forward order, so a client can read the log
+/// page by page from a point in time.
+#[tokio::test]
+async fn list_events_from_a_start_time_returns_the_oldest_first() {
+    let ctx = Ctx::new().await;
+    let admin = ctx.token(Some("realm.admin"));
+    ctx.seed_events(&[
+        AuditAction::UserCreated,
+        AuditAction::UserUpdated,
+        AuditAction::SessionCreated,
+    ]);
+    let (_, all) = ctx.list("/admin/audit?limit=200", Some(&admin)).await;
+    let first_seeded = all["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .find(|e| e["actor"] == "actor-0")
+        .expect("seeded event")["timestamp"]
+        .as_i64()
+        .expect("timestamp");
+
+    let (status, body) = ctx
+        .list(
+            &format!("/admin/audit?start_time={first_seeded}&limit=2"),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(actors(&body), ["actor-0", "actor-1"], "{body}");
 }

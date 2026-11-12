@@ -173,6 +173,20 @@ pub trait AuditEngine: Send + Sync {
     /// combined with AND semantics.
     fn query(&self, query: &AuditQuery) -> Result<Vec<AuditEvent>, AuditError>;
 
+    /// Returns the newest events that match `query`, newest first (#644).
+    ///
+    /// `query.limit` caps the number of events. `query.end_time` is the
+    /// exclusive upper bound, or the current time when it is `None`.
+    /// `query.start_time` is the inclusive lower bound, or the start of the
+    /// log when it is `None`.
+    ///
+    /// The engine reads back from the upper bound in growing time windows
+    /// (1 hour, 1 day, 7 days, 30 days, 365 days, then the remaining log). It
+    /// stops after the first window that holds `limit` matching events, so a
+    /// busy realm reads only its recent events. A quiet realm can read its
+    /// whole log, once.
+    fn recent(&self, query: &AuditQuery) -> Result<Vec<AuditEvent>, AuditError>;
+
     /// Verifies the integrity of the audit log hash chain.
     ///
     /// Walks the event chain for the given realm and time range,
