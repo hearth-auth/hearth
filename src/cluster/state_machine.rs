@@ -1310,6 +1310,60 @@ mod tests {
 
     // ── Snapshot round-trip ───────────────────────────────────────────────────
 
+    /// A snapshot install copies every key of a realm, the counter key
+    /// included. The installed node's kept user count must match the users
+    /// it then holds, whatever it held before (#644).
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn snapshot_install_leaves_an_exact_user_count() {
+        let dir_a = tempdir().unwrap();
+        let dir_b = tempdir().unwrap();
+        let realm = make_realm();
+        let user = |name: &str| {
+            let mut key = crate::core::USER_RECORD_KEY_PREFIX.to_vec();
+            key.extend_from_slice(name.as_bytes());
+            key
+        };
+
+        let snapshot = {
+            let mut sm_a = open_sm(&dir_a.path().join("data"));
+            sm_a.apply([make_batch_entry(
+                1,
+                realm.clone(),
+                vec![
+                    (user("a"), b"1".to_vec()),
+                    (user("b"), b"1".to_vec()),
+                    (user("c"), b"1".to_vec()),
+                ],
+            )])
+            .await
+            .unwrap();
+            let mut builder = sm_a.get_snapshot_builder().await;
+            builder.build_snapshot().await.unwrap()
+        };
+
+        let mut sm_b = open_sm(&dir_b.path().join("data"));
+        sm_b.apply([make_batch_entry(
+            1,
+            realm.clone(),
+            vec![(user("a"), b"old".to_vec()), (user("z"), b"old".to_vec())],
+        )])
+        .await
+        .unwrap();
+        sm_b.install_snapshot(&snapshot.meta, snapshot.snapshot)
+            .await
+            .unwrap();
+
+        let prefix = crate::core::USER_RECORD_KEY_PREFIX;
+        let walked = sm_b
+            .engine
+            .scan_keys(&realm, prefix, &crate::storage::prefix_scan_end(prefix))
+            .unwrap()
+            .len() as u64;
+        assert_eq!(walked, 3);
+        assert_eq!(sm_b.engine.count_prefix(&realm, prefix, 0).unwrap(), 3);
+    }
+
     #[tokio::test]
     #[allow(clippy::unwrap_used)]
     async fn snapshot_roundtrip_identical_keyspace() {

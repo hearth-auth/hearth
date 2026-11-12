@@ -91,6 +91,17 @@ fn this_build_reads_the_fixture_store() {
             "the password of {email} does not verify"
         );
     }
+    // The storage engine keeps the user count (#644, store format 2), so the
+    // list total is the number of users without a walk.
+    let listed = e
+        .identity
+        .list_users(&realm, &hearth::core::PageRequest::new(0, 1))
+        .expect("list users");
+    assert_eq!(
+        listed.total,
+        users.len() as u64,
+        "the kept user count is wrong"
+    );
     let s = e
         .identity
         .get_session(&realm, &session)

@@ -14,6 +14,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   page is full, so a large audit log no longer slows the page or takes memory from sign-ins.
   Before, they loaded the whole log and returned its oldest events. With a start time, events
   still come oldest first from it, and the read now stops when the page is full.
+- **Breaking:** **Store format 2, with an exact user count** (#644): the storage engine now keeps
+  the number of users of each realm and changes it in the same write as the user record, so the
+  count stays exact after a crash and on every cluster node. The user list of the admin API and
+  the admin UI reads its total from this count and reads only the requested page, so a first
+  page no longer reads every user of the realm. A build with this change refuses a data
+  directory of store format 1 at startup: restore a backup archive into a new, empty data
+  directory (see `docs/guides/upgrading.md`).
 
 ### Fixed
 - **Audit queries apply every filter**: a query with both an actor and an action filter ignored
