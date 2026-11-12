@@ -917,6 +917,23 @@ impl EmbeddedStorageEngine {
         self.flush_active(true)
     }
 
+    /// The flush checks after an acknowledged write: a memtable at its flush
+    /// threshold, and the WAL segment's early-flush mark
+    /// ([`Wal::claim_early_flush`], #836). Neither runs under the WAL file
+    /// mutex.
+    fn flush_after_write(&self) -> Result<(), StorageError> {
+        if self.active_memtable.should_flush() {
+            self.flush_if_full()?;
+        }
+        if self.wal.claim_early_flush() {
+            if let Err(e) = self.trigger_flush() {
+                self.wal.release_early_flush();
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
     /// Flushes the memtable whatever its size: before a WAL rotation truncates
     /// the segment, every record in it must be in an SST.
     fn trigger_flush(&self) -> Result<(), StorageError> {
@@ -1932,9 +1949,7 @@ impl StorageEngine for EmbeddedStorageEngine {
         self.run_post_ack_hook();
 
         // 4. Check flush threshold
-        if self.active_memtable.should_flush() {
-            self.flush_if_full()?;
-        }
+        self.flush_after_write()?;
 
         Ok(())
     }
@@ -1982,9 +1997,7 @@ impl StorageEngine for EmbeddedStorageEngine {
         self.run_post_ack_hook();
 
         // 4. Check flush threshold
-        if self.active_memtable.should_flush() {
-            self.flush_if_full()?;
-        }
+        self.flush_after_write()?;
 
         Ok(())
     }
@@ -2053,9 +2066,7 @@ impl StorageEngine for EmbeddedStorageEngine {
 
         // 4. Single flush check at the tail — the batch may have pushed us
         //    over the threshold, but we don't need to check per-entry.
-        if self.active_memtable.should_flush() {
-            self.flush_if_full()?;
-        }
+        self.flush_after_write()?;
 
         Ok(())
     }
@@ -2126,9 +2137,7 @@ impl StorageEngine for EmbeddedStorageEngine {
         match wal_handle {
             WalDurabilityHandle::Immediate => {
                 // SyncMode::None path: the record is already written.
-                if self.active_memtable.should_flush() {
-                    self.flush_if_full()?;
-                }
+                self.flush_after_write()?;
                 Ok(StorageDurabilityHandle(
                     StorageDurabilityHandleKind::Immediate,
                 ))
@@ -2166,8 +2175,8 @@ impl StorageEngine for EmbeddedStorageEngine {
         // that holds it (audit 2026-08-28 §3 B4). Nothing to apply here; only
         // the threshold check remains, and it runs after durability so a flush
         // is never driven by an unacknowledged write.
-        if wal_result.is_ok() && self.active_memtable.should_flush() {
-            self.flush_if_full()?;
+        if wal_result.is_ok() {
+            self.flush_after_write()?;
         }
 
         wal_result
@@ -2302,9 +2311,7 @@ impl StorageEngine for EmbeddedStorageEngine {
         self.run_post_ack_hook();
 
         // 5. Single flush check at the tail.
-        if self.active_memtable.should_flush() {
-            self.flush_if_full()?;
-        }
+        self.flush_after_write()?;
 
         Ok(())
     }
@@ -5583,6 +5590,64 @@ mod tests {
                 "rot-key-{i:04} must survive WAL rotation + reopen (flushed, not truncated away)"
             );
         }
+    }
+
+    /// #836: the flush that a WAL rotation needs ran in full under the WAL
+    /// file lock, so every writer waited for one SST write (120-270 ms in
+    /// the #647 soak). A write that takes the segment past its early-flush
+    /// mark (1/32 of the segment before its end) flushes the memtable outside
+    /// the lock, so the flush at the rotation writes only the last part.
+    #[test]
+    fn a_write_past_the_early_flush_mark_flushes_before_the_rotation() {
+        use crate::storage::wal::SyncMode;
+        for sync_mode in [SyncMode::EveryWrite, SyncMode::None] {
+            early_flush_before_rotation(sync_mode);
+        }
+    }
+
+    fn early_flush_before_rotation(sync_mode: crate::storage::wal::SyncMode) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let realm = RealmId::generate();
+        let value = vec![0xABu8; 512];
+        let max_size = 64 * 1024;
+        let mut config = StorageConfig::test_config(dir.path().to_path_buf());
+        config.wal_config.max_size = max_size;
+        config.wal_config.sync_mode = sync_mode.clone();
+        // Only a rotation or the early flush may flush in this test.
+        config.set_memtable_flush_bytes(64 * 1024 * 1024);
+        let engine = EmbeddedStorageEngine::open(config).expect("open");
+        let wal_len = || {
+            std::fs::metadata(dir.path().join("hearth.wal"))
+                .expect("wal")
+                .len()
+        };
+
+        let mut i = 0u32;
+        while wal_len() < max_size - max_size / 64 {
+            assert!(
+                wal_len() >= max_size - max_size / 32 || engine.sst_readers.load().is_empty(),
+                "{sync_mode:?}: no flush before the mark"
+            );
+            engine
+                .put(&realm, format!("k-{i:05}").as_bytes(), &value)
+                .expect("put");
+            i += 1;
+        }
+
+        assert!(
+            wal_len() > max_size / 2,
+            "{sync_mode:?}: the segment has not rotated yet ({} bytes)",
+            wal_len()
+        );
+        assert!(
+            !engine.sst_readers.load().is_empty(),
+            "{sync_mode:?}: a write past the early-flush mark must flush the memtable \
+             before the rotation"
+        );
+        assert_eq!(
+            engine.get(&realm, b"k-00000").expect("get").as_deref(),
+            Some(value.as_slice())
+        );
     }
 
     /// A [`Fs`] decorator that fails every read of one armed SST path —

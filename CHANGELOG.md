@@ -39,6 +39,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   data directory (see `docs/guides/upgrading.md`).
 
 ### Fixed
+- **Writes no longer stop for a memtable flush at each WAL rotation** (#836): a WAL rotation
+  (every `storage.wal_max_size_bytes`, 256 MiB) flushed the memtable to an SST while every write
+  waited. In a 180-minute test at 120 sign-in journeys/s, each rotation stopped writes for about
+  120-270 ms and the server refused some of them (`503`). The memtable is now also flushed
+  without stopping writes when the WAL is 1/32 of its maximum size from a rotation, so the flush
+  at the rotation is small.
 - **Audit queries apply every filter**: a query with both an actor and an action filter ignored
   the action, and a query with an actor or action filter and an `agent_id` or `tool` filter
   counted events toward the limit before it filtered them, so a page could be short.

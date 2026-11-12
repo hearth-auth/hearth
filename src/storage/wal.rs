@@ -664,6 +664,13 @@ pub struct Wal {
     /// prevents subsequent appends from returning `Ok` for data that will be
     /// silently discarded at replay time.
     fenced: AtomicBool,
+    /// Approximate length of the current segment after the last write, in
+    /// bytes. Written under the file mutex; read without it by
+    /// [`Self::claim_early_flush`] (#836).
+    segment_len: AtomicU64,
+    /// Set when a writer claimed this segment's early flush; cleared by a
+    /// rotation (#836).
+    early_flush_claimed: AtomicBool,
     /// Test hook: barrier released by every writer (leader and followers)
     /// after pushing its slot and computing `am_leader`, but before the
     /// leader begins draining the queue.
@@ -1165,6 +1172,8 @@ impl Wal {
             sync_count: AtomicU64::new(0),
             commit_profile: CommitProfile::default(),
             fenced: AtomicBool::new(false),
+            segment_len: AtomicU64::new(0),
+            early_flush_claimed: AtomicBool::new(false),
             #[cfg(feature = "test-hooks")]
             commit_barrier: None,
         })
@@ -1624,6 +1633,8 @@ impl Wal {
         } else {
             file_size
         };
+        self.segment_len
+            .store(base_len + approx_record_size, Ordering::Relaxed);
 
         apply()?;
 
@@ -1828,12 +1839,16 @@ impl Wal {
                 .map(|s| 4 + s.plaintext.len() as u64 + encryption::TAG_SIZE as u64 + 4)
                 .sum();
 
+            let mut segment_start = file_size;
             if self.config.max_size > 0 && file_size + approx_total > self.config.max_size {
                 if let Some(f) = pre_rotate {
                     f()?;
                 }
                 self.rotate_locked(&mut **file)?;
+                segment_start = self.record_start;
             }
+            self.segment_len
+                .store(segment_start + approx_total, Ordering::Relaxed);
 
             // Reserve every record number for this batch in ONE rotation-mutex
             // critical section and snapshot the DEK once.  Rotation, if it was
@@ -2040,6 +2055,27 @@ impl Wal {
     /// regular flush does not lose data. The callback is called while the WAL
     /// file mutex is held; it must not call any WAL methods or a deadlock
     /// will occur.
+    /// `true` once per segment, for the first caller after the segment
+    /// passed its early-flush mark: 1/32 of `max_size` before its end (#836).
+    ///
+    /// A rotation flushes the memtable under the file mutex, so every writer
+    /// waits for that SST write. A caller that gets `true` flushes the
+    /// memtable without the mutex, so the flush at the rotation writes only
+    /// the records of the last 1/32 of the segment. At the default 256 MiB
+    /// segment, the mark is 8 MiB before the end.
+    pub(crate) fn claim_early_flush(&self) -> bool {
+        let max = self.config.max_size;
+        max > 0
+            && self.segment_len.load(Ordering::Relaxed) >= max - max / 32
+            && !self.early_flush_claimed.swap(true, Ordering::AcqRel)
+    }
+
+    /// Gives back a claim from [`Self::claim_early_flush`] whose flush
+    /// failed, so a later write tries again.
+    pub(crate) fn release_early_flush(&self) {
+        self.early_flush_claimed.store(false, Ordering::Release);
+    }
+
     pub(crate) fn set_pre_rotate_fn(
         &mut self,
         f: impl Fn() -> Result<(), StorageError> + Send + Sync + 'static,
@@ -2077,6 +2113,8 @@ impl Wal {
         if let Some(ref flush) = self.pre_rotate_fn {
             flush()?;
         }
+        // The next segment gets its own early flush (#836).
+        self.early_flush_claimed.store(false, Ordering::Release);
 
         // Everything from here on is past the point of no return: the segment
         // has been truncated. A failure now leaves a header shorter than 82
