@@ -184,6 +184,7 @@ storage:
   # max_writes_in_flight: 32              # single-node writes in progress at once (#596); one
   #                                       # more is refused with 503 + Retry-After, so a stalled
   #                                       # disk cannot add a thread for each waiting write.
+  #                                       # Audit events may use twice this limit (#836).
   # compaction:                            # optional — all fields have defaults shown below
   #   enabled: true                       # whether background SST compaction runs
   #   interval_secs: 3600                 # seconds between periodic FULL compaction sweeps

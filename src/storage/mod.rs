@@ -252,6 +252,24 @@ pub trait StorageEngine: Send + Sync {
         ))
     }
 
+    /// [`enqueue_batch`](Self::enqueue_batch) for a batch that holds only
+    /// audit events (#836).
+    ///
+    /// An audit event usually follows a write that the operation already
+    /// made. When a write limit refuses the event, the operation can succeed
+    /// without its audit event. An engine with a write limit therefore admits
+    /// an audit batch above that limit, up to a higher ceiling that keeps the
+    /// thread count bounded.
+    ///
+    /// The default implementation calls [`enqueue_batch`](Self::enqueue_batch).
+    fn enqueue_audit_batch(
+        &self,
+        realm_id: &RealmId,
+        entries: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<StorageDurabilityHandle, StorageError> {
+        self.enqueue_batch(realm_id, entries)
+    }
+
     /// Block until the batch write represented by `handle` is durable.
     ///
     /// For `Immediate` handles (from the default impl or `SyncMode::None`),

@@ -39,6 +39,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   data directory (see `docs/guides/upgrading.md`).
 
 ### Fixed
+- **An audit event is no longer lost when the single-node write limit is full** (#836): a write
+  that holds only audit events may use twice `storage.max_writes_in_flight`. Before, a token
+  refresh (and other operations whose audit event does not stop the operation) could succeed
+  while the limit refused its audit event (`Audit append failed (non-blocking)` in the log).
 - **Audit queries apply every filter**: a query with both an actor and an action filter ignored
   the action, and a query with an actor or action filter and an `agent_id` or `tool` filter
   counted events toward the limit before it filtered them, so a page could be short.
