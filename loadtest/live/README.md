@@ -94,8 +94,8 @@ availability zone). Later commands read the provider from the run. It needs
 an AWS CLI profile (default `hearth-stress`) for an IAM user with EC2 rights
 on resources tagged `hearth-stress` in one region only; it refuses the
 account root. Each instance terminates itself after `AWS_MAX_HOURS` (10) in
-case `down` never runs. `SERVER_SIZE` and `GENERATOR_SIZE` may also be c7i.2xlarge or
-t3.medium (2 vCPU, 4 GiB, about half the price of c7i.large). Use t3.medium for long memory
+case `down` never runs. `SERVER_SIZE` and `GENERATOR_SIZE` may also be c7i.2xlarge, r7i.large
+(2 vCPU, 16 GiB, for 10M users) or t3.medium (2 vCPU, 4 GiB, about half the price of c7i.large). Use t3.medium for long memory
 soaks, not for latency: it starts in unlimited mode, so it never loses CPU when its credits run
 out, but its CPUs are older and slower.
 
