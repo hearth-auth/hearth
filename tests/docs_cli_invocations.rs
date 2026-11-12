@@ -67,15 +67,7 @@ const KNOWN_BROKEN: &[(&str, &str, &str)] = &[
 
 /// Path to the compiled `hearth` binary, alongside the integration test binary.
 fn hearth_bin() -> PathBuf {
-    let mut path = std::env::current_exe()
-        .expect("current exe")
-        .parent()
-        .expect("parent dir")
-        .parent()
-        .expect("grandparent dir")
-        .to_path_buf();
-    path.push("hearth");
-    path
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_hearth"))
 }
 
 fn repo_root() -> &'static Path {

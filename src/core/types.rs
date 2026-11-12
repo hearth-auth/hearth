@@ -80,37 +80,44 @@ macro_rules! define_id_type {
 
 define_id_type!(
     /// Unique identifier for a realm. All storage operations require this.
-    RealmId, "realm_"
+    RealmId,
+    "realm_"
 );
 
 define_id_type!(
     /// Unique identifier for a user within a realm.
-    UserId, "user_"
+    UserId,
+    "user_"
 );
 
 define_id_type!(
     /// Unique identifier for an authentication session.
-    SessionId, "session_"
+    SessionId,
+    "session_"
 );
 
 define_id_type!(
     /// Unique identifier for an OAuth 2.0 client registration.
-    ClientId, "client_"
+    ClientId,
+    "client_"
 );
 
 define_id_type!(
     /// Unique identifier for an audit log event.
-    AuditEventId, "audit_"
+    AuditEventId,
+    "audit_"
 );
 
 define_id_type!(
     /// Unique identifier for an organization within a realm.
-    OrganizationId, "org_"
+    OrganizationId,
+    "org_"
 );
 
 define_id_type!(
     /// Unique identifier for an organization invitation.
-    InvitationId, "inv_"
+    InvitationId,
+    "inv_"
 );
 
 define_id_type!(
@@ -120,12 +127,14 @@ define_id_type!(
     /// Scoped to a single realm via the containing `RealmId`; the same
     /// `IdpId` value would not appear across realms in practice because
     /// each `register_idp` call generates a fresh UUID.
-    IdpId, "idp_"
+    IdpId,
+    "idp_"
 );
 
 define_id_type!(
     /// Unique identifier for a webhook subscription within a realm.
-    WebhookId, "wh_"
+    WebhookId,
+    "wh_"
 );
 
 define_id_type!(
@@ -134,7 +143,8 @@ define_id_type!(
     /// Agents are distinct from users and OAuth clients — they are autonomous
     /// actors with their own identity lifecycle, credential set, and delegation
     /// chain support. See `openspec/specs/agent-identity/spec.md` for the full specification.
-    AgentId, "agt_"
+    AgentId,
+    "agt_"
 );
 
 define_id_type!(
@@ -142,12 +152,14 @@ define_id_type!(
     ///
     /// Scoped to a specific agent; the same `AgentCredentialId` does not appear
     /// across agents.
-    AgentCredentialId, "acred_"
+    AgentCredentialId,
+    "acred_"
 );
 
 define_id_type!(
     /// Unique identifier for a single webhook delivery attempt.
-    WebhookDeliveryId, "whd_"
+    WebhookDeliveryId,
+    "whd_"
 );
 
 define_id_type!(
@@ -155,7 +167,8 @@ define_id_type!(
     ///
     /// Used as the primary key for protected resource records. See openspec/specs/mcp-authorization/spec.md
     /// and RFC 9728 for the Protected Resource Metadata discovery specification.
-    ResourceServerId, "rs_"
+    ResourceServerId,
+    "rs_"
 );
 
 /// Validated RFC 8707 resource indicator, held in its one canonical form.

@@ -20,15 +20,7 @@ use std::time::{Duration, Instant};
 const MARKER: &str = ".hearth-production";
 
 fn hearth_bin() -> PathBuf {
-    let mut path = std::env::current_exe()
-        .expect("current exe")
-        .parent()
-        .expect("parent dir")
-        .parent()
-        .expect("grandparent dir")
-        .to_path_buf();
-    path.push("hearth");
-    path
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_hearth"))
 }
 
 fn free_port() -> u16 {

@@ -34,15 +34,7 @@ mod sigterm {
     }
 
     fn hearth_bin() -> std::path::PathBuf {
-        let mut path = std::env::current_exe()
-            .expect("current exe")
-            .parent()
-            .expect("parent dir")
-            .parent()
-            .expect("grandparent dir")
-            .to_path_buf();
-        path.push("hearth");
-        path
+        std::path::PathBuf::from(env!("CARGO_BIN_EXE_hearth"))
     }
 
     /// Starts the hearth server in dev mode and returns the raw `Child` handle
