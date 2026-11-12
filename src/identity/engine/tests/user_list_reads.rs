@@ -473,3 +473,41 @@ fn a_sorted_page_skips_a_stale_index_entry_and_stays_full() {
     assert_eq!(got, promised[..10]);
     assert_eq!(page.total, 30);
 }
+
+/// A `PageRequest` built as a struct literal skips the clamp of
+/// `PageRequest::new`. A sorted page still holds at most `MAX_PAGE_LIMIT`
+/// users, so a caller cannot size the page (#644).
+#[test]
+fn a_sorted_page_holds_at_most_the_page_limit_for_an_unclamped_request() {
+    use crate::core::MAX_PAGE_LIMIT;
+
+    let users = MAX_PAGE_LIMIT as usize + 10;
+    let (_dir, _counting, engine) = counting_engine();
+    let realm = create_test_realm(&engine);
+    for i in 0..users {
+        let request = CreateUserRequest {
+            email: format!("user{i:04}@example.com"),
+            display_name: format!("User {i:04}"),
+            ..Default::default()
+        };
+        engine.create_user(&realm, &request).expect("create user");
+    }
+
+    let unclamped = crate::core::PageRequest {
+        offset: 0,
+        limit: 1_000_000,
+    };
+    let page = engine
+        .search_users(
+            &realm,
+            "",
+            &unclamped,
+            Some(UserSortField::Email),
+            SortDir::Asc,
+        )
+        .expect("sorted page");
+
+    assert_eq!(page.items.len(), MAX_PAGE_LIMIT as usize);
+    assert_eq!(page.items[0].email(), "user0000@example.com");
+    assert_eq!(page.total, users as u64);
+}

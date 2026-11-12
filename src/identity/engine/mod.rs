@@ -3860,12 +3860,15 @@ impl EmbeddedIdentityEngine {
     ) -> Result<Vec<User>, IdentityError> {
         use crate::identity::user_index;
 
+        // `PageRequest`'s fields are public, so a struct literal can skip the
+        // clamp of `PageRequest::new`. Clamp again before the page is sized.
+        let limit = page.limit.clamp(1, crate::core::MAX_PAGE_LIMIT);
         let prefix = user_index::index_prefix(field, dir);
-        let mut items: Vec<User> = Vec::with_capacity(page.limit as usize);
+        let mut items: Vec<User> = Vec::with_capacity(limit as usize);
         let mut position = page.offset;
-        while (items.len() as u64) < u64::from(page.limit) {
+        while (items.len() as u64) < u64::from(limit) {
             #[allow(clippy::cast_possible_truncation)]
-            let want = page.limit - items.len() as u32;
+            let want = limit - items.len() as u32;
             let walk_cap = position.saturating_add(u64::from(want));
             let (entries, _) = self
                 .storage
