@@ -161,15 +161,7 @@ fn bare_serve_without_config_refuses_to_start_in_prod() {
 
 /// Returns the path to the compiled `hearth` binary (nextest layout).
 fn hearth_bin() -> std::path::PathBuf {
-    let mut path = std::env::current_exe()
-        .expect("current exe")
-        .parent()
-        .expect("parent dir")
-        .parent()
-        .expect("grandparent dir")
-        .to_path_buf();
-    path.push("hearth");
-    path
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_hearth"))
 }
 
 /// Dev mode keeps today's permissive behaviour for all three: no KEK, no TLS,
