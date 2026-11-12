@@ -56,6 +56,7 @@ use crate::core::{EpochCell, RealmId};
 use crate::storage::encryption;
 use crate::storage::error::StorageError;
 use crate::storage::fs::{Fs, RealFs};
+use crate::storage::key_count;
 use crate::storage::key_merge::{self, KeyCursor};
 use crate::storage::key_registry::KeyRegistry;
 use crate::storage::memtable::{Memtable, MemtableConfig, MemtableKeyCursor, MemtableValue};
@@ -589,9 +590,6 @@ impl EmbeddedStorageEngine {
         let memtable = Memtable::new(config.memtable_config);
 
         let entries = wal.read_all()?;
-        for entry in &entries {
-            memtable.apply_wal_entry(entry)?;
-        }
 
         // Sweep staging orphans before discovery. An interrupted SST write
         // strands a `*.staging` file (memtable flush) or a `*.tmp` file
@@ -682,6 +680,18 @@ impl EmbeddedStorageEngine {
                     })?;
             max_sst_num = max_sst_num.max(*sst_num);
             sst_readers.push(Arc::new(reader));
+        }
+
+        // Replay after SST discovery: a record that writes a counted key
+        // looks up whether the key exists, and the SSTs are part of that
+        // answer (#644). The result does not depend on whether an SST
+        // already holds the record's effect (see `key_count`).
+        {
+            let replay_ssts = Arc::new(sst_readers.clone());
+            let ssts = || Arc::clone(&replay_ssts);
+            for entry in &entries {
+                key_count::replay_counted(&memtable, &ssts, entry)?;
+            }
         }
 
         let hot_tier = HotTier::new(config.tiered_config);
@@ -1081,6 +1091,36 @@ impl EmbeddedStorageEngine {
     #[cfg(test)]
     pub(crate) fn engage_wal_fence_for_test(&self) {
         self.wal.engage_fence("test_fault");
+    }
+
+    /// Applies `puts`, then `deletes`, to the memtable in one write-lock
+    /// hold, with the key-count changes that keep every kept count exact
+    /// (#644).
+    ///
+    /// MUST run inside the WAL critical section, which orders all writes.
+    fn apply_to_memtable(
+        &self,
+        realm_id: &RealmId,
+        puts: &[(Vec<u8>, Vec<u8>)],
+        deletes: &[Vec<u8>],
+    ) -> Result<(), StorageError> {
+        let ssts = || self.sst_readers.load_full();
+        let changed =
+            key_count::apply_counted(&self.active_memtable, &ssts, realm_id, puts, deletes)?;
+        for key in &changed {
+            self.hot_tier.invalidate(realm_id, key);
+        }
+        Ok(())
+    }
+
+    /// Puts `key` into the memtable with no WAL record and no change to the
+    /// key counts, so a test can tell a kept count from a walked one (#644).
+    #[cfg(test)]
+    pub(crate) fn put_without_count_for_test(&self, realm_id: &RealmId, key: &[u8], value: &[u8]) {
+        self.active_memtable
+            .put(realm_id, key, value)
+            .expect("memtable put");
+        self.hot_tier.invalidate(realm_id, key);
     }
 
     /// `(hot-tier entries, block-cache resident bytes)`, for tests that check
@@ -1805,6 +1845,22 @@ impl StorageEngine for EmbeddedStorageEngine {
         Ok(None)
     }
 
+    /// A counted prefix reads its kept count in O(1) (#644); any other
+    /// prefix walks its keys.
+    fn count_prefix(
+        &self,
+        realm_id: &RealmId,
+        prefix: &[u8],
+        cap: u64,
+    ) -> Result<u64, StorageError> {
+        if key_count::is_counted_prefix(prefix) {
+            let stored = self.get_uncached(realm_id, &key_count::counter_key(prefix))?;
+            let count = key_count::decode_count(stored.as_deref())?;
+            return Ok(if cap == 0 { count } else { count.min(cap) });
+        }
+        super::paging::count_prefix(self, realm_id, prefix, cap)
+    }
+
     fn get_uncached(
         &self,
         realm_id: &RealmId,
@@ -1833,6 +1889,10 @@ impl StorageEngine for EmbeddedStorageEngine {
     }
 
     fn put(&self, realm_id: &RealmId, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+        // Only the engine writes a key-count key (#644).
+        if key_count::is_counter_key(key) {
+            return Ok(());
+        }
         let _timer = crate::metrics::metrics()
             .storage_operation_duration_seconds
             .with_label_values(&["put"])
@@ -1857,7 +1917,11 @@ impl StorageEngine for EmbeddedStorageEngine {
         self.wal.append_applying(
             &entry,
             || {
-                self.active_memtable.put(realm_id, key, value)?;
+                if key_count::counted_prefix_of(key).is_some() {
+                    self.apply_to_memtable(realm_id, &[(key.to_vec(), value.to_vec())], &[])?;
+                } else {
+                    self.active_memtable.put(realm_id, key, value)?;
+                }
                 self.hot_tier.invalidate(realm_id, key);
                 Ok(())
             },
@@ -1876,6 +1940,10 @@ impl StorageEngine for EmbeddedStorageEngine {
     }
 
     fn delete(&self, realm_id: &RealmId, key: &[u8]) -> Result<(), StorageError> {
+        // Only the engine writes a key-count key (#644).
+        if key_count::is_counter_key(key) {
+            return Ok(());
+        }
         let _timer = crate::metrics::metrics()
             .storage_operation_duration_seconds
             .with_label_values(&["delete"])
@@ -1899,7 +1967,11 @@ impl StorageEngine for EmbeddedStorageEngine {
         self.wal.append_applying(
             &entry,
             || {
-                self.active_memtable.delete(realm_id, key)?;
+                if key_count::counted_prefix_of(key).is_some() {
+                    self.apply_to_memtable(realm_id, &[], &[key.to_vec()])?;
+                } else {
+                    self.active_memtable.delete(realm_id, key)?;
+                }
                 self.hot_tier.invalidate(realm_id, key);
                 Ok(())
             },
@@ -1926,6 +1998,10 @@ impl StorageEngine for EmbeddedStorageEngine {
         // higher layers don't need to guard against empty batches.
         if entries.is_empty() {
             return Ok(());
+        }
+        // Only the engine writes a key-count key (#644).
+        if let Some((entries, _)) = key_count::without_counter_keys(entries, &[]) {
+            return self.put_batch(realm_id, &entries);
         }
 
         let _timer = crate::metrics::metrics()
@@ -1963,7 +2039,7 @@ impl StorageEngine for EmbeddedStorageEngine {
         self.wal.append_applying(
             &wal_entry,
             || {
-                self.active_memtable.put_batch(realm_id, entries)?;
+                self.apply_to_memtable(realm_id, entries, &[])?;
                 for (key, _value) in entries {
                     self.hot_tier.invalidate(realm_id, key);
                 }
@@ -1995,6 +2071,10 @@ impl StorageEngine for EmbeddedStorageEngine {
             return Ok(StorageDurabilityHandle(
                 StorageDurabilityHandleKind::Immediate,
             ));
+        }
+        // Only the engine writes a key-count key (#644).
+        if let Some((entries, _)) = key_count::without_counter_keys(entries, &[]) {
+            return self.enqueue_batch(realm_id, &entries);
         }
 
         let sub_entries: Vec<BatchEntry> = entries
@@ -2031,7 +2111,7 @@ impl StorageEngine for EmbeddedStorageEngine {
         let wal_handle = self.wal.enqueue_entry(
             &wal_entry,
             || {
-                self.active_memtable.put_batch(realm_id, entries)?;
+                self.apply_to_memtable(realm_id, entries, &[])?;
                 for (key, _) in entries {
                     self.hot_tier.invalidate(realm_id, key);
                 }
@@ -2158,6 +2238,10 @@ impl StorageEngine for EmbeddedStorageEngine {
         if puts.is_empty() && deletes.is_empty() {
             return Ok(());
         }
+        // Only the engine writes a key-count key (#644).
+        if let Some((puts, deletes)) = key_count::without_counter_keys(puts, deletes) {
+            return self.write_batch(realm_id, &puts, &deletes);
+        }
 
         let _timer = crate::metrics::metrics()
             .storage_operation_duration_seconds
@@ -2202,7 +2286,7 @@ impl StorageEngine for EmbeddedStorageEngine {
             || {
                 // One memtable call for the whole batch, so a flush, and
                 // with it a storage snapshot, never holds half of it (#643).
-                self.active_memtable.apply_batch(realm_id, puts, deletes)?;
+                self.apply_to_memtable(realm_id, puts, deletes)?;
                 for (key, _value) in puts {
                     self.hot_tier.invalidate(realm_id, key);
                 }

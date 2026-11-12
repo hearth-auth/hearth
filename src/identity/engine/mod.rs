@@ -12391,9 +12391,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         page: &crate::core::PageRequest,
     ) -> Result<crate::core::PagedResult<User>, IdentityError> {
         let prefix = keys::user_id_scan_prefix();
-        let (entries, total) = self
+        // The walk stops at the end of the page: the cap bounds it, and the
+        // exact total comes from the count that the storage engine keeps
+        // (#644), not from a walk of every user.
+        let walk_cap = page.offset.saturating_add(u64::from(page.limit)).max(1);
+        let (entries, _) = self
             .storage
-            .scan_prefix_paged(realm_id, &prefix, page.offset, page.limit, 0)
+            .scan_prefix_paged(realm_id, &prefix, page.offset, page.limit, walk_cap)
+            .map_err(Self::storage_err)?;
+        let total = self
+            .storage
+            .count_prefix(realm_id, &prefix, 0)
             .map_err(Self::storage_err)?;
 
         let mut items = Vec::with_capacity(entries.len());
@@ -19597,6 +19605,8 @@ mod tests {
     /// A session revocation is never undone by a racing refresh or create.
     mod session_rmw_race;
     mod stale_read_single_use;
+    /// A user-list page reads one page of records, not the realm (#644).
+    mod user_list_reads;
 
     /// Stub HIBP transport for unit tests — always reports passwords as not compromised.
     /// Prevents unit tests from making real network calls when HIBP is default-on.

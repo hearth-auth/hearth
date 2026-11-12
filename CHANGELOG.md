@@ -14,6 +14,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   page is full, so a large audit log no longer slows the page or takes memory from sign-ins.
   Before, they loaded the whole log and returned its oldest events. With a start time, events
   still come oldest first from it, and the read now stops when the page is full.
+- **Breaking:** **Store format 2, with an exact user count** (#644): the storage engine now keeps
+  the number of users of each realm and changes it in the same write as the user record, so the
+  count stays exact after a crash and on every cluster node. The user list of the admin API and
+  the admin UI reads its total from this count and reads only the requested page, so a first
+  page no longer reads every user of the realm. A build with this change refuses a data
+  directory of store format 1 at startup: restore a backup archive into a new, empty data
+  directory (see `docs/guides/upgrading.md`).
 
 ### Fixed
 - **Audit queries apply every filter**: a query with both an actor and an action filter ignored
@@ -24,6 +31,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   starts the browser sign-in flow with the same parameters and checks as a `GET` (OIDC Core
   §3.1.2.1). It answers `303` to the UI authorize page. Before, it got `415`. A JSON `POST` keeps
   the Hearth JSON API without change.
+- **`prompt=login` and `max_age` force a new sign-in, and ID tokens carry `auth_time`** (#782):
+  a browser authorization request with `prompt=login`, or with a `max_age` that is less than the
+  time since the last sign-in, now shows the sign-in page before it issues a code (OIDC Core
+  §3.1.2.1). Before, Hearth issued the code from the current session. With `prompt=none` such a
+  request gets `login_required`. The new sign-in opens a new session and revokes the old one, as
+  every sign-in does. Every ID token from a browser sign-in now has `auth_time`, the time the
+  sign-in (with any second factor) completed. A `max_age` that is not a non-negative integer gets
+  `invalid_request`. `max_age` is read from the query string only, not from a request object or
+  a pushed request.
+
+### Security
+- **Breaking:** **Backups use their own passphrase** (#649): `hearth backup create`,
+  `hearth backup restore`, `POST /admin/backup` and `POST /admin/backup/restore` now wrap and
+  unwrap the archive key with `HEARTH_BACKUP_PASSPHRASE`, not with `HEARTH_MASTER_KEY`. A lost or
+  rotated master key no longer loses the backups, and a leaked backup passphrase does not open a
+  data directory. The HTTP routes refuse to run without the variable; the CLI asks for the
+  passphrase when the variable is not set (`backup create` only with `--encrypt`). To restore an
+  archive from an earlier build, set `HEARTH_BACKUP_PASSPHRASE` to the old `HEARTH_MASTER_KEY`.
 
 ## [4.10.0] — 2026-11-11
 

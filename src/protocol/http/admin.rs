@@ -5480,14 +5480,8 @@ async fn admin_backup_create(
             realm_manifests.push(rm);
         }
 
-        // Wrap the DEK with HEARTH_MASTER_KEY (required for HTTP endpoint).
-        let master_key = std::env::var("HEARTH_MASTER_KEY").map_err(|_| {
-            "HEARTH_MASTER_KEY is not set — backup requires a master key".to_string()
-        })?;
-        if master_key.is_empty() {
-            return Err::<Vec<u8>, String>("HEARTH_MASTER_KEY is empty".to_string());
-        }
-        let passphrase = secrecy::SecretString::from(master_key);
+        // Wrap the DEK with the backup passphrase (#649), never the master key.
+        let passphrase = crate::backup::passphrase::required_passphrase_from_env()?;
         let (wrapped_dek_b64, wrapping_params) =
             crate::backup::BackupExporter::wrap_dek(&dek, &passphrase)
                 .map_err(|e| format!("DEK wrap: {e}"))?;
@@ -5828,13 +5822,9 @@ async fn admin_backup_restore(
 
         let importer = BackupImporter::new(identity, rbac, import_audit, webhooks);
         let dek_passphrase: Option<secrecy::SecretString> = if reader.manifest.sections_encrypted {
-            let mk = std::env::var("HEARTH_MASTER_KEY").map_err(|_| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    "HEARTH_MASTER_KEY not set for encrypted restore".to_string(),
-                )
-            })?;
-            Some(secrecy::SecretString::from(mk))
+            let passphrase = crate::backup::passphrase::required_passphrase_from_env()
+                .map_err(|msg| (StatusCode::BAD_REQUEST, msg))?;
+            Some(passphrase)
         } else {
             None
         };
