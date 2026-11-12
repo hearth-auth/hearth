@@ -143,6 +143,20 @@ async fn move_copies_users_and_deletes_source() {
         src_email.is_none(),
         "email index must be removed from source"
     );
+
+    // The user sort indexes (#644) move with the user: seven entries.
+    let sort_keys = |realm| {
+        storage
+            .scan_keys(
+                realm,
+                b"usr:sort:",
+                &hearth::storage::prefix_scan_end(b"usr:sort:"),
+            )
+            .expect("scan sort index")
+            .len()
+    };
+    assert_eq!(sort_keys(&src), 0, "sort index entries left in the source");
+    assert_eq!(sort_keys(&dst), 7, "sort index entries in the destination");
 }
 
 // ---------------------------------------------------------------------------

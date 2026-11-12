@@ -386,6 +386,14 @@ fn build_user_batch(
         }
     }
 
+    // The user's sort index entries (#644) follow the record.
+    let record_key = keys::encode_user_id(user_id);
+    if let Some((_, bytes)) = batch.iter().find(|(key, _)| *key == record_key) {
+        let user = crate::identity::user_index::decode_record(bytes)
+            .ok_or_else(|| "undecodable user record".to_string())?;
+        batch.extend(crate::identity::user_index::index_writes(None, Some(&user)).0);
+    }
+
     // WebAuthn credentials (`webauthn:cred:{user_uuid}:{cred_id}`).
     let webauthn_prefix = keys::encode_webauthn_credentials_prefix(user_id);
     let webauthn_end = keys::prefix_end(&webauthn_prefix);
@@ -572,13 +580,24 @@ fn delete_source_user(
     src_realm_id: &RealmId,
     storage: &dyn StorageEngine,
 ) {
-    let scalar_keys: Vec<Vec<u8>> = vec![
+    let mut scalar_keys: Vec<Vec<u8>> = vec![
         keys::encode_user_id(user_id),
         keys::encode_user_email(email),
         keys::encode_credential_key(user_id),
         keys::encode_credential_history_key(user_id),
         keys::encode_mfa_totp_key(user_id),
     ];
+    // The user's sort index entries (#644), read from the record before the
+    // record goes.
+    match storage.get(src_realm_id, &keys::encode_user_id(user_id)) {
+        Ok(Some(bytes)) => {
+            if let Some(user) = crate::identity::user_index::decode_record(&bytes) {
+                scalar_keys.extend(crate::identity::user_index::index_writes(Some(&user), None).1);
+            }
+        }
+        Ok(None) => {}
+        Err(e) => warn!(error = %e, "failed to read source user record during move"),
+    }
 
     for key in &scalar_keys {
         if let Err(e) = storage.delete(src_realm_id, key) {

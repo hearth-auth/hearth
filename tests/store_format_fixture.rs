@@ -102,6 +102,23 @@ fn this_build_reads_the_fixture_store() {
         users.len() as u64,
         "the kept user count is wrong"
     );
+    // A sorted list walks a sort index (#644, store format 3), so the store
+    // must hold an entry of each user.
+    let sorted = e
+        .identity
+        .search_users(
+            &realm,
+            "",
+            &hearth::core::PageRequest::new(0, 100),
+            Some(hearth::identity::search::UserSortField::Name),
+            hearth::identity::search::SortDir::Desc,
+        )
+        .expect("sorted list");
+    assert_eq!(
+        sorted.items.len(),
+        users.len(),
+        "a sorted list misses users of the store"
+    );
     let s = e
         .identity
         .get_session(&realm, &session)
