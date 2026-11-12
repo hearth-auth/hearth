@@ -328,7 +328,6 @@ pub trait IdentityEngine: Send + Sync {
     /// and how the user signed in (`sign_in`, [`ra_token::RaClaims::sign_in`]).
     /// `flow` as for [`Self::generate_ra_token`].
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn generate_browser_ra_token(
         &self,
         realm_id: &RealmId,

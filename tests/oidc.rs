@@ -180,17 +180,7 @@ async fn oidc_authorization_code_flow_via_http() {
     drop(listener);
 
     // Start server
-    let hearth_bin = {
-        let mut path = std::env::current_exe()
-            .expect("current exe")
-            .parent()
-            .expect("parent dir")
-            .parent()
-            .expect("grandparent dir")
-            .to_path_buf();
-        path.push("hearth");
-        path
-    };
+    let hearth_bin = std::path::PathBuf::from(env!("CARGO_BIN_EXE_hearth"));
 
     let mut child = Command::new(hearth_bin)
         .args(["serve", "--dev", "--port", &port.to_string()])
