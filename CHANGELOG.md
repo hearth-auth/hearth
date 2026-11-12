@@ -16,6 +16,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   only. The procedure is in `docs/guides/config-migration.md`.
 
 ### Changed
+- **A refused single-node write names the write limit, not a cluster** (#836): the log now
+  says `storage write limit full: ... (storage.max_writes_in_flight)` and `request refused:
+  temporarily unavailable (503)`, not `cluster unavailable (write limit full)`. The `503` body's
+  `error_description` says "The server cannot serve this request right now", not "The
+  cluster". `error` (`cluster_unavailable`) and `error_code` (`HEARTH_CLUSTER_UNAVAILABLE`) do
+  not change.
 - **The audit list shows the newest events first** (#644): `GET /admin/audit`,
   `GET /admin/api/realms/{realm}/audit/events` and the admin audit page now return the newest
   events, newest first, when the request has no start time. They read back in growing time
@@ -39,6 +45,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   data directory (see `docs/guides/upgrading.md`).
 
 ### Fixed
+- **An audit event is no longer lost when the single-node write limit is full** (#836): a write
+  that holds only audit events may use twice `storage.max_writes_in_flight`. Before, a token
+  refresh (and other operations whose audit event does not stop the operation) could succeed
+  while the limit refused its audit event (`Audit append failed (non-blocking)` in the log).
 - **Writes no longer stop for a memtable flush at each WAL rotation** (#836): a WAL rotation
   (every `storage.wal_max_size_bytes`, 256 MiB) flushed the memtable to an SST while every write
   waited. In a 180-minute test at 120 sign-in journeys/s, each rotation stopped writes for about

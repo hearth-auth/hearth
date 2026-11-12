@@ -708,7 +708,7 @@ pub(crate) fn identity_error_to_response(
     // adds `Retry-After` to every 503 that lacks one.
     if let IdentityError::Storage(e) = err {
         if let Some(class) = crate::storage::StorageError::retry_class_of(&**e) {
-            tracing::warn!(error = %e, "request refused: cluster unavailable");
+            tracing::warn!(error = %e, "request refused: temporarily unavailable (503)");
             return cluster_unavailable_response(class);
         }
     }
@@ -1033,7 +1033,7 @@ pub(crate) fn cluster_unavailable_response(
         ),
         _ => (
             "cluster_unavailable",
-            "The cluster cannot serve this request right now and nothing was written. \
+            "The server cannot serve this request right now and nothing was written. \
              Retry shortly.",
             CLUSTER_UNAVAILABLE,
         ),
@@ -1052,7 +1052,7 @@ pub(crate) fn cluster_unavailable_response(
 pub(crate) fn rbac_error_to_response(err: &RbacError) -> (StatusCode, Json<serde_json::Value>) {
     if let RbacError::Storage(e) = err {
         if let Some(class) = crate::storage::StorageError::retry_class_of(&**e) {
-            tracing::warn!(error = %e, "request refused: cluster unavailable");
+            tracing::warn!(error = %e, "request refused: temporarily unavailable (503)");
             return cluster_unavailable_response(class);
         }
     }
@@ -1569,6 +1569,20 @@ mod cluster_unavailable_tests {
             assert_eq!(body.0["error_code"], code, "{}", body.0);
             assert!(!body.0.to_string().contains("10.1.1.1"), "{}", body.0);
         }
+    }
+
+    /// #836: a single node also answers this `503` (its write limit), so the
+    /// fixed description names the server, not a cluster.
+    #[test]
+    fn the_unavailable_description_does_not_name_a_cluster() {
+        let (status, body) = crate::protocol::http::auth::cluster_unavailable_response(
+            crate::storage::RetryClass::Unavailable,
+        );
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.0["error_code"], CLUSTER_UNAVAILABLE, "{}", body.0);
+        let description = body.0["error_description"].as_str().unwrap_or_default();
+        assert!(!description.contains("cluster"), "{description}");
+        assert!(description.contains("nothing was written"), "{description}");
     }
 
     #[test]
