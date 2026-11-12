@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Added
+- **Rotation of `HEARTH_KEK`** (#649): to rotate the key-encryption key, restart Hearth once
+  with the new value in `HEARTH_KEK` and the old value in the new `HEARTH_PREVIOUS_KEK`. Before
+  the engines start, Hearth wraps every stored key again under the new KEK (signing, retiring,
+  SAML and ID-token keys, and the MFA data key, DPoP nonce secret and audit chain key of each
+  realm). The keys keep their values. A wrong `HEARTH_PREVIOUS_KEK` changes nothing, and a
+  changed `HEARTH_KEK` without it now fails at startup with an error that names it. Single node
+  only. The procedure is in `docs/guides/config-migration.md`.
+
 ### Changed
 - **The audit list shows the newest events first** (#644): `GET /admin/audit`,
   `GET /admin/api/realms/{realm}/audit/events` and the admin audit page now return the newest
@@ -33,6 +42,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 - **Audit queries apply every filter**: a query with both an actor and an action filter ignored
   the action, and a query with an actor or action filter and an `agent_id` or `tool` filter
   counted events toward the limit before it filtered them, so a page could be short.
+- **The authorization endpoint accepts a form POST** (#781): a `POST /authorize` or
+  `POST /realms/{realm}/authorize` with `Content-Type: application/x-www-form-urlencoded` now
+  starts the browser sign-in flow with the same parameters and checks as a `GET` (OIDC Core
+  §3.1.2.1). It answers `303` to the UI authorize page. Before, it got `415`. A JSON `POST` keeps
+  the Hearth JSON API without change.
 - **`prompt=login` and `max_age` force a new sign-in, and ID tokens carry `auth_time`** (#782):
   a browser authorization request with `prompt=login`, or with a `max_age` that is less than the
   time since the last sign-in, now shows the sign-in page before it issues a code (OIDC Core

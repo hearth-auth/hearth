@@ -282,6 +282,20 @@ async fn jwks(
         .into_response()
 }
 
+/// True when the request's `Content-Type` is
+/// `application/x-www-form-urlencoded` (any letter case, any parameters such
+/// as `charset`).
+fn is_form_urlencoded(headers: &HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| {
+            ct.trim_start()
+                .to_ascii_lowercase()
+                .starts_with("application/x-www-form-urlencoded")
+        })
+}
+
 /// Request-body extractor that accepts **either** JSON or
 /// `application/x-www-form-urlencoded`.
 ///
@@ -306,17 +320,7 @@ where
     type Rejection = Response;
 
     async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
-        let is_form = req
-            .headers()
-            .get(axum::http::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|ct| {
-                ct.trim_start()
-                    .to_ascii_lowercase()
-                    .starts_with("application/x-www-form-urlencoded")
-            });
-
-        if is_form {
+        if is_form_urlencoded(req.headers()) {
             let bytes = axum::body::Bytes::from_request(req, state)
                 .await
                 .map_err(axum::response::IntoResponse::into_response)?;
@@ -2215,10 +2219,78 @@ async fn generate_unique_slug(state: Arc<AppState>, realm_id: &RealmId, base: &s
 /// receives a 405. This handler 302-redirects the browser to the interactive
 /// login+consent UI at `/ui/oauth/authorize`, preserving all query parameters
 /// (HEA-2105).
-async fn authorize_browser_redirect(uri: axum::http::Uri) -> impl IntoResponse {
-    let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
-    let target = format!("/ui/oauth/authorize{query}");
-    axum::response::Redirect::to(&target)
+async fn authorize_browser_redirect(uri: axum::http::Uri) -> Response {
+    ui_authorize_redirect("/ui/oauth/authorize", uri.query())
+}
+
+/// `303 See Other` to the UI authorize page `ui_page`, with `query` (the
+/// authorization request) as its query string.
+///
+/// A target that is not a valid header value (a realm name with a control
+/// character) gets `400`, not a panic.
+fn ui_authorize_redirect(ui_page: &str, query: Option<&str>) -> Response {
+    let target = match query {
+        Some(q) if !q.is_empty() => format!("{ui_page}?{q}"),
+        _ => ui_page.to_string(),
+    };
+    match axum::http::HeaderValue::try_from(target) {
+        Ok(location) => (
+            StatusCode::SEE_OTHER,
+            [(axum::http::header::LOCATION, location)],
+        )
+            .into_response(),
+        Err(_) => StatusCode::BAD_REQUEST.into_response(),
+    }
+}
+
+/// The body of `POST /authorize` and `POST /realms/{realm}/authorize`. The
+/// `Content-Type` selects the meaning (#781):
+///
+/// * `application/x-www-form-urlencoded`: an OpenID Connect authorization
+///   request from a browser (OIDC Core §3.1.2.1: the authorization endpoint
+///   MUST support GET and POST). It starts the browser flow exactly as a GET.
+/// * anything else: Hearth's JSON authorization API, decoded as before (a
+///   wrong or missing `Content-Type` keeps its `415`).
+enum AuthorizePost {
+    /// The form parameters, encoded again as a query string.
+    Browser(String),
+    /// The JSON authorization request.
+    Json(pb::AuthorizationRequest),
+}
+
+impl<S> axum::extract::FromRequest<S> for AuthorizePost
+where
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        if !is_form_urlencoded(req.headers()) {
+            let Json(body) = Json::<pb::AuthorizationRequest>::from_request(req, state)
+                .await
+                .map_err(IntoResponse::into_response)?;
+            return Ok(Self::Json(body));
+        }
+        let bytes = axum::body::Bytes::from_request(req, state)
+            .await
+            .map_err(IntoResponse::into_response)?;
+        // Decode and encode again: the query string the UI page gets is then
+        // always well formed, whatever bytes the form carried.
+        let query = serde_urlencoded::from_bytes::<Vec<(String, String)>>(&bytes)
+            .ok()
+            .and_then(|pairs| serde_urlencoded::to_string(pairs).ok())
+            .ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "invalid_request",
+                        "error_description": "malformed form body",
+                    })),
+                )
+                    .into_response()
+            })?;
+        Ok(Self::Browser(query))
+    }
 }
 
 /// Builds the authorization request of a non-interactive `/authorize` call —
@@ -2340,6 +2412,10 @@ fn non_interactive_authorization_request(
 
 /// Initiate an OAuth 2.0 authorization code flow.
 ///
+/// A form POST (`application/x-www-form-urlencoded`) is a browser
+/// authorization request: it goes to the UI authorize page exactly as
+/// `GET /authorize` does (#781). A JSON POST is Hearth's JSON API below.
+///
 /// Requires `X-Realm-ID` header and a valid Bearer token. The token's `sub`
 /// claim determines the user on whose behalf the code is issued — the caller
 /// cannot supply an arbitrary `user_id` (HEA-1721).
@@ -2348,8 +2424,14 @@ async fn authorize(
     method: axum::http::Method,
     uri: axum::http::Uri,
     headers: HeaderMap,
-    Json(body): Json<pb::AuthorizationRequest>,
+    body: AuthorizePost,
 ) -> impl IntoResponse {
+    let body = match body {
+        AuthorizePost::Json(body) => body,
+        AuthorizePost::Browser(query) => {
+            return ui_authorize_redirect("/ui/oauth/authorize", Some(&query));
+        }
+    };
     let realm_id = match extract_realm_id(&headers) {
         Ok(t) => t,
         Err(e) => return e.into_response(),
@@ -3831,12 +3913,16 @@ async fn realm_jwks(
 async fn realm_authorize_browser_redirect(
     Path(realm_name): Path<String>,
     uri: axum::http::Uri,
-) -> impl IntoResponse {
-    let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
-    let target = format!("/ui/realms/{realm_name}/oauth/authorize{query}");
-    axum::response::Redirect::to(&target)
+) -> Response {
+    ui_authorize_redirect(
+        &format!("/ui/realms/{realm_name}/oauth/authorize"),
+        uri.query(),
+    )
 }
 
+/// `POST /realms/{realm}/authorize`: the realm twin of [`authorize`]. A form
+/// POST starts the browser flow as `GET /realms/{realm}/authorize` does; a
+/// JSON POST is the machine path.
 async fn realm_authorize(
     State(state): State<Arc<AppState>>,
     method: axum::http::Method,
@@ -3846,8 +3932,18 @@ async fn realm_authorize(
     axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
     headers: HeaderMap,
     Path(realm_name): Path<String>,
-    Json(body): Json<pb::AuthorizationRequest>,
+    body: AuthorizePost,
 ) -> impl IntoResponse {
+    let body = match body {
+        AuthorizePost::Json(body) => body,
+        // A browser form POST: the same flow as `GET /realms/{realm}/authorize`.
+        AuthorizePost::Browser(query) => {
+            return ui_authorize_redirect(
+                &format!("/ui/realms/{realm_name}/oauth/authorize"),
+                Some(&query),
+            );
+        }
+    };
     let realm_id = match resolve_realm_by_name(&state, &realm_name) {
         Ok(id) => id,
         Err(e) => return e,

@@ -134,7 +134,8 @@ HEARTH_MASTER_KEY
 > wraps every file DEK for every realm. Rotation below iterates the map, so it is correct
 > either way — but do not read "per-realm KEKs" as a per-tenant blast-radius boundary.
 
-To rotate the master key without downtime:
+To rotate the master key, restart Hearth once. On a single node, the restart is a short
+outage:
 
 1. Generate a new key (32-byte random, base64-encoded).
 2. Set environment variables before starting:
@@ -149,6 +150,44 @@ To rotate the master key without downtime:
 4. Once startup succeeds, **remove `HEARTH_PREVIOUS_MASTER_KEY` from the environment**. It is no longer needed.
 
 The re-encryption is atomic per KEK (WAL-backed). A crash mid-rotation is safe: partially re-encrypted KEKs are replayed on the next boot with the same two-key environment.
+
+---
+
+## Key-Encryption-Key (`HEARTH_KEK`) Rotation
+
+`HEARTH_KEK` (or `security.key_encryption_key`) wraps the keys that Hearth keeps in its store:
+
+- the global and realm signing keys, and the retiring keys,
+- the SAML signing keys and the RS256 ID-token keys,
+- per realm: the MFA data key, the DPoP nonce secret and the audit chain key.
+
+One KEK covers every realm. A rotation wraps each of these keys again under the new KEK. The
+keys keep their values: tokens, the JWKS, SAML metadata, enrolled TOTP factors and the audit
+chain do not change. The rotation needs one restart. It is supported on a single node only:
+in cluster mode Hearth refuses to start with `HEARTH_PREVIOUS_KEK` set.
+
+1. Make a backup (see the [Backup guide](./backup.md)).
+2. Generate a new KEK: `openssl rand -hex 32`.
+3. Stop Hearth.
+4. Set `HEARTH_KEK` to the new value. If the KEK is in `security.key_encryption_key`, put the
+   new value there, or set `HEARTH_KEK` (it takes precedence).
+5. Set `HEARTH_PREVIOUS_KEK` to the old value.
+6. Start Hearth. Before it opens the engines, it wraps every stored key that does not open
+   under the new KEK again, and it logs `key_encryption_key rotated` with the number of keys.
+7. Remove `HEARTH_PREVIOUS_KEK` from the environment. At the next start, Hearth logs a
+   warning while it is still set.
+8. Destroy every copy of the old KEK after you no longer need the backups that it opens.
+
+Hearth decrypts every key before it writes one, so a wrong `HEARTH_PREVIOUS_KEK` makes startup
+fail and changes nothing. A crash during step 6 is safe: start again with the same two
+values, and Hearth wraps the keys that are still under the old KEK.
+
+If you change `HEARTH_KEK` without `HEARTH_PREVIOUS_KEK`, startup fails before Hearth reads a
+key, and the error names `HEARTH_PREVIOUS_KEK`.
+
+A backup archive holds the stored keys wrapped under the KEK that was in use when you made
+it. After you restore an older archive, start Hearth with that KEK in `HEARTH_KEK`. Or start it
+with the new KEK in `HEARTH_KEK` and the old KEK in `HEARTH_PREVIOUS_KEK`, to rotate at once.
 
 ---
 

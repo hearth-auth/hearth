@@ -1,0 +1,16 @@
+# #647 round A: server c7i.large, 2 c7i.xlarge generators, 1M users in one realm.
+# Pass marks: https://github.com/hearth-auth/hearth/issues/647 (set before the run).
+# Rates are totals over both generators.
+#    name           journey       start step  steps hold_s
+ramp ramp-mix          mix           250   50    10    90
+ramp ramp-login        login         20    10    9     90
+ramp ramp-refresh      refresh       200   100   13    90
+ramp ramp-userinfo     userinfo      2000  2000  6     60
+ramp ramp-admin_lookup admin_lookup  2000  2000  6     60
+ramp ramp-introspect   introspect    1500  1500  6     60
+#       name
+restart restart-1m
+#     name     journey rate seconds kill_at_s k6 settings
+crash crash-1m mix     120  600     300       MIX=refresh:60,login:15,userinfo:15,admin_lookup:5,create_user:5
+#    name     journey rate seconds malloc_info minutes
+soak soak-1m  mix     120  10800   90,179

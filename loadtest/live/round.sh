@@ -7,6 +7,23 @@
 # Plan lines (# starts a comment):
 #   ramp <name> <journey> <start> <step> <steps> <hold_s>
 #   soak <name> <journey> <rate> <seconds> [malloc_info minutes, e.g. 35,59]
+#   restart <name>
+#       a clean stop, the page cache dropped, then a start timed to the first
+#       200 from /readyz (the "start" file: seconds and outcome)
+#   crash <name> <journey> <rate> <seconds> <kill_at_s> [k6 settings]
+#       a load at <rate>; kill -9 at <kill_at_s>, a start at once, timed as
+#       above; then cloud.sh verify (acknowledged users that are missing). For
+#       the mix, add create_user so that there are writes to check, e.g.
+#       MIX=refresh:60,login:15,userinfo:15,admin_lookup:5,create_user:5
+#   backup <name> <journey> <rate> <hold_s>
+#       3 equal steps of <hold_s> at <rate>; POST /admin/backup on the server
+#       when step 2's hold starts. Step 1 is the latency without a backup,
+#       step 2 the latency during it (the "backup" file: seconds, exit status,
+#       archive bytes). Make <hold_s> longer than the backup.
+#   drill <name> <users>
+#       restore-drill.sh on the server with <users> users: backup, restore and
+#       compare times (drill/). It replaces the server's config and data, so
+#       it must be the last line of a plan.
 #
 # Before each line: the image's binary is installed, the post-import store copy
 # is restored, the page cache is dropped, Hearth restarts, and
@@ -178,6 +195,91 @@ heaptrack_collect() {
   note "$name: heaptrack trace $(du -h "$out/heaptrack.${f##*.}" | cut -f1)"
 }
 
+# A clean stop, the page cache dropped, and a start timed to ready (#647).
+restart() {
+  local name=$1 out=$results/$1
+  prepare "$name" || { note "$name: prepare FAILED"; return; }
+  mkdir -p "$out"
+  cp "$run/variant-$name.txt" "$out/variant.txt" 2> /dev/null || true
+  note "$name: clean stop, drop caches, timed start"
+  s "systemctl stop hearth && sync && echo 3 > /proc/sys/vm/drop_caches && /opt/hearth/timed-start.sh $name" \
+    || note "$name: Hearth did not become ready"
+  sp "root@$SERVER_PUBLIC:/opt/hearth/out/$name.start" "$out/start" || note "$name: no start file"
+  note "$name: start to ready: $(cat "$out/start" 2> /dev/null)"
+}
+
+# A load with kill -9 and a start at once, timed to ready; then a check that
+# every acknowledged user is still there (#647).
+crash() {
+  local name=$1 journey=$2 rate=$3 secs=$4 kill_at=$5 k6env=${6:-}
+  prepare "$name" || { note "$name: prepare FAILED"; return; }
+  note "$name: $journey at $rate/s for $secs s, kill -9 at $kill_at s, timed start"
+  observed "$name" env KILL_RESTART=1 K6_ENV="$k6env" "$c" ramp "$name" "$journey" "$rate" 0 1 "$secs" "$kill_at"
+  # The start can outlast the load: wait for timed-start.sh (at most 1,800 s).
+  s "for _ in \$(seq 1 1810); do [ -f /opt/hearth/out/$name.start ] && break; sleep 1; done" \
+    && sp "root@$SERVER_PUBLIC:/opt/hearth/out/$name.start" "$results/$name/start" \
+    || note "$name: no start file"
+  note "$name: start to ready: $(cat "$results/$name/start" 2> /dev/null)"
+  "$c" verify "$name" > "$results/$name/verify.json" || note "$name: verify FAILED"
+  note "$name: verify: $(tr -d ' \n' < "$results/$name/verify.json")"
+}
+
+# POST /admin/backup on the server during step 2 of a 3-step load (#647).
+backup() {
+  local name=$1 journey=$2 rate=$3 hold=$4 out=$results/$1 start_at at
+  prepare "$name" || { note "$name: prepare FAILED"; return; }
+  s "rm -rf /opt/hearth/drill /var/lib/hearth-backup && install -d -m 0700 /opt/hearth/drill /var/lib/hearth-backup" \
+    && sp "$here/restore_drill.py" "$run/bundle/generator.env" "root@$SERVER_PUBLIC:/opt/hearth/drill/" \
+    || { note "$name: copying the backup client FAILED"; return; }
+  note "$name: $journey at $rate/s, 3 steps of $hold s, POST /admin/backup at the start of step 2"
+  observed "$name" "$c" ramp "$name" "$journey" "$rate" 0 3 "$hold" &
+  local rp=$!
+  for _ in $(seq 1 600); do grep -q '^START_AT=' "$out/params.env" 2> /dev/null && break; sleep 2; done
+  start_at=$(sed -n 's/^START_AT=//p' "$out/params.env" 2> /dev/null)
+  if [ -n "$start_at" ]; then
+    # Step 2's hold starts after two ramp-ups (RAMP_S, 5 s) and step 1's hold.
+    at=$((start_at + hold + 10))
+    sleep $((at - $(date +%s) > 0 ? at - $(date +%s) : 0))
+    s "cd /opt/hearth/drill && t0=\$(date +%s.%N)
+      python3 restore_drill.py backup --target generator.env --ca /opt/hearth/ca.crt \
+        --output /var/lib/hearth-backup/archive > /opt/hearth/out/$name.backup.log 2>&1
+      rc=\$?
+      awk -v a=\$t0 -v b=\$(date +%s.%N) -v rc=\$rc -v n=\$(stat -c %s /var/lib/hearth-backup/archive 2> /dev/null || echo 0) \
+        'BEGIN { printf \"%.1f %s %s\\n\", b - a, rc, n }' > /opt/hearth/out/$name.backup"
+  else
+    note "$name: no START_AT; no backup"
+  fi
+  wait "$rp"
+  sp "root@$SERVER_PUBLIC:/opt/hearth/out/$name.backup" "root@$SERVER_PUBLIC:/opt/hearth/out/$name.backup.log" "$out/" \
+    || note "$name: no backup file"
+  note "$name: backup seconds, exit status, bytes: $(cat "$out/$name.backup" 2> /dev/null)"
+  s "rm -rf /var/lib/hearth-backup /opt/hearth/drill"
+}
+
+# restore-drill.sh on the server (#647). It replaces /opt/hearth's config and
+# the data directory: the last line of a plan.
+drill() {
+  local name=$1 users=$2 out=$results/$1 rev rc
+  prepare "$name" || { note "$name: prepare FAILED"; return; }
+  rev=$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')
+  s "set -e
+    systemctl stop hearth
+    rm -rf /var/lib/hearth /var/lib/hearth.base /opt/stress-drill
+    install -d -m 0700 /opt/stress-drill
+    cp /opt/hearth/hearth /opt/stress-drill/hearth" || { note "$name: drill setup FAILED"; return; }
+  sp "$here/restore-drill.sh" "$here/restore_drill.py" "$here/gen-config.sh" "root@$SERVER_PUBLIC:/opt/stress-drill/" \
+    || { note "$name: copying the drill FAILED"; return; }
+  note "$name: restore drill with $users users"
+  s "cd /opt/stress-drill && GITHUB_SHA=$rev USERS=$users bash restore-drill.sh /opt/stress-drill/hearth /opt/stress-drill/out \
+    > /opt/stress-drill/drill.log 2>&1"
+  rc=$?
+  mkdir -p "$out/drill"
+  sp -r "root@$SERVER_PUBLIC:/opt/stress-drill/out/." "root@$SERVER_PUBLIC:/opt/stress-drill/drill.log" "$out/drill/" \
+    || note "$name: fetching the drill results FAILED"
+  echo "$rc" > "$out/drill/exit"
+  note "$name: restore drill exit $rc (0 = the restored server gives back the same data)"
+}
+
 # Turns on jemalloc's heap profiler from Hearth's next start: a profile every
 # 15 minutes in /opt/hearth/out/jeprof, emptied for each plan line. The image
 # must be a `--features heap-profile` build, or Hearth logs that the profiler
@@ -241,6 +343,13 @@ while read -r -u 3 kind name rest; do
       ramp "$name" "$journey" "$start" "$step" "$steps" "$hold" < /dev/null ;;
     soak) read -r journey rate secs minutes <<< "$rest"
       soak "$name" "$journey" "$rate" "$secs" "${minutes:-}" < /dev/null ;;
+    restart) restart "$name" < /dev/null ;;
+    crash) read -r journey rate secs kill_at k6env <<< "$rest"
+      crash "$name" "$journey" "$rate" "$secs" "$kill_at" "${k6env:-}" < /dev/null ;;
+    backup) read -r journey rate hold <<< "$rest"
+      backup "$name" "$journey" "$rate" "$hold" < /dev/null ;;
+    drill) read -r users <<< "$rest"
+      drill "$name" "$users" < /dev/null ;;
     *) note "unknown plan line: $kind $name $rest" ;;
   esac
 done 3<<< "$plan"

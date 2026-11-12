@@ -147,7 +147,7 @@ that application each mark the family revoked; the next refresh on it fails with
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /authorize` | Starts auth code flow (machine path — requires `Authorization: Bearer <token>`); returns a short-lived, single-use code. Token `sub` is used as the user identity. |
+| `POST /authorize` | With a JSON body: starts auth code flow (machine path — requires `Authorization: Bearer <token>`); returns a short-lived, single-use code. Token `sub` is used as the user identity. With a form body (`application/x-www-form-urlencoded`): the browser path, the same as `GET /authorize`. |
 | `POST /token` | Exchanges code → tokens, or rotates a refresh token |
 | `GET  /userinfo` | Returns scope-filtered profile claims for a valid access token |
 | `POST /revoke` | Revokes a refresh token and its entire grant family — only for the client the token was issued to |

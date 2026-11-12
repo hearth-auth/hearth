@@ -17,6 +17,7 @@ pub mod error;
 pub mod federation;
 pub mod hibp;
 pub mod kdf_gate;
+pub mod kek_rotation;
 pub mod key_encryption;
 pub(crate) mod keys;
 pub(crate) mod magic_link;
