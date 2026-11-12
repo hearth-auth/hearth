@@ -3861,10 +3861,11 @@ impl EmbeddedIdentityEngine {
         use crate::identity::user_index;
 
         // `PageRequest`'s fields are public, so a struct literal can skip the
-        // clamp of `PageRequest::new`. Clamp again before the page is sized.
+        // clamp of `PageRequest::new`. Clamp again, and let the page grow
+        // with its users instead of sizing it from the request.
         let limit = page.limit.clamp(1, crate::core::MAX_PAGE_LIMIT);
         let prefix = user_index::index_prefix(field, dir);
-        let mut items: Vec<User> = Vec::with_capacity(limit as usize);
+        let mut items: Vec<User> = Vec::new();
         let mut position = page.offset;
         while (items.len() as u64) < u64::from(limit) {
             #[allow(clippy::cast_possible_truncation)]
