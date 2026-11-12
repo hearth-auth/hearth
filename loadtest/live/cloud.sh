@@ -44,6 +44,8 @@
 #   SETUP_GRACE      seconds between launch and the ramps' common start
 #                    (default: 30, plus time to sign in the token pools)
 #   K6_ENV           extra k6 settings for a ramp, e.g. "MIX=refresh:70,login:30"
+#   KILL_RESTART=1   after a ramp's kill -9, start Hearth again at once and time
+#                    it to ready (remote/timed-start.sh; the "start" file)
 #   PROFILE_AT, PROFILE_S
 #                    profile Hearth for PROFILE_S seconds, PROFILE_AT seconds
 #                    into a ramp (perf + offcputime; needs an unstripped binary)
@@ -267,7 +269,7 @@ install_server_tools() {
 copy_server_scripts() {
   scp_to "$1" /opt/hearth/ "$here/sampler.sh" "$here/metrics-scrape.sh" \
     "$here/remote/observe.sh" "$here/remote/kill.sh" "$here/remote/profile.sh" \
-    "$here/remote/malloc-info.sh"
+    "$here/remote/malloc-info.sh" "$here/remote/timed-start.sh"
   ssh_to "$1" "chmod 0755 /opt/hearth/*.sh"
 }
 
@@ -565,7 +567,7 @@ EOF
     systemd-run --unit=observe-$name --collect --quiet /opt/hearth/observe.sh $name $((grace + run_s + 300))"
   if [ -n "$kill_at" ]; then
     ssh_to "$SERVER_PUBLIC" "systemd-run --unit=kill-$name --collect --quiet \
-      --on-active=\$(( $start_at + $kill_at - \$(date +%s) ))s /opt/hearth/kill.sh $name"
+      --on-active=\$(( $start_at + $kill_at - \$(date +%s) ))s /opt/hearth/kill.sh $name ${KILL_RESTART:+restart}"
     log "kill -9 scheduled ${kill_at}s into the ramp"
   fi
   if [ -n "${PROFILE_AT:-}" ]; then
@@ -627,7 +629,7 @@ cmd_collect() {
     fi
   done
   local f
-  for f in sampler.csv metrics.txt iostat.txt killed_at perf.txt offcpu.folded perf.err offcpu.err; do
+  for f in sampler.csv metrics.txt iostat.txt killed_at start perf.txt offcpu.folded perf.err offcpu.err; do
     scp_from "$SERVER_PUBLIC" "/opt/hearth/out/$name.$f" "$out/$f" 2> /dev/null || true
   done
   ssh_to "$SERVER_PUBLIC" "systemctl is-active hearth; journalctl -u hearth -n 5 --no-pager; \

@@ -94,8 +94,8 @@ availability zone). Later commands read the provider from the run. It needs
 an AWS CLI profile (default `hearth-stress`) for an IAM user with EC2 rights
 on resources tagged `hearth-stress` in one region only; it refuses the
 account root. Each instance terminates itself after `AWS_MAX_HOURS` (10) in
-case `down` never runs. `SERVER_SIZE` and `GENERATOR_SIZE` may also be c7i.2xlarge or
-t3.medium (2 vCPU, 4 GiB, about half the price of c7i.large). Use t3.medium for long memory
+case `down` never runs. `SERVER_SIZE` and `GENERATOR_SIZE` may also be c7i.2xlarge, r7i.large
+(2 vCPU, 16 GiB, for 10M users) or t3.medium (2 vCPU, 4 GiB, about half the price of c7i.large). Use t3.medium for long memory
 soaks, not for latency: it starts in unlimited mode, so it never loses CPU when its credits run
 out, but its CPUs are older and slower.
 
@@ -132,7 +132,13 @@ soaks on the same servers. A round on AWS takes 2–3 hours and costs a few doll
    ```
 2. **Create the AWS identity.** The owner runs `aws login` (an admin session). Right after it, run
    `loadtest/live/aws-iam.sh up`. The admin session can expire within minutes.
-3. **Write a plan.** Start from the newest file in `plans/`.
+3. **Write a plan.** Start from the newest file in `plans/`. Besides `ramp` and `soak`, a plan
+   can time a restart (`restart`), a `kill -9` under load with a check for lost writes
+   (`crash`), a backup under load (`backup`) and the restore drill (`drill`). The header of
+   `round.sh` gives their arguments. A `drill` line replaces the server's data: put it last.
+   With 10M users, set `USERS=10000000` and give the server a larger disk, for example
+   `AWS_DISK_GB=150`: the store, its copy, a backup archive and the drill's store each take
+   about 12 GB at 10M.
 4. **Start the round detached.** It runs for hours, and the agent's background-task monitor can
    kill a long background command:
    ```bash

@@ -12,7 +12,8 @@
 #   AWS_AZ           us-east-1a (all instances share one availability zone)
 #   SERVER_SIZE      c7i.large   (2 vCPU, 4 GiB)
 #   GENERATOR_SIZE   c7i.xlarge  (4 vCPU, 8 GiB)
-#                    The policy also allows c7i.2xlarge and t3.medium (2 vCPU,
+#                    The policy also allows r7i.large (2 vCPU, 16 GiB; the
+#                    10M-user round of #647), c7i.2xlarge and t3.medium (2 vCPU,
 #                    4 GiB, about half the price of c7i.large; for long memory
 #                    soaks, not for latency). A t3 instance starts in unlimited
 #                    mode, so a run never loses CPU when its credits run out.
