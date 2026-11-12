@@ -190,6 +190,10 @@ pub const MAX_CONCURRENT_FORWARDED_WRITES: usize = 256;
 /// syncs, each write that arrives waits, so without a limit the server adds a
 /// thread for each one, and the blocking pool keeps them after the disk
 /// recovers. 32 writes sustain 3,200 writes/s until one write takes 10 ms.
+///
+/// Audit batches may use twice the limit (#836). After a disk stall, the
+/// server can keep about one thread per place, so a higher limit also keeps
+/// more threads (the `write_stall_threads` simulation test).
 pub const DEFAULT_MAX_WRITES_IN_FLIGHT: usize = 32;
 
 /// Extra time a follower gives a forwarded write beyond
@@ -1797,7 +1801,9 @@ impl ClockOffsetMonitor {
 /// [`ClusterUnavailableCause::WriteLimit`](crate::storage::ClusterUnavailableCause::WriteLimit),
 /// a `503` with `Retry-After` at the HTTP layer. A wait for a write that is
 /// already queued ([`StorageEngine::await_batch_durable`]) counts toward the
-/// limit but is never refused.
+/// limit but is never refused. An audit-only batch
+/// ([`StorageEngine::enqueue_audit_batch`]) is admitted up to twice the limit
+/// (#836).
 pub struct ClusterStorageAdapter {
     engine: Arc<ClusterEngine>,
     /// Single-node writes in progress, and waits for queued writes.
@@ -1830,17 +1836,25 @@ impl ClusterStorageAdapter {
         }
     }
 
-    /// Takes a place under the write limit, or `None` when the limit is full.
-    fn try_start_write(&self) -> Option<WriteInFlight<'_>> {
+    /// Takes a place while fewer than `ceiling` writes are in progress, or
+    /// `None` when `ceiling` writes are in progress.
+    fn try_start_write(&self, ceiling: usize) -> Option<WriteInFlight<'_>> {
         // Rust 1.99 renamed `fetch_update` to `try_update`; the MSRV (1.88)
         // has only the old name.
         #[allow(deprecated)]
         self.writes_in_flight
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-                (n < self.max_writes_in_flight).then_some(n + 1)
+                (n < ceiling).then_some(n + 1)
             })
             .ok()?;
         Some(WriteInFlight::counted(&self.writes_in_flight))
+    }
+
+    /// The most single-node writes in progress at which an audit batch is
+    /// still admitted: twice the write limit (#836). See
+    /// [`StorageEngine::enqueue_audit_batch`].
+    fn audit_write_ceiling(&self) -> usize {
+        self.max_writes_in_flight.saturating_mul(2)
     }
 
     /// Single-node mode: runs `write` against the local engine on the calling
@@ -1860,16 +1874,25 @@ impl ClusterStorageAdapter {
         &self,
         write: impl FnOnce(&EmbeddedStorageEngine) -> Result<T, crate::storage::StorageError>,
     ) -> Option<Result<T, crate::storage::StorageError>> {
+        self.single_node_write_below(self.max_writes_in_flight, write)
+    }
+
+    /// [`Self::single_node_write`], admitted while fewer than `ceiling`
+    /// writes are in progress.
+    fn single_node_write_below<T>(
+        &self,
+        ceiling: usize,
+        write: impl FnOnce(&EmbeddedStorageEngine) -> Result<T, crate::storage::StorageError>,
+    ) -> Option<Result<T, crate::storage::StorageError>> {
         if self.engine.raft.is_some() {
             return None;
         }
-        let Some(_in_flight) = self.try_start_write() else {
+        let Some(_in_flight) = self.try_start_write(ceiling) else {
             crate::metrics::metrics().storage_writes_shed_total.inc();
             return Some(Err(crate::storage::StorageError::ClusterUnavailable {
                 cause: crate::storage::ClusterUnavailableCause::WriteLimit,
                 reason: format!(
-                    "{} single-node writes already in progress (storage.max_writes_in_flight)",
-                    self.max_writes_in_flight
+                    "{ceiling} single-node writes already in progress (storage.max_writes_in_flight)"
                 ),
             }));
         };
@@ -2227,6 +2250,22 @@ impl StorageEngine for ClusterStorageAdapter {
         ))
     }
 
+    /// [`Self::enqueue_batch`] for an audit-only batch. Single node: admitted
+    /// while fewer than twice `max_writes_in_flight` writes are in progress
+    /// (#836). Cluster mode: the same Raft proposal as `enqueue_batch`.
+    fn enqueue_audit_batch(
+        &self,
+        realm_id: &RealmId,
+        entries: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<crate::storage::StorageDurabilityHandle, crate::storage::StorageError> {
+        if let Some(done) = self.single_node_write_below(self.audit_write_ceiling(), |inner| {
+            inner.enqueue_batch(realm_id, entries)
+        }) {
+            return done;
+        }
+        self.enqueue_batch(realm_id, entries)
+    }
+
     /// Forwarded to the inner engine, which issued the handle; see
     /// [`Self::enqueue_batch`]. A cluster-mode handle is `Immediate`, a no-op.
     ///
@@ -2569,6 +2608,73 @@ mod tests {
             .put(&realm, b"after", b"v")
             .expect("the limit is free again");
         assert_eq!(adapter.get(&realm, b"after").unwrap(), Some(b"v".to_vec()));
+    }
+
+    /// #836: an audit batch is admitted above the write limit, up to twice
+    /// the limit. An audit event usually follows a write that the operation
+    /// already made, so a refused audit batch lets the operation succeed
+    /// without its event. Above the audit ceiling, an audit batch is refused
+    /// too: the thread count stays bounded when the disk stops.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn an_audit_batch_is_admitted_above_the_write_limit_up_to_twice_the_limit() {
+        let dir = tempdir().unwrap();
+        let inner = open_engine(dir.path().join("data").as_path());
+        let parked_writes = ParkedWrites::install(&inner);
+        let adapter = Arc::new(ClusterStorageAdapter::with_max_writes_in_flight(
+            Arc::new(ClusterEngine::single_node(inner)),
+            2,
+        ));
+        let realm = RealmId::generate();
+
+        let parked: Vec<_> = (0..2u8)
+            .map(|i| {
+                let (adapter, realm) = (Arc::clone(&adapter), realm.clone());
+                std::thread::spawn(move || adapter.put(&realm, &[b'p', i], b"v"))
+            })
+            .collect();
+        wait_for_writes_in_flight(&adapter, 2);
+        assert!(
+            adapter.put(&realm, b"over", b"v").is_err(),
+            "the write limit of 2 is full"
+        );
+
+        let admitted = adapter
+            .enqueue_audit_batch(&realm, &[(b"audit".to_vec(), b"v".to_vec())])
+            .expect("an audit batch at a full write limit must be admitted");
+        adapter
+            .await_batch_durable(admitted)
+            .expect("the admitted audit batch is durable");
+        assert_eq!(adapter.get(&realm, b"audit").unwrap(), Some(b"v".to_vec()));
+
+        // Two more audit writes in progress: 4 in all, twice the limit.
+        let audit_places: Vec<_> = (0..2)
+            .map(|_| {
+                adapter
+                    .try_start_write(adapter.audit_write_ceiling())
+                    .expect("an audit place below twice the limit")
+            })
+            .collect();
+        let refused = adapter.enqueue_audit_batch(&realm, &[(b"a-over".to_vec(), b"v".to_vec())]);
+        assert!(
+            matches!(
+                refused,
+                Err(crate::storage::StorageError::ClusterUnavailable {
+                    cause: crate::storage::ClusterUnavailableCause::WriteLimit,
+                    ..
+                })
+            ),
+            "an audit batch at twice the limit must be refused: {:?}",
+            refused.err()
+        );
+
+        drop(audit_places);
+        drop(parked_writes);
+        for writer in parked {
+            writer.join().unwrap().expect("a parked write completes");
+        }
+        assert_eq!(adapter.writes_in_flight.load(Ordering::SeqCst), 0);
+        assert_eq!(adapter.get(&realm, b"a-over").unwrap(), None);
     }
 
     /// #596: a wait for a write that is already queued is never refused, also

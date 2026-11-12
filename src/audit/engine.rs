@@ -840,11 +840,13 @@ impl AuditEngine for EmbeddedAuditEngine {
         // Delegate to `with_pending_append`, passing a closure that enqueues only
         // the audit KV pairs (no merged caller data). This preserves the original
         // one-audit-record semantics while sharing the chain-lock + RMW logic.
+        // An audit-only batch goes through `enqueue_audit_batch`, which a write
+        // limit admits above the limit (#836).
         let storage = Arc::clone(&self.storage);
         let realm_id = request.realm_id.clone();
         let pending = self.with_pending_append(
             request,
-            Box::new(move |audit_kvs| storage.enqueue_batch(&realm_id, audit_kvs)),
+            Box::new(move |audit_kvs| storage.enqueue_audit_batch(&realm_id, audit_kvs)),
         )?;
 
         // ── Phase 2: fsync wait (OUTSIDE the chain lock) ─────────────────────
@@ -4070,5 +4072,140 @@ mod bounded_read_tests {
 
         assert_eq!(stamps_of(&events), alice[100..110].to_vec());
         assert!(read <= 30, "an actor page of 10 read {read} entries");
+    }
+}
+
+/// #836: an audit append is not refused by the single-node write limit.
+#[cfg(test)]
+mod write_limit_tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::core::FakeClock;
+    use crate::storage::{
+        ClusterUnavailableCause, EmbeddedStorageEngine, StorageConfig, StorageDurabilityHandle,
+        StorageError,
+    };
+
+    /// A store whose write limit fills when `full` is set: it then refuses
+    /// every write as the single-node write limit does, except an audit
+    /// batch, which a write limit admits above the limit.
+    struct LimitFullStorage {
+        inner: Arc<dyn StorageEngine>,
+        full: AtomicBool,
+    }
+
+    impl LimitFullStorage {
+        fn check(&self) -> Result<(), StorageError> {
+            if self.full.load(Ordering::SeqCst) {
+                Err(refused())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn refused() -> StorageError {
+        StorageError::ClusterUnavailable {
+            cause: ClusterUnavailableCause::WriteLimit,
+            reason: "write limit full".to_string(),
+        }
+    }
+
+    impl StorageEngine for LimitFullStorage {
+        fn get(&self, realm_id: &RealmId, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+            self.inner.get(realm_id, key)
+        }
+        fn put(&self, realm_id: &RealmId, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+            self.check()?;
+            self.inner.put(realm_id, key, value)
+        }
+        fn delete(&self, realm_id: &RealmId, key: &[u8]) -> Result<(), StorageError> {
+            self.check()?;
+            self.inner.delete(realm_id, key)
+        }
+        fn scan(
+            &self,
+            realm_id: &RealmId,
+            start: &[u8],
+            end: &[u8],
+        ) -> Result<Vec<ScanEntry>, StorageError> {
+            self.inner.scan(realm_id, start, end)
+        }
+        fn put_batch(
+            &self,
+            realm_id: &RealmId,
+            entries: &[(Vec<u8>, Vec<u8>)],
+        ) -> Result<(), StorageError> {
+            self.check()?;
+            self.inner.put_batch(realm_id, entries)
+        }
+        fn enqueue_batch(
+            &self,
+            realm_id: &RealmId,
+            entries: &[(Vec<u8>, Vec<u8>)],
+        ) -> Result<StorageDurabilityHandle, StorageError> {
+            self.check()?;
+            self.inner.enqueue_batch(realm_id, entries)
+        }
+        fn enqueue_audit_batch(
+            &self,
+            realm_id: &RealmId,
+            entries: &[(Vec<u8>, Vec<u8>)],
+        ) -> Result<StorageDurabilityHandle, StorageError> {
+            self.inner.enqueue_batch(realm_id, entries)
+        }
+        fn await_batch_durable(&self, handle: StorageDurabilityHandle) -> Result<(), StorageError> {
+            self.inner.await_batch_durable(handle)
+        }
+        fn list_realms(&self) -> Result<Vec<RealmId>, StorageError> {
+            self.inner.list_realms()
+        }
+        fn begin_snapshot_restore(&self, snapshot_id: &str) -> Result<(), StorageError> {
+            self.inner.begin_snapshot_restore(snapshot_id)
+        }
+        fn complete_snapshot_restore(&self) -> Result<(), StorageError> {
+            self.inner.complete_snapshot_restore()
+        }
+    }
+
+    /// #836 round A: with the write limit full, `token_refreshed` events were
+    /// lost (`Audit append failed (non-blocking)`) while the refreshes
+    /// succeeded. An append goes through `enqueue_audit_batch`, which a write
+    /// limit admits above the limit.
+    #[test]
+    fn an_append_uses_the_audit_batch_that_the_write_limit_admits() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let inner = Arc::new(
+            EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().to_path_buf()))
+                .expect("storage"),
+        ) as Arc<dyn StorageEngine>;
+        let storage = Arc::new(LimitFullStorage {
+            inner,
+            full: AtomicBool::new(false),
+        });
+        let engine = EmbeddedAuditEngine::new(
+            Arc::clone(&storage) as Arc<dyn StorageEngine>,
+            Arc::new(FakeClock::new(Timestamp::from_micros(9_000_000))) as Arc<dyn Clock>,
+        );
+        let realm_id = RealmId::generate();
+        let refresh = |session: &str| CreateAuditEvent {
+            realm_id: realm_id.clone(),
+            actor: "user:u-1".to_string(),
+            action: AuditAction::TokenRefreshed,
+            resource_type: "session".to_string(),
+            resource_id: session.to_string(),
+            metadata: None,
+        };
+        // The realm's first event writes its HMAC key and chain anchor once.
+        engine.append(&refresh("s-0")).expect("first event");
+        storage.full.store(true, Ordering::SeqCst);
+
+        let appended = engine.append(&refresh("s-1"));
+
+        let event = appended.expect("an audit append must not be refused at the write limit");
+        assert_eq!(event.resource_id, "s-1");
+        assert_eq!(engine.count_events(&realm_id).expect("count"), 2);
     }
 }
