@@ -162,7 +162,7 @@ Embedded storage engine tuning. These control WAL, memtable, and hot tier behavi
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `data_dir` | string | `"./data"` | Directory for WAL files, SSTs, and metadata. Created if it does not exist. In `--dev` mode the effective data directory follows a three-level precedence rule — see [`--dev` mode and `HEARTH_DEV_DATA_DIR`](#--dev-mode-and-hearth_dev_data_dir) below. |
-| `wal_max_size_bytes` | integer | `268435456` (256 MiB) | WAL file rotation threshold. |
+| `wal_max_size_bytes` | integer | `268435456` (256 MiB) | WAL file rotation threshold. A rotation first flushes the memtable to an SST, and writes wait for that flush. So that this flush is small, the memtable is also flushed, without stopping writes, when the WAL reaches 1/32 of this size before the threshold (8 MiB before it at the default). |
 | `memtable_flush_bytes` | integer | `67108864` (64 MiB) | Memtable size threshold before flushing to an SST file. |
 | `hot_tier_capacity` | integer | auto | When set, uses this exact number of hot tier entries. When omitted, auto-sizes from system memory (or `hot_tier_max_memory` if set). |
 | `hot_tier_max_memory` | integer | none | Maximum bytes to allocate for the hot tier. Overrides system memory detection during auto-sizing. Ignored when `hot_tier_capacity` is explicitly set. |
