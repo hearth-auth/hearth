@@ -66,7 +66,7 @@ A `cursor` that this endpoint did not return gets `400`. With `search`, the curs
 |---|---|
 | `cursor` | The `next_cursor` of the previous response |
 | `limit` | Page size, 1–100 (default 20) |
-| `search` | Search across email and display name using the [admin search grammar](admin-table-search.md) (substring by default; exact with `"…"`; glob with `*`/`?`; min 2 characters) |
+| `search` | Search across email and display name using the [admin search grammar](admin-table-search.md) (substring by default; 1 or 2 characters match the start of the email; exact with `"…"`; glob with `*`/`?`, which needs 3 characters in a row or a start, else `400`) |
 | `email` | Exact email match (case-insensitive) |
 | `username` | Substring match on `display_name` (case-insensitive) |
 | `status` | Status filter: `active`, `disabled`, or `pending_verification` |

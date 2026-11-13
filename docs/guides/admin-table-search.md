@@ -14,14 +14,31 @@ Queries are classified at compile time based on syntax, not field type.
 
 | Query form | Example | Behaviour |
 |---|---|---|
-| Empty or fewer than 2 characters | `""`, `"j"` | **Match-all guard** — skips filtering; returns all users |
+| Empty | `""` | **Match-all guard** — skips filtering; returns all users |
+| 1 or 2 characters | `j`, `jo` | **Email prefix** — the email starts with the text (users table only, see below) |
 | Plain text | `john` | **Substring** — field contains the literal anywhere |
 | Quoted string | `"john@acme.com"` | **Exact** — whole-field equality (not a substring) |
 | Contains `*` or `?` | `john*`, `*@acme.com`, `a?z` | **Glob** — anchored whole-field pattern match |
 
 ### Match-all guard
 
-Queries shorter than 2 characters (after trimming leading/trailing whitespace) bypass filtering and return all users. This prevents full-table scans caused by a single-keystroke in a live-search input.
+An empty query (after trimming leading/trailing whitespace) skips filtering and returns all users. On the other admin tables (realms, organizations, groups, webhooks), a query shorter than 2 characters also returns all rows.
+
+### Email prefix (users table)
+
+On the users table, a query of 1 or 2 characters with no wildcard and no quotes matches the users whose **email starts with** the text. It does not search the display name. The search reads the email index, so it does not read every user record of the realm.
+
+```
+j    → "john@acme.com", "jane@test.com"   (not "Bob Jones")
+jo   → "john@acme.com", "joe@test.com"
+```
+
+### How the users table searches (search index)
+
+The users table and `GET /admin/users` search with a **search index** of each user's email and display name: the index holds every 3-character run (a *trigram*) of the lowercased text. A search reads only the users whose index entry holds every trigram of the query, and then checks each of these users against the query. So the results and the `total` are exact, and a search reads about as many user records as it has candidates, not the whole realm.
+
+- A user write puts its change in a queue; a background task adds it to the index, normally within 1 second. A search also reads the users in this queue, so a search finds a user directly after the write.
+- A glob needs at least **3 characters in a row** (`*smith*`, `j?hn@acme*`), or must **start with a character** that is not a wildcard (`jo*`). Any other glob (for example `*a*` or `?b*`) is **too broad** for the index: the admin UI shows a message and no users, and the REST endpoint returns `400`. A glob of stars only (`*`, `**`) matches every user.
 
 ### Substring (default)
 
@@ -59,6 +76,7 @@ john*           → email starts with "john": "john@acme.com", "johndoe@test.com
 j?hn@test.com   → "john@test.com" or "jahn@test.com" (exactly one char between j and hn)
 *smith*         → display name contains "Smith" (leading + trailing * make it a substring)
 *               → matches every user (bare star; equivalent to the match-all guard)
+*a*             → users table: refused as too broad (no 3 characters in a row, no start)
 ```
 
 Consecutive wildcards (`**`) are collapsed to a single `*` before matching; `a**z` behaves identically to `a*z`.
@@ -87,7 +105,7 @@ Click any column header to sort by that column. Clicking the same header a secon
 | Parameter | Values | Default | Description |
 |---|---|---|---|
 | `q` | Any string | `""` (match all) | Search query, using the grammar above |
-| `sort` | `email`, `name`, `status`, `created` | (unsorted) | Column to sort by; omit to use insertion order |
+| `sort` | `email`, `name`, `status`, `created` | `email` | Column to sort by; with no sort, the users table is in email order |
 | `dir` | `asc`, `desc` | `asc` | Sort direction |
 | `page` | Positive integer | `1` | 1-based page number |
 | `per_page` | `5`, `10`, `25`, `50`, `100` | `25` | Rows per page |
@@ -106,7 +124,7 @@ Unknown values for `sort` and `dir` are silently ignored — the server never re
 
 ## REST API
 
-The `GET /admin/users` endpoint accepts a `search` parameter that uses the same grammar described above. Pass any of the four forms (match-all guard, substring, exact, glob) and they are interpreted identically to the admin UI search box.
+The `GET /admin/users` endpoint accepts a `search` parameter that uses the same grammar described above, with the same email-prefix rule for 1 or 2 characters. Results are in email order.
 
 ```bash
 # Substring — all users whose email or name contains "acme"
@@ -119,7 +137,7 @@ GET /admin/users?search="alice@acme.com"
 GET /admin/users?search=*@acme.com
 ```
 
-Queries shorter than 2 characters return an empty result immediately rather than scanning all users.
+An empty `search` returns an empty result. A glob that is too broad for the search index returns `400`.
 
 Column sorting (`sort`, `dir`) is not currently available on the REST endpoint. Apply sort client-side, or use the admin UI for sorted exports.
 
@@ -127,7 +145,7 @@ Column sorting (`sort`, `dir`) is not currently available on the REST endpoint. 
 
 ## Search + Sort + Pagination
 
-Sort applies to the **entire filtered result set** before the page slice is taken. Consequences:
+Sort applies to the **entire filtered result set** before the page slice is taken. On the users table, up to 10,000 matches are sorted in memory; with more matches, the search reads the sort index of the column in order and keeps the matches until the page is full. Consequences:
 
 - `total` in the response counts all matching users, not the page size.
 - Pages are stable — page 2 always contains the second batch in sorted order with no gaps or duplicates.

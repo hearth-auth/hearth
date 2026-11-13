@@ -585,8 +585,9 @@ async fn admin_list_users(
     }
 
     if let Some(q) = &params.search {
-        // Short queries return empty results immediately (no index hit).
-        if q.len() < 2 {
+        // An empty query returns no users. A query of 1 or 2 characters
+        // matches the start of the email (#644).
+        if q.trim().is_empty() {
             return (
                 StatusCode::OK,
                 Json(serde_json::json!({"items": [], "next_cursor": null})),

@@ -12,9 +12,9 @@ use crate::storage::{EntryVisitor, ScanEntry, StorageError};
 
 /// Counts the user records (`usr:id:` keys) that reads walk or return. Every
 /// call goes through to the real engine, `count_prefix` included.
-struct UserReadCountingStorage {
+pub(super) struct UserReadCountingStorage {
     inner: Arc<dyn StorageEngine>,
-    user_reads: AtomicUsize,
+    pub(super) user_reads: AtomicUsize,
 }
 
 impl UserReadCountingStorage {
@@ -132,7 +132,7 @@ impl StorageEngine for UserReadCountingStorage {
 }
 
 /// An engine on a real store, with every user record read counted.
-fn counting_engine() -> (
+pub(super) fn counting_engine() -> (
     tempfile::TempDir,
     Arc<UserReadCountingStorage>,
     EmbeddedIdentityEngine,
@@ -321,7 +321,7 @@ fn every_user_write_path_keeps_the_sort_indexes() {
 
 /// The order that a sorted user list promises: the column (a name without
 /// case), then the user id.
-fn promised_order(users: &[User], field: UserSortField, dir: SortDir) -> Vec<UserId> {
+pub(super) fn promised_order(users: &[User], field: UserSortField, dir: SortDir) -> Vec<UserId> {
     fn rank(status: UserStatus) -> u8 {
         match status {
             UserStatus::Active => 0,
