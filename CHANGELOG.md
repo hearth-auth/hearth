@@ -16,6 +16,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   only. The procedure is in `docs/guides/config-migration.md`.
 
 ### Changed
+- **`GET /admin/users` pages with a key cursor** (#644): `next_cursor` is now the ID of the last
+  user of the page, not a decimal offset, and the next page starts after that user. A user deleted
+  during a walk no longer makes the client skip another user, and a deep page no longer reads
+  every user key before it. A decimal offset or any other value that the endpoint did not return
+  gets `400` (`invalid cursor`). With `search`, the cursor is still a decimal offset. The user
+  export (`GET /admin/users/export`) reads the realm with the same walk.
 - **A refused single-node write names the write limit, not a cluster** (#836): the log now
   says `storage write limit full: ... (storage.max_writes_in_flight)` and `request refused:
   temporarily unavailable (503)`, not `cluster unavailable (write limit full)`. The `503` body's
@@ -54,6 +60,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   a new, empty data directory (see `docs/guides/upgrading.md`).
 
 ### Fixed
+- **The `status`, `username` and `attr` filters of `GET /admin/users` read the whole realm**
+  (#644): before, they read only the first 10,000 users and always answered
+  `next_cursor: null`, so they returned at most one page of the matches among those users. Now a
+  filtered request walks from its cursor until the page is full or it has read 10,000 users, and
+  answers a `next_cursor` when more can follow. A page can then be short or empty and still have
+  a `next_cursor`. A `status` filter reads only the users with that status, through the status
+  sort index. An `email` filter, also with other filters, reads one user through the email index.
 - **SCIM `GET /Users` reads the whole realm, not only its first 1,000 users** (#644): before, the
   list read at most 1,000 users, so a client did not see the other users, `totalResults` stopped
   at 1,000, and an `eq` filter did not find a user past them. Now a page without a filter reads

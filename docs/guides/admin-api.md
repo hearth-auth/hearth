@@ -54,13 +54,17 @@ reconciliation (`roles:`) is operator-authoritative and is not subject to it.
 
 `GET /admin/users`
 
-Returns a paginated list of users. Accepts optional filters; when a filter is active, cursor pagination is disabled (`next_cursor` is always `null`) and a full scan is performed (up to 10 000 users).
+Returns a paginated list of users, in user-ID order. To read every user, follow `next_cursor` until it is `null`. The cursor names the last user of the previous page, so a user deleted or created during the walk does not make the walk skip another user.
+
+With a field filter (`username`, `status`, `attr`), one request reads at most 10,000 users: the users of the realm, or with `status` only the users with that status. When it reaches that limit before the page is full, it answers the matches it found, possibly none, with a `next_cursor`. A short or empty page with a `next_cursor` is not the end: follow the cursor. An `email` filter reads one user through the email index.
+
+A `cursor` that this endpoint did not return gets `400`. With `search`, the cursor is a decimal offset.
 
 **Query parameters:**
 
 | Parameter | Description |
 |---|---|
-| `cursor` | Opaque pagination cursor from a previous response (not available with field filters) |
+| `cursor` | The `next_cursor` of the previous response |
 | `limit` | Page size, 1–100 (default 20) |
 | `search` | Search across email and display name using the [admin search grammar](admin-table-search.md) (substring by default; exact with `"…"`; glob with `*`/`?`; min 2 characters) |
 | `email` | Exact email match (case-insensitive) |
@@ -95,7 +99,6 @@ Filters users to those whose custom `attributes` map contains an exact match on 
 - Matching is **exact and case-sensitive**.
 - Returns `400 Bad Request` if the parameter contains no colon separator.
 - Only one attribute filter is supported per request.
-- When `attr` is present, cursor pagination is disabled.
 
 **Examples:**
 
