@@ -135,19 +135,37 @@ async fn search_users_returns_matching_results() {
     assert_eq!(items[0]["email"], "alice@example.com");
 }
 
+/// A search of 1 or 2 characters matches the start of the email (#644).
 #[tokio::test]
-async fn search_users_short_query_returns_empty() {
+async fn search_users_short_query_matches_the_start_of_the_email() {
     let h = common::TestHarness::in_process().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
     let token = admin_token(&h, &realm).await;
+    for (email, name) in [
+        ("alice@example.com", "Alice Clark"),
+        ("carla@example.com", "Carla"),
+    ] {
+        h.identity()
+            .create_user(
+                &realm,
+                &CreateUserRequest {
+                    email: email.into(),
+                    display_name: name.into(),
+                    first_name: String::new(),
+                    last_name: String::new(),
+                    attributes: Default::default(),
+                },
+            )
+            .expect("create user");
+    }
 
     let app = build_app(&h).await;
     let resp = app
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/admin/users?search=a")
+                .uri("/admin/users?search=c")
                 .header("Authorization", format!("Bearer {token}"))
                 .header("X-Realm-ID", realm.as_uuid().to_string())
                 .body(Body::empty())
@@ -158,8 +176,40 @@ async fn search_users_short_query_returns_empty() {
 
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp_json(resp).await;
-    let items = body["items"].as_array().expect("items array");
-    assert_eq!(items.len(), 0, "single-char search must return empty");
+    let emails: Vec<&str> = body["items"]
+        .as_array()
+        .expect("items array")
+        .iter()
+        .map(|u| u["email"].as_str().expect("email"))
+        .collect();
+    // "Alice Clark" holds a "c", but her email does not start with one.
+    assert_eq!(emails, ["carla@example.com"]);
+    assert_eq!(body["total"], 1);
+}
+
+/// A glob with no 3 characters in a row and no start is too broad (#644).
+#[tokio::test]
+async fn search_users_too_broad_glob_is_a_bad_request() {
+    let h = common::TestHarness::in_process().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = admin_token(&h, &realm).await;
+
+    let app = build_app(&h).await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/users?search=*a*")
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

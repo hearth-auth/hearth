@@ -122,10 +122,6 @@ pub(crate) fn posting_prefix(trigram: &Trigram) -> Vec<u8> {
 }
 
 /// The bucket number of a posting block key of `trigram`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the search query reads it (#644 part 2b)")
-)]
 pub(crate) fn posting_bucket(trigram_prefix: &[u8], key: &[u8]) -> Option<u64> {
     let raw = key.strip_prefix(trigram_prefix)?;
     if raw.len() != BUCKET_LEN {
@@ -286,28 +282,22 @@ impl PostingBlock {
     }
 
     /// The number of docids in the block.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the search query reads it (#644 part 2b)")
-    )]
     pub(crate) fn len(&self) -> usize {
         self.offsets.len()
     }
 
     /// `true` when the block holds the docid with `offset`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the search query reads it (#644 part 2b)")
-    )]
+    #[cfg(test)]
     pub(crate) fn contains(&self, offset: u16) -> bool {
         self.offsets.contains(&offset)
     }
 
+    /// Keeps only the docids that `other` also holds.
+    pub(crate) fn retain_common(&mut self, other: &Self) {
+        self.offsets.retain(|o| other.offsets.contains(o));
+    }
+
     /// The docids of the block in `bucket`, in ascending order.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the search query reads it (#644 part 2b)")
-    )]
     pub(crate) fn docids(&self, bucket: u64) -> impl Iterator<Item = u64> + '_ {
         let base = bucket << BUCKET_BITS;
         self.offsets.iter().map(move |&o| base + u64::from(o))

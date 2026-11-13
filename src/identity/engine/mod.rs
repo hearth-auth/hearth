@@ -414,6 +414,7 @@ mod scope_grant;
 mod search_merge;
 mod sharded_cache;
 mod single_use;
+mod user_search;
 mod user_walk;
 // Phase D engine modules
 pub(super) mod aat;
@@ -12580,58 +12581,32 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         sort_field: Option<crate::identity::search::UserSortField>,
         sort_dir: crate::identity::search::SortDir,
     ) -> Result<crate::core::PagedResult<User>, IdentityError> {
-        use crate::identity::search::SearchQuery;
+        use crate::identity::search::{SortDir, UserSortField};
 
-        let matcher = SearchQuery::compile(query);
-        let prefix = keys::user_id_scan_prefix();
-
-        // A sort with no search text walks the sort index (#644): one page
-        // of records, and the exact total from the count that the storage
-        // engine keeps.
-        if let (SearchQuery::MatchAll, Some(field)) = (&matcher, sort_field) {
-            let items = self.sorted_user_page(realm_id, field, sort_dir, page)?;
-            let total = self
-                .storage
-                .count_prefix(realm_id, &prefix, 0)
-                .map_err(Self::storage_err)?;
-            return Ok(crate::core::PagedResult::new(
-                items,
-                total,
-                page.offset,
-                page.limit,
-            ));
+        // A search with no sort column is in email order (#644).
+        let (field, dir) = match sort_field {
+            Some(field) => (field, sort_dir),
+            None => (UserSortField::Email, SortDir::Asc),
+        };
+        if let Some(found) = self.search_users_indexed(
+            realm_id,
+            query,
+            page,
+            field,
+            dir,
+            user_search::IN_MEMORY_SORT_MAX,
+        )? {
+            return Ok(found);
         }
 
-        let end = keys::prefix_end(&prefix);
-        let entries = self
+        // The query matches every user: walk the sort index for one page,
+        // and take the exact total from the count that the storage engine
+        // keeps.
+        let items = self.sorted_user_page(realm_id, field, dir, page)?;
+        let total = self
             .storage
-            .scan(realm_id, &prefix, &end)
+            .count_prefix(realm_id, &keys::user_id_scan_prefix(), 0)
             .map_err(Self::storage_err)?;
-
-        // Filter using the compiled matcher (email or display name).
-        let mut all_matching: Vec<User> = Vec::new();
-        for entry in &entries {
-            let user: User = Self::deserialize_user(&entry.value)?;
-            if matcher.matches_any(&[user.email(), user.display_name()]) {
-                all_matching.push(user);
-            }
-        }
-
-        // Sort the full matching set before slicing so page N is stable
-        // regardless of storage key order. The sort key is the key of the
-        // sort index, so a search sorts in the same order as a plain list.
-        if let Some(field) = sort_field {
-            all_matching.sort_by_cached_key(|user| {
-                crate::identity::user_index::index_key(user, field, sort_dir)
-            });
-        }
-
-        // Exact total so filtered lists paginate correctly (HEA-1614).
-        let total = all_matching.len() as u64;
-        let start = (page.offset as usize).min(all_matching.len());
-        let end_idx = (start + page.limit as usize).min(all_matching.len());
-        let items = all_matching[start..end_idx].to_vec();
-
         Ok(crate::core::PagedResult::new(
             items,
             total,
@@ -19779,6 +19754,7 @@ mod tests {
     mod stale_read_single_use;
     /// A user-list page reads one page of records, not the realm (#644).
     mod user_list_reads;
+    mod user_search_index;
 
     /// Stub HIBP transport for unit tests — always reports passwords as not compromised.
     /// Prevents unit tests from making real network calls when HIBP is default-on.

@@ -75,6 +75,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   guide lists the new keys: a user delete removes the user's index entries when the task applies
   it. A build with this change refuses a data directory of an earlier store format at startup:
   restore a backup archive into a new, empty data directory (see `docs/guides/upgrading.md`).
+- **Breaking:** **User search reads the search index, not every user** (#644): the user search
+  of the admin UI and `GET /admin/users?search=` reads only the users whose search index entry
+  holds every 3-character run of the query, and the users with a write that the index does not
+  hold yet. The results and the total stay exact. Before, each search read every user record of
+  the realm. Changes for operators and integrators:
+  - A query of 1 or 2 characters matches the users whose email starts with it. Before, a query
+    of 1 character returned all users in the UI and no users in the REST API, and a query of 2
+    characters searched the email and the display name anywhere.
+  - A glob with no 3 characters in a row that does not start with a character (for example
+    `*a*`) is too broad: the REST API returns `400`, and the admin UI shows a message.
+  - A search with no sort column is in email order. Before, it was in user-id order.
+  - Up to 10,000 matches are sorted in memory; with more, the search reads the sort index of
+    the column until the page is full.
 
 ### Fixed
 - **Two admin UI buttons now work under the CSP** (#820): the session **Revoke** button now asks
