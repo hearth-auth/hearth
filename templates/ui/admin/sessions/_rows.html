@@ -20,14 +20,15 @@
     <form method="post" action="/ui/admin/realms/{{ s.realm_name }}/sessions/{{ s.session.id().as_uuid() }}/revoke"
           hx-post="/ui/admin/realms/{{ s.realm_name }}/sessions/{{ s.session.id().as_uuid() }}/revoke"
           hx-target="#session-{{ s.session.id().as_uuid() }}"
-          hx-swap="outerHTML"
-          onsubmit="if(!this.hasAttribute('hx-post'))return confirm('Revoke this session?');">
+          hx-swap="outerHTML">
       {% match csrf %}
         {% when Some with (token) %}
           <input type="hidden" name="_csrf" value="{{ token }}">
         {% when None %}
       {% endmatch %}
       <button type="submit"
+              data-component="confirm"
+              data-message="Revoke this session?"
               class="rounded-md bg-danger/[0.12] px-2.5 py-1 text-xs font-semibold text-danger-fg hover:bg-danger/[0.2]">
         Revoke
       </button>

@@ -1,0 +1,91 @@
+{#-
+  Previous / next pagination partial (#644) — no page numbers.
+
+  Required template variables (must be on the parent template struct):
+    pagination: PrevNextPager
+
+  The page-size <select> is a full GET <form> that carries all filter_params
+  as hidden inputs so search/filter/sort state survives page-size changes.
+  A page-size change starts again at the first page.
+-#}
+{% if pagination.total > 0 %}
+<div class="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+
+  {# ── Count summary ── #}
+  <p class="text-sm text-ht-content-muted">
+    {% if pagination.prev_href.is_none() && pagination.next_href.is_none() %}
+      {{ pagination.total }} item{% if pagination.total != 1 %}s{% endif %}
+    {% else %}
+      {{ pagination.range_start }}–{{ pagination.range_end }}
+      of {{ pagination.total }}
+    {% endif %}
+  </p>
+
+  {# ── Page-size form (GET, no JS required) ── #}
+  <form method="get" action="{{ pagination.base_url }}" class="flex items-center gap-2">
+    {% for (k, v) in pagination.filter_params %}
+      <input type="hidden" name="{{ k }}" value="{{ v }}">
+    {% endfor %}
+    <label for="per-page-select" class="text-sm text-ht-content-muted">Rows per page</label>
+    <select id="per-page-select"
+            name="per_page"
+            class="rounded border border-strong bg-ht-surface-elevated px-2 py-1 text-sm text-ht-content-primary focus:outline-none focus:ring-1 focus:ring-ht-brand-accent">
+      {% for opt in pagination.page_size_options %}
+        <option value="{{ opt.size }}" {% if opt.selected %}selected{% endif %}>{{ opt.size }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit"
+            class="rounded border border-strong bg-ht-surface-elevated px-2 py-1 text-sm text-ht-content-secondary hover-bg-divider">
+      Go
+    </button>
+  </form>
+
+  {# ── Previous / next ── #}
+  {% if pagination.prev_href.is_some() || pagination.next_href.is_some() %}
+  <nav class="flex items-center gap-1" aria-label="Page navigation">
+    {% match pagination.prev_href %}
+      {% when Some with (href) %}
+        <a href="{{ href }}"
+           class="inline-flex items-center rounded border border-strong bg-ht-surface-elevated px-2 py-1 text-sm text-ht-content-secondary hover-bg-divider"
+           aria-label="Previous page">
+          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="15 18 9 12 15 6"/>
+          </svg>
+        </a>
+      {% when None %}
+        <button type="button" disabled
+                class="inline-flex items-center rounded border border-divider-faint bg-ht-surface-base px-2 py-1 text-sm text-ht-content-muted opacity-40 cursor-not-allowed"
+                aria-label="Previous page">
+          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="15 18 9 12 15 6"/>
+          </svg>
+        </button>
+    {% endmatch %}
+
+    {% match pagination.next_href %}
+      {% when Some with (href) %}
+        <a href="{{ href }}"
+           class="inline-flex items-center rounded border border-strong bg-ht-surface-elevated px-2 py-1 text-sm text-ht-content-secondary hover-bg-divider"
+           aria-label="Next page">
+          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="9 18 15 12 9 6"/>
+          </svg>
+        </a>
+      {% when None %}
+        <button type="button" disabled
+                class="inline-flex items-center rounded border border-divider-faint bg-ht-surface-base px-2 py-1 text-sm text-ht-content-muted opacity-40 cursor-not-allowed"
+                aria-label="Next page">
+          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="9 18 15 12 9 6"/>
+          </svg>
+        </button>
+    {% endmatch %}
+  </nav>
+  {% endif %}
+
+</div>
+{% endif %}{# total > 0 #}
