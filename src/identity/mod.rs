@@ -32,6 +32,7 @@ pub mod pre_token_webhook;
 pub mod ra_token;
 pub mod reconcile;
 pub mod search;
+pub(crate) mod search_index;
 pub mod session_version;
 pub mod sessions;
 pub mod step_up;
@@ -2810,6 +2811,19 @@ pub trait IdentityEngine: Send + Sync {
         &self,
         realm_id: &RealmId,
     ) -> Result<crate::identity::cleanup::CleanupStats, IdentityError>;
+
+    /// Applies up to `max_entries` pending writes (outbox entries) of
+    /// `realm_id` to its trigram search index (#644), and returns the number
+    /// applied: `0` when none is pending.
+    ///
+    /// A background task calls it. It does nothing and returns `0` on a node
+    /// that does not take writes (a cluster follower), because only one
+    /// merger may assign the docids of a realm.
+    fn merge_search_index(
+        &self,
+        realm_id: &RealmId,
+        max_entries: usize,
+    ) -> Result<usize, IdentityError>;
 
     /// Redelivers every approval webhook still sitting in `realm_id`'s outbox.
     ///

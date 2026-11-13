@@ -58,6 +58,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   page, and a realm suspend or archive reads only the live sessions. A build with this change
   refuses a data directory of an earlier store format at startup: restore a backup archive into
   a new, empty data directory (see `docs/guides/upgrading.md`).
+- **Breaking:** **Store format 5, with a trigram search index** (#644): each user write that
+  changes the email or display name, and each user create and delete, now also puts one search
+  outbox entry in the same atomic write as the user record. A background task applies the
+  entries, about once a second, to an index of the 3-character windows (trigrams) of each user's
+  lowercased email and display name. User search does not read this index yet; a later change
+  moves search to it, so a search no longer reads every user record of the realm. The privacy
+  guide lists the new keys: a user delete removes the user's index entries when the task applies
+  it. A build with this change refuses a data directory of an earlier store format at startup:
+  restore a backup archive into a new, empty data directory (see `docs/guides/upgrading.md`).
 
 ### Fixed
 - **The `status`, `username` and `attr` filters of `GET /admin/users` read the whole realm**

@@ -534,6 +534,7 @@ async fn delete_realm_leaves_no_residual_pii() {
     assert_empty("orgm:user:", "user memberships (user→org side)");
     assert_empty("oauth:client:", "OAuth clients");
     assert_empty("rel:", "RBAC relation tuples");
+    assert_empty("usr:srch:", "search index (trigrams of emails and names)");
 }
 
 // ===== §4.20#9: the user cascade against the realm's whole key space =====
@@ -630,5 +631,28 @@ async fn delete_user_leaves_no_key_naming_the_user() {
     assert!(
         residue.is_empty(),
         "keys still naming the deleted user: {residue:?}"
+    );
+
+    // The search index (#644) names a user by the raw UUID bytes. After the
+    // merge that applies the delete, no key or value may hold them.
+    harness
+        .identity()
+        .merge_search_index(&realm_id, 1_024)
+        .expect("merge search index");
+    let raw = user_id.as_uuid().as_bytes();
+    let binary_residue: Vec<String> = harness
+        .storage()
+        .scan(&realm_id, &[], &[0xFF; 256])
+        .expect("full key-space scan")
+        .iter()
+        .filter(|e| {
+            e.key.windows(raw.len()).any(|w| w == raw)
+                || e.value.windows(raw.len()).any(|w| w == raw)
+        })
+        .map(|e| String::from_utf8_lossy(&e.key).into_owned())
+        .collect();
+    assert!(
+        binary_residue.is_empty(),
+        "entries still holding the deleted user's UUID bytes: {binary_residue:?}"
     );
 }

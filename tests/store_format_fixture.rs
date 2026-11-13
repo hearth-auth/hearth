@@ -164,6 +164,22 @@ fn this_build_reads_the_fixture_store() {
     );
 }
 
+/// Each user write puts an entry in the search index outbox (#644, store
+/// format 5), so the merger applies one entry for each fixture user.
+#[test]
+fn the_fixture_store_holds_one_search_outbox_entry_per_user() {
+    let m = manifest();
+    let (realm, users, _session) = fixture::ids(&m);
+    let (_tmp, dir) = copy_of_fixture();
+    let e = fixture::open(&dir, fixture::T0_MICROS + 60_000_000).expect("open the fixture");
+    let merges = [0, 1].map(|_| {
+        e.identity
+            .merge_search_index(&realm, 1_024)
+            .expect("merge search index")
+    });
+    assert_eq!(merges, [users.len(), 0], "one search outbox entry per user");
+}
+
 /// A store with another format version is refused before any record is read.
 #[test]
 fn a_store_with_another_format_is_refused() {

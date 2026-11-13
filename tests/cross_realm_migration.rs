@@ -564,3 +564,57 @@ async fn completed_migration_is_idempotent() {
         "second run should be a no-op due to completed marker"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Search index (#644): a move takes the user out of the source realm's index
+// ---------------------------------------------------------------------------
+
+/// The keys of the search index forward entries in `realm`.
+fn search_forward_keys(
+    storage: &dyn hearth::storage::StorageEngine,
+    realm: &hearth::core::RealmId,
+) -> usize {
+    let prefix = b"usr:srch:fwd:";
+    let end = hearth::storage::prefix_scan_end(prefix);
+    storage
+        .scan_keys(realm, prefix, &end)
+        .expect("scan forward keys")
+        .len()
+}
+
+#[tokio::test]
+async fn a_move_takes_the_user_out_of_the_source_search_index() {
+    let h = common::TestHarness::in_process().await.expect("harness");
+    let identity = h.identity();
+    let storage = h.storage();
+
+    let src = make_realm(identity, "migration-search-src");
+    let dst = make_realm(identity, "migration-search-dst");
+    make_user(identity, &src, "searchable@example.com");
+    identity.merge_search_index(&src, 1_024).expect("merge src");
+    assert_eq!(search_forward_keys(storage, &src), 1, "the user is indexed");
+
+    execute_cross_realm_migration(
+        identity,
+        h.rbac(),
+        storage,
+        &src,
+        &dst,
+        "migration-search-src",
+        &default_opts(true),
+    )
+    .expect("migration should succeed");
+    identity.merge_search_index(&src, 1_024).expect("merge src");
+    identity.merge_search_index(&dst, 1_024).expect("merge dst");
+
+    assert_eq!(
+        search_forward_keys(storage, &src),
+        0,
+        "the moved user stays in the source search index"
+    );
+    assert_eq!(
+        search_forward_keys(storage, &dst),
+        1,
+        "the moved user is not in the destination search index"
+    );
+}

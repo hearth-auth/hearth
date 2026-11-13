@@ -587,12 +587,17 @@ fn delete_source_user(
         keys::encode_credential_history_key(user_id),
         keys::encode_mfa_totp_key(user_id),
     ];
+    // The search outbox entry (#644) that tells the source realm's merger
+    // that the user is gone.
+    let mut search_outbox: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     // The user's sort index entries (#644), read from the record before the
     // record goes.
     match storage.get(src_realm_id, &keys::encode_user_id(user_id)) {
         Ok(Some(bytes)) => {
             if let Some(user) = crate::identity::user_index::decode_record(&bytes) {
-                scalar_keys.extend(crate::identity::user_index::index_writes(Some(&user), None).1);
+                let (puts, deletes) = crate::identity::user_index::index_writes(Some(&user), None);
+                scalar_keys.extend(deletes);
+                search_outbox = puts;
             }
         }
         Ok(None) => {}
@@ -602,6 +607,13 @@ fn delete_source_user(
     for key in &scalar_keys {
         if let Err(e) = storage.delete(src_realm_id, key) {
             warn!(error = %e, "failed to delete source user key during move");
+        }
+    }
+    // Write the outbox entry after the record delete: a merge that reads it
+    // then finds no record and removes the user from the index.
+    for (key, value) in &search_outbox {
+        if let Err(e) = storage.put(src_realm_id, key, value) {
+            warn!(error = %e, "failed to write the search outbox entry during move");
         }
     }
 

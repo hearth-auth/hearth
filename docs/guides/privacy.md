@@ -22,6 +22,10 @@ with the owning `RealmId`, except signing keys which live in the **system realm*
 | Email address | `usr:email:{normalized_email}` | Normalized UTF-8 string (in the key itself) | Index maps email → `UserId` |
 | Full user record | `usr:id:{user_uuid}` | JSON | Contains: `email`, `display_name`, `first_name`, `last_name`, `status`, `email_verified`, `attributes`, `created_at`, `updated_at` |
 | Custom attributes | inside `usr:id:…` value | JSON map (`BTreeMap<String,String>`) | Operator-defined key/value pairs per realm |
+| Search index outbox | `usr:srch:ob:{user_uuid_bytes}{nonce}` | empty | One entry per write that changes the email or display name; the search index merger deletes it, normally within 1 s |
+| Search index forward entry | `usr:srch:fwd:{user_uuid_bytes}` | binary | The user's search document number and the set of lowercased 3-character windows (trigrams) of the email and display name. **Derived PII**: removed when the merger applies the user delete |
+| Search index posting block | `usr:srch:p:{trigram}{bucket}` | binary | The document numbers of the users whose email or display name holds the trigram. The key holds one trigram, the value holds no name and no UUID |
+| Search index document map | `usr:srch:doc:{doc_number}` | 16-byte user UUID | Maps a search document number to its user; removed with the forward entry |
 
 ### 1.2 Credentials
 

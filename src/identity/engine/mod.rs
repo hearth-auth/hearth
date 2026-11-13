@@ -411,6 +411,7 @@ mod orphan_audit;
 mod retired_keys;
 mod scim_paging;
 mod scope_grant;
+mod search_merge;
 mod sharded_cache;
 mod single_use;
 mod user_walk;
@@ -996,6 +997,10 @@ pub struct EmbeddedIdentityEngine {
     ///
     // INVARIANT: guard held for the entire sync org write operation; released when the method returns.
     org_write_lock: Mutex<()>,
+    /// Serializes the merges of the trigram search index (#644): the merger
+    /// assigns docids from a stored counter, so two merges must not run at
+    /// once.
+    search_merge_lock: Mutex<()>,
     /// HIBP k-anonymity breach-check client.
     ///
     /// Shared across all password-set/-change operations. Uses an injectable
@@ -1718,6 +1723,7 @@ impl EmbeddedIdentityEngine {
             realm_ops_lock: Mutex::new(()),
             // INVARIANT: guard held for entire sync org write op; released when method returns.
             org_write_lock: Mutex::new(()),
+            search_merge_lock: Mutex::new(()),
             hibp: Arc::new(crate::identity::hibp::HibpClient::new()),
             pre_token_client: Arc::new(
                 crate::identity::pre_token_webhook::PreTokenWebhookClient::new(),
@@ -2171,6 +2177,7 @@ impl EmbeddedIdentityEngine {
             realm_ops_lock: Mutex::new(()),
             // INVARIANT: guard held for entire sync org write op; released when method returns.
             org_write_lock: Mutex::new(()),
+            search_merge_lock: Mutex::new(()),
             hibp: Arc::new(crate::identity::hibp::HibpClient::new()),
             pre_token_client: Arc::new(
                 crate::identity::pre_token_webhook::PreTokenWebhookClient::new(),
@@ -7274,10 +7281,15 @@ impl EmbeddedIdentityEngine {
             serde_json::to_vec(&reservation).map_err(|e| IdentityError::Serialization {
                 reason: e.to_string(),
             })?;
+        let (index_puts, index_deletes) =
+            crate::identity::user_index::index_writes(Some(&user), None);
         self.storage
             .write_batch(
                 realm_id,
-                &[(keys::encode_email_reserved(user.email()), reserved_bytes)],
+                // The search outbox entry goes with the record (#644).
+                &std::iter::once((keys::encode_email_reserved(user.email()), reserved_bytes))
+                    .chain(index_puts)
+                    .collect::<Vec<_>>(),
                 &[
                     keys::encode_user_id(user_id),
                     keys::encode_user_email(user.email()),
@@ -7288,7 +7300,7 @@ impl EmbeddedIdentityEngine {
                 ]
                 .into_iter()
                 // The sort index entries go with the record (#644).
-                .chain(crate::identity::user_index::index_writes(Some(&user), None).1)
+                .chain(index_deletes)
                 .collect::<Vec<_>>(),
             )
             .map_err(Self::storage_err)?;
@@ -16928,6 +16940,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
     // ===== Periodic cleanup =====
 
+    fn merge_search_index(
+        &self,
+        realm_id: &RealmId,
+        max_entries: usize,
+    ) -> Result<usize, IdentityError> {
+        if !self.storage.accepts_writes() {
+            return Ok(0);
+        }
+        self.merge_search_outbox(realm_id, max_entries)
+    }
+
     #[allow(clippy::too_many_lines)]
     fn sweep_expired(
         &self,
@@ -19732,6 +19755,8 @@ mod tests {
     mod revocation_reload_races;
     /// A signing-key rotation lands in one atomic storage batch.
     mod rotation_atomicity;
+    /// Each user write puts a search outbox entry; the merger builds the index (#644).
+    mod search_index_merge;
     /// PKCE challenge and refresh-token hash compare in constant time.
     mod secret_compare;
     /// A session-cache fill never resurrects a session revoked while it ran.

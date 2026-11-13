@@ -154,6 +154,10 @@ pub(crate) fn entry_user_id(
 /// The index writes for a change of a user record from `old` to `new`
 /// (`None`: the record does not exist): `(puts, deletes)`. The email
 /// ascending index is the email index, which its own writers keep.
+///
+/// The puts also hold the search outbox entry when the change touches the
+/// indexed text (see [`crate::identity::search_index`]), so a caller must
+/// write the puts also when the record goes.
 pub(crate) fn index_writes(
     old: Option<&User>,
     new: Option<&User>,
@@ -169,7 +173,8 @@ pub(crate) fn index_writes(
                 .collect()
         })
         .unwrap_or_default();
-    let puts = new_keys.into_iter().map(|key| (key, Vec::new())).collect();
+    let mut puts: Vec<IndexPut> = new_keys.into_iter().map(|key| (key, Vec::new())).collect();
+    puts.extend(crate::identity::search_index::outbox_write(old, new));
     (puts, deletes)
 }
 
