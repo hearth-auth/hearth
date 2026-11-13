@@ -1738,6 +1738,26 @@ pub trait IdentityEngine: Send + Sync {
         limit: u32,
     ) -> Result<crate::identity::search::UserWalkPage, IdentityError>;
 
+    /// One page of the user list in the order of `field` and `dir`, with a
+    /// key cursor (#644).
+    ///
+    /// The page walks the sort index of `field` and `dir` (email ascending
+    /// is the email index) from the cursor user, and reads only the users of
+    /// the page and one more. [`UserPageCursor::Before`] walks the index of
+    /// the other direction, so a page has a previous page without a reverse
+    /// scan. A cursor user that no longer exists gives the first page.
+    /// `limit` is capped at [`MAX_PAGE_LIMIT`](crate::core::MAX_PAGE_LIMIT).
+    ///
+    /// [`UserPageCursor::Before`]: crate::identity::search::UserPageCursor::Before
+    fn user_page_by_cursor(
+        &self,
+        realm_id: &RealmId,
+        field: crate::identity::search::UserSortField,
+        dir: crate::identity::search::SortDir,
+        cursor: &crate::identity::search::UserPageCursor,
+        limit: u32,
+    ) -> Result<crate::identity::search::UserCursorPage, IdentityError>;
+
     /// Lists one page of users in user-id order for SCIM `startIndex` paging
     /// (#644). `position` is zero-based. `total` is the exact user count.
     ///

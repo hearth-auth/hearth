@@ -22,6 +22,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   every user key before it. A decimal offset or any other value that the endpoint did not return
   gets `400` (`invalid cursor`). With `search`, the cursor is still a decimal offset. The user
   export (`GET /admin/users/export`) reads the realm with the same walk.
+- **The admin UI user lists page with previous and next links** (#644): the realm user list and
+  the admin-user list (`/ui/admin/admin-users`) now show "previous" and "next" links and the
+  "X–Y of N" count, not page numbers. Each link carries the ID of the first or last user of the
+  page (`?after=` or `?before=`), and the next page starts after that user in the sort order. A
+  user deleted while an operator reads the list no longer moves another user onto a page that the
+  operator already saw, and a deep page no longer reads every user before it. Without a sort, the
+  list is in email order (before, user-ID order). A search (2 or more characters) still pages by
+  page number.
 - **A refused single-node write names the write limit, not a cluster** (#836): the log now
   says `storage write limit full: ... (storage.max_writes_in_flight)` and `request refused:
   temporarily unavailable (503)`, not `cluster unavailable (write limit full)`. The `503` body's

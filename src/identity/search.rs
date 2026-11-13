@@ -333,6 +333,31 @@ pub struct UserWalkPage {
     pub more: bool,
 }
 
+/// Where a [`crate::identity::IdentityEngine::user_page_by_cursor`] page
+/// starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserPageCursor {
+    /// The first page.
+    First,
+    /// The page after this user, in the sort order.
+    After(crate::core::UserId),
+    /// The page before this user, in the sort order.
+    Before(crate::core::UserId),
+}
+
+/// One page of a sorted user list with a key cursor.
+#[derive(Debug, Clone)]
+pub struct UserCursorPage {
+    /// The users of the page, in the sort order.
+    pub users: Vec<crate::identity::User>,
+    /// `true` when users come before the page.
+    pub has_prev: bool,
+    /// `true` when users come after the page.
+    pub has_next: bool,
+    /// The exact number of users of the realm.
+    pub total: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Sort types for user list queries
 // ---------------------------------------------------------------------------

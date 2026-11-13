@@ -97,6 +97,14 @@ pub struct UserListParams {
     pub sort: Option<String>,
     /// Sort direction: `asc` | `desc`. Defaults to `asc`.
     pub dir: Option<String>,
+    /// Key cursor (#644): the page starts after this user id. A value that
+    /// is not a user id gives the first page.
+    pub after: Option<String>,
+    /// Key cursor (#644): the page ends before this user id.
+    pub before: Option<String>,
+    /// 0-based position of the first user of the page, carried in the
+    /// previous and next links for the "X–Y of N" text only.
+    pub pos: Option<u64>,
 }
 
 impl UserListParams {
@@ -124,6 +132,81 @@ impl UserListParams {
             .map(crate::identity::search::SortDir::from_param)
             .unwrap_or_default()
     }
+
+    fn cursor(&self) -> crate::identity::search::UserPageCursor {
+        use crate::identity::search::UserPageCursor;
+        let parse = |raw: &Option<String>| {
+            raw.as_deref()
+                .and_then(|v| uuid::Uuid::parse_str(v).ok())
+                .map(crate::core::UserId::new)
+        };
+        if let Some(id) = parse(&self.after) {
+            UserPageCursor::After(id)
+        } else if let Some(id) = parse(&self.before) {
+            UserPageCursor::Before(id)
+        } else {
+            UserPageCursor::First
+        }
+    }
+}
+
+/// Reads one page of the user list of `realm` for `params`, with its pager.
+///
+/// A search (2 or more characters) pages by offset, with page-number
+/// links. Every other list pages with a key cursor in the sort order
+/// (email ascending when no sort is given), so a user deleted between two
+/// pages moves no other user to a page the operator already saw (#644).
+fn user_list_page(
+    state: &WebState,
+    realm: &RealmId,
+    params: &UserListParams,
+    base_url: &str,
+) -> Result<(Vec<User>, PrevNextPager), crate::identity::IdentityError> {
+    let search_query = params.q.clone().unwrap_or_default();
+    let preserved = super::pagination::join_params(&[
+        super::pagination::encode_param("q", &search_query),
+        super::pagination::encode_param("sort", params.sort.as_deref().unwrap_or("")),
+        super::pagination::encode_param("dir", params.dir.as_deref().unwrap_or("")),
+    ]);
+    if search_query.len() >= 2 {
+        let page = state.identity.search_users(
+            realm,
+            &search_query,
+            &params.as_page_request(),
+            params.sort_field(),
+            params.sort_dir(),
+        )?;
+        let pager = PrevNextPager::from_offsets(&page, base_url, &preserved);
+        return Ok((page.items, pager));
+    }
+    let per_page = params.per_page_validated();
+    let page = state.identity.user_page_by_cursor(
+        realm,
+        params
+            .sort_field()
+            .unwrap_or(crate::identity::search::UserSortField::Email),
+        params.sort_dir(),
+        &params.cursor(),
+        per_page,
+    )?;
+    let pos = if page.has_prev {
+        params.pos.unwrap_or(0)
+    } else {
+        0
+    };
+    let first = page.users.first().map(|u| u.id().as_uuid().to_string());
+    let last = page.users.last().map(|u| u.id().as_uuid().to_string());
+    let pager = PrevNextPager::from_cursors(
+        page.total,
+        per_page,
+        pos,
+        page.users.len(),
+        first.as_deref().filter(|_| page.has_prev),
+        last.as_deref().filter(|_| page.has_next),
+        base_url,
+        &preserved,
+    );
+    Ok((page.users, pager))
 }
 
 /// Template for `GET /ui/admin/users`.
@@ -132,7 +215,7 @@ impl UserListParams {
 #[allow(clippy::struct_excessive_bools)]
 struct UserListTemplate {
     users: Vec<User>,
-    pagination: PaginationView,
+    pagination: PrevNextPager,
     search_query: String,
     realm_name: String,
     /// Base URL the search form submits to, also used as the `hx-get`
@@ -181,43 +264,17 @@ pub async fn admin_users_list(
     DedupQuery(params): DedupQuery<UserListParams>,
 ) -> Response {
     let search_query = params.q.clone().unwrap_or_default();
-    let sort_field = params.sort_field();
-    let sort_dir = params.sort_dir();
-    let has_search = search_query.len() >= 2;
-    let has_sort = sort_field.is_some();
-
-    let result = if has_search || has_sort {
-        state.identity.search_users(
-            target.id(),
-            &search_query,
-            &params.as_page_request(),
-            sort_field,
-            sort_dir,
-        )
-    } else {
-        state
-            .identity
-            .list_users(target.id(), &params.as_page_request())
-    };
-
-    match result {
-        Ok(page) => {
-            let realm_name = target.0.name().to_string();
-            let user_base_url = format!("/ui/admin/realms/{realm_name}/users");
-
+    let realm_name = target.0.name().to_string();
+    let user_base_url = format!("/ui/admin/realms/{realm_name}/users");
+    match user_list_page(&state, target.id(), &params, &user_base_url) {
+        Ok((users, pagination)) => {
             // Full page always. Search/sort HTMX requests extract
             // #users-table-region via hx-select; a full page keeps the table
             // structural elements nested so DOMParser preserves them (HEA-1643).
             let sort_field_str = params.sort.clone().unwrap_or_default();
             let sort_dir_str = params.dir.clone().unwrap_or_default();
-            let preserved = super::pagination::join_params(&[
-                super::pagination::encode_param("q", &search_query),
-                super::pagination::encode_param("sort", &sort_field_str),
-                super::pagination::encode_param("dir", &sort_dir_str),
-            ]);
-            let pagination = PaginationView::new(&page, user_base_url.clone(), preserved);
             render(&UserListTemplate {
-                users: page.items,
+                users,
                 pagination,
                 search_query,
                 list_url: user_base_url.clone(),
@@ -267,39 +324,14 @@ pub async fn admin_admin_users_list(
 ) -> Response {
     let system_realm = crate::identity::keys::system_realm_id();
     let search_query = params.q.clone().unwrap_or_default();
-    let sort_field = params.sort_field();
-    let sort_dir = params.sort_dir();
-    let has_search = search_query.len() >= 2;
-    let has_sort = sort_field.is_some();
-
-    let result = if has_search || has_sort {
-        state.identity.search_users(
-            &system_realm,
-            &search_query,
-            &params.as_page_request(),
-            sort_field,
-            sort_dir,
-        )
-    } else {
-        state
-            .identity
-            .list_users(&system_realm, &params.as_page_request())
-    };
-
-    match result {
-        Ok(page) => {
+    match user_list_page(&state, &system_realm, &params, "/ui/admin/admin-users") {
+        Ok((users, pagination)) => {
             // Full page always; HTMX search/sort extract #users-table-region
             // via hx-select from this response (HEA-1615 / HEA-1643).
             let sort_field_str = params.sort.clone().unwrap_or_default();
             let sort_dir_str = params.dir.clone().unwrap_or_default();
-            let preserved = super::pagination::join_params(&[
-                super::pagination::encode_param("q", &search_query),
-                super::pagination::encode_param("sort", &sort_field_str),
-                super::pagination::encode_param("dir", &sort_dir_str),
-            ]);
-            let pagination = PaginationView::new(&page, "/ui/admin/admin-users", preserved);
             render(&UserListTemplate {
-                users: page.items,
+                users,
                 pagination,
                 search_query,
                 realm_name: String::new(),
