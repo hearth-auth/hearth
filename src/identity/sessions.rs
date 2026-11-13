@@ -123,9 +123,17 @@ impl SessionStore for EmbeddedSessionStore {
         let key = keys::encode_session_id(session.id());
         let bytes = crate::codec::encode(&session.to_storage_record())
             .map_err(|reason| IdentityError::Serialization { reason })?;
-        self.storage
-            .put(realm_id, &key, &bytes)
-            .map_err(|e| IdentityError::Storage(Box::new(e)))
+        // The live-session index entry exists exactly while the record is not
+        // revoked (#644), so both go in one atomic write.
+        let live_key = keys::encode_live_session(session.id());
+        let result = if session.is_revoked() {
+            self.storage
+                .write_batch(realm_id, &[(key, bytes)], &[live_key])
+        } else {
+            self.storage
+                .put_batch(realm_id, &[(key, bytes), (live_key, Vec::new())])
+        };
+        result.map_err(|e| IdentityError::Storage(Box::new(e)))
     }
 
     fn list_by_user(

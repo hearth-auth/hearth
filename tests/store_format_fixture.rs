@@ -125,6 +125,21 @@ fn this_build_reads_the_fixture_store() {
         .expect("get session")
         .expect("the session (written to the WAL) is missing");
     assert_eq!(s.user_id(), &users[1].1);
+    // The realm session list walks the live-session index (#644, store
+    // format 4), so the store must hold an entry of the session.
+    let live = e
+        .identity
+        .list_sessions_by_realm(&realm, &hearth::core::PageRequest::new(0, 10))
+        .expect("list sessions");
+    assert_eq!(live.total, 1, "the kept live-session count is wrong");
+    assert_eq!(
+        live.items
+            .iter()
+            .map(|s| s.id().clone())
+            .collect::<Vec<_>>(),
+        vec![session.clone()],
+        "the realm session list misses the session of the store"
+    );
 
     assert_eq!(
         fixture::permissions(e.rbac.as_ref(), &realm, &users[0].1).expect("permissions"),

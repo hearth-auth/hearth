@@ -43,6 +43,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   case, and users with an equal value sort by user ID. A build with this change refuses a data
   directory of an earlier store format at startup: restore a backup archive into a new, empty
   data directory (see `docs/guides/upgrading.md`).
+- **Breaking:** **Store format 4, with a live-session index** (#644): each session write now
+  also keeps one index entry for each session that is not revoked, in the same write as the
+  session record, and the storage engine keeps the count of these entries. The realm session
+  list (admin API and admin UI) reads only the requested page of sessions and takes its total
+  from this count. Before, it read every session record of the realm, revoked sessions included.
+  The idle and absolute session-timeout sweep reads each live session once per run, not once per
+  page, and a realm suspend or archive reads only the live sessions. A build with this change
+  refuses a data directory of an earlier store format at startup: restore a backup archive into
+  a new, empty data directory (see `docs/guides/upgrading.md`).
 
 ### Fixed
 - **SCIM `GET /Users` reads the whole realm, not only its first 1,000 users** (#644): before, the

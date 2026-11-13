@@ -18,7 +18,7 @@ mod types;
 pub use epoch_cell::{EpochCell, EpochCellOption, EpochGuard};
 pub use error::CoreError;
 pub use ip_range::{IpRange, IpRangeError};
-pub use keyspace::{COUNTED_KEY_PREFIXES, USER_RECORD_KEY_PREFIX};
+pub use keyspace::{COUNTED_KEY_PREFIXES, LIVE_SESSION_KEY_PREFIX, USER_RECORD_KEY_PREFIX};
 pub use limiter::{rate_limit_key, rate_limit_key_str, ExpiringMap, LimiterClock, SWEEP_FLOOR};
 pub use pagination::{
     Page, PageRequest, PagedResult, DEFAULT_COUNT_CAP, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT,

@@ -700,7 +700,9 @@ pub trait IdentityEngine: Send + Sync {
     /// Lists all active sessions in a realm, with offset-based pagination.
     ///
     /// Revoked sessions are excluded. Sessions are returned by their UUID
-    /// ordering in the `ses:id:{session_uuid}` primary key space.
+    /// ordering in the `ses:live:{session_uuid}` live-session index (#644);
+    /// a page reads one page of session records, and the total is the kept
+    /// count of that index.
     fn list_sessions_by_realm(
         &self,
         realm_id: &RealmId,

@@ -356,6 +356,11 @@ const CONFIG_SNAPSHOT_KEY: &str = "config:snapshot:v1";
 /// Prefix for user-to-sessions index keys.
 const SESSION_USER_PREFIX: &str = "ses:user:";
 
+/// Prefix for the live-session index (#644): one key with an empty value for
+/// each session record that is not revoked. The realm session list and the
+/// session-timeout sweep walk it instead of every session record.
+const SESSION_LIVE_PREFIX: &str = "ses:live:";
+
 /// Encodes the primary key for a user record.
 ///
 /// Format: `usr:id:{uuid}`
@@ -478,6 +483,40 @@ pub(crate) fn encode_user_sessions_prefix(user_id: &UserId) -> Vec<u8> {
 /// Format: `ses:id:`
 pub(crate) fn session_id_scan_prefix() -> Vec<u8> {
     SESSION_ID_PREFIX.as_bytes().to_vec()
+}
+
+/// Encodes the live-session index key of a session.
+///
+/// Format: `ses:live:{uuid}`
+pub(crate) fn encode_live_session(session_id: &SessionId) -> Vec<u8> {
+    format!("{SESSION_LIVE_PREFIX}{}", session_id.as_uuid()).into_bytes()
+}
+
+/// Returns the scan prefix of the live-session index.
+///
+/// Format: `ses:live:`
+pub(crate) fn live_session_scan_prefix() -> Vec<u8> {
+    SESSION_LIVE_PREFIX.as_bytes().to_vec()
+}
+
+/// The session record key (`ses:id:{uuid}`) of a live-session index key, or
+/// `None` when `live_key` is not one.
+pub(crate) fn session_record_key_of_live(live_key: &[u8]) -> Option<Vec<u8>> {
+    let uuid = live_key.strip_prefix(SESSION_LIVE_PREFIX.as_bytes())?;
+    let mut key = Vec::with_capacity(SESSION_ID_PREFIX.len() + uuid.len());
+    key.extend_from_slice(SESSION_ID_PREFIX.as_bytes());
+    key.extend_from_slice(uuid);
+    Some(key)
+}
+
+/// The live-session index key of a session record key (`ses:id:{uuid}`), or
+/// `None` when `record_key` is not one.
+pub(crate) fn live_session_key_of_record(record_key: &[u8]) -> Option<Vec<u8>> {
+    let uuid = record_key.strip_prefix(SESSION_ID_PREFIX.as_bytes())?;
+    let mut key = Vec::with_capacity(SESSION_LIVE_PREFIX.len() + uuid.len());
+    key.extend_from_slice(SESSION_LIVE_PREFIX.as_bytes());
+    key.extend_from_slice(uuid);
+    Some(key)
 }
 
 /// Computes the exclusive end bound for a prefix scan.
@@ -2783,6 +2822,27 @@ mod tests {
             crate::core::USER_RECORD_KEY_PREFIX
         );
         assert!(crate::core::COUNTED_KEY_PREFIXES.contains(&USER_ID_PREFIX.as_bytes()));
+    }
+
+    #[test]
+    fn the_live_session_prefix_is_the_one_the_storage_engine_counts() {
+        assert_eq!(
+            SESSION_LIVE_PREFIX.as_bytes(),
+            crate::core::LIVE_SESSION_KEY_PREFIX
+        );
+        assert!(crate::core::COUNTED_KEY_PREFIXES.contains(&SESSION_LIVE_PREFIX.as_bytes()));
+    }
+
+    #[test]
+    fn a_live_session_key_and_its_record_key_map_to_each_other() {
+        let session_id = SessionId::new(Uuid::new_v4());
+        let live = encode_live_session(&session_id);
+        let record = encode_session_id(&session_id);
+        assert!(live.starts_with(&live_session_scan_prefix()));
+        assert_eq!(session_record_key_of_live(&live), Some(record.clone()));
+        assert_eq!(live_session_key_of_record(&record), Some(live.clone()));
+        assert_eq!(session_record_key_of_live(&record), None);
+        assert_eq!(live_session_key_of_record(&live), None);
     }
 
     #[test]
