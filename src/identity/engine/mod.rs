@@ -409,6 +409,7 @@ pub(super) mod oauth;
 mod operator_token;
 mod orphan_audit;
 mod retired_keys;
+mod scim_paging;
 mod scope_grant;
 mod sharded_cache;
 mod single_use;
@@ -758,6 +759,9 @@ pub struct EmbeddedIdentityEngine {
     dummy_hashes: Mutex<std::collections::HashMap<RealmId, String>>,
     /// Per-node rate limiter for `OrphanedReferenceSkipped` audit events.
     orphan_audit: orphan_audit::OrphanAuditLimiter,
+    /// Per-node memo for SCIM `startIndex` paging of users (#644): where each
+    /// recent page ended, so the next page in sequence starts there.
+    scim_page_memo: scim_paging::PositionMemo,
     /// Default Ed25519 signing key for JWT token issuance (Phase 0 compat).
     signing_key: Arc<SigningKey>,
     /// Per-realm Ed25519 signing keys, lazily loaded from storage.
@@ -1663,6 +1667,7 @@ impl EmbeddedIdentityEngine {
             dummy_hash,
             dummy_hashes: Mutex::new(std::collections::HashMap::new()),
             orphan_audit: orphan_audit::OrphanAuditLimiter::new(),
+            scim_page_memo: scim_paging::PositionMemo::new(),
             signing_key,
             realm_signing_keys: Arc::new(ShardedEpochMap::new()),
             realm_retiring_keys: Arc::new(ShardedEpochMap::new()),
@@ -2115,6 +2120,7 @@ impl EmbeddedIdentityEngine {
             dummy_hash,
             dummy_hashes: Mutex::new(std::collections::HashMap::new()),
             orphan_audit: orphan_audit::OrphanAuditLimiter::new(),
+            scim_page_memo: scim_paging::PositionMemo::new(),
             signing_key,
             realm_signing_keys: Arc::new(ShardedEpochMap::new()),
             realm_retiring_keys: Arc::new(ShardedEpochMap::new()),
@@ -12434,6 +12440,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             page.offset,
             page.limit,
         ))
+    }
+
+    fn list_users_at_position(
+        &self,
+        realm_id: &RealmId,
+        position: u64,
+        limit: u32,
+    ) -> Result<crate::core::PagedResult<User>, IdentityError> {
+        self.list_users_at_position_inner(realm_id, position, limit)
     }
 
     fn search_users(

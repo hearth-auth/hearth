@@ -17,9 +17,13 @@
 //! - Filter operators: `eq`, `ne`, `co`, `sw`, `ew`, `pr`, `and`, `or`.
 //! - PATCH: simple path (`active`, `name.givenName`, `emails`, `members`…)
 //!   and root-object replacement. Bracketed paths are rejected.
-//! - Pagination: `startIndex` + `count`, in-memory page slice over a
-//!   1000-record scan. Adequate for the per-IdP provisioning volumes we
-//!   care about in v1.
+//! - Pagination: `startIndex` + `count`. `/Users` reads one page of users
+//!   and gives the exact `totalResults`; a per-node memo of where each page
+//!   ended lets the next page in sequence start there (#644). `eq` on
+//!   `userName`, `emails.value`, `externalId` or `id` reads an index. Any
+//!   other `/Users` filter reads the whole realm, up to
+//!   `SCIM_FILTER_SCAN_LIMIT` users (more: `400` `tooMany`). `/Groups`
+//!   still pages in memory over a 1000-record scan.
 //! - ETag: weak (`W/"<micros>"`) emitted on every resource response;
 //!   inbound `If-Match` on `PUT`/`PATCH`/`DELETE` is enforced — a stale
 //!   validator yields `412 Precondition Failed` (see [`etag`]).
@@ -29,7 +33,7 @@
 //! - Bracketed filter paths and PATCH complex value filters.
 //! - `/Bulk`, `/Me`, sorting, attribute projection.
 //! - Enterprise User schema extension + additional schema URNs.
-//! - Engine-level filter / pagination push-down.
+//! - Engine-level filter / pagination push-down for `/Groups`.
 
 use std::sync::Arc;
 
