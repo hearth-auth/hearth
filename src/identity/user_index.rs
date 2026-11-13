@@ -303,12 +303,16 @@ mod tests {
 
     #[test]
     fn a_new_record_puts_seven_entries_and_a_removed_one_deletes_them() {
+        // Each side also puts one search outbox entry (#644).
         let u = user("a@x.io", "A", UserStatus::Active, 1);
         let (puts, deletes) = index_writes(None, Some(&u));
-        assert_eq!((puts.len(), deletes.len()), (7, 0));
+        assert_eq!((puts.len(), deletes.len()), (7 + 1, 0));
         assert!(puts.iter().all(|(_, v)| v.is_empty()));
         let (puts, deletes) = index_writes(Some(&u), None);
-        assert_eq!((puts.len(), deletes.len()), (0, 7));
+        assert_eq!((puts.len(), deletes.len()), (1, 7));
+        assert!(puts[0]
+            .0
+            .starts_with(crate::identity::search_index::OUTBOX_PREFIX));
     }
 
     #[test]
@@ -317,7 +321,8 @@ mod tests {
         let mut new = old.clone();
         new.set_display_name("B".to_string());
         let (puts, deletes) = index_writes(Some(&old), Some(&new));
-        assert_eq!(puts.len(), 7);
+        // The name change also puts one search outbox entry (#644).
+        assert_eq!(puts.len(), 7 + 1);
         let mut expected = vec![
             index_key(&old, UserSortField::Name, SortDir::Asc),
             index_key(&old, UserSortField::Name, SortDir::Desc),
