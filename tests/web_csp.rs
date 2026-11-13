@@ -310,3 +310,97 @@ async fn font_files_served_with_woff2_content_type() {
         assert_eq!(ct, "font/woff2", "{font} must have font/woff2 content-type");
     }
 }
+
+// ---------------------------------------------------------------------------
+// #820: no inline event handlers in templates
+// ---------------------------------------------------------------------------
+
+/// Every `.html` file under `dir` and its subdirectories.
+fn html_files_under(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    for entry in std::fs::read_dir(dir).expect("read dir") {
+        let path = entry.expect("dir entry").path();
+        if path.is_dir() {
+            html_files_under(&path, out);
+        } else if path.extension().is_some_and(|e| e == "html") {
+            out.push(path);
+        }
+    }
+}
+
+/// The inline event handler attributes (`onclick=`, `onsubmit=`, ...) in
+/// `text`, as `line: attribute` strings.
+fn inline_handlers(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        let bytes = line.as_bytes();
+        for i in 0..bytes.len() {
+            let after_space = i == 0 || bytes[i - 1].is_ascii_whitespace();
+            if !after_space || !line[i..].starts_with("on") {
+                continue;
+            }
+            let name_len = line[i + 2..]
+                .bytes()
+                .take_while(u8::is_ascii_lowercase)
+                .count();
+            if name_len > 0 && line[i + 2 + name_len..].starts_with('=') {
+                found.push(format!("{}: {}", n + 1, &line[i..i + 2 + name_len]));
+            }
+        }
+    }
+    found
+}
+
+/// The CSP (`script-src 'self'`) blocks an inline event handler, so the
+/// browser never runs it. Before #820, the session revoke form had an
+/// `onsubmit=` confirm and the raw config editor had an `onclick=` reset.
+#[test]
+fn no_template_has_an_inline_event_handler() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
+    let mut files = Vec::new();
+    html_files_under(&root, &mut files);
+    assert!(!files.is_empty(), "templates found");
+    let mut offenders = Vec::new();
+    for file in &files {
+        let text = std::fs::read_to_string(file).expect("read template");
+        for hit in inline_handlers(&text) {
+            offenders.push(format!("{}:{hit}", file.display()));
+        }
+    }
+    assert_eq!(
+        offenders,
+        Vec::<String>::new(),
+        "inline event handlers (blocked by the CSP)"
+    );
+}
+
+#[test]
+fn the_inline_handler_scan_finds_a_handler() {
+    assert_eq!(
+        inline_handlers("<form\n   onsubmit=\"x\" data-on=\"y\">"),
+        vec!["2: onsubmit".to_string()]
+    );
+    assert_eq!(
+        inline_handlers("<p>Turn it on = off</p>"),
+        Vec::<String>::new()
+    );
+}
+
+/// The raw config editor's reset button gets its listener from
+/// `admin.js`, which calls `resetRawEditor`.
+#[test]
+fn the_raw_editor_reset_button_has_a_listener() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let template =
+        std::fs::read_to_string(root.join("templates/ui/admin/settings/_raw_editor.html"))
+            .expect("raw editor template");
+    let script =
+        std::fs::read_to_string(root.join("src/protocol/web/assets/admin.js")).expect("admin.js");
+    assert!(
+        template.contains("id=\"raw-reset-bottom\""),
+        "the reset button has the id raw-reset-bottom"
+    );
+    assert!(
+        script.contains("getElementById('raw-reset-bottom')?.addEventListener('click', () => this.resetRawEditor())"),
+        "admin.js wires the reset button to resetRawEditor"
+    );
+}
