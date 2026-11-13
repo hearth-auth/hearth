@@ -821,6 +821,7 @@ class ConfigEditor {
       document.getElementById('apply-btn')?.addEventListener('click', () => this.apply());
       document.getElementById('raw-preview-top')?.addEventListener('click', () => this.preview());
       document.getElementById('raw-preview-bottom')?.addEventListener('click', () => this.preview());
+      document.getElementById('raw-reset-bottom')?.addEventListener('click', () => this.resetRawEditor());
     }
 
     // Delegated change/input for data-bind and data-bind-bool
@@ -1071,7 +1072,11 @@ class ConfigEditor {
 
   resetRawEditor() {
     const ta = document.getElementById('yaml-editor');
-    if (ta) ta.value = ta.defaultValue;
+    if (ta) {
+      ta.value = ta.defaultValue;
+      // The highlight mirror follows the textarea on 'input'.
+      ta.dispatchEvent(new Event('input'));
+    }
     const diff = document.getElementById('diff-output');
     if (diff) diff.innerHTML = '';
   }

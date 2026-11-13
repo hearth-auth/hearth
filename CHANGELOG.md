@@ -68,6 +68,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   a new, empty data directory (see `docs/guides/upgrading.md`).
 
 ### Fixed
+- **Two admin UI buttons now work under the CSP** (#820): the session **Revoke** button now asks
+  "Revoke this session?" before it revokes, and the **Reset** button of the raw config editor now
+  puts back the saved YAML. Before, both used inline event handlers, which the admin CSP
+  (`script-src 'self'`) blocks, so the revoke had no confirmation and the reset did nothing. The
+  dev mailcatcher's delete and clear buttons now ask for confirmation, for the same reason.
 - **The `status`, `username` and `attr` filters of `GET /admin/users` read the whole realm**
   (#644): before, they read only the first 10,000 users and always answered
   `next_cursor: null`, so they returned at most one page of the matches among those users. Now a
