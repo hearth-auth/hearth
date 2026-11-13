@@ -1721,6 +1721,23 @@ pub trait IdentityEngine: Send + Sync {
         page: &PageRequest,
     ) -> Result<PagedResult<User>, IdentityError>;
 
+    /// Walks the users of a realm in user-id order with a key cursor (#644).
+    ///
+    /// The step reads at most `limit` index entries (capped at
+    /// [`MAX_PAGE_LIMIT`](crate::core::MAX_PAGE_LIMIT)) after the user
+    /// `after`, or from the start. [`UserWalk::Status`] reads only the users
+    /// with that status. A user deleted or changed during a walk does not move
+    /// another user past the cursor.
+    ///
+    /// [`UserWalk::Status`]: crate::identity::search::UserWalk::Status
+    fn walk_users(
+        &self,
+        realm_id: &RealmId,
+        walk: crate::identity::search::UserWalk,
+        after: Option<&UserId>,
+        limit: u32,
+    ) -> Result<crate::identity::search::UserWalkPage, IdentityError>;
+
     /// Lists one page of users in user-id order for SCIM `startIndex` paging
     /// (#644). `position` is zero-based. `total` is the exact user count.
     ///

@@ -65,6 +65,15 @@ pub const SCIM_MAX_SCAN_LIMIT: usize = 1_000;
 /// realm.
 pub const SCIM_FILTER_SCAN_LIMIT: usize = 10_000;
 
+/// Maximum user records that one filtered `GET /admin/users` request reads
+/// (#644).
+///
+/// A `username` or `attr` filter walks every user of the realm, and a
+/// `status` filter walks the users with that status. A walk that reaches this
+/// limit stops and answers the matches it found with a `next_cursor`, so a
+/// client that follows `next_cursor` reads the whole realm in bounded steps.
+pub const ADMIN_USER_FILTER_WALK_LIMIT: usize = 10_000;
+
 /// Maximum SAML XML parse-event count per `AuthnResponse` (A-35).
 pub const MAX_SAML_XML_EVENTS: usize = 10_000;
 

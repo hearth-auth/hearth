@@ -308,6 +308,32 @@ impl GroupSortField {
 }
 
 // ---------------------------------------------------------------------------
+// Key-cursor walks of the users of a realm (#644)
+// ---------------------------------------------------------------------------
+
+/// The users that a [`crate::identity::IdentityEngine::walk_users`] walk
+/// visits. Both walks go in user-id order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserWalk {
+    /// Every user record of the realm.
+    All,
+    /// Only the users with this status, through the status sort index.
+    Status(crate::identity::UserStatus),
+}
+
+/// One step of a user walk.
+#[derive(Debug, Clone)]
+pub struct UserWalkPage {
+    /// The users of the step, in walk order.
+    pub users: Vec<crate::identity::User>,
+    /// The id of the last entry the step walked, also when the step did not
+    /// return it. The next step starts after it.
+    pub last: Option<crate::core::UserId>,
+    /// `true` when the step stopped at its limit, so more entries can follow.
+    pub more: bool,
+}
+
+// ---------------------------------------------------------------------------
 // Sort types for user list queries
 // ---------------------------------------------------------------------------
 

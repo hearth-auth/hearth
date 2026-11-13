@@ -114,6 +114,22 @@ pub(crate) fn index_key(user: &User, field: UserSortField, dir: SortDir) -> Vec<
     key
 }
 
+/// The scan prefix of the users with `status` in the status ascending
+/// index. In it, the users of one status are in user-id order.
+pub(crate) fn status_walk_prefix(status: UserStatus) -> Vec<u8> {
+    let mut prefix = index_prefix(UserSortField::Status, SortDir::Asc);
+    prefix.push(status_rank(status));
+    prefix
+}
+
+/// The key of `user_id` in the status ascending index, for a user with
+/// `status`.
+pub(crate) fn status_walk_key(status: UserStatus, user_id: &UserId) -> Vec<u8> {
+    let mut key = status_walk_prefix(status);
+    key.extend_from_slice(user_id.as_uuid().as_bytes());
+    key
+}
+
 /// The user id that an index entry points at.
 pub(crate) fn entry_user_id(
     field: UserSortField,

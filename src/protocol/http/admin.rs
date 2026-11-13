@@ -16,7 +16,7 @@ use crate::identity::email::{validate_email_template, EmailBranding, LocalizedEm
 use crate::identity::UpdateRealmRequest;
 use crate::protocol::convert::identity::{
     proto_user_status_to_domain, realm_page_to_proto, user_bulk_result_to_proto,
-    user_page_to_proto, void_bulk_result_to_proto,
+    void_bulk_result_to_proto,
 };
 use crate::protocol::convert::oauth::client_page_to_proto;
 use crate::protocol::proto::identity::v1 as pb;
@@ -622,147 +622,211 @@ async fn admin_list_users(
         };
     }
 
+    // The cursor names the last user of the previous step (#644): a user
+    // deleted before it does not move another user past the client.
+    let after = match parse_user_cursor(params.cursor.as_deref()) {
+        Ok(after) => after,
+        Err(resp) => return resp,
+    };
+
     let has_field_filters = params.email.is_some()
         || params.username.is_some()
         || params.status.is_some()
         || params.attr.is_some();
 
-    if has_field_filters {
-        // Fast path: exact email-index lookup (O(1)) when only ?email= is given.
-        // This exercises the hot-tier storage path without a full corpus scan,
-        // making it suitable for tier-miss latency profiling (HEA-1876).
-        if params.email.is_some()
-            && params.username.is_none()
-            && params.status.is_none()
-            && params.attr.is_none()
-        {
-            let email_raw = params.email.as_deref().unwrap_or("");
-            return match state.identity.get_user_by_email(&auth.realm_id, email_raw) {
-                Ok(Some(user)) => {
-                    let item = proto_to_rest_json(&pb::User::from(&user));
-                    (
-                        StatusCode::OK,
-                        Json(serde_json::json!({"items": [item], "next_cursor": null, "total": 1})),
-                    )
-                        .into_response()
-                }
-                Ok(None) => (
-                    StatusCode::OK,
-                    Json(serde_json::json!({"items": [], "next_cursor": null, "total": 0})),
+    if !has_field_filters {
+        return list_users_page(
+            &state,
+            &auth.realm_id,
+            after.as_ref(),
+            params.effective_limit(),
+        );
+    }
+
+    // Parse the status filter value if provided.
+    let status_filter = if let Some(s) = &params.status {
+        match s.as_str() {
+            "active" => Some(crate::identity::UserStatus::Active),
+            "disabled" => Some(crate::identity::UserStatus::Disabled),
+            "pending_verification" => Some(crate::identity::UserStatus::PendingVerification),
+            _ => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "invalid status filter; expected active, disabled, or pending_verification"})),
                 )
-                    .into_response(),
-                Err(e) => identity_error_to_response(&e).into_response(),
-            };
-        }
-
-        // Parse the status filter value if provided.
-        let status_filter = if let Some(s) = &params.status {
-            let parsed = match s.as_str() {
-                "active" => Some(crate::identity::UserStatus::Active),
-                "disabled" => Some(crate::identity::UserStatus::Disabled),
-                "pending_verification" => Some(crate::identity::UserStatus::PendingVerification),
-                _ => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error": "invalid status filter; expected active, disabled, or pending_verification"})),
-                    )
-                        .into_response();
-                }
-            };
-            parsed
-        } else {
-            None
-        };
-
-        // Full scan via offset pages up to a bounded cap, then apply predicates.
-        // Filtered results don't support cursor pagination — next_cursor is always null.
-        const FILTER_SCAN_CAP: usize = 10_000;
-        let mut all_users: Vec<crate::identity::User> = Vec::new();
-        let mut scan_offset = 0u64;
-        loop {
-            let batch = crate::core::MAX_PAGE_LIMIT;
-            let scan_page = match state.identity.list_users(
-                &auth.realm_id,
-                &crate::core::PageRequest::new(scan_offset, batch),
-            ) {
-                Ok(p) => p,
-                Err(e) => return identity_error_to_response(&e).into_response(),
-            };
-            let n = scan_page.items.len() as u64;
-            all_users.extend(scan_page.items);
-            if n == 0 || scan_offset + n >= scan_page.total || all_users.len() >= FILTER_SCAN_CAP {
-                break;
+                    .into_response();
             }
-            scan_offset += n;
         }
+    } else {
+        None
+    };
 
-        let email_norm = params.email.as_deref().map(|e| e.to_lowercase());
-        let username_lower = params.username.as_deref().map(|u| u.to_lowercase());
-
-        // Parse `?attr=key:value` — split on the first colon only so values may
-        // contain colons (e.g. ISO timestamps or URLs).
-        let attr_filter: Option<(String, String)> = params.attr.as_deref().and_then(|s| {
-            let (k, v) = s.split_once(':')?;
-            Some((k.to_owned(), v.to_owned()))
-        });
-
-        if params.attr.is_some() && attr_filter.is_none() {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": "invalid attr filter; expected key:value format"
-                })),
-            )
-                .into_response();
-        }
-
-        let items: Vec<serde_json::Value> = all_users
-            .iter()
-            .filter(|u| {
-                if let Some(ref ef) = email_norm {
-                    if u.email() != ef.as_str() {
-                        return false;
-                    }
-                }
-                if let Some(ref uf) = username_lower {
-                    if !u.display_name().to_lowercase().contains(uf.as_str()) {
-                        return false;
-                    }
-                }
-                if let Some(sf) = status_filter {
-                    if u.status() != sf {
-                        return false;
-                    }
-                }
-                if let Some((ref ak, ref av)) = attr_filter {
-                    if u.attributes().get(ak.as_str()).map(String::as_str) != Some(av.as_str()) {
-                        return false;
-                    }
-                }
-                true
-            })
-            .take(params.effective_limit())
-            .map(|u| proto_to_rest_json(&pb::User::from(u)))
-            .collect();
-
+    // Parse `?attr=key:value` — split on the first colon only so values may
+    // contain colons (e.g. ISO timestamps or URLs).
+    let attr_filter: Option<(String, String)> = params.attr.as_deref().and_then(|s| {
+        let (k, v) = s.split_once(':')?;
+        Some((k.to_owned(), v.to_owned()))
+    });
+    if params.attr.is_some() && attr_filter.is_none() {
         return (
-            StatusCode::OK,
-            Json(serde_json::json!({"items": items, "next_cursor": null})),
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid attr filter; expected key:value format"
+            })),
         )
             .into_response();
     }
 
-    match state
-        .identity
-        .list_users(&auth.realm_id, &params.as_page_request())
-    {
-        Ok(page) => (
+    let email_norm = params.email.as_deref().map(str::to_lowercase);
+    let username_lower = params.username.as_deref().map(str::to_lowercase);
+    let matches = |u: &crate::identity::User| -> bool {
+        if let Some(ref ef) = email_norm {
+            if u.email() != ef.as_str() {
+                return false;
+            }
+        }
+        if let Some(ref uf) = username_lower {
+            if !u.display_name().to_lowercase().contains(uf.as_str()) {
+                return false;
+            }
+        }
+        if let Some(sf) = status_filter {
+            if u.status() != sf {
+                return false;
+            }
+        }
+        if let Some((ref ak, ref av)) = attr_filter {
+            if u.attributes().get(ak.as_str()).map(String::as_str) != Some(av.as_str()) {
+                return false;
+            }
+        }
+        true
+    };
+
+    // An email filter is one email-index lookup (O(1)): at most one user
+    // matches. This exercises the hot-tier storage path without a corpus
+    // scan, so it suits tier-miss latency profiling (HEA-1876).
+    if let Some(email) = params.email.as_deref() {
+        let user = match state.identity.get_user_by_email(&auth.realm_id, email) {
+            Ok(user) => user.filter(|u| matches(u)),
+            Err(e) => return identity_error_to_response(&e).into_response(),
+        };
+        // A cursor means the client already has the one match.
+        let items: Vec<serde_json::Value> = user
+            .filter(|_| after.is_none())
+            .iter()
+            .map(|u| proto_to_rest_json(&pb::User::from(u)))
+            .collect();
+        let total = items.len();
+        return (
             StatusCode::OK,
-            Json(proto_to_rest_json(&user_page_to_proto(&page))),
+            Json(serde_json::json!({"items": items, "next_cursor": null, "total": total})),
         )
-            .into_response(),
-        Err(e) => identity_error_to_response(&e).into_response(),
+            .into_response();
     }
+
+    // Any other filter walks the users (a status filter: only the users with
+    // that status) from the cursor until the page is full or the walk has
+    // read ADMIN_USER_FILTER_WALK_LIMIT records. Then it answers what it
+    // found, with a cursor to go on from.
+    let walk = status_filter.map_or(
+        crate::identity::search::UserWalk::All,
+        crate::identity::search::UserWalk::Status,
+    );
+    let limit = params.effective_limit();
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    let mut cursor = after;
+    let mut walked = 0usize;
+    let next_cursor: Option<UserId> = loop {
+        let step = match state.identity.walk_users(
+            &auth.realm_id,
+            walk,
+            cursor.as_ref(),
+            crate::core::MAX_PAGE_LIMIT,
+        ) {
+            Ok(step) => step,
+            Err(e) => return identity_error_to_response(&e).into_response(),
+        };
+        walked += crate::core::MAX_PAGE_LIMIT as usize;
+        let mut full: Option<UserId> = None;
+        for user in step.users.iter().filter(|u| matches(u)) {
+            items.push(proto_to_rest_json(&pb::User::from(user)));
+            if items.len() >= limit {
+                full = Some(user.id().clone());
+                break;
+            }
+        }
+        if full.is_some() {
+            // The page is full: the next page starts after its last user.
+            break full;
+        }
+        if !step.more {
+            break None;
+        }
+        cursor = step.last;
+        if walked >= crate::abuse::ADMIN_USER_FILTER_WALK_LIMIT {
+            break cursor;
+        }
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "items": items,
+            "next_cursor": next_cursor.map(|id| id.as_uuid().to_string()),
+        })),
+    )
+        .into_response()
+}
+
+/// Parses the `cursor` of `GET /admin/users` without search text: the id of
+/// the last user of the previous step. `400` for any other value.
+fn parse_user_cursor(cursor: Option<&str>) -> Result<Option<UserId>, Response> {
+    let Some(cursor) = cursor.filter(|c| !c.is_empty()) else {
+        return Ok(None);
+    };
+    cursor
+        .parse::<uuid::Uuid>()
+        .map(|uuid| Some(UserId::new(uuid)))
+        .map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid cursor"})),
+            )
+                .into_response()
+        })
+}
+
+/// One page of `GET /admin/users` without a filter. The walk reads one user
+/// more than the page, so the last page has no `next_cursor`.
+fn list_users_page(
+    state: &AppState,
+    realm_id: &RealmId,
+    after: Option<&UserId>,
+    limit: usize,
+) -> Response {
+    #[allow(clippy::cast_possible_truncation)] // INVARIANT: effective_limit() is at most 100.
+    let step = match state.identity.walk_users(
+        realm_id,
+        crate::identity::search::UserWalk::All,
+        after,
+        limit as u32 + 1,
+    ) {
+        Ok(step) => step,
+        Err(e) => return identity_error_to_response(&e).into_response(),
+    };
+    let mut users = step.users;
+    let next_cursor = if users.len() > limit {
+        users.truncate(limit);
+        users.last().map(|u| u.id().as_uuid().to_string())
+    } else {
+        None
+    };
+    let page = pb::UserPage {
+        items: users.iter().map(pb::User::from).collect(),
+        next_cursor,
+    };
+    (StatusCode::OK, Json(proto_to_rest_json(&page))).into_response()
 }
 
 /// Import request body — one entry per user to import.
@@ -1032,24 +1096,25 @@ async fn admin_export_users(
         &export_id,
     );
 
-    // Collect all users by draining pages.
+    // Collect all users with one key-cursor walk (#644): each step reads only
+    // its own users, not every key before an offset.
     let mut all_users: Vec<crate::identity::User> = Vec::new();
-    let mut offset = 0u64;
-    let batch = crate::core::MAX_PAGE_LIMIT;
+    let mut after: Option<UserId> = None;
     loop {
-        let page = match state.identity.list_users(
+        let step = match state.identity.walk_users(
             &auth.realm_id,
-            &crate::core::PageRequest::new(offset, batch),
+            crate::identity::search::UserWalk::All,
+            after.as_ref(),
+            crate::core::MAX_PAGE_LIMIT,
         ) {
-            Ok(p) => p,
+            Ok(step) => step,
             Err(e) => return identity_error_to_response(&e).into_response(),
         };
-        let n = page.items.len() as u64;
-        all_users.extend(page.items);
-        if n == 0 || offset + n >= page.total {
+        all_users.extend(step.users);
+        if !step.more {
             break;
         }
-        offset += n;
+        after = step.last;
     }
 
     let user_to_json = |u: &crate::identity::User| -> serde_json::Value {

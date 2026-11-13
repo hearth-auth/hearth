@@ -144,19 +144,6 @@ impl From<&domain::RealmConfig> for pb::RealmConfig {
 
 // ==================== PagedResult → proto page ====================
 
-/// Converts a `PagedResult<User>` to a proto `UserPage`.
-///
-/// Phase 3 will extend the proto with `total`/`offset`/`limit`. For now the
-/// cursor field encodes the next offset as a decimal string so that
-/// cursor-aware callers can still paginate.
-pub(crate) fn user_page_to_proto(page: &crate::core::PagedResult<domain::User>) -> pb::UserPage {
-    let next_cursor = next_offset_cursor(page.total, page.offset, page.items.len() as u64);
-    pb::UserPage {
-        items: page.items.iter().map(pb::User::from).collect(),
-        next_cursor,
-    }
-}
-
 /// Converts a `PagedResult<Realm>` to a proto `RealmPage`.
 pub(crate) fn realm_page_to_proto(page: &crate::core::PagedResult<domain::Realm>) -> pb::RealmPage {
     let next_cursor = next_offset_cursor(page.total, page.offset, page.items.len() as u64);

@@ -413,6 +413,7 @@ mod scim_paging;
 mod scope_grant;
 mod sharded_cache;
 mod single_use;
+mod user_walk;
 // Phase D engine modules
 pub(super) mod aat;
 pub(super) mod cross_realm;
@@ -12536,6 +12537,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         limit: u32,
     ) -> Result<crate::core::PagedResult<User>, IdentityError> {
         self.list_users_at_position_inner(realm_id, position, limit)
+    }
+
+    fn walk_users(
+        &self,
+        realm_id: &RealmId,
+        walk: crate::identity::search::UserWalk,
+        after: Option<&UserId>,
+        limit: u32,
+    ) -> Result<crate::identity::search::UserWalkPage, IdentityError> {
+        self.walk_users_inner(realm_id, walk, after, limit)
     }
 
     fn search_users(

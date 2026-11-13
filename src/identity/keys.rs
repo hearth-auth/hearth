@@ -410,6 +410,14 @@ pub(crate) fn decode_user_id_value(bytes: &[u8]) -> Option<UserId> {
     uuid::Uuid::parse_str(text).ok().map(UserId::new)
 }
 
+/// The user id of a user record key (`usr:id:{uuid}`), or `None` when
+/// `key` is not one.
+pub(crate) fn decode_user_record_key(key: &[u8]) -> Option<UserId> {
+    let uuid = key.strip_prefix(USER_ID_PREFIX.as_bytes())?;
+    let text = std::str::from_utf8(uuid).ok()?;
+    uuid::Uuid::parse_str(text).ok().map(UserId::new)
+}
+
 /// Returns the scan prefix for listing all user records.
 ///
 /// Format: `usr:id:`

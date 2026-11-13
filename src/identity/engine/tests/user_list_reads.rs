@@ -511,3 +511,71 @@ fn a_sorted_page_holds_at_most_the_page_limit_for_an_unclamped_request() {
     assert_eq!(page.items[0].email(), "user0000@example.com");
     assert_eq!(page.total, users as u64);
 }
+
+/// A status walk reads the records of the users with that status only, and a
+/// walk step after a cursor reads only its own users (#644).
+#[test]
+fn a_user_walk_reads_only_the_users_of_its_step() {
+    use crate::identity::search::UserWalk;
+
+    const ACTIVE: usize = 300;
+    const DISABLED: usize = 20;
+
+    let (_dir, counting, engine) = counting_engine();
+    let realm = create_test_realm(&engine);
+    for i in 0..ACTIVE + DISABLED {
+        let user = engine
+            .create_user(
+                &realm,
+                &CreateUserRequest {
+                    email: format!("walk{i:04}@example.com"),
+                    display_name: format!("Walk {i:04}"),
+                    ..Default::default()
+                },
+            )
+            .expect("create user");
+        if i >= ACTIVE {
+            engine
+                .update_user(
+                    &realm,
+                    user.id(),
+                    &UpdateUserRequest {
+                        status: Some(UserStatus::Disabled),
+                        ..UpdateUserRequest::default()
+                    },
+                )
+                .expect("disable user");
+        }
+    }
+
+    counting.user_reads.store(0, Ordering::SeqCst);
+    let step = engine
+        .walk_users(&realm, UserWalk::Status(UserStatus::Disabled), None, 200)
+        .expect("status walk");
+    let reads = counting.user_reads.load(Ordering::SeqCst);
+    assert_eq!(step.users.len(), DISABLED);
+    assert!(step
+        .users
+        .iter()
+        .all(|u| u.status() == UserStatus::Disabled));
+    assert!(!step.more);
+    assert!(
+        reads <= DISABLED + 2,
+        "a walk of {DISABLED} disabled users read {reads} user records"
+    );
+
+    let first = engine
+        .walk_users(&realm, UserWalk::All, None, 100)
+        .expect("first step");
+    counting.user_reads.store(0, Ordering::SeqCst);
+    let second = engine
+        .walk_users(&realm, UserWalk::All, first.last.as_ref(), 20)
+        .expect("second step");
+    let reads = counting.user_reads.load(Ordering::SeqCst);
+    assert_eq!(second.users.len(), 20);
+    assert!(second.users[0].id().as_uuid() > first.users[99].id().as_uuid());
+    assert!(
+        reads <= 20 + 2,
+        "a step of 20 after a cursor read {reads} user records"
+    );
+}
