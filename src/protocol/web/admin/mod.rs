@@ -71,7 +71,9 @@ pub use identity_providers::*;
 pub use migrations::*;
 pub use onboarding::*;
 pub use orgs::*;
-pub use pagination::{AdminPageParams, PaginationView, DEFAULT_PER_PAGE, PAGE_SIZES};
+pub use pagination::{
+    AdminPageParams, PaginationView, PrevNextPager, DEFAULT_PER_PAGE, PAGE_SIZES,
+};
 pub use query::DedupQuery;
 pub use rbac::*;
 pub use realms::*;

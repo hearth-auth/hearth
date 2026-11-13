@@ -12549,6 +12549,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.walk_users_inner(realm_id, walk, after, limit)
     }
 
+    fn user_page_by_cursor(
+        &self,
+        realm_id: &RealmId,
+        field: crate::identity::search::UserSortField,
+        dir: crate::identity::search::SortDir,
+        cursor: &crate::identity::search::UserPageCursor,
+        limit: u32,
+    ) -> Result<crate::identity::search::UserCursorPage, IdentityError> {
+        self.user_page_by_cursor_inner(realm_id, field, dir, cursor, limit)
+    }
+
     fn search_users(
         &self,
         realm_id: &RealmId,

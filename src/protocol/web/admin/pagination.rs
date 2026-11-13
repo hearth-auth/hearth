@@ -202,6 +202,149 @@ impl PaginationView {
 }
 
 // ---------------------------------------------------------------------------
+// Previous / next pager (#644)
+// ---------------------------------------------------------------------------
+
+/// Template-ready view-model for a pagination bar with only "previous" and
+/// "next" links, no page numbers.
+///
+/// A key-cursor list (the user list) builds it with [`Self::from_cursors`].
+/// An offset list (a user search) builds it with [`Self::from_offsets`], so
+/// one template serves both.
+pub struct PrevNextPager {
+    /// Total items in the full result set.
+    pub total: u64,
+    /// 1-based index of the first item on this page (0 when empty).
+    pub range_start: u64,
+    /// 1-based index of the last item on this page.
+    pub range_end: u64,
+    /// Effective `per_page` value (validated against the allowlist).
+    pub per_page: u32,
+    /// Page-size dropdown options.
+    pub page_size_options: Vec<PageSizeOption>,
+    /// The link to the previous page, or `None` on the first page.
+    pub prev_href: Option<String>,
+    /// The link to the next page, or `None` on the last page.
+    pub next_href: Option<String>,
+    /// Base URL path (no query string) of the page-size form.
+    pub base_url: String,
+    /// Pre-split `(name, value)` pairs of the preserved params, for the
+    /// page-size form's hidden inputs.
+    pub filter_params: Vec<(String, String)>,
+}
+
+impl PrevNextPager {
+    /// A pager for a key-cursor page.
+    ///
+    /// `pos` is the 0-based index of the first item, carried in the links
+    /// for the "X–Y of N" text only. `first_id` and `last_id` are the
+    /// cursors of the first and last items. `preserved_params` must not hold
+    /// `after`, `before`, `pos` or `per_page`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_cursors(
+        total: u64,
+        per_page: u32,
+        pos: u64,
+        shown: usize,
+        prev: Option<&str>,
+        next: Option<&str>,
+        base_url: impl Into<String>,
+        preserved_params: &str,
+    ) -> Self {
+        let base_url: String = base_url.into();
+        let tail = if preserved_params.is_empty() {
+            String::new()
+        } else {
+            format!("&{preserved_params}")
+        };
+        let shown = shown as u64;
+        let prev_href = prev.map(|id| {
+            let prev_pos = pos.saturating_sub(u64::from(per_page));
+            format!("{base_url}?before={id}&pos={prev_pos}&per_page={per_page}{tail}")
+        });
+        let next_href = next.map(|id| {
+            let next_pos = pos + shown;
+            format!("{base_url}?after={id}&pos={next_pos}&per_page={per_page}{tail}")
+        });
+        Self::build(
+            total,
+            per_page,
+            pos,
+            shown,
+            prev_href,
+            next_href,
+            base_url,
+            preserved_params,
+        )
+    }
+
+    /// A pager for an offset page: the links name page numbers.
+    pub fn from_offsets<T>(
+        result: &PagedResult<T>,
+        base_url: impl Into<String>,
+        preserved_params: &str,
+    ) -> Self {
+        let base_url: String = base_url.into();
+        let tail = if preserved_params.is_empty() {
+            String::new()
+        } else {
+            format!("&{preserved_params}")
+        };
+        let per_page = result.limit;
+        let current = result.current_page();
+        let prev_href = (current > 1)
+            .then(|| format!("{base_url}?page={}&per_page={per_page}{tail}", current - 1));
+        let next_href = (current < result.total_pages())
+            .then(|| format!("{base_url}?page={}&per_page={per_page}{tail}", current + 1));
+        Self::build(
+            result.total,
+            per_page,
+            result.offset,
+            result.items.len() as u64,
+            prev_href,
+            next_href,
+            base_url,
+            preserved_params,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        total: u64,
+        per_page: u32,
+        pos: u64,
+        shown: u64,
+        prev_href: Option<String>,
+        next_href: Option<String>,
+        base_url: String,
+        preserved_params: &str,
+    ) -> Self {
+        let (range_start, range_end) = if shown == 0 {
+            (0, 0)
+        } else {
+            (pos + 1, pos + shown)
+        };
+        Self {
+            total,
+            range_start,
+            range_end,
+            per_page,
+            page_size_options: PAGE_SIZES
+                .iter()
+                .map(|&size| PageSizeOption {
+                    size,
+                    selected: size == per_page,
+                })
+                .collect(),
+            prev_href,
+            next_href,
+            base_url,
+            filter_params: parse_query_pairs(preserved_params),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Page window builder (up to 7 visible items + ellipsis)
 // ---------------------------------------------------------------------------
 
