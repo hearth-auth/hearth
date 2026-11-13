@@ -18,7 +18,7 @@ use super::error::StorageError;
 use super::fs::Fs;
 
 /// The store format this build reads and writes.
-pub const STORE_FORMAT_VERSION: u32 = 3;
+pub const STORE_FORMAT_VERSION: u32 = 4;
 
 /// The name of the format file in the data directory.
 pub const FORMAT_FILE: &str = "FORMAT";

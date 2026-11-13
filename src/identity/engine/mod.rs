@@ -4761,12 +4761,23 @@ impl EmbeddedIdentityEngine {
     ) -> Result<(), IdentityError> {
         let session_bytes = Self::serialize_session(session)?;
         let id_key = keys::encode_session_id(session.id());
-        let mut batch = Vec::with_capacity(1 + extra.len());
+        let live_key = keys::encode_live_session(session.id());
+        let mut batch = Vec::with_capacity(2 + extra.len());
         batch.push((id_key, session_bytes));
-        batch.extend(extra);
-        self.storage
-            .put_batch(realm_id, &batch)
-            .map_err(Self::storage_err)?;
+        // The live-session index entry goes in the same atomic write as the
+        // record (#644): it exists exactly while the record is not revoked.
+        if session.is_revoked() {
+            batch.extend(extra);
+            self.storage
+                .write_batch(realm_id, &batch, &[live_key])
+                .map_err(Self::storage_err)?;
+        } else {
+            batch.push((live_key, Vec::new()));
+            batch.extend(extra);
+            self.storage
+                .put_batch(realm_id, &batch)
+                .map_err(Self::storage_err)?;
+        }
         // Update the cache after the storage write succeeds. The insert reads
         // the row back rather than trusting `session`, so a revocation that
         // lands in between is never overwritten in the cache.
@@ -5042,30 +5053,36 @@ impl EmbeddedIdentityEngine {
         }
         let now = self.clock.now();
         let mut evicted: u64 = 0;
-        let mut offset = 0u64;
-        let batch = crate::core::MAX_PAGE_LIMIT;
+        // One walk of the live-session index (#644): each live session is
+        // read once. An eviction deletes the index entry of a session the
+        // walk already passed, so it moves nothing after the cursor.
+        let mut after: Option<Vec<u8>> = None;
         loop {
-            let page = self
-                .list_sessions_by_realm(realm_id, &crate::core::PageRequest::new(offset, batch))?;
-            let n = page.items.len() as u64;
-            let mut evicted_in_page: u64 = 0;
-            for session in &page.items {
-                if session.is_valid(now) && session.is_policy_expired(now) {
-                    if self.evict_session_by_policy(realm_id, session, now).is_ok() {
-                        evicted_in_page += 1;
-                    }
+            let live_keys = self.live_session_keys_after(
+                realm_id,
+                after.as_deref(),
+                crate::core::MAX_PAGE_LIMIT as usize,
+            )?;
+            let Some(last) = live_keys.last() else {
+                break;
+            };
+            after = Some(last.clone());
+            for live_key in &live_keys {
+                let Some(session) = self.live_session_record(realm_id, live_key)? else {
+                    continue;
+                };
+                if session.is_valid(now)
+                    && session.is_policy_expired(now)
+                    && self
+                        .evict_session_by_policy(realm_id, &session, now)
+                        .is_ok()
+                {
+                    evicted += 1;
                 }
             }
-            evicted += evicted_in_page;
-            if n == 0 || offset + n >= page.total {
+            if live_keys.len() < crate::core::MAX_PAGE_LIMIT as usize {
                 break;
             }
-            // An evicted session is revoked, and the listing leaves revoked
-            // sessions out: the sessions after this page move up by the
-            // number evicted in it. Advancing by the full page length skipped
-            // them until a later sweep. A session that another caller revokes
-            // between two pages can still be skipped; the next sweep evicts it.
-            offset += n - evicted_in_page;
         }
         Ok(evicted)
     }
@@ -6020,26 +6037,93 @@ impl EmbeddedIdentityEngine {
     /// Called on suspend/archive transitions. Skips per-session audit events;
     /// the caller's `RealmUpdated` event covers the lifecycle change.
     fn bulk_revoke_sessions(&self, realm_id: &RealmId) {
-        let storage = self.storage.as_ref();
-        let prefix = keys::session_id_scan_prefix();
-        let end = keys::prefix_end(&prefix);
-        let Ok(entries) = storage.scan(realm_id, &prefix, &end) else {
-            return;
-        };
-        for entry in &entries {
-            if let Ok(mut session) = Self::deserialize_session(&entry.value) {
-                if !session.is_revoked() {
-                    let session_id = session.id().clone();
-                    session.revoke();
-                    if let Ok(bytes) = Self::serialize_session(&session) {
-                        let _ = storage.put(realm_id, &entry.key, &bytes);
-                    }
-                    // Drop the cached (still-valid) copy so subsequent
-                    // get_session calls observe the revocation.
-                    self.session_cache_invalidate(realm_id, &session_id);
-                }
+        // Walk the live-session index (#644), a page at a time: a revoked
+        // session has no index entry, so its record is not read again.
+        let mut after: Option<Vec<u8>> = None;
+        loop {
+            let Ok(live_keys) = self.live_session_keys_after(
+                realm_id,
+                after.as_deref(),
+                crate::core::MAX_PAGE_LIMIT as usize,
+            ) else {
+                return;
+            };
+            let Some(last) = live_keys.last() else {
+                return;
+            };
+            after = Some(last.clone());
+            for live_key in &live_keys {
+                let Ok(Some(mut session)) = self.live_session_record(realm_id, live_key) else {
+                    continue;
+                };
+                let session_id = session.id().clone();
+                session.revoke();
+                let _ = self.persist_session(realm_id, &session);
+                // Drop the cached (still-valid) copy so subsequent
+                // get_session calls observe the revocation.
+                self.session_cache_invalidate(realm_id, &session_id);
+            }
+            if live_keys.len() < crate::core::MAX_PAGE_LIMIT as usize {
+                return;
             }
         }
+    }
+
+    /// Up to `limit` keys of the live-session index (#644), in key order,
+    /// after `after` (exclusive) or from the start.
+    fn live_session_keys_after(
+        &self,
+        realm_id: &RealmId,
+        after: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<Vec<Vec<u8>>, IdentityError> {
+        let prefix = keys::live_session_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let start = after.map_or_else(
+            || prefix.clone(),
+            |key| {
+                let mut next = key.to_vec();
+                next.push(0);
+                next
+            },
+        );
+        let mut found = Vec::with_capacity(limit.min(crate::core::MAX_PAGE_LIMIT as usize));
+        self.storage
+            .visit_keys(realm_id, &start, &end, &mut |key| {
+                found.push(key.to_vec());
+                if found.len() >= limit {
+                    std::ops::ControlFlow::Break(())
+                } else {
+                    std::ops::ControlFlow::Continue(())
+                }
+            })
+            .map_err(Self::storage_err)?;
+        Ok(found)
+    }
+
+    /// The session record that a live-session index key names, if it exists
+    /// and is not revoked.
+    ///
+    /// The index entry and the record change in one atomic write, so a
+    /// missing or revoked record means a write that raced this read; the
+    /// caller skips it.
+    fn live_session_record(
+        &self,
+        realm_id: &RealmId,
+        live_key: &[u8],
+    ) -> Result<Option<Session>, IdentityError> {
+        let Some(record_key) = keys::session_record_key_of_live(live_key) else {
+            return Ok(None);
+        };
+        let Some(bytes) = self
+            .storage
+            .get(realm_id, &record_key)
+            .map_err(Self::storage_err)?
+        else {
+            return Ok(None);
+        };
+        let session = Self::deserialize_session(&bytes)?;
+        Ok((!session.is_revoked()).then_some(session))
     }
 
     /// Returns `{base_issuer}/realms/{name}` for per-realm OIDC scoping.
@@ -7342,9 +7426,15 @@ impl EmbeddedIdentityEngine {
             if let Some(session_uuid_str) = key_str.rsplit(':').next() {
                 if let Ok(uuid) = uuid::Uuid::parse_str(session_uuid_str) {
                     let session_id = SessionId::new(uuid);
-                    let session_key = keys::encode_session_id(&session_id);
                     self.storage
-                        .delete(realm_id, &session_key)
+                        .write_batch(
+                            realm_id,
+                            &[],
+                            &[
+                                keys::encode_session_id(&session_id),
+                                keys::encode_live_session(&session_id),
+                            ],
+                        )
                         .map_err(Self::storage_err)?;
                     // Evict from in-process cache so subsequent get_session
                     // calls see the deletion rather than a stale cache hit.
@@ -9427,30 +9517,27 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         page: &crate::core::PageRequest,
     ) -> Result<crate::core::PagedResult<Session>, IdentityError> {
-        let prefix = keys::session_id_scan_prefix();
-        let end = keys::prefix_end(&prefix);
-
-        let entries = self
+        // The live-session index holds one key per session that is not
+        // revoked (#644). The walk stops at the end of the page, and the
+        // exact total comes from the count that the storage engine keeps,
+        // not from a read of every session record.
+        let prefix = keys::live_session_scan_prefix();
+        let walk_cap = page.offset.saturating_add(u64::from(page.limit)).max(1);
+        let (entries, _) = self
             .storage
-            .scan(realm_id, &prefix, &end)
+            .scan_prefix_paged(realm_id, &prefix, page.offset, page.limit, walk_cap)
+            .map_err(Self::storage_err)?;
+        let total = self
+            .storage
+            .count_prefix(realm_id, &prefix, 0)
             .map_err(Self::storage_err)?;
 
-        // Filter revoked sessions, then apply offset window on remaining.
-        let mut all: Vec<Session> = Vec::new();
+        let mut items = Vec::with_capacity(entries.len());
         for entry in &entries {
-            let session: Session = Self::deserialize_session(&entry.value)?;
-            if !session.is_revoked() {
-                all.push(session);
+            if let Some(session) = self.live_session_record(realm_id, &entry.key)? {
+                items.push(session);
             }
         }
-
-        // Exact total: this path already materialises the full result set, so
-        // capping the reported count only hides records from the admin UI
-        // pager (HEA-1614).
-        let total = all.len() as u64;
-        let start = (page.offset as usize).min(all.len());
-        let end_idx = (start + page.limit as usize).min(all.len());
-        let items = all[start..end_idx].to_vec();
 
         Ok(crate::core::PagedResult::new(
             items,
@@ -19254,8 +19341,11 @@ impl EmbeddedIdentityEngine {
         let session_bytes = Self::serialize_session(&session)?;
         let id_key = keys::encode_session_id(session.id());
         let user_session_key = keys::encode_user_session(user_id, &session_id);
-        let session_kvs: Vec<(Vec<u8>, Vec<u8>)> =
-            vec![(id_key, session_bytes), (user_session_key, Vec::new())];
+        let session_kvs: Vec<(Vec<u8>, Vec<u8>)> = vec![
+            (id_key, session_bytes),
+            (keys::encode_live_session(&session_id), Vec::new()),
+            (user_session_key, Vec::new()),
+        ];
 
         let session_audit_ctx = AuditContext {
             actor: Actor::User(user_id.clone()),
@@ -19620,6 +19710,8 @@ mod tests {
     mod secret_compare;
     /// A session-cache fill never resurrects a session revoked while it ran.
     mod session_fill_race;
+    /// The realm session list and the timeout sweep read live sessions only (#644).
+    mod session_list_reads;
     /// A session revocation is never undone by a racing refresh or create.
     mod session_rmw_race;
     mod stale_read_single_use;

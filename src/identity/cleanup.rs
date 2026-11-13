@@ -964,8 +964,8 @@ pub(crate) fn sweep_session_parent_links(
 const SESSION_DELETE_GRACE_MICROS: i64 = 3_600 * 1_000_000;
 
 /// Deletes the sessions that expired more than
-/// [`SESSION_DELETE_GRACE_MICROS`] ago: the `ses:id` row and its `ses:user`
-/// index row, in one write. A revoked session goes too, once its own expiry
+/// [`SESSION_DELETE_GRACE_MICROS`] ago: the `ses:id` row, its `ses:user`
+/// index row and its `ses:live` index row, in one write. A revoked session goes too, once its own expiry
 /// passes. Nothing else deletes an expired session, so before this sweep
 /// every sign-in left both rows behind for good (#445).
 fn sweep_sessions(
@@ -993,6 +993,11 @@ fn sweep_sessions(
         },
         |key, index_key, batch| {
             batch.push(key.to_vec());
+            // A session that expired without a revocation still has its
+            // live-session index entry (#644).
+            if let Some(live_key) = keys::live_session_key_of_record(key) {
+                batch.push(live_key);
+            }
             batch.push(index_key);
             Ok(true)
         },

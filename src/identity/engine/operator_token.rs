@@ -184,6 +184,7 @@ impl EmbeddedIdentityEngine {
                 &[],
                 &[
                     keys::encode_session_id(&session_id),
+                    keys::encode_live_session(&session_id),
                     keys::encode_user_session(user_id, &session_id),
                 ],
             );
