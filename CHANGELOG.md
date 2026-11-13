@@ -96,6 +96,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   last one ended. `eq` on `userName`, `emails.value`, `externalId` or `id` reads an index;
   `externalId` is now case-exact, as RFC 7643 defines it. Any other filter reads every user, and
   in a realm with more than 10,000 users it gets `400` with `scimType` `tooMany`.
+- **SCIM `GET /Groups` reads the whole realm, not only its first 1,000 groups** (#644): before,
+  the list read at most 1,000 groups, so a client did not see the other groups, `totalResults`
+  stopped at 1,000, and a filter did not find a group past them. Now a page without a filter
+  reads only its own groups at `startIndex` and gives the exact `totalResults`. A filter reads
+  every group, and in a realm with more than 10,000 groups it gets `400` with `scimType`
+  `tooMany`.
 - **An audit event is no longer lost when the single-node write limit is full** (#836): a write
   that holds only audit events may use twice `storage.max_writes_in_flight`. Before, a token
   refresh (and other operations whose audit event does not stop the operation) could succeed
