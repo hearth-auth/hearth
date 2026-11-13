@@ -105,10 +105,10 @@ impl EmbeddedIdentityEngine {
                 .remember(realm_id, end, last.key.clone());
         }
 
-        let mut items = Vec::with_capacity(entries.len());
-        for entry in &entries {
-            items.push(Self::deserialize_user(&entry.value)?);
-        }
+        let items = entries
+            .iter()
+            .map(|entry| Self::deserialize_user(&entry.value))
+            .collect::<Result<Vec<User>, IdentityError>>()?;
         Ok(PagedResult::new(items, total, position, limit))
     }
 
