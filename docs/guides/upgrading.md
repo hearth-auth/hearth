@@ -99,7 +99,7 @@ Work through this list for every upgrade, including patch releases.
 
   ```bash
   cat /var/lib/hearth/data/FORMAT
-  # → hearth-store-format 4
+  # → hearth-store-format 5
   ```
 
   A Hearth build reads and writes exactly one store format version. At startup it compares
@@ -108,7 +108,7 @@ Work through this list for every upgrade, including patch releases.
 
   ```
   the FORMAT file of data directory '/var/lib/hearth/data' says "hearth-store-format 1"; this
-  build reads only store format 4. Run the build that wrote it, or see docs/guides/upgrading.md
+  build reads only store format 5. Run the build that wrote it, or see docs/guides/upgrading.md
   ```
 
   A data directory without `FORMAT` (a new directory, or one from a build before this check) gets

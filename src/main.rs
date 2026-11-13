@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use tokio::sync::Notify;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
 use hearth::config::{Config, EmailTransport, StorageSection, TlsMinVersionYaml, ValidationIssue};
@@ -1213,6 +1213,12 @@ fn dev_mode_bind_check(dev: bool, http_bind: &str) -> DevBindCheck {
 ///
 /// Item (3) used to say the setup token was "printed (truncated)"; dev mode in
 /// fact logs the full setup URL, token included (GA audit 2026-09-28 L6).
+/// The time between two runs of the search index merger (#644).
+const SEARCH_MERGE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The maximum number of outbox entries that one search index merge applies.
+const SEARCH_MERGE_BATCH: usize = 1_024;
+
 const DEV_MODE_BANNER: &str = "DEV MODE ACTIVE — security reductions in effect: \
      (1) Argon2 parameters weakened to fast_for_testing (256 KiB / 1 iter); \
      (2) CSRF cookie enforcement bypassed on pre-auth forms; \
@@ -2417,6 +2423,74 @@ async fn run_serve(
                     Ok(_) => {}
                     Err(e) => {
                         warn!(error = %e, "approval_outbox: flush task panicked, retrying next tick");
+                    }
+                }
+            }
+        });
+    }
+
+    // Background merge of the trigram search index (#644). A user write puts
+    // only an outbox entry in its batch; this task applies the entries to the
+    // posting blocks. A search reads the pending entries itself, so the result
+    // is exact also while the merge is behind. The first tick is not skipped:
+    // it applies what an earlier run left. `merge_search_index` does nothing
+    // on a node that does not take writes.
+    {
+        let merge_engine = Arc::clone(&identity_engine);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(SEARCH_MERGE_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                let engine = Arc::clone(&merge_engine);
+                let joined = tokio::task::spawn_blocking(move || {
+                    let mut realms = vec![hearth::core::RealmId::new(uuid::Uuid::nil())];
+                    let batch = hearth::core::MAX_PAGE_LIMIT;
+                    let mut offset = 0u64;
+                    loop {
+                        let page =
+                            match engine.list_realms(&hearth::core::PageRequest::new(offset, batch))
+                            {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    warn!(error = %e, "search_merge: realm enumeration failed, retrying next tick");
+                                    break;
+                                }
+                            };
+                        let n = page.items.len() as u64;
+                        realms.extend(page.items.iter().map(|r| r.id().clone()));
+                        if n == 0 || offset + n >= page.total {
+                            break;
+                        }
+                        offset += n;
+                    }
+                    let mut applied = 0usize;
+                    for realm in &realms {
+                        loop {
+                            match engine.merge_search_index(realm, SEARCH_MERGE_BATCH) {
+                                Ok(n) => {
+                                    applied += n;
+                                    if n < SEARCH_MERGE_BATCH {
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(error = %e, "search_merge: merge failed, retrying next tick");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    applied
+                })
+                .await;
+                match joined {
+                    Ok(applied) if applied > 0 => {
+                        debug!(applied, "search_merge: applied search index writes");
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        warn!(error = %e, "search_merge: merge task panicked, retrying next tick");
                     }
                 }
             }
