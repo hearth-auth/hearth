@@ -54,6 +54,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   a new, empty data directory (see `docs/guides/upgrading.md`).
 
 ### Fixed
+- **SCIM `GET /Users` reads the whole realm, not only its first 1,000 users** (#644): before, the
+  list read at most 1,000 users, so a client did not see the other users, `totalResults` stopped
+  at 1,000, and an `eq` filter did not find a user past them. Now a page without a filter reads
+  only its own users and gives the exact `totalResults`, and a page in sequence starts where the
+  last one ended. `eq` on `userName`, `emails.value`, `externalId` or `id` reads an index;
+  `externalId` is now case-exact, as RFC 7643 defines it. Any other filter reads every user, and
+  in a realm with more than 10,000 users it gets `400` with `scimType` `tooMany`.
 - **An audit event is no longer lost when the single-node write limit is full** (#836): a write
   that holds only audit events may use twice `storage.max_writes_in_flight`. Before, a token
   refresh (and other operations whose audit event does not stop the operation) could succeed

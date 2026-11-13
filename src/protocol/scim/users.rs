@@ -9,7 +9,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::abuse::{MAX_SCIM_OPERATIONS, SCIM_MAX_SCAN_LIMIT};
+use crate::abuse::{MAX_SCIM_OPERATIONS, SCIM_FILTER_SCAN_LIMIT};
 use crate::audit::{AuditAction, CreateAuditEvent};
 use crate::core::{RealmId, UserId};
 use crate::identity::{CreateUserRequest, UpdateUserRequest, User, UserStatus};
@@ -406,55 +406,156 @@ pub async fn list_users(
         None => None,
     };
 
-    // Phase 1 pagination: scan at most SCIM_MAX_SCAN_LIMIT users and slice in
-    // memory. Okta / Azure paginate at ~100; Phase 2 can push the filter
-    // + pagination into the engine layer.
-    //
-    // The cap is critical: without it a `?count=1` request triggers O(realm-
-    // size) work — a DoS with O(1) attacker cost (HEA-2032 defect 1).
-    let mut all_items: Vec<crate::identity::User> = Vec::new();
-    let mut scim_offset = 0u64;
-    loop {
-        let batch = crate::core::MAX_PAGE_LIMIT;
-        let scan_page = match state.identity.list_users(
-            &auth.realm_id,
-            &crate::core::PageRequest::new(scim_offset, batch),
-        ) {
+    let start = q.start_index.unwrap_or(1).max(1);
+    let count = q.count.unwrap_or(100).min(200);
+
+    // No filter: one page of users and the exact total (#644).
+    let Some(expr) = filter_expr else {
+        let position = u64::try_from(start - 1).unwrap_or(u64::MAX);
+        let limit = u32::try_from(count).unwrap_or(crate::core::MAX_PAGE_LIMIT);
+        let page = match state
+            .identity
+            .list_users_at_position(&auth.realm_id, position, limit)
+        {
             Ok(p) => p,
             Err(e) => return from_identity_error(&e).into_response(),
         };
-        let n = scan_page.items.len() as u64;
-        all_items.extend(scan_page.items);
-        if n == 0 || scim_offset + n >= scan_page.total || all_items.len() >= SCIM_MAX_SCAN_LIMIT {
+        let resources: Vec<ScimUser> = page
+            .items
+            .iter()
+            .map(|user| scim_user_with_external_id(&state, &auth.realm_id, user, &base))
+            .collect();
+        let total = usize::try_from(page.total).unwrap_or(usize::MAX);
+        return Json(ListResponse::new(total, start, resources)).into_response();
+    };
+
+    let matches = match filtered_users(&state, &auth.realm_id, &expr, &base) {
+        Ok(m) => m,
+        Err(e) => return e.into_response(),
+    };
+    let total = matches.len();
+    let slice: Vec<ScimUser> = matches.into_iter().skip(start - 1).take(count).collect();
+    Json(ListResponse::new(total, start, slice)).into_response()
+}
+
+/// The SCIM form of `user`, with its `externalId` when it has one.
+fn scim_user_with_external_id(
+    state: &AppState,
+    realm_id: &RealmId,
+    user: &User,
+    base: &ScimBase,
+) -> ScimUser {
+    let ext = state
+        .identity
+        .get_scim_external_id(realm_id, user.id())
+        .ok()
+        .flatten();
+    user_to_scim(user, ext, base)
+}
+
+/// An `eq` comparison that an index serves.
+enum IndexedEq<'a> {
+    /// `userName` or `emails.value`: the email index.
+    Email(&'a str),
+    /// `externalId`: the SCIM external-id index.
+    ExternalId(&'a str),
+    /// `id`: the user record itself.
+    Id(&'a str),
+}
+
+/// The indexed `eq` of `expr`: the filter itself, or one side of an `and`.
+/// An index then gives the only user that can match the whole filter.
+fn indexed_eq(expr: &FilterExpr) -> Option<IndexedEq<'_>> {
+    match expr {
+        FilterExpr::Eq(attr, filter::Value::Str(value)) => {
+            match attr.to_ascii_lowercase().as_str() {
+                "username" | "emails.value" => Some(IndexedEq::Email(value)),
+                "externalid" => Some(IndexedEq::ExternalId(value)),
+                "id" => Some(IndexedEq::Id(value)),
+                _ => None,
+            }
+        }
+        FilterExpr::And(a, b) => indexed_eq(a).or_else(|| indexed_eq(b)),
+        _ => None,
+    }
+}
+
+/// The user that an indexed `eq` names, if any.
+fn indexed_user(
+    state: &AppState,
+    realm_id: &RealmId,
+    eq: &IndexedEq<'_>,
+) -> Result<Option<User>, crate::identity::IdentityError> {
+    match eq {
+        IndexedEq::Email(email) => match state.identity.get_user_by_email(realm_id, email) {
+            // A value that is not an email address names no user.
+            Err(crate::identity::IdentityError::InvalidInput { .. }) => Ok(None),
+            other => other,
+        },
+        IndexedEq::ExternalId(external_id) => state
+            .identity
+            .find_user_by_scim_external_id(realm_id, external_id),
+        IndexedEq::Id(id) => match uuid::Uuid::parse_str(id) {
+            Ok(uuid) => state.identity.get_user(realm_id, &UserId::new(uuid)),
+            Err(_) => Ok(None),
+        },
+    }
+}
+
+/// The users that match `expr`, in user-id order (#644).
+///
+/// An indexed `eq` (alone or in an `and`) reads its index. Any other filter
+/// reads every user of the realm, so a realm with more than
+/// [`SCIM_FILTER_SCAN_LIMIT`] users gets `400` `tooMany` (RFC 7644 §3.12),
+/// not the matches of part of the realm.
+fn filtered_users(
+    state: &AppState,
+    realm_id: &RealmId,
+    expr: &FilterExpr,
+    base: &ScimBase,
+) -> Result<Vec<ScimUser>, ScimError> {
+    let keep = |user: &User| {
+        let scim = scim_user_with_external_id(state, realm_id, user, base);
+        filter::matches_user(expr, &scim).then_some(scim)
+    };
+
+    if let Some(eq) = indexed_eq(expr) {
+        let user = indexed_user(state, realm_id, &eq).map_err(|e| from_identity_error(&e))?;
+        return Ok(user.as_ref().and_then(keep).into_iter().collect());
+    }
+
+    let scan_limit = u64::try_from(SCIM_FILTER_SCAN_LIMIT).unwrap_or(u64::MAX);
+    let realm_users = state
+        .identity
+        .list_users_at_position(realm_id, 0, 0)
+        .map_err(|e| from_identity_error(&e))?
+        .total;
+    if realm_users > scan_limit {
+        return Err(ScimError::bad_request(
+            "tooMany",
+            format!(
+                "This filter reads every user, and the realm has more than \
+                 {SCIM_FILTER_SCAN_LIMIT} users. Use eq on userName, emails.value, \
+                 externalId or id."
+            ),
+        ));
+    }
+
+    let mut matches = Vec::new();
+    let mut position = 0u64;
+    // The bound holds when users are created during the walk.
+    while position < scan_limit {
+        let page = state
+            .identity
+            .list_users_at_position(realm_id, position, crate::core::MAX_PAGE_LIMIT)
+            .map_err(|e| from_identity_error(&e))?;
+        if page.items.is_empty() {
             break;
         }
-        scim_offset += n;
+        position = position.saturating_add(page.items.len() as u64);
+        matches.extend(page.items.iter().filter_map(keep));
     }
-    let page = crate::core::PagedResult::new(all_items, 0, 0, crate::core::MAX_PAGE_LIMIT);
-
-    let mut resources: Vec<ScimUser> = Vec::with_capacity(page.items.len());
-    for user in &page.items {
-        let ext = state
-            .identity
-            .get_scim_external_id(&auth.realm_id, user.id())
-            .ok()
-            .flatten();
-        let scim = user_to_scim(user, ext, &base);
-        if filter_expr
-            .as_ref()
-            .map_or(true, |e| filter::matches_user(e, &scim))
-        {
-            resources.push(scim);
-        }
-    }
-
-    let total = resources.len();
-    let start = q.start_index.unwrap_or(1).max(1);
-    let count = q.count.unwrap_or(100).min(200);
-    let start_idx0 = start.saturating_sub(1);
-    let slice: Vec<ScimUser> = resources.into_iter().skip(start_idx0).take(count).collect();
-
-    Json(ListResponse::new(total, start, slice)).into_response()
+    Ok(matches)
 }
 
 /// `PUT /scim/v2/Users/{id}` — full replace.
