@@ -1719,6 +1719,23 @@ pub trait IdentityEngine: Send + Sync {
         page: &PageRequest,
     ) -> Result<PagedResult<User>, IdentityError>;
 
+    /// Lists one page of users in user-id order for SCIM `startIndex` paging
+    /// (#644). `position` is zero-based. `total` is the exact user count.
+    ///
+    /// When an earlier page of this realm ended at `position` on this node,
+    /// the page starts after the last user of that page. A client that pages
+    /// in sequence then reads only its page, and a user deleted from an
+    /// earlier page does not move a user past the client. Any other position
+    /// walks the user keys up to it. `limit` is capped at
+    /// [`MAX_PAGE_LIMIT`](crate::core::MAX_PAGE_LIMIT); `0` returns only the
+    /// total.
+    fn list_users_at_position(
+        &self,
+        realm_id: &RealmId,
+        position: u64,
+        limit: u32,
+    ) -> Result<PagedResult<User>, IdentityError>;
+
     /// Searches and/or sorts users.
     ///
     /// When `query` is non-trivial (≥ 2 characters or glob/exact syntax),

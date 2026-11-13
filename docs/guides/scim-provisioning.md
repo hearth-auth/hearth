@@ -223,6 +223,15 @@ GET /realms/my-realm/scim/v2/Users?filter=userName eq "alice@example.com"
 GET /realms/my-realm/scim/v2/Users?filter=active eq true
 ```
 
+On `/Users`, an `eq` on `userName`, `emails.value`, `externalId` or `id` reads an index, alone
+or as one side of an `and`. It costs the same in a realm of any size. `externalId` is
+case-exact (RFC 7643); the other three ignore case.
+
+Any other `/Users` filter, for example `active eq true` or `displayName co "Smith"`, reads every
+user of the realm. In a realm with more than 10,000 users, such a filter gets `400` with
+`"scimType": "tooMany"` (RFC 7644 §3.12), not the matches of part of the realm. Use an indexed
+`eq` there, or page through all users without a filter.
+
 ## Pagination
 
 Use `startIndex` (1-based) and `count` for page navigation:
@@ -243,7 +252,15 @@ Response wraps results in a `ListResponse`:
 }
 ```
 
-Maximum scan per request: 1 000 records. For large realms, iterate with `startIndex`.
+Without a filter, `/Users` reads one page per request, and `totalResults` is the exact number
+of users in the realm. Pages are in user-id order. `count` is at most 200.
+
+Page in sequence (`startIndex=1`, then `1 + count`, and so on). Hearth remembers where each page
+ended, so the next page in sequence starts there: it reads only its own users, and a user deleted
+from an earlier page does not make the client skip a user. Another `startIndex` (a jump) also
+works, but it reads the user keys up to that position.
+
+`/Groups` pages in memory over at most 1,000 groups per request.
 
 ## Configuring Okta
 

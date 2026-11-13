@@ -56,6 +56,15 @@ pub const MAX_SCIM_OPERATIONS: usize = 1_000;
 /// realm.
 pub const SCIM_MAX_SCAN_LIMIT: usize = 1_000;
 
+/// Most users that a SCIM `GET /Users` filter with no index reads (#644).
+///
+/// `eq` on `userName`, `emails.value`, `externalId` or `id` reads an index
+/// and does not count against this limit. Any other filter reads every user
+/// of the realm. In a realm with more users, such a filter gets `400` with
+/// `scimType` `tooMany` (RFC 7644 §3.12), not the matches of part of the
+/// realm.
+pub const SCIM_FILTER_SCAN_LIMIT: usize = 10_000;
+
 /// Maximum SAML XML parse-event count per `AuthnResponse` (A-35).
 pub const MAX_SAML_XML_EVENTS: usize = 10_000;
 
