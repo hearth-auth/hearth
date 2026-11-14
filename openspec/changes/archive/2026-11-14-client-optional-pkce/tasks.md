@@ -16,4 +16,4 @@
 
 - [x] 3.1 Docs (configuration reference, API reference, backup guide) and `CHANGELOG.md`.
 - [x] 3.2 `scripts/conformance-oidf/hearth.yaml`: the static clients set `require_pkce: false`.
-- [ ] 3.3 OpenID Foundation run: the Basic OP plan runs past the PKCE stop with the release image.
+- [x] 3.3 OpenID Foundation run: the Basic OP plan runs past the PKCE stop with the release image.
