@@ -337,6 +337,10 @@ struct BackupClient {
     /// has no `created_at`; the restore then stamps the restore time.
     #[serde(default)]
     created_at: Option<crate::core::Timestamp>,
+    /// #780. Absent in archives written before the field, which restore as
+    /// `true`.
+    #[serde(default = "default_true")]
+    require_pkce: bool,
 }
 
 fn default_true() -> bool {
@@ -1562,6 +1566,7 @@ impl BackupImporter {
                 dpop_bound_access_tokens: client.dpop_bound_access_tokens,
                 mfa_required: client.mfa_required,
                 created_at: client.created_at,
+                require_pkce: Some(client.require_pkce),
             };
 
             // Validate before anything is written or deleted — with exactly

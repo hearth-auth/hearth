@@ -163,7 +163,9 @@ The primary goals are credential theft, token forgery, and denial of service.
   storage. Refresh tokens are single-use; presenting a previously-used refresh token is
   treated as theft and triggers family revocation.
 - *PKCE bypass*: All public OAuth 2.0 clients must supply a `code_challenge`. The
-  authorization server rejects authorization requests without one.
+  authorization server rejects authorization requests without one. Confidential clients must
+  too, unless an admin sets `require_pkce: false` for one client. A token request that sends a
+  `code_verifier` for a code issued without a `code_challenge` is refused (`invalid_grant`).
 - *Password enumeration*: Hash verification uses `subtle::ConstantTimeEq` for constant-time
   comparison. Error responses do not distinguish between "user not found" and "wrong password".
 - *DoS via request flooding*: Tower `Buffer` enforces a configurable request queue depth

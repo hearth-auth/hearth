@@ -43,6 +43,9 @@ class V1OAuthClient:
         dpop_bound_access_tokens (bool | Unset): RFC 9449 s5.2: when true, every token request from this client must
             carry
             a DPoP proof, and every token it gets is bound to the proof's key.
+        require_pkce (bool | Unset): When true (the default), every authorization request from this client
+            must carry a PKCE S256 code_challenge. Only a confidential client can
+            have false; a public client always needs PKCE. Always set in a response.
     """
 
     client_id: str | Unset = UNSET
@@ -55,6 +58,7 @@ class V1OAuthClient:
     id_token_signed_response_alg: str | Unset = UNSET
     client_secret: str | Unset = UNSET
     dpop_bound_access_tokens: bool | Unset = UNSET
+    require_pkce: bool | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -84,6 +88,8 @@ class V1OAuthClient:
 
         dpop_bound_access_tokens = self.dpop_bound_access_tokens
 
+        require_pkce = self.require_pkce
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update({})
@@ -107,6 +113,8 @@ class V1OAuthClient:
             field_dict["client_secret"] = client_secret
         if dpop_bound_access_tokens is not UNSET:
             field_dict["dpop_bound_access_tokens"] = dpop_bound_access_tokens
+        if require_pkce is not UNSET:
+            field_dict["require_pkce"] = require_pkce
 
         return field_dict
 
@@ -140,6 +148,8 @@ class V1OAuthClient:
 
         dpop_bound_access_tokens = d.pop("dpop_bound_access_tokens", UNSET)
 
+        require_pkce = d.pop("require_pkce", UNSET)
+
         v1o_auth_client = cls(
             client_id=client_id,
             client_name=client_name,
@@ -151,6 +161,7 @@ class V1OAuthClient:
             id_token_signed_response_alg=id_token_signed_response_alg,
             client_secret=client_secret,
             dpop_bound_access_tokens=dpop_bound_access_tokens,
+            require_pkce=require_pkce,
         )
 
         v1o_auth_client.additional_properties = d

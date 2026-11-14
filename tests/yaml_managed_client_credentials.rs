@@ -171,8 +171,8 @@ async fn patch(
     )
 }
 
-/// `PATCH /admin/applications/{id}` refuses `jwks` and
-/// `assertion_public_key` on a YAML-managed application with `409`, naming
+/// `PATCH /admin/applications/{id}` refuses `jwks`, `assertion_public_key`
+/// and `require_pkce` on a YAML-managed application with `409`, naming
 /// `hearth.yaml`, and changes nothing. A non-credential edit still works.
 #[tokio::test]
 async fn rest_refuses_credential_changes_on_a_yaml_managed_application() {
@@ -186,6 +186,9 @@ async fn rest_refuses_credential_changes_on_a_yaml_managed_application() {
     for body in [
         serde_json::json!({ "jwks": JWKS_JSON }),
         serde_json::json!({ "assertion_public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc" }),
+        // #780: reconcile re-applies `require_pkce` from YAML, so a runtime
+        // value would not last.
+        serde_json::json!({ "require_pkce": true }),
     ] {
         let (status, resp) = patch(&h, &token, &realm, client.client_id(), body.clone()).await;
         assert_eq!(status, StatusCode::CONFLICT, "{body}: {resp}");
@@ -223,6 +226,10 @@ async fn the_engine_refuses_credential_changes_on_a_yaml_managed_application() {
         },
         UpdateClientRequest {
             assertion_public_key: Some(None),
+            ..Default::default()
+        },
+        UpdateClientRequest {
+            require_pkce: Some(true),
             ..Default::default()
         },
     ] {

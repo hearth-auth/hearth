@@ -5813,6 +5813,10 @@
           "dpop_bound_access_tokens": {
             "type": "boolean",
             "description": "RFC 9449 s5.2: when true, every token request from this client must carry\na DPoP proof, and every token it gets is bound to the proof's key."
+          },
+          "require_pkce": {
+            "type": "boolean",
+            "description": "When true (the default), every authorization request from this client\nmust carry a PKCE S256 code_challenge. Only a confidential client can\nhave false; a public client always needs PKCE. Always set in a response."
           }
         },
         "description": "A registered OAuth 2.0 client."

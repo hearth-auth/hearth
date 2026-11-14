@@ -2951,6 +2951,10 @@ struct AdminUpdateClientBody {
     /// RFC 9449 §5.2 `dpop_bound_access_tokens`: `true` makes every token
     /// request from this client need a DPoP proof. Omit to leave unchanged.
     dpop_bound_access_tokens: Option<bool>,
+    /// #780: `false` lets this confidential client send an authorization
+    /// request without PKCE. Omit to leave unchanged; the engine refuses
+    /// `false` for a public client.
+    require_pkce: Option<bool>,
 }
 
 /// Deserializes `jwks` for [`AdminUpdateClientBody`]: absent → `None`,
@@ -3055,6 +3059,9 @@ async fn admin_update_client(
         // Validated by `update_client_inner` (public signing keys only).
         jwks: body.jwks,
         dpop_bound_access_tokens: body.dpop_bound_access_tokens,
+        // Validated by `update_client_inner` (`false` only for a confidential
+        // client).
+        require_pkce: body.require_pkce,
         ..Default::default()
     };
 

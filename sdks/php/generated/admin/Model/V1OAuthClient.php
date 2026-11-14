@@ -73,6 +73,14 @@ class V1OAuthClient implements AdditionalPropertiesInterface
      */
     protected $dpopBoundAccessTokens;
     /**
+     * When true (the default), every authorization request from this client
+     * must carry a PKCE S256 code_challenge. Only a confidential client can
+     * have false; a public client always needs PKCE. Always set in a response.
+     *
+     * @var bool|null
+     */
+    protected $requirePkce;
+    /**
      * @return string|null
      */
     public function getClientId(): ?string
@@ -286,8 +294,34 @@ class V1OAuthClient implements AdditionalPropertiesInterface
         $this->dpopBoundAccessTokens = $dpopBoundAccessTokens;
         return $this;
     }
+    /**
+     * When true (the default), every authorization request from this client
+     * must carry a PKCE S256 code_challenge. Only a confidential client can
+     * have false; a public client always needs PKCE. Always set in a response.
+     *
+     * @return bool|null
+     */
+    public function getRequirePkce(): ?bool
+    {
+        return $this->requirePkce;
+    }
+    /**
+    * When true (the default), every authorization request from this client
+    must carry a PKCE S256 code_challenge. Only a confidential client can
+    have false; a public client always needs PKCE. Always set in a response.
+    *
+    * @param bool|null $requirePkce
+    *
+    * @return self
+    */
+    public function setRequirePkce(?bool $requirePkce): self
+    {
+        $this->initialized['requirePkce'] = true;
+        $this->requirePkce = $requirePkce;
+        return $this;
+    }
     public function definedProperties(): array
     {
-        return ['clientId' => ['client_id', 'getClientId', 'setClientId'], 'clientName' => ['client_name', 'getClientName', 'setClientName'], 'redirectUris' => ['redirect_uris', 'getRedirectUris', 'setRedirectUris'], 'createdAt' => ['created_at', 'getCreatedAt', 'setCreatedAt'], 'isConfidential' => ['is_confidential', 'getIsConfidential', 'setIsConfidential'], 'grantTypes' => ['grant_types', 'getGrantTypes', 'setGrantTypes'], 'accessTokenAuthorization' => ['access_token_authorization', 'getAccessTokenAuthorization', 'setAccessTokenAuthorization'], 'idTokenSignedResponseAlg' => ['id_token_signed_response_alg', 'getIdTokenSignedResponseAlg', 'setIdTokenSignedResponseAlg'], 'clientSecret' => ['client_secret', 'getClientSecret', 'setClientSecret'], 'dpopBoundAccessTokens' => ['dpop_bound_access_tokens', 'getDpopBoundAccessTokens', 'setDpopBoundAccessTokens']];
+        return ['clientId' => ['client_id', 'getClientId', 'setClientId'], 'clientName' => ['client_name', 'getClientName', 'setClientName'], 'redirectUris' => ['redirect_uris', 'getRedirectUris', 'setRedirectUris'], 'createdAt' => ['created_at', 'getCreatedAt', 'setCreatedAt'], 'isConfidential' => ['is_confidential', 'getIsConfidential', 'setIsConfidential'], 'grantTypes' => ['grant_types', 'getGrantTypes', 'setGrantTypes'], 'accessTokenAuthorization' => ['access_token_authorization', 'getAccessTokenAuthorization', 'setAccessTokenAuthorization'], 'idTokenSignedResponseAlg' => ['id_token_signed_response_alg', 'getIdTokenSignedResponseAlg', 'setIdTokenSignedResponseAlg'], 'clientSecret' => ['client_secret', 'getClientSecret', 'setClientSecret'], 'dpopBoundAccessTokens' => ['dpop_bound_access_tokens', 'getDpopBoundAccessTokens', 'setDpopBoundAccessTokens'], 'requirePkce' => ['require_pkce', 'getRequirePkce', 'setRequirePkce']];
     }
 }

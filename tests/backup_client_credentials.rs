@@ -561,3 +561,41 @@ async fn restored_public_client_stays_public() {
         .await;
     assert_eq!(s, 201, "a public client pushes on its client_id alone: {b}");
 }
+
+/// #780: a backup restore keeps a confidential client's `require_pkce: false`.
+#[tokio::test]
+async fn restored_client_keeps_require_pkce_false() {
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
+    let realm = source_realm(&src).await;
+    let cid = src
+        .identity()
+        .register_client(
+            &realm,
+            &RegisterClientRequest {
+                client_name: "No-PKCE confidential client".to_string(),
+                redirect_uris: vec![REDIRECT_URI.to_string()],
+                grant_types: vec!["authorization_code".to_string()],
+                client_secret: Some("a-backup-client-secret-780".to_string()),
+                trust_level: ClientTrustLevel::FirstParty,
+                require_pkce: false,
+                ..Default::default()
+            },
+        )
+        .expect("register client")
+        .client_id()
+        .clone();
+
+    let dst = restore(&src, &realm).await;
+    let restored = dst
+        .h
+        .identity()
+        .get_client(&dst.realm_id, &cid)
+        .expect("get client")
+        .expect("restored");
+    assert!(
+        !restored.require_pkce(),
+        "require_pkce: false must be restored"
+    );
+}

@@ -2075,6 +2075,25 @@ fn validate_app_id_token_alg(
     });
 }
 
+/// Validates an application's `require_pkce` (#780): `false` only for a
+/// confidential application. The engine refuses it at reconcile too;
+/// `hearth config validate` must say so first.
+fn validate_app_require_pkce(
+    prefix: &str,
+    app: &super::types::ApplicationYamlConfig,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let confidential = app.confidential == Some(true) || app.jwks_json().is_some();
+    if app.require_pkce == Some(false) && !confidential {
+        issues.push(ValidationIssue {
+            field: format!("{prefix}.require_pkce"),
+            reason: "false is allowed only for a confidential application \
+                     (confidential: true, or an inline jwks for private_key_jwt)"
+                .to_string(),
+        });
+    }
+}
+
 /// Validates an application's inline `jwks`: the engine refuses an invalid
 /// set at reconcile, so `hearth config validate` must say so first.
 fn validate_app_jwks(
@@ -2130,6 +2149,7 @@ fn validate_realm_applications_all(
             }
             validate_app_id_token_alg(&prefix, app, issues);
             validate_app_jwks(&prefix, app, issues);
+            validate_app_require_pkce(&prefix, app, issues);
             // A confidential client whose `client_secret` is present but empty
             // authenticates with `Authorization: Basic base64("<client_id>:")`,
             // which any caller who knows the client id can send. The `is_none()`
@@ -3759,6 +3779,58 @@ realms:
                 "{bad:?} must be refused by `hearth config validate`, not first at reconcile"
             );
         }
+    }
+
+    /// #780: `require_pkce: false` is accepted only for a confidential
+    /// application (a client secret or an inline `jwks` for
+    /// `private_key_jwt`).
+    #[test]
+    fn config_refuses_require_pkce_false_for_a_public_application() {
+        let yaml = |app: &str| {
+            format!(
+                r#"
+oidc:
+  issuer: "https://auth.example.com"
+server:
+  trust_forwarded_proto: true
+  trusted_proxies: ["127.0.0.1"]
+security:
+  key_encryption_key: "1111111111111111111111111111111111111111111111111111111111111111"
+realms:
+  myrealm:
+    applications:
+      my-app:
+        name: "My App"
+        redirect_uris: ["https://app.example.com/cb"]
+{app}
+"#
+            )
+        };
+        let pkce_issues = |app: &str| {
+            Config::from_yaml_str_unchecked(&yaml(app))
+                .expect("fixture parses")
+                .validate_all()
+                .into_iter()
+                .filter(|issue| issue.field == "realms.myrealm.applications.my-app.require_pkce")
+                .count()
+        };
+        let secret = "        confidential: true\n        client_secret: \"s3cr3t-s3cr3t\"\n";
+        let jwks = "        jwks: {keys: [{kty: OKP, crv: Ed25519, x: \"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\"}]}\n";
+        assert_eq!(
+            pkce_issues("        require_pkce: false"),
+            1,
+            "a public app"
+        );
+        assert_eq!(
+            pkce_issues(&format!("{secret}        require_pkce: false")),
+            0
+        );
+        assert_eq!(
+            pkce_issues(&format!("{jwks}        require_pkce: false")),
+            0
+        );
+        assert_eq!(pkce_issues("        require_pkce: true"), 0);
+        assert_eq!(pkce_issues(""), 0);
     }
 
     #[test]

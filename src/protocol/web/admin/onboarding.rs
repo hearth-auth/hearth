@@ -354,6 +354,7 @@ pub async fn admin_onboarding_app_post(
         id_token_signed_response_alg: None,
         dpop_bound_access_tokens: false,
         mfa_required: None,
+        require_pkce: true,
     };
 
     match state.identity.register_client(&realm_id, &req) {

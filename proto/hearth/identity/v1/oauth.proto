@@ -132,6 +132,10 @@ message OAuthClient {
   // RFC 9449 s5.2: when true, every token request from this client must carry
   // a DPoP proof, and every token it gets is bound to the proof's key.
   bool dpop_bound_access_tokens = 10 [json_name = "dpop_bound_access_tokens"];
+  // When true (the default), every authorization request from this client
+  // must carry a PKCE S256 code_challenge. Only a confidential client can
+  // have false; a public client always needs PKCE. Always set in a response.
+  optional bool require_pkce = 11;
 }
 
 // A cursor-based page of OAuth clients.

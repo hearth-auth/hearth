@@ -678,8 +678,12 @@ type OAuthClient struct {
 	// RFC 9449 s5.2: when true, every token request from this client must carry
 	// a DPoP proof, and every token it gets is bound to the proof's key.
 	DpopBoundAccessTokens bool `protobuf:"varint,10,opt,name=dpop_bound_access_tokens,proto3" json:"dpop_bound_access_tokens,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+	// When true (the default), every authorization request from this client
+	// must carry a PKCE S256 code_challenge. Only a confidential client can
+	// have false; a public client always needs PKCE. Always set in a response.
+	RequirePkce   *bool `protobuf:"varint,11,opt,name=require_pkce,json=requirePkce,proto3,oneof" json:"require_pkce,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *OAuthClient) Reset() {
@@ -778,6 +782,13 @@ func (x *OAuthClient) GetClientSecret() string {
 func (x *OAuthClient) GetDpopBoundAccessTokens() bool {
 	if x != nil {
 		return x.DpopBoundAccessTokens
+	}
+	return false
+}
+
+func (x *OAuthClient) GetRequirePkce() bool {
+	if x != nil && x.RequirePkce != nil {
+		return *x.RequirePkce
 	}
 	return false
 }
@@ -2340,7 +2351,7 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"\f_client_nameB\x1d\n" +
 	"\x1b_access_token_authorizationB\x0e\n" +
 	"\f_trust_levelB\x1f\n" +
-	"\x1d_id_token_signed_response_alg\"\x82\x04\n" +
+	"\x1d_id_token_signed_response_alg\"\xbb\x04\n" +
 	"\vOAuthClient\x12\x1b\n" +
 	"\tclient_id\x18\x01 \x01(\tR\bclientId\x12\x1f\n" +
 	"\vclient_name\x18\x02 \x01(\tR\n" +
@@ -2355,8 +2366,10 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"\x1cid_token_signed_response_alg\x18\b \x01(\tR\x1cid_token_signed_response_alg\x12)\n" +
 	"\rclient_secret\x18\t \x01(\tH\x00R\rclient_secret\x88\x01\x01\x12:\n" +
 	"\x18dpop_bound_access_tokens\x18\n" +
-	" \x01(\bR\x18dpop_bound_access_tokensB\x10\n" +
-	"\x0e_client_secret\"~\n" +
+	" \x01(\bR\x18dpop_bound_access_tokens\x12&\n" +
+	"\frequire_pkce\x18\v \x01(\bH\x01R\vrequirePkce\x88\x01\x01B\x10\n" +
+	"\x0e_client_secretB\x0f\n" +
+	"\r_require_pkce\"~\n" +
 	"\x0fOAuthClientPage\x125\n" +
 	"\x05items\x18\x01 \x03(\v2\x1f.hearth.identity.v1.OAuthClientR\x05items\x12$\n" +
 	"\vnext_cursor\x18\x02 \x01(\tH\x00R\n" +

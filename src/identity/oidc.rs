@@ -208,6 +208,10 @@ pub struct RegisterClientRequest {
     /// an origin may be a redirect-URI base without being allowed to make
     /// credentialed cross-origin token requests.
     pub cors_origins: Vec<String>,
+    /// Whether an authorization request must carry PKCE (#780). Default
+    /// `true`. `false` is accepted only for a confidential client. Dynamic
+    /// client registration always passes `true`.
+    pub require_pkce: bool,
 }
 
 impl Default for RegisterClientRequest {
@@ -236,6 +240,7 @@ impl Default for RegisterClientRequest {
             id_token_signed_response_alg: None,
             dpop_bound_access_tokens: false,
             mfa_required: None,
+            require_pkce: true,
         }
     }
 }
@@ -487,6 +492,17 @@ pub struct OAuthClient {
     /// tokens then follow `grant_types` exactly.
     #[serde(default)]
     grant_types_enforced: bool,
+    /// Whether an authorization request of this client must carry PKCE
+    /// (`code_challenge` with `S256`). Default `true`; a record written
+    /// before the field existed reads as `true`. Only a confidential client
+    /// can store `false` (#780), and a public client needs PKCE whatever
+    /// this field says ([`Self::pkce_required`]).
+    #[serde(default = "default_require_pkce")]
+    require_pkce: bool,
+}
+
+fn default_require_pkce() -> bool {
+    true
 }
 
 fn default_require_consent() -> bool {
@@ -547,6 +563,7 @@ impl OAuthClient {
             dpop_bound_access_tokens: false,
             mfa_required: None,
             grant_types_enforced: true,
+            require_pkce: true,
         }
     }
 
@@ -585,6 +602,7 @@ impl OAuthClient {
             dpop_bound_access_tokens: false,
             mfa_required: None,
             grant_types_enforced: true,
+            require_pkce: true,
         }
     }
 
@@ -893,6 +911,24 @@ impl OAuthClient {
         self.mfa_required = value;
     }
 
+    /// The stored `require_pkce` setting (#780). Use [`Self::pkce_required`]
+    /// to decide if a request needs PKCE.
+    pub fn require_pkce(&self) -> bool {
+        self.require_pkce
+    }
+
+    /// Whether an authorization request of this client must carry PKCE: the
+    /// `require_pkce` setting, or always for a public client (#780).
+    pub fn pkce_required(&self) -> bool {
+        self.require_pkce || self.is_public()
+    }
+
+    /// Sets the `require_pkce` setting. The caller checks that `false` is
+    /// only set for a confidential client.
+    pub(crate) fn set_require_pkce(&mut self, value: bool) {
+        self.require_pkce = value;
+    }
+
     /// Returns `true` if this client was provisioned from YAML configuration.
     ///
     /// YAML-managed clients have deterministic UUID v5 identifiers (derived
@@ -961,6 +997,9 @@ pub struct UpdateClientRequest {
     ///
     /// `None` leaves unchanged; `Some(vec)` replaces the entire list.
     pub cors_origins: Option<Vec<String>>,
+    /// New `require_pkce` setting (#780). `None` leaves unchanged. `false`
+    /// is refused unless the client is confidential after the update.
+    pub require_pkce: Option<bool>,
 }
 
 // ===== RP-Initiated Logout =====

@@ -362,7 +362,8 @@ A realm in which any client selected RS256 ID tokens (`id_token_signed_response_
 
 Each client record carries everything the client authenticates with: the
 stored client-secret **hash** (never a plaintext secret), the assertion public
-key, the inline `jwks` / `jwks_uri`, and its `dpop_bound_access_tokens` flag,
+key, the inline `jwks` / `jwks_uri`, and its `dpop_bound_access_tokens` and
+`require_pkce` flags,
 together with its consent, logout, CORS, MFA and lifecycle settings. A restore writes them back in the same single write that re-creates
 the client, so a confidential or `private_key_jwt` client comes back exactly
 as strong as it was: it authenticates with the same secret or key, and is
