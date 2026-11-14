@@ -4,20 +4,26 @@
 //
 // The generator reaches the server by name; `options.hosts` maps that name to
 // the server's address, and SSL_CERT_FILE makes k6 trust the run's CA.
+//
+// A run may span several realms (gen-config.sh REALMS): `realms` lists them,
+// from STRESS_REALM, STRESS_APP_CLIENT_ID, STRESS_API_CLIENT_ID and
+// STRESS_API_SECRET (realm 1) and the same names with `_<k>` (realm k), for
+// STRESS_REALMS realms (default 1; see realms.js). The helpers below take a
+// realm and default to realm 1.
 import http from 'k6/http';
 import { sleep } from 'k6';
 import crypto from 'k6/crypto';
 import encoding from 'k6/encoding';
+import { realmsFromEnv } from './realms.js';
+
+/** The run's realms; realm 1 first. */
+export const realms = realmsFromEnv(__ENV);
 
 export const env = {
   base: req('STRESS_BASE'),
   host: req('STRESS_HOST'),
   serverIp: req('STRESS_SERVER_IP'),
-  realm: req('STRESS_REALM'),
   redirectUri: req('STRESS_REDIRECT_URI'),
-  appClientId: req('STRESS_APP_CLIENT_ID'),
-  apiClientId: req('STRESS_API_CLIENT_ID'),
-  apiSecret: __ENV.STRESS_API_SECRET || '',
   loginUsers: parseInt(req('STRESS_LOGIN_USERS'), 10),
   userPassword: req('STRESS_USER_PASSWORD'),
   adminEmail: req('STRESS_ADMIN_EMAIL'),
@@ -98,20 +104,17 @@ function stepParams(jar, name, tags) {
   };
 }
 
-/**
- * The four requests of one sign-in, as plain request descriptions, so a
- * caller can run them one at a time (signIn) or as batches (signInMany).
- */
-const loginUrl = () => `${env.base}/ui/realms/${env.realm}/login`;
-const authorizeUrl = () => `${env.base}/ui/realms/${env.realm}/oauth/authorize`;
-const tokenUrl = () => `${env.base}/realms/${env.realm}/token`;
+/** The sign-in URLs of realm `r` (an entry of `realms`). */
+const loginUrl = (r) => `${env.base}/ui/realms/${r.name}/login`;
+const authorizeUrl = (r) => `${env.base}/ui/realms/${r.name}/oauth/authorize`;
+const tokenUrl = (r) => `${env.base}/realms/${r.name}/token`;
 
 /**
- * Signs `email` in through the login form and the code flow. Returns
- * `{ ok, access, refresh, durationMs, failedStep, status }`. `durationMs` is
- * the sum of the four requests' durations.
+ * Signs `email` in to realm `r` through the login form and the code flow.
+ * Returns `{ ok, access, refresh, durationMs, failedStep, status }`.
+ * `durationMs` is the sum of the four requests' durations.
  */
-export function signIn(email, password, tags) {
+export function signIn(email, password, tags, r = realms[0]) {
   const jar = new http.CookieJar();
   let duration = 0;
   const fail = (step, res) => ({
@@ -122,12 +125,12 @@ export function signIn(email, password, tags) {
     durationMs: duration,
   });
 
-  const page = http.get(loginUrl(), stepParams(jar, 'login_page', tags));
+  const page = http.get(loginUrl(r), stepParams(jar, 'login_page', tags));
   duration += page.timings.duration;
   if (page.status !== 200) return fail('login_page', page);
 
   const posted = http.post(
-    loginUrl(),
+    loginUrl(r),
     { _csrf: hidden(page.body, '_csrf') || '', email, password },
     stepParams(jar, 'login_submit', tags),
   );
@@ -137,9 +140,9 @@ export function signIn(email, password, tags) {
   const { verifier, challenge } = pkce();
   const state = b64url(randomBytes(12));
   const authz = http.get(
-    `${authorizeUrl()}?${query({
+    `${authorizeUrl(r)}?${query({
       response_type: 'code',
-      client_id: env.appClientId,
+      client_id: r.appClientId,
       redirect_uri: env.redirectUri,
       state,
       scope: 'openid',
@@ -154,12 +157,12 @@ export function signIn(email, password, tags) {
   if (!p.code || p.state !== state) return fail('authorize', authz);
 
   const token = http.post(
-    tokenUrl(),
+    tokenUrl(r),
     {
       grant_type: 'authorization_code',
       code: p.code,
       redirect_uri: env.redirectUri,
-      client_id: env.appClientId,
+      client_id: r.appClientId,
       code_verifier: verifier,
     },
     stepParams(jar, 'code_exchange', tags),
@@ -176,25 +179,25 @@ export function signIn(email, password, tags) {
 }
 
 /**
- * Signs many users in, `parallel` at a time, with http.batch per step. Used by
- * setup() to build the token pool; not a measured journey. Returns the
- * sessions that worked and the number that failed.
+ * Signs many users in to realm `r`, `parallel` at a time, with http.batch per
+ * step. Used by setup() to build the token pool; not a measured journey.
+ * Returns the sessions that worked and the number that failed.
  */
-export function signInMany(emails, password, parallel) {
+export function signInMany(emails, password, parallel, r = realms[0]) {
   // A small server sheds concurrent password checks with 503 (the KDF gate):
   // retry the users that failed, a few rounds, with a pause between rounds.
   const sessions = [];
   let pending = emails;
   for (let round = 0; round < 6 && pending.length > 0; round++) {
     if (round > 0) sleep(1 + round);
-    const r = signInPass(pending, password, parallel);
-    for (const s of r.sessions) sessions.push(s);
-    pending = r.retry;
+    const pass = signInPass(pending, password, parallel, r);
+    for (const s of pass.sessions) sessions.push(s);
+    pending = pass.retry;
   }
   return { sessions, failed: pending.length };
 }
 
-function signInPass(emails, password, parallel) {
+function signInPass(emails, password, parallel, r) {
   const sessions = [];
   const retry = [];
   for (let i = 0; i < emails.length; i += parallel) {
@@ -203,12 +206,12 @@ function signInPass(emails, password, parallel) {
     const t = { phase: 'setup' };
 
     const pages = http.batch(
-      flows.map((f) => ['GET', loginUrl(), null, stepParams(f.jar, 'login_page', t)]),
+      flows.map((f) => ['GET', loginUrl(r), null, stepParams(f.jar, 'login_page', t)]),
     );
     const posts = http.batch(
       flows.map((f, j) => [
         'POST',
-        loginUrl(),
+        loginUrl(r),
         { _csrf: hidden(pages[j].body, '_csrf') || '', email: f.email, password },
         stepParams(f.jar, 'login_submit', t),
       ]),
@@ -222,9 +225,9 @@ function signInPass(emails, password, parallel) {
     const authzs = http.batch(
       flows.map((f, j) => [
         'GET',
-        `${authorizeUrl()}?${query({
+        `${authorizeUrl(r)}?${query({
           response_type: 'code',
-          client_id: env.appClientId,
+          client_id: r.appClientId,
           redirect_uri: env.redirectUri,
           state: f.state,
           scope: 'openid',
@@ -250,20 +253,20 @@ function signInPass(emails, password, parallel) {
     const tokens = http.batch(
       live.map((f) => [
         'POST',
-        tokenUrl(),
+        tokenUrl(r),
         {
           grant_type: 'authorization_code',
           code: f.code,
           redirect_uri: env.redirectUri,
-          client_id: env.appClientId,
+          client_id: r.appClientId,
           code_verifier: f.verifier,
         },
         stepParams(f.jar, 'code_exchange', t),
       ]),
     );
-    tokens.forEach((r, j) => {
-      if (r.status === 200) {
-        const b = r.json();
+    tokens.forEach((res, j) => {
+      if (res.status === 200) {
+        const b = res.json();
         sessions.push({ access: b.access_token, refresh: b.refresh_token });
       } else {
         retry.push(live[j].email);
@@ -278,11 +281,12 @@ export function claims(jwt) {
   return JSON.parse(encoding.b64decode(jwt.split('.')[1], 'rawurl', 's'));
 }
 
-/** Signs the realm admin in. Throws when it fails: nothing works without it. */
-export function adminSession() {
-  const s = signIn(env.adminEmail, env.adminPassword, { phase: 'setup' });
+/** Signs realm `r`'s admin in. Throws when it fails: nothing works without it. */
+export function adminSession(r = realms[0]) {
+  const s = signIn(env.adminEmail, env.adminPassword, { phase: 'setup' }, r);
   if (!s.ok) {
-    throw new Error(`admin sign-in failed at ${s.failedStep} (status ${s.status})`);
+    const where = realms.length > 1 ? ` in realm ${r.name}` : '';
+    throw new Error(`admin sign-in${where} failed at ${s.failedStep} (status ${s.status})`);
   }
   return s;
 }
@@ -296,7 +300,7 @@ export function adminHeaders(adminToken, realmId) {
   };
 }
 
-/** Basic auth header for the confidential `api` client. */
-export function apiBasic(secret) {
-  return `Basic ${encoding.b64encode(`${env.apiClientId}:${secret}`)}`;
+/** Basic auth header for realm `r`'s confidential `api` client. */
+export function apiBasic(r = realms[0]) {
+  return `Basic ${encoding.b64encode(`${r.apiClientId}:${r.apiSecret}`)}`;
 }

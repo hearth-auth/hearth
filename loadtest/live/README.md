@@ -8,6 +8,7 @@ fails, and records how it fails. It complements the in-repo load test
 |---|---|
 | `gen-config.sh` | Secrets, CA and HTTPS leaf, `hearth.yaml` for one production node |
 | `k6/lib.js` | Sign-in through the hosted login form + authorization code + PKCE; admin helpers |
+| `k6/realms.js` | The realms of a run with several (`REALMS`), and how VUs and imported users spread over them (`k6/test_realms.mjs` tests it) |
 | `k6/prepare.js` | Makes the `api` client a resource server, regenerates its secret, bulk-imports users |
 | `k6/stress.js` | One open-loop ramp of one journey (or a mix) |
 | `k6/verify.js` | Checks every user a `create_user` ramp saw acknowledged still exists |
@@ -138,7 +139,7 @@ soaks on the same servers. A round on AWS takes 2–3 hours and costs a few doll
    `round.sh` gives their arguments. A `drill` line replaces the server's data: put it last.
    With 10M users, set `USERS=10000000` and give the server a larger disk, for example
    `AWS_DISK_GB=150`: the store, its copy, a backup archive and the drill's store each take
-   about 12 GB at 10M.
+   about 12 GB at 10M. For several realms, set `REALMS` (see "Several realms").
 4. **Start the round detached.** It runs for hours, and the agent's background-task monitor can
    kill a long background command:
    ```bash
@@ -155,6 +156,35 @@ soaks on the same servers. A round on AWS takes 2–3 hours and costs a few doll
 6. **Clean up.** Check that `cloud.sh down` printed an empty "left over" list. Then, with an
    admin session, run `loadtest/live/aws-iam.sh down`.
 7. **Publish** the results as one file, `docs/perf/<date>-<server>.md` (see "Report format").
+
+## Several realms (#647 round B)
+
+`REALMS=<N>` (default 1) spreads a run over N realms. `round.sh` and `cloud.sh deploy` pass it
+to `gen-config.sh`; later commands read it from the bundle's `generator.env`. With `REALMS=1`
+(or unset) every file and request is the same as before the setting existed
+(`test_gen_config.sh` compares the bundle byte for byte).
+
+- **Config.** `gen-config.sh` declares the realms `stress`, `stress2` … `stress<N>`. Each has
+  the same `app` and `api` clients and the same seed users (the admin and `LOGIN_USERS`), so
+  the first start seeds N × (`LOGIN_USERS` + 1) users; `deploy` waits for all of them.
+- **Generator settings.** `generator.env` keeps realm 1 in the old variables and adds
+  `STRESS_REALMS=<N>` and, for realm k ≥ 2, `STRESS_REALM_<k>`, `STRESS_APP_CLIENT_ID_<k>`,
+  `STRESS_API_CLIENT_ID_<k>` (UUID v5 of `<realm>/<key>`) and `STRESS_API_SECRET_<k>`.
+  `prepare.js` regenerates every realm's `api` secret, and `deploy` writes all of them to every
+  generator.
+- **Users.** `cloud.sh import <from> <to>` splits the range evenly over the realms in
+  contiguous blocks: with `USERS=1000000` and `REALMS=10`, realm 1 gets `bulk00000000` …
+  `bulk00099999`, realm 2 `bulk00100000` … `bulk00199999`, and so on. A batch never crosses a
+  realm. `fill` writes into realm 1 only.
+- **Load.** Each k6 VU works in one realm for every journey: VU v in realm (v − 1) mod N, so each
+  realm gets `VUS`/N of the VUs. The VU's refresh chain, sign-ins, admin token, admin lookups,
+  introspection client and created users are all in its realm. `setup()` splits the token pool
+  (`POOL`) and `ADMIN_IDS` evenly over the realms. With N > 1, each request is tagged
+  `realm=<name>`.
+- **Durability check.** `create_user` logs `ACK <id> <realm number>`; `verify.js` looks each user
+  up in its realm.
+
+The plan for round B is `plans/647-round-b-c7i-large-10x100k.txt`.
 
 ## Steady-state memory test (weekly, #445)
 

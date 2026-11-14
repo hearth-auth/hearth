@@ -40,6 +40,12 @@
 #   GENERATORS       2     (load generators; ramp rates are split evenly)
 #   IMAGE            hearth-stress:local (Docker image the binary comes from)
 #   LOGIN_USERS      1000  (users with a password; seeded at first start)
+#   REALMS           1     (realms, for deploy: gen-config.sh declares stress,
+#                    stress2 ... stress<N>, each with the clients, the admin and
+#                    LOGIN_USERS; prepare.js gives each api client a secret;
+#                    import splits its users evenly over the realms; each k6 VU
+#                    works in one realm, VU v in realm (v - 1) % N. Later
+#                    commands read N from the bundle's generator.env)
 #   VUS              1000  (k6 VUs per generator: the most journeys in flight)
 #   SETUP_GRACE      seconds between launch and the ramps' common start
 #                    (default: 30, plus time to sign in the token pools)
@@ -291,8 +297,15 @@ install_generator() {
     sysctl -q -w net.ipv4.ip_local_port_range='10240 65535' net.ipv4.tcp_tw_reuse=1"
   scp_to "$ip" /opt/stress/ "$here/sampler.sh" "$here/remote/launch.sh"
   ssh_to "$ip" "chmod 0755 /opt/stress/launch.sh"
-  scp_to "$ip" /opt/stress/k6/ "$here/k6/lib.js" "$here/k6/stress.js" \
+  scp_to "$ip" /opt/stress/k6/ "$here/k6/lib.js" "$here/k6/realms.js" "$here/k6/stress.js" \
     "$here/k6/prepare.js" "$here/k6/verify.js" "$here/k6/fill.js"
+}
+
+# The number of realms in the run's bundle (gen-config.sh REALMS).
+bundle_realms() {
+  local n
+  n=$(sed -n 's/^STRESS_REALMS=//p' "$run/bundle/generator.env" 2> /dev/null)
+  echo "${n:-1}"
 }
 
 hearth_ready() {
@@ -359,7 +372,10 @@ EOF
     install_generator "$(gen_public "$i")" "$bundle"
   done
 
-  log "waiting for Hearth (first start seeds $login_users password users)"
+  local realms
+  realms=$(bundle_realms)
+  log "waiting for Hearth (first start seeds $login_users password users$(
+    [ "$realms" = 1 ] || echo " in each of $realms realms"))"
   local ready=0
   for _ in $(seq 1 360); do
     if hearth_ready; then
@@ -374,7 +390,7 @@ EOF
     sleep 5
   done
   [ "$ready" = 1 ] || die "Hearth did not become ready; see: cloud.sh status"
-  wait_seeded
+  wait_seeded "$realms"
 
   log "checking the binary is a production build (POST /admin/bootstrap must be 404)"
   local code
@@ -384,27 +400,33 @@ EOF
 
   log "preparing the api client (regenerated secret)"
   k6_on_generator "PREPARE_CLIENTS=1 PREPARE_OUT=/opt/stress/prepare.json" run -q prepare.js > /dev/null
-  local secret
-  secret=$(ssh_to "$GEN_PUBLIC" "python3 -c 'import json; print(json.load(open(\"/opt/stress/prepare.json\"))[\"api_secret\"])'")
+  # One line per realm: STRESS_API_SECRET=..., then STRESS_API_SECRET_<k>=...
+  local secrets
+  secrets=$(ssh_to "$GEN_PUBLIC" "python3 -c 'import json
+for k, v in json.load(open(\"/opt/stress/prepare.json\"))[\"api_secrets\"].items(): print(k + \"=\" + v)'")
+  [ "$(grep -c '^STRESS_API_SECRET' <<< "$secrets")" = "$realms" ] \
+    || die "prepare.js gave $(grep -c '^STRESS_API_SECRET' <<< "$secrets") api secrets for $realms realms"
   for i in $(seq 1 "$GEN_COUNT"); do
-    ssh_to "$(gen_public "$i")" "sed -i '/^STRESS_API_SECRET=/d' /opt/stress/generator.env && \
-      cat >> /opt/stress/generator.env" <<< "STRESS_API_SECRET=$secret"
+    ssh_to "$(gen_public "$i")" "sed -i '/^STRESS_API_SECRET\(_[0-9][0-9]*\)\?=/d' /opt/stress/generator.env && \
+      cat >> /opt/stress/generator.env" <<< "$secrets"
   done
   record_inventory
   log "deployed. Next: cloud.sh fill <from> <to>, or cloud.sh ramp <name> <journey> <start> <step> <steps>"
 }
 
 # Waits until the declared seed users exist: the first start creates them one
-# by one after the listener is up.
+# by one after the listener is up. $1: realms (each has the admin and
+# LOGIN_USERS).
 wait_seeded() {
+  local want=$((${1:-1} * (login_users + 1)))
   for _ in $(seq 1 720); do
     if ssh_to "$SERVER_PUBLIC" "grep -c 'created seed user' /opt/hearth/out/hearth.log" 2> /dev/null \
-      | awk -v n="$login_users" '{exit !($1 >= n + 1)}'; then
+      | awk -v n="$want" '{exit !($1 >= n)}'; then
       return 0
     fi
     sleep 5
   done
-  die "seeding $login_users users did not finish"
+  die "seeding $want users did not finish"
 }
 
 # The commit the image was built from: its OCI revision label, else IMAGE_COMMIT.
@@ -437,6 +459,7 @@ record_inventory() {
     echo "tooling revision: $(git -C "$repo" rev-parse HEAD)"
     echo "k6: $k6_version"
     echo "login_users: $login_users"
+    echo "realms: $(bundle_realms)"
     echo "vus per generator: $vus"
   } >> "$results/inventory.txt"
   log "inventory: $results/inventory.txt"
@@ -450,7 +473,9 @@ cmd_import() {
 
 # Runs <script> over the user range [from, to), split evenly across the
 # generators as detached jobs, waits, and adds up the result JSONs.
-# $5: the script's range variable prefix (FILL or IMPORT).
+# $5: the script's range variable prefix (FILL or IMPORT). <prefix>_ALL_FROM and
+# <prefix>_ALL_TO give each job the whole range: prepare.js splits it over the
+# realms (fill.js writes into realm 1 only).
 run_split_job() {
   local name=$1 from=$2 to=$3 script=$4 prefix=$5 limit=$6 i lo hi
   local per=$((((to - from) + GEN_COUNT - 1) / GEN_COUNT))
@@ -470,6 +495,8 @@ K6_SCRIPT=$script
 K6_NO_CSV=1
 ${prefix}_FROM=$lo
 ${prefix}_TO=$hi
+${prefix}_ALL_FROM=$from
+${prefix}_ALL_TO=$to
 FILL_VUS=${FILL_VUS:-64}
 IMPORT_BATCH=${IMPORT_BATCH:-2000}
 IMPORT_VUS=${IMPORT_VUS:-8}
@@ -814,7 +841,7 @@ case ${1:-} in
     cmd_down "$@"
     ;;
   *)
-    sed -n '2,52p' "$0"
+    sed -n '2,58p' "$0"
     exit 2
     ;;
 esac

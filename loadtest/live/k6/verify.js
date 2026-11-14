@@ -1,6 +1,8 @@
 // Durability check after a crash or restart: every user that a create_user
 // ramp saw acknowledged (201) must still exist. Reads the "ACK <id>" lines
-// that stress.js wrote to its console output, then GETs each id.
+// that stress.js wrote to its console output, then GETs each id. With several
+// realms (STRESS_REALMS), a line is "ACK <id> <realm number>" and the id is
+// looked up in that realm, as that realm's admin.
 //
 //   missing  404: an acknowledged write was lost. Must be 0.
 //   errors   any other failure: the check could not decide; re-run it.
@@ -11,16 +13,11 @@ import http from 'k6/http';
 import exec from 'k6/execution';
 import { SharedArray } from 'k6/data';
 import { Counter } from 'k6/metrics';
-import { adminHeaders, adminSession, claims, env, hosts, TIMEOUT } from './lib.js';
+import { adminHeaders, adminSession, claims, env, hosts, realms, TIMEOUT } from './lib.js';
+import { parseAcks } from './realms.js';
 
-const ids = new SharedArray('acked', () => {
-  const text = open(__ENV.ACK_FILE);
-  const out = [];
-  const re = /ACK ([0-9a-f-]{36})/g;
-  let m;
-  while ((m = re.exec(text)) !== null) out.push(m[1]);
-  return out;
-});
+// [{ id, realm }], realm 0-based.
+const ids = new SharedArray('acked', () => parseAcks(open(__ENV.ACK_FILE)));
 
 const found = new Counter('verify_found');
 const missing = new Counter('verify_missing');
@@ -43,15 +40,26 @@ export const options = {
 };
 
 export function setup() {
-  const admin = adminSession();
-  return { token: admin.access, realmId: claims(admin.access).tid.replace(/^realm_/, '') };
+  return {
+    realms: realms.map((r) => {
+      const admin = adminSession(r);
+      return { token: admin.access, realmId: claims(admin.access).tid.replace(/^realm_/, '') };
+    }),
+  };
 }
 
 export default function (data) {
   if (ids.length === 0) return;
-  const id = ids[exec.scenario.iterationInTest];
+  const { id, realm } = ids[exec.scenario.iterationInTest];
+  const d = data.realms[realm];
+  if (!d) {
+    // An ACK for a realm this run does not have: the check cannot decide.
+    errors.add(1);
+    console.error(`UNKNOWN REALM ${realm + 1} for ${id}`);
+    return;
+  }
   const res = http.get(`${env.base}/admin/users/${id}`, {
-    headers: adminHeaders(data.token, data.realmId),
+    headers: adminHeaders(d.token, d.realmId),
     timeout: TIMEOUT,
     tags: { name: 'verify' },
   });
