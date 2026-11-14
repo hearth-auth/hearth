@@ -23,7 +23,8 @@
 //!   `userName`, `emails.value`, `externalId` or `id` reads an index. Any
 //!   other `/Users` filter reads the whole realm, up to
 //!   `SCIM_FILTER_SCAN_LIMIT` users (more: `400` `tooMany`). `/Groups`
-//!   still pages in memory over a 1000-record scan.
+//!   reads one page at `startIndex` with no filter; a filter reads every
+//!   group of a realm of at most `SCIM_FILTER_SCAN_LIMIT` groups.
 //! - ETag: weak (`W/"<micros>"`) emitted on every resource response;
 //!   inbound `If-Match` on `PUT`/`PATCH`/`DELETE` is enforced — a stale
 //!   validator yields `412 Precondition Failed` (see [`etag`]).

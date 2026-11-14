@@ -54,15 +54,20 @@ pub const MAX_SCIM_OPERATIONS: usize = 1_000;
 /// bounds both the scan and the allocation so an authenticated SCIM client
 /// cannot exhaust tenant CPU/memory by requesting `?count=1` against a large
 /// realm.
+///
+/// Since #644 no SCIM list handler reads this cap: a list with no filter
+/// reads one page, and a filter reads at most [`SCIM_FILTER_SCAN_LIMIT`]
+/// records.
 pub const SCIM_MAX_SCAN_LIMIT: usize = 1_000;
 
-/// Most users that a SCIM `GET /Users` filter with no index reads (#644).
+/// Most users or groups that a SCIM `GET /Users` or `GET /Groups` filter with
+/// no index reads (#644).
 ///
-/// `eq` on `userName`, `emails.value`, `externalId` or `id` reads an index
-/// and does not count against this limit. Any other filter reads every user
-/// of the realm. In a realm with more users, such a filter gets `400` with
-/// `scimType` `tooMany` (RFC 7644 §3.12), not the matches of part of the
-/// realm.
+/// On `/Users`, `eq` on `userName`, `emails.value`, `externalId` or `id`
+/// reads an index and does not count against this limit. Any other filter
+/// reads every user (or every group) of the realm. In a realm with more
+/// users (or groups), such a filter gets `400` with `scimType` `tooMany`
+/// (RFC 7644 §3.12), not the matches of part of the realm.
 pub const SCIM_FILTER_SCAN_LIMIT: usize = 10_000;
 
 /// Maximum user records that one filtered `GET /admin/users` request reads

@@ -15,9 +15,9 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::abuse::{MAX_SCIM_OPERATIONS, SCIM_MAX_SCAN_LIMIT};
+use crate::abuse::{MAX_SCIM_OPERATIONS, SCIM_FILTER_SCAN_LIMIT};
 use crate::audit::{AuditAction, CreateAuditEvent};
-use crate::core::{OrganizationId, RealmId, UserId};
+use crate::core::{OrganizationId, PageRequest, RealmId, UserId, MAX_PAGE_LIMIT};
 use crate::identity::{
     CreateOrganizationRequest, Organization, OrganizationRole, UpdateOrganizationRequest,
 };
@@ -577,58 +577,131 @@ pub async fn list_groups(
         None => None,
     };
 
-    // Collect at most SCIM_MAX_SCAN_LIMIT orgs via offset pagination for SCIM.
-    // Without the cap a `?count=1` request triggers O(realm-size) work
-    // (HEA-2032 defect 1).
-    let mut all_orgs: Vec<crate::identity::Organization> = Vec::new();
-    let mut scim_off = 0u64;
-    loop {
-        let batch = crate::core::MAX_PAGE_LIMIT;
-        let sp = match state.identity.list_organizations(
-            &auth.realm_id,
-            &crate::core::PageRequest::new(scim_off, batch),
-        ) {
-            Ok(p) => p,
-            Err(e) => return from_identity_error(&e).into_response(),
-        };
-        let n = sp.items.len() as u64;
-        all_orgs.extend(sp.items);
-        if n == 0 || scim_off + n >= sp.total || all_orgs.len() >= SCIM_MAX_SCAN_LIMIT {
-            break;
-        }
-        scim_off += n;
-    }
-    let page = crate::core::PagedResult::new(all_orgs, 0, 0, crate::core::MAX_PAGE_LIMIT);
-    // Filters never read `members`, so match on the member-less
-    // representation and read the full membership only for the page returned.
-    let mut matching: Vec<(&Organization, ScimGroup)> = Vec::with_capacity(page.items.len());
-    for org in &page.items {
-        let ext = state
-            .identity
-            .get_scim_group_external_id(&auth.realm_id, org.id())
-            .ok()
-            .flatten();
-        let scim = group_to_scim(org, &[], ext, &base);
-        if filter_expr
-            .as_ref()
-            .map_or(true, |e| filter::matches_group(e, &scim))
-        {
-            matching.push((org, scim));
-        }
-    }
-    let total = matching.len();
     let start = q.start_index.unwrap_or(1).max(1);
-    let count = q.count.unwrap_or(100).min(200);
-    let start_idx0 = start.saturating_sub(1);
-    let mut slice: Vec<ScimGroup> = Vec::new();
-    for (org, scim) in matching.into_iter().skip(start_idx0).take(count) {
+    let count = q.count.unwrap_or(100).min(MAX_PAGE_LIMIT as usize);
+    let listed = match filter_expr {
+        None => unfiltered_groups(&state, &auth.realm_id, start, count),
+        Some(expr) => filtered_groups(&state, &auth.realm_id, &expr, &base)
+            .map(|matches| page_of(matches, start, count)),
+    };
+    let (total, page) = match listed {
+        Ok(listed) => listed,
+        Err(e) => return e.into_response(),
+    };
+    let mut slice: Vec<ScimGroup> = Vec::with_capacity(page.len());
+    for (org, external_id) in page {
         let members = match load_members(&state, &auth.realm_id, org.id()) {
             Ok(m) => m,
             Err(e) => return e.into_response(),
         };
-        slice.push(group_to_scim(org, &members, scim.external_id, &base));
+        slice.push(group_to_scim(&org, &members, external_id, &base));
     }
     Json(ListResponse::new(total, start, slice)).into_response()
+}
+
+/// One group of a list page and its SCIM `externalId`.
+type GroupRow = (Organization, Option<String>);
+
+/// The external id of `org`, or `None` when it has none or the read fails.
+fn external_id_of(state: &AppState, realm_id: &RealmId, org: &Organization) -> Option<String> {
+    state
+        .identity
+        .get_scim_group_external_id(realm_id, org.id())
+        .ok()
+        .flatten()
+}
+
+/// The `[start, start + count)` slice (1-based `start`) of `matches`, and
+/// the number of matches.
+fn page_of(matches: Vec<GroupRow>, start: usize, count: usize) -> (usize, Vec<GroupRow>) {
+    let total = matches.len();
+    let page = matches
+        .into_iter()
+        .skip(start.saturating_sub(1))
+        .take(count)
+        .collect();
+    (total, page)
+}
+
+/// One page of every group of the realm, read directly at `start` (#644).
+///
+/// The total is the exact number of groups of the realm.
+fn unfiltered_groups(
+    state: &AppState,
+    realm_id: &RealmId,
+    start: usize,
+    count: usize,
+) -> Result<(usize, Vec<GroupRow>), ScimError> {
+    let offset = u64::try_from(start.saturating_sub(1)).unwrap_or(u64::MAX);
+    // `PageRequest` reads at least one row; `count=0` asks for the total only.
+    let limit = u32::try_from(count).unwrap_or(MAX_PAGE_LIMIT);
+    let page = state
+        .identity
+        .list_organizations(realm_id, &PageRequest::new(offset, limit))
+        .map_err(|e| from_identity_error(&e))?;
+    let total = usize::try_from(page.total).unwrap_or(usize::MAX);
+    let rows = page
+        .items
+        .into_iter()
+        .take(count)
+        .map(|org| {
+            let ext = external_id_of(state, realm_id, &org);
+            (org, ext)
+        })
+        .collect();
+    Ok((total, rows))
+}
+
+/// The groups that match `expr`, in group-id order (#644).
+///
+/// A filter reads every group of the realm, so a realm with more than
+/// [`SCIM_FILTER_SCAN_LIMIT`] groups gets `400` `tooMany` (RFC 7644 §3.12),
+/// not the matches of part of the realm. Filters never read `members`, so
+/// the match uses the member-less representation.
+fn filtered_groups(
+    state: &AppState,
+    realm_id: &RealmId,
+    expr: &FilterExpr,
+    base: &ScimBase,
+) -> Result<Vec<GroupRow>, ScimError> {
+    let scan_limit = u64::try_from(SCIM_FILTER_SCAN_LIMIT).unwrap_or(u64::MAX);
+    let realm_groups = state
+        .identity
+        .list_organizations(realm_id, &PageRequest::new(0, 1))
+        .map_err(|e| from_identity_error(&e))?
+        .total;
+    if realm_groups > scan_limit {
+        return Err(ScimError::bad_request(
+            "tooMany",
+            format!(
+                "This filter reads every group, and the realm has more than \
+                 {SCIM_FILTER_SCAN_LIMIT} groups. Use GET /Groups/{{id}} or page \
+                 the list without a filter."
+            ),
+        ));
+    }
+
+    let mut matches = Vec::new();
+    let mut offset = 0u64;
+    // The bound holds when groups are created during the walk.
+    while offset < scan_limit {
+        let page = state
+            .identity
+            .list_organizations(realm_id, &PageRequest::new(offset, MAX_PAGE_LIMIT))
+            .map_err(|e| from_identity_error(&e))?;
+        if page.items.is_empty() {
+            break;
+        }
+        offset = offset.saturating_add(page.items.len() as u64);
+        for org in page.items {
+            let ext = external_id_of(state, realm_id, &org);
+            let scim = group_to_scim(&org, &[], ext, base);
+            if filter::matches_group(expr, &scim) {
+                matches.push((org, scim.external_id));
+            }
+        }
+    }
+    Ok(matches)
 }
 
 /// `PUT /scim/v2/Groups/{id}`
