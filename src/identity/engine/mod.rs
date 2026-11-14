@@ -19731,6 +19731,8 @@ mod tests {
     mod import_client_rs256_key;
     /// Tokens with the prefixed IDs of releases before 4.0 stay valid.
     mod legacy_prefixed_ids;
+    /// A cross-realm migration lists the source users with one walk (#644).
+    mod migration_user_walk;
     /// A PAR `request_uri` is consumed exactly once under concurrency.
     mod par_consume_race;
     /// The admin password email: set-password and reset links.
