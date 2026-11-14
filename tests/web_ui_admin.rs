@@ -2516,9 +2516,14 @@ async fn get_body(rig: &TestRig, cookie: &str, uri: &str) -> String {
 async fn admin_sessions_list_pages_newest_first_with_a_cursor() {
     let rig = build_rig();
     let cookie = admin_cookie(&rig, "csrf-sessions-847");
+    // Wait for the clock to move, so every session below is newer than the
+    // sessions of the rig.
+    let start = hearth::core::Timestamp::now();
+    while hearth::core::Timestamp::now() <= start {
+        std::hint::spin_loop();
+    }
     let mut created = Vec::new();
     for _ in 0..7 {
-        std::thread::sleep(std::time::Duration::from_millis(2));
         let session = rig
             .identity
             .create_session(
@@ -2527,9 +2532,12 @@ async fn admin_sessions_list_pages_newest_first_with_a_cursor() {
                 &hearth::identity::SessionContext::default(),
             )
             .expect("create session");
-        created.push(session.id().as_uuid().to_string());
+        created.push((session.created_at(), *session.id().as_uuid()));
     }
-    let newest_first: Vec<String> = created.iter().rev().cloned().collect();
+    // The newest-first index orders by created time, then session id (both
+    // descending), so two sessions with one created time have a known order.
+    created.sort_unstable_by(|a, b| b.cmp(a));
+    let newest_first: Vec<String> = created.iter().map(|(_, id)| id.to_string()).collect();
 
     let first = get_body(&rig, &cookie, "/ui/admin/realms/acme/sessions?per_page=5").await;
     assert_eq!(
