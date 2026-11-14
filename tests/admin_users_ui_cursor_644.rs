@@ -391,3 +391,32 @@ async fn the_pager_has_no_page_number_links() {
     );
     assert!(html.contains("of 30"), "the pager shows the exact total");
 }
+
+/// A glob with no 3 characters in a row and no start is too broad for the
+/// search index (#644): the list page shows why, with no users, and is not
+/// a server error.
+#[tokio::test]
+async fn a_too_broad_search_shows_a_message_not_an_error_page() {
+    let rig = build_rig();
+    let cookie = admin_cookie(&rig, "csrf-broad");
+    create_users(&rig, 3);
+    let realm = rig.tenant_realm_name.clone();
+
+    let html = get_page(
+        &rig,
+        &cookie,
+        &format!("/ui/admin/realms/{realm}/users?q=*a*"),
+    )
+    .await;
+    assert!(html.contains("too broad"), "the page names the reason");
+    assert_eq!(row_emails(&html), Vec::<String>::new());
+
+    // One character matches the start of the email.
+    let html = get_page(
+        &rig,
+        &cookie,
+        &format!("/ui/admin/realms/{realm}/users?q=u"),
+    )
+    .await;
+    assert_eq!(row_emails(&html).len(), 3);
+}

@@ -152,8 +152,7 @@ impl UserListParams {
 
 /// Reads one page of the user list of `realm` for `params`, with its pager.
 ///
-/// A search (2 or more characters) pages by offset, with page-number
-/// links. Every other list pages with a key cursor in the sort order
+/// A search pages by offset, with page-number links. Every other list pages with a key cursor in the sort order
 /// (email ascending when no sort is given), so a user deleted between two
 /// pages moves no other user to a page the operator already saw (#644).
 fn user_list_page(
@@ -161,23 +160,39 @@ fn user_list_page(
     realm: &RealmId,
     params: &UserListParams,
     base_url: &str,
-) -> Result<(Vec<User>, PrevNextPager), crate::identity::IdentityError> {
+) -> Result<(Vec<User>, PrevNextPager, Option<Flash>), crate::identity::IdentityError> {
     let search_query = params.q.clone().unwrap_or_default();
     let preserved = super::pagination::join_params(&[
         super::pagination::encode_param("q", &search_query),
         super::pagination::encode_param("sort", params.sort.as_deref().unwrap_or("")),
         super::pagination::encode_param("dir", params.dir.as_deref().unwrap_or("")),
     ]);
-    if search_query.len() >= 2 {
-        let page = state.identity.search_users(
+    if !search_query.trim().is_empty() {
+        let request = params.as_page_request();
+        let page = match state.identity.search_users(
             realm,
             &search_query,
-            &params.as_page_request(),
+            &request,
             params.sort_field(),
             params.sort_dir(),
-        )?;
+        ) {
+            Ok(page) => page,
+            // A search that the index cannot serve (too broad) lists no
+            // users and says why (#644).
+            Err(crate::identity::IdentityError::InvalidInput { reason }) => {
+                let empty: crate::core::PagedResult<User> =
+                    crate::core::PagedResult::new(Vec::new(), 0, 0, request.limit);
+                let pager = PrevNextPager::from_offsets(&empty, base_url, &preserved);
+                let flash = Flash {
+                    kind: "error",
+                    message: format!("No search: {reason}."),
+                };
+                return Ok((Vec::new(), pager, Some(flash)));
+            }
+            Err(e) => return Err(e),
+        };
         let pager = PrevNextPager::from_offsets(&page, base_url, &preserved);
-        return Ok((page.items, pager));
+        return Ok((page.items, pager, None));
     }
     let per_page = params.per_page_validated();
     let page = state.identity.user_page_by_cursor(
@@ -206,7 +221,7 @@ fn user_list_page(
         base_url,
         &preserved,
     );
-    Ok((page.users, pager))
+    Ok((page.users, pager, None))
 }
 
 /// Template for `GET /ui/admin/users`.
@@ -267,7 +282,7 @@ pub async fn admin_users_list(
     let realm_name = target.0.name().to_string();
     let user_base_url = format!("/ui/admin/realms/{realm_name}/users");
     match user_list_page(&state, target.id(), &params, &user_base_url) {
-        Ok((users, pagination)) => {
+        Ok((users, pagination, flash)) => {
             // Full page always. Search/sort HTMX requests extract
             // #users-table-region via hx-select; a full page keeps the table
             // structural elements nested so DOMParser preserves them (HEA-1643).
@@ -287,7 +302,7 @@ pub async fn admin_users_list(
                 active: "users",
                 user_email: Some(session.user_email.clone()),
                 is_admin: true,
-                flash: None,
+                flash,
                 csrf: session.csrf.clone(),
                 narrow: false,
                 product_name: state.product_name_for(target.id()),
@@ -325,7 +340,7 @@ pub async fn admin_admin_users_list(
     let system_realm = crate::identity::keys::system_realm_id();
     let search_query = params.q.clone().unwrap_or_default();
     match user_list_page(&state, &system_realm, &params, "/ui/admin/admin-users") {
-        Ok((users, pagination)) => {
+        Ok((users, pagination, flash)) => {
             // Full page always; HTMX search/sort extract #users-table-region
             // via hx-select from this response (HEA-1615 / HEA-1643).
             let sort_field_str = params.sort.clone().unwrap_or_default();
@@ -344,7 +359,7 @@ pub async fn admin_admin_users_list(
                 active: "admin-users",
                 user_email: Some(session.user_email.clone()),
                 is_admin: true,
-                flash: None,
+                flash,
                 csrf: session.csrf.clone(),
                 narrow: false,
                 product_name: state.product_name.clone(),
