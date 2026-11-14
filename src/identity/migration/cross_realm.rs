@@ -34,6 +34,7 @@ use tracing::{info, warn};
 use crate::config::MigrateConflictPolicy;
 use crate::core::{RealmId, UserId};
 use crate::identity::keys;
+use crate::identity::search::UserWalk;
 use crate::identity::{IdentityEngine, IdentityError};
 use crate::rbac::{AssignRoleRequest, RbacEngine, Scope, Subject};
 use crate::storage::StorageEngine;
@@ -161,27 +162,29 @@ pub fn execute_cross_realm_migration(
         "starting cross-realm user migration"
     );
 
-    // 2. Enumerate all users in the source realm (full pagination).
+    // 2. Enumerate all users in the source realm with a key cursor. An
+    //    offset page walks the user keys up to its offset, so offset pages
+    //    read the realm once per page (#644).
     let mut user_ids: Vec<UserId> = Vec::new();
-    let mut offset = 0u64;
-    let batch = crate::core::MAX_PAGE_LIMIT;
+    let mut after: Option<UserId> = None;
     loop {
-        let page =
-            match engine.list_users(src_realm_id, &crate::core::PageRequest::new(offset, batch)) {
-                Ok(p) => p,
-                Err(e) => {
-                    warn!(error = %e, src_slug, "failed to list source users; aborting migration");
-                    return Ok(report);
-                }
-            };
-        let n = page.items.len() as u64;
-        for user in &page.items {
-            user_ids.push(user.id().clone());
-        }
-        if n == 0 || offset + n >= page.total {
+        let step = match engine.walk_users(
+            src_realm_id,
+            UserWalk::All,
+            after.as_ref(),
+            crate::core::MAX_PAGE_LIMIT,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, src_slug, "failed to list source users; aborting migration");
+                return Ok(report);
+            }
+        };
+        user_ids.extend(step.users.iter().map(|u| u.id().clone()));
+        if !step.more || step.last.is_none() {
             break;
         }
-        offset += n;
+        after = step.last;
     }
 
     if user_ids.is_empty() {

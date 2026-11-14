@@ -90,6 +90,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
     the column until the page is full.
 
 ### Fixed
+- **A `migrate_from` / `copy_from` realm migration lists the source users in one pass** (#644):
+  before, the startup migration listed the source users in pages of 200, and each page walked
+  the user keys of the realm up to its start. The work grew with the square of the number of
+  users (for 1M users, about 5,000 walks of the realm). Now one key-cursor walk reads each source
+  user once.
 - **Two admin UI buttons now work under the CSP** (#820): the session **Revoke** button now asks
   "Revoke this session?" before it revokes, and the **Reset** button of the raw config editor now
   puts back the saved YAML. Before, both used inline event handlers, which the admin CSP
