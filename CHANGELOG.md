@@ -15,6 +15,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   changed `HEARTH_KEK` without it now fails at startup with an error that names it. Single node
   only. The procedure is in `docs/guides/config-migration.md`.
 
+- **Per-client `require_pkce` setting** (#780): an admin can let one confidential client (a client
+  secret or `private_key_jwt`) send authorization requests without PKCE. Set
+  `realms.<name>.applications.<app>.require_pkce: false` in `hearth.yaml`, or `require_pkce` on
+  `POST /admin/applications`, `POST /clients` and `PATCH /admin/applications/{id}`. The default is
+  `true`, and the client JSON of the admin routes now shows the value. A public client always needs
+  PKCE: `false` for a public client fails config validation and is refused by the admin API
+  (`400`). Dynamic client registration cannot set it. A backup keeps the value.
+
 ### Changed
 - **`GET /admin/users` pages with a key cursor** (#644): `next_cursor` is now the ID of the last
   user of the page, not a decimal offset, and the next page starts after that user. A user deleted
@@ -156,6 +164,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   data directory. The HTTP routes refuse to run without the variable; the CLI asks for the
   passphrase when the variable is not set (`backup create` only with `--encrypt`). To restore an
   archive from an earlier build, set `HEARTH_BACKUP_PASSPHRASE` to the old `HEARTH_MASTER_KEY`.
+- **A `code_verifier` for a code without a challenge is refused** (#780): a token request that
+  sends `code_verifier` to exchange a code issued without `code_challenge` now gets
+  `invalid_grant` (RFC 9700 §4.8.2). Before, the verifier was ignored.
 
 ## [4.10.0] — 2026-11-11
 

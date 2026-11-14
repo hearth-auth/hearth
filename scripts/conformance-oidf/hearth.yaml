@@ -50,6 +50,8 @@ realms:
         client_secret: "${OIDF_CLIENT_SECRET}"
         # The OpenID Connect default. The suite verifies RS256 ID tokens.
         id_token_signed_response_alg: RS256
+        # The Basic OP plan sends authorization requests without PKCE (#780).
+        require_pkce: false
       oidf-client2:
         name: "OIDF conformance client 2"
         redirect_uris:
@@ -60,6 +62,7 @@ realms:
         confidential: true
         client_secret: "${OIDF_CLIENT2_SECRET}"
         id_token_signed_response_alg: RS256
+        require_pkce: false
     seed_users:
       - email: "oidf-user@example.com"
         display_name: "OIDF Conformance User"

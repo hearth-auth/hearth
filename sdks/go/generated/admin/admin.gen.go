@@ -645,6 +645,11 @@ type V1OAuthClient struct {
 	IdTokenSignedResponseAlg *string   `json:"id_token_signed_response_alg,omitempty"`
 	IsConfidential           *bool     `json:"is_confidential,omitempty"`
 	RedirectUris             *[]string `json:"redirect_uris,omitempty"`
+
+	// RequirePkce When true (the default), every authorization request from this client
+	// must carry a PKCE S256 code_challenge. Only a confidential client can
+	// have false; a public client always needs PKCE. Always set in a response.
+	RequirePkce *bool `json:"require_pkce,omitempty"`
 }
 
 // V1OAuthClientPage A cursor-based page of OAuth clients.

@@ -1159,6 +1159,64 @@ async fn plain_confidential_request_without_pkce_is_refused_with_an_error_redire
     );
 }
 
+/// #780: a confidential client with `require_pkce: false` gets a code from
+/// the browser path without `code_challenge`. A `code_challenge_method`
+/// without a challenge is still refused with an error redirect.
+#[tokio::test]
+async fn a_client_without_the_pkce_requirement_gets_a_code_without_pkce() {
+    let rig = rig().await;
+    let client = rig
+        .identity
+        .register_client(
+            &rig.realm_id,
+            &RegisterClientRequest {
+                client_name: "No-PKCE gate parity app".to_string(),
+                redirect_uris: vec![REDIRECT.to_string()],
+                client_secret: Some("no-pkce-gate-parity-secret".to_string()),
+                grant_types: vec!["authorization_code".to_string()],
+                trust_level: hearth::identity::ClientTrustLevel::FirstParty,
+                require_pkce: false,
+                ..Default::default()
+            },
+        )
+        .expect("register client");
+    let uri = |extra: &str| {
+        format!(
+            "/ui/oauth/authorize?client_id={}&redirect_uri=https%3A%2F%2Fapp.example.com%2Fcb\
+             &response_type=code&scope=openid&state=no-pkce-state&nonce={}{extra}",
+            client.client_id().as_uuid(),
+            uuid::Uuid::new_v4(),
+        )
+    };
+
+    let resp = get(&rig, &uri(""), &session_cookie(&rig)).await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let loc = location(&resp);
+    assert!(
+        loc.starts_with(REDIRECT),
+        "expected the client redirect, got {loc}"
+    );
+    assert!(
+        redirect_param(&loc, "code", false).is_some(),
+        "a code without PKCE for this client; got {loc}"
+    );
+    assert!(redirect_param(&loc, "error", false).is_none(), "got {loc}");
+
+    let resp = get(
+        &rig,
+        &uri("&code_challenge_method=S256"),
+        &session_cookie(&rig),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let loc = location(&resp);
+    assert_eq!(
+        redirect_param(&loc, "error", false).as_deref(),
+        Some("invalid_request"),
+        "a method without a challenge is refused; got {loc}"
+    );
+}
+
 /// The realm-scoped authorize URI for a plain request (the URI the realm's
 /// discovery document leads a browser to).
 fn scoped_plain_uri(rig: &Rig, client: &OAuthClient, extra: &str) -> String {

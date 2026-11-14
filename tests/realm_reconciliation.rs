@@ -689,3 +689,70 @@ realms:
     // Idempotent: a second reconcile changes nothing and does not fail.
     reconcile_realms(identity, harness.authz(), &config).expect("reconcile again");
 }
+
+/// #780: an application's `require_pkce` in `hearth.yaml` is stored at
+/// create, and a later reconcile applies a change in either direction.
+#[tokio::test]
+async fn reconcile_applies_require_pkce_from_yaml() {
+    let harness = common::TestHarness::in_process().await.expect("harness");
+    let identity = harness.identity();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("hearth.yaml");
+    let write = |require_pkce: &str| {
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+realms:
+  pkcedemo:
+    applications:
+      conf-rp:
+        name: "Confidential RP"
+        redirect_uris:
+          - "https://rp.example.com/callback"
+        grant_types:
+          - authorization_code
+        confidential: true
+        client_secret: "a-confidential-rp-secret-780"
+{require_pkce}
+"#
+            ),
+        )
+        .expect("write config");
+        Config::from_file_as_dev(&path).expect("config")
+    };
+    let stored = || {
+        let realm = identity
+            .get_realm_by_name("pkcedemo")
+            .expect("lookup realm")
+            .expect("realm exists");
+        identity
+            .list_clients(realm.id(), &hearth::core::PageRequest::new(0, 10))
+            .expect("list clients")
+            .items
+            .into_iter()
+            .find(|c| c.client_name() == "Confidential RP")
+            .expect("client exists")
+            .require_pkce()
+    };
+
+    reconcile_realms(
+        identity,
+        harness.authz(),
+        &write("        require_pkce: false"),
+    )
+    .expect("reconcile");
+    assert!(!stored(), "require_pkce: false is stored at create");
+    reconcile_realms(identity, harness.authz(), &write("")).expect("reconcile");
+    assert!(stored(), "an absent key means require_pkce: true");
+    reconcile_realms(
+        identity,
+        harness.authz(),
+        &write("        require_pkce: false"),
+    )
+    .expect("reconcile");
+    assert!(
+        !stored(),
+        "a reconcile applies require_pkce: false to an existing client"
+    );
+}

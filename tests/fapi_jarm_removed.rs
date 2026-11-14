@@ -277,3 +277,58 @@ async fn dynamic_registration_records_dpop_bound_access_tokens() {
         .expect("client exists");
     assert!(stored.dpop_bound_access_tokens(), "stored on the client");
 }
+
+/// #780: dynamic client registration cannot drop the PKCE requirement. The
+/// field is not registration metadata, so the request is refused.
+#[tokio::test]
+async fn dynamic_registration_cannot_set_require_pkce() {
+    let h = common::TestHarness::in_process().await.expect("harness");
+    let realm = h
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("pkce-dcr-{}", uuid::Uuid::new_v4()),
+            config: Some(RealmConfig {
+                dcr_policy: Some(hearth::identity::DcrPolicy::Open),
+                ..Default::default()
+            }),
+        })
+        .expect("realm")
+        .id()
+        .clone();
+    let register = |extra: serde_json::Value| {
+        let mut body = serde_json::json!({
+            "client_name": "pkce-dcr",
+            "redirect_uris": ["https://app.example.com/cb"],
+            "grant_types": ["authorization_code"],
+            "token_endpoint_auth_method": "client_secret_basic",
+        });
+        if let serde_json::Value::Object(extra) = extra {
+            body.as_object_mut().expect("object").extend(extra);
+        }
+        Request::builder()
+            .method("POST")
+            .uri("/register")
+            .header("X-Realm-ID", realm.as_uuid().to_string())
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("request")
+    };
+    let (status, body) = send(
+        app(&h),
+        register(serde_json::json!({"require_pkce": false})),
+    )
+    .await;
+    assert!(status.is_client_error(), "{status}: {body}");
+
+    let (status, body) = send(app(&h), register(serde_json::json!({}))).await;
+    assert_eq!(status, StatusCode::CREATED, "control: {body}");
+    let client_id = hearth::core::ClientId::new(
+        uuid::Uuid::parse_str(body["client_id"].as_str().expect("client_id")).expect("uuid"),
+    );
+    let stored = h
+        .identity()
+        .get_client(&realm, &client_id)
+        .expect("lookup")
+        .expect("client exists");
+    assert!(stored.require_pkce(), "a registered client needs PKCE");
+}

@@ -1331,6 +1331,12 @@ export interface components {
              *     a DPoP proof, and every token it gets is bound to the proof's key.
              */
             dpop_bound_access_tokens?: boolean;
+            /**
+             * @description When true (the default), every authorization request from this client
+             *     must carry a PKCE S256 code_challenge. Only a confidential client can
+             *     have false; a public client always needs PKCE. Always set in a response.
+             */
+            require_pkce?: boolean;
         };
         /** @description A cursor-based page of OAuth clients. */
         v1OAuthClientPage: {

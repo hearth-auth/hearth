@@ -1714,7 +1714,7 @@ fn split_registration_body(
 
 /// Decodes an administrative registration body (`POST /clients`, `POST
 /// /admin/applications`) into the domain request, including `jwks`,
-/// `jwks_uri` and `dpop_bound_access_tokens` — without which an operator
+/// `jwks_uri`, `dpop_bound_access_tokens` and `require_pkce` — without which an operator
 /// could not register a `private_key_jwt` or DPoP-bound client over REST.
 ///
 /// `token_endpoint_auth_method` `client_secret_basic` / `client_secret_post`
@@ -1738,6 +1738,15 @@ pub(super) fn admin_registration_request(
         )
             .into_response()
     };
+    // #780: `require_pkce` is an admin setting, not RFC 7591 metadata, so it is
+    // taken out here and never by `split_registration_body` (the dynamic
+    // registration path refuses it as an unknown field).
+    let mut raw = raw;
+    let require_pkce = match raw.as_object_mut().and_then(|m| m.remove("require_pkce")) {
+        None | Some(serde_json::Value::Null) => true,
+        Some(serde_json::Value::Bool(b)) => b,
+        Some(_) => return Err(unprocessable("require_pkce must be a boolean")),
+    };
     let (body, extras) =
         split_registration_body(raw).map_err(|description| unprocessable(&description))?;
     if body.client_secret.is_some() {
@@ -1751,6 +1760,7 @@ pub(super) fn admin_registration_request(
     request.jwks = extras.jwks;
     request.jwks_uri = extras.jwks_uri;
     request.dpop_bound_access_tokens = extras.dpop_bound_access_tokens;
+    request.require_pkce = require_pkce;
     request
         .apply_token_endpoint_auth_method(extras.token_endpoint_auth_method.as_deref())
         .map_err(|e| match e {
@@ -4920,6 +4930,9 @@ async fn realm_register_client_dynamic(
         id_token_signed_response_alg: Some(id_token_signed_response_alg),
         dpop_bound_access_tokens: extras.dpop_bound_access_tokens,
         mfa_required: None,
+        // RFC 7591 has no such metadata: a registered client always needs
+        // PKCE (#780).
+        require_pkce: true,
     };
     match state.identity.register_client(&realm_id, &request) {
         Ok(client) => {

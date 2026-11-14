@@ -335,3 +335,126 @@ async fn rest_regenerate_secret_replaces_it_at_once() {
     let (status, _) = fx.regenerate(&uuid::Uuid::new_v4().to_string()).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+impl Fx {
+    /// PATCHes `/admin/applications/{id}`.
+    async fn patch(&self, id: &str, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+        self.send(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/admin/applications/{id}"))
+                .header("X-Realm-ID", self.realm.as_uuid().to_string())
+                .header("Authorization", format!("Bearer {}", self.token))
+                .header("Content-Type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+    }
+
+    fn stored_require_pkce(&self, client_id: &str) -> bool {
+        self.h
+            .identity()
+            .get_client(&self.realm, &ClientId::new(client_id.parse().unwrap()))
+            .unwrap()
+            .expect("client stored")
+            .require_pkce()
+    }
+}
+
+/// An authorization-code client body; `method` `None` makes a public client.
+fn code_client_body(method: Option<&str>) -> serde_json::Value {
+    let mut body = confidential_body(method.unwrap_or("none"));
+    body["grant_types"] = serde_json::json!(["authorization_code"]);
+    if method.is_none() {
+        body.as_object_mut()
+            .unwrap()
+            .remove("token_endpoint_auth_method");
+    }
+    body
+}
+
+/// #780: `require_pkce` defaults to `true` and shows in the response. An admin
+/// can set it to `false` at create for a confidential client only.
+#[tokio::test]
+async fn rest_admin_create_sets_require_pkce_for_a_confidential_client_only() {
+    let fx = fixture().await;
+    for route in ROUTES {
+        let (status, body) = fx
+            .create(route, code_client_body(Some("client_secret_basic")))
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{route}: {body}");
+        assert_eq!(body["require_pkce"], true, "{route}: default: {body}");
+
+        let mut off = code_client_body(Some("client_secret_basic"));
+        off["require_pkce"] = serde_json::json!(false);
+        let (status, body) = fx.create(route, off).await;
+        assert_eq!(status, StatusCode::CREATED, "{route}: {body}");
+        assert_eq!(body["require_pkce"], false, "{route}: {body}");
+        assert!(
+            !fx.stored_require_pkce(body["client_id"].as_str().unwrap()),
+            "{route}: stored"
+        );
+
+        let mut public = code_client_body(None);
+        public["require_pkce"] = serde_json::json!(false);
+        let (status, body) = fx.create(route, public).await;
+        // The engine refuses it; the admin API keeps engine reasons out of
+        // its error bodies.
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{route}: a public client keeps PKCE: {body}"
+        );
+        assert_eq!(
+            body["error_code"], "HEARTH_INVALID_INPUT",
+            "{route}: {body}"
+        );
+
+        let mut wrong_type = code_client_body(Some("client_secret_basic"));
+        wrong_type["require_pkce"] = serde_json::json!("no");
+        let (status, body) = fx.create(route, wrong_type).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{route}: {body}");
+    }
+}
+
+/// #780: PATCH changes `require_pkce` on a confidential client and refuses
+/// `false` on a public client.
+#[tokio::test]
+async fn rest_admin_patch_sets_require_pkce_for_a_confidential_client_only() {
+    let fx = fixture().await;
+    let (_, body) = fx
+        .create(
+            "/admin/applications",
+            code_client_body(Some("client_secret_post")),
+        )
+        .await;
+    let id = body["client_id"].as_str().unwrap().to_string();
+    let (status, body) = fx
+        .patch(&id, serde_json::json!({"require_pkce": false}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["require_pkce"], false, "{body}");
+    assert!(!fx.stored_require_pkce(&id));
+    let (status, body) = fx
+        .patch(&id, serde_json::json!({"client_name": "Renamed"}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!fx.stored_require_pkce(&id), "an omitted field leaves it");
+    let (status, body) = fx
+        .patch(&id, serde_json::json!({"require_pkce": true}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(fx.stored_require_pkce(&id));
+
+    let (_, body) = fx
+        .create("/admin/applications", code_client_body(None))
+        .await;
+    let public = body["client_id"].as_str().unwrap().to_string();
+    let (status, body) = fx
+        .patch(&public, serde_json::json!({"require_pkce": false}))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error_code"], "HEARTH_INVALID_INPUT", "{body}");
+    assert!(fx.stored_require_pkce(&public), "not changed");
+}

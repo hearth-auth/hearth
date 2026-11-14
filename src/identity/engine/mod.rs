@@ -7797,6 +7797,8 @@ impl EmbeddedIdentityEngine {
         client.set_id_token_signed_response_alg(Self::parse_client_id_token_alg(
             request.id_token_signed_response_alg.as_deref(),
         )?);
+        client.set_require_pkce(request.require_pkce.unwrap_or(true));
+        Self::check_require_pkce(&client)?;
         Ok(client)
     }
 }
@@ -12773,8 +12775,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Archival is a freeze: refuse mutations on a non-active realm
         // (audit 2026-08-28 §4.20#5).
         self.require_active_realm(realm_id)?;
-        // The YAML-managed gate for credentials and the security profile,
-        // enforced here so REST and the console share it. Reconcile
+        // The YAML-managed gate for credentials and the security profile
+        // (`require_pkce` included, #780), enforced here so REST and the console share it. Reconcile
         // treats `hearth.yaml` as authoritative for these fields: a key added
         // at runtime would be removed at the next restart or SIGHUP, and on a
         // secretless client that makes it public.
@@ -12784,7 +12786,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // refused.
         let touches_credentials = request.jwks.is_some()
             || request.assertion_public_key.is_some()
-            || request.dpop_bound_access_tokens.is_some();
+            || request.dpop_bound_access_tokens.is_some()
+            || request.require_pkce.is_some();
         if touches_credentials || request.access_token_authorization.is_some() {
             if let Some(client) = self.get_client(realm_id, client_id)? {
                 let changes_mode = request

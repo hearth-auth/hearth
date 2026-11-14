@@ -376,6 +376,23 @@ refused with `400 invalid_dpop_proof`. The issued tokens are bound to the proof 
 setting is available in `hearth.yaml` as
 `realms.<name>.applications.<app>.dpop_bound_access_tokens`.
 
+### Clients without the PKCE requirement (`require_pkce`)
+
+`POST /admin/applications`, `POST /clients` and `PATCH /admin/applications/{id}` accept
+`require_pkce` (boolean, default `true`). The client JSON returned by the admin routes always
+carries it. With `true`, every authorization request from the client must carry a PKCE
+`code_challenge` with `code_challenge_method=S256`. `false` is accepted only for a confidential
+client (a client secret or `private_key_jwt`) that cannot send PKCE. For a public client it is
+refused with `400` (`HEARTH_INVALID_INPUT`), and a public client always needs PKCE. A
+non-boolean value is refused (`422` on the admin create routes). For a YAML-declared application
+the `PATCH` is refused with `409`; set it in `hearth.yaml` as
+`realms.<name>.applications.<app>.require_pkce`.
+
+With `false`, a request that carries `code_challenge` is still checked as for every other
+client. A token request that sends `code_verifier` for a code issued without `code_challenge` is
+refused with `invalid_grant` (RFC 9700 §4.8.2). Dynamic client registration (`POST /register`)
+does not accept `require_pkce`: a registered client always needs PKCE.
+
 ### Unauthenticated dynamic client registration
 
 If your use-case is self-service client registration (third-party apps registering

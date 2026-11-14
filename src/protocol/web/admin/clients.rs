@@ -433,6 +433,7 @@ fn parse_app_create_form(form: &AppCreateForm) -> RegisterClientRequest {
             .then(|| form.id_token_signed_response_alg.clone()),
         dpop_bound_access_tokens: false,
         mfa_required: None,
+        require_pkce: true,
     }
 }
 
@@ -799,6 +800,7 @@ pub async fn admin_app_edit_submit(
 
     let req = UpdateClientRequest {
         cors_origins: None,
+        require_pkce: None,
         client_name: if form.client_name.is_empty() {
             None
         } else {

@@ -43,6 +43,9 @@ class V1OAuthClientNormalizer implements DenormalizerInterface, NormalizerInterf
         if (\array_key_exists('dpop_bound_access_tokens', $data) && \is_int($data['dpop_bound_access_tokens'])) {
             $data['dpop_bound_access_tokens'] = (bool) $data['dpop_bound_access_tokens'];
         }
+        if (\array_key_exists('require_pkce', $data) && \is_int($data['require_pkce'])) {
+            $data['require_pkce'] = (bool) $data['require_pkce'];
+        }
         if (\array_key_exists('client_id', $data) && $data['client_id'] !== null) {
             $object->setClientId($data['client_id']);
             unset($data['client_id']);
@@ -131,6 +134,14 @@ class V1OAuthClientNormalizer implements DenormalizerInterface, NormalizerInterf
             $object->setDpopBoundAccessTokens(null);
             unset($data['dpop_bound_access_tokens']);
         }
+        if (\array_key_exists('require_pkce', $data) && $data['require_pkce'] !== null) {
+            $object->setRequirePkce($data['require_pkce']);
+            unset($data['require_pkce']);
+        }
+        elseif (\array_key_exists('require_pkce', $data) && $data['require_pkce'] === null) {
+            $object->setRequirePkce(null);
+            unset($data['require_pkce']);
+        }
         foreach ($data as $key => $value_2) {
             if (preg_match('/.*/', (string) $key)) {
                 $object[$key] = $value_2;
@@ -178,6 +189,9 @@ class V1OAuthClientNormalizer implements DenormalizerInterface, NormalizerInterf
         }
         if ($data->isInitialized('dpopBoundAccessTokens') && null !== $data->getDpopBoundAccessTokens()) {
             $dataArray['dpop_bound_access_tokens'] = $data->getDpopBoundAccessTokens();
+        }
+        if ($data->isInitialized('requirePkce') && null !== $data->getRequirePkce()) {
+            $dataArray['require_pkce'] = $data->getRequirePkce();
         }
         foreach ($data->additionalPropertyEntries() as $key => $value_2) {
             if (preg_match('/.*/', (string) $key)) {

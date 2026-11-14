@@ -204,6 +204,9 @@ pub struct ImportClientRequest {
     /// The archived creation time (a backup restore), kept verbatim. `None`
     /// stamps the import time, as a migration or a `hearth.yaml` client does.
     pub created_at: Option<Timestamp>,
+    /// Whether an authorization request must carry PKCE (#780). `None` means
+    /// `true`. `Some(false)` is accepted only for a confidential client.
+    pub require_pkce: Option<bool>,
 }
 
 /// Parameters for the large-scale demo seeder ([`IdentityEngine::seed_demo_users`]).

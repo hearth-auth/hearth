@@ -262,6 +262,8 @@ impl EmbeddedIdentityEngine {
         if !request.cors_origins.is_empty() {
             client.set_cors_origins(request.cors_origins.clone());
         }
+        client.set_require_pkce(request.require_pkce);
+        Self::check_require_pkce(&client)?;
 
         // ID-token signing algorithm (task 26.55). `None` is the administrative
         // default, EdDSA; both Dynamic Client Registration handlers resolve an
@@ -622,8 +624,9 @@ impl EmbeddedIdentityEngine {
             return Err(IdentityError::ConsentRequired);
         }
 
-        // 5. PKCE enforcement (RFC 9700 §2.1.1 — unconditional for all clients)
-        if request.code_challenge.is_none() {
+        // 5. PKCE enforcement (RFC 9700 §2.1.1): every public client, and
+        //    every confidential client with `require_pkce` (the default, #780).
+        if request.code_challenge.is_none() && client.pkce_required() {
             return Err(IdentityError::InvalidInput {
                 reason: "PKCE is required (code_challenge with S256 must be supplied)".to_string(),
             });
@@ -849,7 +852,15 @@ impl EmbeddedIdentityEngine {
             }
         }
 
-        // 7. Validate PKCE if code_challenge was present
+        // 7. Validate PKCE if code_challenge was present. A verifier for a
+        //    code issued without a challenge is a PKCE downgrade (RFC 9700
+        //    §4.8.2, #780).
+        if stored_code.code_challenge.is_none() && request.code_verifier.is_some() {
+            return Err(IdentityError::InvalidGrant {
+                reason: "code_verifier was sent, but the code was issued without code_challenge"
+                    .to_string(),
+            });
+        }
         if let Some(ref challenge) = stored_code.code_challenge {
             let verifier = request
                 .code_verifier
@@ -2741,8 +2752,9 @@ impl EmbeddedIdentityEngine {
             return Err(IdentityError::InvalidRedirectUri);
         }
 
-        // PKCE unconditional for all clients (RFC 9700 §2.1.1)
-        if effective_code_challenge.is_none() {
+        // PKCE (RFC 9700 §2.1.1): every public client, and every
+        // confidential client with `require_pkce` (the default, #780).
+        if effective_code_challenge.is_none() && client.pkce_required() {
             return Err(IdentityError::InvalidInput {
                 reason: "PKCE is required (code_challenge with S256 must be supplied)".to_string(),
             });
@@ -4242,6 +4254,20 @@ impl EmbeddedIdentityEngine {
 
     /// Refuses an assertion key that is not a base64url-encoded 32-byte
     /// Ed25519 public key.
+    /// Refuses `require_pkce: false` on a public client (#780): only a
+    /// client that authenticates at the token endpoint (a client secret or
+    /// `private_key_jwt`) can drop the PKCE requirement.
+    pub(super) fn check_require_pkce(client: &OAuthClient) -> Result<(), IdentityError> {
+        if !client.require_pkce() && client.is_public() {
+            return Err(IdentityError::InvalidInput {
+                reason: "require_pkce: false is allowed only for a confidential client \
+                         (a client secret or private_key_jwt)"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
     pub(super) fn check_assertion_public_key(key: &str) -> Result<(), IdentityError> {
         let decoded = URL_SAFE_NO_PAD
             .decode(key)
@@ -4384,6 +4410,12 @@ impl EmbeddedIdentityEngine {
         if let Some(cors) = &request.cors_origins {
             client.set_cors_origins(cors.clone());
         }
+        if let Some(require_pkce) = request.require_pkce {
+            client.set_require_pkce(require_pkce);
+        }
+        // Also after a credential change: a client that becomes public cannot
+        // keep `require_pkce: false` (#780).
+        Self::check_require_pkce(&client)?;
         // ID-token signing algorithm (task 26.55): validated, and the realm's
         // RSA key provisioned, before the change is persisted.
         if let Some(alg) = request.id_token_signed_response_alg.as_deref() {

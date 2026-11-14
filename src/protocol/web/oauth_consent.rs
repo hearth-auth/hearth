@@ -442,11 +442,13 @@ fn plain_params(
         ));
     };
 
-    // Every client MUST supply PKCE S256, public and confidential (RFC 9700
+    // Every public client, and every confidential client with
+    // `require_pkce` (the default, #780), MUST supply PKCE S256 (RFC 9700
     // §2.1.1, spec `oidc-provider`). Refuse here, with an error redirect to
     // the validated URI: code issuance refuses it too, but only after
-    // consent, and as a server error (#639).
-    if q.code_challenge.is_empty() {
+    // consent, and as a server error (#639). A method without a challenge is
+    // refused for every client.
+    if q.code_challenge.is_empty() && (client.pkce_required() || code_challenge_method.is_some()) {
         return Err(authorization_error_redirect(
             state,
             realm,
@@ -1113,7 +1115,11 @@ fn jar_params(
         Some("S256") => Some(CodeChallengeMethod::S256),
         _ => None,
     };
-    if code_challenge.is_empty() || code_challenge_method.is_none() {
+    // A sent challenge needs S256; no challenge is accepted only for a
+    // confidential client without `require_pkce` (#780).
+    let pkce_missing =
+        code_challenge.is_empty() && (client.pkce_required() || code_challenge_method.is_some());
+    if pkce_missing || (!code_challenge.is_empty() && code_challenge_method.is_none()) {
         return Err(handlers_common::bad_request(
             "PKCE is required (code_challenge with code_challenge_method=S256)",
         ));
@@ -1133,7 +1139,7 @@ fn jar_params(
         redirect_uri,
         scope: jar.scope.unwrap_or_else(|| q.scope.clone()),
         state: state_param,
-        code_challenge: Some(code_challenge),
+        code_challenge: (!code_challenge.is_empty()).then_some(code_challenge),
         code_challenge_method,
         nonce: optional(&jar.nonce.unwrap_or_else(|| q.nonce.clone())),
         prompt: jar.prompt.unwrap_or_else(|| q.prompt.clone()),

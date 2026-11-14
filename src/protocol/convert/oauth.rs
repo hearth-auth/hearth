@@ -26,6 +26,7 @@ impl From<&domain::OAuthClient> for pb::OAuthClient {
             access_token_authorization: mode,
             id_token_signed_response_alg: c.id_token_signed_response_alg().as_str().to_string(),
             dpop_bound_access_tokens: c.dpop_bound_access_tokens(),
+            require_pkce: Some(c.require_pkce()),
             // The domain record holds only the secret's hash. The create
             // paths set the generated plaintext on their response, once.
             client_secret: None,
@@ -100,6 +101,9 @@ impl From<pb::RegisterClientRequest> for domain::RegisterClientRequest {
             id_token_signed_response_alg: r.id_token_signed_response_alg,
             dpop_bound_access_tokens: false,
             mfa_required: None,
+            // #780: the proto request has no such field. The admin routes set
+            // it from their body; dynamic registration keeps `true`.
+            require_pkce: true,
         }
     }
 }

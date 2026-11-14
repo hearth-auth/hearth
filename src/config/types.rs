@@ -2354,6 +2354,13 @@ pub struct ApplicationYamlConfig {
     /// ID-token key on first use (task 26.55).
     #[serde(default)]
     pub id_token_signed_response_alg: Option<String>,
+    /// Whether an authorization request of this application must carry PKCE
+    /// (`code_challenge` with `S256`). Absent means `true`. `false` is
+    /// accepted only for a confidential application (`confidential: true` or
+    /// an inline `jwks` for `private_key_jwt`), and only for a client that
+    /// cannot send PKCE (#780).
+    #[serde(default)]
+    pub require_pkce: Option<bool>,
 }
 
 impl ApplicationYamlConfig {
