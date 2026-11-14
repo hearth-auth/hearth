@@ -1,0 +1,21 @@
+# #647 round B: server c7i.large, 2 c7i.xlarge generators, 1M users in 10 realms of 100k.
+# Run with SETUP=1 USERS=1000000 REALMS=10 IMAGE=hearth-stress:<tag>
+#   PLAN_FILE=loadtest/live/plans/647-round-b-c7i-large-10x100k.txt loadtest/live/round.sh
+# (detached: README, "Running a round"). Realms stress, stress2 ... stress10, each with
+# the app and api clients, the admin and 1,000 login users; the import puts 100k users
+# in each. Each k6 VU works in one realm (VU v in realm (v - 1) % 10).
+# Pass marks: https://github.com/hearth-auth/hearth/issues/647 (set before the run).
+# Mark 2: the mix clean rate >= 90 % of round A's. The ramps, the restart and the crash
+# are round A's; round B has no soak.
+# Rates are totals over both generators.
+#    name           journey       start step  steps hold_s
+ramp ramp-mix          mix           250   50    10    90
+ramp ramp-login        login         20    10    9     90
+ramp ramp-refresh      refresh       200   100   13    90
+ramp ramp-userinfo     userinfo      2000  2000  6     60
+ramp ramp-admin_lookup admin_lookup  2000  2000  6     60
+ramp ramp-introspect   introspect    1500  1500  6     60
+#       name
+restart restart-10x100k
+#     name          journey rate seconds kill_at_s k6 settings
+crash crash-10x100k mix     120  600     300       MIX=refresh:60,login:15,userinfo:15,admin_lookup:5,create_user:5

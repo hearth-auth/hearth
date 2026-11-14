@@ -595,6 +595,16 @@ jobs:
       - name: Restore drill comparison — tests (test_restore_drill.py)
         run: python3 -I loadtest/live/test_restore_drill.py
 
+      # #647 round B runs the live stress test over several realms (REALMS).
+      # With REALMS=1 the bundle must stay byte-identical to the one-realm
+      # bundle (rounds A and C), and k6/realms.js decides how VUs, token pools
+      # and imported users spread over the realms. Neither runs anywhere else
+      # before an AWS round.
+      - name: Live stress test, several realms — tests (test_gen_config.sh, test_realms.mjs)
+        run: |
+          bash loadtest/live/test_gen_config.sh
+          node loadtest/live/k6/test_realms.mjs
+
       # The #[ignore] rule inside `make test-quality` was red at HEAD on a false
       # positive: it matched the literal text `#[ignore` anywhere on a line, so
       # prose saying a test must NOT be ignored reported itself. A gate that

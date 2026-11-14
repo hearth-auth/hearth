@@ -33,11 +33,20 @@
 #   ACCESS_TOKEN_TTL    token.access_token_ttl (default: 1h, the most Hearth accepts)
 #   REFRESH_TOKEN_TTL   token.refresh_token_ttl (default: Hearth's, 7d)
 #   SESSION_TTL         auth.session_ttl (default: Hearth's, 24h)
+# and, for a run over several realms (#647 round B):
+#   REALMS              realms to declare (default 1): stress, then stress2 ...
+#                       stress<N>, each with the same app and api clients and the
+#                       same seed users (the admin and the login users). With 1
+#                       the bundle is the one-realm bundle. generator.env gives
+#                       realm k > 1 as STRESS_REALM_<k>, STRESS_APP_CLIENT_ID_<k>,
+#                       STRESS_API_CLIENT_ID_<k> and STRESS_API_SECRET_<k>, and
+#                       the count as STRESS_REALMS (k6/realms.js reads them)
 set -euo pipefail
 
 out=${1:?usage: gen-config.sh <out-dir> <server-ip> [login-users]}
 server_ip=${2:?usage: gen-config.sh <out-dir> <server-ip> [login-users]}
 login_users=${3:-1000}
+realms=${REALMS:-1}
 
 host=hearth.stress.test
 port=8443
@@ -52,6 +61,14 @@ if ! [[ $login_users =~ ^[0-9]+$ ]] || [ "$login_users" -lt 1 ]; then
   echo "gen-config: login-users must be a positive integer" >&2
   exit 2
 fi
+if ! [[ $realms =~ ^[1-9][0-9]*$ ]]; then
+  echo "gen-config: REALMS must be a positive integer" >&2
+  exit 2
+fi
+# Realm k (1-based): stress, then stress2, stress3 ...
+realm_name() {
+  if [ "$1" = 1 ]; then echo "$realm"; else echo "$realm$1"; fi
+}
 
 storage_extra=""
 for setting in HOT_TIER_CAPACITY:hot_tier_capacity BLOCK_CACHE_BYTES:block_cache_bytes \
@@ -175,7 +192,14 @@ metrics:
   enabled: true
   bearer_token: "\${STRESS_METRICS_TOKEN}"
 realms:
-  $realm:
+EOF
+  seed_users=$(for i in $(seq 1 "$login_users"); do
+    printf '      - email: "user%06d@%s"\n        display_name: "User %d"\n        password: "${STRESS_USER_PASSWORD}"\n' \
+      "$i" "$host" "$i"
+  done)
+  for k in $(seq 1 "$realms"); do
+    cat << EOF
+  $(realm_name "$k"):
     auth:
       mfa_required: false
     applications:
@@ -202,16 +226,15 @@ realms:
         password: "\${STRESS_ADMIN_PASSWORD}"
         roles: [realm.admin]
 EOF
-  for i in $(seq 1 "$login_users"); do
-    printf '      - email: "user%06d@%s"\n        display_name: "User %d"\n        password: "${STRESS_USER_PASSWORD}"\n' \
-      "$i" "$host" "$i"
+    printf '%s\n' "$seed_users"
   done
 } > "$out/server/hearth.yaml"
 
 # Client IDs of YAML-declared applications: UUID v5 of "<realm>/<key>" in
 # Hearth's application namespace (src/identity/reconcile.rs, APP_NAMESPACE).
+# $1: the client key; $2: the realm (default: realm 1).
 client_id() {
-  python3 -c 'import sys, uuid; print(uuid.uuid5(uuid.UUID("8b074e8c-3e6a-5a8e-961d-8f2baae71bf4"), sys.argv[1]))' "$realm/$1"
+  python3 -c 'import sys, uuid; print(uuid.uuid5(uuid.UUID("8b074e8c-3e6a-5a8e-961d-8f2baae71bf4"), sys.argv[1]))' "${2:-$realm}/$1"
 }
 
 cat > "$out/generator.env" << EOF
@@ -229,5 +252,20 @@ STRESS_ADMIN_PASSWORD=$admin_password
 STRESS_API_SECRET=$api_secret
 STRESS_METRICS_TOKEN=$metrics_token
 EOF
+# Realms 2 and up, after realm 1's lines. Each starts with the declared api
+# secret; prepare.js gives each realm's api client a new one.
+if [ "$realms" -gt 1 ]; then
+  {
+    echo "STRESS_REALMS=$realms"
+    for k in $(seq 2 "$realms"); do
+      name=$(realm_name "$k")
+      echo "STRESS_REALM_$k=$name"
+      echo "STRESS_APP_CLIENT_ID_$k=$(client_id app "$name")"
+      echo "STRESS_API_CLIENT_ID_$k=$(client_id api "$name")"
+      echo "STRESS_API_SECRET_$k=$api_secret"
+    done
+  } >> "$out/generator.env"
+fi
 
-echo "gen-config: bundle written to $out (server ip $server_ip, $login_users login users)" >&2
+echo "gen-config: bundle written to $out (server ip $server_ip, $login_users login users$(
+  [ "$realms" = 1 ] || echo " in each of $realms realms"))" >&2

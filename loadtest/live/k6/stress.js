@@ -33,6 +33,13 @@
 // 0 = never), PRESENT (pool: the tokens userinfo and introspect present;
 // see userToken()).
 //
+// Several realms (STRESS_REALMS > 1, gen-config.sh REALMS): each VU works in
+// one realm for all its journeys, VU v in realm (v - 1) % STRESS_REALMS
+// (realms.js), so the VUs, and with them the load, spread evenly. setup()
+// signs in each realm's admin, splits the token pool (POOL) and ADMIN_IDS
+// evenly over the realms, and each iteration is tagged with its realm
+// (`realm`). create_user logs "ACK <id> <realm number>".
+//
 // Tokens never expire under a run: each VU replaces a token when 10 to 25 % of
 // its lifetime is left (a fraction each VU draws once), by a sign-in tagged
 // name=renew. A ramp ends before its tokens get near their expiry, so this does
@@ -48,11 +55,13 @@ import {
   claims,
   env,
   hosts,
+  realms,
   signIn,
   signInMany,
   TIMEOUT,
   userEmail,
 } from './lib.js';
+import { ackLine, share, vuRealm, vuSlot } from './realms.js';
 
 const JOURNEYS = ['introspect', 'userinfo', 'refresh', 'login', 'admin_lookup', 'create_user'];
 const journey = __ENV.JOURNEY;
@@ -101,6 +110,7 @@ const mix = (__ENV.MIX || 'refresh:65,login:15,userinfo:15,admin_lookup:5')
 const mixTotal = mix.reduce((s, m) => s + m.weight, 0);
 const needsTokens = (j) => ['introspect', 'userinfo', 'refresh'].includes(j);
 const uses = journey === 'mix' ? mix.map((m) => m.name) : [journey];
+const nRealms = realms.length;
 
 // One journey's latency: the sum of its requests' durations, in ms.
 const journeyMs = new Trend('journey_ms', true);
@@ -144,46 +154,64 @@ export const options = {
   },
 };
 
+// setup()'s data: one entry per realm, in the order of `realms`, with that
+// realm's admin token, its id, its token pool and the user ids to look up.
 export function setup() {
-  const admin = adminSession();
-  const realmId = claims(admin.access).tid.replace(/^realm_/, '');
   const data = {
-    admin: admin.access,
-    adminLife: life(admin.access),
-    realmId,
-    sessions: [],
-    userIds: [],
+    realms: realms.map((r) => {
+      const admin = adminSession(r);
+      return {
+        admin: admin.access,
+        adminLife: life(admin.access),
+        realmId: claims(admin.access).tid.replace(/^realm_/, ''),
+        sessions: [],
+        userIds: [],
+      };
+    }),
   };
+  // With one realm, error messages read as they did before REALMS.
+  const inRealm = (r) => (nRealms > 1 ? ` of realm ${r.name}` : '');
 
   if (uses.some(needsTokens)) {
     if (uses.includes('refresh') && pool < vus) {
       throw new Error('POOL must be >= VUS: each VU owns one refresh chain');
     }
-    const emails = [];
-    for (let i = 0; i < pool; i++) emails.push(userEmail((i % env.loginUsers) + 1));
-    const r = signInMany(emails, env.userPassword, setupParallel);
-    // A few users may stay shed by the KDF gate. A refresh VU without a
-    // session signs in at its first iteration (counted as a relogin).
-    if (r.sessions.length < Math.ceil(pool * 0.9)) {
-      throw new Error(`token pool: ${r.failed} of ${pool} sign-ins failed`);
-    }
-    data.sessions = r.sessions.map((s) => Object.assign(life(s.access), s));
+    if (pool < nRealms) throw new Error(`POOL must be >= the number of realms (${nRealms})`);
+    realms.forEach((r, ri) => {
+      // Realm ri's share of the pool: at least one session per VU of the realm.
+      const want = share(pool, nRealms, ri);
+      const emails = [];
+      for (let i = 0; i < want; i++) emails.push(userEmail((i % env.loginUsers) + 1));
+      const res = signInMany(emails, env.userPassword, setupParallel, r);
+      // A few users may stay shed by the KDF gate. A refresh VU without a
+      // session signs in at its first iteration (counted as a relogin).
+      if (res.sessions.length < Math.ceil(want * 0.9)) {
+        throw new Error(`token pool${inRealm(r)}: ${res.failed} of ${want} sign-ins failed`);
+      }
+      data.realms[ri].sessions = res.sessions.map((s) => Object.assign(life(s.access), s));
+    });
   }
   if (uses.includes('admin_lookup')) {
-    let cursor = null;
-    while (data.userIds.length < adminIds) {
-      const url = `${env.base}/admin/users?limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
-      const res = http.get(url, { headers: adminHeaders(admin.access, realmId), tags: { phase: 'setup' } });
-      if (res.status !== 200) throw new Error(`list users answered ${res.status}`);
-      const body = res.json();
-      for (const u of body.items) data.userIds.push(u.id);
-      cursor = body.next_cursor || body.cursor || null;
-      if (!cursor || body.items.length === 0) break;
-    }
-    if (data.userIds.length === 0) throw new Error('no users to look up');
+    realms.forEach((r, ri) => {
+      const d = data.realms[ri];
+      const want = share(adminIds, nRealms, ri);
+      let cursor = null;
+      while (d.userIds.length < want) {
+        const url = `${env.base}/admin/users?limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
+        const res = http.get(url, { headers: adminHeaders(d.admin, d.realmId), tags: { phase: 'setup' } });
+        if (res.status !== 200) throw new Error(`list users${inRealm(r)} answered ${res.status}`);
+        const body = res.json();
+        for (const u of body.items) d.userIds.push(u.id);
+        cursor = body.next_cursor || body.cursor || null;
+        if (!cursor || body.items.length === 0) break;
+      }
+      if (d.userIds.length === 0) throw new Error(`no users to look up${inRealm(r)}`);
+    });
   }
-  if (uses.includes('introspect') && !env.apiSecret) {
-    throw new Error('STRESS_API_SECRET is required for introspect (run prepare.js first)');
+  if (uses.includes('introspect')) {
+    for (const r of realms) {
+      if (!r.apiSecret) throw new Error(`${r.secretVar} is required for introspect (run prepare.js first)`);
+    }
   }
   if (__ENV.START_AT) {
     const waitMs = parseInt(__ENV.START_AT, 10) * 1000 - Date.now();
@@ -195,6 +223,18 @@ export function setup() {
   }
   data.startedAt = Date.now();
   return data;
+}
+
+// This VU's realm: its entry in `realms` and its index there.
+function realmIndex() {
+  return vuRealm(exec.vu.idInTest, nRealms);
+}
+function myRealm() {
+  return realms[realmIndex()];
+}
+// This VU's realm's part of setup()'s data.
+function mine(data) {
+  return data.realms[realmIndex()];
 }
 
 // VU-local state: this VU's session ({ refresh, access, iat, exp, refreshes },
@@ -223,18 +263,17 @@ function session(s) {
 
 // Signs this VU's own user in; `name` tags the requests (they are not a journey).
 function signInOwn(name) {
-  return signIn(userEmail(1 + (exec.vu.idInTest % env.loginUsers)), env.userPassword, { name });
+  return signIn(userEmail(1 + (exec.vu.idInTest % env.loginUsers)), env.userPassword, { name }, myRealm());
 }
 
 // This VU's session, or null when the VU must sign in again. The first call
-// takes the VU's own session from the pool. A session whose access token
-// nears expiry is replaced by a fresh sign-in.
+// takes the VU's own session from its realm's pool. A session whose access
+// token nears expiry is replaced by a fresh sign-in.
 function ownSession(data) {
   if (chain === null) {
-    chain =
-      exec.vu.idInTest <= data.sessions.length
-        ? Object.assign({ refreshes: 0 }, data.sessions[exec.vu.idInTest - 1])
-        : 'relogin';
+    const sessions = mine(data).sessions;
+    const slot = vuSlot(exec.vu.idInTest, nRealms);
+    chain = slot < sessions.length ? Object.assign({ refreshes: 0 }, sessions[slot]) : 'relogin';
   }
   if (chain !== 'relogin' && due(chain)) {
     renewals.add(1);
@@ -257,16 +296,17 @@ function userToken(data) {
   return own ? own.access : pickSession(data).access;
 }
 
-// The realm admin's token. setup()'s expires after the access-token lifetime,
-// so near its expiry each VU signs the admin in for itself.
+// This VU's realm admin's token. setup()'s expires after the access-token
+// lifetime, so near its expiry each VU signs the admin in for itself.
 function adminToken(data) {
-  if (!due(data.adminLife)) return data.admin;
+  const d = mine(data);
+  if (!due(d.adminLife)) return d.admin;
   if (admin === null || due(admin)) {
     renewals.add(1);
-    const s = signIn(env.adminEmail, env.adminPassword, { name: 'renew' });
+    const s = signIn(env.adminEmail, env.adminPassword, { name: 'renew' }, myRealm());
     if (s.ok) admin = Object.assign({ access: s.access }, life(s.access));
   }
-  return admin ? admin.access : data.admin;
+  return admin ? admin.access : d.admin;
 }
 
 function tagIteration() {
@@ -275,6 +315,7 @@ function tagIteration() {
   const phase = elapsed - step * stepS < rampS ? 'ramp' : 'hold';
   exec.vu.metrics.tags.step = String(step);
   exec.vu.metrics.tags.phase = phase;
+  if (nRealms > 1) exec.vu.metrics.tags.realm = myRealm().name;
 }
 
 // A failure's class: the HTTP status when the server answered, else k6's
@@ -302,21 +343,23 @@ function record(name, ok, ms, cls) {
 }
 
 function pickSession(data) {
-  return data.sessions[exec.scenario.iterationInTest % data.sessions.length];
+  const sessions = mine(data).sessions;
+  return sessions[exec.scenario.iterationInTest % sessions.length];
 }
 
 function introspect(data) {
+  const r = myRealm();
   const res = http.post(
-    `${env.base}/realms/${env.realm}/introspect`,
+    `${env.base}/realms/${r.name}/introspect`,
     { token: userToken(data) },
-    { headers: { Authorization: apiBasic(env.apiSecret) }, timeout: TIMEOUT, tags: { name: 'introspect' } },
+    { headers: { Authorization: apiBasic(r) }, timeout: TIMEOUT, tags: { name: 'introspect' } },
   );
   const ok = res.status === 200 && res.json('active') === true;
   record('introspect', ok, res.timings.duration, ok ? null : res.status === 200 ? 'inactive' : fail(res));
 }
 
 function userinfo(data) {
-  const res = http.get(`${env.base}/realms/${env.realm}/userinfo`, {
+  const res = http.get(`${env.base}/realms/${myRealm().name}/userinfo`, {
     headers: { Authorization: `Bearer ${userToken(data)}` },
     timeout: TIMEOUT,
     tags: { name: 'userinfo' },
@@ -336,9 +379,10 @@ function refresh(data) {
     chain = session(signInOwn('rotate'));
     return;
   }
+  const r = myRealm();
   const res = http.post(
-    `${env.base}/realms/${env.realm}/token`,
-    { grant_type: 'refresh_token', refresh_token: own.refresh, client_id: env.appClientId },
+    `${env.base}/realms/${r.name}/token`,
+    { grant_type: 'refresh_token', refresh_token: own.refresh, client_id: r.appClientId },
     { timeout: TIMEOUT, tags: { name: 'refresh' } },
   );
   const ok = res.status === 200;
@@ -362,15 +406,16 @@ function refresh(data) {
 
 function login() {
   const user = 1 + Math.floor(Math.random() * env.loginUsers);
-  const s = signIn(userEmail(user), env.userPassword);
+  const s = signIn(userEmail(user), env.userPassword, undefined, myRealm());
   const cls = s.ok ? null : `${s.failedStep}:${s.status > 0 ? s.status : `e${s.errorCode}`}`;
   record('login', s.ok, s.durationMs, cls);
 }
 
 function adminLookup(data) {
-  const id = data.userIds[exec.scenario.iterationInTest % data.userIds.length];
+  const d = mine(data);
+  const id = d.userIds[exec.scenario.iterationInTest % d.userIds.length];
   const res = http.get(`${env.base}/admin/users/${id}`, {
-    headers: adminHeaders(adminToken(data), data.realmId),
+    headers: adminHeaders(adminToken(data), d.realmId),
     timeout: TIMEOUT,
     tags: { name: 'admin_lookup' },
   });
@@ -382,11 +427,15 @@ function createUser(data) {
   const res = http.post(
     `${env.base}/admin/users`,
     JSON.stringify({ email, display_name: 'Stress created' }),
-    { headers: adminHeaders(adminToken(data), data.realmId), timeout: TIMEOUT, tags: { name: 'create_user' } },
+    {
+      headers: adminHeaders(adminToken(data), mine(data).realmId),
+      timeout: TIMEOUT,
+      tags: { name: 'create_user' },
+    },
   );
   const ok = res.status === 201;
   record('create_user', ok, res.timings.duration, fail(res));
-  if (ok) console.log(`ACK ${res.json('id')}`);
+  if (ok) console.log(ackLine(res.json('id'), realmIndex(), nRealms));
 }
 
 const run = {

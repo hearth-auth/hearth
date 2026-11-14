@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# A stand-in for openssl that test_gen_config.sh puts first on PATH, so that
+# gen-config.sh writes the same bundle on every run: each `rand` prints the next
+# value of a counter kept in $FAKE_OPENSSL_STATE, and `req` and `x509` write
+# placeholder files where the real ones would write keys and certificates.
+set -euo pipefail
+state=${FAKE_OPENSSL_STATE:?FAKE_OPENSSL_STATE must name a counter file}
+case ${1:-} in
+  rand)
+    n=$(($(cat "$state" 2> /dev/null || echo 0) + 1))
+    echo "$n" > "$state"
+    case ${2:-} in
+      -hex) printf '%064x\n' "$n" ;;
+      -base64) printf 'fakeSecret%04dAbCdEfGhIjKlMnOp\n' "$n" ;;
+      *) echo "fake openssl: rand ${2:-} is not faked" >&2; exit 1 ;;
+    esac
+    ;;
+  req | x509)
+    cmd=$1
+    shift
+    while [ $# -gt 0 ]; do
+      case $1 in
+        -keyout | -out) printf 'fake %s %s\n' "$cmd" "$1" > "$2"; shift ;;
+      esac
+      shift
+    done
+    ;;
+  *) echo "fake openssl: ${1:-} is not faked" >&2; exit 1 ;;
+esac

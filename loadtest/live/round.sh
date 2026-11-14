@@ -33,6 +33,8 @@
 # Settings (environment), on top of cloud.sh's:
 #   SETUP=1      first: up, deploy, a dsync disk check, import USERS, store copy
 #   USERS        1000000 (users imported by SETUP)
+#   REALMS       1 (realms; cloud.sh's REALMS): SETUP splits USERS evenly over
+#                them, and each k6 VU works in one of them
 #   IMAGE        Docker image the binary comes from (needs a revision label)
 #   PLAN_FILE    the plan; default: the PLAN variable
 #   KEEP=1       leave the run up at the end
