@@ -1,0 +1,7 @@
+# #647 round A, rerun of the refresh mark: server c7i.large, 2 c7i.xlarge generators, 1M users
+# in one realm, the settings of round A. Round A (v4.10.0) failed this mark at 700/s (#836).
+# Run with SETUP=1 USERS=1000000 IMAGE=<the newest release> PLAN_FILE=<this file> round.sh.
+# Pass marks: https://github.com/hearth-auth/hearth/issues/647 (set before the run; unchanged).
+# Rates are totals over both generators.
+#    name           journey       start step  steps hold_s
+ramp ramp-refresh      refresh       200   100   13    90

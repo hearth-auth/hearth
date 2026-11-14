@@ -1,0 +1,13 @@
+# #647 round A, rerun of the memory soak (mark 6): server c7i.large, 2 c7i.xlarge generators,
+# 1M users in one realm. The round A soak had no steady state: the hot tier grew for the whole
+# run. This run uses the settings of the weekly steady-memory test (loadtest/live/steady-memory.sh)
+# and its 300 minutes, so the stored data levels off. Run with
+#   SETUP=1 USERS=1000000 VUS=500 HOT_TIER_CAPACITY=20000 BLOCK_CACHE_BYTES=33554432 \
+#   MEMTABLE_FLUSH_BYTES=8388608 COMPACTION_INTERVAL_SECS=600 CLAIMS_CACHE_MAX=2048 \
+#   ACCESS_TOKEN_TTL=5m REFRESH_TOKEN_TTL=10m SESSION_TTL=10m \
+#   IMAGE=<the newest release> PLAN_FILE=<this file> round.sh
+# Verdict: the #573 rule (end <= start + 30 %, and the slope rule) over the 180-minute window
+# that starts when the caches are full (loadtest/live/steady_heap.py).
+# Pass marks: https://github.com/hearth-auth/hearth/issues/647 (set before the run; unchanged).
+#    name     journey rate seconds malloc_info minutes
+soak soak-1m  mix     120  18000   150,299
