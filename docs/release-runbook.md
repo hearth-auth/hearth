@@ -63,17 +63,21 @@ authorization endpoints, and before each manual release:
 ```bash
 make conformance-oidf-check        # the script's own guards (seconds, no Docker)
 make conformance-oidf PLAN=config  # MUST exit 0
-make conformance-oidf PLAN=basic   # regression check: compare with the newest report
+make conformance-oidf PLAN=basic   # exits 0 since 2026-11-14; a failure is a regression
 make conformance-oidf PLAN=dynamic # regression check: compare with the newest report
 ```
 
 - **Config OP must exit 0.** A failed condition, or a warning or skip with no recorded decision,
   stops the release: fix it, or record a decision in
   `scripts/conformance-oidf/expected-warnings.json` / `expected-skips.json` in a PR.
-- **Basic OP and Dynamic OP do not pass today** (see the newest `reports/oidf-conformance-*.md`).
-  Compare the failures in `results.txt` with that report. A new failure is a regression: open an
-  issue before the release. Whether these plans become a release gate is an owner decision
-  (#780, #784).
+- **Basic OP exits 0** since the 2026-11-14 report. A failed condition, or a warning or skip
+  with no recorded decision, is a regression: open an issue before the release. Whether Basic
+  OP becomes a release gate is an owner decision.
+- **Dynamic OP does not pass, and that is not a goal** (owner decision on #784). It runs for
+  regressions only: compare the failed modules in `results.txt` with the known-failure list of
+  the newest `reports/oidf-conformance-*.md`. A module that is not in that list is a
+  regression: open an issue before the release. To see every module, set
+  `OIDF_MAX_CONSECUTIVE_FAILURES=200`.
 - Results go to `target/conformance-oidf/<timestamp>/` (`results.txt`, the suite's export and
   the Hearth log). The script stops its own Compose project (`hearth-oidf`) at the end.
 
