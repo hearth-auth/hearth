@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.12.0] — 2026-11-14
+
 ### Added
 - **Rotation of `HEARTH_KEK`** (#649): to rotate the key-encryption key, restart Hearth once
   with the new value in `HEARTH_KEK` and the old value in the new `HEARTH_PREVIOUS_KEK`. Before
