@@ -15,22 +15,33 @@ use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use crate::identity::search::SortDir;
 use crate::storage::{EntryVisitor, ScanEntry, StorageError};
 
 const SESSION_RECORD_PREFIX: &[u8] = b"ses:id:";
 const LIVE_SESSION_PREFIX: &[u8] = b"ses:live:";
+/// The prefix of both created-time session indexes (#847).
+const CREATED_INDEX_PREFIX: &[u8] = b"ses:ct:";
 
-/// Counts the session records (`ses:id:` keys) that reads walk or return.
-/// Every call goes through to the real engine.
-struct SessionReadCountingStorage {
+/// Counts the session records (`ses:id:` keys) that reads walk or return,
+/// and the created-time index keys that writes put or delete. Every call
+/// goes through to the real engine.
+pub(super) struct SessionReadCountingStorage {
     inner: Arc<dyn StorageEngine>,
-    session_reads: AtomicUsize,
+    pub(super) session_reads: AtomicUsize,
+    pub(super) created_index_writes: AtomicUsize,
 }
 
 impl SessionReadCountingStorage {
     fn count(&self, key: &[u8]) {
         if key.starts_with(SESSION_RECORD_PREFIX) {
             self.session_reads.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn count_write(&self, key: &[u8]) {
+        if key.starts_with(CREATED_INDEX_PREFIX) {
+            self.created_index_writes.fetch_add(1, Ordering::SeqCst);
         }
     }
 }
@@ -42,10 +53,12 @@ impl StorageEngine for SessionReadCountingStorage {
     }
 
     fn put(&self, realm_id: &RealmId, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+        self.count_write(key);
         self.inner.put(realm_id, key, value)
     }
 
     fn delete(&self, realm_id: &RealmId, key: &[u8]) -> Result<(), StorageError> {
+        self.count_write(key);
         self.inner.delete(realm_id, key)
     }
 
@@ -116,6 +129,9 @@ impl StorageEngine for SessionReadCountingStorage {
         realm_id: &RealmId,
         entries: &[(Vec<u8>, Vec<u8>)],
     ) -> Result<(), StorageError> {
+        for (key, _) in entries {
+            self.count_write(key);
+        }
         self.inner.put_batch(realm_id, entries)
     }
 
@@ -125,6 +141,9 @@ impl StorageEngine for SessionReadCountingStorage {
         puts: &[(Vec<u8>, Vec<u8>)],
         deletes: &[Vec<u8>],
     ) -> Result<(), StorageError> {
+        for key in puts.iter().map(|(key, _)| key).chain(deletes) {
+            self.count_write(key);
+        }
         self.inner.write_batch(realm_id, puts, deletes)
     }
 
@@ -142,7 +161,7 @@ impl StorageEngine for SessionReadCountingStorage {
 }
 
 /// An engine on a real store, with every session record read counted.
-fn counting_engine() -> (
+pub(super) fn counting_engine() -> (
     tempfile::TempDir,
     Arc<SessionReadCountingStorage>,
     EmbeddedIdentityEngine,
@@ -155,6 +174,7 @@ fn counting_engine() -> (
     let counting = Arc::new(SessionReadCountingStorage {
         inner,
         session_reads: AtomicUsize::new(0),
+        created_index_writes: AtomicUsize::new(0),
     });
     let storage = Arc::clone(&counting) as Arc<dyn StorageEngine>;
     let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000_000)));
@@ -223,6 +243,27 @@ fn assert_live_index_matches_records(storage: &dyn StorageEngine, realm: &RealmI
         indexed, live,
         "{step}: the live index must hold the sessions that are not revoked"
     );
+    // Both created-time indexes hold the same sessions as the live index
+    // (#847).
+    for dir in [SortDir::Asc, SortDir::Desc] {
+        let prefix = keys::session_created_scan_prefix(dir);
+        let created: BTreeSet<Vec<u8>> = storage
+            .scan_keys(realm, &prefix, &keys::prefix_end(&prefix))
+            .expect("scan created index")
+            .iter()
+            .map(|key| {
+                keys::session_id_of_created_key(key, dir)
+                    .expect("a created-index key")
+                    .as_uuid()
+                    .to_string()
+                    .into_bytes()
+            })
+            .collect();
+        assert_eq!(
+            created, live,
+            "{step}: the created-time index ({dir:?}) must hold the live sessions"
+        );
+    }
     assert_eq!(
         storage
             .count_prefix(realm, LIVE_SESSION_PREFIX, 0)

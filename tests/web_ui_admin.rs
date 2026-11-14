@@ -2478,3 +2478,108 @@ async fn tenant_users_list_renders_realm_breadcrumb() {
         "tenant users list must mark active tab"
     );
 }
+
+/// The session ids of the rows of a session list page, in page order.
+fn session_row_ids(body: &str) -> Vec<String> {
+    body.split(r#"id="session-"#)
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .map(str::to_string)
+        .collect()
+}
+
+async fn get_body(rig: &TestRig, cookie: &str, uri: &str) -> String {
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(uri)
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK, "{uri}");
+    let bytes = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    String::from_utf8(bytes.to_vec()).expect("utf-8")
+}
+
+/// #847: the realm session list shows the newest sessions first and pages
+/// with a key cursor. Before, a page held a random set of sessions (the
+/// live index is in session-id order), sorted among themselves.
+#[tokio::test]
+async fn admin_sessions_list_pages_newest_first_with_a_cursor() {
+    let rig = build_rig();
+    let cookie = admin_cookie(&rig, "csrf-sessions-847");
+    // Wait for the clock to move, so every session below is newer than the
+    // sessions of the rig.
+    let start = hearth::core::Timestamp::now();
+    while hearth::core::Timestamp::now() <= start {
+        std::hint::spin_loop();
+    }
+    let mut created = Vec::new();
+    for _ in 0..7 {
+        let session = rig
+            .identity
+            .create_session(
+                &rig.realm_id,
+                &rig.non_admin_user_id,
+                &hearth::identity::SessionContext::default(),
+            )
+            .expect("create session");
+        created.push((session.created_at(), *session.id().as_uuid()));
+    }
+    // The newest-first index orders by created time, then session id (both
+    // descending), so two sessions with one created time have a known order.
+    created.sort_unstable_by(|a, b| b.cmp(a));
+    let newest_first: Vec<String> = created.iter().map(|(_, id)| id.to_string()).collect();
+
+    let first = get_body(&rig, &cookie, "/ui/admin/realms/acme/sessions?per_page=5").await;
+    assert_eq!(
+        session_row_ids(&first),
+        newest_first[..5].to_vec(),
+        "page 1"
+    );
+    let next = first
+        .split(r#"href="/ui/admin/realms/acme/sessions?after="#)
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("a next link with a cursor")
+        .replace("&amp;", "&");
+    let second = get_body(
+        &rig,
+        &cookie,
+        &format!("/ui/admin/realms/acme/sessions?after={next}"),
+    )
+    .await;
+    let rows = session_row_ids(&second);
+    assert_eq!(rows[..2].to_vec(), newest_first[5..].to_vec(), "page 2");
+    assert!(
+        rows.contains(&rig.non_admin_session_id.as_uuid().to_string()),
+        "the older seeded session follows on page 2"
+    );
+
+    // The total counts every live session, so only the "All" list shows
+    // "of N". The Active list (the default) shows the range only.
+    let words = |body: &str| body.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(words(&first).contains("1–5 "), "page 1 range");
+    assert!(
+        !words(&first).contains("1–5 of"),
+        "a filtered list does not claim a total"
+    );
+    let all = get_body(
+        &rig,
+        &cookie,
+        "/ui/admin/realms/acme/sessions?per_page=5&status=all",
+    )
+    .await;
+    assert!(
+        words(&all).contains("1–5 of"),
+        "the All list shows its total"
+    );
+}

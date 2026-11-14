@@ -196,6 +196,24 @@ const PROMPT_NONE_WINDOW_MICROS: i64 = 60 * 60 * 1_000_000;
 /// Maximum `prompt=none` probes per (realm, subject) per hour (A-37).
 const PROMPT_NONE_MAX_PROBES: u32 = 50;
 
+/// Most created-time index entries that one realm session page walks to fill
+/// a page with the sessions of a status filter (#847). A page that reaches
+/// it holds fewer sessions and still has a next page.
+const SESSION_PAGE_WALK_MAX: usize = 2_000;
+
+/// The result of one walk of a created-time session index (#847).
+#[derive(Default)]
+struct CreatedIndexWalk {
+    /// The sessions that the walk kept, in walk order.
+    sessions: Vec<Session>,
+    /// The session of the first index entry walked.
+    first_walked: Option<SessionId>,
+    /// The session of the last index entry walked.
+    last_walked: Option<SessionId>,
+    /// `true` when an index entry follows the last one walked.
+    more: bool,
+}
+
 /// Maximum tolerated clock skew between issuer and validator, in seconds.
 ///
 /// Tokens with `iat > now + CLOCK_SKEW_SECS` are rejected as future-dated.
@@ -4755,6 +4773,12 @@ impl EmbeddedIdentityEngine {
         self.persist_session_with(realm_id, session, Vec::new())
     }
 
+    /// The created-time index entries of a new session (#847), for the
+    /// `extra` entries of its create write.
+    fn session_created_index_puts(session: &Session) -> [(Vec<u8>, Vec<u8>); 2] {
+        keys::session_created_keys(session.id(), session.created_at()).map(|key| (key, Vec::new()))
+    }
+
     /// Persists a session record together with `extra` index entries as a
     /// **single** atomic write.
     ///
@@ -4781,10 +4805,14 @@ impl EmbeddedIdentityEngine {
         batch.push((id_key, session_bytes));
         // The live-session index entry goes in the same atomic write as the
         // record (#644): it exists exactly while the record is not revoked.
+        // A revocation also deletes the created-time index entries (#847); a
+        // create puts them in `extra`, and a refresh does not write them.
         if session.is_revoked() {
             batch.extend(extra);
+            let [ascending, descending] =
+                keys::session_created_keys(session.id(), session.created_at());
             self.storage
-                .write_batch(realm_id, &batch, &[live_key])
+                .write_batch(realm_id, &batch, &[live_key, ascending, descending])
                 .map_err(Self::storage_err)?;
         } else {
             batch.push((live_key, Vec::new()));
@@ -6092,17 +6120,166 @@ impl EmbeddedIdentityEngine {
         after: Option<&[u8]>,
         limit: usize,
     ) -> Result<Vec<Vec<u8>>, IdentityError> {
-        let prefix = keys::live_session_scan_prefix();
-        let end = keys::prefix_end(&prefix);
+        self.prefix_keys_after(realm_id, &keys::live_session_scan_prefix(), after, limit)
+    }
+
+    /// [`IdentityEngine::session_page_by_cursor`] with a walk bound of
+    /// `walk_max` index entries (#847).
+    ///
+    /// [`SessionPageCursor::Before`] walks the index of the other direction
+    /// from the cursor session and reverses the result, so a page has a
+    /// previous page without a reverse scan.
+    ///
+    /// [`SessionPageCursor::Before`]: crate::identity::search::SessionPageCursor::Before
+    pub(crate) fn session_page_walk(
+        &self,
+        realm_id: &RealmId,
+        dir: crate::identity::search::SortDir,
+        status: crate::identity::search::SessionStatusFilter,
+        cursor: &crate::identity::search::SessionPageCursor,
+        limit: u32,
+        walk_max: usize,
+    ) -> Result<crate::identity::search::SessionCursorPage, IdentityError> {
+        use crate::identity::search::{SessionPageCursor, SortDir};
+
+        let limit = limit.clamp(1, crate::core::MAX_PAGE_LIMIT) as usize;
+        let total = self
+            .storage
+            .count_prefix(realm_id, &keys::live_session_scan_prefix(), 0)
+            .map_err(Self::storage_err)?;
+        let other = match dir {
+            SortDir::Asc => SortDir::Desc,
+            SortDir::Desc => SortDir::Asc,
+        };
+        // The cursor key holds the created time, so the cursor record names
+        // it. A cursor session that no longer exists gives the first page.
+        let (cursor_id, backward) = match cursor {
+            SessionPageCursor::First => (None, false),
+            SessionPageCursor::After(id) => (Some(id), false),
+            SessionPageCursor::Before(id) => (Some(id), true),
+        };
+        let cursor_session = match cursor_id {
+            Some(id) => self.load_session_raw(realm_id, id)?,
+            None => None,
+        };
+        let (walk_dir, backward) = if backward && cursor_session.is_some() {
+            (other, true)
+        } else {
+            (dir, false)
+        };
+        let start_after = cursor_session
+            .as_ref()
+            .map(|s| keys::encode_session_created(s.id(), s.created_at(), walk_dir));
+
+        let mut walk = self.walk_created_index(
+            realm_id,
+            walk_dir,
+            start_after.as_deref(),
+            status,
+            limit,
+            walk_max,
+        )?;
+        let cursor_id = cursor_session.map(|s| s.id().clone());
+        let (prev, next) = if backward {
+            walk.sessions.reverse();
+            // The walk went back from the cursor, so the cursor session
+            // comes after the page.
+            let prev = if walk.more { walk.last_walked } else { None };
+            (prev, walk.first_walked.or(cursor_id))
+        } else {
+            // A page after a cursor has a page before it.
+            let prev = cursor_id.map(|c| walk.first_walked.unwrap_or(c));
+            let next = if walk.more { walk.last_walked } else { None };
+            (prev, next)
+        };
+        Ok(crate::identity::search::SessionCursorPage {
+            sessions: walk.sessions,
+            prev,
+            next,
+            total,
+        })
+    }
+
+    /// Walks the created-time index of `dir` after `after` (exclusive) or
+    /// from the start, and keeps the live sessions that `status` selects
+    /// (#847).
+    ///
+    /// The walk stops when it keeps `limit` sessions or walks `walk_max`
+    /// entries. `more` is `true` when an entry follows the last one walked.
+    fn walk_created_index(
+        &self,
+        realm_id: &RealmId,
+        dir: crate::identity::search::SortDir,
+        after: Option<&[u8]>,
+        status: crate::identity::search::SessionStatusFilter,
+        limit: usize,
+        walk_max: usize,
+    ) -> Result<CreatedIndexWalk, IdentityError> {
+        use crate::identity::search::SessionStatusFilter;
+
+        let now = self.clock.now().as_micros();
+        let prefix = keys::session_created_scan_prefix(dir);
+        let walk_max = walk_max.max(1);
+        let mut walk = CreatedIndexWalk::default();
+        let mut walked = 0usize;
+        let mut after = after.map(<[u8]>::to_vec);
+        'walk: loop {
+            // One key more than the walk can take shows whether more follow.
+            let want = (walk_max - walked).min(crate::core::MAX_PAGE_LIMIT as usize) + 1;
+            let batch = self.prefix_keys_after(realm_id, &prefix, after.as_deref(), want)?;
+            let short = batch.len() < want;
+            for key in batch {
+                if walked >= walk_max || walk.sessions.len() >= limit {
+                    walk.more = true;
+                    break 'walk;
+                }
+                walked += 1;
+                if let Some(id) = keys::session_id_of_created_key(&key, dir) {
+                    if walk.first_walked.is_none() {
+                        walk.first_walked = Some(id.clone());
+                    }
+                    if let Some(session) = self.load_session_raw(realm_id, &id)? {
+                        let active = session.expires_at().as_micros() > now;
+                        let keep = !session.is_revoked()
+                            && match status {
+                                SessionStatusFilter::Active => active,
+                                SessionStatusFilter::Expired => !active,
+                                SessionStatusFilter::All => true,
+                            };
+                        if keep {
+                            walk.sessions.push(session);
+                        }
+                    }
+                    walk.last_walked = Some(id);
+                }
+                after = Some(key);
+            }
+            if short {
+                break;
+            }
+        }
+        Ok(walk)
+    }
+
+    /// Up to `limit` keys under `prefix`, after `after` (exclusive) or from
+    /// the start.
+    fn prefix_keys_after(
+        &self,
+        realm_id: &RealmId,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<Vec<Vec<u8>>, IdentityError> {
+        let end = keys::prefix_end(prefix);
         let start = after.map_or_else(
-            || prefix.clone(),
+            || prefix.to_vec(),
             |key| {
                 let mut next = key.to_vec();
                 next.push(0);
                 next
             },
         );
-        let mut found = Vec::with_capacity(limit.min(crate::core::MAX_PAGE_LIMIT as usize));
+        let mut found = Vec::with_capacity(limit.min(crate::core::MAX_PAGE_LIMIT as usize + 1));
         self.storage
             .visit_keys(realm_id, &start, &end, &mut |key| {
                 found.push(key.to_vec());
@@ -7446,15 +7623,20 @@ impl EmbeddedIdentityEngine {
             if let Some(session_uuid_str) = key_str.rsplit(':').next() {
                 if let Ok(uuid) = uuid::Uuid::parse_str(session_uuid_str) {
                     let session_id = SessionId::new(uuid);
+                    let mut doomed = vec![
+                        keys::encode_session_id(&session_id),
+                        keys::encode_live_session(&session_id),
+                    ];
+                    // The created-time index keys hold the created time, so
+                    // the record names them (#847).
+                    if let Some(session) = self.load_session_raw(realm_id, &session_id)? {
+                        doomed.extend(keys::session_created_keys(
+                            &session_id,
+                            session.created_at(),
+                        ));
+                    }
                     self.storage
-                        .write_batch(
-                            realm_id,
-                            &[],
-                            &[
-                                keys::encode_session_id(&session_id),
-                                keys::encode_live_session(&session_id),
-                            ],
-                        )
+                        .write_batch(realm_id, &[], &doomed)
                         .map_err(Self::storage_err)?;
                     // Evict from in-process cache so subsequent get_session
                     // calls see the deletion rather than a stale cache hit.
@@ -9567,6 +9749,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             page.offset,
             page.limit,
         ))
+    }
+
+    fn session_page_by_cursor(
+        &self,
+        realm_id: &RealmId,
+        dir: crate::identity::search::SortDir,
+        status: crate::identity::search::SessionStatusFilter,
+        cursor: &crate::identity::search::SessionPageCursor,
+        limit: u32,
+    ) -> Result<crate::identity::search::SessionCursorPage, IdentityError> {
+        self.session_page_walk(realm_id, dir, status, cursor, limit, SESSION_PAGE_WALK_MAX)
     }
 
     fn revoke_all_user_sessions(
@@ -19379,11 +19572,14 @@ impl EmbeddedIdentityEngine {
         let session_bytes = Self::serialize_session(&session)?;
         let id_key = keys::encode_session_id(session.id());
         let user_session_key = keys::encode_user_session(user_id, &session_id);
-        let session_kvs: Vec<(Vec<u8>, Vec<u8>)> = vec![
+        let mut session_kvs: Vec<(Vec<u8>, Vec<u8>)> = vec![
             (id_key, session_bytes),
             (keys::encode_live_session(&session_id), Vec::new()),
             (user_session_key, Vec::new()),
         ];
+        // The created-time indexes change only at create and removal, never
+        // at a refresh (#847).
+        session_kvs.extend(Self::session_created_index_puts(&session));
 
         let session_audit_ctx = AuditContext {
             actor: Actor::User(user_id.clone()),
@@ -19431,11 +19627,9 @@ impl EmbeddedIdentityEngine {
             Err(crate::audit::AuditError::MergedAppendNotSupported) => {
                 // Non-embedded audit engine: two-record fallback (HEA-1945 behaviour).
                 let user_session_key = keys::encode_user_session(user_id, &session_id);
-                self.persist_session_with(
-                    realm_id,
-                    &session,
-                    vec![(user_session_key, Vec::new())],
-                )?;
+                let mut index = vec![(user_session_key, Vec::new())];
+                index.extend(Self::session_created_index_puts(&session));
+                self.persist_session_with(realm_id, &session, index)?;
                 self.record_audit(
                     realm_id,
                     Some(&session_audit_ctx),
@@ -19453,11 +19647,9 @@ impl EmbeddedIdentityEngine {
                      falling back to session-only write"
                 );
                 let user_session_key = keys::encode_user_session(user_id, &session_id);
-                self.persist_session_with(
-                    realm_id,
-                    &session,
-                    vec![(user_session_key, Vec::new())],
-                )?;
+                let mut index = vec![(user_session_key, Vec::new())];
+                index.extend(Self::session_created_index_puts(&session));
+                self.persist_session_with(realm_id, &session, index)?;
                 let _ = self.audit.append(&audit_request);
             }
         }
@@ -19750,6 +19942,8 @@ mod tests {
     mod search_index_merge;
     /// PKCE challenge and refresh-token hash compare in constant time.
     mod secret_compare;
+    /// The realm session list pages in created-time order (#847).
+    mod session_created_index;
     /// A session-cache fill never resurrects a session revoked while it ran.
     mod session_fill_race;
     /// The realm session list and the timeout sweep read live sessions only (#644).

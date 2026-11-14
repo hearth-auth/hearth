@@ -152,7 +152,9 @@ impl EmbeddedIdentityEngine {
         let jti = crate::identity::tokens::decode_claims_unverified(&access_token)?.jti;
 
         let user_session_key = keys::encode_user_session(user_id, &session_id);
-        self.persist_session_with(&realm_id, &session, vec![(user_session_key, Vec::new())])?;
+        let mut index = vec![(user_session_key, Vec::new())];
+        index.extend(Self::session_created_index_puts(&session));
+        self.persist_session_with(&realm_id, &session, index)?;
 
         // The audit record is a precondition, not a best effort: an operator
         // token nobody can trace is worse than no token. `record_audit` treats
@@ -179,15 +181,16 @@ impl EmbeddedIdentityEngine {
             metadata: Some(metadata),
         };
         if let Err(e) = self.audit.append(&event) {
-            let undo = self.storage.write_batch(
-                &realm_id,
-                &[],
-                &[
-                    keys::encode_session_id(&session_id),
-                    keys::encode_live_session(&session_id),
-                    keys::encode_user_session(user_id, &session_id),
-                ],
-            );
+            let mut undo_keys = vec![
+                keys::encode_session_id(&session_id),
+                keys::encode_live_session(&session_id),
+                keys::encode_user_session(user_id, &session_id),
+            ];
+            undo_keys.extend(keys::session_created_keys(
+                &session_id,
+                session.created_at(),
+            ));
+            let undo = self.storage.write_batch(&realm_id, &[], &undo_keys);
             self.session_cache_invalidate(&realm_id, &session_id);
             if let Err(undo_err) = undo {
                 tracing::error!(

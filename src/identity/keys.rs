@@ -361,6 +361,11 @@ const SESSION_USER_PREFIX: &str = "ses:user:";
 /// session-timeout sweep walk it instead of every session record.
 const SESSION_LIVE_PREFIX: &str = "ses:live:";
 
+/// Prefix of the created-time session indexes (#847): `ses:ct:a:` holds the
+/// live sessions oldest first, `ses:ct:d:` newest first. Each holds one key
+/// with an empty value for each session that has a live-session index entry.
+const SESSION_CREATED_PREFIX: &str = "ses:ct:";
+
 /// Encodes the primary key for a user record.
 ///
 /// Format: `usr:id:{uuid}`
@@ -525,6 +530,69 @@ pub(crate) fn live_session_key_of_record(record_key: &[u8]) -> Option<Vec<u8>> {
     key.extend_from_slice(SESSION_LIVE_PREFIX.as_bytes());
     key.extend_from_slice(uuid);
     Some(key)
+}
+
+/// Returns the scan prefix of the created-time session index of `dir`.
+///
+/// Format: `ses:ct:a:` (oldest first) or `ses:ct:d:` (newest first)
+pub(crate) fn session_created_scan_prefix(dir: crate::identity::search::SortDir) -> Vec<u8> {
+    let dir = match dir {
+        crate::identity::search::SortDir::Asc => "a",
+        crate::identity::search::SortDir::Desc => "d",
+    };
+    format!("{SESSION_CREATED_PREFIX}{dir}:").into_bytes()
+}
+
+/// Encodes the key of a session in the created-time index of `dir`.
+///
+/// Format: `ses:ct:a:{created 8 B}{uuid 16 B}`, or `ses:ct:d:` with every
+/// byte after the prefix inverted, so that a forward walk of either index
+/// is in its order. The created time has its sign bit flipped, so a signed
+/// time sorts as unsigned bytes.
+pub(crate) fn encode_session_created(
+    session_id: &SessionId,
+    created: crate::core::Timestamp,
+    dir: crate::identity::search::SortDir,
+) -> Vec<u8> {
+    #[allow(clippy::cast_sign_loss)]
+    let time = ((created.as_micros() as u64) ^ (1 << 63)).to_be_bytes();
+    let mut key = session_created_scan_prefix(dir);
+    let body = key.len();
+    key.extend_from_slice(&time);
+    key.extend_from_slice(session_id.as_uuid().as_bytes());
+    if dir == crate::identity::search::SortDir::Desc {
+        for byte in &mut key[body..] {
+            *byte = !*byte;
+        }
+    }
+    key
+}
+
+/// The keys of a session in both created-time indexes (#847).
+pub(crate) fn session_created_keys(
+    session_id: &SessionId,
+    created: crate::core::Timestamp,
+) -> [Vec<u8>; 2] {
+    [
+        encode_session_created(session_id, created, crate::identity::search::SortDir::Asc),
+        encode_session_created(session_id, created, crate::identity::search::SortDir::Desc),
+    ]
+}
+
+/// The session id of a key of the created-time index of `dir`, or `None`
+/// when `key` is not one.
+pub(crate) fn session_id_of_created_key(
+    key: &[u8],
+    dir: crate::identity::search::SortDir,
+) -> Option<SessionId> {
+    let body = key.strip_prefix(session_created_scan_prefix(dir).as_slice())?;
+    let id: [u8; 16] = body.get(8..)?.try_into().ok()?;
+    let id = if dir == crate::identity::search::SortDir::Desc {
+        id.map(|byte| !byte)
+    } else {
+        id
+    };
+    Some(SessionId::new(uuid::Uuid::from_bytes(id)))
 }
 
 /// Computes the exclusive end bound for a prefix scan.

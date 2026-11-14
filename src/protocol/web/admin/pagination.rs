@@ -231,9 +231,20 @@ pub struct PrevNextPager {
     /// Pre-split `(name, value)` pairs of the preserved params, for the
     /// page-size form's hidden inputs.
     pub filter_params: Vec<(String, String)>,
+    /// `false` when `total` is not the size of the list that the page
+    /// shows (a filtered list, #847): the page then shows no "of N" text.
+    pub show_total: bool,
 }
 
 impl PrevNextPager {
+    /// The same pager without the "of N" and "N items" text, for a
+    /// filtered list whose size is not known (#847).
+    #[must_use]
+    pub fn without_total(mut self) -> Self {
+        self.show_total = false;
+        self
+    }
+
     /// A pager for a key-cursor page.
     ///
     /// `pos` is the 0-based index of the first item, carried in the links
@@ -340,6 +351,7 @@ impl PrevNextPager {
             next_href,
             base_url,
             filter_params: parse_query_pairs(preserved_params),
+            show_total: true,
         }
     }
 }

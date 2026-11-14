@@ -1821,9 +1821,9 @@ pub struct SessionRow {
 #[template(path = "ui/admin/sessions/list.html")]
 struct SessionListTemplate {
     sessions: Vec<SessionRow>,
-    pagination: PaginationView,
+    pagination: PrevNextPager,
     realm_name: String,
-    /// Active sort column (`"created"` | `"expires"`), empty = default (created desc).
+    /// Active sort column (`"created"`), empty = default (created desc).
     sort_field: String,
     /// Active sort direction (`"asc"` | `"desc"`).
     sort_dir: String,
@@ -1838,10 +1838,11 @@ struct SessionListTemplate {
     /// `"all"`. Defaults to `"active"`. Drives the filter pill highlight
     /// and the per-row classification.
     status_filter: String,
-    /// Counts before filtering — surfaced in the filter pill labels so
-    /// operators can see the cardinality without flipping tabs.
-    count_active: usize,
-    count_expired: usize,
+    /// The exact number of live (not revoked) sessions of the realm, of
+    /// every status, shown on the "All" pill (#847). The Active and
+    /// Expired pills show no count: an exact count of each needs a walk of
+    /// every session.
+    live_total: u64,
     /// Realm-context query prefix the filter pill links append to
     /// `/ui/admin/sessions`. Empty for the global view; `"&realm=foo"` or
     /// `"&admin_target=system"` for the scoped views. Allows pill links
@@ -1861,25 +1862,33 @@ struct SessionListTemplate {
     inline_theme_css: Option<String>,
 }
 
-/// Query params for the sessions list page. Extends pagination with an
-/// expiry filter. Default semantics: no `status` → show only Active.
+/// Query params for the sessions list page. Default semantics: no
+/// `status` → show only Active, newest first.
 #[derive(Debug, Deserialize, Default)]
 pub struct SessionsListParams {
-    /// 1-based page number.
-    #[serde(default)]
-    pub page: Option<u32>,
     /// Items per page (allowlist: 5/10/25/50/100; defaults to 25).
     #[serde(default)]
     pub per_page: Option<u32>,
     /// Expiry filter — `"active"` (default), `"expired"`, or `"all"`.
     #[serde(default)]
     pub status: Option<String>,
-    /// Column to sort by: `created` | `expires`. Unknown values → default (created desc).
+    /// Column to sort by: `created` only (#847). Other values give the
+    /// default (created desc).
     #[serde(default)]
     pub sort: Option<String>,
     /// Sort direction: `asc` | `desc`. Defaults to `desc` (newest first).
     #[serde(default)]
     pub dir: Option<String>,
+    /// Key cursor (#847): the page starts after this session id.
+    #[serde(default)]
+    pub after: Option<String>,
+    /// Key cursor (#847): the page ends before this session id.
+    #[serde(default)]
+    pub before: Option<String>,
+    /// 0-based position of the first session of the page, carried in the
+    /// previous and next links for the "X–Y" text only.
+    #[serde(default)]
+    pub pos: Option<u64>,
 }
 
 impl SessionsListParams {
@@ -1887,18 +1896,36 @@ impl SessionsListParams {
         super::pagination::validate_per_page(self.per_page.unwrap_or(DEFAULT_PER_PAGE))
     }
 
-    fn as_page_request(&self) -> crate::core::PageRequest {
-        crate::core::PageRequest::from_page_number(
-            self.page.unwrap_or(1),
-            self.per_page_validated(),
-        )
-    }
-
     fn sort_dir(&self) -> crate::identity::search::SortDir {
         self.dir
             .as_deref()
             .map(crate::identity::search::SortDir::from_param)
             .unwrap_or(crate::identity::search::SortDir::Desc) // newest first by default
+    }
+
+    fn status(&self) -> crate::identity::search::SessionStatusFilter {
+        use crate::identity::search::SessionStatusFilter;
+        match self.status.as_deref() {
+            Some("expired") => SessionStatusFilter::Expired,
+            Some("all") => SessionStatusFilter::All,
+            _ => SessionStatusFilter::Active,
+        }
+    }
+
+    fn cursor(&self) -> crate::identity::search::SessionPageCursor {
+        use crate::identity::search::SessionPageCursor;
+        let parse = |raw: &Option<String>| {
+            raw.as_deref()
+                .and_then(|v| uuid::Uuid::parse_str(v).ok())
+                .map(SessionId::new)
+        };
+        if let Some(id) = parse(&self.after) {
+            SessionPageCursor::After(id)
+        } else if let Some(id) = parse(&self.before) {
+            SessionPageCursor::Before(id)
+        } else {
+            SessionPageCursor::First
+        }
     }
 }
 
@@ -1960,11 +1987,10 @@ fn resolve_user_email(
 ///    so each row's origin is unambiguous, and routes per-row revoke
 ///    requests back to the row's realm via `realm_target_query`.
 ///
-/// Cursor pagination is intentionally disabled for the global view —
-/// stitching cursors across realms would require a fan-out paginator
-/// that this PR doesn't introduce. A LIMIT-per-realm cap keeps the
-/// query bounded; busy deployments should narrow with `?realm=` until
-/// a real cross-realm cursor is added.
+/// The page walks the created-time index of the realm from a key cursor
+/// and keeps the sessions of the status filter (#847). The status filter,
+/// the order and the previous / next links apply to every live session of
+/// the realm, not only to one page of them.
 pub async fn admin_sessions_list(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,
@@ -1975,11 +2001,13 @@ pub async fn admin_sessions_list(
     // Single now-snapshot per request — two rows can't disagree on
     // whether they're past expiry within the same render.
     let now_micros = crate::core::Timestamp::now().as_micros();
-    let status_filter = match params.status.as_deref() {
-        Some("expired") => "expired".to_string(),
-        Some("all") => "all".to_string(),
-        _ => "active".to_string(),
-    };
+    let status = params.status();
+    let status_filter = match status {
+        crate::identity::search::SessionStatusFilter::Expired => "expired",
+        crate::identity::search::SessionStatusFilter::All => "all",
+        crate::identity::search::SessionStatusFilter::Active => "active",
+    }
+    .to_string();
 
     let realm_name = target.0.name().to_string();
     // Per-row revoke forms POST to a path-based URL; the suffix is
@@ -1987,15 +2015,21 @@ pub async fn admin_sessions_list(
     // a query string. Kept as a template field so the partial doesn't
     // need to know whether realm context survives in query params.
     let row_target_query = String::new();
+    let per_page = params.per_page_validated();
 
-    match state
-        .identity
-        .list_sessions_by_realm(target.id(), &params.as_page_request())
-    {
+    match state.identity.session_page_by_cursor(
+        target.id(),
+        params.sort_dir(),
+        status,
+        &params.cursor(),
+        per_page,
+    ) {
         Ok(page) => {
             let base_url = format!("/ui/admin/realms/{realm_name}/sessions");
-            let sort_field_str = params.sort.clone().unwrap_or_default();
-            let sort_dir = params.sort_dir();
+            let sort_field_str = match params.sort.as_deref() {
+                Some("created") => "created".to_string(),
+                _ => String::new(),
+            };
             let sort_dir_str = params.dir.clone().unwrap_or_else(|| "desc".to_string());
             // Pagination links must carry every active dimension — status,
             // sort column, and direction — so paging never silently drops a
@@ -2010,9 +2044,30 @@ pub async fn admin_sessions_list(
                 super::pagination::encode_param("sort", &sort_field_str),
                 super::pagination::encode_param("dir", &dir_param),
             ]);
-            let pagination = PaginationView::new(&page, base_url.clone(), preserved);
-            let all_rows: Vec<SessionRow> = page
-                .items
+            let pos = if page.prev.is_some() {
+                params.pos.unwrap_or(0)
+            } else {
+                0
+            };
+            let prev = page.prev.as_ref().map(|id| id.as_uuid().to_string());
+            let next = page.next.as_ref().map(|id| id.as_uuid().to_string());
+            let mut pagination = PrevNextPager::from_cursors(
+                page.total,
+                per_page,
+                pos,
+                page.sessions.len(),
+                prev.as_deref(),
+                next.as_deref(),
+                base_url.clone(),
+                &preserved,
+            );
+            // The total counts every live session; it is the size of the
+            // filtered list only for "All".
+            if status != crate::identity::search::SessionStatusFilter::All {
+                pagination = pagination.without_total();
+            }
+            let rows: Vec<SessionRow> = page
+                .sessions
                 .into_iter()
                 .map(|s| {
                     build_session_row(
@@ -2025,27 +2080,6 @@ pub async fn admin_sessions_list(
                     )
                 })
                 .collect();
-            let count_active = all_rows.iter().filter(|r| r.is_active).count();
-            let count_expired = all_rows.len() - count_active;
-            let mut rows = filter_session_rows(all_rows, &status_filter);
-            match sort_field_str.as_str() {
-                "expires" => rows.sort_by(|a, b| {
-                    let ord = a.session.expires_at().cmp(&b.session.expires_at());
-                    if sort_dir == crate::identity::search::SortDir::Asc {
-                        ord
-                    } else {
-                        ord.reverse()
-                    }
-                }),
-                _ => rows.sort_by(|a, b| {
-                    let ord = a.session.created_at().cmp(&b.session.created_at());
-                    if sort_dir == crate::identity::search::SortDir::Asc {
-                        ord
-                    } else {
-                        ord.reverse()
-                    }
-                }),
-            }
             render(&SessionListTemplate {
                 sessions: rows,
                 pagination,
@@ -2054,9 +2088,8 @@ pub async fn admin_sessions_list(
                 sort_dir: sort_dir_str,
                 list_url: base_url.clone(),
                 is_global: false,
-                status_filter: status_filter.clone(),
-                count_active,
-                count_expired,
+                status_filter,
+                live_total: page.total,
                 realm_query_suffix: String::new(),
                 chrome: true,
                 active: "sessions",
@@ -2072,20 +2105,9 @@ pub async fn admin_sessions_list(
             })
         }
         Err(e) => {
-            tracing::warn!(error = %e, "list_sessions_by_realm failed");
+            tracing::warn!(error = %e, "session_page_by_cursor failed");
             super::handlers_common::server_error()
         }
-    }
-}
-
-/// Applies the `?status=` filter to a freshly-built row collection. Pure
-/// function so the unit test can pin behaviour without spinning up a
-/// `WebState`.
-fn filter_session_rows(rows: Vec<SessionRow>, status: &str) -> Vec<SessionRow> {
-    match status {
-        "expired" => rows.into_iter().filter(|r| !r.is_active).collect(),
-        "all" => rows,
-        _ => rows.into_iter().filter(|r| r.is_active).collect(),
     }
 }
 

@@ -333,6 +333,46 @@ pub struct UserWalkPage {
     pub more: bool,
 }
 
+/// The live sessions that a realm session page shows (#847).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionStatusFilter {
+    /// Sessions that are not past their expiry.
+    #[default]
+    Active,
+    /// Sessions past their expiry that the cleanup sweep did not delete yet.
+    Expired,
+    /// Every live session.
+    All,
+}
+
+/// Where a [`crate::identity::IdentityEngine::session_page_by_cursor`] page
+/// starts (#847).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionPageCursor {
+    /// The first page.
+    First,
+    /// The page after this session, in the sort order.
+    After(crate::core::SessionId),
+    /// The page before this session, in the sort order.
+    Before(crate::core::SessionId),
+}
+
+/// One page of the realm session list in created-time order (#847).
+#[derive(Debug, Clone)]
+pub struct SessionCursorPage {
+    /// The sessions of the page, in the sort order.
+    pub sessions: Vec<crate::identity::Session>,
+    /// The cursor of the previous page ([`SessionPageCursor::Before`]), or
+    /// `None` when no session comes before the page.
+    pub prev: Option<crate::core::SessionId>,
+    /// The cursor of the next page ([`SessionPageCursor::After`]), or `None`
+    /// when no session comes after the page.
+    pub next: Option<crate::core::SessionId>,
+    /// The exact number of live (not revoked) sessions of the realm, of
+    /// every status.
+    pub total: u64,
+}
+
 /// Where a [`crate::identity::IdentityEngine::user_page_by_cursor`] page
 /// starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
