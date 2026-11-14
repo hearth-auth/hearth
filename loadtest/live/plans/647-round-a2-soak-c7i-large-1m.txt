@@ -6,7 +6,8 @@
 #   MEMTABLE_FLUSH_BYTES=8388608 COMPACTION_INTERVAL_SECS=600 CLAIMS_CACHE_MAX=2048 \
 #   ACCESS_TOKEN_TTL=5m REFRESH_TOKEN_TTL=10m SESSION_TTL=10m \
 #   IMAGE=<the newest release> PLAN_FILE=<this file> round.sh
-# Verdict: the #573 rule (end <= start + 30 %, and the slope rule) over the last 180 minutes.
+# Verdict: the #573 rule (end <= start + 30 %, and the slope rule) over the 180-minute window
+# that starts when the caches are full (loadtest/live/steady_heap.py).
 # Pass marks: https://github.com/hearth-auth/hearth/issues/647 (set before the run; unchanged).
 #    name     journey rate seconds malloc_info minutes
 soak soak-1m  mix     120  18000   150,299
