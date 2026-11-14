@@ -41,6 +41,7 @@ with the owning `RealmId`, except signing keys which live in the **system realm*
 | Session record | `ses:id:{session_uuid}` | JSON | Contains: `user_id`, `realm_id`, `ip_address` (nullable), `user_agent_raw` (nullable), `device_label` (nullable), `idle_deadline`, `absolute_deadline` |
 | Session user-index | `ses:user:{user_uuid}:{session_uuid}` | empty / TTL marker | Lookup index; no PII in value |
 | Live-session index | `ses:live:{session_uuid}` | empty | One entry per session that is not revoked; no PII |
+| Session created-time index | `ses:ct:a:{created_time}{session_uuid}`, `ses:ct:d:{created_time}{session_uuid}` | empty | Two entries per session that is not revoked (oldest-first and newest-first order of the admin session list); the key holds the session creation time; no PII |
 | Session-version counter | `ssv:sid:{session_uuid}` | little-endian u64 | Used to invalidate JWTs without storing them; no PII |
 
 ### 1.4 MFA Secrets

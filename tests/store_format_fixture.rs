@@ -180,6 +180,33 @@ fn the_fixture_store_holds_one_search_outbox_entry_per_user() {
     assert_eq!(merges, [users.len(), 0], "one search outbox entry per user");
 }
 
+/// Each session create puts its created-time index keys in the same write
+/// (#847, store format 6), so the fixture session is on the first page of
+/// the realm session list.
+#[test]
+fn the_fixture_session_is_in_the_created_time_index() {
+    use hearth::identity::search::{SessionPageCursor, SessionStatusFilter, SortDir};
+    let m = manifest();
+    let (realm, _users, session) = fixture::ids(&m);
+    let (_tmp, dir) = copy_of_fixture();
+    let e = fixture::open(&dir, fixture::T0_MICROS + 60_000_000).expect("open the fixture");
+    for sort in [SortDir::Asc, SortDir::Desc] {
+        let page = e
+            .identity
+            .session_page_by_cursor(
+                &realm,
+                sort,
+                SessionStatusFilter::All,
+                &SessionPageCursor::First,
+                10,
+            )
+            .expect("session page");
+        let ids: Vec<_> = page.sessions.iter().map(|s| s.id().clone()).collect();
+        assert_eq!(ids, vec![session.clone()], "{sort:?}");
+        assert_eq!(page.total, 1);
+    }
+}
+
 /// A store with another format version is refused before any record is read.
 #[test]
 fn a_store_with_another_format_is_refused() {

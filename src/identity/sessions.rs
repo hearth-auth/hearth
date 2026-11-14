@@ -125,13 +125,26 @@ impl SessionStore for EmbeddedSessionStore {
             .map_err(|reason| IdentityError::Serialization { reason })?;
         // The live-session index entry exists exactly while the record is not
         // revoked (#644), so both go in one atomic write.
+        // The created-time index entries follow the live entry (#847).
         let live_key = keys::encode_live_session(session.id());
+        let [ascending, descending] =
+            keys::session_created_keys(session.id(), session.created_at());
         let result = if session.is_revoked() {
-            self.storage
-                .write_batch(realm_id, &[(key, bytes)], &[live_key])
+            self.storage.write_batch(
+                realm_id,
+                &[(key, bytes)],
+                &[live_key, ascending, descending],
+            )
         } else {
-            self.storage
-                .put_batch(realm_id, &[(key, bytes), (live_key, Vec::new())])
+            self.storage.put_batch(
+                realm_id,
+                &[
+                    (key, bytes),
+                    (live_key, Vec::new()),
+                    (ascending, Vec::new()),
+                    (descending, Vec::new()),
+                ],
+            )
         };
         result.map_err(|e| IdentityError::Storage(Box::new(e)))
     }

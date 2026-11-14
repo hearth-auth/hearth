@@ -710,6 +710,25 @@ pub trait IdentityEngine: Send + Sync {
         page: &PageRequest,
     ) -> Result<PagedResult<Session>, IdentityError>;
 
+    /// One page of the live sessions of a realm in created-time order, with
+    /// a key cursor (#847).
+    ///
+    /// The page walks the created-time index of `dir` from the cursor and
+    /// keeps the sessions that `status` selects, until the page holds
+    /// `limit` sessions (capped at
+    /// [`MAX_PAGE_LIMIT`](crate::core::MAX_PAGE_LIMIT)) or the walk reaches
+    /// its bound. A page that reaches the bound can hold fewer sessions and
+    /// still have a next page. A cursor session that no longer exists gives
+    /// the first page.
+    fn session_page_by_cursor(
+        &self,
+        realm_id: &RealmId,
+        dir: crate::identity::search::SortDir,
+        status: crate::identity::search::SessionStatusFilter,
+        cursor: &crate::identity::search::SessionPageCursor,
+        limit: u32,
+    ) -> Result<crate::identity::search::SessionCursorPage, IdentityError>;
+
     /// Revokes all active sessions (and their grant families) for a user.
     ///
     /// `keep` exempts one session from revocation so the caller's device

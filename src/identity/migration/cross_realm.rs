@@ -17,7 +17,7 @@
 //! - org membership keys (conditional on `opts.orgs`)
 //!
 //! Skipped (ephemeral / realm-specific):
-//! - `ses:id:*`, `ses:user:*`, `ses:live:*` — sessions
+//! - `ses:id:*`, `ses:user:*`, `ses:live:*`, `ses:ct:*` — sessions
 //! - `magic:link:*` — magic links
 //! - `email:verify:*` — email verification tokens
 //! - `rst:token:*` — password reset tokens

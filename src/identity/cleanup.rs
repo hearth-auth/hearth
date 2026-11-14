@@ -965,7 +965,8 @@ const SESSION_DELETE_GRACE_MICROS: i64 = 3_600 * 1_000_000;
 
 /// Deletes the sessions that expired more than
 /// [`SESSION_DELETE_GRACE_MICROS`] ago: the `ses:id` row, its `ses:user`
-/// index row and its `ses:live` index row, in one write. A revoked session goes too, once its own expiry
+/// index row, its `ses:live` index row and its two `ses:ct` index rows, in
+/// one write. A revoked session goes too, once its own expiry
 /// passes. Nothing else deletes an expired session, so before this sweep
 /// every sign-in left both rows behind for good (#445).
 fn sweep_sessions(
@@ -988,17 +989,25 @@ fn sweep_sessions(
                 .expires_at()
                 .as_micros()
                 .saturating_add(SESSION_DELETE_GRACE_MICROS);
-            Ok((now.as_micros() >= deadline)
-                .then(|| keys::encode_user_session(session.user_id(), session.id())))
+            Ok((now.as_micros() >= deadline).then(|| {
+                let [ascending, descending] =
+                    keys::session_created_keys(session.id(), session.created_at());
+                [
+                    keys::encode_user_session(session.user_id(), session.id()),
+                    ascending,
+                    descending,
+                ]
+            }))
         },
-        |key, index_key, batch| {
+        |key, index_keys, batch| {
             batch.push(key.to_vec());
             // A session that expired without a revocation still has its
-            // live-session index entry (#644).
+            // live-session index entry (#644) and its created-time index
+            // entries (#847).
             if let Some(live_key) = keys::live_session_key_of_record(key) {
                 batch.push(live_key);
             }
-            batch.push(index_key);
+            batch.extend(index_keys);
             Ok(true)
         },
     )

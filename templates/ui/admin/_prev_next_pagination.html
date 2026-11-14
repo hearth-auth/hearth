@@ -4,6 +4,9 @@
   Required template variables (must be on the parent template struct):
     pagination: PrevNextPager
 
+  With pagination.show_total false (a filtered list, #847) the summary shows
+  the "X–Y" range of the page only, not "of N".
+
   The page-size <select> is a full GET <form> that carries all filter_params
   as hidden inputs so search/filter/sort state survives page-size changes.
   A page-size change starts again at the first page.
@@ -13,7 +16,9 @@
 
   {# ── Count summary ── #}
   <p class="text-sm text-ht-content-muted">
-    {% if pagination.prev_href.is_none() && pagination.next_href.is_none() %}
+    {% if !pagination.show_total %}
+      {% if pagination.range_start > 0 %}{{ pagination.range_start }}–{{ pagination.range_end }}{% endif %}
+    {% else if pagination.prev_href.is_none() && pagination.next_href.is_none() %}
       {{ pagination.total }} item{% if pagination.total != 1 %}s{% endif %}
     {% else %}
       {{ pagination.range_start }}–{{ pagination.range_end }}

@@ -75,6 +75,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   guide lists the new keys: a user delete removes the user's index entries when the task applies
   it. A build with this change refuses a data directory of an earlier store format at startup:
   restore a backup archive into a new, empty data directory (see `docs/guides/upgrading.md`).
+- **Breaking:** **Store format 6: the admin UI session list pages newest first** (#847, part of
+  #644): each session that is not revoked now also has two created-time index entries
+  (oldest-first and newest-first), in the same write as the session record. The realm session
+  list of the admin UI (`/ui/admin/realms/{realm}/sessions`) reads this index with a key cursor
+  (`?after=` / `?before=`, no page numbers). The Active, Expired and All filters and the
+  Created order now apply to every session of the realm. Before, they applied only to the
+  sessions of the current page, and a page held sessions in random order. Changes for
+  operators: the Expires column no longer sorts; the Active and Expired filters show no count
+  (the All filter shows the exact number of live sessions); a filtered page can hold fewer rows
+  than the page size and still have a next page, because one page reads at most 2,000 index
+  entries. The admin API session list does not change. A build with this change refuses a data
+  directory of an earlier store format at startup: restore a backup archive into a new, empty
+  data directory (see `docs/guides/upgrading.md`).
 - **Breaking:** **User search reads the search index, not every user** (#644): the user search
   of the admin UI and `GET /admin/users?search=` reads only the users whose search index entry
   holds every 3-character run of the query, and the users with a write that the index does not

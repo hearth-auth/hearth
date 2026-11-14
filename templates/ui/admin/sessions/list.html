@@ -37,21 +37,21 @@
      aria-selected="{% if status_filter == "active" %}true{% else %}false{% endif %}"
      class="rounded px-3 py-1.5 text-xs font-medium transition-colors
             {% if status_filter == "active" %}bg-ht-divider/[0.10] text-ht-content-primary{% else %}text-ht-content-secondary hover:bg-ht-divider/[0.07] hover:text-ht-content-primary{% endif %}">
-    Active <span class="ml-1 text-ht-content-muted">{{ count_active }}</span>
+    Active
   </a>
   <a href="/ui/admin/realms/{{ realm_name }}/sessions?status=expired"
      role="tab"
      aria-selected="{% if status_filter == "expired" %}true{% else %}false{% endif %}"
      class="rounded px-3 py-1.5 text-xs font-medium transition-colors
             {% if status_filter == "expired" %}bg-ht-divider/[0.10] text-ht-content-primary{% else %}text-ht-content-secondary hover:bg-ht-divider/[0.07] hover:text-ht-content-primary{% endif %}">
-    Expired <span class="ml-1 text-ht-content-muted">{{ count_expired }}</span>
+    Expired
   </a>
   <a href="/ui/admin/realms/{{ realm_name }}/sessions?status=all"
      role="tab"
      aria-selected="{% if status_filter == "all" %}true{% else %}false{% endif %}"
      class="rounded px-3 py-1.5 text-xs font-medium transition-colors
             {% if status_filter == "all" %}bg-ht-divider/[0.10] text-ht-content-primary{% else %}text-ht-content-secondary hover:bg-ht-divider/[0.07] hover:text-ht-content-primary{% endif %}">
-    All <span class="ml-1 text-ht-content-muted">{{ count_active + count_expired }}</span>
+    All <span class="ml-1 text-ht-content-muted">{{ live_total }}</span>
   </a>
 </div>
 
@@ -74,7 +74,7 @@
           <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted" scope="col">Device</th>
           <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted" scope="col">IP</th>
           {% call sortable::th("Created", "created", sort_field, sort_dir, list_url, "", pagination.per_page, "sessions-table-region") %}
-          {% call sortable::th("Expires", "expires", sort_field, sort_dir, list_url, "", pagination.per_page, "sessions-table-region") %}
+          <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted" scope="col">Expires</th>
           <th class="px-4 py-3" scope="col" aria-label="Actions"></th>
         </tr>
       </thead>
@@ -85,6 +85,6 @@
   </div>
 </div>
 
-{% include "ui/admin/_pagination.html" %}
+{% include "ui/admin/_prev_next_pagination.html" %}
 </div>{# #sessions-table-region #}
 {% endblock %}
