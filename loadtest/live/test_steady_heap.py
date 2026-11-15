@@ -197,6 +197,25 @@ class SteadyHeapTest(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn("VERDICT: INVALID", out)
 
+    def test_a_round_dir_with_one_summary_per_generator_is_judged(self):
+        # round.sh keeps summary-g<i>.json per generator (cloud.sh), not k6-summary.json.
+        run(self.d)
+        with open(f"{self.d}/k6-summary.json") as f:
+            total = json.load(f)
+        os.remove(f"{self.d}/k6-summary.json")
+        half = total["journeys"] // 2
+        for i, (journeys, ok_rate, late_ms) in enumerate(
+                [(half, 0.999, 0), (total["journeys"] - half, 0.997, 2000)], start=1):
+            with open(f"{self.d}/summary-g{i}.json", "w") as f:
+                json.dump({"journey": "mix", "journeys": journeys, "ok_rate": ok_rate,
+                           "started_at": total["started_at"] + late_ms}, f)
+        code, out = judge(self.d)
+        self.assertEqual(code, 0, out)
+        self.assertIn("VERDICT: PASS", out)
+        self.assertIn("2 generator summaries", out)
+        self.assertIn("ok rate 99.80%", out)
+        self.assertIn("steady from minute 80", out)
+
 
 if __name__ == "__main__":
     unittest.main()

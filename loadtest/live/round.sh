@@ -31,13 +31,17 @@
 # vmstat runs on every generator, so a generator-bound result is visible.
 #
 # Settings (environment), on top of cloud.sh's:
-#   SETUP=1      first: up, deploy, a dsync disk check, import USERS, store copy
+#   SETUP=1      first: up, deploy, a dsync disk check, the server's MemTotal
+#                (server-memory.txt), import USERS, store copy
 #   USERS        1000000 (users imported by SETUP)
 #   REALMS       1 (realms; cloud.sh's REALMS): SETUP splits USERS evenly over
 #                them, and each k6 VU works in one of them
 #   IMAGE        Docker image the binary comes from (needs a revision label)
 #   PLAN_FILE    the plan; default: the PLAN variable
 #   KEEP=1       leave the run up at the end
+#   STRESS_RUN   the run to use (default: the newest .build/run-*, which is the
+#                new one after SETUP's `up`); exported, so every cloud.sh call of
+#                the round uses the same run. Start one round per worktree only.
 #   HEAPTRACK=1  run each plan line's Hearth under heaptrack, and end each soak
 #                with kill -9, so the trace's "leaked" memory is the live heap
 #                (needs an image with symbols: README, "Heap accounting")
@@ -70,7 +74,15 @@ if [ "${SETUP:-}" = 1 ]; then
   note "up"
   "$c" up || exit 1
 fi
-run=$(command ls -1d "$here"/.build/run-* | sort | tail -n 1)
+# Pin the run: each cloud.sh call after `up` takes the newest .build/run-* unless
+# STRESS_RUN names one, so a second round from this tree would cross-wire them.
+if [ -n "${STRESS_RUN:-}" ]; then
+  run=$here/.build/run-$STRESS_RUN
+else
+  run=$(command ls -1d "$here"/.build/run-* | sort | tail -n 1)
+  export STRESS_RUN=${run##*/run-}
+fi
+note "run $STRESS_RUN"
 # shellcheck disable=SC1091
 . "$run/run.env"
 results=$here/results/$RUN_ID
@@ -84,6 +96,7 @@ sp() { scp -q "${ssh_opts[@]}" "$@"; }
 if [ "${SETUP:-}" = 1 ]; then
   note "deploy ($IMAGE)"
   "$c" deploy || exit 1
+  s 'grep -E "^(MemTotal|SwapTotal):" /proc/meminfo; nproc' | tee "$results/server-memory.txt"
   s 'dd if=/dev/zero of=/var/lib/hearth/dd.test bs=4k count=2000 oflag=dsync 2>&1 | tail -n 1; rm -f /var/lib/hearth/dd.test' \
     | tee "$results/disk-dsync.txt"
   note "import 0..${USERS:-1000000}"
@@ -258,17 +271,19 @@ backup() {
   s "rm -rf /var/lib/hearth-backup /opt/hearth/drill"
 }
 
-# restore-drill.sh on the server (#647). It replaces /opt/hearth's config and
-# the data directory: the last line of a plan.
+# restore-drill.sh on the server (#647). The drill needs a host without a Hearth
+# install, so the round's /opt/hearth moves to /opt/hearth.stress and the data
+# directory is deleted: the last line of a plan.
 drill() {
   local name=$1 users=$2 out=$results/$1 rev rc
   prepare "$name" || { note "$name: prepare FAILED"; return; }
   rev=$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')
   s "set -e
     systemctl stop hearth
-    rm -rf /var/lib/hearth /var/lib/hearth.base /opt/stress-drill
+    rm -rf /var/lib/hearth /var/lib/hearth.base /opt/stress-drill /opt/hearth.stress
     install -d -m 0700 /opt/stress-drill
-    cp /opt/hearth/hearth /opt/stress-drill/hearth" || { note "$name: drill setup FAILED"; return; }
+    cp /opt/hearth/hearth /opt/stress-drill/hearth
+    mv /opt/hearth /opt/hearth.stress" || { note "$name: drill setup FAILED"; return; }
   sp "$here/restore-drill.sh" "$here/restore_drill.py" "$here/gen-config.sh" "root@$SERVER_PUBLIC:/opt/stress-drill/" \
     || { note "$name: copying the drill FAILED"; return; }
   note "$name: restore drill with $users users"
