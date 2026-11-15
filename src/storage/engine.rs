@@ -1733,44 +1733,62 @@ fn run_after_compaction_publish_hook() {
 /// Selects a contiguous run of same-size-tier SSTs to merge, or `None` if no tier
 /// has accumulated `merge_min` files yet (HEA-1885).
 ///
-/// `readers` is newest-first (index 0 = newest, highest number). A "tier" is a
-/// maximal contiguous span whose largest member is within [`SIZE_TIER_RATIO`] of
-/// its smallest (bucketing by entry count, a proxy for on-disk size). The first
-/// (newest) span reaching `merge_min` files is returned as an inclusive
-/// `(start, end)` index range. Restricting to a *contiguous* span guarantees the
+/// `readers` is newest-first (index 0 = newest, highest number). The rule is
+/// in [`select_tier_run`], which reads only the entry counts.
+fn select_partial_run(readers: &[Arc<SstReader>], merge_min: usize) -> Option<(usize, usize)> {
+    let counts: Vec<u32> = readers.iter().map(|r| r.entry_count()).collect();
+    select_tier_run(&counts, merge_min)
+}
+
+/// The tier rule of [`select_partial_run`], over entry counts (a proxy for
+/// on-disk size), newest first.
+///
+/// A "tier" is a contiguous span whose *counted* members are within
+/// `SIZE_TIER_RATIO` of each other. An SST more than `SIZE_TIER_RATIO` times
+/// smaller than the tier's smallest counted member joins the span but does
+/// not count toward `merge_min`. Such small SSTs come from the early flush
+/// and the rotation flush of each WAL segment (#836, #862): they sat between the
+/// full-memtable flushes and broke every run before it reached `merge_min`.
+/// A span never takes in a larger SST of another tier, so a merged SST is not
+/// merged again with fresh flushes.
+///
+/// The first (newest) span with `merge_min` counted members is returned as an
+/// inclusive `(start, end)` index range. A *contiguous* span guarantees the
 /// merged output's number band contains no surviving SST, which the splice in
 /// [`EmbeddedStorageEngine::compact_partial`] relies on for recovery-consistent
 /// ordering.
-fn select_partial_run(readers: &[Arc<SstReader>], merge_min: usize) -> Option<(usize, usize)> {
+fn select_tier_run(counts: &[u32], merge_min: usize) -> Option<(usize, usize)> {
     /// Size spread (max/min entry count) tolerated within one tier. A merged SST
     /// (~`merge_min`× the entries of a flush) sits in the next tier up, so it is
     /// never re-merged with fresh flushes — this is what keeps write
     /// amplification `O(log N)` instead of quadratic.
     const SIZE_TIER_RATIO: f64 = 2.0;
 
-    let n = readers.len();
-    let mut i = 0;
-    while i < n {
-        let base = f64::from(readers[i].entry_count().max(1));
-        let mut lo = base;
-        let mut hi = base;
+    let size = |k: usize| f64::from(counts[k].max(1));
+    let n = counts.len();
+    // A failed span restarts at the next SST, not after the span: a span that
+    // starts at a small SST stops at the first larger one, and the small SSTs
+    // a span took in can form a tier of their own. `n` is bounded by the count
+    // trigger, so the quadratic scan is cheap.
+    for i in 0..n {
+        let (mut lo, mut hi, mut counted) = (size(i), size(i), 1usize);
         let mut j = i;
         while j + 1 < n {
-            let next = f64::from(readers[j + 1].entry_count().max(1));
-            let nlo = lo.min(next);
-            let nhi = hi.max(next);
-            if nhi / nlo <= SIZE_TIER_RATIO {
-                lo = nlo;
-                hi = nhi;
-                j += 1;
+            let next = size(j + 1);
+            if next * SIZE_TIER_RATIO < lo {
+                // Much smaller than the tier: in the span, not counted.
+            } else if hi.max(next) / lo.min(next) <= SIZE_TIER_RATIO {
+                lo = lo.min(next);
+                hi = hi.max(next);
+                counted += 1;
             } else {
                 break;
             }
+            j += 1;
         }
-        if j - i + 1 >= merge_min {
+        if counted >= merge_min {
             return Some((i, j));
         }
-        i = j + 1;
     }
     None
 }
@@ -5646,6 +5664,87 @@ mod tests {
         );
         assert_eq!(
             engine.get(&realm, b"k-00000").expect("get").as_deref(),
+            Some(value.as_slice())
+        );
+    }
+
+    /// The tier rule over entry counts (newest first), for the shapes the
+    /// count trigger meets.
+    #[test]
+    fn tier_run_counts_only_near_equal_ssts_and_takes_in_small_ones() {
+        // Equal flushes: the whole span, as before.
+        assert_eq!(select_tier_run(&[10; 5], 4), Some((0, 4)));
+        // Per WAL segment, oldest first: three full flushes, the early flush,
+        // the rotation flush (the shape the #647 round saw).
+        let segment_newest_first = [30, 79, 293, 293, 293];
+        let two_segments: Vec<u32> = segment_newest_first.repeat(2);
+        assert_eq!(select_tier_run(&two_segments, 4), Some((2, 9)));
+        assert_eq!(select_tier_run(&segment_newest_first, 4), None);
+        // A merged SST is not merged again with fresh flushes until its own
+        // tier has `merge_min` members.
+        assert_eq!(select_tier_run(&[100, 100, 100, 400, 400], 4), None);
+        assert_eq!(select_tier_run(&[100, 100, 100, 100, 400], 4), Some((0, 3)));
+        assert_eq!(
+            select_tier_run(&[100, 100, 100, 400, 400, 400, 400], 4),
+            Some((3, 6))
+        );
+        // Small SSTs that a failed span took in still form their own tier.
+        assert_eq!(select_tier_run(&[100, 10, 10, 10, 10], 4), Some((1, 4)));
+        assert_eq!(select_tier_run(&[], 4), None);
+    }
+
+    /// #862, v4.12.0 load round (#647): with the early flush of #836, each WAL
+    /// segment ends with a large SST (the early flush) and a small one (the
+    /// rotation flush). The count trigger fired, but the size-tier selection
+    /// found no run of `merge_min` SSTs of near-equal size, so no partial
+    /// compaction ran and the SST count grew until the periodic sweep.
+    /// The defaults set the segment to 4 memtables (256 MiB, 64 MiB); this
+    /// test keeps that ratio at a small scale.
+    #[test]
+    fn count_trigger_bounds_sst_count_with_early_and_rotation_flushes() {
+        const TRIGGER: usize = 12;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let realm = RealmId::generate();
+        let value = vec![0xABu8; 200];
+        let mut config = StorageConfig::test_config(dir.path().to_path_buf());
+        config.wal_config.max_size = 256 * 1024;
+        config.set_memtable_flush_bytes(64 * 1024);
+        config.compaction = CompactionConfig {
+            enabled: true,
+            interval_secs: 0, // no periodic sweep: only the count trigger
+            min_sst_count: 3,
+            max_sst_count: TRIGGER,
+            merge_min: 4,
+        };
+        let engine = EmbeddedStorageEngine::open(config).expect("open");
+
+        let mut most = 0;
+        for i in 0u32..20_000 {
+            engine
+                .put(&realm, format!("k-{i:06}").as_bytes(), &value)
+                .expect("put");
+            // Service the count trigger as the background task does.
+            while engine.sst_readers.load().len() >= TRIGGER {
+                if engine.compact_partial().expect("compact_partial") == 0 {
+                    break;
+                }
+            }
+            most = most.max(engine.sst_readers.load().len());
+        }
+
+        let sizes: Vec<u32> = engine
+            .sst_readers
+            .load()
+            .iter()
+            .map(|r| r.entry_count())
+            .collect();
+        assert!(
+            most <= TRIGGER,
+            "the live SST count reached {most} (trigger {TRIGGER}); entries per SST, \
+             newest first: {sizes:?}"
+        );
+        assert_eq!(
+            engine.get(&realm, b"k-000000").expect("get").as_deref(),
             Some(value.as_slice())
         );
     }

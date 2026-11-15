@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Fixed
+- **Partial compaction runs again under a steady write load** (#862): since 4.12.0, the small SSTs
+  that the early flush and the WAL rotation flush write at the end of each WAL segment stopped
+  every size-tier run before it had enough SSTs to merge. Only the periodic sweep merged SSTs, so
+  the SST count grew (49 in a 20-minute refresh load test) and reads that miss the hot tier slowed
+  down. A small SST now joins the run of its larger neighbors.
+
 ## [4.12.0] — 2026-11-14
 
 ### Added
