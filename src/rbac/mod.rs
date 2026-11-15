@@ -545,8 +545,26 @@ pub trait RbacEngine: Send + Sync {
     /// Returns all scope definitions in a realm for backup export.
     fn export_all_scopes(&self, realm_id: &RealmId) -> Result<Vec<ScopeExport>, RbacError>;
 
-    /// Returns all role-assignment records in a realm for backup export.
-    fn export_all_assignments(&self, realm_id: &RealmId) -> Result<Vec<RoleAssignment>, RbacError>;
+    /// Passes every role-assignment record in a realm to `visit`, one at a
+    /// time, for backup export (#866).
+    fn visit_all_assignments(
+        &self,
+        realm_id: &RealmId,
+        visit: &mut crate::core::ExportVisitor<'_, RoleAssignment>,
+    ) -> Result<(), RbacError>;
+
+    /// Returns all role-assignment records in a realm.
+    ///
+    /// Collects [`visit_all_assignments`](Self::visit_all_assignments), so the
+    /// result grows with the realm. A backup uses the visitor.
+    fn export_all_assignments(&self, realm_id: &RealmId) -> Result<Vec<RoleAssignment>, RbacError> {
+        let mut out = Vec::new();
+        self.visit_all_assignments(realm_id, &mut |assignment| {
+            out.push(assignment);
+            std::ops::ControlFlow::Continue(())
+        })?;
+        Ok(out)
+    }
 
     /// Every stored reference in the realm to a registry entry that resolution
     /// skips: a role or permission `hearth.yaml` removed (archived), a deleted
@@ -554,7 +572,8 @@ pub trait RbacEngine: Send + Sync {
     /// at startup for the orphan summary; not on any request path.
     fn orphaned_references(&self, realm_id: &RealmId) -> Result<Vec<OrphanRef>, RbacError>;
 
-    /// Returns every group-membership edge in a realm for backup export.
+    /// Passes every group-membership edge in a realm to `visit`, one at a
+    /// time, for backup export (#866).
     ///
     /// Groups and the role assignments bound to them already round-trip; the
     /// edges between a group and its members did not, so a restored realm
@@ -563,7 +582,8 @@ pub trait RbacEngine: Send + Sync {
     fn export_all_group_memberships(
         &self,
         realm_id: &RealmId,
-    ) -> Result<Vec<GroupMembershipEdge>, RbacError>;
+        visit: &mut crate::core::ExportVisitor<'_, GroupMembershipEdge>,
+    ) -> Result<(), RbacError>;
 
     // ------- Backup import helpers -------
     //

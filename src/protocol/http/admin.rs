@@ -5523,7 +5523,8 @@ async fn admin_backup_create(
     let result = tokio::task::spawn_blocking(move || {
         use crate::backup::{BackupArchive, BackupExporter, BackupManifest, ExportOptions};
 
-        // Write the archive to a temporary file; read it back as bytes.
+        // Write the archive to a temporary file. The response streams it
+        // from there (#866), so the archive is never held in memory.
         let tmp = tempfile::NamedTempFile::new().map_err(|e| format!("tempfile: {e}"))?;
         let tmp_path = tmp.path().to_path_buf();
 
@@ -5567,7 +5568,15 @@ async fn admin_backup_create(
             .finish(manifest)
             .map_err(|e| format!("finish archive: {e}"))?;
 
-        let bytes = std::fs::read(&tmp_path).map_err(|e| format!("read archive: {e}"))?;
+        // The open handle keeps the file readable after the path is removed:
+        // the temporary file is unlinked here, and its space is freed when
+        // the response has streamed it.
+        let archive = tmp.reopen().map_err(|e| format!("reopen archive: {e}"))?;
+        let len = archive
+            .metadata()
+            .map_err(|e| format!("archive size: {e}"))?
+            .len();
+        drop(tmp);
         // #648: the time of this backup, for the backup-time gauge. A failed
         // write costs the metric only, not the backup.
         if let Some(dir) = &marker_dir {
@@ -5579,7 +5588,7 @@ async fn admin_backup_create(
                 tracing::warn!(error = %e, "the backup succeeded, but its time was not recorded for /metrics");
             }
         }
-        Ok::<Vec<u8>, String>(bytes)
+        Ok::<(std::fs::File, u64), String>((archive, len))
     })
     .await;
 
@@ -5594,7 +5603,7 @@ async fn admin_backup_create(
             Json(serde_json::json!({"error": msg})),
         )
             .into_response(),
-        Ok(Ok(bytes)) => {
+        Ok(Ok((archive, len))) => {
             let ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -5616,11 +5625,12 @@ async fn admin_backup_create(
             axum::http::Response::builder()
                 .status(StatusCode::OK)
                 .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
+                .header(axum::http::header::CONTENT_LENGTH, len)
                 .header(
                     axum::http::header::CONTENT_DISPOSITION,
                     format!("attachment; filename=\"{filename}\""),
                 )
-                .body(axum::body::Body::from(bytes))
+                .body(stream_file_body(archive))
                 .unwrap_or_else(|_| {
                     axum::http::Response::new(axum::body::Body::from(
                         b"internal error building response" as &[u8],
@@ -5628,6 +5638,42 @@ async fn admin_backup_create(
                 })
         }
     }
+}
+
+/// Bytes of each piece of a streamed backup response.
+const BACKUP_STREAM_PIECE_LEN: usize = 64 * 1024;
+/// Pieces of a streamed backup response that wait for the client.
+const BACKUP_STREAM_QUEUE: usize = 4;
+
+/// A response body that streams `file` from its start (#866).
+///
+/// A blocking task reads the file in pieces of [`BACKUP_STREAM_PIECE_LEN`]
+/// bytes into a queue of [`BACKUP_STREAM_QUEUE`] pieces, so the response holds
+/// at most that many pieces in memory, whatever the size of the file. When the
+/// client goes away, the queue closes and the task stops.
+fn stream_file_body(mut file: std::fs::File) -> axum::body::Body {
+    let (tx, rx) =
+        tokio::sync::mpsc::channel::<Result<Vec<u8>, std::io::Error>>(BACKUP_STREAM_QUEUE);
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read as _;
+        loop {
+            let mut piece = vec![0u8; BACKUP_STREAM_PIECE_LEN];
+            let item = match file.read(&mut piece) {
+                Ok(0) => return,
+                Ok(n) => {
+                    piece.truncate(n);
+                    Ok(piece)
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => Err(e),
+            };
+            let failed = item.is_err();
+            if tx.blocking_send(item).is_err() || failed {
+                return;
+            }
+        }
+    });
+    axum::body::Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx))
 }
 
 /// Why `POST /admin/backup/restore` refused, as the blocking restore task

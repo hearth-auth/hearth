@@ -35,7 +35,7 @@ pub use trusted_proxy::{
     MIN_IPV6_PREFIX,
 };
 pub use types::{
-    AgentCredentialId, AgentId, AuditEventId, ClientId, IdpId, ImportOutcome, InvitationId,
-    OrganizationId, RealmId, ResourceServerId, SessionId, Uri, UriError, UserId, WebhookDeliveryId,
-    WebhookId,
+    AgentCredentialId, AgentId, AuditEventId, ClientId, ExportVisitor, IdpId, ImportOutcome,
+    InvitationId, OrganizationId, RealmId, ResourceServerId, SessionId, Uri, UriError, UserId,
+    WebhookDeliveryId, WebhookId,
 };

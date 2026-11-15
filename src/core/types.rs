@@ -25,6 +25,13 @@ pub enum ImportOutcome {
     Overwritten,
 }
 
+/// A callback that takes one record of a backup export walk.
+///
+/// The `export_*` methods of the engines pass each record to it in key order,
+/// one at a time, so a walk over a million records holds one at a time
+/// (#866). `ControlFlow::Break` stops the walk; the method then returns `Ok`.
+pub type ExportVisitor<'a, T> = dyn FnMut(T) -> std::ops::ControlFlow<()> + 'a;
+
 /// Generates a newtype ID wrapper around `Uuid` with consistent behavior.
 ///
 /// Each generated type gets:

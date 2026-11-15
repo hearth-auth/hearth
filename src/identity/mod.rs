@@ -2904,26 +2904,32 @@ pub trait IdentityEngine: Send + Sync {
 
     // ===== Backup export helpers =====
 
-    /// Returns every user record in a realm for backup export, in one walk of
-    /// the user keys.
+    /// Passes every user record in a realm to `visit`, for backup export, in
+    /// one walk of the user keys.
     ///
     /// Paging with [`list_users`](Self::list_users) walks every user key once
-    /// per page to count the total, and a backup holds every write on the node
-    /// until its reads end.
-    fn export_all_users(&self, realm_id: &RealmId) -> Result<Vec<User>, IdentityError>;
+    /// per page to count the total. The walk holds one record at a time, so a
+    /// backup of a large realm does not hold the realm in memory (#866).
+    fn export_all_users(
+        &self,
+        realm_id: &RealmId,
+        visit: &mut crate::core::ExportVisitor<'_, User>,
+    ) -> Result<(), IdentityError>;
 
-    /// Returns all stored credentials in a realm for backup export.
+    /// Passes every stored credential in a realm to `visit`, for backup
+    /// export.
     ///
     /// Each entry pairs a `UserId` with the PHC-formatted hash and its
     /// creation timestamp. Credentials are stored per-user, so this method
-    /// performs a prefix scan across all `cred:user:*` keys.
+    /// walks all `cred:user:*` keys, one at a time.
     fn export_all_credentials(
         &self,
         realm_id: &RealmId,
-    ) -> Result<Vec<CredentialExport>, IdentityError>;
+        visit: &mut crate::core::ExportVisitor<'_, CredentialExport>,
+    ) -> Result<(), IdentityError>;
 
-    /// Returns every second-factor record in a realm for backup export
-    /// (audit 2026-08-28 §4.18#5).
+    /// Passes every second-factor record in a realm to `visit`, for backup
+    /// export (audit 2026-08-28 §4.18#5).
     ///
     /// Covers TOTP/recovery-code state (decrypted — the archive encrypts it)
     /// and `WebAuthn` passkeys. The email-OTP factor has no
@@ -2932,7 +2938,8 @@ pub trait IdentityEngine: Send + Sync {
     fn export_all_mfa_factors(
         &self,
         realm_id: &RealmId,
-    ) -> Result<Vec<MfaFactorExport>, IdentityError>;
+        visit: &mut crate::core::ExportVisitor<'_, MfaFactorExport>,
+    ) -> Result<(), IdentityError>;
 
     /// Writes one second-factor record from a backup archive into the realm.
     ///
@@ -2946,15 +2953,16 @@ pub trait IdentityEngine: Send + Sync {
         overwrite: bool,
     ) -> Result<crate::core::ImportOutcome, IdentityError>;
 
-    /// Returns every organization-membership record in a realm for backup
-    /// export (OpenSpec 26.40).
+    /// Passes every organization-membership record in a realm to `visit`,
+    /// for backup export (OpenSpec 26.40).
     ///
     /// Organizations already round-tripped; their members did not, so a
     /// restored realm held every org with nobody in it.
     fn export_all_organization_memberships(
         &self,
         realm_id: &RealmId,
-    ) -> Result<Vec<OrganizationMembership>, IdentityError>;
+        visit: &mut crate::core::ExportVisitor<'_, OrganizationMembership>,
+    ) -> Result<(), IdentityError>;
 
     /// Restores one organization membership, writing **both** index entries
     /// (org->user and user->org) exactly as `add_member` writes them.
@@ -2969,9 +2977,14 @@ pub trait IdentityEngine: Send + Sync {
         overwrite: bool,
     ) -> Result<ImportOutcome, IdentityError>;
 
-    /// Returns every OAuth consent record in a realm for backup export,
-    /// paired with the exact storage key it was read from (OpenSpec 26.40).
-    fn export_all_consents(&self, realm_id: &RealmId) -> Result<Vec<ConsentExport>, IdentityError>;
+    /// Passes every OAuth consent record in a realm to `visit`, for backup
+    /// export, paired with the exact storage key it was read from (OpenSpec
+    /// 26.40).
+    fn export_all_consents(
+        &self,
+        realm_id: &RealmId,
+        visit: &mut crate::core::ExportVisitor<'_, ConsentExport>,
+    ) -> Result<(), IdentityError>;
 
     /// Restores one OAuth consent record at its original storage key.
     ///
@@ -3017,11 +3030,13 @@ pub trait IdentityEngine: Send + Sync {
         overwrite: bool,
     ) -> Result<ImportOutcome, IdentityError>;
 
-    /// Returns every federation account link in a realm, for backup export.
+    /// Passes every federation account link in a realm to `visit`, for
+    /// backup export.
     fn export_all_federation_links(
         &self,
         realm_id: &RealmId,
-    ) -> Result<Vec<FederationLinkExport>, IdentityError>;
+        visit: &mut crate::core::ExportVisitor<'_, FederationLinkExport>,
+    ) -> Result<(), IdentityError>;
 
     /// Restores one federation account link, writing **both** index entries.
     fn import_federation_link(
@@ -3070,11 +3085,13 @@ pub trait IdentityEngine: Send + Sync {
         plaintext_json: &[u8],
     ) -> Result<(), IdentityError>;
 
-    /// Returns every SCIM `externalId` mapping in a realm, for backup export.
+    /// Passes every SCIM `externalId` mapping in a realm to `visit`, for
+    /// backup export.
     fn export_all_scim_mappings(
         &self,
         realm_id: &RealmId,
-    ) -> Result<Vec<ScimMappingExport>, IdentityError>;
+        visit: &mut crate::core::ExportVisitor<'_, ScimMappingExport>,
+    ) -> Result<(), IdentityError>;
 
     /// Restores one SCIM `externalId` mapping, writing both index directions.
     fn import_scim_mapping(
@@ -3084,11 +3101,13 @@ pub trait IdentityEngine: Send + Sync {
         overwrite: bool,
     ) -> Result<ImportOutcome, IdentityError>;
 
-    /// Returns every organization invitation in a realm, for backup export.
+    /// Passes every organization invitation in a realm to `visit`, for
+    /// backup export.
     fn export_all_invitations(
         &self,
         realm_id: &RealmId,
-    ) -> Result<Vec<OrganizationInvitation>, IdentityError>;
+        visit: &mut crate::core::ExportVisitor<'_, OrganizationInvitation>,
+    ) -> Result<(), IdentityError>;
 
     /// Restores one organization invitation with all four of its index entries
     /// (primary, token hash, org+email dedup, org listing), so an outstanding
@@ -3172,7 +3191,7 @@ pub trait IdentityEngine: Send + Sync {
         overwrite: bool,
     ) -> Result<ImportOutcome, IdentityError>;
 
-    /// Returns the realm's live token revocations — revoked access-token
+    /// Passes to `visit` the realm's live token revocations — revoked access-token
     /// JTIs, blocked DPoP key thumbprints and revoked AAT JTIs — for backup
     /// export (audit GA 2026-09-28 M3) — and every non-zero user
     /// required-action generation and every live spent required-action
@@ -3184,7 +3203,8 @@ pub trait IdentityEngine: Send + Sync {
     fn export_revocations(
         &self,
         realm_id: &RealmId,
-    ) -> Result<Vec<RevocationExport>, IdentityError>;
+        visit: &mut crate::core::ExportVisitor<'_, RevocationExport>,
+    ) -> Result<(), IdentityError>;
 
     /// Restores one revocation and applies it to this node's in-memory
     /// blocklists, so a token revoked before the backup stays dead after the

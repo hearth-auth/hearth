@@ -15,8 +15,6 @@
 
 use std::path::Path;
 
-use std::io::Read as _;
-
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
 use ring::rand::SecureRandom as _;
@@ -237,9 +235,9 @@ pub fn sign_archive(
         if path == "manifest.json" {
             continue;
         }
-        let mut bytes = Vec::new();
-        entry.read_to_end(&mut bytes)?;
-        writer.add_file(&path, &bytes)?;
+        // Copied as it is read: a member is never held whole (#866).
+        let size = entry.header().size()?;
+        writer.add_reader(&path, size, &mut entry)?;
     }
     writer.finish_signed(reader.manifest.clone(), key)?;
 
