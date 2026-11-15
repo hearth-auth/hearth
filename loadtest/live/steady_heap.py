@@ -6,7 +6,8 @@ The weekly steady-state memory test runs the server with small cache limits and 
 lifetimes, so every cache reaches its limit and the cleanup sweep deletes rows as fast as
 the load creates them. A run dir holds `metrics.txt` (lines "<unix ts> <metric line>", one
 scrape every few seconds) and `k6-summary.json` (k6/stress.js SUMMARY_OUT: journeys,
-ok_rate, and started_at in milliseconds, the start of the load).
+ok_rate, and started_at in milliseconds, the start of the load). A round.sh soak dir has
+one summary-g<i>.json per generator instead; their sum is used.
 
 1. Validity. k6's ok_rate must be at least --min-ok-rate, and the achieved rate
    (journeys / --duration-s) at least --min-rate-frac of --target-rate. Else INVALID.
@@ -37,6 +38,7 @@ ok_rate, and started_at in milliseconds, the start of the load).
 """
 import argparse
 import bisect
+import glob
 import json
 import os
 import statistics
@@ -114,10 +116,30 @@ def judge(name, points, start, rate, args):
     return verdict
 
 
+def read_summary(d):
+    """The k6 summary of a run dir: k6-summary.json, or else the summary-g<i>.json files of
+    a round (one per generator, from cloud.sh) added up: the earliest start, the sum of the
+    journeys, and the journey-weighted ok rate."""
+    try:
+        with open(f"{d}/k6-summary.json") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        pass
+    parts = []
+    for path in sorted(glob.glob(f"{d}/summary-g*.json")):
+        with open(path) as f:
+            parts.append(json.load(f))
+    if not parts:
+        raise SystemExit(f"{d}: no k6-summary.json and no summary-g*.json")
+    journeys = sum(p["journeys"] for p in parts)
+    print(f"{len(parts)} generator summaries")
+    return {"started_at": min(p["started_at"] for p in parts), "journeys": journeys,
+            "ok_rate": sum(p["ok_rate"] * p["journeys"] for p in parts) / max(journeys, 1)}
+
+
 def run(d, args):
     """Judges one run dir and returns its verdict."""
-    with open(f"{d}/k6-summary.json") as f:
-        summary = json.load(f)
+    summary = read_summary(d)
     t0 = summary["started_at"] // 1000
     rate = summary["journeys"] / args.duration_s
     print(f"run: {d}")
