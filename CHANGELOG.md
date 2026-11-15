@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.12.1] — 2026-11-15
+
 ### Fixed
 - **Partial compaction runs again under a steady write load** (#862): since 4.12.0, the small SSTs
   that the early flush and the WAL rotation flush write at the end of each WAL segment stopped
