@@ -92,6 +92,10 @@ ssh_opts=(-i "$run/id_ed25519" -o UserKnownHostsFile="$run/known_hosts" -o Batch
 s() { ssh "${ssh_opts[@]}" "root@$SERVER_PUBLIC" "$@"; }
 sg() { local h=$1; shift; ssh "${ssh_opts[@]}" "root@$h" "$@"; }
 sp() { scp -q "${ssh_opts[@]}" "$@"; }
+# A timed `systemctl stop hearth` on the server: prints the seconds and the unit's
+# result ("success", or "timeout" when systemd ended it with SIGKILL).
+timed_stop='t0=$(date +%s.%N); systemctl stop hearth; t1=$(date +%s.%N);
+  echo "stop $(awk -v a=$t0 -v b=$t1 "BEGIN { printf \"%.1f\", b - a }") s, result $(systemctl show -p Result --value hearth)"'
 
 if [ "${SETUP:-}" = 1 ]; then
   note "deploy ($IMAGE)"
@@ -102,7 +106,7 @@ if [ "${SETUP:-}" = 1 ]; then
   note "import 0..${USERS:-1000000}"
   "$c" import 0 "${USERS:-1000000}" | tee "$results/import.json" || exit 1
   note "store copy"
-  s 'systemctl stop hearth && cp -a /var/lib/hearth /var/lib/hearth.base && du -sh /var/lib/hearth.base && df -h /' \
+  s "$timed_stop"' && cp -a /var/lib/hearth /var/lib/hearth.base && du -sh /var/lib/hearth.base && df -h /' \
     | tee "$results/store-copy.txt" || exit 1
 fi
 
@@ -217,8 +221,10 @@ restart() {
   mkdir -p "$out"
   cp "$run/variant-$name.txt" "$out/variant.txt" 2> /dev/null || true
   note "$name: clean stop, drop caches, timed start"
-  s "systemctl stop hearth && sync && echo 3 > /proc/sys/vm/drop_caches && /opt/hearth/timed-start.sh $name" \
+  s "$timed_stop > /opt/hearth/out/$name.stop && sync && echo 3 > /proc/sys/vm/drop_caches && /opt/hearth/timed-start.sh $name" \
     || note "$name: Hearth did not become ready"
+  sp "root@$SERVER_PUBLIC:/opt/hearth/out/$name.stop" "$out/stop" || note "$name: no stop file"
+  note "$name: $(cat "$out/stop" 2> /dev/null)"
   sp "root@$SERVER_PUBLIC:/opt/hearth/out/$name.start" "$out/start" || note "$name: no start file"
   note "$name: start to ready: $(cat "$out/start" 2> /dev/null)"
 }
