@@ -7175,7 +7175,7 @@ mod tests {
             .read_file(&member)
             .expect("read member")
             .expect("the system realm's users.ndjson must be in the archive");
-        let plain = hearth::backup::decrypt_bytes(&raw, &dek).expect("decrypt");
+        let plain = hearth::backup::decrypt_member(&member, &raw, &dek).expect("decrypt");
         let text = String::from_utf8_lossy(&plain);
         assert!(
             text.contains("operator@hearth.test"),

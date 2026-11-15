@@ -29,7 +29,8 @@ pub enum BackupError {
     #[error("manifest.json not found in archive")]
     ManifestNotFound,
 
-    /// The archive was produced by a newer, incompatible format version.
+    /// The archive has a format version that this Hearth version does not
+    /// read (an older or a newer version).
     #[error("unsupported archive format version: {0}")]
     UnsupportedVersion(u32),
 

@@ -12,6 +12,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   every size-tier run before it had enough SSTs to merge. Only the periodic sweep merged SSTs, so
   the SST count grew (49 in a 20-minute refresh load test) and reads that miss the hot tier slowed
   down. A small SST now joins the run of its larger neighbors.
+- **A backup no longer holds the realm in memory** (#866): `POST /admin/backup` and `hearth backup`
+  collected each section of a realm in memory and encrypted it whole. At 10,000,000 users in one
+  realm the heap grew from about 650 MiB to 9,632 MiB, so a server with less free memory could stop
+  with an out-of-memory error during its own backup. The export now reads one record at a time
+  from the snapshot and encrypts each member in chunks of 64 KiB, and the response streams the
+  archive file with a `Content-Length` header. The extra memory of a backup is now a few MiB,
+  whatever the number of users. The backup also needs temporary disk space for its largest member
+  (see the backup guide). A restore still holds one realm in memory (#867).
+
+### Changed
+- **Backup archive format version 3** (#866): each archive member is now encrypted in chunks of
+  64 KiB (AES-256-GCM, STREAM construction). Each chunk is authenticated with its number and a
+  last-chunk flag, so a restore refuses a member with a reordered, removed or cut chunk. A restore
+  refuses archives from earlier versions (format version 2 or lower) with
+  `unsupported archive format version`. Take a new backup after the upgrade.
 
 ## [4.12.0] — 2026-11-14
 

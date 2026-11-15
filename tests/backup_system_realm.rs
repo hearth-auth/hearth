@@ -919,7 +919,7 @@ fn decrypted_members(
         .into_iter()
         .map(|(path, bytes)| {
             let member = path.rsplit('/').next().expect("member").to_string();
-            let plain = hearth::backup::decrypt_bytes(&bytes, &dek).expect("decrypt");
+            let plain = hearth::backup::decrypt_member(&path, &bytes, &dek).expect("decrypt");
             (member, plain.to_vec())
         })
         .collect()
@@ -1139,10 +1139,14 @@ async fn a_system_realm_restore_refuses_what_the_live_api_never_creates_there() 
         .is_none(),
         "no consent lands in the system realm"
     );
-    assert!(
-        id.export_all_scim_mappings(&sys)
-            .expect("scim mappings")
-            .is_empty(),
+    let mut scim_mappings = 0;
+    id.export_all_scim_mappings(&sys, &mut |_| {
+        scim_mappings += 1;
+        std::ops::ControlFlow::Continue(())
+    })
+    .expect("scim mappings");
+    assert_eq!(
+        scim_mappings, 0,
         "no SCIM mapping lands in the system realm"
     );
 }

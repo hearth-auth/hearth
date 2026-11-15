@@ -2165,24 +2165,24 @@ impl RbacEngine for EmbeddedRbacEngine {
     fn export_all_group_memberships(
         &self,
         realm_id: &RealmId,
-    ) -> Result<Vec<GroupMembershipEdge>, RbacError> {
+        visit: &mut crate::core::ExportVisitor<'_, GroupMembershipEdge>,
+    ) -> Result<(), RbacError> {
         let prefix = keys::gm_forward_realm_scan_prefix();
         let end = keys::prefix_end(&prefix);
-        let entries = self.storage.scan(realm_id, &prefix, &end)?;
-        let mut out = Vec::with_capacity(entries.len());
-        for entry in entries {
-            // The forward value holds the member; the owning group lives only
-            // in the key (see `decode_gm_forward_group`, which is asserted to
-            // invert `encode_gm_forward`).
-            let Some(group_id) = keys::decode_gm_forward_group(&entry.key) else {
-                continue;
-            };
-            let Ok(member) = Self::de::<GroupMember>(&entry.value) else {
-                continue;
-            };
-            out.push(GroupMembershipEdge { group_id, member });
-        }
-        Ok(out)
+        self.storage
+            .visit_entries(realm_id, &prefix, &end, &mut |key, value| {
+                // The forward value holds the member; the owning group lives
+                // only in the key (see `decode_gm_forward_group`, which is
+                // asserted to invert `encode_gm_forward`).
+                let (Some(group_id), Ok(member)) = (
+                    keys::decode_gm_forward_group(key),
+                    Self::de::<GroupMember>(value),
+                ) else {
+                    return std::ops::ControlFlow::Continue(());
+                };
+                visit(GroupMembershipEdge { group_id, member })
+            })?;
+        Ok(())
     }
 
     fn orphaned_references(&self, realm_id: &RealmId) -> Result<Vec<OrphanRef>, RbacError> {
@@ -2265,18 +2265,24 @@ impl RbacEngine for EmbeddedRbacEngine {
         Ok(out.into_iter().collect())
     }
 
-    fn export_all_assignments(&self, realm_id: &RealmId) -> Result<Vec<RoleAssignment>, RbacError> {
+    fn visit_all_assignments(
+        &self,
+        realm_id: &RealmId,
+        visit: &mut crate::core::ExportVisitor<'_, RoleAssignment>,
+    ) -> Result<(), RbacError> {
         let prefix = keys::ASSIGN_PRI_PREFIX.as_bytes().to_vec();
         let end = keys::prefix_end(&prefix);
-        let entries = self.storage.scan(realm_id, &prefix, &end)?;
-        let mut out = Vec::new();
-        for entry in entries {
-            let Ok(assignment) = Self::de::<RoleAssignment>(&entry.value) else {
-                continue;
-            };
-            out.push(assignment);
-        }
-        Ok(out)
+        self.storage
+            .visit_entries(
+                realm_id,
+                &prefix,
+                &end,
+                &mut |_, value| match Self::de::<RoleAssignment>(value) {
+                    Ok(assignment) => visit(assignment),
+                    Err(_) => std::ops::ControlFlow::Continue(()),
+                },
+            )?;
+        Ok(())
     }
 
     // -------------------- Backup import helpers (HEA-2160) --------------------

@@ -38,7 +38,11 @@
 //! ```
 //!
 //! Empty sections are omitted, so an absent member means "none of these
-//! existed". See [`UNEXPORTED_FAMILIES`] for the entity families this list
+//! existed".
+//!
+//! Every member is encrypted with the archive DEK in chunks of 64 KiB (see
+//! [`EncryptWriter`] for the layout), so that a backup holds one chunk of a
+//! member in memory and not the whole member (#866). See [`UNEXPORTED_FAMILIES`] for the entity families this list
 //! deliberately or accidentally leaves out.
 //!
 //! The manifest is always the **last** entry so that checksums for all
@@ -70,19 +74,21 @@ mod import;
 pub mod marker;
 pub mod passphrase;
 mod signature;
+mod stream;
 mod types;
 
 pub use encryption::{decrypt_archive, encrypt_archive};
 pub use error::BackupError;
-pub use export::{
-    decrypt_bytes, unwrap_dek, wrap_dek, BackupExporter, ExportOptions, SnapshotExporter,
-};
+pub use export::{unwrap_dek, wrap_dek, BackupExporter, ExportOptions, SnapshotExporter};
 pub use import::{
     BackupImporter, Conflict, EntityCounts, ImportOptions, ImportReport, RestoreMode,
 };
 pub use signature::{
     check_restore_signature, sign_archive, verify_manifest_signature, BackupSigningKey,
     SignatureCheck,
+};
+pub use stream::{
+    decrypt_member, encrypt_member, DecryptReader, EncryptWriter, CHUNK_LEN as MEMBER_CHUNK_LEN,
 };
 pub use types::{
     BackupManifest, BackupRecord, DekWrappingParams, RealmManifest, RecordCounts, MANIFEST_VERSION,
@@ -256,16 +262,49 @@ impl ArchiveWriter {
     /// `archive_path` must be an archive-relative POSIX path, e.g.
     /// `realms/my-realm/users.ndjson`.
     pub fn add_file(&mut self, archive_path: &str, data: &[u8]) -> Result<(), BackupError> {
-        let checksum = sha256_hex(data);
-        self.checksums.insert(archive_path.to_string(), checksum);
+        self.add_reader(archive_path, data.len() as u64, data)
+    }
 
+    /// Appends `size` bytes from `data` at `archive_path` inside the archive,
+    /// without holding them in memory (#866).
+    ///
+    /// The SHA-256 checksum is computed while the bytes are copied, and
+    /// written into `manifest.json` by [`finish`](Self::finish).
+    ///
+    /// # Errors
+    ///
+    /// [`BackupError::Io`] when `data` cannot be read, gives other than
+    /// `size` bytes, or the archive cannot be written. The archive is not
+    /// usable after an error.
+    pub fn add_reader(
+        &mut self,
+        archive_path: &str,
+        size: u64,
+        data: impl Read,
+    ) -> Result<(), BackupError> {
         let mut header = tar::Header::new_gnu();
-        header.set_size(data.len() as u64);
+        header.set_size(size);
         header.set_mode(0o644);
         header.set_mtime(0);
         header.set_cksum();
 
-        self.builder.append_data(&mut header, archive_path, data)?;
+        // `take`: never more than the header says. `tar` does not check that
+        // it got as many bytes as the header says, so the count is checked
+        // here.
+        let mut hashing = HashingReader::new(data.take(size));
+        self.builder
+            .append_data(&mut header, archive_path, &mut hashing)?;
+        if hashing.count != size {
+            return Err(BackupError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!(
+                    "member {archive_path}: got {} bytes, expected {size}",
+                    hashing.count
+                ),
+            )));
+        }
+        self.checksums
+            .insert(archive_path.to_string(), hashing.hex_digest());
         Ok(())
     }
 
@@ -472,9 +511,10 @@ impl ArchiveReader {
             let Some(expected) = self.manifest.checksums.get(&entry_path) else {
                 return Err(BackupError::UnchecksummedMember { path: entry_path });
             };
-            let mut bytes = Vec::new();
-            entry.read_to_end(&mut bytes)?;
-            let actual = sha256_hex(&bytes);
+            // Hashed as it is read: a member is never held whole (#866).
+            let mut hashing = HashingReader::new(&mut entry);
+            std::io::copy(&mut hashing, &mut std::io::sink())?;
+            let actual = hashing.hex_digest();
             if actual != *expected {
                 return Err(BackupError::ChecksumMismatch {
                     path: entry_path,
@@ -528,8 +568,41 @@ fn manifest_from(source: impl Read) -> Result<BackupManifest, BackupError> {
 }
 
 /// Returns the lowercase hex-encoded SHA-256 digest of `data`.
+#[cfg(test)]
 fn sha256_hex(data: &[u8]) -> String {
     hex_encode(Sha256::digest(data))
+}
+
+/// A [`Read`] that computes the SHA-256 digest and the count of the bytes
+/// read through it.
+struct HashingReader<R: Read> {
+    inner: R,
+    hasher: Sha256,
+    count: u64,
+}
+
+impl<R: Read> HashingReader<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            hasher: Sha256::new(),
+            count: 0,
+        }
+    }
+
+    /// The lowercase hex-encoded SHA-256 digest of the bytes read so far.
+    fn hex_digest(&self) -> String {
+        hex_encode(self.hasher.clone().finalize())
+    }
+}
+
+impl<R: Read> Read for HashingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.hasher.update(&buf[..n]);
+        self.count += n as u64;
+        Ok(n)
+    }
 }
 
 #[cfg(test)]

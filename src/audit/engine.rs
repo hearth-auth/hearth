@@ -1210,6 +1210,16 @@ impl AuditEngine for EmbeddedAuditEngine {
         Ok(events)
     }
 
+    fn export_events(
+        &self,
+        realm_id: &RealmId,
+        visit: &mut crate::core::ExportVisitor<'_, AuditEvent>,
+    ) -> Result<(), AuditError> {
+        let query = AuditQuery::for_realm(realm_id.clone());
+        let source = EventSource::for_query(&query);
+        self.visit_matching_ascending(&query, &source, None, None, visit)
+    }
+
     fn recent(&self, query: &AuditQuery) -> Result<Vec<AuditEvent>, AuditError> {
         if let (Some(start), Some(end)) = (query.start_time, query.end_time) {
             if start > end {

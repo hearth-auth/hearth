@@ -1488,7 +1488,7 @@ fn decrypt_ndjson_lines(
     let Some(enc) = reader.read_file(archive_path).expect("read section") else {
         return Vec::new();
     };
-    let plain = hearth::backup::decrypt_bytes(&enc, dek).expect("decrypt section");
+    let plain = hearth::backup::decrypt_member(archive_path, &enc, dek).expect("decrypt section");
     plain
         .split(|&b| b == b'\n')
         .filter(|l| !l.is_empty())
@@ -4030,4 +4030,197 @@ async fn restore_keeps_ended_required_action_flows() {
     dst.identity()
         .consume_required_action_flow(&realm, &open)
         .expect("a flow still open at backup time can end on the restored store");
+}
+
+// ── chunked member encryption against a changed archive (#866) ───────────────
+
+/// Bytes before the first chunk of an encrypted member: the 8-byte format
+/// magic and the 7-byte nonce prefix.
+const MEMBER_HEADER_LEN: usize = 15;
+
+/// A change to the bytes of one archive member.
+type MemberChange = Box<dyn FnOnce(Vec<u8>) -> Vec<u8>>;
+
+/// Splits an encrypted member into its header and its chunk frames (last
+/// flag, sealed length, sealed bytes).
+fn split_chunks(member: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {
+    let (header, mut rest) = member.split_at(MEMBER_HEADER_LEN);
+    let mut frames = Vec::new();
+    while !rest.is_empty() {
+        let len = u32::from_le_bytes(rest[1..5].try_into().expect("length field")) as usize;
+        let (frame, tail) = rest.split_at(5 + len);
+        frames.push(frame.to_vec());
+        rest = tail;
+    }
+    (header.to_vec(), frames)
+}
+
+/// Rewrites `src` as a new archive in which `member` is replaced by the
+/// result of `change`. The manifest gets the checksum of the new bytes, so
+/// that only the member encryption can find the change.
+fn rewrite_member(
+    src: &std::path::Path,
+    member: &str,
+    change: impl FnOnce(Vec<u8>) -> Vec<u8>,
+) -> NamedTempFile {
+    use sha2::Digest as _;
+    use std::io::Read as _;
+
+    let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
+    {
+        let file = std::fs::File::open(src).expect("open source archive");
+        let mut archive = tar::Archive::new(zstd::Decoder::new(file).expect("zstd decoder"));
+        for entry in archive.entries().expect("entries") {
+            let mut entry = entry.expect("entry");
+            let path = entry.path().expect("path").to_string_lossy().into_owned();
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).expect("read entry");
+            entries.push((path, bytes));
+        }
+    }
+    let mut change = Some(change);
+    for (path, bytes) in &mut entries {
+        if path == member {
+            let changed = (change.take().expect("one member"))(std::mem::take(bytes));
+            *bytes = changed;
+        }
+    }
+    assert!(change.is_none(), "the archive must contain '{member}'");
+    let checksum = hex::encode(sha2::Sha256::digest(
+        &entries.iter().find(|(p, _)| p == member).expect("member").1,
+    ));
+    for (path, bytes) in &mut entries {
+        if path == "manifest.json" {
+            let mut manifest: serde_json::Value =
+                serde_json::from_slice(bytes).expect("manifest json");
+            manifest["checksums"][member] = serde_json::Value::String(checksum.clone());
+            *bytes = serde_json::to_vec(&manifest).expect("manifest bytes");
+        }
+    }
+
+    let out = NamedTempFile::new().expect("tempfile");
+    {
+        let file = std::fs::File::create(out.path()).expect("create changed archive");
+        let mut builder = tar::Builder::new(zstd::Encoder::new(file, 0).expect("zstd encoder"));
+        for (path, bytes) in &entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, path, bytes.as_slice())
+                .expect("append entry");
+        }
+        builder
+            .into_inner()
+            .expect("finish tar")
+            .finish()
+            .expect("finish zstd");
+    }
+    out
+}
+
+/// An archive whose `users.ndjson` has its chunks reordered, a middle chunk
+/// removed, or its last chunk removed must not restore, also when the
+/// manifest checksum agrees with the changed bytes. Each chunk is
+/// authenticated with its index and the last-chunk flag.
+#[tokio::test]
+async fn restore_refuses_a_member_whose_chunks_are_reordered_removed_or_cut() {
+    let src = common::TestHarness::in_process()
+        .await
+        .expect("src harness");
+    let realm = src.create_realm();
+    for i in 0..800 {
+        src.identity()
+            .create_user(
+                &realm,
+                &CreateUserRequest {
+                    email: format!("chunk-{i}@backup-test.example"),
+                    display_name: format!("Chunk User {i} with a long display name"),
+                    first_name: "Chunk".into(),
+                    last_name: "User".into(),
+                    attributes: Default::default(),
+                },
+            )
+            .expect("create user");
+    }
+    let tmp = export_realm_to_file(&src, &realm, &ExportOptions::default());
+    let slug = realm_slug(&src, &realm);
+    let member = format!("realms/{slug}/users.ndjson");
+
+    let original = BackupArchive::open(tmp.path())
+        .expect("open")
+        .read_file(&member)
+        .expect("read users")
+        .expect("users member");
+    let (_, frames) = split_chunks(&original);
+    assert!(
+        frames.len() >= 3,
+        "the fixture must give users.ndjson three chunks or more, not {}",
+        frames.len()
+    );
+
+    // Control: the same rewrite without a change restores every user.
+    let unchanged = rewrite_member(tmp.path(), &member, |bytes| bytes);
+    let control = common::TestHarness::in_process()
+        .await
+        .expect("control harness");
+    let report = make_importer(&control)
+        .import_realm(
+            &slug,
+            &BackupArchive::open(unchanged.path()).expect("open unchanged archive"),
+            &import_opts_with_passphrase(),
+        )
+        .expect("an unchanged member restores");
+    assert_eq!(
+        report.users.created, 800,
+        "every user of the unchanged archive"
+    );
+
+    let reorder = |bytes: Vec<u8>| {
+        let (header, mut frames) = split_chunks(&bytes);
+        frames.swap(0, 1);
+        [header, frames.concat()].concat()
+    };
+    let remove_middle = |bytes: Vec<u8>| {
+        let (header, mut frames) = split_chunks(&bytes);
+        frames.remove(1);
+        [header, frames.concat()].concat()
+    };
+    let cut_last = |bytes: Vec<u8>| {
+        let (header, mut frames) = split_chunks(&bytes);
+        frames.pop();
+        [header, frames.concat()].concat()
+    };
+    let changes: [(&str, MemberChange); 3] = [
+        ("reordered chunks", Box::new(reorder)),
+        ("a removed middle chunk", Box::new(remove_middle)),
+        ("a removed last chunk", Box::new(cut_last)),
+    ];
+    for (what, change) in changes {
+        let tampered = rewrite_member(tmp.path(), &member, change);
+        let reader = BackupArchive::open(tampered.path()).expect("open changed archive");
+        reader
+            .verify_checksums()
+            .expect("the manifest checksum agrees with the changed member");
+        let dst = common::TestHarness::in_process()
+            .await
+            .expect("dst harness");
+        let err = make_importer(&dst)
+            .import_realm(&slug, &reader, &import_opts_with_passphrase())
+            .expect_err("a changed member must fail the restore");
+        let message = format!("{err}");
+        assert!(
+            message.contains("users.ndjson"),
+            "{what}: the error must name the member; got: {message}"
+        );
+        let restored = dst
+            .identity()
+            .get_user_by_email(&realm, "chunk-0@backup-test.example")
+            .expect("lookup");
+        assert!(
+            restored.is_none(),
+            "{what}: no user of the changed archive may be restored"
+        );
+    }
 }

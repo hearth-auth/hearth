@@ -12,7 +12,11 @@ use crate::core::Timestamp;
 /// that is always Argon2id-wrapped before being stored in the manifest.
 /// Previously (v1) only `signing_key.json` was encrypted; credentials and
 /// other sections were plaintext NDJSON.
-pub const MANIFEST_VERSION: u32 = 2;
+///
+/// v3: each member is encrypted in chunks of 64 KiB (#866), so that the
+/// backup and the verification read a member in pieces of a fixed size. A v2
+/// member is one AES-256-GCM message, and this version does not read it.
+pub const MANIFEST_VERSION: u32 = 3;
 
 /// Per-entity-type record counts for a single realm in the backup.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

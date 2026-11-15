@@ -173,6 +173,25 @@ pub trait AuditEngine: Send + Sync {
     /// combined with AND semantics.
     fn query(&self, query: &AuditQuery) -> Result<Vec<AuditEvent>, AuditError>;
 
+    /// Passes every event of `realm_id` to `visit`, oldest first, one at a
+    /// time, for backup export (#866). The order is the chain order, as for
+    /// [`query`](Self::query).
+    ///
+    /// The default collects [`query`](Self::query) first, so its memory grows
+    /// with the log: correct for test doubles.
+    fn export_events(
+        &self,
+        realm_id: &RealmId,
+        visit: &mut crate::core::ExportVisitor<'_, AuditEvent>,
+    ) -> Result<(), AuditError> {
+        for event in self.query(&AuditQuery::for_realm(realm_id.clone()))? {
+            if visit(event).is_break() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     /// Returns the newest events that match `query`, newest first (#644).
     ///
     /// `query.limit` caps the number of events. `query.end_time` is the

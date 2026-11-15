@@ -1765,6 +1765,23 @@ impl EmbeddedIdentityEngine {
         }
     }
 
+    /// Passes every entry under `prefix` in `realm_id` to `each`, in key
+    /// order, one at a time, until the range ends or `each` breaks.
+    ///
+    /// The backup export walks are built on it, so a backup holds one record
+    /// at a time and not the whole realm (#866).
+    fn walk_prefix(
+        &self,
+        realm_id: &RealmId,
+        prefix: &[u8],
+        each: &mut crate::storage::EntryVisitor<'_>,
+    ) -> Result<(), IdentityError> {
+        let end = keys::prefix_end(prefix);
+        self.storage
+            .visit_entries(realm_id, prefix, &end, each)
+            .map_err(Self::storage_err)
+    }
+
     /// A read-only copy of this engine over `storage`, a storage snapshot
     /// (#643). `rbac` and `audit` MUST read the same snapshot.
     ///
@@ -14024,24 +14041,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     fn export_all_organization_memberships(
         &self,
         realm_id: &RealmId,
-    ) -> Result<Vec<OrganizationMembership>, IdentityError> {
+        visit: &mut crate::core::ExportVisitor<'_, OrganizationMembership>,
+    ) -> Result<(), IdentityError> {
         // The org->user index is authoritative; the user->org index stores the
         // same bytes and is rebuilt from the record on import.
-        let prefix = keys::membership_org_scan_prefix();
-        let end = keys::prefix_end(&prefix);
-        let entries = self
-            .storage
-            .scan(realm_id, &prefix, &end)
-            .map_err(Self::storage_err)?;
-        let mut out = Vec::with_capacity(entries.len());
-        for entry in entries {
-            let Ok(membership) = serde_json::from_slice::<OrganizationMembership>(&entry.value)
-            else {
-                continue;
-            };
-            out.push(membership);
-        }
-        Ok(out)
+        self.walk_prefix(
+            realm_id,
+            &keys::membership_org_scan_prefix(),
+            &mut |_, value| match serde_json::from_slice::<OrganizationMembership>(value) {
+                Ok(membership) => visit(membership),
+                Err(_) => std::ops::ControlFlow::Continue(()),
+            },
+        )
     }
 
     fn import_organization_membership(
@@ -14081,27 +14092,27 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         })
     }
 
-    fn export_all_consents(&self, realm_id: &RealmId) -> Result<Vec<ConsentExport>, IdentityError> {
-        let prefix = keys::oauth_consent_scan_prefix();
-        let end = keys::prefix_end(&prefix);
-        let entries = self
-            .storage
-            .scan(realm_id, &prefix, &end)
-            .map_err(Self::storage_err)?;
-        let mut out = Vec::with_capacity(entries.len());
-        for entry in entries {
-            let Ok(storage_key) = String::from_utf8(entry.key.clone()) else {
-                continue;
-            };
-            let Ok(record) = serde_json::from_slice::<ConsentRecord>(&entry.value) else {
-                continue;
-            };
-            out.push(ConsentExport {
-                storage_key,
-                record,
-            });
-        }
-        Ok(out)
+    fn export_all_consents(
+        &self,
+        realm_id: &RealmId,
+        visit: &mut crate::core::ExportVisitor<'_, ConsentExport>,
+    ) -> Result<(), IdentityError> {
+        self.walk_prefix(
+            realm_id,
+            &keys::oauth_consent_scan_prefix(),
+            &mut |key, value| {
+                let (Ok(storage_key), Ok(record)) = (
+                    String::from_utf8(key.to_vec()),
+                    serde_json::from_slice::<ConsentRecord>(value),
+                ) else {
+                    return std::ops::ControlFlow::Continue(());
+                };
+                visit(ConsentExport {
+                    storage_key,
+                    record,
+                })
+            },
+        )
     }
 
     fn import_consent(
@@ -14279,31 +14290,28 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     fn export_all_federation_links(
         &self,
         realm_id: &RealmId,
-    ) -> Result<Vec<FederationLinkExport>, IdentityError> {
+        visit: &mut crate::core::ExportVisitor<'_, FederationLinkExport>,
+    ) -> Result<(), IdentityError> {
         // Read the FORWARD index: its key carries both identifiers and its
-        // value carries the external subject, so one scan yields everything
+        // value carries the external subject, so one walk yields everything
         // needed to rebuild both directions.
-        let prefix = keys::fed_ext_fwd_scan_prefix();
-        let end = keys::prefix_end(&prefix);
-        let entries = self
-            .storage
-            .scan(realm_id, &prefix, &end)
-            .map_err(Self::storage_err)?;
-        let mut out = Vec::with_capacity(entries.len());
-        for entry in entries {
-            let Some((user_id, idp_id)) = keys::decode_federation_ext_fwd(&entry.key) else {
-                continue;
-            };
-            let Ok(external_sub) = String::from_utf8(entry.value.clone()) else {
-                continue;
-            };
-            out.push(FederationLinkExport {
-                user_id,
-                idp_id,
-                external_sub,
-            });
-        }
-        Ok(out)
+        self.walk_prefix(
+            realm_id,
+            &keys::fed_ext_fwd_scan_prefix(),
+            &mut |key, value| {
+                let (Some((user_id, idp_id)), Ok(external_sub)) = (
+                    keys::decode_federation_ext_fwd(key),
+                    String::from_utf8(value.to_vec()),
+                ) else {
+                    return std::ops::ControlFlow::Continue(());
+                };
+                visit(FederationLinkExport {
+                    user_id,
+                    idp_id,
+                    external_sub,
+                })
+            },
+        )
     }
 
     fn import_federation_link(
@@ -14465,8 +14473,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     fn export_all_scim_mappings(
         &self,
         realm_id: &RealmId,
-    ) -> Result<Vec<ScimMappingExport>, IdentityError> {
-        let mut out = Vec::new();
+        visit: &mut crate::core::ExportVisitor<'_, ScimMappingExport>,
+    ) -> Result<(), IdentityError> {
+        use std::ops::ControlFlow;
         for (kind, prefix, decode) in [
             (
                 ScimMappingKind::User,
@@ -14479,28 +14488,25 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 keys::decode_scim_ext_group_external_id as fn(&[u8]) -> Option<String>,
             ),
         ] {
-            let end = keys::prefix_end(&prefix);
-            let entries = self
-                .storage
-                .scan(realm_id, &prefix, &end)
-                .map_err(Self::storage_err)?;
-            for entry in entries {
-                let Some(external_id) = decode(&entry.key) else {
-                    continue;
+            let mut stopped = false;
+            self.walk_prefix(realm_id, &prefix, &mut |key, value| {
+                let (Some(external_id), Ok(bytes)) = (decode(key), <[u8; 16]>::try_from(value))
+                else {
+                    return ControlFlow::Continue(());
                 };
-                if entry.value.len() != 16 {
-                    continue;
-                }
-                let mut bytes = [0u8; 16];
-                bytes.copy_from_slice(&entry.value);
-                out.push(ScimMappingExport {
+                let flow = visit(ScimMappingExport {
                     kind,
                     external_id,
                     subject_id: uuid::Uuid::from_bytes(bytes),
                 });
+                stopped = flow.is_break();
+                flow
+            })?;
+            if stopped {
+                break;
             }
         }
-        Ok(out)
+        Ok(())
     }
 
     fn import_scim_mapping(
@@ -14554,20 +14560,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     fn export_all_invitations(
         &self,
         realm_id: &RealmId,
-    ) -> Result<Vec<OrganizationInvitation>, IdentityError> {
-        let prefix = keys::invitation_id_scan_prefix();
-        let end = keys::prefix_end(&prefix);
-        let entries = self
-            .storage
-            .scan(realm_id, &prefix, &end)
-            .map_err(Self::storage_err)?;
-        let mut out = Vec::with_capacity(entries.len());
-        for entry in entries {
-            if let Ok(invitation) = serde_json::from_slice::<OrganizationInvitation>(&entry.value) {
-                out.push(invitation);
-            }
-        }
-        Ok(out)
+        visit: &mut crate::core::ExportVisitor<'_, OrganizationInvitation>,
+    ) -> Result<(), IdentityError> {
+        self.walk_prefix(
+            realm_id,
+            &keys::invitation_id_scan_prefix(),
+            &mut |_, value| match serde_json::from_slice::<OrganizationInvitation>(value) {
+                Ok(invitation) => visit(invitation),
+                Err(_) => std::ops::ControlFlow::Continue(()),
+            },
+        )
     }
 
     fn import_invitation(
@@ -14624,68 +14626,74 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     fn export_revocations(
         &self,
         realm_id: &RealmId,
-    ) -> Result<Vec<RevocationExport>, IdentityError> {
+        visit: &mut crate::core::ExportVisitor<'_, RevocationExport>,
+    ) -> Result<(), IdentityError> {
+        use std::ops::ControlFlow;
         let now_secs = self.clock.now().as_micros() / 1_000_000;
-        let mut out = Vec::new();
-        let scan = |prefix: Vec<u8>| -> Result<Vec<(String, Vec<u8>)>, IdentityError> {
-            let end = keys::prefix_end(&prefix);
-            Ok(self
-                .storage
-                .scan(realm_id, &prefix, &end)
-                .map_err(Self::storage_err)?
-                .into_iter()
-                .map(|e| {
-                    let id = String::from_utf8_lossy(e.key.get(prefix.len()..).unwrap_or(&[]))
-                        .into_owned();
-                    (id, e.value)
-                })
-                .collect())
+        // Walks one prefix and passes each `(id, value)` row to `pick`, which
+        // returns the record to export, if any. Returns whether `visit`
+        // stopped the walk.
+        let mut walk = |prefix: Vec<u8>,
+                        pick: &dyn Fn(String, &[u8]) -> Option<RevocationExport>|
+         -> Result<bool, IdentityError> {
+            let mut stopped = false;
+            self.walk_prefix(realm_id, &prefix, &mut |key, value| {
+                let id =
+                    String::from_utf8_lossy(key.get(prefix.len()..).unwrap_or(&[])).into_owned();
+                let Some(record) = pick(id, value) else {
+                    return ControlFlow::Continue(());
+                };
+                let flow = visit(record);
+                stopped = flow.is_break();
+                flow
+            })?;
+            Ok(stopped)
         };
-        for (jti, value) in scan(keys::revoked_jti_scan_prefix())? {
-            let exp = control::decode_revoked_jti_expiry(&value);
-            if exp != i64::MAX && now_secs >= exp {
-                continue;
-            }
-            out.push(RevocationExport::Jti {
+        if walk(keys::revoked_jti_scan_prefix(), &|jti, value| {
+            let exp = control::decode_revoked_jti_expiry(value);
+            (exp == i64::MAX || now_secs < exp).then(|| RevocationExport::Jti {
                 jti,
                 exp: (exp != i64::MAX).then_some(exp),
-            });
+            })
+        })? {
+            return Ok(());
         }
-        for (jkt, _) in scan(keys::blocked_dpop_jkt_scan_prefix())? {
-            out.push(RevocationExport::DpopJkt { jkt });
+        if walk(keys::blocked_dpop_jkt_scan_prefix(), &|jkt, _| {
+            Some(RevocationExport::DpopJkt { jkt })
+        })? {
+            return Ok(());
         }
-        for (jti, _) in scan(keys::aat_revoked_jti_scan_prefix())? {
-            out.push(RevocationExport::AatJti { jti });
+        if walk(keys::aat_revoked_jti_scan_prefix(), &|jti, _| {
+            Some(RevocationExport::AatJti { jti })
+        })? {
+            return Ok(());
         }
         // Required-action generations (GA sweep 4). Generation 0 is the
         // absent-row default and carries nothing a restore must keep.
-        for (user_id, value) in scan(keys::ra_generation_scan_prefix())? {
-            let generation = <[u8; 8]>::try_from(value.as_slice()).map_or(0, u64::from_le_bytes);
-            if generation != 0 {
-                out.push(RevocationExport::RaGeneration {
-                    user_id,
-                    generation,
-                });
-            }
+        if walk(keys::ra_generation_scan_prefix(), &|user_id, value| {
+            let generation = <[u8; 8]>::try_from(value).map_or(0, u64::from_le_bytes);
+            (generation != 0).then_some(RevocationExport::RaGeneration {
+                user_id,
+                generation,
+            })
+        })? {
+            return Ok(());
         }
         // Spent required-action markers (GA sweep 4 round 2); an expired one
         // guards nothing and is left to the sweep.
         for kind in keys::RA_CONSUMED_KINDS {
-            for (hash, value) in scan(keys::consumed_ra_scan_prefix(kind))? {
-                let Ok(bytes) = <[u8; 8]>::try_from(value.as_slice()) else {
-                    continue;
-                };
-                let expires_at = i64::from_le_bytes(bytes);
-                if now_secs < expires_at {
-                    out.push(RevocationExport::RaConsumed {
-                        marker: kind.to_string(),
-                        hash,
-                        expires_at,
-                    });
-                }
+            if walk(keys::consumed_ra_scan_prefix(kind), &|hash, value| {
+                let expires_at = i64::from_le_bytes(<[u8; 8]>::try_from(value).ok()?);
+                (now_secs < expires_at).then(|| RevocationExport::RaConsumed {
+                    marker: kind.to_string(),
+                    hash,
+                    expires_at,
+                })
+            })? {
+                return Ok(());
             }
         }
-        Ok(out)
+        Ok(())
     }
 
     fn import_revocation(
@@ -17512,139 +17520,143 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.storage.is_write_fenced()
     }
 
-    fn export_all_users(&self, realm_id: &RealmId) -> Result<Vec<User>, IdentityError> {
-        let prefix = keys::user_id_scan_prefix();
-        let end = keys::prefix_end(&prefix);
-        let mut users = Vec::new();
+    fn export_all_users(
+        &self,
+        realm_id: &RealmId,
+        visit: &mut crate::core::ExportVisitor<'_, User>,
+    ) -> Result<(), IdentityError> {
         let mut failure = None;
-        self.storage
-            .visit_entries(
-                realm_id,
-                &prefix,
-                &end,
-                &mut |_, value| match Self::deserialize_user(value) {
-                    Ok(user) => {
-                        users.push(user);
-                        std::ops::ControlFlow::Continue(())
-                    }
-                    Err(e) => {
-                        failure = Some(e);
-                        std::ops::ControlFlow::Break(())
-                    }
-                },
-            )
-            .map_err(Self::storage_err)?;
-        match failure {
-            Some(e) => Err(e),
-            None => Ok(users),
-        }
+        self.walk_prefix(realm_id, &keys::user_id_scan_prefix(), &mut |_, value| {
+            match Self::deserialize_user(value) {
+                Ok(user) => visit(user),
+                Err(e) => {
+                    failure = Some(e);
+                    std::ops::ControlFlow::Break(())
+                }
+            }
+        })?;
+        failure.map_or(Ok(()), Err)
     }
 
     fn export_all_credentials(
         &self,
         realm_id: &RealmId,
-    ) -> Result<Vec<crate::identity::CredentialExport>, IdentityError> {
+        visit: &mut crate::core::ExportVisitor<'_, crate::identity::CredentialExport>,
+    ) -> Result<(), IdentityError> {
         use crate::identity::credentials::StoredCredential;
+        use std::ops::ControlFlow;
         let prefix = keys::credential_scan_prefix();
-        let end = keys::prefix_end(&prefix);
-        let entries = self
-            .storage
-            .scan(realm_id, &prefix, &end)
-            .map_err(Self::storage_err)?;
-        let mut out = Vec::new();
-        for entry in entries {
-            let Ok(stored) = crate::codec::decode::<StoredCredential>(&entry.value) else {
-                continue;
+        self.walk_prefix(realm_id, &prefix, &mut |key, value| {
+            let Ok(stored) = crate::codec::decode::<StoredCredential>(value) else {
+                return ControlFlow::Continue(());
             };
-            let uuid_bytes = &entry.key[prefix.len()..];
-            let Ok(uuid_str) = std::str::from_utf8(uuid_bytes) else {
-                continue;
+            let Some(uuid) = key
+                .get(prefix.len()..)
+                .and_then(|b| std::str::from_utf8(b).ok())
+                .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            else {
+                return ControlFlow::Continue(());
             };
-            let Ok(uuid) = uuid::Uuid::parse_str(uuid_str) else {
-                continue;
-            };
-            out.push(crate::identity::CredentialExport {
+            visit(crate::identity::CredentialExport {
                 user_id: UserId::new(uuid),
-                phc_string: stored.hash.clone(),
+                phc_string: stored.hash,
                 created_at_micros: stored.created_at,
-            });
-        }
-        Ok(out)
+            })
+        })
     }
 
     fn export_all_mfa_factors(
         &self,
         realm_id: &RealmId,
-    ) -> Result<Vec<crate::identity::MfaFactorExport>, IdentityError> {
+        visit: &mut crate::core::ExportVisitor<'_, crate::identity::MfaFactorExport>,
+    ) -> Result<(), IdentityError> {
         use crate::identity::MfaFactorExport;
+        use std::ops::ControlFlow;
 
         let serde_err = |e: serde_json::Error| IdentityError::Serialization {
             reason: e.to_string(),
         };
-        let mut out = Vec::new();
+        let mut failure = None;
+        let mut stopped = false;
 
         // TOTP state — decrypted via `load_mfa_state`, which handles the
         // per-realm MFA DEK and the legacy signing-key-derived fallback. The
         // plaintext travels only inside the archive, which encrypts every
         // section (audit 2026-08-28 §4.18#5).
         let prefix = keys::mfa_totp_scan_prefix();
-        let end = keys::prefix_end(&prefix);
-        let entries = self
-            .storage
-            .scan(realm_id, &prefix, &end)
-            .map_err(Self::storage_err)?;
-        for entry in &entries {
-            let uuid_bytes = &entry.key[prefix.len()..];
-            let Some(uuid) = std::str::from_utf8(uuid_bytes)
-                .ok()
+        self.walk_prefix(realm_id, &prefix, &mut |key, _| {
+            let Some(uuid) = key
+                .get(prefix.len()..)
+                .and_then(|b| std::str::from_utf8(b).ok())
                 .and_then(|s| uuid::Uuid::parse_str(s).ok())
             else {
                 tracing::warn!("skipping TOTP export: unparseable user id in storage key");
-                continue;
+                return ControlFlow::Continue(());
             };
             let user_id = UserId::new(uuid);
-            let Some(state) = self.load_mfa_state(realm_id, &user_id)? else {
-                continue;
-            };
-            out.push(MfaFactorExport::Totp {
-                user_id,
-                state: serde_json::to_value(&state).map_err(serde_err)?,
+            let factor = self.load_mfa_state(realm_id, &user_id).and_then(|state| {
+                state
+                    .map(|state| {
+                        Ok(MfaFactorExport::Totp {
+                            user_id,
+                            state: serde_json::to_value(&state).map_err(serde_err)?,
+                        })
+                    })
+                    .transpose()
             });
+            match factor {
+                Ok(None) => ControlFlow::Continue(()),
+                Ok(Some(factor)) => {
+                    let flow = visit(factor);
+                    stopped = flow.is_break();
+                    flow
+                }
+                Err(e) => {
+                    failure = Some(e);
+                    ControlFlow::Break(())
+                }
+            }
+        })?;
+        if let Some(e) = failure {
+            return Err(e);
+        }
+        if stopped {
+            return Ok(());
         }
 
         // WebAuthn passkeys — public-key material, stored as plaintext JSON;
         // exported verbatim. Key format: `webauthn:cred:{user_uuid}:{cred_b64}`.
         let prefix = keys::webauthn_credential_scan_prefix();
-        let end = keys::prefix_end(&prefix);
-        let entries = self
-            .storage
-            .scan(realm_id, &prefix, &end)
-            .map_err(Self::storage_err)?;
-        for entry in &entries {
-            let suffix = &entry.key[prefix.len()..];
-            let Some(uuid) = std::str::from_utf8(suffix)
-                .ok()
+        self.walk_prefix(realm_id, &prefix, &mut |key, value| {
+            let Some(uuid) = key
+                .get(prefix.len()..)
+                .and_then(|b| std::str::from_utf8(b).ok())
                 .and_then(|s| s.split_once(':'))
                 .and_then(|(uuid_str, _)| uuid::Uuid::parse_str(uuid_str).ok())
             else {
                 tracing::warn!("skipping passkey export: unparseable user id in storage key");
-                continue;
+                return ControlFlow::Continue(());
             };
             let stored: crate::identity::webauthn::StoredWebAuthnCredential =
-                match serde_json::from_slice(&entry.value) {
+                match serde_json::from_slice(value) {
                     Ok(s) => s,
                     Err(e) => {
                         tracing::warn!(err = %e, "skipping passkey export: undecodable record");
-                        continue;
+                        return ControlFlow::Continue(());
                     }
                 };
-            out.push(MfaFactorExport::Passkey {
-                user_id: UserId::new(uuid),
-                credential: serde_json::to_value(&stored).map_err(serde_err)?,
-            });
-        }
-
-        Ok(out)
+            match serde_json::to_value(&stored) {
+                Ok(credential) => visit(MfaFactorExport::Passkey {
+                    user_id: UserId::new(uuid),
+                    credential,
+                }),
+                Err(e) => {
+                    failure = Some(serde_err(e));
+                    ControlFlow::Break(())
+                }
+            }
+        })?;
+        failure.map_or(Ok(()), Err)
     }
 
     fn import_mfa_factor(

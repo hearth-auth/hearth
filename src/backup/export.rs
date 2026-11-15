@@ -36,6 +36,8 @@
 //! }
 //! ```
 
+use std::io::{BufWriter, Seek, SeekFrom, Write};
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -47,12 +49,13 @@ use serde::Serialize;
 use tracing::instrument;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::audit::{AuditEngine, AuditQuery};
-use crate::core::RealmId;
+use crate::audit::AuditEngine;
+use crate::core::{ExportVisitor, RealmId};
 use crate::identity::IdentityEngine;
 use crate::rbac::RbacEngine;
 use crate::webhook::{WebhookEngine, WebhookQuery};
 
+use super::stream::EncryptWriter;
 use super::{ArchiveWriter, BackupError, DekWrappingParams, RealmManifest, RecordCounts};
 
 const DEK_WRAP_M_COST: u32 = 65_536;
@@ -339,244 +342,148 @@ impl BackupExporter {
         opts: &ExportOptions,
         dek: &[u8; 32],
     ) -> Result<RealmManifest, BackupError> {
-        // Phase 1 — the read pass. An exporter from `snapshot()` reads one
-        // storage snapshot, so every read below sees the same point in time
-        // (no group membership names a user the archive omits) and no write
-        // waits for this pass (#643). The pass only reads and serialises into
-        // memory (`members`); phase 2 encrypts, compresses and writes the
-        // archive.
-        // Plaintext archive members, zeroed on drop: credentials and key
-        // material pass through here.
-        let mut members: Vec<(String, Zeroizing<Vec<u8>>)> = Vec::new();
+        // An exporter from `snapshot()` reads one storage snapshot, so every
+        // read below sees the same point in time (no group membership names a
+        // user the archive omits) and no write waits for the export (#643).
+        //
+        // Each member is streamed (#866): the engines pass the records one at
+        // a time, each record is serialised into a chunked encryptor, and the
+        // encrypted member is spooled to an anonymous temporary file and then
+        // copied into the archive. The export holds one chunk and one record
+        // at a time, whatever the size of the realm.
+        let engine = |e: &dyn std::fmt::Display| BackupError::Engine(e.to_string());
 
-        let realm = self
-            .identity
-            .get_realm(realm_id)
-            .map_err(|e| BackupError::Engine(e.to_string()))?;
+        let realm = self.identity.get_realm(realm_id).map_err(|e| engine(&e))?;
         let slug = realm
             .as_ref()
             .map(|r| slugify(r.name()))
             .unwrap_or_else(|| realm_id.as_uuid().to_string());
         let prefix = format!("realms/{slug}");
         let mut counts = RecordCounts::default();
+        let mut out = MemberOutput {
+            writer,
+            dek,
+            prefix: &prefix,
+        };
 
         // realm.json
         if let Some(ref r) = realm {
-            let data = serde_json::to_vec_pretty(r)?;
-            members.push((format!("{prefix}/realm.json"), Zeroizing::new(data)));
+            out.bytes("realm.json", &Zeroizing::new(serde_json::to_vec_pretty(r)?))?;
         }
 
         // users.ndjson — one walk of the user keys. Pages of `list_users` each
-        // walk every user key to count the total, while this pass holds every
-        // write on the node.
-        let users = self
-            .identity
-            .export_all_users(realm_id)
-            .map_err(|e| BackupError::Engine(e.to_string()))?;
-        counts.users = users.len() as u64;
-        if !users.is_empty() {
-            let data = to_ndjson(&users)?;
-            members.push((format!("{prefix}/users.ndjson"), Zeroizing::new(data)));
-        }
+        // walk every user key to count the total.
+        counts.users = out.ndjson("users.ndjson", |visit| {
+            self.identity.export_all_users(realm_id, visit)
+        })?;
 
         // credentials.ndjson
-        let credentials = self
-            .identity
-            .export_all_credentials(realm_id)
-            .map_err(|e| BackupError::Engine(e.to_string()))?;
-        counts.credentials = credentials.len() as u64;
-        if !credentials.is_empty() {
-            let data = to_ndjson(&credentials)?;
-            members.push((format!("{prefix}/credentials.ndjson"), Zeroizing::new(data)));
-        }
+        counts.credentials = out.ndjson("credentials.ndjson", |visit| {
+            self.identity.export_all_credentials(realm_id, visit)
+        })?;
 
         // mfa_factors.ndjson — TOTP/recovery-code state (decrypted; every
         // archive section is itself AES-256-GCM encrypted) and WebAuthn
         // passkeys. Without this an operator who restores a realm silently
         // loses every second factor (audit 2026-08-28 §4.18#5).
-        let mfa_factors = self
-            .identity
-            .export_all_mfa_factors(realm_id)
-            .map_err(|e| BackupError::Engine(e.to_string()))?;
-        counts.mfa_factors = mfa_factors.len() as u64;
-        if !mfa_factors.is_empty() {
-            let data = to_ndjson(&mfa_factors)?;
-            members.push((format!("{prefix}/mfa_factors.ndjson"), Zeroizing::new(data)));
-        }
+        counts.mfa_factors = out.ndjson("mfa_factors.ndjson", |visit| {
+            self.identity.export_all_mfa_factors(realm_id, visit)
+        })?;
 
         // clients.ndjson
-        let clients = self.export_offset_paginated(|page| {
-            self.identity
-                .list_clients(realm_id, &page)
-                .map_err(|e| BackupError::Engine(e.to_string()))
+        counts.clients = out.ndjson("clients.ndjson", |visit| {
+            visit_offset_pages(visit, |page| {
+                self.identity
+                    .list_clients(realm_id, &page)
+                    .map_err(|e| engine(&e))
+            })
         })?;
-        counts.clients = clients.len() as u64;
-        if !clients.is_empty() {
-            let data = to_ndjson(&clients)?;
-            members.push((format!("{prefix}/clients.ndjson"), Zeroizing::new(data)));
-        }
 
         // roles.ndjson
-        let roles = self.export_paginated(|cursor| {
-            self.rbac
-                .list_roles(realm_id, cursor, 500)
-                .map(|p| (p.items, p.next_cursor))
-                .map_err(|e| BackupError::Engine(e.to_string()))
+        counts.roles = out.ndjson("roles.ndjson", |visit| {
+            visit_cursor_pages(visit, |cursor| {
+                self.rbac
+                    .list_roles(realm_id, cursor, 500)
+                    .map(|p| (p.items, p.next_cursor))
+                    .map_err(|e| engine(&e))
+            })
         })?;
-        counts.roles = roles.len() as u64;
-        if !roles.is_empty() {
-            let data = to_ndjson(&roles)?;
-            members.push((format!("{prefix}/roles.ndjson"), Zeroizing::new(data)));
-        }
 
         // permissions.ndjson
-        let permissions = self
-            .rbac
-            .export_all_permissions(realm_id)
-            .map_err(|e| BackupError::Engine(e.to_string()))?;
-        counts.permissions = permissions.len() as u64;
-        if !permissions.is_empty() {
-            let data = to_ndjson(&permissions)?;
-            members.push((format!("{prefix}/permissions.ndjson"), Zeroizing::new(data)));
-        }
+        counts.permissions = out.ndjson("permissions.ndjson", |visit| {
+            visit_vec(visit, self.rbac.export_all_permissions(realm_id))
+        })?;
 
         // groups.ndjson
-        let groups = self.export_offset_paginated(|page| {
-            self.rbac
-                .list_groups(realm_id, &page)
-                .map_err(|e| BackupError::Engine(e.to_string()))
+        counts.groups = out.ndjson("groups.ndjson", |visit| {
+            visit_offset_pages(visit, |page| {
+                self.rbac
+                    .list_groups(realm_id, &page)
+                    .map_err(|e| engine(&e))
+            })
         })?;
-        counts.groups = groups.len() as u64;
-        if !groups.is_empty() {
-            let data = to_ndjson(&groups)?;
-            members.push((format!("{prefix}/groups.ndjson"), Zeroizing::new(data)));
-        }
 
         // assignments.ndjson
-        let assignments = self
-            .rbac
-            .export_all_assignments(realm_id)
-            .map_err(|e| BackupError::Engine(e.to_string()))?;
-        counts.assignments = assignments.len() as u64;
-        if !assignments.is_empty() {
-            let data = to_ndjson(&assignments)?;
-            members.push((format!("{prefix}/assignments.ndjson"), Zeroizing::new(data)));
-        }
+        counts.assignments = out.ndjson("assignments.ndjson", |visit| {
+            self.rbac.visit_all_assignments(realm_id, visit)
+        })?;
 
         // scopes.ndjson
-        let scopes = self
-            .rbac
-            .export_all_scopes(realm_id)
-            .map_err(|e| BackupError::Engine(e.to_string()))?;
-        counts.scopes = scopes.len() as u64;
-        if !scopes.is_empty() {
-            let data = to_ndjson(&scopes)?;
-            members.push((format!("{prefix}/scopes.ndjson"), Zeroizing::new(data)));
-        }
+        counts.scopes = out.ndjson("scopes.ndjson", |visit| {
+            visit_vec(visit, self.rbac.export_all_scopes(realm_id))
+        })?;
 
         // organizations.ndjson
-        let organizations = self.export_offset_paginated(|page| {
-            self.identity
-                .list_organizations(realm_id, &page)
-                .map_err(|e| BackupError::Engine(e.to_string()))
+        counts.organizations = out.ndjson("organizations.ndjson", |visit| {
+            visit_offset_pages(visit, |page| {
+                self.identity
+                    .list_organizations(realm_id, &page)
+                    .map_err(|e| engine(&e))
+            })
         })?;
-        counts.organizations = organizations.len() as u64;
-        if !organizations.is_empty() {
-            let data = to_ndjson(&organizations)?;
-            members.push((
-                format!("{prefix}/organizations.ndjson"),
-                Zeroizing::new(data),
-            ));
-        }
 
         // group_memberships.ndjson — the edges between a group and its
         // members. Without this, groups restore EMPTY: the group record and
         // the role-to-group assignment both come back, so every count matches
         // while the permissions the group granted silently vanish
         // (OpenSpec 26.40).
-        let group_memberships = self
-            .rbac
-            .export_all_group_memberships(realm_id)
-            .map_err(|e| BackupError::Engine(e.to_string()))?;
-        counts.group_memberships = group_memberships.len() as u64;
-        if !group_memberships.is_empty() {
-            let data = to_ndjson(&group_memberships)?;
-            members.push((
-                format!("{prefix}/group_memberships.ndjson"),
-                Zeroizing::new(data),
-            ));
-        }
+        counts.group_memberships = out.ndjson("group_memberships.ndjson", |visit| {
+            self.rbac.export_all_group_memberships(realm_id, visit)
+        })?;
 
         // organization_memberships.ndjson — same shape as group memberships:
         // organizations used to restore with nobody in them.
-        let org_memberships = self
-            .identity
-            .export_all_organization_memberships(realm_id)
-            .map_err(|e| BackupError::Engine(e.to_string()))?;
-        counts.organization_memberships = org_memberships.len() as u64;
-        if !org_memberships.is_empty() {
-            let data = to_ndjson(&org_memberships)?;
-            members.push((
-                format!("{prefix}/organization_memberships.ndjson"),
-                Zeroizing::new(data),
-            ));
-        }
+        counts.organization_memberships =
+            out.ndjson("organization_memberships.ndjson", |visit| {
+                self.identity
+                    .export_all_organization_memberships(realm_id, visit)
+            })?;
 
         // consents.ndjson — a restored user must not be re-prompted for
         // consent they already granted.
-        let consents = self
-            .identity
-            .export_all_consents(realm_id)
-            .map_err(|e| BackupError::Engine(e.to_string()))?;
-        counts.consents = consents.len() as u64;
-        if !consents.is_empty() {
-            let data = to_ndjson(&consents)?;
-            members.push((format!("{prefix}/consents.ndjson"), Zeroizing::new(data)));
-        }
+        counts.consents = out.ndjson("consents.ndjson", |visit| {
+            self.identity.export_all_consents(realm_id, visit)
+        })?;
 
         // agents.ndjson — the agent record AND its credentials. An agent that
         // vanishes on restore takes its credentials and its authority with it
         // (OpenSpec 26.40).
-        let agents = self
-            .identity
-            .export_all_agents(realm_id)
-            .map_err(|e| BackupError::Engine(e.to_string()))?;
-        counts.agents = agents.len() as u64;
-        if !agents.is_empty() {
-            let data = to_ndjson(&agents)?;
-            members.push((format!("{prefix}/agents.ndjson"), Zeroizing::new(data)));
-        }
+        counts.agents = out.ndjson("agents.ndjson", |visit| {
+            visit_vec(visit, self.identity.export_all_agents(realm_id))
+        })?;
 
         // identity_providers.ndjson — the connector configs. The IdpId must
         // survive because every federation link is keyed by it.
-        let idps = self
-            .identity
-            .export_all_identity_providers(realm_id)
-            .map_err(|e| BackupError::Engine(e.to_string()))?;
-        counts.identity_providers = idps.len() as u64;
-        if !idps.is_empty() {
-            let data = to_ndjson(&idps)?;
-            members.push((
-                format!("{prefix}/identity_providers.ndjson"),
-                Zeroizing::new(data),
-            ));
-        }
+        counts.identity_providers = out.ndjson("identity_providers.ndjson", |visit| {
+            visit_vec(visit, self.identity.export_all_identity_providers(realm_id))
+        })?;
 
         // federation_links.ndjson — the user-to-IdP bindings. Without them a
         // user who only ever signed in through an external IdP cannot get back
         // in, even with the connector restored.
-        let links = self
-            .identity
-            .export_all_federation_links(realm_id)
-            .map_err(|e| BackupError::Engine(e.to_string()))?;
-        counts.federation_links = links.len() as u64;
-        if !links.is_empty() {
-            let data = to_ndjson(&links)?;
-            members.push((
-                format!("{prefix}/federation_links.ndjson"),
-                Zeroizing::new(data),
-            ));
-        }
+        counts.federation_links = out.ndjson("federation_links.ndjson", |visit| {
+            self.identity.export_all_federation_links(realm_id, visit)
+        })?;
 
         // webhook_subscriptions.ndjson — the subscriptions that the dispatcher
         // delivers to (#654): silent loss of an integration nobody notices
@@ -584,60 +491,39 @@ impl BackupExporter {
         // receiver's signature check keeps passing. The identity engine's
         // own webhook store (`webhooks.ndjson` in older archives) never
         // delivered (#617) and is not exported.
-        let subscriptions = self
-            .webhooks
-            .list(&WebhookQuery {
-                realm_id: realm_id.clone(),
-                enabled_only: false,
-            })
-            .map_err(|e| BackupError::Engine(e.to_string()))?;
-        counts.webhook_subscriptions = subscriptions.len() as u64;
-        if !subscriptions.is_empty() {
-            let data = to_ndjson(&subscriptions)?;
-            members.push((
-                format!("{prefix}/webhook_subscriptions.ndjson"),
-                Zeroizing::new(data),
-            ));
-        }
+        counts.webhook_subscriptions = out.ndjson("webhook_subscriptions.ndjson", |visit| {
+            visit_vec(
+                visit,
+                self.webhooks.list(&WebhookQuery {
+                    realm_id: realm_id.clone(),
+                    enabled_only: false,
+                }),
+            )
+        })?;
 
         // saml_signing_key.json — the realm's SAML key, whose certificate the
         // SP metadata publishes to upstream IdPs.
         if let Some(saml_key) = self
             .identity
             .export_realm_saml_key(realm_id)
-            .map_err(|e| BackupError::Engine(e.to_string()))?
+            .map_err(|e| engine(&e))?
         {
             // Unsealed on the way out, resealed under the destination's KEK on
             // the way in. The archive member itself is DEK-encrypted.
-            members.push((format!("{prefix}/saml_signing_key.json"), saml_key));
+            out.bytes("saml_signing_key.json", &saml_key)?;
         }
 
         // scim_mappings.ndjson — without them the next SCIM sync re-creates
         // every user it provisioned instead of updating it.
-        let scim = self
-            .identity
-            .export_all_scim_mappings(realm_id)
-            .map_err(|e| BackupError::Engine(e.to_string()))?;
-        counts.scim_mappings = scim.len() as u64;
-        if !scim.is_empty() {
-            let data = to_ndjson(&scim)?;
-            members.push((
-                format!("{prefix}/scim_mappings.ndjson"),
-                Zeroizing::new(data),
-            ));
-        }
+        counts.scim_mappings = out.ndjson("scim_mappings.ndjson", |visit| {
+            self.identity.export_all_scim_mappings(realm_id, visit)
+        })?;
 
         // invitations.ndjson — an outstanding invitation link must still
         // redeem after the restore.
-        let invitations = self
-            .identity
-            .export_all_invitations(realm_id)
-            .map_err(|e| BackupError::Engine(e.to_string()))?;
-        counts.invitations = invitations.len() as u64;
-        if !invitations.is_empty() {
-            let data = to_ndjson(&invitations)?;
-            members.push((format!("{prefix}/invitations.ndjson"), Zeroizing::new(data)));
-        }
+        counts.invitations = out.ndjson("invitations.ndjson", |visit| {
+            self.identity.export_all_invitations(realm_id, visit)
+        })?;
 
         // revocations.ndjson — revoked access-token JTIs, blocked DPoP keys and
         // revoked AAT JTIs. A sessionless token (`client_credentials`, an
@@ -648,39 +534,25 @@ impl BackupExporter {
         // to 0 revived RA tokens a revocation had ended (GA sweep 4) — and so
         // do the spent markers of flows that already ended, which could
         // otherwise end again (GA sweep 4 round 2).
-        let revocations = self
-            .identity
-            .export_revocations(realm_id)
-            .map_err(|e| BackupError::Engine(e.to_string()))?;
-        counts.revocations = revocations.len() as u64;
-        if !revocations.is_empty() {
-            let data = to_ndjson(&revocations)?;
-            members.push((format!("{prefix}/revocations.ndjson"), Zeroizing::new(data)));
-        }
+        counts.revocations = out.ndjson("revocations.ndjson", |visit| {
+            self.identity.export_revocations(realm_id, visit)
+        })?;
 
         // retiring_signing_keys.json — a restore taken mid-rotation is exactly
         // when the outgoing key matters. Deadlines are absolute, so the window
         // resumes rather than restarting, and keys already past theirs are not
         // exported at all.
-        let retiring = self
-            .identity
-            .export_retiring_signing_keys(realm_id)
-            .map_err(|e| BackupError::Engine(e.to_string()))?;
-        counts.retiring_signing_keys = retiring.len() as u64;
-        if !retiring.is_empty() {
-            let data = to_ndjson(&retiring)?;
-            members.push((
-                format!("{prefix}/retiring_signing_keys.json"),
-                Zeroizing::new(data),
-            ));
-        }
+        counts.retiring_signing_keys = out.ndjson("retiring_signing_keys.json", |visit| {
+            visit_vec(visit, self.identity.export_retiring_signing_keys(realm_id))
+        })?;
 
         // signing_key.json (AES-256-GCM encrypted PKCS#8 bytes)
-        let pkcs8 = self
-            .identity
-            .export_realm_signing_key_pkcs8(realm_id)
-            .map_err(|e| BackupError::Engine(e.to_string()))?;
-        members.push((format!("{prefix}/signing_key.json"), Zeroizing::new(pkcs8)));
+        let pkcs8 = Zeroizing::new(
+            self.identity
+                .export_realm_signing_key_pkcs8(realm_id)
+                .map_err(|e| engine(&e))?,
+        );
+        out.bytes("signing_key.json", &pkcs8)?;
 
         // id_token_signing_key.json — the realm's RS256 ID-token key, present
         // once any client in the realm selected RS256 (task 26.55). Without it
@@ -690,43 +562,33 @@ impl BackupExporter {
         if let Some(rsa_pkcs8) = self
             .identity
             .export_realm_id_token_rsa_key(realm_id)
-            .map_err(|e| BackupError::Engine(e.to_string()))?
+            .map_err(|e| engine(&e))?
         {
-            members.push((format!("{prefix}/id_token_signing_key.json"), rsa_pkcs8));
+            out.bytes("id_token_signing_key.json", &rsa_pkcs8)?;
         }
 
         // retiring_id_token_signing_keys.json — the RS256 twin of
         // retiring_signing_keys.json: absolute deadlines, expired keys omitted.
-        let retiring_rsa = self
-            .identity
-            .export_retiring_id_token_rsa_keys(realm_id)
-            .map_err(|e| BackupError::Engine(e.to_string()))?;
-        counts.retiring_id_token_signing_keys = retiring_rsa.len() as u64;
-        if !retiring_rsa.is_empty() {
-            let data = to_ndjson(&retiring_rsa)?;
-            members.push((
-                format!("{prefix}/retiring_id_token_signing_keys.json"),
-                Zeroizing::new(data),
-            ));
-        }
+        counts.retiring_id_token_signing_keys =
+            out.ndjson("retiring_id_token_signing_keys.json", |visit| {
+                visit_vec(
+                    visit,
+                    self.identity.export_retiring_id_token_rsa_keys(realm_id),
+                )
+            })?;
 
         // audit.ndjson (optional), plus the chain material a restore needs to
         // check the exported hashes instead of discarding them (§4.14#5).
         let mut audit_chain_included = false;
         if opts.include_audit {
-            let events = self
-                .audit
-                .query(&AuditQuery::for_realm(realm_id.clone()))
-                .map_err(|e| BackupError::Engine(e.to_string()))?;
-            counts.audit_events = events.len() as u64;
-            if !events.is_empty() {
-                let data = to_ndjson(&events)?;
-                members.push((format!("{prefix}/audit.ndjson"), Zeroizing::new(data)));
-
+            counts.audit_events = out.ndjson("audit.ndjson", |visit| {
+                self.audit.export_events(realm_id, visit)
+            })?;
+            if counts.audit_events > 0 {
                 let material = self
                     .audit
                     .export_chain_material(realm_id)
-                    .map_err(|e| BackupError::Engine(e.to_string()))?
+                    .map_err(|e| engine(&e))?
                     .ok_or_else(|| {
                         BackupError::Engine(
                             "realm has audit events but no chain material; refusing to write an \
@@ -734,19 +596,12 @@ impl BackupExporter {
                                 .to_string(),
                         )
                     })?;
-                let chain_json = serde_json::to_vec(&material)?;
-                members.push((
-                    format!("{prefix}/audit_chain.json"),
-                    Zeroizing::new(chain_json),
-                ));
+                out.bytes(
+                    "audit_chain.json",
+                    &Zeroizing::new(serde_json::to_vec(&material)?),
+                )?;
                 audit_chain_included = true;
             }
-        }
-
-        // Phase 2 — the archive I/O.
-        for (path, plaintext) in &members {
-            let encrypted = encrypt_bytes(plaintext, dek)?;
-            writer.add_file(path, &encrypted)?;
         }
 
         Ok(RealmManifest {
@@ -756,48 +611,168 @@ impl BackupExporter {
             audit_chain_included,
         })
     }
+}
 
-    /// Exhausts all pages from a paginated engine call, collecting every item.
-    ///
-    /// The closure returns `(items, next_cursor)` — this avoids a type conflict
-    /// between `identity::types::Page<T>` and `rbac::types::Page<T>`, which are
-    /// structurally identical but distinct types.
-    /// Paginates via cursor for engines that still use cursor-based APIs (e.g. list_roles).
-    fn export_paginated<T, F>(&self, fetch: F) -> Result<Vec<T>, BackupError>
-    where
-        F: Fn(Option<&str>) -> Result<(Vec<T>, Option<String>), BackupError>,
-    {
-        let mut all = Vec::new();
-        let mut cursor: Option<String> = None;
-        loop {
-            let (items, next_cursor) = fetch(cursor.as_deref())?;
-            all.extend(items);
-            match next_cursor {
-                None => break,
-                Some(c) => cursor = Some(c),
-            }
-        }
-        Ok(all)
+/// Writes the encrypted members of one realm into the archive.
+struct MemberOutput<'a> {
+    writer: &'a mut ArchiveWriter,
+    dek: &'a [u8; 32],
+    /// `realms/<slug>`.
+    prefix: &'a str,
+}
+
+impl MemberOutput<'_> {
+    /// Writes `data` as the member `name`.
+    fn bytes(&mut self, name: &str, data: &[u8]) -> Result<(), BackupError> {
+        let mut member = MemberWriter::new(format!("{}/{name}", self.prefix), self.dek)?;
+        member.out.write_all(data)?;
+        member.finish_into(self.writer)
     }
 
-    /// Paginates via offset for engines that use `PageRequest` / `PagedResult`.
-    fn export_offset_paginated<T, F>(&self, fetch: F) -> Result<Vec<T>, BackupError>
+    /// Writes the NDJSON member `name` from the records that `walk` passes
+    /// to its visitor, one line per record, and returns the number of
+    /// records. A member with no record is left out of the archive.
+    ///
+    /// # Errors
+    ///
+    /// The error of `walk` as [`BackupError::Engine`], or the first error
+    /// serialising, encrypting or writing a record.
+    fn ndjson<T, E, F>(&mut self, name: &str, walk: F) -> Result<u64, BackupError>
     where
-        F: Fn(crate::core::PageRequest) -> Result<crate::core::PagedResult<T>, BackupError>,
+        T: Serialize,
+        E: std::fmt::Display,
+        F: FnOnce(&mut ExportVisitor<'_, T>) -> Result<(), E>,
     {
-        let batch = crate::core::MAX_PAGE_LIMIT;
-        let mut all = Vec::new();
-        let mut offset = 0u64;
-        loop {
-            let result = fetch(crate::core::PageRequest::new(offset, batch))?;
-            let n = result.items.len() as u64;
-            all.extend(result.items);
-            if n == 0 || offset + n >= result.total {
-                break;
+        let mut member = MemberWriter::new(format!("{}/{name}", self.prefix), self.dek)?;
+        let mut failure = None;
+        walk(&mut |record: T| match member.record(&record) {
+            Ok(()) => ControlFlow::Continue(()),
+            Err(e) => {
+                failure = Some(e);
+                ControlFlow::Break(())
             }
-            offset += n;
+        })
+        .map_err(|e| BackupError::Engine(e.to_string()))?;
+        if let Some(e) = failure {
+            return Err(e);
         }
-        Ok(all)
+        let records = member.records;
+        if records > 0 {
+            member.finish_into(self.writer)?;
+        }
+        Ok(records)
+    }
+}
+
+/// Bytes of the write buffer in front of a member's spool file.
+const SPOOL_BUFFER_LEN: usize = 64 * 1024;
+
+/// One archive member while it is written (#866).
+///
+/// The records are serialised into a chunked encryptor, and the encrypted
+/// member goes to an anonymous temporary file (the spool): a tar entry needs
+/// its size before its bytes. [`finish_into`](Self::finish_into) then copies
+/// the spool into the archive. The spool holds only ciphertext, and it is
+/// unlinked from the moment it is made, so it is gone when it is dropped.
+struct MemberWriter {
+    path: String,
+    out: EncryptWriter<BufWriter<std::fs::File>>,
+    records: u64,
+}
+
+impl MemberWriter {
+    fn new(path: String, dek: &[u8; 32]) -> Result<Self, BackupError> {
+        let spool = BufWriter::with_capacity(SPOOL_BUFFER_LEN, tempfile::tempfile()?);
+        let out = EncryptWriter::new(spool, dek, &path)?;
+        Ok(Self {
+            path,
+            out,
+            records: 0,
+        })
+    }
+
+    /// Writes `record` as one NDJSON line.
+    fn record<T: Serialize>(&mut self, record: &T) -> Result<(), BackupError> {
+        serde_json::to_writer(&mut self.out, record)?;
+        self.out.write_all(b"\n")?;
+        self.records += 1;
+        Ok(())
+    }
+
+    /// Seals the member and copies it from the spool into `writer`.
+    fn finish_into(self, writer: &mut ArchiveWriter) -> Result<(), BackupError> {
+        let mut spool = self
+            .out
+            .finish()?
+            .into_inner()
+            .map_err(|e| BackupError::Io(e.into_error()))?;
+        let len = spool.stream_position()?;
+        spool.seek(SeekFrom::Start(0))?;
+        writer.add_reader(&self.path, len, spool)
+    }
+}
+
+/// Passes every item of `items` to `visit`, for an engine call that returns a
+/// small family as one `Vec`.
+fn visit_vec<T, E: std::fmt::Display>(
+    visit: &mut ExportVisitor<'_, T>,
+    items: Result<Vec<T>, E>,
+) -> Result<(), BackupError> {
+    let items = items.map_err(|e| BackupError::Engine(e.to_string()))?;
+    for item in items {
+        if visit(item).is_break() {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Passes every item of a cursor-paginated engine call to `visit`, one page
+/// at a time.
+///
+/// The closure returns `(items, next_cursor)` — this avoids a type conflict
+/// between `identity::types::Page<T>` and `rbac::types::Page<T>`, which are
+/// structurally identical but distinct types.
+fn visit_cursor_pages<T, F>(visit: &mut ExportVisitor<'_, T>, fetch: F) -> Result<(), BackupError>
+where
+    F: Fn(Option<&str>) -> Result<(Vec<T>, Option<String>), BackupError>,
+{
+    let mut cursor: Option<String> = None;
+    loop {
+        let (items, next_cursor) = fetch(cursor.as_deref())?;
+        for item in items {
+            if visit(item).is_break() {
+                return Ok(());
+            }
+        }
+        match next_cursor {
+            None => return Ok(()),
+            Some(c) => cursor = Some(c),
+        }
+    }
+}
+
+/// Passes every item of an offset-paginated engine call (`PageRequest` /
+/// `PagedResult`) to `visit`, one page at a time.
+fn visit_offset_pages<T, F>(visit: &mut ExportVisitor<'_, T>, fetch: F) -> Result<(), BackupError>
+where
+    F: Fn(crate::core::PageRequest) -> Result<crate::core::PagedResult<T>, BackupError>,
+{
+    let batch = crate::core::MAX_PAGE_LIMIT;
+    let mut offset = 0u64;
+    loop {
+        let result = fetch(crate::core::PageRequest::new(offset, batch))?;
+        let n = result.items.len() as u64;
+        let total = result.total;
+        for item in result.items {
+            if visit(item).is_break() {
+                return Ok(());
+            }
+        }
+        if n == 0 || offset + n >= total {
+            return Ok(());
+        }
+        offset += n;
     }
 }
 
@@ -818,83 +793,6 @@ fn slugify(name: &str) -> String {
         }
     }
     slug.trim_end_matches('-').to_string()
-}
-
-/// Serialises a slice of records as NDJSON (one JSON object per line).
-fn to_ndjson<T: Serialize>(items: &[T]) -> Result<Vec<u8>, BackupError> {
-    let mut out = Vec::new();
-    for item in items {
-        serde_json::to_writer(&mut out, item)?;
-        out.push(b'\n');
-    }
-    Ok(out)
-}
-
-/// AES-256-GCM encrypts `plaintext` using `dek`.
-///
-/// Output is a JSON object:
-/// ```text
-/// {"nonce_b64":"<12B base64>","ciphertext_b64":"<ciphertext+tag base64>"}
-/// ```
-pub(crate) fn encrypt_bytes(plaintext: &[u8], dek: &[u8; 32]) -> Result<Vec<u8>, BackupError> {
-    let mut nonce_bytes = [0u8; 12];
-    SystemRandom::new()
-        .fill(&mut nonce_bytes)
-        .map_err(|_| BackupError::Crypto("nonce generation failed".into()))?;
-
-    let unbound = UnboundKey::new(&AES_256_GCM, dek)
-        .map_err(|_| BackupError::Crypto("key initialisation failed".into()))?;
-    let key = LessSafeKey::new(unbound);
-    let nonce = Nonce::assume_unique_for_key(nonce_bytes);
-
-    let mut ciphertext = plaintext.to_vec();
-    key.seal_in_place_append_tag(nonce, Aad::empty(), &mut ciphertext)
-        .map_err(|_| BackupError::Crypto("encryption failed".into()))?;
-
-    let payload = serde_json::json!({
-        "nonce_b64": BASE64.encode(nonce_bytes),
-        "ciphertext_b64": BASE64.encode(&ciphertext),
-    });
-    Ok(serde_json::to_vec(&payload)?)
-}
-
-/// AES-256-GCM decrypts a blob produced by [`encrypt_bytes`].
-///
-/// Returns a [`Zeroizing`] wrapper so the plaintext key material is actively
-/// overwritten when the returned value is dropped (HEA-750 M1).
-pub fn decrypt_bytes(
-    encrypted_json: &[u8],
-    dek: &[u8; 32],
-) -> Result<Zeroizing<Vec<u8>>, BackupError> {
-    #[derive(serde::Deserialize)]
-    struct Payload {
-        nonce_b64: String,
-        ciphertext_b64: String,
-    }
-    let payload: Payload = serde_json::from_slice(encrypted_json)?;
-    let nonce_bytes = BASE64
-        .decode(&payload.nonce_b64)
-        .map_err(|e| BackupError::Crypto(format!("nonce decode: {e}")))?;
-    if nonce_bytes.len() != 12 {
-        return Err(BackupError::Crypto("nonce must be 12 bytes".into()));
-    }
-    let mut nonce_arr = [0u8; 12];
-    nonce_arr.copy_from_slice(&nonce_bytes);
-
-    let unbound = UnboundKey::new(&AES_256_GCM, dek)
-        .map_err(|_| BackupError::Crypto("key initialisation failed".into()))?;
-    let key = LessSafeKey::new(unbound);
-    let nonce = Nonce::assume_unique_for_key(nonce_arr);
-
-    let mut ciphertext = BASE64
-        .decode(&payload.ciphertext_b64)
-        .map_err(|e| BackupError::Crypto(format!("ciphertext decode: {e}")))?;
-    let plaintext = key
-        .open_in_place(nonce, Aad::empty(), &mut ciphertext)
-        .map_err(|_| {
-            BackupError::Crypto("decryption failed — wrong DEK or corrupted data".into())
-        })?;
-    Ok(Zeroizing::new(plaintext.to_vec()))
 }
 
 /// Derives a 32-byte AES wrapping key using Argon2id with default DEK-wrapping parameters.
@@ -955,69 +853,10 @@ mod tests {
     };
 
     #[test]
-    fn to_ndjson_line_count_matches_input() {
-        let items = vec![
-            serde_json::json!({"id": "a", "name": "Alice"}),
-            serde_json::json!({"id": "b", "name": "Bob"}),
-            serde_json::json!({"id": "c", "name": "Carol"}),
-        ];
-        let ndjson = to_ndjson(&items).expect("serialize");
-        // Split on newlines; NDJSON ends with a trailing '\n', so split produces
-        // one extra empty element which we subtract.
-        let line_count = ndjson.split(|&b| b == b'\n').count().saturating_sub(1);
-        assert_eq!(
-            line_count,
-            items.len(),
-            "each item must produce exactly one line"
-        );
-    }
-
-    #[test]
-    fn to_ndjson_each_line_is_valid_json() {
-        let items = vec![serde_json::json!({"x": 1}), serde_json::json!({"x": 2})];
-        let ndjson = to_ndjson(&items).expect("serialize");
-        for line in ndjson.split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
-            let parsed: serde_json::Value =
-                serde_json::from_slice(line).expect("valid JSON per line");
-            assert!(parsed.is_object());
-        }
-    }
-
-    #[test]
-    fn encrypt_decrypt_roundtrip() {
-        let dek = BackupExporter::generate_dek().expect("generate DEK");
-        let plaintext = b"this is my PKCS#8 signing key";
-        let encrypted = encrypt_bytes(plaintext, &dek).expect("encrypt");
-        let decrypted = decrypt_bytes(&encrypted, &dek).expect("decrypt");
-        assert_eq!(&*decrypted, plaintext);
-    }
-
-    #[test]
-    fn decrypt_with_wrong_dek_fails() {
-        let dek = BackupExporter::generate_dek().expect("generate DEK");
-        let wrong_dek = BackupExporter::generate_dek().expect("generate DEK");
-        let encrypted = encrypt_bytes(b"secret", &dek).expect("encrypt");
-        let result = decrypt_bytes(&encrypted, &wrong_dek);
-        assert!(result.is_err(), "decryption with wrong DEK must fail");
-    }
-
-    #[test]
     fn generate_dek_produces_distinct_keys() {
         let a = BackupExporter::generate_dek().expect("dek a");
         let b = BackupExporter::generate_dek().expect("dek b");
         assert_ne!(a, b, "each generated DEK must be unique");
-    }
-
-    #[test]
-    fn decrypt_bytes_returns_zeroizing() {
-        // Type-level assertion: decrypt_bytes must return Zeroizing<Vec<u8>> so
-        // that the plaintext key material is actively overwritten when dropped,
-        // rather than relying on the OS to zero freed heap pages (HEA-750 M1).
-        use zeroize::Zeroizing;
-        let dek = BackupExporter::generate_dek().expect("generate DEK");
-        let enc = encrypt_bytes(b"pkcs8-key-material", &dek).expect("encrypt");
-        let result: Zeroizing<Vec<u8>> = decrypt_bytes(&enc, &dek).expect("decrypt");
-        assert_eq!(&*result, b"pkcs8-key-material");
     }
 
     #[test]

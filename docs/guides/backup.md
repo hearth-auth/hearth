@@ -74,7 +74,18 @@ A `.hearth-backup` file is a zstd-compressed archive. Inside, each realm is stor
 | `realms/<slug>/audit.ndjson` | Audit events (**only when `--include-audit` is passed**) |
 | `realms/<slug>/audit_chain.json` | The audit chain key and anchor for those events (AES-256-GCM encrypted with the DEK) |
 
-The NDJSON format (one JSON object per line) enables streaming reads during large restores without loading the full file into memory.
+The NDJSON format has one JSON object on each line. The backup writes the
+records one at a time. A restore still reads all the members of a realm into
+memory before it restores them (#867).
+
+**Member encryption.** Every member is encrypted with the archive DEK in
+chunks of 64 KiB (AES-256-GCM, the STREAM construction). Each chunk has its
+own authentication tag. The nonce of each chunk holds the chunk number and a
+flag for the last chunk, and the member path is authenticated data. A restore
+therefore refuses a member with a changed, reordered, removed or added chunk,
+a member that is cut short, and a member that was moved to another path.
+Archives from Hearth versions before this format (archive format version 2 or
+lower) are refused with `unsupported archive format version`.
 
 ### What a backup does not carry
 
@@ -747,8 +758,17 @@ the file write.
   replaces them during the backup, the server frees their disk space only when
   the backup ends. Keep free disk space for at least one more copy of the data
   directory's SST files while a backup runs.
-- **Memory.** The exporter holds one realm's serialised sections in RAM before
-  it encrypts and writes them, as before.
+- **Memory.** The export does not hold a realm in memory (#866). It reads
+  the records one at a time from the snapshot, and it encrypts each member in
+  chunks of 64 KiB. The response streams the archive file. The extra memory
+  of a backup is a few MiB, whatever the number of users. A restore still
+  holds the members of one realm in memory (#867).
+- **Temporary disk space.** The server writes the archive to the system
+  temporary directory (`$TMPDIR`) before it sends it. It also writes each
+  member, encrypted, to a temporary file before it adds the member to the
+  archive. Keep free space there for the archive plus its largest member
+  (usually `users.ndjson`, about the size of the archive for a realm with
+  many users).
 - **One extra SST file** per backup, which normal compaction merges.
 
 The snapshot is **single-node**: it is the state of the node that runs the

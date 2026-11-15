@@ -27,7 +27,7 @@ use crate::webhook::{WebhookEngine, WebhookSubscription};
 
 use zeroize::Zeroizing;
 
-use super::{decrypt_bytes, unwrap_dek, ArchiveReader, BackupError};
+use super::{decrypt_member, unwrap_dek, ArchiveReader, BackupError};
 
 /// Every archive member (relative to `realms/<slug>/`) the importer knows how
 /// to restore. A member NOT in this list is a hard error — see the fail-closed
@@ -448,7 +448,7 @@ impl BackupImporter {
                 ))
             })?;
             let bytes = match &dek {
-                Some(d) => decrypt_bytes(&raw, d)?,
+                Some(d) => decrypt_member(&member, &raw, d)?,
                 None => Zeroizing::new(raw),
             };
             let realm: Realm = serde_json::from_slice(&bytes)?;
@@ -511,9 +511,10 @@ impl BackupImporter {
         let dek = Self::archive_dek(reader, opts)?;
 
         // Convenience closure: decrypt a section if the archive is encrypted.
-        let try_decrypt = |raw: &[u8]| -> Result<Zeroizing<Vec<u8>>, BackupError> {
+        // The member path is the additional authenticated data of each chunk.
+        let try_decrypt = |path: &str, raw: &[u8]| -> Result<Zeroizing<Vec<u8>>, BackupError> {
             if let Some(ref d) = dek {
-                decrypt_bytes(raw, d)
+                decrypt_member(path, raw, d)
             } else {
                 Ok(Zeroizing::new(raw.to_vec()))
             }
@@ -609,7 +610,7 @@ impl BackupImporter {
                 format!("realm.json not found for slug '{realm_slug}'"),
             ))
         })?;
-        let realm_bytes = try_decrypt(realm_raw)?;
+        let realm_bytes = try_decrypt(&realm_key, realm_raw)?;
         let realm: Realm = serde_json::from_slice(&realm_bytes)?;
 
         // ── Realm authorization (fail closed, before any write) ─────────────
@@ -684,7 +685,7 @@ impl BackupImporter {
         // source chain order.
         let audit_key = format!("realms/{realm_slug}/audit.ndjson");
         if let Some(raw) = files.get(&audit_key) {
-            let decrypted = try_decrypt(raw)?;
+            let decrypted = try_decrypt(&audit_key, raw)?;
             let mut events: Vec<AuditEvent> = Vec::new();
             for line in decrypted.split(|&b| b == b'\n') {
                 let line = trim_bytes(line);
@@ -707,7 +708,7 @@ impl BackupImporter {
             match files.get(&chain_key) {
                 Some(raw_chain) => {
                     let material: crate::audit::AuditChainMaterial =
-                        serde_json::from_slice(&try_decrypt(raw_chain)?)?;
+                        serde_json::from_slice(&try_decrypt(&chain_key, raw_chain)?)?;
                     use base64::Engine as _;
                     let key = base64::engine::general_purpose::STANDARD
                         .decode(&material.chain_key_b64)
@@ -768,7 +769,7 @@ impl BackupImporter {
         // Parse credentials.ndjson — optional (users may have no passwords).
         let cred_key = format!("realms/{realm_slug}/credentials.ndjson");
         let credential_map = if let Some(raw) = files.get(&cred_key) {
-            let decrypted = try_decrypt(raw)?;
+            let decrypted = try_decrypt(&cred_key, raw)?;
             parse_credentials(&decrypted)?
         } else {
             std::collections::HashMap::new()
@@ -847,7 +848,7 @@ impl BackupImporter {
         // ── Users ──────────────────────────────────────────────────────────
         let users_key = format!("realms/{realm_slug}/users.ndjson");
         if let Some(raw) = files.get(&users_key) {
-            let decrypted = try_decrypt(raw)?;
+            let decrypted = try_decrypt(&users_key, raw)?;
             self.import_users(
                 &decrypted,
                 &credential_map,
@@ -878,7 +879,7 @@ impl BackupImporter {
         // ── Clients ────────────────────────────────────────────────────────
         let clients_key = format!("realms/{realm_slug}/clients.ndjson");
         if let Some(raw) = files.get(&clients_key) {
-            let decrypted = try_decrypt(raw)?;
+            let decrypted = try_decrypt(&clients_key, raw)?;
             self.import_clients(&decrypted, &restored_realm_id, opts, &mut report)?;
         }
 
@@ -1048,8 +1049,9 @@ impl BackupImporter {
         // webhook store, which the dispatcher never read (#617): those
         // webhooks never delivered. Count them as skipped instead of bringing
         // them back as if they worked (#654).
-        if let Some(raw) = files.get(&format!("realms/{realm_slug}/webhooks.ndjson")) {
-            let skipped = count_ndjson_records(&try_decrypt(raw)?);
+        let old_webhooks_key = format!("realms/{realm_slug}/webhooks.ndjson");
+        if let Some(raw) = files.get(&old_webhooks_key) {
+            let skipped = count_ndjson_records(&try_decrypt(&old_webhooks_key, raw)?);
             report.webhooks.skipped += skipped;
             if skipped > 0 {
                 warn!(
@@ -1080,7 +1082,7 @@ impl BackupImporter {
         // destination's KEK is a different key (OpenSpec 26.40).
         let saml_key_member = format!("realms/{realm_slug}/saml_signing_key.json");
         if let Some(raw) = files.get(&saml_key_member) {
-            let plaintext = try_decrypt(raw)?;
+            let plaintext = try_decrypt(&saml_key_member, raw)?;
             if !opts.dry_run {
                 match self
                     .identity
@@ -1193,7 +1195,7 @@ impl BackupImporter {
         &self,
         files: &std::collections::HashMap<String, Vec<u8>>,
         key: &str,
-        try_decrypt: &impl Fn(&[u8]) -> Result<Zeroizing<Vec<u8>>, BackupError>,
+        try_decrypt: &impl Fn(&str, &[u8]) -> Result<Zeroizing<Vec<u8>>, BackupError>,
         opts: &ImportOptions,
         counts: &mut EntityCounts,
         import_one: F,
@@ -1205,7 +1207,7 @@ impl BackupImporter {
         let Some(raw) = files.get(key) else {
             return Ok(());
         };
-        let decrypted = try_decrypt(raw)?;
+        let decrypted = try_decrypt(key, raw)?;
         for line in decrypted.split(|&b| b == b'\n') {
             let line = trim_bytes(line);
             if line.is_empty() {
@@ -1249,7 +1251,7 @@ impl BackupImporter {
             // No DEK available — archive predates v2 or was opened without passphrase.
             return Ok(None);
         };
-        let pkcs8 = decrypt_bytes(encrypted, d)?;
+        let pkcs8 = decrypt_member(&sk_key, encrypted, d)?;
         debug!(slug = realm_slug, "signing_key restored from archive");
         Ok(Some(pkcs8))
     }
@@ -1269,7 +1271,7 @@ impl BackupImporter {
         let (Some(encrypted), Some(d)) = (files.get(&member), dek) else {
             return Ok(None);
         };
-        Ok(Some(decrypt_bytes(encrypted, d)?))
+        Ok(Some(decrypt_member(&member, encrypted, d)?))
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
@@ -1661,12 +1663,13 @@ impl BackupImporter {
 fn archive_has_rs256_clients(
     realm_slug: &str,
     files: &std::collections::HashMap<String, Vec<u8>>,
-    try_decrypt: &impl Fn(&[u8]) -> Result<Zeroizing<Vec<u8>>, BackupError>,
+    try_decrypt: &impl Fn(&str, &[u8]) -> Result<Zeroizing<Vec<u8>>, BackupError>,
 ) -> Result<bool, BackupError> {
-    let Some(raw) = files.get(&format!("realms/{realm_slug}/clients.ndjson")) else {
+    let key = format!("realms/{realm_slug}/clients.ndjson");
+    let Some(raw) = files.get(&key) else {
         return Ok(false);
     };
-    let decrypted = try_decrypt(raw)?;
+    let decrypted = try_decrypt(&key, raw)?;
     for line in decrypted.split(|&b| b == b'\n') {
         let line = trim_bytes(line);
         if line.is_empty() {
@@ -1747,7 +1750,7 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::audit::EmbeddedAuditEngine;
-    use crate::backup::export::encrypt_bytes;
+    use crate::backup::encrypt_member;
     use crate::backup::{
         wrap_dek, BackupArchive, BackupExporter, BackupManifest, RealmManifest, RecordCounts,
     };
@@ -1887,8 +1890,12 @@ mod tests {
         let passphrase = test_passphrase();
         let (wrapped_dek_b64, dek_wrapping_params) = wrap_dek(&dek, &passphrase).expect("wrap DEK");
 
-        let realm_encrypted = encrypt_bytes(&realm_bytes, &dek).expect("encrypt realm");
-        let users_encrypted = encrypt_bytes(&users_bytes, &dek).expect("encrypt users");
+        let realm_encrypted =
+            encrypt_member(&format!("realms/{slug}/realm.json"), &realm_bytes, &dek)
+                .expect("encrypt realm");
+        let users_encrypted =
+            encrypt_member(&format!("realms/{slug}/users.ndjson"), &users_bytes, &dek)
+                .expect("encrypt users");
 
         // RealmManifest.realm_id is a plain String, so the prefixed form is fine.
         let realm_id_str = format!("realm_{realm_uuid}");
@@ -1921,10 +1928,10 @@ mod tests {
             .add_file(&format!("realms/{slug}/users.ndjson"), &users_encrypted)
             .expect("add users.ndjson");
         for (member, plaintext) in extra {
-            let encrypted = encrypt_bytes(plaintext.as_bytes(), &dek).expect("encrypt member");
-            writer
-                .add_file(&format!("realms/{slug}/{member}"), &encrypted)
-                .expect("add member");
+            let path = format!("realms/{slug}/{member}");
+            let encrypted =
+                encrypt_member(&path, plaintext.as_bytes(), &dek).expect("encrypt member");
+            writer.add_file(&path, &encrypted).expect("add member");
         }
         // Manually set checksums (finish guard requires sections_encrypted fields to be set)
         manifest.checksums = std::collections::BTreeMap::new();
@@ -2259,10 +2266,19 @@ mod tests {
         let dek = BackupExporter::generate_dek().expect("dek");
         let (wrapped_dek_b64, dek_wrapping_params) =
             wrap_dek(&dek, &test_passphrase()).expect("wrap dek");
-        let realm_enc =
-            encrypt_bytes(&serde_json::to_vec(&realm_json).expect("ser"), &dek).expect("enc realm");
+        let realm_enc = encrypt_member(
+            &format!("realms/{slug}/realm.json"),
+            &serde_json::to_vec(&realm_json).expect("ser"),
+            &dek,
+        )
+        .expect("enc realm");
         // A member with a name the importer has never heard of.
-        let surprise_enc = encrypt_bytes(b"{}\n", &dek).expect("enc surprise");
+        let surprise_enc = encrypt_member(
+            &format!("realms/{slug}/future_feature.ndjson"),
+            b"{}\n",
+            &dek,
+        )
+        .expect("enc surprise");
 
         let manifest = BackupManifest {
             format_version: crate::backup::MANIFEST_VERSION,
@@ -2346,10 +2362,18 @@ mod tests {
         let passphrase = test_passphrase();
         let (wrapped_dek_b64, dek_wrapping_params) = wrap_dek(&dek, &passphrase).expect("wrap DEK");
 
-        let realm_encrypted =
-            encrypt_bytes(&serde_json::to_vec(&realm_json).expect("ser realm"), &dek)
-                .expect("encrypt realm");
-        let sk_encrypted = encrypt_bytes(signing_key_pkcs8, &dek).expect("encrypt signing key");
+        let realm_encrypted = encrypt_member(
+            &format!("realms/{slug}/realm.json"),
+            &serde_json::to_vec(&realm_json).expect("ser realm"),
+            &dek,
+        )
+        .expect("encrypt realm");
+        let sk_encrypted = encrypt_member(
+            &format!("realms/{slug}/signing_key.json"),
+            signing_key_pkcs8,
+            &dek,
+        )
+        .expect("encrypt signing key");
 
         let manifest = BackupManifest {
             format_version: crate::backup::MANIFEST_VERSION,
