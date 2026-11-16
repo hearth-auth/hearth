@@ -5068,7 +5068,7 @@ fn run_backup_create(
             // enumeration gap, not a capability gap.
             //
             // Exporting it does put operator identities in the file. That is
-            // already true of every other realm's `credentials.ndjson` and
+            // already true of every other realm's password hashes and
             // signing key, and `backup create` refuses to write an archive at
             // all without `HEARTH_MASTER_KEY` or `--encrypt`: every section is
             // AES-256-GCM encrypted under a DEK wrapped with Argon2id from

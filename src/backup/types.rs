@@ -16,15 +16,21 @@ use crate::core::Timestamp;
 /// v3: each member is encrypted in chunks of 64 KiB (#866), so that the
 /// backup and the verification read a member in pieces of a fixed size. A v2
 /// member is one AES-256-GCM message, and this version does not read it.
-pub const MANIFEST_VERSION: u32 = 3;
+///
+/// v4: a restore streams the archive (#867). Each line of `users.ndjson`
+/// carries the user and its password credential (no `credentials.ndjson`),
+/// and the members come in the order a restore imports them, with
+/// `audit_chain.json` before `audit.ndjson`.
+pub const MANIFEST_VERSION: u32 = 4;
 
 /// Per-entity-type record counts for a single realm in the backup.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordCounts {
     /// Number of user records.
     pub users: u64,
-    /// Number of password credential records (PHC hash strings). Second
-    /// factors are counted separately in `mfa_factors`.
+    /// Number of users whose line in `users.ndjson` carries a password
+    /// credential (a PHC hash string). Second factors are counted separately
+    /// in `mfa_factors`.
     pub credentials: u64,
     /// Number of second-factor records: TOTP/recovery-code state and
     /// `WebAuthn` passkeys (audit 2026-08-28 §4.18#5). Zero for archives

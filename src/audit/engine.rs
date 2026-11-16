@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use ring::hmac;
 use ring::rand::SecureRandom as _;
+use zeroize::Zeroizing;
 
 use crate::codec;
 use crate::core::{AuditEventId, Clock, RealmId, Timestamp};
@@ -595,18 +596,28 @@ impl EmbeddedAuditEngine {
         &self,
         realm_id: &RealmId,
     ) -> Result<(std::collections::HashSet<AuditEventId>, Option<Timestamp>), AuditError> {
+        // One event at a time (#867): only the ids are kept, not the events.
         let prefix = keys::event_scan_prefix();
-        let entries = self
-            .storage
-            .scan(realm_id, &prefix, &keys::prefix_end(&prefix))?;
-        let mut known = std::collections::HashSet::with_capacity(entries.len());
+        let mut known = std::collections::HashSet::new();
         let mut newest: Option<Timestamp> = None;
-        for entry in &entries {
-            let event = decode_event(&entry.value)?;
-            newest = newest.max(Some(event.timestamp));
-            known.insert(event.id);
-        }
-        Ok((known, newest))
+        let mut failure = None;
+        self.storage.visit_entries(
+            realm_id,
+            &prefix,
+            &keys::prefix_end(&prefix),
+            &mut |_, value| match decode_event(value) {
+                Ok(event) => {
+                    newest = newest.max(Some(event.timestamp));
+                    known.insert(event.id);
+                    ControlFlow::Continue(())
+                }
+                Err(e) => {
+                    failure = Some(e);
+                    ControlFlow::Break(())
+                }
+            },
+        )?;
+        failure.map_or(Ok((known, newest)), Err)
     }
 
     /// Plans a prune of a chronological prefix of events.
@@ -1019,11 +1030,12 @@ impl AuditEngine for EmbeddedAuditEngine {
         }))
     }
 
-    #[allow(clippy::too_many_lines)] // one chunk loop: plan, enqueue, fsync, account
-    fn import_events(
+    #[allow(clippy::too_many_lines)] // one chunk loop, kept whole for its lock discipline
+    fn import_event_stream(
         &self,
         realm_id: &RealmId,
-        events: &[AuditEvent],
+        plan: &super::AuditImportPlan,
+        events: &mut dyn Iterator<Item = AuditEvent>,
     ) -> Result<super::AuditImportOutcome, AuditError> {
         // Mirrors `with_pending_append`'s chain read-modify-write, one CHUNK at
         // a time. The realm's `std` chain lock is taken per chunk — for its
@@ -1037,8 +1049,13 @@ impl AuditEngine for EmbeddedAuditEngine {
         // contended only by another import). Live appends between chunks mint
         // fresh random event ids, so they can never duplicate an archived
         // event: the dedupe set read before the first chunk stays exact.
+        //
+        // The events come one chunk at a time (#867): the import holds one
+        // chunk, never the archive's whole run.
         let mut outcome = super::AuditImportOutcome::default();
-        if events.is_empty() {
+        let mut pending: Option<Vec<AuditEvent>> =
+            Some((&mut *events).take(IMPORT_CHUNK).collect());
+        if pending.as_ref().is_some_and(Vec::is_empty) {
             return Ok(outcome);
         }
         let import_lock = self.realm_import_lock(realm_id);
@@ -1047,28 +1064,38 @@ impl AuditEngine for EmbeddedAuditEngine {
 
         // What the realm already holds — the ids (dedupe) and the newest
         // timestamp (the floor for re-stamped events) — read BEFORE the chain
-        // lock: this scan decodes every event the realm has.
-        let (mut known, newest) = self.held_event_ids(realm_id)?;
+        // lock: this walk decodes every event the realm has.
+        let (known, newest) = self.held_event_ids(realm_id)?;
 
         // Original timestamps are kept only where they cannot reorder the
         // chain: an empty chain, events in ascending time, none in the future
         // (a later live append must sort after them), and no live append
         // landing between two chunks. Once anything else is in the chain,
-        // events are stamped no earlier than the newest time it holds.
+        // events are stamped no earlier than the newest time it holds. The
+        // plan says what the whole run holds before its first event is here.
         let now = self.clock.now();
-        let ascending = events.windows(2).all(|w| w[0].timestamp <= w[1].timestamp);
-        let in_past = events.iter().all(|e| e.timestamp <= now);
-        let mut restamp = !ascending || !in_past;
+        let mut restamp = !plan.ascending() || plan.newest().is_some_and(|n| n > now);
         let mut stamp = newest.map_or(now, |n| n.max(now));
+        // The timestamps this import wrote: the last, and the newest.
+        let mut last_written: Option<Timestamp> = None;
+        let mut newest_written: Option<Timestamp> = None;
 
         let chain_lock = self.realm_chain_lock(realm_id);
         let mut batch: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(IMPORT_CHUNK * 3 + 1);
         // The sequence number our last chunk ended the chain on.
         let mut our_seq: Option<u64> = None;
         let mut anchored = false;
-        let mut next = 0usize;
-        while next < events.len() {
-            let end = (next + IMPORT_CHUNK).min(events.len());
+        loop {
+            let chunk = match pending.take() {
+                Some(chunk) => chunk,
+                None => {
+                    let chunk: Vec<AuditEvent> = (&mut *events).take(IMPORT_CHUNK).collect();
+                    if chunk.is_empty() {
+                        break;
+                    }
+                    chunk
+                }
+            };
             let (head, written, handle) = {
                 let mut cached = chain_lock.lock().expect("realm chain lock poisoned");
                 // Re-read the head every chunk: live appends may have moved it.
@@ -1089,12 +1116,28 @@ impl AuditEngine for EmbeddedAuditEngine {
                     stamp = stamp.max(self.clock.now());
                 }
                 let mut written = 0u64;
-                for source in &events[next..end] {
-                    if !known.insert(source.id.clone()) {
+                for source in &chunk {
+                    if known.contains(&source.id) {
                         outcome.duplicates += 1;
                         continue;
                     }
+                    // A run that does not match its plan: stamp the rest no
+                    // earlier than anything written, so the order holds.
+                    if !restamp
+                        && (source.timestamp > now
+                            || last_written.is_some_and(|last| source.timestamp < last))
+                    {
+                        tracing::warn!(
+                            realm = %realm_id,
+                            "audit import: the events do not match their plan; stamping the \
+                             rest with the import time"
+                        );
+                        restamp = true;
+                        stamp = stamp.max(newest_written.unwrap_or(stamp));
+                    }
                     let timestamp = if restamp { stamp } else { source.timestamp };
+                    last_written = Some(timestamp);
+                    newest_written = newest_written.max(Some(timestamp));
                     let mut event = AuditEvent {
                         id: source.id.clone(),
                         realm_id: realm_id.clone(),
@@ -1135,7 +1178,6 @@ impl AuditEngine for EmbeddedAuditEngine {
                     );
                     written += 1;
                 }
-                next = end;
                 if written == 0 {
                     continue;
                 }
@@ -1685,19 +1727,45 @@ fn restore_marked_metadata(
 /// `integrity_hash` does not match, or `None` when the whole run checks out.
 ///
 /// Used by restore, which otherwise discards every source hash and re-signs the
-/// events under the destination realm's key (audit 2026-08-28 §4.14#5).
+/// events under the destination realm's key (audit 2026-08-28 §4.14#5). A
+/// restore checks the events one at a time with [`ChainVerifier`] instead.
 pub fn first_broken_link(events: &[AuditEvent], key: &[u8], anchor: &str) -> Option<usize> {
-    let mut prev = anchor.to_string();
-    for (i, event) in events.iter().enumerate() {
+    let mut verifier = ChainVerifier::new(key, anchor);
+    events.iter().position(|event| !verifier.check(event))
+}
+
+/// Checks an exported HMAC chain one event at a time, so that a restore does
+/// not hold the events of a realm in memory to check them (#867).
+///
+/// Give it the events in the order they were written. [`check`](Self::check)
+/// answers `false` for the first event whose stored `integrity_hash` does not
+/// follow from the events before it.
+pub struct ChainVerifier {
+    key: Zeroizing<Vec<u8>>,
+    prev: String,
+}
+
+impl ChainVerifier {
+    /// A verifier for a chain that starts at `anchor` under the HMAC `key`.
+    pub fn new(key: &[u8], anchor: &str) -> Self {
+        Self {
+            key: Zeroizing::new(key.to_vec()),
+            prev: anchor.to_string(),
+        }
+    }
+
+    /// Whether `event` is the next link of the chain. After `false` the
+    /// verifier is not usable: the chain is broken.
+    pub fn check(&mut self, event: &AuditEvent) -> bool {
         if !integrity_tag_matches(
             &event.integrity_hash,
-            &EmbeddedAuditEngine::compute_hmac_hash(key, &prev, event),
+            &EmbeddedAuditEngine::compute_hmac_hash(&self.key, &self.prev, event),
         ) {
-            return Some(i);
+            return false;
         }
-        prev.clone_from(&event.integrity_hash);
+        self.prev.clone_from(&event.integrity_hash);
+        true
     }
-    None
 }
 
 /// Encodes bytes as lowercase hexadecimal.
@@ -3125,6 +3193,111 @@ mod tests {
         assert!(engine
             .verify_integrity(&realm_id, None, None)
             .expect("verify"));
+    }
+
+    /// #867: a restore passes the events one at a time. Over several chunks,
+    /// into an empty chain, they keep their times and the chain verifies.
+    #[test]
+    fn a_streamed_import_takes_the_events_one_chunk_at_a_time() {
+        let (engine, realm_id, clock) = setup_with_clock();
+        clock.set(Timestamp::from_micros(9_000_000));
+        let n = i64::try_from(2 * IMPORT_CHUNK + 7).expect("small");
+        let archived = archived_events(&realm_id, 1_000, n);
+        let plan = crate::audit::AuditImportPlan::of(&archived);
+        let mut taken = 0usize;
+        let mut stream = archived.iter().cloned().inspect(|_| taken += 1);
+        let outcome = engine
+            .import_event_stream(&realm_id, &plan, &mut stream)
+            .expect("import");
+        assert_eq!(
+            taken,
+            archived.len(),
+            "every event is taken from the stream"
+        );
+        assert_eq!(outcome.imported, archived.len() as u64);
+        assert!(!outcome.restamped);
+        let times: Vec<Timestamp> = all_events(&engine, &realm_id)
+            .iter()
+            .map(|e| e.timestamp)
+            .collect();
+        let want: Vec<Timestamp> = archived.iter().map(|e| e.timestamp).collect();
+        assert_eq!(times, want);
+        assert!(engine
+            .verify_integrity(&realm_id, None, None)
+            .expect("verify"));
+    }
+
+    /// A stream whose events do not match the plan it came with (an older
+    /// event after a newer one) still leaves storage order = chain order: the
+    /// rest of the run is stamped no earlier than what was written.
+    #[test]
+    fn a_stream_that_breaks_its_plan_keeps_the_chain_in_order() {
+        let (engine, realm_id, clock) = setup_with_clock();
+        clock.set(Timestamp::from_micros(9_000_000));
+        let n = i64::try_from(IMPORT_CHUNK + 3).expect("small");
+        let mut archived = archived_events(&realm_id, 1_000, n);
+        // The plan sees an ascending run; the stream swaps two events.
+        let plan = crate::audit::AuditImportPlan::of(&archived);
+        archived.swap(IMPORT_CHUNK, IMPORT_CHUNK + 1);
+        let outcome = engine
+            .import_event_stream(&realm_id, &plan, &mut archived.iter().cloned())
+            .expect("import");
+        assert_eq!(outcome.imported, archived.len() as u64);
+        assert!(outcome.restamped, "the rest of the run is re-stamped");
+        let events = all_events(&engine, &realm_id);
+        assert_eq!(events.len(), archived.len());
+        assert!(
+            events.windows(2).all(|w| w[0].timestamp <= w[1].timestamp),
+            "storage order stays time order"
+        );
+        let ids: Vec<_> = events.iter().map(|e| e.id.clone()).collect();
+        let want: Vec<_> = archived.iter().map(|e| e.id.clone()).collect();
+        assert_eq!(ids, want, "chain order is the stream order");
+        assert!(engine
+            .verify_integrity(&realm_id, None, None)
+            .expect("verify"));
+    }
+
+    #[test]
+    fn the_import_plan_sees_the_order_and_the_newest_time() {
+        let realm_id = RealmId::generate();
+        let events = archived_events(&realm_id, 1_000, 3);
+        let plan = crate::audit::AuditImportPlan::of(&events);
+        assert!(plan.ascending());
+        assert_eq!(plan.newest(), Some(Timestamp::from_micros(1_002)));
+        let mut reversed = events.clone();
+        reversed.reverse();
+        let plan = crate::audit::AuditImportPlan::of(&reversed);
+        assert!(!plan.ascending());
+        assert_eq!(plan.newest(), Some(Timestamp::from_micros(1_002)));
+        assert_eq!(crate::audit::AuditImportPlan::of(&[]).newest(), None);
+    }
+
+    #[test]
+    fn the_chain_verifier_stops_at_the_first_broken_link() {
+        let (engine, realm_id, _clock) = setup_with_clock();
+        append_n(&engine, &realm_id, 4);
+        let events = all_events(&engine, &realm_id);
+        let material = engine
+            .export_chain_material(&realm_id)
+            .expect("material")
+            .expect("a chain");
+        use base64::Engine as _;
+        let key = base64::engine::general_purpose::STANDARD
+            .decode(&material.chain_key_b64)
+            .expect("key");
+        let mut verifier = ChainVerifier::new(&key, &material.anchor);
+        assert!(events.iter().all(|e| verifier.check(e)), "an intact chain");
+
+        let mut tampered = events.clone();
+        tampered[2].actor = "forged".to_string();
+        let mut verifier = ChainVerifier::new(&key, &material.anchor);
+        let first_bad = tampered.iter().position(|e| !verifier.check(e));
+        assert_eq!(first_bad, Some(2));
+        assert_eq!(
+            first_broken_link(&tampered, &key, &material.anchor),
+            Some(2)
+        );
     }
 
     /// Importing the same archive twice adds nothing the second time.

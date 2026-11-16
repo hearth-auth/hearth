@@ -46,8 +46,7 @@ A `.hearth-backup` file is a zstd-compressed archive. Inside, each realm is stor
 |---|---|
 | `manifest.json` | Archive header: version, timestamp, record counts, SHA-256 checksums, optional DEK |
 | `realms/<slug>/realm.json` | Realm configuration record |
-| `realms/<slug>/users.ndjson` | User records (one JSON object per line) |
-| `realms/<slug>/credentials.ndjson` | Hashed credentials |
+| `realms/<slug>/users.ndjson` | User records (one JSON object per line), each with its password hash in the field `credential` when the user has a password |
 | `realms/<slug>/mfa_factors.ndjson` | TOTP secrets, recovery codes and WebAuthn passkeys |
 | `realms/<slug>/clients.ndjson` | OAuth 2.0 application registrations, including each client's credentials (see [Client credentials](#client-credentials)) |
 | `realms/<slug>/roles.ndjson` | RBAC role definitions |
@@ -75,8 +74,21 @@ A `.hearth-backup` file is a zstd-compressed archive. Inside, each realm is stor
 | `realms/<slug>/audit_chain.json` | The audit chain key and anchor for those events (AES-256-GCM encrypted with the DEK) |
 
 The NDJSON format has one JSON object on each line. The backup writes the
-records one at a time. A restore still reads all the members of a realm into
-memory before it restores them (#867).
+records one at a time, and the members in the order a restore imports them.
+
+**How a restore reads the archive.** A restore reads the archive as a stream,
+twice (#867). The first pass decrypts and checks every member: it refuses a
+member that does not decrypt, a malformed record line, a user line with the
+password hash of another user, a member it does not know, a member that is in
+the archive twice and an audit chain that does not match its own hashes. It
+writes nothing. The second pass imports the records, one at a time. So a
+damaged or changed archive stops the restore before anything is written,
+wherever the damage is in the archive. A restore holds one decrypted chunk of
+64 KiB, one record and one chunk of 512 audit events at a time; its extra
+memory is a few MiB, whatever the number of users in the archive. A restore
+into a realm that already holds data needs more: it keeps the id of each
+audit event that the realm holds (to skip duplicates), and one report entry
+for each conflict (for example, each user that is already there).
 
 **Member encryption.** Every member is encrypted with the archive DEK in
 chunks of 64 KiB (AES-256-GCM, the STREAM construction). Each chunk has its
@@ -84,7 +96,7 @@ own authentication tag. The nonce of each chunk holds the chunk number and a
 flag for the last chunk, and the member path is authenticated data. A restore
 therefore refuses a member with a changed, reordered, removed or added chunk,
 a member that is cut short, and a member that was moved to another path.
-Archives from Hearth versions before this format (archive format version 2 or
+Archives from Hearth versions before this format (archive format version 3 or
 lower) are refused with `unsupported archive format version`.
 
 ### What a backup does not carry
@@ -259,9 +271,9 @@ Restore re-signs every imported audit event under the **destination** realm's
 HMAC key, because the source realm's key is not the destination's. That means
 the hashes the archive carries are replaced, so restore checks them first:
 `audit_chain.json` holds the source realm's chain key and anchor, and the
-restore walks the exported events against them before importing any of them. A
-chain that does not match its own hashes aborts the restore with the index of
-the first broken link.
+restore walks the exported events against them in its first pass, before it
+writes anything. A chain that does not match its own hashes aborts the restore
+with the index of the first broken link.
 
 The manifest records whether the chain material was written
 (`audit_chain_included`). Because the manifest is checksum-covered — and its
@@ -733,7 +745,7 @@ source beyond the current segment, and it is never shipped off-host.
 ### Referential consistency — one snapshot per backup
 
 An export reads each entity type at a different moment during the run (users
-first, then credentials, clients, roles, and so on). A concurrent write could
+and their credentials first, then clients, roles, and so on). A concurrent write could
 tear the archive: for example, a role assignment that refers to a user created
 *after* the export read the users. To prevent this, `POST /admin/backup` takes
 one **storage snapshot** at its start and reads every realm from it (#643).
@@ -761,8 +773,8 @@ the file write.
 - **Memory.** The export does not hold a realm in memory (#866). It reads
   the records one at a time from the snapshot, and it encrypts each member in
   chunks of 64 KiB. The response streams the archive file. The extra memory
-  of a backup is a few MiB, whatever the number of users. A restore still
-  holds the members of one realm in memory (#867).
+  of a backup is a few MiB, whatever the number of users. A restore does
+  not hold a realm in memory either (#867).
 - **Temporary disk space.** The server writes the archive to the system
   temporary directory (`$TMPDIR`) before it sends it. It also writes each
   member, encrypted, to a temporary file before it adds the member to the

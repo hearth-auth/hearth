@@ -185,12 +185,13 @@ impl AuditEngine for SometimesUnmerged {
         self.inner.forget_realm(realm_id);
     }
 
-    fn import_events(
+    fn import_event_stream(
         &self,
         realm_id: &RealmId,
-        events: &[crate::audit::AuditEvent],
+        plan: &crate::audit::AuditImportPlan,
+        events: &mut dyn Iterator<Item = crate::audit::AuditEvent>,
     ) -> Result<crate::audit::AuditImportOutcome, crate::audit::AuditError> {
-        self.inner.import_events(realm_id, events)
+        self.inner.import_event_stream(realm_id, plan, events)
     }
 
     fn query(

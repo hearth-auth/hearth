@@ -51,7 +51,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::audit::AuditEngine;
 use crate::core::{ExportVisitor, RealmId};
-use crate::identity::IdentityEngine;
+use crate::identity::{CredentialExport, IdentityEngine, User};
 use crate::rbac::RbacEngine;
 use crate::webhook::{WebhookEngine, WebhookQuery};
 
@@ -366,21 +366,79 @@ impl BackupExporter {
             prefix: &prefix,
         };
 
+        // The members come in the order a restore imports them (#867), so
+        // that the restore reads the archive once: first the members it
+        // checks before it writes anything (realm, keys, audit chain), then
+        // the audit events, which it restores first, then the rest in the
+        // order of their references. See `RESTORE_ORDER` in `import.rs`.
+
         // realm.json
         if let Some(ref r) = realm {
             out.bytes("realm.json", &Zeroizing::new(serde_json::to_vec_pretty(r)?))?;
         }
 
-        // users.ndjson — one walk of the user keys. Pages of `list_users` each
-        // walk every user key to count the total.
-        counts.users = out.ndjson("users.ndjson", |visit| {
-            self.identity.export_all_users(realm_id, visit)
-        })?;
+        // signing_key.json (AES-256-GCM encrypted PKCS#8 bytes)
+        let pkcs8 = Zeroizing::new(
+            self.identity
+                .export_realm_signing_key_pkcs8(realm_id)
+                .map_err(|e| engine(&e))?,
+        );
+        out.bytes("signing_key.json", &pkcs8)?;
 
-        // credentials.ndjson
-        counts.credentials = out.ndjson("credentials.ndjson", |visit| {
-            self.identity.export_all_credentials(realm_id, visit)
+        // id_token_signing_key.json — the realm's RS256 ID-token key, present
+        // once any client in the realm selected RS256 (task 26.55). Without it
+        // a restore would provision a new RSA key and every ID token issued
+        // before the backup would stop verifying. Unsealed by the engine,
+        // DEK-encrypted here, re-sealed under the destination's KEK on import.
+        if let Some(rsa_pkcs8) = self
+            .identity
+            .export_realm_id_token_rsa_key(realm_id)
+            .map_err(|e| engine(&e))?
+        {
+            out.bytes("id_token_signing_key.json", &rsa_pkcs8)?;
+        }
+
+        // audit_chain.json and audit.ndjson (optional): the chain material a
+        // restore needs to check the exported hashes instead of discarding
+        // them (§4.14#5). The material comes first, so that a restore checks
+        // each event as it reads it (#867); it is written only for a realm
+        // with events, so the events are spooled before it is written.
+        let mut audit_chain_included = false;
+        if opts.include_audit {
+            let (events, spooled) = out.ndjson_spooled("audit.ndjson", |visit| {
+                self.audit.export_events(realm_id, visit)
+            })?;
+            counts.audit_events = events;
+            if let Some(member) = spooled {
+                let material = self
+                    .audit
+                    .export_chain_material(realm_id)
+                    .map_err(|e| engine(&e))?
+                    .ok_or_else(|| {
+                        BackupError::Engine(
+                            "realm has audit events but no chain material; refusing to write an \
+                             archive whose audit log cannot be verified on restore"
+                                .to_string(),
+                        )
+                    })?;
+                out.bytes(
+                    "audit_chain.json",
+                    &Zeroizing::new(serde_json::to_vec(&material)?),
+                )?;
+                member.finish_into(out.writer)?;
+                audit_chain_included = true;
+            }
+        }
+
+        // users.ndjson — one walk of the user keys, each user with its
+        // password credential on the same line (#867), so that a restore
+        // needs no map of credentials by user. Pages of `list_users` each
+        // walk every user key to count the total.
+        let mut credentials = 0;
+        counts.users = out.ndjson("users.ndjson", |visit| {
+            visit_users_with_credentials(self.identity.as_ref(), realm_id, visit, &mut credentials)
         })?;
+        counts.credentials = credentials;
 
         // mfa_factors.ndjson — TOTP/recovery-code state (decrypted; every
         // archive section is itself AES-256-GCM encrypted) and WebAuthn
@@ -399,6 +457,11 @@ impl BackupExporter {
             })
         })?;
 
+        // permissions.ndjson
+        counts.permissions = out.ndjson("permissions.ndjson", |visit| {
+            visit_vec(visit, self.rbac.export_all_permissions(realm_id))
+        })?;
+
         // roles.ndjson
         counts.roles = out.ndjson("roles.ndjson", |visit| {
             visit_cursor_pages(visit, |cursor| {
@@ -407,11 +470,6 @@ impl BackupExporter {
                     .map(|p| (p.items, p.next_cursor))
                     .map_err(|e| engine(&e))
             })
-        })?;
-
-        // permissions.ndjson
-        counts.permissions = out.ndjson("permissions.ndjson", |visit| {
-            visit_vec(visit, self.rbac.export_all_permissions(realm_id))
         })?;
 
         // groups.ndjson
@@ -423,16 +481,6 @@ impl BackupExporter {
             })
         })?;
 
-        // assignments.ndjson
-        counts.assignments = out.ndjson("assignments.ndjson", |visit| {
-            self.rbac.visit_all_assignments(realm_id, visit)
-        })?;
-
-        // scopes.ndjson
-        counts.scopes = out.ndjson("scopes.ndjson", |visit| {
-            visit_vec(visit, self.rbac.export_all_scopes(realm_id))
-        })?;
-
         // organizations.ndjson
         counts.organizations = out.ndjson("organizations.ndjson", |visit| {
             visit_offset_pages(visit, |page| {
@@ -440,6 +488,11 @@ impl BackupExporter {
                     .list_organizations(realm_id, &page)
                     .map_err(|e| engine(&e))
             })
+        })?;
+
+        // assignments.ndjson
+        counts.assignments = out.ndjson("assignments.ndjson", |visit| {
+            self.rbac.visit_all_assignments(realm_id, visit)
         })?;
 
         // group_memberships.ndjson — the edges between a group and its
@@ -546,27 +599,6 @@ impl BackupExporter {
             visit_vec(visit, self.identity.export_retiring_signing_keys(realm_id))
         })?;
 
-        // signing_key.json (AES-256-GCM encrypted PKCS#8 bytes)
-        let pkcs8 = Zeroizing::new(
-            self.identity
-                .export_realm_signing_key_pkcs8(realm_id)
-                .map_err(|e| engine(&e))?,
-        );
-        out.bytes("signing_key.json", &pkcs8)?;
-
-        // id_token_signing_key.json — the realm's RS256 ID-token key, present
-        // once any client in the realm selected RS256 (task 26.55). Without it
-        // a restore would provision a new RSA key and every ID token issued
-        // before the backup would stop verifying. Unsealed by the engine,
-        // DEK-encrypted here, re-sealed under the destination's KEK on import.
-        if let Some(rsa_pkcs8) = self
-            .identity
-            .export_realm_id_token_rsa_key(realm_id)
-            .map_err(|e| engine(&e))?
-        {
-            out.bytes("id_token_signing_key.json", &rsa_pkcs8)?;
-        }
-
         // retiring_id_token_signing_keys.json — the RS256 twin of
         // retiring_signing_keys.json: absolute deadlines, expired keys omitted.
         counts.retiring_id_token_signing_keys =
@@ -577,32 +609,10 @@ impl BackupExporter {
                 )
             })?;
 
-        // audit.ndjson (optional), plus the chain material a restore needs to
-        // check the exported hashes instead of discarding them (§4.14#5).
-        let mut audit_chain_included = false;
-        if opts.include_audit {
-            counts.audit_events = out.ndjson("audit.ndjson", |visit| {
-                self.audit.export_events(realm_id, visit)
-            })?;
-            if counts.audit_events > 0 {
-                let material = self
-                    .audit
-                    .export_chain_material(realm_id)
-                    .map_err(|e| engine(&e))?
-                    .ok_or_else(|| {
-                        BackupError::Engine(
-                            "realm has audit events but no chain material; refusing to write an \
-                             archive whose audit log cannot be verified on restore"
-                                .to_string(),
-                        )
-                    })?;
-                out.bytes(
-                    "audit_chain.json",
-                    &Zeroizing::new(serde_json::to_vec(&material)?),
-                )?;
-                audit_chain_included = true;
-            }
-        }
+        // scopes.ndjson
+        counts.scopes = out.ndjson("scopes.ndjson", |visit| {
+            visit_vec(visit, self.rbac.export_all_scopes(realm_id))
+        })?;
 
         Ok(RealmManifest {
             realm_id: realm_id.as_uuid().to_string(),
@@ -643,6 +653,26 @@ impl MemberOutput<'_> {
         E: std::fmt::Display,
         F: FnOnce(&mut ExportVisitor<'_, T>) -> Result<(), E>,
     {
+        let (records, member) = self.ndjson_spooled(name, walk)?;
+        if let Some(member) = member {
+            member.finish_into(self.writer)?;
+        }
+        Ok(records)
+    }
+
+    /// As [`ndjson`](Self::ndjson), but returns the spooled member instead of
+    /// writing it into the archive, so that the caller can write another
+    /// member before it. `None` for a member with no record.
+    fn ndjson_spooled<T, E, F>(
+        &mut self,
+        name: &str,
+        walk: F,
+    ) -> Result<(u64, Option<MemberWriter>), BackupError>
+    where
+        T: Serialize,
+        E: std::fmt::Display,
+        F: FnOnce(&mut ExportVisitor<'_, T>) -> Result<(), E>,
+    {
         let mut member = MemberWriter::new(format!("{}/{name}", self.prefix), self.dek)?;
         let mut failure = None;
         walk(&mut |record: T| match member.record(&record) {
@@ -657,10 +687,138 @@ impl MemberOutput<'_> {
             return Err(e);
         }
         let records = member.records;
-        if records > 0 {
-            member.finish_into(self.writer)?;
+        Ok((records, (records > 0).then_some(member)))
+    }
+}
+
+/// One line of `users.ndjson` (format v4, #867): a user and its password
+/// credential, if it has one.
+#[derive(Serialize)]
+struct UserLine {
+    #[serde(flatten)]
+    user: User,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credential: Option<CredentialExport>,
+}
+
+/// Credentials the credential walk may run ahead of the user walk by.
+const CREDENTIAL_QUEUE: usize = 256;
+
+/// Passes every user of the realm to `visit` with its password credential,
+/// and counts the credentials in `credentials`.
+///
+/// The users and the credentials are two walks of the store, both in the
+/// order of the user ID. The credential walk runs on its own thread and
+/// passes its records through a bounded queue, and the user walk takes from
+/// it the credential of each user: a merge of two sorted walks, which holds
+/// at most [`CREDENTIAL_QUEUE`] credentials (#867). A credential without a
+/// user is not exported (a restore had nothing to attach it to).
+///
+/// # Errors
+///
+/// [`BackupError::Engine`] when a walk fails or a walk is not in the order
+/// of the user ID (the merge would then lose credentials), or the error of
+/// `visit`.
+fn visit_users_with_credentials(
+    identity: &dyn IdentityEngine,
+    realm_id: &RealmId,
+    visit: &mut ExportVisitor<'_, UserLine>,
+    credentials: &mut u64,
+) -> Result<(), BackupError> {
+    let engine = |e: &dyn std::fmt::Display| BackupError::Engine(e.to_string());
+    let (tx, rx) = std::sync::mpsc::sync_channel::<CredentialExport>(CREDENTIAL_QUEUE);
+    std::thread::scope(|scope| {
+        let credential_walk = scope.spawn(move || {
+            identity.export_all_credentials(realm_id, &mut |credential| {
+                if tx.send(credential).is_ok() {
+                    ControlFlow::Continue(())
+                } else {
+                    // The user walk ended: no user is left to take it.
+                    ControlFlow::Break(())
+                }
+            })
+        });
+        let mut join = CredentialJoin {
+            rx,
+            pending: None,
+            last: None,
+        };
+        let mut last_user: Option<uuid::Uuid> = None;
+        let mut failure = None;
+        let walked = identity.export_all_users(realm_id, &mut |user| {
+            let id = *user.id().as_uuid();
+            if last_user.is_some_and(|prev| prev >= id) {
+                failure = Some(BackupError::Engine(
+                    "the user walk is not in the order of the user ID".to_string(),
+                ));
+                return ControlFlow::Break(());
+            }
+            last_user = Some(id);
+            let credential = match join.take_for(id) {
+                Ok(credential) => credential,
+                Err(e) => {
+                    failure = Some(e);
+                    return ControlFlow::Break(());
+                }
+            };
+            if credential.is_some() {
+                *credentials += 1;
+            }
+            visit(UserLine { user, credential })
+        });
+        // Stops the credential walk if it waits on a full queue.
+        drop(join);
+        let credential_walk = credential_walk
+            .join()
+            .map_err(|_| BackupError::Engine("the credential walk panicked".to_string()))?;
+        walked.map_err(|e| engine(&e))?;
+        if let Some(e) = failure {
+            return Err(e);
         }
-        Ok(records)
+        credential_walk.map_err(|e| engine(&e))
+    })
+}
+
+/// The credential side of [`visit_users_with_credentials`].
+struct CredentialJoin {
+    rx: std::sync::mpsc::Receiver<CredentialExport>,
+    /// A credential taken from the queue for a user that comes later.
+    pending: Option<CredentialExport>,
+    /// The user ID of the last credential taken from the queue.
+    last: Option<uuid::Uuid>,
+}
+
+impl CredentialJoin {
+    /// The credential of the user `id`, if it has one. Users must come in
+    /// ascending order of their ID.
+    fn take_for(&mut self, id: uuid::Uuid) -> Result<Option<CredentialExport>, BackupError> {
+        loop {
+            let next = match self.pending.take() {
+                Some(credential) => credential,
+                None => {
+                    let Ok(credential) = self.rx.recv() else {
+                        return Ok(None);
+                    };
+                    let owner = *credential.user_id.as_uuid();
+                    if self.last.is_some_and(|last| last >= owner) {
+                        return Err(BackupError::Engine(
+                            "the credential walk is not in the order of the user ID".to_string(),
+                        ));
+                    }
+                    self.last = Some(owner);
+                    credential
+                }
+            };
+            match next.user_id.as_uuid().cmp(&id) {
+                // A credential whose user does not exist.
+                std::cmp::Ordering::Less => {}
+                std::cmp::Ordering::Equal => return Ok(Some(next)),
+                std::cmp::Ordering::Greater => {
+                    self.pending = Some(next);
+                    return Ok(None);
+                }
+            }
+        }
     }
 }
 

@@ -207,3 +207,22 @@ pub enum BackupError {
     #[error("invalid backup signing key: {0}")]
     SigningKeyInvalid(String),
 }
+
+impl BackupError {
+    /// Converts an error of a [`Read`](std::io::Read) over an archive member
+    /// back into the [`BackupError`] it carries, if any.
+    ///
+    /// [`DecryptReader`](super::DecryptReader) returns a refused chunk as an
+    /// [`std::io::Error`] that wraps a [`BackupError::Crypto`]; this keeps that
+    /// variant instead of reporting it as an I/O error.
+    pub fn from_read(e: std::io::Error) -> Self {
+        if !e.get_ref().is_some_and(|inner| inner.is::<BackupError>()) {
+            return BackupError::Io(e);
+        }
+        match e.into_inner().map(|inner| inner.downcast::<BackupError>()) {
+            Some(Ok(backup)) => *backup,
+            // Not reached: the inner error was checked to be a `BackupError`.
+            _ => BackupError::Io(std::io::Error::other("archive member read failed")),
+        }
+    }
+}
