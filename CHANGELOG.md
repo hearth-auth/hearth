@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Fixed
+- **A clean stop no longer waits for the search index backlog** (#865): after a large import, the
+  search index merger applied the whole outbox backlog in one run, and the process could not exit
+  until that run ended. A `systemctl stop` then outlasted the systemd stop timeout (90 s by
+  default), and systemd ended Hearth with `SIGKILL`. The merger now stops after the batch in
+  progress when a shutdown starts. The next start applies the rest of the backlog.
+
 ## [4.12.1] — 2026-11-15
 
 ### Fixed
@@ -22,11 +29,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   archive file with a `Content-Length` header. The extra memory of a backup is now a few MiB,
   whatever the number of users. The backup also needs temporary disk space for its largest member
   (see the backup guide). A restore still holds one realm in memory (#867).
-- **A clean stop no longer waits for the search index backlog** (#865): after a large import, the
-  search index merger applied the whole outbox backlog in one run, and the process could not exit
-  until that run ended. A `systemctl stop` then outlasted the systemd stop timeout (90 s by
-  default), and systemd ended Hearth with `SIGKILL`. The merger now stops after the batch in
-  progress when a shutdown starts. The next start applies the rest of the backlog.
 
 ### Changed
 - **Backup archive format version 3** (#866): each archive member is now encrypted in chunks of
