@@ -7,6 +7,15 @@
 //! one batch, with a delete of each outbox key that it read. A write that
 //! lands after the merge read a record also put a new outbox key, so a later
 //! merge indexes that user again. Only one merge runs at a time.
+//!
+//! A merge reads the outbox from the last key that the previous merge of
+//! the realm applied (its cursor), not from the prefix start (#870). The
+//! keys that earlier merges deleted stay as tombstones until a compaction
+//! removes them, and a read from the prefix start passes all of them, so
+//! each batch was slower than the batch before it. At the end of the prefix
+//! the read goes back to the prefix start, so a key that sorts before the
+//! cursor is read in the next pass. The cursor is in memory only: after a
+//! restart the first read starts at the prefix start.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::ControlFlow;
@@ -31,15 +40,17 @@ impl EmbeddedIdentityEngine {
     ) -> Result<usize, IdentityError> {
         // The lock guards no data: a panic in a merge leaves nothing
         // half-written, so a poisoned lock is safe to take.
-        let _merge = self
+        let mut cursors = self
             .search_merge_lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        let outbox = self.read_outbox(realm_id, max_entries.max(1))?;
-        if outbox.is_empty() {
+        let cursor = cursors.get(realm_id).map(Vec::as_slice);
+        let outbox = self.read_outbox(realm_id, cursor, max_entries.max(1))?;
+        let Some(last) = outbox.last().cloned() else {
+            cursors.remove(realm_id);
             return Ok(0);
-        }
+        };
         let users: BTreeSet<UserId> = outbox.iter().filter_map(|k| si::outbox_user(k)).collect();
 
         let mut next_docid = self.read_next_docid(realm_id)?;
@@ -124,15 +135,44 @@ impl EmbeddedIdentityEngine {
         self.storage
             .write_batch(realm_id, &puts, &deletes)
             .map_err(Self::storage_err)?;
+        // Only after the write: a failed merge reads the same keys again.
+        cursors.insert(realm_id.clone(), last);
         Ok(outbox.len())
     }
 
-    /// Up to `max` outbox keys of `realm_id`, in key order.
-    fn read_outbox(&self, realm_id: &RealmId, max: usize) -> Result<Vec<Vec<u8>>, IdentityError> {
+    /// Up to `max` outbox keys of `realm_id`: first the keys from `cursor` to
+    /// the end of the prefix, then the keys from the prefix start to `cursor`.
+    /// Without a cursor, the read starts at the prefix start.
+    fn read_outbox(
+        &self,
+        realm_id: &RealmId,
+        cursor: Option<&[u8]>,
+        max: usize,
+    ) -> Result<Vec<Vec<u8>>, IdentityError> {
         let end = keys::prefix_end(si::OUTBOX_PREFIX);
+        let start = cursor.unwrap_or(si::OUTBOX_PREFIX);
         let mut out = Vec::new();
+        self.visit_outbox(realm_id, start, &end, max, &mut out)?;
+        if let Some(cursor) = cursor {
+            if out.len() < max {
+                self.visit_outbox(realm_id, si::OUTBOX_PREFIX, cursor, max, &mut out)?;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Adds the outbox keys in `[start, end)` to `out`, until `out` holds
+    /// `max` keys.
+    fn visit_outbox(
+        &self,
+        realm_id: &RealmId,
+        start: &[u8],
+        end: &[u8],
+        max: usize,
+        out: &mut Vec<Vec<u8>>,
+    ) -> Result<(), IdentityError> {
         self.storage
-            .visit_keys(realm_id, si::OUTBOX_PREFIX, &end, &mut |key| {
+            .visit_keys(realm_id, start, end, &mut |key| {
                 out.push(key.to_vec());
                 if out.len() >= max {
                     ControlFlow::Break(())
@@ -140,8 +180,7 @@ impl EmbeddedIdentityEngine {
                     ControlFlow::Continue(())
                 }
             })
-            .map_err(Self::storage_err)?;
-        Ok(out)
+            .map_err(Self::storage_err)
     }
 
     /// The next free docid of `realm_id`.
