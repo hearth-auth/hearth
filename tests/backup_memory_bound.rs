@@ -1,4 +1,5 @@
-//! A backup holds a fixed amount of heap, whatever the number of users (#866).
+//! A backup and a restore hold a fixed amount of heap, whatever the number of
+//! users (#866, #867).
 //!
 //! `POST /admin/backup` collected every user of a realm into one `Vec`,
 //! serialised `users.ndjson` into one buffer and encrypted that buffer whole.
@@ -6,15 +7,23 @@
 //! 9,632 MiB during the backup. These tests export two realms of different
 //! sizes and measure the peak heap that the export holds on the calling thread.
 //! The peak must not grow with the number of users.
+//!
+//! The restore read every member of the realm into one map, decrypted each
+//! member whole, collected the credentials into a map by user and the audit
+//! events into one `Vec` (#867). The restore tests import the two archives
+//! into new stores and measure the peak heap of the import the same way.
 
 mod common;
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
-use hearth::backup::{BackupArchive, BackupExporter, BackupManifest, ExportOptions};
+use hearth::backup::{
+    BackupArchive, BackupExporter, BackupImporter, BackupManifest, ExportOptions, ImportOptions,
+};
 use hearth::core::RealmId;
 use hearth::identity::{CleartextPassword, CreateUserRequest};
+use secrecy::SecretString;
 
 // ── Peak live heap, scoped to the measuring thread ───────────────────────────
 
@@ -41,9 +50,19 @@ fn note(delta: i64) {
     }
 }
 
+/// The memory of the Argon2id key derivation that unwraps the DEK at the
+/// start of a restore (m = 65,536 KiB). It is one allocation of a fixed size,
+/// freed before the restore reads a member, so it is not counted: it would
+/// hide the heap that the rest of the restore holds.
+const DEK_KDF_BYTES: usize = 64 * 1024 * 1024;
+
 #[allow(clippy::cast_possible_wrap)]
 fn bytes(n: usize) -> i64 {
-    n as i64
+    if n == DEK_KDF_BYTES {
+        0
+    } else {
+        n as i64
+    }
 }
 
 unsafe impl GlobalAlloc for PeakAllocator {
@@ -156,6 +175,122 @@ fn export_peak(h: &common::TestHarness, realm: &RealmId) -> (i64, u64) {
     (peak, manifest.record_counts.users)
 }
 
+/// How much more heap the restore of the large realm may hold than the
+/// restore of the small one. A restore that keeps the realm in memory holds
+/// the archive members, their plaintext, the credential map and the audit
+/// events: about 3.4 KiB more for each user here, so about 12 MiB more. A
+/// streaming restore holds the same buffers for both (about 5 KB apart).
+const RESTORE_GROWTH_BUDGET_BYTES: i64 = 256 * 1024;
+/// The heap that one restore may hold at its peak: buffers of a fixed size
+/// (one decryption chunk, the zstd and tar read buffers, one audit import
+/// chunk, the store's small buffers below) and one record at a time. A
+/// streaming restore holds about 2.6 MB.
+const RESTORE_BUDGET_BYTES: i64 = 4 * 1024 * 1024;
+
+/// The passphrase that wraps the DEK of the restore archives.
+fn passphrase() -> SecretString {
+    SecretString::new("memory-bound-restore-passphrase".into())
+}
+
+/// Exports `realm` with its audit events into a new archive whose DEK is
+/// wrapped with [`passphrase`], so that a restore can open it.
+fn export_for_restore(h: &common::TestHarness, realm: &RealmId) -> tempfile::NamedTempFile {
+    let exporter = BackupExporter::new(
+        h.identity_arc(),
+        h.audit_arc(),
+        h.rbac_arc(),
+        h.webhooks_arc(),
+    )
+    .snapshot()
+    .expect("snapshot");
+    let dek = BackupExporter::generate_dek().expect("generate DEK");
+    let archive = tempfile::NamedTempFile::new().expect("tempfile");
+    let mut writer = BackupArchive::create(archive.path()).expect("create archive");
+    let opts = ExportOptions {
+        include_audit: true,
+        ..ExportOptions::default()
+    };
+    let realm_manifest = exporter
+        .export_realm(realm, &mut writer, &opts, &dek)
+        .expect("export realm");
+    assert!(
+        realm_manifest.record_counts.audit_events > 0,
+        "the archive carries audit events, so the restore imports them"
+    );
+    let (wrapped, params) = BackupExporter::wrap_dek(&dek, &passphrase()).expect("wrap DEK");
+    let mut manifest = BackupManifest::new(vec![realm_manifest]);
+    manifest.sections_encrypted = true;
+    manifest.wrapped_dek_b64 = Some(wrapped);
+    manifest.dek_wrapping_params = Some(params);
+    writer.finish(manifest).expect("finish archive");
+    archive
+}
+
+/// The memtable and block cache of the store a restore writes to.
+const STORE_BUFFER_BYTES: usize = 64 * 1024;
+/// The hot-tier entries of the store a restore writes to.
+const STORE_HOT_TIER_ENTRIES: usize = 256;
+
+/// Restores the only realm of `archive` into a new store, checks that every
+/// user came back with a credential, and returns the peak heap of the import.
+async fn restore_peak(archive: &tempfile::NamedTempFile, realm: &RealmId, users: usize) -> i64 {
+    // The store keeps written records in its memtable, its hot tier and its
+    // block cache until they are full. Those are the store's memory, bounded
+    // by its configuration, not the restore's: they are kept small here so
+    // that what the restore itself holds shows.
+    let target = common::TestHarness::in_process_with_storage(|config| {
+        config.set_memtable_flush_bytes(STORE_BUFFER_BYTES);
+        config.set_hot_tier_capacity(STORE_HOT_TIER_ENTRIES);
+        config.block_cache_bytes = STORE_BUFFER_BYTES;
+    })
+    .await
+    .expect("target harness");
+    let importer = BackupImporter::new(
+        target.identity_arc(),
+        target.rbac_arc(),
+        target.audit_arc(),
+        target.webhooks_arc(),
+    );
+    let reader = BackupArchive::open_private_copy(archive.path()).expect("open archive");
+    reader.verify_checksums().expect("the archive verifies");
+    let slug = reader.realms()[0].slug.clone();
+    let opts = ImportOptions {
+        dek_passphrase: Some(passphrase()),
+        ..ImportOptions::default()
+    };
+
+    let (report, peak) = peak_heap_during(|| {
+        importer
+            .import_realm(&slug, &reader, &opts)
+            .expect("restore")
+    });
+
+    assert_eq!(report.users.created, users as u64, "every user is restored");
+    assert_eq!(report.users.errored, 0, "no user fails");
+    assert!(report.audit_chain_verified, "the audit chain is checked");
+    assert!(
+        report.audit_events.created > 0,
+        "the audit events are restored"
+    );
+    assert_eq!(report.audit_events.errored, 0, "no audit event fails");
+    let password = CleartextPassword::from_string("Sup3rS3cret!".to_string());
+    for i in [0, users / 2, users - 1] {
+        let user = target
+            .identity()
+            .get_user_by_email(realm, &format!("user-{i}@memory-bound.example"))
+            .expect("look up user")
+            .expect("the user is restored");
+        assert!(
+            target
+                .identity()
+                .verify_password(realm, user.id(), &password)
+                .expect("the user has its credential"),
+            "user {i} keeps its own password"
+        );
+    }
+    peak
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -179,5 +314,29 @@ async fn the_heap_of_a_backup_does_not_grow_with_the_number_of_users() {
         large_peak <= EXPORT_BUDGET_BYTES,
         "the export of {LARGE} users held {large_peak} bytes of heap at its peak \
          (budget {EXPORT_BUDGET_BYTES})"
+    );
+}
+
+#[tokio::test]
+async fn the_heap_of_a_restore_does_not_grow_with_the_number_of_users() {
+    let source = common::TestHarness::in_process().await.expect("harness");
+    let small = realm_with_users(&source, SMALL);
+    let large = realm_with_users(&source, LARGE);
+    let small_archive = export_for_restore(&source, &small);
+    let large_archive = export_for_restore(&source, &large);
+
+    let small_peak = restore_peak(&small_archive, &small, SMALL).await;
+    let large_peak = restore_peak(&large_archive, &large, LARGE).await;
+
+    assert!(
+        large_peak - small_peak <= RESTORE_GROWTH_BUDGET_BYTES,
+        "the restore of {LARGE} users held {large_peak} bytes of heap at its peak and the \
+         restore of {SMALL} users {small_peak} bytes: the heap grows with the users \
+         (budget for the difference {RESTORE_GROWTH_BUDGET_BYTES})"
+    );
+    assert!(
+        large_peak <= RESTORE_BUDGET_BYTES,
+        "the restore of {LARGE} users held {large_peak} bytes of heap at its peak \
+         (budget {RESTORE_BUDGET_BYTES})"
     );
 }

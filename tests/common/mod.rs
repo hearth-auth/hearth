@@ -117,10 +117,20 @@ impl fmt::Debug for TestHarness {
 
 impl TestHarness {
     /// Creates a test harness in in-process mode.
-    #[allow(clippy::unused_async)]
     pub async fn in_process() -> Result<Self, TestHarnessError> {
+        Self::in_process_with_storage(|_| {}).await
+    }
+
+    /// Creates a test harness in in-process mode whose storage configuration
+    /// `configure` adjusts first: for a test that needs the store's own
+    /// buffers and caches small (#867).
+    #[allow(clippy::unused_async)]
+    pub async fn in_process_with_storage(
+        configure: impl FnOnce(&mut StorageConfig),
+    ) -> Result<Self, TestHarnessError> {
         let temp_dir = tempfile::tempdir().map_err(hearth::storage::StorageError::Io)?;
-        let config = StorageConfig::dev(temp_dir.path().to_path_buf());
+        let mut config = StorageConfig::dev(temp_dir.path().to_path_buf());
+        configure(&mut config);
         let engine = Arc::new(EmbeddedStorageEngine::open(config)?);
         let clock = Arc::new(SystemClock) as Arc<dyn Clock>;
         let rbac_engine = Arc::new(EmbeddedRbacEngine::new(

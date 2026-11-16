@@ -227,10 +227,11 @@ async fn test_destructive_delete_fails_when_audit_down() {
                 reason: "simulated".to_string(),
             })
         }
-        fn import_events(
+        fn import_event_stream(
             &self,
             _realm_id: &hearth::core::RealmId,
-            _events: &[hearth::audit::AuditEvent],
+            _plan: &hearth::audit::AuditImportPlan,
+            _events: &mut dyn Iterator<Item = hearth::audit::AuditEvent>,
         ) -> Result<hearth::audit::AuditImportOutcome, hearth::audit::AuditError> {
             Err(hearth::audit::AuditError::IntegrityViolation {
                 reason: "simulated".to_string(),

@@ -17,6 +17,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   merges, so each batch was slower than the batch before it. A merge now continues from the last
   entry that the previous merge applied. In a test with 50,000 users with random names, the time
   to apply the whole outbox went down by 38 %.
+- **A restore no longer holds the realm in memory** (#867): `POST /admin/backup/restore` and
+  `hearth backup restore` read every member of a realm into memory, decrypted each member whole
+  and collected the password hashes and the audit events of the realm. The heap of a restore
+  grew by about 3.4 KiB for each user, so a server with less free memory than the realm data
+  could stop with an out-of-memory error during a restore. The restore now reads the archive as
+  a stream: one decrypted chunk of 64 KiB, one record and one chunk of 512 audit events at a
+  time. Its extra memory no longer grows with the archive. A restore into a realm that already
+  holds data also keeps the ids of the realm's audit events and one report entry per conflict.
+  The restore reads the archive twice: the first pass checks every member and parses every
+  record, and only the second pass writes. A member that does not decrypt, a malformed record
+  line, an unknown member or a member that is in the archive twice now stops the restore before
+  anything is written, wherever it is in the archive.
+
+### Changed
+- **Backup archive format version 4** (#867): the password hash of a user is now on the user's
+  line of `users.ndjson`; there is no `credentials.ndjson` member. The members are written in
+  the order a restore imports them. A restore refuses archives of format version 3 or lower
+  (written by 4.12.1 and earlier) with `unsupported archive format version`. Take a new backup
+  after the upgrade.
 
 ## [4.12.1] — 2026-11-15
 

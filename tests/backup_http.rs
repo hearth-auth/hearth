@@ -644,9 +644,6 @@ fn make_test_archive(harness: &common::TestHarness, realm_id: &RealmId) -> Vec<u
         .add_file(&format!("realms/{realm_slug}/users.ndjson"), b"")
         .expect("add users");
     writer
-        .add_file(&format!("realms/{realm_slug}/credentials.ndjson"), b"")
-        .expect("add credentials");
-    writer
         .add_file(&format!("realms/{realm_slug}/clients.ndjson"), b"")
         .expect("add clients");
 

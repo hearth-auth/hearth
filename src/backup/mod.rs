@@ -6,21 +6,22 @@
 //! zstd-compressed tar containing:
 //!
 //! ```text
-//! manifest.json
 //! realms/<realm-slug>/realm.json
-//! realms/<realm-slug>/users.ndjson
-//! realms/<realm-slug>/credentials.ndjson
+//! realms/<realm-slug>/signing_key.json   (AES-256-GCM encrypted)
+//! realms/<realm-slug>/id_token_signing_key.json           (RS256 ID-token key; encrypted)
+//! realms/<realm-slug>/audit_chain.json   (optional, with audit.ndjson)
+//! realms/<realm-slug>/audit.ndjson       (optional)
+//! realms/<realm-slug>/users.ndjson       (each user with its password credential)
 //! realms/<realm-slug>/mfa_factors.ndjson
 //! realms/<realm-slug>/clients.ndjson
-//! realms/<realm-slug>/roles.ndjson
 //! realms/<realm-slug>/permissions.ndjson
+//! realms/<realm-slug>/roles.ndjson
 //! realms/<realm-slug>/groups.ndjson
-//! realms/<realm-slug>/group_memberships.ndjson
-//! realms/<realm-slug>/assignments.ndjson
 //! realms/<realm-slug>/organizations.ndjson
+//! realms/<realm-slug>/assignments.ndjson
+//! realms/<realm-slug>/group_memberships.ndjson
 //! realms/<realm-slug>/organization_memberships.ndjson
 //! realms/<realm-slug>/consents.ndjson
-//! realms/<realm-slug>/scopes.ndjson
 //! realms/<realm-slug>/agents.ndjson
 //! realms/<realm-slug>/identity_providers.ndjson
 //! realms/<realm-slug>/federation_links.ndjson
@@ -30,12 +31,13 @@
 //! realms/<realm-slug>/invitations.ndjson
 //! realms/<realm-slug>/revocations.ndjson   (revoked JTIs, blocked DPoP keys, revoked AAT JTIs, RA generations, spent RA markers)
 //! realms/<realm-slug>/retiring_signing_keys.json (AES-256-GCM encrypted)
-//! realms/<realm-slug>/signing_key.json   (AES-256-GCM encrypted)
-//! realms/<realm-slug>/id_token_signing_key.json           (RS256 ID-token key; encrypted)
 //! realms/<realm-slug>/retiring_id_token_signing_keys.json (encrypted)
-//! realms/<realm-slug>/audit.ndjson       (optional)
-//! realms/<realm-slug>/audit_chain.json   (optional, with audit.ndjson)
+//! realms/<realm-slug>/scopes.ndjson
+//! manifest.json
 //! ```
+//!
+//! The members of a realm come in the order a restore imports them (#867),
+//! so that a restore reads the archive in one pass after its check pass.
 //!
 //! Empty sections are omitted, so an absent member means "none of these
 //! existed".
@@ -378,6 +380,11 @@ impl ArchiveWriter {
     }
 }
 
+/// The visitor of [`ArchiveReader::visit_realm_members`] and
+/// [`ArchiveReader::visit_members_in_order`]: it gets the archive path of a
+/// member and a stream of the member's raw bytes.
+pub type MemberVisitor<'a> = dyn FnMut(&str, &mut dyn Read) -> Result<(), BackupError> + 'a;
+
 /// Reader for an existing `.hearth-backup` archive.
 ///
 /// Obtained via [`BackupArchive::open`], [`BackupArchive::open_private_copy`]
@@ -454,8 +461,10 @@ impl ArchiveReader {
     /// Reads all files for a realm in a single archive pass.
     ///
     /// Returns a map from archive-relative path to raw bytes for every entry
-    /// under `realms/<slug>/`. More efficient than calling [`read_file`](Self::read_file)
-    /// multiple times when restoring a full realm.
+    /// under `realms/<slug>/`. The map holds the whole realm, so it is for
+    /// tests and tools that inspect small archives: a restore streams the
+    /// members with [`visit_realm_members`](Self::visit_realm_members) and
+    /// [`visit_members_in_order`](Self::visit_members_in_order) (#867).
     pub fn read_all_realm_files(
         &self,
         slug: &str,
@@ -474,6 +483,77 @@ impl ArchiveReader {
             }
         }
         Ok(out)
+    }
+
+    /// Calls `visit` with the path and the raw bytes of every member under
+    /// `realms/<slug>/`, in archive order, in one pass over the archive.
+    ///
+    /// `visit` reads the member as a stream: nothing is held in memory but
+    /// the decompression buffers. A member that `visit` does not read to its
+    /// end is skipped.
+    ///
+    /// # Errors
+    ///
+    /// The first error of `visit`, or of reading the archive.
+    pub fn visit_realm_members(
+        &self,
+        slug: &str,
+        visit: &mut MemberVisitor<'_>,
+    ) -> Result<(), BackupError> {
+        let prefix = format!("realms/{slug}/");
+        let decoder = zstd::Decoder::new(self.source.reader()?)?;
+        let mut archive = tar::Archive::new(decoder);
+        for entry in archive.entries()? {
+            let mut entry = entry?;
+            let entry_path = entry.path()?.to_string_lossy().into_owned();
+            if entry_path.starts_with(&prefix) {
+                visit(&entry_path, &mut entry)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Calls `visit` with the raw bytes of each member in `paths`, in the
+    /// order of `paths`, as streams (#867).
+    ///
+    /// One pass over the archive visits the members that come in the archive
+    /// in the order of `paths`; a member that comes before the one visited
+    /// last starts a new pass. An archive written in the order of `paths`
+    /// is read once. Each path must be in the archive once.
+    ///
+    /// # Errors
+    ///
+    /// The first error of `visit` or of reading the archive, and
+    /// [`BackupError::MissingMembers`] when a pass from the start of the
+    /// archive does not find the next path.
+    pub fn visit_members_in_order(
+        &self,
+        paths: &[String],
+        visit: &mut MemberVisitor<'_>,
+    ) -> Result<(), BackupError> {
+        let mut next = 0;
+        while next < paths.len() {
+            let start = next;
+            let decoder = zstd::Decoder::new(self.source.reader()?)?;
+            let mut archive = tar::Archive::new(decoder);
+            for entry in archive.entries()? {
+                let mut entry = entry?;
+                if entry.path()?.to_string_lossy() == paths[next].as_str() {
+                    visit(&paths[next], &mut entry)?;
+                    next += 1;
+                    if next == paths.len() {
+                        break;
+                    }
+                }
+            }
+            if next == start {
+                return Err(BackupError::MissingMembers {
+                    count: 1,
+                    paths: paths[next].clone(),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Reads every non-manifest entry from the archive, validates its SHA-256

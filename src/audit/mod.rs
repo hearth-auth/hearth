@@ -21,7 +21,7 @@ pub(crate) mod keys;
 mod types;
 
 pub use context::{Actor, AuditContext};
-pub use engine::{first_broken_link, EmbeddedAuditEngine};
+pub use engine::{first_broken_link, ChainVerifier, EmbeddedAuditEngine};
 pub use error::AuditError;
 pub use types::{
     AuditAction, AuditEvent, AuditFailurePolicy, AuditQuery, AuditRetentionConfig, CreateAuditEvent,
@@ -98,6 +98,55 @@ pub struct AuditImportOutcome {
     pub restamped: bool,
 }
 
+/// What an audit import must know about the whole run of archived events
+/// before it writes the first one, so that it can take the events one at a
+/// time (#867).
+///
+/// Events keep their original timestamps only when the whole run is in
+/// ascending time and none is in the future. A restore learns this when it
+/// checks the archive's chain, before it imports: [`observe`](Self::observe)
+/// each event in order, then pass the plan to
+/// [`AuditEngine::import_event_stream`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AuditImportPlan {
+    /// The timestamp of the last event observed.
+    last: Option<Timestamp>,
+    /// The newest timestamp observed.
+    newest: Option<Timestamp>,
+    /// An event was older than the one before it.
+    descending: bool,
+}
+
+impl AuditImportPlan {
+    /// The plan for the run `events`.
+    pub fn of(events: &[AuditEvent]) -> Self {
+        let mut plan = Self::default();
+        for event in events {
+            plan.observe(event);
+        }
+        plan
+    }
+
+    /// Adds `event`, the next event of the run.
+    pub fn observe(&mut self, event: &AuditEvent) {
+        if self.last.is_some_and(|last| event.timestamp < last) {
+            self.descending = true;
+        }
+        self.last = Some(event.timestamp);
+        self.newest = self.newest.max(Some(event.timestamp));
+    }
+
+    /// Whether the events observed are in ascending time.
+    pub fn ascending(&self) -> bool {
+        !self.descending
+    }
+
+    /// The newest timestamp observed, `None` for an empty run.
+    pub fn newest(&self) -> Option<Timestamp> {
+        self.newest
+    }
+}
+
 pub trait AuditEngine: Send + Sync {
     /// A read-only copy of this engine that reads `storage`, a storage
     /// snapshot, or `None` if this engine cannot make one (#643). A backup
@@ -144,10 +193,37 @@ pub trait AuditEngine: Send + Sync {
     /// per chunk (never across a chunk's fsync or the whole import), so live
     /// audit writes to the realm wait at most for one chunk. A chunk that fails
     /// leaves the chunks before it durable, chained and anchored.
+    ///
+    /// The slice form of [`import_event_stream`](Self::import_event_stream).
     fn import_events(
         &self,
         realm_id: &RealmId,
         events: &[AuditEvent],
+    ) -> Result<AuditImportOutcome, AuditError> {
+        self.import_event_stream(
+            realm_id,
+            &AuditImportPlan::of(events),
+            &mut events.iter().cloned(),
+        )
+    }
+
+    /// [`import_events`](Self::import_events) for a run of events that the
+    /// caller passes one at a time, so that an import does not hold the run
+    /// in memory (#867).
+    ///
+    /// `plan` describes the whole run of `events` (see [`AuditImportPlan`]).
+    /// If the run does not match it — an event older than the one before it,
+    /// or one in the future, where the plan said there is none — the
+    /// remaining events are stamped no earlier than every event written
+    /// before them, so storage order stays chain order.
+    ///
+    /// The duplicate check is against the events the realm holds when the
+    /// import starts.
+    fn import_event_stream(
+        &self,
+        realm_id: &RealmId,
+        plan: &AuditImportPlan,
+        events: &mut dyn Iterator<Item = AuditEvent>,
     ) -> Result<AuditImportOutcome, AuditError>;
 
     /// Returns the material a restore needs to verify an exported chain.

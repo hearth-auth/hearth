@@ -163,15 +163,16 @@ impl crate::audit::AuditEngine for NotifyingAuditEngine {
         self.inner.forget_realm(realm_id);
     }
 
-    fn import_events(
+    fn import_event_stream(
         &self,
         realm_id: &crate::core::RealmId,
-        events: &[crate::audit::AuditEvent],
+        plan: &crate::audit::AuditImportPlan,
+        events: &mut dyn Iterator<Item = crate::audit::AuditEvent>,
     ) -> Result<crate::audit::AuditImportOutcome, crate::audit::AuditError> {
         // Restore path: re-chain the events through the inner engine. No
         // webhook broadcast — restore is an operator recovery action, not a
         // live event.
-        self.inner.import_events(realm_id, events)
+        self.inner.import_event_stream(realm_id, plan, events)
     }
 
     fn query(

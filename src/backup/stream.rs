@@ -39,7 +39,7 @@
 //! The last chunk holds 0 to [`CHUNK_LEN`] bytes, so an empty member is one
 //! empty last chunk.
 
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, Read, Write};
 
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
 use ring::rand::{SecureRandom, SystemRandom};
@@ -192,6 +192,8 @@ pub struct DecryptReader<R: Read> {
     pos: usize,
     /// The last chunk was read and checked.
     done: bool,
+    /// A chunk was refused: every later read is an error.
+    failed: bool,
 }
 
 impl<R: Read> DecryptReader<R> {
@@ -226,6 +228,7 @@ impl<R: Read> DecryptReader<R> {
             buf: Zeroizing::new(Vec::with_capacity(CHUNK_LEN + TAG_LEN)),
             pos: 0,
             done: false,
+            failed: false,
         })
     }
 
@@ -326,17 +329,49 @@ impl<R: Read> DecryptReader<R> {
 
 impl<R: Read> Read for DecryptReader<R> {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
-        while self.pos == self.buf.len() {
-            if self.done {
-                return Ok(0);
-            }
-            self.next_chunk()
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-        }
-        let n = out.len().min(self.buf.len() - self.pos);
-        out[..n].copy_from_slice(&self.buf[self.pos..self.pos + n]);
-        self.pos += n;
+        let available = self.fill_buf()?;
+        let n = out.len().min(available.len());
+        out[..n].copy_from_slice(&available[..n]);
+        self.consume(n);
         Ok(n)
+    }
+}
+
+/// Reads lines straight from the chunk buffer, which is zeroed after each
+/// chunk: a `BufReader` around the reader would keep a copy of the plaintext
+/// in a buffer that is not zeroed.
+impl<R: Read> BufRead for DecryptReader<R> {
+    /// The error of a refused chunk is an [`io::ErrorKind::InvalidData`]
+    /// error that carries the [`BackupError`]; [`BackupError::from_read`]
+    /// takes it back out.
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        while self.pos == self.buf.len() {
+            if self.failed {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    BackupError::Crypto(format!(
+                        "member {} was refused at an earlier chunk",
+                        self.path()
+                    )),
+                ));
+            }
+            if self.done {
+                return Ok(&[]);
+            }
+            if let Err(e) = self.next_chunk() {
+                // Drop the refused chunk: no byte of it is returned later.
+                self.failed = true;
+                self.buf.zeroize();
+                self.buf.clear();
+                self.pos = 0;
+                return Err(io::Error::new(io::ErrorKind::InvalidData, e));
+            }
+        }
+        Ok(&self.buf[self.pos..])
+    }
+
+    fn consume(&mut self, amt: usize) {
+        self.pos = (self.pos + amt).min(self.buf.len());
     }
 }
 
@@ -485,6 +520,19 @@ mod tests {
     }
 
     #[test]
+    fn lines_are_read_from_the_chunk_buffer() {
+        let dek = dek();
+        // Lines that cross chunk boundaries.
+        let lines: Vec<String> = (0..20_000).map(|i| format!("{{\"n\":{i}}}")).collect();
+        let plain = lines.join("\n") + "\n";
+        assert!(plain.len() > 2 * CHUNK_LEN, "the member has several chunks");
+        let member = encrypt_member(PATH, plain.as_bytes(), &dek).expect("encrypt");
+        let reader = DecryptReader::new(member.as_slice(), &dek, PATH).expect("reader");
+        let back: Vec<String> = reader.lines().map(|l| l.expect("line")).collect();
+        assert_eq!(back, lines);
+    }
+
+    #[test]
     fn the_writer_holds_one_chunk_at_a_time() {
         let dek = dek();
         let mut writer = EncryptWriter::new(Vec::new(), &dek, PATH).expect("writer");
@@ -520,11 +568,14 @@ mod tests {
         let err = decrypt_member(PATH, &cut, &dek).expect_err("truncated member");
         assert!(crypto_message(&err).contains("ends before"), "got: {err}");
 
-        // The streaming reader refuses it too, after the authentic chunks.
+        // The streaming reader refuses it too, after the authentic chunks,
+        // and the error still says why.
         let mut reader = DecryptReader::new(cut.as_slice(), &dek, PATH).expect("reader");
         let mut sink = Vec::new();
         let err = reader.read_to_end(&mut sink).expect_err("truncated member");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let err = BackupError::from_read(err);
+        assert!(crypto_message(&err).contains("ends before"), "got: {err}");
     }
 
     #[test]
@@ -576,6 +627,27 @@ mod tests {
         let at = chunk_ranges(&member)[1].start + FRAME_LEN + 3;
         member[at] ^= 0x01;
         decrypt_member(PATH, &member, &dek).expect_err("changed byte");
+    }
+
+    /// After a refused chunk, every later read is an error too: it returns
+    /// no bytes of the refused chunk and does not panic.
+    #[test]
+    fn a_read_after_a_refused_chunk_is_an_error() {
+        let dek = dek();
+        let mut member = encrypt_member(PATH, &plaintext(CHUNK_LEN + 9), &dek).expect("encrypt");
+        let at = chunk_ranges(&member)[1].start + FRAME_LEN + 3;
+        member[at] ^= 0x01;
+        let mut reader = DecryptReader::new(member.as_slice(), &dek, PATH).expect("header");
+
+        assert_eq!(reader.fill_buf().expect("first chunk").len(), CHUNK_LEN);
+        reader.consume(CHUNK_LEN);
+        reader.fill_buf().expect_err("the changed chunk is refused");
+        for _ in 0..2 {
+            assert!(
+                reader.fill_buf().is_err(),
+                "a read after a refused chunk must be an error"
+            );
+        }
     }
 
     #[test]
