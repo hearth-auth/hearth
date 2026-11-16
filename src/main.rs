@@ -1209,16 +1209,57 @@ fn dev_mode_bind_check(dev: bool, http_bind: &str) -> DevBindCheck {
     }
 }
 
-/// Logged at ERROR on every `--dev` start.
-///
-/// Item (3) used to say the setup token was "printed (truncated)"; dev mode in
-/// fact logs the full setup URL, token included (GA audit 2026-09-28 L6).
 /// The time between two runs of the search index merger (#644).
 const SEARCH_MERGE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The maximum number of outbox entries that one search index merge applies.
 const SEARCH_MERGE_BATCH: usize = 1_024;
 
+/// One run of the search index merger: applies the outbox backlog of each
+/// realm in `realms`, `batch` entries per `merge` call, and returns the
+/// number of entries applied.
+///
+/// `stop` is asked before each batch. When it returns `true` (a shutdown
+/// started), the run ends after the batch in progress (#865). The run is a
+/// blocking task, and the runtime waits for each running blocking task
+/// before the process exits: a run through the backlog of a large import
+/// held a clean stop for minutes, and its writes came after the memtable
+/// flush of the shutdown. The next run applies what this one left.
+///
+/// A failed `merge` is logged, and the run moves to the next realm.
+fn merge_search_backlog<E: std::fmt::Display>(
+    realms: &[hearth::core::RealmId],
+    batch: usize,
+    stop: &dyn Fn() -> bool,
+    mut merge: impl FnMut(&hearth::core::RealmId, usize) -> Result<usize, E>,
+) -> usize {
+    let mut applied = 0usize;
+    for realm in realms {
+        loop {
+            if stop() {
+                return applied;
+            }
+            match merge(realm, batch) {
+                Ok(n) => {
+                    applied += n;
+                    if n < batch {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "search_merge: merge failed, retrying next tick");
+                    break;
+                }
+            }
+        }
+    }
+    applied
+}
+
+/// Logged at ERROR on every `--dev` start.
+///
+/// Item (3) used to say the setup token was "printed (truncated)"; dev mode in
+/// fact logs the full setup URL, token included (GA audit 2026-09-28 L6).
 const DEV_MODE_BANNER: &str = "DEV MODE ACTIVE — security reductions in effect: \
      (1) Argon2 parameters weakened to fast_for_testing (256 KiB / 1 iter); \
      (2) CSRF cookie enforcement bypassed on pre-auth forms; \
@@ -2437,12 +2478,17 @@ async fn run_serve(
     // on a node that does not take writes.
     {
         let merge_engine = Arc::clone(&identity_engine);
+        let merge_shutdown = shutdown_signal_rx.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(SEARCH_MERGE_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 interval.tick().await;
+                if merge_shutdown.borrow().is_some() {
+                    break;
+                }
                 let engine = Arc::clone(&merge_engine);
+                let shutdown = merge_shutdown.clone();
                 let joined = tokio::task::spawn_blocking(move || {
                     let mut realms = vec![hearth::core::RealmId::new(uuid::Uuid::nil())];
                     let batch = hearth::core::MAX_PAGE_LIMIT;
@@ -2464,24 +2510,12 @@ async fn run_serve(
                         }
                         offset += n;
                     }
-                    let mut applied = 0usize;
-                    for realm in &realms {
-                        loop {
-                            match engine.merge_search_index(realm, SEARCH_MERGE_BATCH) {
-                                Ok(n) => {
-                                    applied += n;
-                                    if n < SEARCH_MERGE_BATCH {
-                                        break;
-                                    }
-                                }
-                                Err(e) => {
-                                    warn!(error = %e, "search_merge: merge failed, retrying next tick");
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    applied
+                    merge_search_backlog(
+                        &realms,
+                        SEARCH_MERGE_BATCH,
+                        &|| shutdown.borrow().is_some(),
+                        |realm, batch| engine.merge_search_index(realm, batch),
+                    )
                 })
                 .await;
                 match joined {
@@ -6629,6 +6663,76 @@ fn print_migration_report(report: &hearth::identity::MigrationReport) {
 
 #[cfg(test)]
 mod tests {
+    /// #865: one run of the search index merger.
+    mod search_merge_run {
+        use super::super::merge_search_backlog;
+        use hearth::core::RealmId;
+        use std::cell::Cell;
+
+        const BATCH: usize = 4;
+
+        fn realms(n: u128) -> Vec<RealmId> {
+            (1..=n)
+                .map(|i| RealmId::new(uuid::Uuid::from_u128(i)))
+                .collect()
+        }
+
+        #[test]
+        fn a_run_applies_the_whole_backlog_of_every_realm() {
+            // Realm 1 holds 9 entries, realm 2 holds 3.
+            let left = std::cell::RefCell::new(vec![9usize, 3]);
+            let all = realms(2);
+            let applied = merge_search_backlog(
+                &all,
+                BATCH,
+                &|| false,
+                |realm, batch| -> Result<usize, String> {
+                    let k = usize::from(realm != &all[0]);
+                    let mut left = left.borrow_mut();
+                    let n = left[k].min(batch);
+                    left[k] -= n;
+                    Ok(n)
+                },
+            );
+            assert_eq!(applied, 12);
+            assert_eq!(*left.borrow(), vec![0, 0]);
+        }
+
+        #[test]
+        fn a_shutdown_stops_the_run_after_the_batch_in_progress() {
+            // An import left a backlog much larger than one batch. The stop
+            // comes during the third batch: the run ends after that batch and
+            // does not start the next realm.
+            let calls = Cell::new(0usize);
+            let applied = merge_search_backlog(
+                &realms(2),
+                BATCH,
+                &|| calls.get() >= 3,
+                |_, batch| -> Result<usize, String> {
+                    calls.set(calls.get() + 1);
+                    Ok(batch)
+                },
+            );
+            assert_eq!(calls.get(), 3);
+            assert_eq!(applied, 3 * BATCH);
+        }
+
+        #[test]
+        fn a_failed_merge_moves_to_the_next_realm() {
+            let calls = Cell::new(0usize);
+            let applied = merge_search_backlog(&realms(2), BATCH, &|| false, |realm, _| {
+                calls.set(calls.get() + 1);
+                if realm.as_uuid().as_u128() == 1 {
+                    Err("storage error".to_string())
+                } else {
+                    Ok(2)
+                }
+            });
+            assert_eq!(calls.get(), 2);
+            assert_eq!(applied, 2);
+        }
+    }
+
     /// #649: `HEARTH_PREVIOUS_KEK` parsing.
     mod previous_kek {
         use super::super::parse_previous_kek;
