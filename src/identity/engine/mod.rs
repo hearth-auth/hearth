@@ -1018,8 +1018,9 @@ pub struct EmbeddedIdentityEngine {
     org_write_lock: Mutex<()>,
     /// Serializes the merges of the trigram search index (#644): the merger
     /// assigns docids from a stored counter, so two merges must not run at
-    /// once.
-    search_merge_lock: Mutex<()>,
+    /// once. The guarded map holds the outbox cursor of each realm: the last
+    /// outbox key that a merge applied (#870).
+    search_merge_lock: Mutex<std::collections::HashMap<RealmId, Vec<u8>>>,
     /// HIBP k-anonymity breach-check client.
     ///
     /// Shared across all password-set/-change operations. Uses an injectable
@@ -1742,7 +1743,7 @@ impl EmbeddedIdentityEngine {
             realm_ops_lock: Mutex::new(()),
             // INVARIANT: guard held for entire sync org write op; released when method returns.
             org_write_lock: Mutex::new(()),
-            search_merge_lock: Mutex::new(()),
+            search_merge_lock: Mutex::new(std::collections::HashMap::new()),
             hibp: Arc::new(crate::identity::hibp::HibpClient::new()),
             pre_token_client: Arc::new(
                 crate::identity::pre_token_webhook::PreTokenWebhookClient::new(),
@@ -2213,7 +2214,7 @@ impl EmbeddedIdentityEngine {
             realm_ops_lock: Mutex::new(()),
             // INVARIANT: guard held for entire sync org write op; released when method returns.
             org_write_lock: Mutex::new(()),
-            search_merge_lock: Mutex::new(()),
+            search_merge_lock: Mutex::new(std::collections::HashMap::new()),
             hibp: Arc::new(crate::identity::hibp::HibpClient::new()),
             pre_token_client: Arc::new(
                 crate::identity::pre_token_webhook::PreTokenWebhookClient::new(),
