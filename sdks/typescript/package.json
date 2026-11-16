@@ -60,7 +60,7 @@
     "eslint": "^10.14.0",
     "jsdom": "^25.0.0",
     "openapi-typescript": "7.13.0",
-    "prettier": "3.9.10",
+    "prettier": "3.10.1",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
     "tsx": "4.23.15",
