@@ -176,6 +176,11 @@ Releases are automatic. Do not tag by hand.
 - It first waits for `main`'s CI on the head commit of `main` (`required-summary`). If CI failed for an
   infrastructure reason (a rate limit, no runner), re-run the failed jobs with
   `gh run rerun <id> --failed`, then re-run the release.
+- A merge by a bot (Dependabot auto-merge merges as `github-actions[bot]`) starts no workflow on
+  `main`. When such a merge is the head of `main`, the release finds no `required-summary` and
+  stops after 120 minutes with `No verdict from 'required-summary' within 7200s`. `ci.yml` has no
+  `workflow_dispatch`. Merge a PR with a user token (that push starts main CI), let CI pass, then
+  re-run the release.
 - The `v*` tag triggers `release.yml` (signed binaries, SBOM, provenance), `docker.yml` and
   `helm.yml`. The SDK tags (`sdk-ts-v*`, `sdks/go/v*`, `sdk-python-v*`, `sdk-php-v*`) trigger
   their publish workflows.
