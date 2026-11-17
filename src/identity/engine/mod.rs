@@ -5141,9 +5141,8 @@ impl EmbeddedIdentityEngine {
                     evicted += 1;
                 }
             }
-            if live_keys.len() < crate::core::MAX_PAGE_LIMIT as usize {
-                break;
-            }
+            // As in `bulk_revoke_sessions`: the walk ends on the first empty
+            // page, so no early-exit compare is left for an equivalent mutant.
         }
         Ok(evicted)
     }
@@ -6124,9 +6123,10 @@ impl EmbeddedIdentityEngine {
                 // get_session calls observe the revocation.
                 self.session_cache_invalidate(realm_id, &session_id);
             }
-            if live_keys.len() < crate::core::MAX_PAGE_LIMIT as usize {
-                return;
-            }
+            // The walk ends on the first empty page, one index read after
+            // the last session. A test of `len() < limit` here only saved
+            // that read; its `>` mutant was equivalent and no test could
+            // catch it (#641).
         }
     }
 
@@ -23255,6 +23255,41 @@ mod tests {
         assert_eq!(left.total, 0, "no policy-expired session may stay live");
     }
 
+    /// A suspend revokes every live session of the realm, also past the
+    /// first page of the live-session index.
+    #[test]
+    fn suspend_revokes_every_session_past_the_first_page() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm_id);
+        let count = 2 * u64::from(crate::core::MAX_PAGE_LIMIT) + 1;
+        for _ in 0..count {
+            engine
+                .create_session(&realm_id, user.id(), &SessionContext::default())
+                .expect("create session");
+        }
+        let before = engine
+            .list_sessions_by_realm(&realm_id, &crate::core::PageRequest::new(0, 1))
+            .expect("list");
+        assert_eq!(before.total, count, "every session starts live");
+
+        engine
+            .update_realm(
+                &realm_id,
+                &UpdateRealmRequest {
+                    status: Some(RealmStatus::Suspended),
+                    name: None,
+                    config: None,
+                },
+            )
+            .expect("suspend");
+
+        let left = engine
+            .list_sessions_by_realm(&realm_id, &crate::core::PageRequest::new(0, 1))
+            .expect("list");
+        assert_eq!(left.total, 0, "a suspend must revoke every live session");
+    }
+
     /// The sweep evicts only the policy-expired sessions, also when live
     /// sessions sit between them on every page.
     #[test]
@@ -23773,6 +23808,90 @@ mod tests {
         assert!(
             matches!(result2, Err(IdentityError::InvalidAuthorizationCode)),
             "second exchange must fail, got: {result2:?}"
+        );
+    }
+
+    /// A second use of a code ends the grant of the first exchange (#783,
+    /// RFC 9700 §4.5): the access token of the first exchange no longer
+    /// validates. The exchange records its session in the spent code row, so
+    /// the second use can find it.
+    #[test]
+    fn a_reused_code_ends_the_grant_of_the_first_exchange() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let client = register_test_client(&engine, &realm);
+        let user = create_test_user(&engine, &realm);
+        let code = engine
+            .authorize(
+                &realm,
+                &AuthorizationRequest {
+                    organization: None,
+                    client_id: client.client_id().clone(),
+                    redirect_uri: "https://app.example.com/callback".to_string(),
+                    scope: "openid".to_string(),
+                    state: "state-reuse".to_string(),
+                    response_type: "code".to_string(),
+                    user_id: user.id().clone(),
+                    code_challenge: Some(pkce_challenge(TEST_PKCE_VERIFIER)),
+                    code_challenge_method: Some(CodeChallengeMethod::S256),
+                    nonce: None,
+                    resource: None,
+                    amr_values: Vec::new(),
+                    response_mode: None,
+                    request: None,
+                },
+            )
+            .expect("authorize")
+            .code()
+            .to_string();
+        let exchange = TokenExchangeRequest {
+            client_id: client.client_id().clone(),
+            code,
+            redirect_uri: "https://app.example.com/callback".to_string(),
+            code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+            dpop_jkt: None,
+            client_assertion_type: None,
+            client_assertion: None,
+            resource: None,
+        };
+        let first = engine
+            .exchange_authorization_code(&realm, &exchange)
+            .expect("first exchange");
+        engine
+            .validate_token(&realm, first.access_token())
+            .expect("the first access token validates before the reuse");
+
+        let second = engine.exchange_authorization_code(&realm, &exchange);
+        assert!(
+            matches!(second, Err(IdentityError::InvalidAuthorizationCode)),
+            "second exchange must fail, got: {second:?}"
+        );
+        assert!(
+            engine.validate_token(&realm, first.access_token()).is_err(),
+            "the reuse must end the grant of the first exchange"
+        );
+    }
+
+    /// A public client cannot drop the PKCE requirement (#780): only a
+    /// confidential client may register with `require_pkce: false`.
+    #[test]
+    fn a_public_client_cannot_register_without_pkce() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let result = engine.register_client(
+            &realm,
+            &RegisterClientRequest {
+                client_name: "Public App".to_string(),
+                redirect_uris: vec!["https://app.example.com/callback".to_string()],
+                client_secret: None,
+                grant_types: vec!["authorization_code".to_string()],
+                require_pkce: false,
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(result, Err(IdentityError::InvalidInput { .. })),
+            "a public client with require_pkce: false must be refused, got: {result:?}"
         );
     }
 

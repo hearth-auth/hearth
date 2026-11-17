@@ -2472,6 +2472,108 @@ mod tests {
         Permission::new(s).expect("valid perm")
     }
 
+    /// The backup export walks every role assignment of the realm (#866).
+    #[test]
+    fn visit_all_assignments_visits_every_assignment() {
+        let (engine, realm) = mk_engine();
+        let role = mk_role(&engine, &realm, "reader", "docs.read");
+        let users = [UserId::generate(), UserId::generate()];
+        for user in &users {
+            engine
+                .assign_role(
+                    &realm,
+                    &AssignRoleRequest {
+                        subject: Subject::User(user.clone()),
+                        role_id: role.clone(),
+                        scope: Scope::Realm,
+                        assigned_by: None,
+                    },
+                )
+                .expect("assign");
+        }
+
+        let mut seen = Vec::new();
+        engine
+            .visit_all_assignments(&realm, &mut |assignment| {
+                seen.push(assignment);
+                std::ops::ControlFlow::Continue(())
+            })
+            .expect("visit");
+
+        assert_eq!(seen.len(), users.len(), "one visit per assignment");
+        for user in &users {
+            assert!(
+                seen.iter()
+                    .any(|a| a.subject == Subject::User(user.clone()) && a.role_id == role),
+                "the assignment of {user:?} must be visited"
+            );
+        }
+    }
+
+    /// The backup export walks every group membership of the realm (#866).
+    #[test]
+    fn export_all_group_memberships_visits_every_membership() {
+        let (engine, realm) = mk_engine();
+        let group = engine
+            .create_group(
+                &realm,
+                &CreateGroupRequest {
+                    name: "Staff".to_string(),
+                    slug: "staff".to_string(),
+                    description: None,
+                },
+            )
+            .expect("create group");
+        let members = [
+            GroupMember::User(UserId::generate()),
+            GroupMember::User(UserId::generate()),
+        ];
+        for member in &members {
+            engine
+                .add_group_member(&realm, &group.id, member)
+                .expect("add member");
+        }
+
+        let mut seen = Vec::new();
+        engine
+            .export_all_group_memberships(&realm, &mut |edge| {
+                seen.push(edge);
+                std::ops::ControlFlow::Continue(())
+            })
+            .expect("export");
+
+        assert_eq!(seen.len(), members.len(), "one visit per membership");
+        for member in &members {
+            assert!(
+                seen.iter()
+                    .any(|e| e.group_id == group.id && &e.member == member),
+                "the membership of {member:?} must be visited"
+            );
+        }
+    }
+
+    /// A read view reads the RBAC rows of the storage that it is given (the
+    /// follower-read path of a cluster node).
+    #[test]
+    fn a_read_view_reads_the_rows_of_its_storage() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let storage = Arc::new(
+            EmbeddedStorageEngine::open(StorageConfig::dev(tmp.path().to_path_buf()))
+                .expect("storage"),
+        ) as Arc<dyn StorageEngine>;
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1))) as Arc<dyn Clock>;
+        let engine = EmbeddedRbacEngine::new(Arc::clone(&storage), clock);
+        let realm = RealmId::generate();
+        let role = mk_role(&engine, &realm, "viewer", "docs.read");
+
+        let view = engine
+            .read_view(Arc::clone(&storage))
+            .expect("the RBAC engine has a read view");
+
+        let read = view.get_role(&realm, &role).expect("get role");
+        assert_eq!(read.map(|r| r.id), Some(role), "the view reads the role");
+    }
+
     #[test]
     fn a_missing_scope_row_reads_as_missing() {
         let (engine, realm) = mk_engine();
