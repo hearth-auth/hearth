@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.12.2] — 2026-11-17
+
 ### Fixed
 - **A clean stop no longer waits for the search index backlog** (#865): after a large import, the
   search index merger applied the whole outbox backlog in one run, and the process could not exit
