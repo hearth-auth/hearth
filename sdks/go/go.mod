@@ -7,7 +7,7 @@ go 1.26.3
 // advisories osv-scanner reports against 1.26.3 (GO-2026-4970, -5026, -5856,
 // -5942, -5972, -6088..6091, -6218) and against 1.26.6 (GO-2026-6599..6613,
 // -6617, -6809), without forcing importers to upgrade.
-toolchain go1.26.10
+toolchain go1.26.11
 
 require google.golang.org/protobuf v1.36.11
 
