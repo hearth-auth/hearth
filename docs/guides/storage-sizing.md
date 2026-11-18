@@ -195,11 +195,32 @@ The table below gives conservative RAM recommendations for operating a single
 Hearth node where the total on-disk dataset is approximately 10× physical RAM.
 "Active sessions" refers to sessions accessed at least once in the past hour.
 
+#### Measured: 1 M and 10 M users (v4.12.2, #647)
+
+These rows come from the AWS rounds of 2026-11-17
+([report](../perf/2026-11-17-aws-647-v4.12.2.md)): 2 vCPU servers, EBS gp3, one realm,
+HTTPS load from two separate hosts. The 1 M row is round B (10 realms of 100 K); the 10 M row
+is round C (one realm). The store was not 10× RAM in these runs.
+
+| Total users | Server (RAM) | Store on disk | Peak RSS in the load steps | Peak RSS at start | Hot-tier entries (used / auto capacity) | `GET /admin/users/{id}` p99 at 2,000/s |
+|---|---|---|---|---|---|---|
+| 1 M | c7i.large (3.7 GiB) | 1.7 GB | 2.6 GiB (69 %) | 2.7 GiB (72 %) | 113 K–160 K / not recorded | 0.9 ms (HTTPS, end to end) |
+| 10 M | r7i.large (15.3 GiB) | 15 GB | 9.0 GiB (58 %) | 14.7 GiB (96 %, #888) | 1.07 M / 12.4 M | 1.6 ms (HTTPS, end to end) |
+
+- **1 M users:** 4 GiB of RAM is enough.
+- **10 M users:** 16 GiB of RAM is enough for the load, but a start after `kill -9` takes up to
+  9 GB of heap and reaches 96 % of RAM (#888). Until #888 is fixed, give a 10 M node more than
+  16 GiB, or check the start on your own hardware.
+- RSS includes the file pages of the memory-mapped SSTs. The hot tier costs 258–281 bytes per
+  entry, by Hearth's own count (`hearth_storage_hot_tier_bytes`).
+- The p99 column is a full HTTPS request, not an engine read. The engine-level warm read was
+  not measured at these sizes.
+
+#### Extrapolated: 100 K, 100 M and 1 B users
+
 | Total users | Active sessions | Recommended RAM | Expected hot-tier entries | p99 read (warm) |
 |-------------|-----------------|-----------------|--------------------------|-----------------|
 | 100 K | 10 K | 1 GiB | 750 K (auto) → all fit | < 10 µs |
-| 1 M | 100 K | 4 GiB | 3 M (auto) → all fit | < 10 µs |
-| 10 M | 500 K | 8 GiB | 6 M (auto) → 500 K active ≈ 8% of hot | < 50 µs |
 | 100 M | 2 M | 32 GiB | 25 M (auto) → 2 M active ≈ 8% of hot | < 200 µs |
 | 1 B | 10 M | 128 GiB | 100 M (auto) → 10 M active ≈ 10% of hot | < 500 µs |
 
@@ -207,12 +228,13 @@ Hearth node where the total on-disk dataset is approximately 10× physical RAM.
 > workload profile. Skewed access distributions (Zipf) will outperform these
 > estimates; uniform random access will approach the worst-case column.
 
-> **Nothing in this table above 1 M users has been measured.** The largest corpus this project
-> has ever measured is **1,000,000 users** ([July 2026 figures](https://github.com/hearth-auth/hearth/blob/3981837a75422969959d23b4324c81a61e0efc2f/docs/perf/PUBLISHED_FIGURES.md) §3.1). The 10 M,
-> 100 M and 1 B rows — including their `p99 read (warm)` column — are extrapolations from the
-> measured per-user RAM slope (100 B/user) and per-user disk slope (1,195.6 B/user), not
-> observations. Size from them if you have nothing better, but do not cite them as results, and
-> re-measure with `make bench-gate` before committing to hardware at those scales.
+> **Nothing in this table has been measured.** The largest corpus this project has measured is
+> **10,000,000 users** (the measured rows above). The 100 M and 1 B rows — including their
+> `p99 read (warm)` column — are extrapolations from the measured per-user RAM slope
+> (100 B/user) and per-user disk slope (1,195.6 B/user, [July 2026 figures](https://github.com/hearth-auth/hearth/blob/3981837a75422969959d23b4324c81a61e0efc2f/docs/perf/PUBLISHED_FIGURES.md) §3.1), not observations.
+> At 10 M users, the measured disk use was about 1,500 B/user. Size from these rows if you have
+> nothing better, but do not cite them as results, and re-measure with `make bench-gate` before
+> committing to hardware at those scales.
 
 ## Tuning checklist for large datasets
 
