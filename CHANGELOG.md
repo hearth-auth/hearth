@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Fixed
+- **A restore writes users in batches, not one durable write per user** (#887):
+  `hearth backup restore` and `POST /admin/backup/restore` wrote each user of `users.ndjson`
+  with its own durable write, and each user waited for two fsyncs. On an AWS gp3 volume that was
+  about 175 users/s, so a restore of 10M users took about 18 hours. The restore now imports the
+  users of a tenant realm in batches of 512 through the same path as
+  `POST /admin/users/import`, which shares each fsync among many users: in a test, a restore of
+  600 users made 15 fsyncs instead of 1,205. The report, the conflicts and the overwrite mode are
+  unchanged. Operator accounts in the system realm are still restored one by one.
+
 ## [4.12.2] — 2026-11-17
 
 ### Fixed
