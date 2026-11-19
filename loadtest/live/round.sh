@@ -32,7 +32,9 @@
 #
 # Settings (environment), on top of cloud.sh's:
 #   SETUP=1      first: up, deploy, a dsync disk check, the server's MemTotal
-#                (server-memory.txt), import USERS, store copy
+#                (server-memory.txt), import USERS, settle (settle.txt: the wait
+#                until no store file changed for 60 s), store copy
+#   SETTLE_MAX_S 7200 (the longest settle wait; SETUP fails after it)
 #   USERS        1000000 (users imported by SETUP)
 #   REALMS       1 (realms; cloud.sh's REALMS): SETUP splits USERS evenly over
 #                them, and each k6 VU works in one of them
@@ -98,6 +100,22 @@ sp() { scp -q "${ssh_opts[@]}" "$@"; }
 timed_stop='t0=$(date +%s.%N); systemctl stop hearth; t1=$(date +%s.%N);
   tail -n 40 /opt/hearth/out/hearth.log > /opt/hearth/out/stop-tail.log;
   echo "stop $(awk -v a=$t0 -v b=$t1 "BEGIN { printf \"%.1f\", b - a }") s, result $(systemctl show -p Result --value hearth)"'
+# Waits on the server until no file of the store has changed for 60 s (#889), and
+# prints the wait. After an import, Hearth still merges the search index outbox of
+# every imported user, and the flushes and compactions of those writes follow: at
+# 10M users, about one core for many minutes. A copy taken before that ends holds
+# the pending work, and every plan line restored from it does the work again.
+# Gives up after SETTLE_MAX_S (remote variable, set below).
+settle='t0=$(date +%s); last=""; quiet=0
+  while [ "$quiet" -lt 60 ]; do
+    now=$(find /var/lib/hearth -type f -printf "%p %s %T@\n" | sort | md5sum)
+    if [ "$now" = "$last" ]; then quiet=$((quiet + 10)); else quiet=0; last=$now; fi
+    if [ $(( $(date +%s) - t0 )) -ge "$SETTLE_MAX_S" ]; then
+      echo "settle: the store still changes after $SETTLE_MAX_S s"; exit 1
+    fi
+    [ "$quiet" -ge 60 ] || sleep 10
+  done
+  echo "settled: no store file changed for 60 s, $(( $(date +%s) - t0 - 60 )) s after the import"'
 
 if [ "${SETUP:-}" = 1 ]; then
   note "deploy ($IMAGE)"
@@ -107,6 +125,8 @@ if [ "${SETUP:-}" = 1 ]; then
     | tee "$results/disk-dsync.txt"
   note "import 0..${USERS:-1000000}"
   "$c" import 0 "${USERS:-1000000}" | tee "$results/import.json" || exit 1
+  note "settle (search index merge and compaction after the import)"
+  s "SETTLE_MAX_S=${SETTLE_MAX_S:-7200}; $settle" | tee "$results/settle.txt" || exit 1
   note "store copy"
   s "$timed_stop"' && cp -a /var/lib/hearth /var/lib/hearth.base && du -sh /var/lib/hearth.base && df -h /' \
     | tee "$results/store-copy.txt" || exit 1

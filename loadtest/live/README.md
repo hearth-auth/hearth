@@ -403,6 +403,11 @@ image, not of this build.
   "Sustained" line allows 1% errors, so it can read higher than the clean step.
 - **Same start for every run.** `round.sh` restores the post-import store copy, drops the page
   cache and restarts Hearth before each plan line.
+- **A settled store copy.** After the import, Hearth still merges the search index outbox of each
+  imported user, and flushes and compacts those writes: at 10M users, about one core for many
+  minutes. `round.sh` takes the store copy only when no store file has changed for 60 s
+  (`settle.txt` gives the wait). A copy taken earlier holds that work, and every plan line
+  restored from it does the work again (#889).
 - **Production build only.** `POST /admin/bootstrap` must answer `404`.
 - **Generator attribution.** For fast endpoints (userinfo, admin lookup, introspect), 2 c7i.xlarge
   generators get busy near 8,000–12,000 req/s. Check the k6 CPU (`gen-sampler`) and the generator

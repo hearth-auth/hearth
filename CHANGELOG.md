@@ -33,6 +33,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   14.4–15.0 s to 0.35 s, and the peak heap from 2.6 GB to 180 MB. `POST /admin/backup` listed
   the realms of its snapshot in the same way, and now also reads one block per realm. The start
   log now shows the time of the WAL read, the SST open, the WAL replay and the key check.
+- **An idle server no longer uses a large part of a core for the search index** (#889): the
+  search index merger ran every second. When it found less than a batch of 1,024 pending user
+  writes, it had read the whole list of pending writes, and with it a deleted entry for every
+  user write merged since a compaction last removed them. After an import, that is one per
+  imported user: in a local test with 4M users, a server without requests used 34–49 % of a
+  core until the hourly full compaction. The merger now waits twice as long after each such
+  run, up to 60 s, and runs every second again as soon as a run fills a batch. In the same
+  test, the idle server now uses 0.8 % of a core. Search results do not change: a search reads
+  the pending writes itself.
 
 ## [4.12.2] — 2026-11-17
 
