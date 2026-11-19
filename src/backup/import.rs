@@ -311,6 +311,43 @@ struct BackupUserLine {
     credential: Option<BackupCredential>,
 }
 
+impl BackupUserLine {
+    /// The import request that restores this line.
+    ///
+    /// # Errors
+    ///
+    /// [`BackupError::Engine`] when the credential names another user.
+    fn into_request(self) -> Result<ImportUserRequest, BackupError> {
+        let BackupUserLine { user, credential } = self;
+        let credential = credential.map(|c| c.into_raw(&user)).transpose()?;
+        Ok(ImportUserRequest {
+            id: Some(user.id().clone()),
+            email: user.email().to_string(),
+            display_name: user.display_name().to_string(),
+            first_name: user.first_name().to_string(),
+            last_name: user.last_name().to_string(),
+            status: user.status(),
+            credential,
+            attributes: user.attributes().clone(),
+            restored: Some(RestoredUserState {
+                required_actions: user.required_actions().to_vec(),
+                email_verified: user.email_verified(),
+                email_otp_enabled: user.email_otp_enabled(),
+                created_at: user.created_at(),
+                updated_at: user.updated_at(),
+            }),
+        })
+    }
+}
+
+/// Most lines of `users.ndjson` a restore reads before it imports them
+/// together (#887).
+///
+/// [`IdentityEngine::import_users`] shares each fsync among the users of a
+/// batch. The batch also bounds the users the import pass holds: the restore
+/// streams the archive (#867), so its memory must not grow with the realm.
+const RESTORE_USER_BATCH: usize = 512;
+
 /// The password credential on a line of `users.ndjson`.
 #[derive(Deserialize)]
 struct BackupCredential {
@@ -1040,51 +1077,61 @@ impl BackupImporter {
         }
     }
 
-    /// Restores one line of `users.ndjson`: the user and its password
-    /// credential (#867).
-    fn import_user_line(
+    /// Restores a batch of lines of `users.ndjson`: the users and their
+    /// password credentials (#867).
+    ///
+    /// A tenant realm's batch goes to [`IdentityEngine::import_users`], which
+    /// shares each fsync among many users: one user per durable write took
+    /// about 18 hours for 10M users (#887). Operator accounts go through
+    /// `import_admin_user` one by one — the only import path into the system
+    /// realm, with `import_user`'s validation.
+    fn import_user_batch(
         &self,
-        line: BackupUserLine,
+        requests: &[ImportUserRequest],
         realm_id: &RealmId,
         opts: &ImportOptions,
         report: &mut ImportReport,
     ) -> Result<(), BackupError> {
-        // Operator accounts go through `import_admin_user` — the only import
-        // path into the system realm, with `import_user`'s validation.
-        let import_one = |req: &ImportUserRequest| {
-            if realm_id.as_uuid().is_nil() {
-                self.identity.import_admin_user(req)
-            } else {
-                self.identity.import_user(realm_id, req)
-            }
-        };
-        let BackupUserLine { user, credential } = line;
-        let credential = credential.map(|c| c.into_raw(&user)).transpose()?;
-
-        let req = ImportUserRequest {
-            id: Some(user.id().clone()),
-            email: user.email().to_string(),
-            display_name: user.display_name().to_string(),
-            first_name: user.first_name().to_string(),
-            last_name: user.last_name().to_string(),
-            status: user.status(),
-            credential,
-            attributes: user.attributes().clone(),
-            restored: Some(RestoredUserState {
-                required_actions: user.required_actions().to_vec(),
-                email_verified: user.email_verified(),
-                email_otp_enabled: user.email_otp_enabled(),
-                created_at: user.created_at(),
-                updated_at: user.updated_at(),
-            }),
-        };
-
         if opts.dry_run {
-            report.users.created += 1;
+            report.users.created += requests.len() as u64;
             return Ok(());
         }
+        if realm_id.as_uuid().is_nil() {
+            for req in requests {
+                let result = self.identity.import_admin_user(req);
+                self.settle_user_import(req, result, realm_id, opts, report)?;
+            }
+            return Ok(());
+        }
+        if requests.is_empty() {
+            return Ok(());
+        }
+        let results = self.identity.import_users(realm_id, requests);
+        if results.len() != requests.len() {
+            return Err(BackupError::Engine(format!(
+                "the identity engine returned {} results for {} imported users",
+                results.len(),
+                requests.len()
+            )));
+        }
+        for (req, result) in requests.iter().zip(results) {
+            self.settle_user_import(req, result, realm_id, opts, report)?;
+        }
+        Ok(())
+    }
 
-        match import_one(&req) {
+    /// Counts the outcome of one user import into `report`. A user whose
+    /// email is already stored is skipped and reported, or in overwrite mode
+    /// replaces the stored user.
+    fn settle_user_import(
+        &self,
+        req: &ImportUserRequest,
+        result: Result<User, IdentityError>,
+        realm_id: &RealmId,
+        opts: &ImportOptions,
+        report: &mut ImportReport,
+    ) -> Result<(), BackupError> {
+        match result {
             Ok(_) => report.users.created += 1,
             Err(IdentityError::DuplicateEmail) => {
                 match opts.mode {
@@ -1103,7 +1150,12 @@ impl BackupImporter {
                                 self.identity
                                     .delete_user(realm_id, existing.id())
                                     .map_err(identity_to_backup_err)?;
-                                import_one(&req).map_err(identity_to_backup_err)?;
+                                let again = if realm_id.as_uuid().is_nil() {
+                                    self.identity.import_admin_user(req)
+                                } else {
+                                    self.identity.import_user(realm_id, req)
+                                };
+                                again.map_err(identity_to_backup_err)?;
                                 report.users.overwritten += 1;
                             }
                             Ok(None) => {
@@ -1484,9 +1536,15 @@ impl RealmRestore<'_> {
         let report = &mut self.report;
         match name {
             "users.ndjson" => {
+                let mut batch = Vec::new();
                 for line in NdjsonRecords::<BackupUserLine>::new(member) {
-                    importer.import_user_line(line?, &realm_id, opts, report)?;
+                    batch.push(line?.into_request()?);
+                    if batch.len() == RESTORE_USER_BATCH {
+                        importer.import_user_batch(&batch, &realm_id, opts, report)?;
+                        batch.clear();
+                    }
                 }
+                importer.import_user_batch(&batch, &realm_id, opts, report)?;
             }
             // After users so the owning records exist. TOTP state is
             // re-encrypted under the destination realm's MFA DEK inside
@@ -2078,16 +2136,28 @@ mod tests {
         rbac: Arc<dyn RbacEngine>,
         audit: Arc<dyn AuditEngine>,
         webhooks: Arc<dyn WebhookEngine>,
+        /// The store under the engines: its WAL sync count is the number of
+        /// durable writes.
+        storage: Arc<EmbeddedStorageEngine>,
         // Held to keep the temp directory alive for the duration of the test.
         _dir: TempDir,
     }
 
     fn make_rig() -> TestRig {
+        make_rig_with(crate::storage::wal::SyncMode::None)
+    }
+
+    /// A rig on storage that fsyncs every durable write, as in production.
+    fn make_durable_rig() -> TestRig {
+        make_rig_with(crate::storage::wal::SyncMode::EveryWrite)
+    }
+
+    fn make_rig_with(sync_mode: crate::storage::wal::SyncMode) -> TestRig {
         let dir = TempDir::new().expect("tmpdir");
-        let storage = Arc::new(
-            EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().to_path_buf()))
-                .expect("storage"),
-        ) as Arc<dyn StorageEngine>;
+        let mut config = StorageConfig::dev(dir.path().to_path_buf());
+        config.wal_config.sync_mode = sync_mode;
+        let embedded = Arc::new(EmbeddedStorageEngine::open(config).expect("storage"));
+        let storage = Arc::clone(&embedded) as Arc<dyn StorageEngine>;
         let clock =
             Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000_000))) as Arc<dyn Clock>;
         let audit = Arc::new(EmbeddedAuditEngine::new(
@@ -2116,6 +2186,7 @@ mod tests {
             rbac,
             audit,
             webhooks,
+            storage: embedded,
             _dir: dir,
         }
     }
@@ -2165,20 +2236,6 @@ mod tests {
         extra: &[(&str, &str)],
         raw: &[(&str, &[u8])],
     ) -> std::path::PathBuf {
-        let archive_path = tmp.path().join("test.hearth-backup");
-
-        // Realm's serde Deserialize goes through the inner Uuid, so IDs must be
-        // bare UUIDs here (no "realm_" / "user_" prefix). The prefixed form only
-        // appears in Display/FromStr — not in serde JSON round-trips.
-        let realm_json = serde_json::json!({
-            "id": realm_uuid,
-            "name": slug,
-            "status": "Active",
-            "config": {},
-            "created_at": 0,
-            "updated_at": 0
-        });
-
         // Two test users — bare UUIDs for serde.
         let user1_json = serde_json::json!({
             "id": "00000000-0000-0000-0000-000000000001",
@@ -2205,9 +2262,51 @@ mod tests {
             serde_json::to_string(&user1_json).expect("serialize user1"),
             serde_json::to_string(&user2_json).expect("serialize user2")
         );
+        make_archive(tmp, slug, realm_uuid, &users_ndjson, extra, raw)
+    }
+
+    /// A user line of `users.ndjson` for user number `i` of a test archive.
+    fn numbered_user_line(i: u32) -> String {
+        let user = serde_json::json!({
+            "id": format!("00000000-0000-0000-0001-{i:012}"),
+            "email": format!("user{i:05}@example.com"),
+            "display_name": format!("User {i}"),
+            "first_name": "User",
+            "last_name": "",
+            "status": "Active",
+            "created_at": 0,
+            "updated_at": 0
+        });
+        serde_json::to_string(&user).expect("serialize user")
+    }
+
+    /// An archive of one realm whose `users.ndjson` is `users_ndjson`, plus
+    /// `extra` members (plaintext, encrypted under the archive DEK) and `raw`
+    /// members (written as they are).
+    fn make_archive(
+        tmp: &TempDir,
+        slug: &str,
+        realm_uuid: &str,
+        users_ndjson: &str,
+        extra: &[(&str, &str)],
+        raw: &[(&str, &[u8])],
+    ) -> std::path::PathBuf {
+        let archive_path = tmp.path().join("test.hearth-backup");
+
+        // Realm's serde Deserialize goes through the inner Uuid, so IDs must be
+        // bare UUIDs here (no "realm_" / "user_" prefix). The prefixed form only
+        // appears in Display/FromStr — not in serde JSON round-trips.
+        let realm_json = serde_json::json!({
+            "id": realm_uuid,
+            "name": slug,
+            "status": "Active",
+            "config": {},
+            "created_at": 0,
+            "updated_at": 0
+        });
 
         let realm_bytes = serde_json::to_vec(&realm_json).expect("serialize realm");
-        let users_bytes = users_ndjson.into_bytes();
+        let users_bytes = users_ndjson.as_bytes();
 
         // Generate a DEK and wrap it with the test passphrase.
         let dek = BackupExporter::generate_dek().expect("generate DEK");
@@ -2218,7 +2317,7 @@ mod tests {
             encrypt_member(&format!("realms/{slug}/realm.json"), &realm_bytes, &dek)
                 .expect("encrypt realm");
         let users_encrypted =
-            encrypt_member(&format!("realms/{slug}/users.ndjson"), &users_bytes, &dek)
+            encrypt_member(&format!("realms/{slug}/users.ndjson"), users_bytes, &dek)
                 .expect("encrypt users");
 
         // RealmManifest.realm_id is a plain String, so the prefixed form is fine.
@@ -2231,7 +2330,10 @@ mod tests {
                 realm_id: realm_id_str,
                 slug: slug.to_string(),
                 record_counts: RecordCounts {
-                    users: 2,
+                    users: users_ndjson
+                        .lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .count() as u64,
                     ..Default::default()
                 },
                 audit_chain_included: false,
@@ -2298,6 +2400,168 @@ mod tests {
         assert_eq!(report.realms.errored, 0);
         assert_eq!(report.users.errored, 0);
         assert!(report.conflicts.is_empty());
+    }
+
+    /// Restores `users_ndjson` into a new realm with `mode`, and returns the
+    /// report, the realm and the number of WAL fsyncs of the restore.
+    fn restore_users(
+        rig: &TestRig,
+        users_ndjson: &str,
+        mode: RestoreMode,
+    ) -> (ImportReport, RealmId, u64) {
+        let archive_dir = TempDir::new().expect("archive tmpdir");
+        let realm_uuid = "00000000-0000-0000-0000-000000000887";
+        let slug = "batched-restore";
+        let archive_path = make_archive(&archive_dir, slug, realm_uuid, users_ndjson, &[], &[]);
+        let reader = BackupArchive::open(&archive_path).expect("open");
+        let opts = ImportOptions {
+            mode,
+            ..opts_with_passphrase()
+        };
+        let before = rig.storage.wal_sync_count();
+        let report = importer(rig)
+            .import_realm(slug, &reader, &opts)
+            .expect("import");
+        let syncs = rig.storage.wal_sync_count() - before;
+        let realm = RealmId::new(uuid::Uuid::parse_str(realm_uuid).expect("uuid"));
+        (report, realm, syncs)
+    }
+
+    /// A restore wrote one user per durable write, and each user waited for
+    /// two fsyncs: one for its rows, one for its audit event. On a cloud disk
+    /// that is about 175 users/s: a restore of 10M users took about 18 hours
+    /// (#887). A restore must share each fsync among many users.
+    #[test]
+    fn a_restore_shares_each_durable_write_among_many_users() {
+        let rig = make_durable_rig();
+        // More than one chunk of users, and a partial last chunk.
+        let n: u32 = 600;
+        let users: String = (0..n).map(|i| numbered_user_line(i) + "\n").collect();
+
+        let (report, realm, syncs) = restore_users(&rig, &users, RestoreMode::Skip);
+
+        assert_eq!(report.users.created, u64::from(n), "every user is restored");
+        assert_eq!(report.users.errored, 0);
+        assert_eq!(report.users.skipped, 0);
+        for i in 0..n {
+            let email = format!("user{i:05}@example.com");
+            let user = rig
+                .identity
+                .get_user_by_email(&realm, &email)
+                .expect("get")
+                .unwrap_or_else(|| panic!("{email} is not restored"));
+            assert_eq!(
+                user.id().as_uuid().to_string(),
+                format!("00000000-0000-0000-0001-{i:012}"),
+                "{email} keeps its archived id"
+            );
+        }
+        assert!(
+            syncs <= u64::from(n) / 10,
+            "{syncs} durable writes to restore {n} users"
+        );
+    }
+
+    /// A user line whose email an earlier line of the archive already holds
+    /// is skipped and reported, also when both lines go in the same batch.
+    #[test]
+    fn a_repeated_email_in_the_archive_is_skipped_and_reported() {
+        let rig = make_rig();
+        let mut lines: Vec<String> = (0..5).map(numbered_user_line).collect();
+        let mut repeat: serde_json::Value =
+            serde_json::from_str(&numbered_user_line(9)).expect("json");
+        repeat["email"] = serde_json::json!("user00002@example.com");
+        lines.insert(3, repeat.to_string());
+        let users: String = lines.iter().map(|l| format!("{l}\n")).collect();
+
+        let (report, realm, _) = restore_users(&rig, &users, RestoreMode::Skip);
+
+        assert_eq!(report.users.created, 5);
+        assert_eq!(report.users.skipped, 1);
+        assert_eq!(report.users.errored, 0);
+        assert_eq!(report.conflicts.len(), 1, "{:?}", report.conflicts);
+        assert_eq!(report.conflicts[0].entity_type, "user");
+        assert_eq!(report.conflicts[0].identifier, "user00002@example.com");
+        assert_eq!(report.conflicts[0].reason, "email already exists");
+        let kept = rig
+            .identity
+            .get_user_by_email(&realm, "user00002@example.com")
+            .expect("get")
+            .expect("stored");
+        assert_eq!(
+            kept.id().as_uuid().to_string(),
+            "00000000-0000-0000-0001-000000000002",
+            "the first line with the email is kept"
+        );
+    }
+
+    /// In overwrite mode a repeated email replaces the user of the earlier
+    /// line, as the lines come one after the other in the archive.
+    #[test]
+    fn a_repeated_email_in_the_archive_is_overwritten_in_overwrite_mode() {
+        let rig = make_rig();
+        let mut lines: Vec<String> = (0..5).map(numbered_user_line).collect();
+        for later in [9, 10] {
+            let mut repeat: serde_json::Value =
+                serde_json::from_str(&numbered_user_line(later)).expect("json");
+            repeat["email"] = serde_json::json!("user00002@example.com");
+            lines.push(repeat.to_string());
+        }
+        let users: String = lines.iter().map(|l| format!("{l}\n")).collect();
+
+        let (report, realm, _) = restore_users(&rig, &users, RestoreMode::Overwrite);
+
+        assert_eq!(report.users.created, 5);
+        assert_eq!(report.users.overwritten, 2);
+        assert_eq!(report.users.errored, 0);
+        let kept = rig
+            .identity
+            .get_user_by_email(&realm, "user00002@example.com")
+            .expect("get")
+            .expect("stored");
+        assert_eq!(
+            kept.id().as_uuid().to_string(),
+            "00000000-0000-0000-0001-000000000010",
+            "the last line with the email wins"
+        );
+        let replaced = crate::core::UserId::new(
+            uuid::Uuid::parse_str("00000000-0000-0000-0001-000000000002").expect("uuid"),
+        );
+        assert!(
+            rig.identity
+                .get_user(&realm, &replaced)
+                .expect("get")
+                .is_none(),
+            "the overwritten user is gone"
+        );
+    }
+
+    /// A user line that fails validation is counted as errored; the other
+    /// users of its batch are restored.
+    #[test]
+    fn an_invalid_user_line_is_counted_and_the_rest_of_its_batch_restored() {
+        let rig = make_rig();
+        let mut lines: Vec<String> = (0..4).map(numbered_user_line).collect();
+        let mut invalid: serde_json::Value =
+            serde_json::from_str(&numbered_user_line(7)).expect("json");
+        invalid["email"] = serde_json::json!("not-an-email");
+        lines.insert(2, invalid.to_string());
+        let users: String = lines.iter().map(|l| format!("{l}\n")).collect();
+
+        let (report, realm, _) = restore_users(&rig, &users, RestoreMode::Skip);
+
+        assert_eq!(report.users.created, 4);
+        assert_eq!(report.users.errored, 1);
+        for i in 0..4 {
+            let email = format!("user{i:05}@example.com");
+            assert!(
+                rig.identity
+                    .get_user_by_email(&realm, &email)
+                    .expect("get")
+                    .is_some(),
+                "{email} is restored"
+            );
+        }
     }
 
     /// A `webhooks.ndjson` member holds the identity engine's webhook store,
