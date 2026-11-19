@@ -1215,6 +1215,50 @@ const SEARCH_MERGE_INTERVAL: std::time::Duration = std::time::Duration::from_sec
 /// The maximum number of outbox entries that one search index merge applies.
 const SEARCH_MERGE_BATCH: usize = 1_024;
 
+/// The longest time between two runs of the search index merger (#889).
+const SEARCH_MERGE_IDLE_MAX: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Runs the search index merger until `stopped` returns `true`. `run` is one
+/// run of the merger and returns the number of outbox entries it applied.
+///
+/// The first run starts at once: it applies what an earlier process left.
+/// After a run, the wait is [`next_search_merge_wait`].
+async fn pace_search_merges<Run, Fut>(stopped: impl Fn() -> bool, mut run: Run)
+where
+    Run: FnMut() -> Fut,
+    Fut: std::future::Future<Output = usize>,
+{
+    let mut wait = SEARCH_MERGE_INTERVAL;
+    loop {
+        if stopped() {
+            break;
+        }
+        let applied = run().await;
+        wait = next_search_merge_wait(wait, applied);
+        tokio::time::sleep(wait).await;
+    }
+}
+
+/// The wait before the next run of the search index merger, after a run that
+/// applied `applied` outbox entries and came `previous` after the run before.
+///
+/// A run that filled a batch had a backlog: the next run comes after
+/// [`SEARCH_MERGE_INTERVAL`]. Any other run read the outbox prefix to its
+/// end, and with it the tombstone of every outbox key merged since the last
+/// compaction that removed them: after an import of 4M users, a third of a
+/// core at one run per second, on a server without requests (#889). So the
+/// wait doubles, up to [`SEARCH_MERGE_IDLE_MAX`]. A search reads the pending
+/// entries itself, so its result does not depend on the wait.
+fn next_search_merge_wait(previous: std::time::Duration, applied: usize) -> std::time::Duration {
+    if applied >= SEARCH_MERGE_BATCH {
+        SEARCH_MERGE_INTERVAL
+    } else {
+        previous
+            .saturating_mul(2)
+            .clamp(SEARCH_MERGE_INTERVAL, SEARCH_MERGE_IDLE_MAX)
+    }
+}
+
 /// One run of the search index merger: applies the outbox backlog of each
 /// realm in `realms`, `batch` entries per `merge` call, and returns the
 /// number of entries applied.
@@ -2490,56 +2534,57 @@ async fn run_serve(
     {
         let merge_engine = Arc::clone(&identity_engine);
         let merge_shutdown = shutdown_signal_rx.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(SEARCH_MERGE_INTERVAL);
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                interval.tick().await;
-                if merge_shutdown.borrow().is_some() {
-                    break;
-                }
+        let stop_shutdown = shutdown_signal_rx.clone();
+        tokio::spawn(pace_search_merges(
+            move || stop_shutdown.borrow().is_some(),
+            move || {
                 let engine = Arc::clone(&merge_engine);
                 let shutdown = merge_shutdown.clone();
-                let joined = tokio::task::spawn_blocking(move || {
-                    let mut realms = vec![hearth::core::RealmId::new(uuid::Uuid::nil())];
-                    let batch = hearth::core::MAX_PAGE_LIMIT;
-                    let mut offset = 0u64;
-                    loop {
-                        let page =
-                            match engine.list_realms(&hearth::core::PageRequest::new(offset, batch))
-                            {
-                                Ok(p) => p,
-                                Err(e) => {
-                                    warn!(error = %e, "search_merge: realm enumeration failed, retrying next tick");
-                                    break;
-                                }
-                            };
-                        let n = page.items.len() as u64;
-                        realms.extend(page.items.iter().map(|r| r.id().clone()));
-                        if n == 0 || offset + n >= page.total {
-                            break;
+                async move {
+                    let joined = tokio::task::spawn_blocking(move || {
+                        let mut realms = vec![hearth::core::RealmId::new(uuid::Uuid::nil())];
+                        let batch = hearth::core::MAX_PAGE_LIMIT;
+                        let mut offset = 0u64;
+                        loop {
+                            let page =
+                                match engine.list_realms(&hearth::core::PageRequest::new(offset, batch))
+                                {
+                                    Ok(p) => p,
+                                    Err(e) => {
+                                        warn!(error = %e, "search_merge: realm enumeration failed, retrying next tick");
+                                        break;
+                                    }
+                                };
+                            let n = page.items.len() as u64;
+                            realms.extend(page.items.iter().map(|r| r.id().clone()));
+                            if n == 0 || offset + n >= page.total {
+                                break;
+                            }
+                            offset += n;
                         }
-                        offset += n;
-                    }
-                    merge_search_backlog(
-                        &realms,
-                        SEARCH_MERGE_BATCH,
-                        &|| shutdown.borrow().is_some(),
-                        |realm, batch| engine.merge_search_index(realm, batch),
-                    )
-                })
-                .await;
-                match joined {
-                    Ok(applied) if applied > 0 => {
-                        debug!(applied, "search_merge: applied search index writes");
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        warn!(error = %e, "search_merge: merge task panicked, retrying next tick");
+                        merge_search_backlog(
+                            &realms,
+                            SEARCH_MERGE_BATCH,
+                            &|| shutdown.borrow().is_some(),
+                            |realm, batch| engine.merge_search_index(realm, batch),
+                        )
+                    })
+                    .await;
+                    match joined {
+                        Ok(applied) => {
+                            if applied > 0 {
+                                debug!(applied, "search_merge: applied search index writes");
+                            }
+                            applied
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "search_merge: merge task panicked, retrying next tick");
+                            0
+                        }
                     }
                 }
-            }
-        });
+            },
+        ));
     }
 
     // Background SST compaction: a periodic full sweep and/or a count-triggered
@@ -6741,6 +6786,107 @@ mod tests {
             });
             assert_eq!(calls.get(), 2);
             assert_eq!(applied, 2);
+        }
+    }
+
+    /// #889: the time between two runs of the search index merger.
+    ///
+    /// A run that finds less than a batch has read the whole outbox prefix,
+    /// and with it every tombstone of the outbox keys merged earlier. After
+    /// an import of 4M users, that read took a third of a core at one run per
+    /// second, on a server without any request.
+    mod search_merge_pacing {
+        use super::super::{pace_search_merges, SEARCH_MERGE_BATCH};
+        use std::cell::Cell;
+        use std::rc::Rc;
+        use std::time::Duration;
+
+        /// The number of runs in `span` of (paused) time, when the run with
+        /// index `i` applies `applied(i)` entries.
+        async fn runs_in(span: Duration, applied: impl Fn(usize) -> usize + 'static) -> usize {
+            let runs = Rc::new(Cell::new(0usize));
+            let counted = Rc::clone(&runs);
+            let pacer = pace_search_merges(
+                || false,
+                move || {
+                    let i = counted.get();
+                    counted.set(i + 1);
+                    let n = applied(i);
+                    async move { n }
+                },
+            );
+            // The pacer never ends on its own; the timeout ends it.
+            let ended = tokio::time::timeout(span, pacer).await;
+            assert!(ended.is_err(), "the pacer must run until it is stopped");
+            runs.get()
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn an_idle_merger_runs_about_once_a_minute() {
+            let runs = runs_in(Duration::from_secs(600), |_| 0).await;
+            // Runs at 0, 2, 6, 14, 30 and 62 s, then once every 60 s: 14.
+            assert!(
+                (10..=20).contains(&runs),
+                "an idle merger ran {runs} times in 10 minutes"
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_trickle_of_writes_is_merged_about_once_a_minute() {
+            // A few user writes between two runs: less than one batch.
+            let runs = runs_in(Duration::from_secs(600), |_| 3).await;
+            assert!(
+                (10..=20).contains(&runs),
+                "a merger with a small backlog ran {runs} times in 10 minutes"
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_backlog_is_merged_every_second() {
+            let runs = runs_in(Duration::from_secs(60), |_| SEARCH_MERGE_BATCH).await;
+            assert!(
+                runs >= 58,
+                "a merger with a backlog ran {runs} times in 60 s"
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_backlog_after_an_idle_time_is_merged_every_second_again() {
+            // Idle for 20 runs (more than 10 minutes once the wait is long),
+            // then an import: from then on every run fills a batch.
+            let runs = runs_in(Duration::from_secs(20 * 60), |i| {
+                if i < 20 {
+                    0
+                } else {
+                    SEARCH_MERGE_BATCH
+                }
+            })
+            .await;
+            // The 20 idle runs end before minute 19, and one run comes at
+            // most 60 s after that; each later run comes 1 s after the one
+            // before. So at least 20 + 1 + 59 runs, less one for rounding.
+            assert!(
+                runs >= 79,
+                "a merger ran {runs} times in 20 minutes with a backlog in the last ones"
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_stop_ends_the_pacer_before_the_next_run() {
+            let runs = Rc::new(Cell::new(0usize));
+            let counted = Rc::clone(&runs);
+            let seen = Rc::clone(&runs);
+            let pacer = pace_search_merges(
+                move || seen.get() >= 3,
+                move || {
+                    counted.set(counted.get() + 1);
+                    async { 0 }
+                },
+            );
+            tokio::time::timeout(Duration::from_secs(3_600), pacer)
+                .await
+                .expect("the pacer ends when stopped");
+            assert_eq!(runs.get(), 3);
         }
     }
 
