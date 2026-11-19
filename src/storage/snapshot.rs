@@ -142,10 +142,9 @@ impl StorageEngine for SnapshotStorage {
 
     fn list_realms(&self) -> Result<Vec<RealmId>, StorageError> {
         let mut realms = std::collections::BTreeSet::new();
+        // About one data block per realm in each file, not every record (#888).
         for reader in self.readers.iter() {
-            for (key, _) in reader.iter_all()? {
-                realms.insert(key.realm_id().clone());
-            }
+            realms.extend(reader.realm_ids()?);
         }
         Ok(realms.into_iter().collect())
     }

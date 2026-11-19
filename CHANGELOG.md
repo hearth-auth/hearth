@@ -22,6 +22,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `POST /admin/users/import`, which shares each fsync among many users: in a test, a restore of
   600 users made 15 fsyncs instead of 1,205. The report, the conflicts and the overwrite mode are
   unchanged. Operator accounts in the system realm are still restored one by one.
+- **A start with `HEARTH_KEK` set no longer reads the whole store** (#888): at each start, the
+  check that every stored key opens under `HEARTH_KEK` listed the realms of the store by reading
+  and decrypting every record of every SST file, and it held each file's records in memory at
+  once. The start time grew with the store, and the heap during the start grew with the largest
+  SST file: on AWS, a 10M-user store took about 125 s to start, with up to 9 GB of heap. The
+  check now reads about one block per realm in each SST file. In a local test with 4M users
+  (5.9 GB store, largest SST 5.7 GB), after a `kill -9`, the start went from 23.3 s to 0.3 s,
+  and the peak heap from 8.3 GB to 103 MB. With 3M users after a clean stop, the start went from
+  14.4–15.0 s to 0.35 s, and the peak heap from 2.6 GB to 180 MB. `POST /admin/backup` listed
+  the realms of its snapshot in the same way, and now also reads one block per realm. The start
+  log now shows the time of the WAL read, the SST open, the WAL replay and the key check.
 
 ## [4.12.2] — 2026-11-17
 
