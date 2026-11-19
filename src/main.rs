@@ -1745,11 +1745,17 @@ async fn run_serve(
         .into());
     }
     if let Some(kek) = storage_kek.as_ref() {
+        let check_started = std::time::Instant::now();
         hearth::identity::kek_rotation::rotate_key_encryption_key(
             &storage,
             kek,
             previous_kek.as_ref(),
         )?;
+        // #888: this check once read every record of the store.
+        info!(
+            elapsed_ms = check_started.elapsed().as_millis(),
+            "stored keys checked against HEARTH_KEK"
+        );
     }
 
     // Resolve the optional Argon2id server-side pepper from
@@ -1899,6 +1905,7 @@ async fn run_serve(
         }
     }
 
+    let identity_started = std::time::Instant::now();
     let raw_identity_engine = Arc::new(EmbeddedIdentityEngine::with_rbac(
         Arc::clone(&storage) as Arc<dyn StorageEngine>,
         Arc::clone(&clock),
@@ -1906,6 +1913,10 @@ async fn run_serve(
         Arc::clone(&rbac_engine),
         Arc::clone(&audit_engine) as Arc<dyn AuditEngine>,
     )?);
+    info!(
+        elapsed_ms = identity_started.elapsed().as_millis(),
+        "identity engine loaded"
+    );
     // Wire session-version bumping so RBAC changes invalidate standing tokens.
     raw_rbac_engine.init_sv_bumper(Arc::clone(&raw_identity_engine) as Arc<dyn SvBumper>);
     // Wire the Raft state machine's projection observer so a revocation

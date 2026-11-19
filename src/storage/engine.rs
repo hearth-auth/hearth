@@ -579,6 +579,7 @@ impl EmbeddedStorageEngine {
         let system_kek_id = key_registry.kek_id_for_realm(&system_realm);
 
         // Open WAL with encryption
+        let open_started = std::time::Instant::now();
         let wal_path = config.data_dir.join("hearth.wal");
         let mut wal = Wal::open_with_fs(
             &wal_path,
@@ -590,6 +591,7 @@ impl EmbeddedStorageEngine {
         let memtable = Memtable::new(config.memtable_config);
 
         let entries = wal.read_all()?;
+        let wal_read = open_started.elapsed();
 
         // Sweep staging orphans before discovery. An interrupted SST write
         // strands a `*.staging` file (memtable flush) or a `*.tmp` file
@@ -682,6 +684,7 @@ impl EmbeddedStorageEngine {
             sst_readers.push(Arc::new(reader));
         }
 
+        let ssts_opened = open_started.elapsed();
         // Replay after SST discovery: a record that writes a counted key
         // looks up whether the key exists, and the SSTs are part of that
         // answer (#644). The result does not depend on whether an SST
@@ -693,6 +696,19 @@ impl EmbeddedStorageEngine {
                 key_count::replay_counted(&memtable, &ssts, entry)?;
             }
         }
+        // #888: the phases of a start, so a slow one shows in the log.
+        tracing::info!(
+            wal_records = entries.len(),
+            sst_files = sst_readers.len(),
+            wal_read_ms = wal_read.as_millis(),
+            sst_open_ms = ssts_opened.saturating_sub(wal_read).as_millis(),
+            wal_replay_ms = open_started
+                .elapsed()
+                .saturating_sub(ssts_opened)
+                .as_millis(),
+            "storage engine opened"
+        );
+        drop(entries);
 
         let hot_tier = HotTier::new(config.tiered_config);
 
@@ -2543,9 +2559,11 @@ impl StorageEngine for EmbeddedStorageEngine {
     /// realms are included — [`StorageEngine::scan`] on an all-tombstone realm
     /// returns empty, making the Phase 1 delete a no-op for that realm.
     ///
-    /// This scans every entry in every SST file; it is O(total data size) and
-    /// intended only for the cluster snapshot install path, which is a rare
-    /// cluster-recovery event (HEA-2131).
+    /// The memtable is walked entry by entry; it is bounded by the flush
+    /// threshold and the WAL. Each SST is walked realm by realm: about one
+    /// data block per realm, not every record (#888). Every start with
+    /// `HEARTH_KEK` set calls this (the stored-key check of #649), so its
+    /// cost must not grow with the number of records.
     fn list_realms(&self) -> Result<Vec<RealmId>, StorageError> {
         let mut realms = std::collections::BTreeSet::new();
 
@@ -2557,9 +2575,7 @@ impl StorageEngine for EmbeddedStorageEngine {
         // Enumerate from every live SST file.
         let sst_readers = self.sst_readers.load_full();
         for reader in sst_readers.iter() {
-            for (key, _) in reader.iter_all()? {
-                realms.insert(key.realm_id().clone());
-            }
+            realms.extend(reader.realm_ids()?);
         }
 
         Ok(realms.into_iter().collect())
@@ -6601,6 +6617,99 @@ mod tests {
             realms, expected,
             "list_realms must include realms whose data flushed to SST files"
         );
+    }
+
+    /// Writes one realm of 4,000 rows, which spans many data blocks, and
+    /// three realms of one row (one of them a tombstone only), flushes them
+    /// to an SST, and returns every realm, sorted.
+    fn write_one_big_and_three_small_realms(engine: &EmbeddedStorageEngine) -> Vec<RealmId> {
+        let big = RealmId::new(uuid::Uuid::from_bytes([0x40; 16]));
+        let small = [
+            RealmId::new(uuid::Uuid::from_bytes([0x10; 16])),
+            RealmId::new(uuid::Uuid::from_bytes([0x80; 16])),
+            RealmId::new(uuid::Uuid::from_bytes([0xff; 16])),
+        ];
+        let rows: Vec<(Vec<u8>, Vec<u8>)> = (0..4_000_u32)
+            .map(|i| (format!("user:{i:08}").into_bytes(), vec![b'x'; 200]))
+            .collect();
+        engine.put_batch(&big, &rows).expect("put the big realm");
+        for realm in &small {
+            engine.put(realm, b"k", b"v").expect("put a small realm");
+        }
+        engine
+            .delete(&small[2], b"k")
+            .expect("tombstone-only realm");
+        engine.flush_memtable().expect("flush");
+
+        // The fixture spans many blocks: a walk of the big realm reads them all.
+        let before = sst::data_block_reads();
+        let end = keys_end(b"user:");
+        assert_eq!(
+            engine.scan(&big, b"user:", &end).expect("scan").len(),
+            4_000
+        );
+        let realm_blocks = sst::data_block_reads() - before;
+        assert!(
+            realm_blocks >= 100,
+            "the big realm should span many data blocks, read {realm_blocks}"
+        );
+
+        let mut expected = vec![big];
+        expected.extend(small);
+        expected.sort();
+        expected
+    }
+
+    /// Asserts that `storage.list_realms()` names `expected` and reads at
+    /// most two data blocks per realm.
+    fn assert_list_realms_reads_one_block_per_realm(
+        storage: &dyn StorageEngine,
+        expected: &[RealmId],
+    ) {
+        let before = sst::data_block_reads();
+        let mut realms = storage.list_realms().expect("list_realms");
+        let reads = sst::data_block_reads() - before;
+        realms.sort();
+        assert_eq!(realms, expected, "every realm in the SST, and only those");
+        assert!(
+            reads <= 2 * expected.len() as u64,
+            "list_realms read {reads} data blocks for {} realms",
+            expected.len()
+        );
+    }
+
+    /// #888: `list_realms` runs at every start with `HEARTH_KEK` set (the
+    /// stored-key check). It read and decoded every record of every SST, so
+    /// a start took time and heap in proportion to the store: 14 s and
+    /// 2.6 GB of heap at 3M users. It must read about one data block per
+    /// realm in each SST, not the realm's whole key range.
+    #[test]
+    fn list_realms_reads_one_block_per_realm_not_every_record() {
+        let (_dir, engine) = setup_engine();
+        let expected = write_one_big_and_three_small_realms(&engine);
+        assert_list_realms_reads_one_block_per_realm(&engine, &expected);
+    }
+
+    /// #888: an online backup lists the realms of its read snapshot, which
+    /// read every record of every SST the same way.
+    #[test]
+    fn snapshot_list_realms_reads_one_block_per_realm_not_every_record() {
+        let (_dir, engine) = setup_engine();
+        let expected = write_one_big_and_three_small_realms(&engine);
+        let snapshot = engine
+            .read_snapshot()
+            .expect("snapshot")
+            .expect("the embedded engine makes snapshots");
+        assert_list_realms_reads_one_block_per_realm(&*snapshot, &expected);
+    }
+
+    /// The exclusive end of the keys that start with `prefix`.
+    fn keys_end(prefix: &[u8]) -> Vec<u8> {
+        let mut end = prefix.to_vec();
+        if let Some(last) = end.last_mut() {
+            *last += 1;
+        }
+        end
     }
 
     // ===== Releasing replaced SST reader lists =====

@@ -441,6 +441,14 @@ impl<'a> EntryRef<'a> {
     }
 }
 
+/// The realm whose UUID bytes follow `realm`'s, or `None` for the last one.
+/// `(next_realm(r), [])` is the first composite key past every key of `r`.
+fn next_realm(realm: &RealmId) -> Option<RealmId> {
+    u128::from_be_bytes(*realm.as_uuid().as_bytes())
+        .checked_add(1)
+        .map(|next| RealmId::new(Uuid::from_u128(next)))
+}
+
 /// A borrowed view of an owned value: `None` for a tombstone.
 fn value_view(value: &MemtableValue) -> Option<&[u8]> {
     match value {
@@ -1567,6 +1575,20 @@ fn count_resident_bytes(
 /// that reuses an SST file number (see [`BlockId`]).
 static NEXT_READER_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+#[cfg(test)]
+thread_local! {
+    /// The data blocks this thread read from blocked SST files, cache hits
+    /// included. Tests use it to bound the reads of a walk (#888).
+    static DATA_BLOCK_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The data blocks this thread read from blocked SST files so far, cache
+/// hits included.
+#[cfg(test)]
+pub(crate) fn data_block_reads() -> u64 {
+    DATA_BLOCK_READS.with(std::cell::Cell::get)
+}
+
 /// An index or filter block of a partition.
 enum Piece {
     /// Held on the heap for the life of the reader: a v3 file's footer holds
@@ -1643,6 +1665,10 @@ impl BlockedBody {
         sst_number: u64,
         cached: bool,
     ) -> Result<Arc<CachedBlock>, StorageError> {
+        #[cfg(test)]
+        if kind == BlockKind::Data {
+            DATA_BLOCK_READS.with(|reads| reads.set(reads.get() + 1));
+        }
         let id = BlockId {
             reader_id: self.reader_id,
             block_index: handle.ordinal,
@@ -2370,6 +2396,59 @@ impl SstReader {
                 Ok(out)
             }
         }
+    }
+
+    /// The realms that own at least one entry in this file, a tombstone
+    /// included, in key order.
+    ///
+    /// Entries sort by realm first, so the walk reads the first entry of a
+    /// realm and then seeks past the realm's last possible key. It reads
+    /// about one data block per realm, never a realm's other records, and
+    /// holds one block at a time (#888). Blocks are read past the shared
+    /// cache, as a one-shot walk should (HEA-1922).
+    ///
+    /// # Errors
+    ///
+    /// The error reading or decrypting an index or data block.
+    pub(crate) fn realm_ids(&self) -> Result<Vec<RealmId>, StorageError> {
+        let mut realms: Vec<RealmId> = Vec::new();
+        match &self.body {
+            SstBody::Eager(entries) => {
+                for (key, _) in entries {
+                    if realms.last() != Some(key.realm_id()) {
+                        realms.push(key.realm_id().clone());
+                    }
+                }
+            }
+            SstBody::Blocked(body) => {
+                // `None`: from the first entry of the file.
+                let mut from: Option<RealmId> = None;
+                loop {
+                    let mut walk = match &from {
+                        None => BlockWalk::from_start(body, self.sst_number, false),
+                        Some(realm) => BlockWalk::seek(body, self.sst_number, false, realm, &[])?,
+                    };
+                    let mut found = None;
+                    while let Some(block) = walk.next_block(None)? {
+                        let data = block.block.data()?;
+                        let pos = from
+                            .as_ref()
+                            .map_or(0, |realm| data.lower_bound(realm, &[]));
+                        if let Some(entry) = data.entry(pos) {
+                            found = Some(RealmId::new(Uuid::from_bytes(*entry.realm)));
+                            break;
+                        }
+                    }
+                    let Some(realm) = found else { break };
+                    from = next_realm(&realm);
+                    realms.push(realm);
+                    if from.is_none() {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(realms)
     }
 
     /// Returns all entries for a specific realm, with raw keys (no realm prefix).
@@ -4477,6 +4556,111 @@ mod tests {
 
     /// Enough fixed-size rows for three partitions or more.
     const PARTITIONED_ROWS: u32 = 40_000;
+
+    /// The realms of `entries` in order, as a full read finds them.
+    fn realms_of(entries: &[(CompositeKey, MemtableValue)]) -> Vec<RealmId> {
+        let mut realms: Vec<RealmId> = entries.iter().map(|(k, _)| k.realm_id().clone()).collect();
+        realms.dedup();
+        realms
+    }
+
+    /// Edge realm IDs for the realm walk (#888): the first and last UUID,
+    /// and pairs that differ by one, where the seek past one realm lands
+    /// exactly on the first key of the next.
+    fn edge_realms() -> Vec<RealmId> {
+        [0_u128, 1, 2, 0x4000, 0x4001, u128::MAX - 1, u128::MAX]
+            .into_iter()
+            .map(|n| RealmId::new(Uuid::from_u128(n)))
+            .collect()
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(48))]
+
+        /// `realm_ids` names every realm of a file, tombstone-only realms
+        /// included, in key order, for v3 and v4 files: the same realms as
+        /// a full read (#888).
+        #[test]
+        fn proptest_realm_ids_match_a_full_read(
+            rows in prop::collection::vec((0..7_usize, 0..400_u32, any::<bool>()), 0..1_500),
+            v3 in any::<bool>(),
+        ) {
+            let realms = edge_realms();
+            let mut map = std::collections::BTreeMap::new();
+            for (realm, key, tombstone) in rows {
+                let value = if tombstone {
+                    MemtableValue::Tombstone
+                } else {
+                    MemtableValue::Data(vec![b'v'; 120])
+                };
+                map.insert(
+                    CompositeKey::new(realms[realm].clone(), format!("k{key:05}").into_bytes()),
+                    value,
+                );
+            }
+            let entries: Vec<_> = map.into_iter().collect();
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("realms.sst");
+            let (dek, enc) = test_encryption_context();
+            write_either(v3, &path, &entries, 1, &dek, &enc);
+            let reader = SstReader::open(&path, 1, &dek).expect("open");
+            prop_assert_eq!(reader.realm_ids().expect("realm_ids"), realms_of(&entries));
+        }
+    }
+
+    /// A v4 file with several partitions: the realm walk seeks across
+    /// partition boundaries, and reads about one data block per realm.
+    #[test]
+    fn realm_ids_across_partitions_reads_one_block_per_realm() {
+        let realms = edge_realms();
+        let mut entries = Vec::new();
+        for realm in &realms {
+            entries.extend(fixed_entries(realm, PARTITIONED_ROWS / 7));
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("partitioned-realms.sst");
+        let (dek, enc) = test_encryption_context();
+        SstWriter::write_sst(&path, &entries, 1, &dek, &enc).expect("write");
+        let reader = SstReader::open(&path, 1, &dek).expect("open");
+        assert!(
+            partitions(&reader).len() >= 3,
+            "precondition: {} partitions",
+            partitions(&reader).len()
+        );
+        let blocks = data_blocks(&reader).len();
+
+        let before = data_block_reads();
+        assert_eq!(reader.realm_ids().expect("realm_ids"), realms);
+        let reads = data_block_reads() - before;
+        assert!(
+            reads <= 2 * realms.len() as u64,
+            "{reads} data blocks read for {} realms in a file of {blocks} blocks",
+            realms.len()
+        );
+    }
+
+    /// A legacy v1 file holds its entries in memory; its realms come from them.
+    #[test]
+    fn realm_ids_of_a_v1_file() {
+        let realms = edge_realms();
+        let entries: Vec<_> = realms
+            .iter()
+            .flat_map(|realm| {
+                [b"a".to_vec(), b"b".to_vec()].map(|key| {
+                    (
+                        CompositeKey::new(realm.clone(), key),
+                        MemtableValue::Data(b"v".to_vec()),
+                    )
+                })
+            })
+            .collect();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("v1.sst");
+        let (dek, enc) = test_encryption_context();
+        write_v1_manual(&path, &entries, 1, &dek, &enc);
+        let reader = SstReader::open(&path, 1, &dek).expect("open");
+        assert_eq!(reader.realm_ids().expect("realm_ids"), realms);
+    }
 
     #[test]
     fn v4_round_trip_across_partitions() {
