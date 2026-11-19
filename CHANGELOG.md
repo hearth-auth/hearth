@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Security
+- **SMTP email delivery uses lettre 0.11.24**, which fixes four advisories in lettre 0.11.23:
+  forged SMTP replies after `STARTTLS` (RUSTSEC-2026-0560), SMTP command injection through a bare
+  LF or CR in a message (RUSTSEC-2026-0561), a panic on an `EHLO` reply line of only white space
+  (RUSTSEC-2026-0562), and delivery to a different address for a quoted local part
+  (RUSTSEC-2026-0563).
+
 ## [4.12.2] — 2026-11-17
 
 ### Fixed

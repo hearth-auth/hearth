@@ -146,3 +146,31 @@ reason = "glob 13.0.6 bundled inside the npm CLI 11.21.1 (release tooling, dev s
 
 # No [[PackageOverrides]] path-exclusion entries — scope is controlled via
 # explicit --lockfile flags in security.yml, which is the correct mechanism.
+
+# chrono, chrono-tz and chrono-tz-build: RustSec "unmaintained" notices published
+# 2026-11-18 (all versions, no fixed release). Same assessment as the deny.toml and
+# .cargo/audit.toml entries: maintenance notices, not vulnerabilities; Hearth's own
+# code does not use chrono. fuzz/Cargo.lock has the same three crates through hearth.
+
+# guard: package=chrono lockfile=Cargo.lock
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0543"
+reason = "chrono is unmaintained (RustSec notice, 2026-11-18): all versions, no fixed release, no vulnerability reported. Hearth's own code uses `time`, not chrono. chrono comes in through openraft 0.9, pbjson-types 0.9 and tera 1 (the `builtins` feature gives operator email templates the `date` filter). Revisit when openraft, pbjson-types and tera drop chrono, or when an advisory reports a vulnerability in chrono."
+
+# guard: package=chrono-tz lockfile=Cargo.lock
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0555"
+reason = "chrono-tz is unmaintained (RustSec notice, 2026-11-18): all versions, no fixed release, no vulnerability reported. It comes in only through tera 1 (the `builtins` feature, the `date` filter for operator email templates). Revisit when tera drops chrono-tz, or when an advisory reports a vulnerability in chrono-tz."
+
+# guard: package=chrono-tz-build lockfile=Cargo.lock
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0559"
+reason = "chrono-tz-build is unmaintained (RustSec notice, 2026-11-18): all versions, no fixed release, no vulnerability reported. It is a build dependency of chrono-tz, which comes in only through tera 1. Revisit when tera drops chrono-tz."
+
+# picomatch has no fixed release: GHSA-fc5q-39xc-vjpf covers every version through 4.0.7,
+# the newest (checked 2026-11-18).
+
+# guard: package=picomatch lockfile=sdks/typescript/package-lock.json
+[[IgnoredVulns]]
+id = "GHSA-fc5q-39xc-vjpf"
+reason = "picomatch through 4.0.7 (every release, no fix; checked 2026-11-18): a glob pattern such as +(*) makes the regular expression backtrack exponentially (ReDoS). The attacker must supply the glob pattern. Every copy here is build or test tooling that matches the repository's own patterns: sdks/typescript 4.0.7 via vite, vitest, tinyglobby and fdir (dev scope; the SDK's runtime dependencies are jose and openapi-fetch); docs-site 2.3.2 via micromatch, anymatch, readdirp and jest-util under Docusaurus (the site ships as static HTML); root 2.3.2 and 4.0.7 via micromatch, tinyglobby and fdir, plus 4.0.4 bundled inside the npm CLI (release tooling, dev scope). None ships in the server, an SDK runtime or the site's pages. Revisit when picomatch publishes a fixed release."

@@ -113,3 +113,15 @@ vulnerabilities:
     paths:
       - "docs-site/package-lock.json"
     statement: "minimatch 3.1.5 pinned by serve-handler 6.1.7 (Docusaurus local preview); patterns come from its own config; fix only in 11.0.1."
+
+  # CVE-2026-112366 (GHSA-fc5q-39xc-vjpf, 2026-11-18 in the scan): picomatch
+  # through 4.0.7 (every release, no fix) backtracks exponentially on a glob
+  # pattern such as +(*). The attacker must supply the pattern. docs-site has
+  # picomatch 2.3.2 only through Docusaurus build tooling (micromatch, anymatch,
+  # readdirp, jest-util), which matches the site's own patterns; the site ships
+  # as static HTML. Same assessment as the osv-scanner.toml entry. Revisit when
+  # picomatch publishes a fixed release.
+  - id: CVE-2026-112366
+    paths:
+      - "docs-site/package-lock.json"
+    statement: "picomatch 2.3.2 in Docusaurus build tooling; patterns come from the repo; no patched release."

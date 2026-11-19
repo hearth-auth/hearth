@@ -448,7 +448,7 @@ Used by:
 --------------------------------------------------------------------------------
 License: Apache License 2.0 (Apache-2.0)
 Used by:
-  - hearth 4.10.0
+  - hearth 4.12.2
   - encoding_rs 0.8.35
   - qrcode 0.14.1
   - secrecy 0.8.0
@@ -1515,7 +1515,7 @@ Used by:
   - ciborium-io 0.2.2
   - ciborium-ll 0.2.2
   - ciborium 0.2.2
-  - email-encoding 0.4.1
+  - email-encoding 0.4.3
   - opentelemetry-proto 0.32.0
   - redb 2.6.3
   - unarray 0.1.4
@@ -7219,7 +7219,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 --------------------------------------------------------------------------------
 License: MIT License (MIT)
 Used by:
-  - lettre 0.11.23
+  - lettre 0.11.24
 
 Copyright (c) 2014-2024 Alexis Mousset <contact@amousset.me>
 Copyright (c) 2019-2025 Paolo Barbolini <paolo@paolo565.org>
