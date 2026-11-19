@@ -1,5 +1,18 @@
 [advisories]
-ignore = []
+ignore = [
+    # RUSTSEC-2026-0543 (chrono), RUSTSEC-2026-0555 (chrono-tz) and
+    # RUSTSEC-2026-0559 (chrono-tz-build), published 2026-11-18: "unmaintained",
+    # all versions affected, no fixed version. These are maintenance notices, not
+    # vulnerabilities. Hearth's own code does not use chrono (it uses `time`).
+    # chrono comes in through openraft 0.9, pbjson-types 0.9 and tera 1 (the
+    # `builtins` feature, which gives operator email templates the `date` filter);
+    # chrono-tz and chrono-tz-build come in through tera only.
+    # Revisit when openraft, pbjson-types and tera drop chrono, or when an
+    # advisory reports a vulnerability in chrono or chrono-tz.
+    "RUSTSEC-2026-0543",
+    "RUSTSEC-2026-0555",
+    "RUSTSEC-2026-0559",
+]
 
 [licenses]
 # cargo-deny 0.14+ uses a pure allowlist model: any license (or no license) not
