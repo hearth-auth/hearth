@@ -24,6 +24,8 @@
 #   self.storage.put_batch(...)
 #   self.storage.delete(...)
 #   self.storage.delete_batch(...)
+#   self.storage.enqueue_batch(...) / enqueue_batch_if_absent(...)
+#   <pipeline>.push_rows(...) / push_if_absent(...)   (a restore's WritePipeline, #896)
 #
 # unless the line carries the inline allow marker:
 #
@@ -55,7 +57,7 @@ while IFS= read -r hit; do
     [[ "$hit" == *"rbac-storage-write-ok"* ]] && continue
     echo "FAIL [raw rbac storage write] $FILE:$hit"
     violations=$((violations + 1))
-done < <(grep -nE 'self\.storage\.(put|delete)(_batch)?\(' "$FILE" 2>/dev/null || true)
+done < <(grep -nE 'self\.storage\.(put|delete)(_batch)?\(|\.enqueue_batch(_if_absent)?\(|\.push_(rows|if_absent)\(' "$FILE" 2>/dev/null || true)
 
 if (( violations > 0 )); then
     echo ""
@@ -67,6 +69,7 @@ if (( violations > 0 )); then
     echo "  self.write_put(realm_id, key, value)?;      // instead of self.storage.put(...)"
     echo "  self.write_put_batch(realm_id, &entries)?;  // instead of self.storage.put_batch(...)"
     echo "  self.write_delete(realm_id, key)?;          // instead of self.storage.delete(...)"
+    echo "  self.write_pipelined(&mut pipeline, ...);   // instead of pipeline.push_rows(...)"
     echo ""
     echo "A direct self.storage.put/delete call skips invalidate_realm(), leaving a"
     echo "stale cached resolution live after the grant/membership changed — a"

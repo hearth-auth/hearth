@@ -36,9 +36,9 @@ pub use types::{
     AssignRoleRequest, AssignmentId, CreateGroupRequest, CreateRoleRequest, CycleKind, Group,
     GroupId, GroupMember, GroupMembership, GroupMembershipEdge, OrphanKind, OrphanRef, Page,
     Permission, PermissionDefinition, PermissionRecord, PermissionStatus, ProtectedResource,
-    ResolvedPermissions, Role, RoleAssignment, RoleId, RoleScopeKind, RoleSpec, RoleStatus,
-    RoleSubject, Scope, ScopeBundle, ScopeExport, ScopeMode, ScopeRequest, ScopeSpec, Subject,
-    TraversalKind, UpdateGroupRequest, UpdateRoleRequest, UserPermissionGrant,
+    RbacImportRecords, ResolvedPermissions, Role, RoleAssignment, RoleId, RoleScopeKind, RoleSpec,
+    RoleStatus, RoleSubject, Scope, ScopeBundle, ScopeExport, ScopeMode, ScopeRequest, ScopeSpec,
+    Subject, TraversalKind, UpdateGroupRequest, UpdateRoleRequest, UserPermissionGrant,
 };
 
 use crate::core::{ImportOutcome, OrganizationId, PageRequest, PagedResult, RealmId, UserId};
@@ -653,4 +653,21 @@ pub trait RbacEngine: Send + Sync {
         edge: &GroupMembershipEdge,
         overwrite: bool,
     ) -> Result<ImportOutcome, RbacError>;
+
+    /// Restores many records of one backup member, and returns one result per
+    /// record, in order (#896).
+    ///
+    /// Each record is validated and written exactly as the one-record import
+    /// of its member does it ([`import_group`](Self::import_group),
+    /// [`import_assignment`](Self::import_assignment),
+    /// [`import_group_membership`](Self::import_group_membership)), each as
+    /// one atomic write, but many records share each durable write: one by
+    /// one, a restore wrote 175–300 records/s on a cloud disk. A record's
+    /// result is `Ok` only once its write is durable.
+    fn import_records(
+        &self,
+        realm_id: &RealmId,
+        records: RbacImportRecords<'_>,
+        overwrite: bool,
+    ) -> Vec<Result<ImportOutcome, RbacError>>;
 }

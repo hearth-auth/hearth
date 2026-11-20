@@ -360,6 +360,25 @@ pub struct GroupMembershipEdge {
     pub member: GroupMember,
 }
 
+/// The records of one backup member that a restore imports together with
+/// [`RbacEngine::import_records`](crate::rbac::RbacEngine::import_records)
+/// (#896).
+///
+/// Each variant holds records of a member a realm can hold millions of. The
+/// engine validates and writes each record as the one-record import of its
+/// member does (`import_group`, `import_assignment`,
+/// `import_group_membership`), and many records share each durable write.
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub enum RbacImportRecords<'a> {
+    /// Records of `groups.ndjson`.
+    Groups(&'a [Group]),
+    /// Records of `assignments.ndjson`.
+    Assignments(&'a [RoleAssignment]),
+    /// Records of `group_memberships.ndjson`.
+    GroupMemberships(&'a [GroupMembershipEdge]),
+}
+
 /// Subject of a role assignment: either a user or a group.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "id", rename_all = "lowercase")]

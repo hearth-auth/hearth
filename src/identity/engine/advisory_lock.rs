@@ -90,14 +90,15 @@ impl<'a> AdvisoryLock<'a> {
         self.inner.lock()
     }
 
-    /// Returns the underlying mutex, for identity comparisons in tests.
-    /// Tries to take the lock without blocking (tests that probe whether a
-    /// holder is inside its critical section).
-    #[cfg(test)]
+    /// Tries to take the lock without blocking: for a caller that must not
+    /// wait for a holder before it has settled its own pending writes (a
+    /// restore, #896), and for tests that probe whether a holder is inside
+    /// its critical section.
     pub(super) fn try_lock(&self) -> std::sync::TryLockResult<MutexGuard<'_, ()>> {
         self.inner.try_lock()
     }
 
+    /// Returns the underlying mutex, for identity comparisons in tests.
     #[cfg(test)]
     pub(super) fn mutex(&self) -> &Mutex<()> {
         &self.inner

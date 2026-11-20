@@ -7,10 +7,12 @@
 //! - `org`        — organizations, memberships, and invitations
 //! - `credential` — migration / import credential types
 //! - `token`      — OAuth consent, webhooks, and agents
+//! - `restore`    — the records of a backup member, restored together
 
 pub mod credential;
 pub mod org;
 pub mod realm;
+pub mod restore;
 pub mod session;
 pub mod token;
 pub mod user;
@@ -18,6 +20,7 @@ pub mod user;
 pub use credential::*;
 pub use org::*;
 pub use realm::*;
+pub use restore::*;
 pub use session::*;
 pub use token::*;
 pub use user::*;
