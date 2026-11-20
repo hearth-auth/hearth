@@ -130,16 +130,16 @@ pub use types::{
     ConsentDisclosure, ConsentExport, ConsentGrant, ConsentKey, ConsentListEntry, ConsentRecord,
     ConsentState, ConsentSurface, CreateInvitationRequest, CreateOrganizationRequest,
     CreateRealmRequest, CreateUserRequest, CreateWebhookRequest, CredentialExport, DcrPolicy,
-    DemoSeedOutcome, DemoSeedSpec, FederationLinkExport, ImportClientRequest, ImportUserRequest,
-    InvitationStatus, MfaFactorExport, MfaProof, MigrationReport, Organization, OrganizationConfig,
-    OrganizationInvitation, OrganizationMembership, OrganizationRole, OrganizationStatus, Page,
-    PasswordEmail, PasswordEmailKind, PasswordPolicy, PendingAuthorizationRequest,
-    PreTokenWebhookConfig, PreTokenWebhookErrorPolicy, RawCredential, Realm, RealmConfig,
-    RealmQuotaConfig, RealmStatus, RegisterUserRequest, RegisterUserResponse, RegistrationPolicy,
-    RequiredAction, RestoredUserState, ScimMappingExport, ScimMappingKind, Session, SessionContext,
-    SessionLimitPolicy, SessionVersionConfig, SignInMethod, UpdateOrganizationRequest,
-    UpdateRealmRequest, UpdateUserRequest, UpdateWebhookRequest, User, UserStatus,
-    VerificationOrigin, WebAuthnAttestationPolicy, Webhook,
+    DemoSeedOutcome, DemoSeedSpec, FederationLinkExport, ImportClientRequest, ImportRecords,
+    ImportUserRequest, InvitationStatus, MfaFactorExport, MfaProof, MigrationReport, Organization,
+    OrganizationConfig, OrganizationInvitation, OrganizationMembership, OrganizationRole,
+    OrganizationStatus, Page, PasswordEmail, PasswordEmailKind, PasswordPolicy,
+    PendingAuthorizationRequest, PreTokenWebhookConfig, PreTokenWebhookErrorPolicy, RawCredential,
+    Realm, RealmConfig, RealmQuotaConfig, RealmStatus, RegisterUserRequest, RegisterUserResponse,
+    RegistrationPolicy, RequiredAction, RestoredUserState, ScimMappingExport, ScimMappingKind,
+    Session, SessionContext, SessionLimitPolicy, SessionVersionConfig, SignInMethod,
+    UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest, UpdateWebhookRequest, User,
+    UserStatus, VerificationOrigin, WebAuthnAttestationPolicy, Webhook,
 };
 pub use types::{
     AatClaims, AatResponse, AatToolPermission, Agent, AgentCredential, AgentCredentialKind,
@@ -2952,6 +2952,23 @@ pub trait IdentityEngine: Send + Sync {
         factor: &MfaFactorExport,
         overwrite: bool,
     ) -> Result<crate::core::ImportOutcome, IdentityError>;
+
+    /// Restores many records of one backup member, and returns one result per
+    /// record, in order (#896).
+    ///
+    /// Each record is validated and written exactly as the one-record import
+    /// of its member does it (`import_organization`, `import_mfa_factor`,
+    /// `import_organization_membership`, `import_consent`, `import_agent`,
+    /// `import_federation_link`, `import_scim_mapping`, `import_invitation`,
+    /// `import_revocation`), each as one atomic write, but many records share
+    /// each durable write: one by one, a restore wrote 175–300 records/s on a
+    /// cloud disk. A record's result is `Ok` only once its write is durable.
+    fn import_records(
+        &self,
+        realm_id: &RealmId,
+        records: ImportRecords<'_>,
+        overwrite: bool,
+    ) -> Vec<Result<ImportOutcome, IdentityError>>;
 
     /// Passes every organization-membership record in a realm to `visit`,
     /// for backup export (OpenSpec 26.40).

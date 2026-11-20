@@ -32,6 +32,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `POST /admin/users/import`, which shares each fsync among many users: in a test, a restore of
   600 users made 15 fsyncs instead of 1,205. The report, the conflicts and the overwrite mode are
   unchanged. Operator accounts in the system realm are still restored one by one.
+- **A restore writes the other large members in batches too** (#896): after the users, a restore
+  wrote each MFA factor, group, organization, role assignment, group and organization membership,
+  consent, agent, federation link, SCIM mapping, invitation and revocation with its own durable
+  write, about 200 records/s locally and 175–300 records/s on an AWS gp3 volume, so 10M role
+  assignments took 10–16 hours. These members are now restored 512 records at a time, and the
+  records of a batch share one fsync: locally, 37,000–69,000 records/s instead of 180–265. Each
+  record is still validated and written on its own, as one atomic write, and the report, the
+  per-record errors, the order of the members and the restore modes are unchanged. A batch of
+  revocations bumps the revocation epoch once instead of once per token. Clients, roles,
+  permissions, scopes, identity providers, webhook subscriptions and retiring keys, which a
+  realm holds few of, are still restored one by one, and so is a restore into a cluster.
 - **A start with `HEARTH_KEK` set no longer reads the whole store** (#888): at each start, the
   check that every stored key opens under `HEARTH_KEK` listed the realms of the store by reading
   and decrypting every record of every SST file, and it held each file's records in memory at

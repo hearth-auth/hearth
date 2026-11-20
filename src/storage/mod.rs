@@ -32,6 +32,7 @@ pub(crate) mod sst;
 #[allow(dead_code)]
 mod tiered;
 pub mod wal;
+pub(crate) mod write_pipeline;
 
 pub use engine::{CompactionConfig, EmbeddedStorageEngine, StorageConfig};
 pub use error::{ClusterUnavailableCause, RetryClass, StorageError};

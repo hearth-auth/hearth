@@ -17,12 +17,13 @@ use crate::identity::federation::IdpConfig;
 use crate::identity::{
     AccessTokenAuthorization, AgentExport, ApplicationStatus, ClientTrustLevel, ConsentExport,
     CreateRealmRequest, FederationLinkExport, IdentityEngine, IdentityError, ImportClientRequest,
-    ImportUserRequest, MfaFactorExport, Organization, OrganizationInvitation,
+    ImportRecords, ImportUserRequest, MfaFactorExport, Organization, OrganizationInvitation,
     OrganizationMembership, RawCredential, Realm, RestoredUserState, RetiringSigningKeyExport,
     RevocationExport, ScimMappingExport, User,
 };
 use crate::rbac::{
-    Group, GroupMembershipEdge, PermissionRecord, RbacEngine, Role, RoleAssignment, ScopeExport,
+    Group, GroupMembershipEdge, PermissionRecord, RbacEngine, RbacImportRecords, Role,
+    RoleAssignment, ScopeExport,
 };
 use crate::webhook::{WebhookEngine, WebhookSubscription};
 
@@ -1554,11 +1555,12 @@ impl RealmRestore<'_> {
                 path,
                 opts,
                 &mut report.mfa_factors,
-                |factor: &MfaFactorExport| {
-                    importer
-                        .identity
-                        .import_mfa_factor(&realm_id, factor, overwrite)
-                        .map_err(|e| BackupError::Engine(e.to_string()))
+                |batch: &[MfaFactorExport]| {
+                    engine_results(importer.identity.import_records(
+                        &realm_id,
+                        ImportRecords::MfaFactors(batch),
+                        overwrite,
+                    ))
                 },
             )?,
             "clients.ndjson" => {
@@ -1576,39 +1578,53 @@ impl RealmRestore<'_> {
                 path,
                 opts,
                 &mut report.permissions,
-                |record: &PermissionRecord| {
+                each(|record: &PermissionRecord| {
                     importer
                         .rbac
                         .import_permission(&realm_id, record, overwrite)
                         .map_err(|e| BackupError::Engine(e.to_string()))
-                },
+                }),
             )?,
             "roles.ndjson" => {
-                restore_records(member, path, opts, &mut report.roles, |role: &Role| {
-                    importer
-                        .rbac
-                        .import_role(&realm_id, role, overwrite)
-                        .map_err(|e| BackupError::Engine(e.to_string()))
-                })?;
+                restore_records(
+                    member,
+                    path,
+                    opts,
+                    &mut report.roles,
+                    each(|role: &Role| {
+                        importer
+                            .rbac
+                            .import_role(&realm_id, role, overwrite)
+                            .map_err(|e| BackupError::Engine(e.to_string()))
+                    }),
+                )?;
             }
             "groups.ndjson" => {
-                restore_records(member, path, opts, &mut report.groups, |group: &Group| {
-                    importer
-                        .rbac
-                        .import_group(&realm_id, group, overwrite)
-                        .map_err(|e| BackupError::Engine(e.to_string()))
-                })?;
+                restore_records(
+                    member,
+                    path,
+                    opts,
+                    &mut report.groups,
+                    |batch: &[Group]| {
+                        engine_results(importer.rbac.import_records(
+                            &realm_id,
+                            RbacImportRecords::Groups(batch),
+                            overwrite,
+                        ))
+                    },
+                )?;
             }
             "organizations.ndjson" => restore_records(
                 member,
                 path,
                 opts,
                 &mut report.organizations,
-                |org: &Organization| {
-                    importer
-                        .identity
-                        .import_organization(&realm_id, org, overwrite)
-                        .map_err(|e| BackupError::Engine(e.to_string()))
+                |batch: &[Organization]| {
+                    engine_results(importer.identity.import_records(
+                        &realm_id,
+                        ImportRecords::Organizations(batch),
+                        overwrite,
+                    ))
                 },
             )?,
             "assignments.ndjson" => restore_records(
@@ -1616,11 +1632,12 @@ impl RealmRestore<'_> {
                 path,
                 opts,
                 &mut report.assignments,
-                |assignment: &RoleAssignment| {
-                    importer
-                        .rbac
-                        .import_assignment(&realm_id, assignment, overwrite)
-                        .map_err(|e| BackupError::Engine(e.to_string()))
+                |batch: &[RoleAssignment]| {
+                    engine_results(importer.rbac.import_records(
+                        &realm_id,
+                        RbacImportRecords::Assignments(batch),
+                        overwrite,
+                    ))
                 },
             )?,
             // Group memberships come AFTER groups and users so the records they
@@ -1632,11 +1649,12 @@ impl RealmRestore<'_> {
                 path,
                 opts,
                 &mut report.group_memberships,
-                |edge: &GroupMembershipEdge| {
-                    importer
-                        .rbac
-                        .import_group_membership(&realm_id, edge, overwrite)
-                        .map_err(|e| BackupError::Engine(e.to_string()))
+                |batch: &[GroupMembershipEdge]| {
+                    engine_results(importer.rbac.import_records(
+                        &realm_id,
+                        RbacImportRecords::GroupMemberships(batch),
+                        overwrite,
+                    ))
                 },
             )?,
             "organization_memberships.ndjson" => restore_records(
@@ -1644,11 +1662,12 @@ impl RealmRestore<'_> {
                 path,
                 opts,
                 &mut report.organization_memberships,
-                |membership: &OrganizationMembership| {
-                    importer
-                        .identity
-                        .import_organization_membership(&realm_id, membership, overwrite)
-                        .map_err(|e| BackupError::Engine(e.to_string()))
+                |batch: &[OrganizationMembership]| {
+                    engine_results(importer.identity.import_records(
+                        &realm_id,
+                        ImportRecords::OrganizationMemberships(batch),
+                        overwrite,
+                    ))
                 },
             )?,
             "consents.ndjson" => restore_records(
@@ -1656,11 +1675,12 @@ impl RealmRestore<'_> {
                 path,
                 opts,
                 &mut report.consents,
-                |consent: &ConsentExport| {
-                    importer
-                        .identity
-                        .import_consent(&realm_id, consent, overwrite)
-                        .map_err(|e| BackupError::Engine(e.to_string()))
+                |batch: &[ConsentExport]| {
+                    engine_results(importer.identity.import_records(
+                        &realm_id,
+                        ImportRecords::Consents(batch),
+                        overwrite,
+                    ))
                 },
             )?,
             // Agents come after users and organizations so their owner exists.
@@ -1673,11 +1693,12 @@ impl RealmRestore<'_> {
                 path,
                 opts,
                 &mut report.agents,
-                |export: &AgentExport| {
-                    importer
-                        .identity
-                        .import_agent(&realm_id, export, overwrite)
-                        .map_err(|e| BackupError::Engine(e.to_string()))
+                |batch: &[AgentExport]| {
+                    engine_results(importer.identity.import_records(
+                        &realm_id,
+                        ImportRecords::Agents(batch),
+                        overwrite,
+                    ))
                 },
             )?,
             // IdP connectors BEFORE federation links: a link is keyed by the
@@ -1687,23 +1708,24 @@ impl RealmRestore<'_> {
                 path,
                 opts,
                 &mut report.identity_providers,
-                |idp: &IdpConfig| {
+                each(|idp: &IdpConfig| {
                     importer
                         .identity
                         .import_identity_provider(&realm_id, idp, overwrite)
                         .map_err(|e| BackupError::Engine(e.to_string()))
-                },
+                }),
             )?,
             "federation_links.ndjson" => restore_records(
                 member,
                 path,
                 opts,
                 &mut report.federation_links,
-                |link: &FederationLinkExport| {
-                    importer
-                        .identity
-                        .import_federation_link(&realm_id, link, overwrite)
-                        .map_err(|e| BackupError::Engine(e.to_string()))
+                |batch: &[FederationLinkExport]| {
+                    engine_results(importer.identity.import_records(
+                        &realm_id,
+                        ImportRecords::FederationLinks(batch),
+                        overwrite,
+                    ))
                 },
             )?,
             // An older archive's webhooks.ndjson holds the identity engine's
@@ -1731,12 +1753,12 @@ impl RealmRestore<'_> {
                 path,
                 opts,
                 &mut report.webhook_subscriptions,
-                |sub: &WebhookSubscription| {
+                each(|sub: &WebhookSubscription| {
                     importer
                         .webhooks
                         .import(&realm_id, sub, overwrite)
                         .map_err(|e| BackupError::Engine(e.to_string()))
-                },
+                }),
             )?,
             // The SAML signing key is restored BEFORE the SPs it authenticates
             // to, and is re-sealed under THIS node's KEK inside
@@ -1770,11 +1792,12 @@ impl RealmRestore<'_> {
                 path,
                 opts,
                 &mut report.scim_mappings,
-                |mapping: &ScimMappingExport| {
-                    importer
-                        .identity
-                        .import_scim_mapping(&realm_id, mapping, overwrite)
-                        .map_err(|e| BackupError::Engine(e.to_string()))
+                |batch: &[ScimMappingExport]| {
+                    engine_results(importer.identity.import_records(
+                        &realm_id,
+                        ImportRecords::ScimMappings(batch),
+                        overwrite,
+                    ))
                 },
             )?,
             "invitations.ndjson" => restore_records(
@@ -1782,11 +1805,12 @@ impl RealmRestore<'_> {
                 path,
                 opts,
                 &mut report.invitations,
-                |invitation: &OrganizationInvitation| {
-                    importer
-                        .identity
-                        .import_invitation(&realm_id, invitation, overwrite)
-                        .map_err(|e| BackupError::Engine(e.to_string()))
+                |batch: &[OrganizationInvitation]| {
+                    engine_results(importer.identity.import_records(
+                        &realm_id,
+                        ImportRecords::Invitations(batch),
+                        overwrite,
+                    ))
                 },
             )?,
             "revocations.ndjson" => restore_records(
@@ -1794,11 +1818,12 @@ impl RealmRestore<'_> {
                 path,
                 opts,
                 &mut report.revocations,
-                |revocation: &RevocationExport| {
-                    importer
-                        .identity
-                        .import_revocation(&realm_id, revocation, overwrite)
-                        .map_err(|e| BackupError::Engine(e.to_string()))
+                |batch: &[RevocationExport]| {
+                    engine_results(importer.identity.import_records(
+                        &realm_id,
+                        ImportRecords::Revocations(batch),
+                        overwrite,
+                    ))
                 },
             )?,
             "retiring_signing_keys.json" => restore_records(
@@ -1806,36 +1831,36 @@ impl RealmRestore<'_> {
                 path,
                 opts,
                 &mut report.retiring_signing_keys,
-                |key: &RetiringSigningKeyExport| {
+                each(|key: &RetiringSigningKeyExport| {
                     importer
                         .identity
                         .import_retiring_signing_key(&realm_id, key, overwrite)
                         .map_err(|e| BackupError::Engine(e.to_string()))
-                },
+                }),
             )?,
             "retiring_id_token_signing_keys.json" => restore_records(
                 member,
                 path,
                 opts,
                 &mut report.retiring_id_token_signing_keys,
-                |key: &RetiringSigningKeyExport| {
+                each(|key: &RetiringSigningKeyExport| {
                     importer
                         .identity
                         .import_retiring_id_token_rsa_key(&realm_id, key, overwrite)
                         .map_err(|e| BackupError::Engine(e.to_string()))
-                },
+                }),
             )?,
             "scopes.ndjson" => restore_records(
                 member,
                 path,
                 opts,
                 &mut report.scopes,
-                |scope: &ScopeExport| {
+                each(|scope: &ScopeExport| {
                     importer
                         .rbac
                         .import_scope(&realm_id, scope, overwrite)
                         .map_err(|e| BackupError::Engine(e.to_string()))
-                },
+                }),
             )?,
             // Every name in RESTORE_ORDER has an arm above.
             other => {
@@ -1954,30 +1979,78 @@ fn check_records(name: &str, member: &mut dyn BufRead) -> Result<(), BackupError
     }
 }
 
-/// Restores every record of the NDJSON `member` by deserializing each line
-/// into `T` and applying `import_one`, tallying outcomes into `counts`.
+/// Most records of one member a restore reads before it imports them
+/// together (#896).
 ///
-/// A malformed line is a hard error (propagated); a per-record engine error
-/// is counted in `counts.errored` and logged, matching the user/client
-/// import behavior.
+/// The engines' batch imports share each fsync among the records of a batch.
+/// The batch also bounds the records the import pass holds: the restore
+/// streams the archive (#867), so its memory must not grow with the realm.
+const RESTORE_RECORD_BATCH: usize = 512;
+
+/// Restores every record of the NDJSON `member`, read [`RESTORE_RECORD_BATCH`]
+/// records at a time and imported with `import_batch`, tallying outcomes into
+/// `counts`.
+///
+/// `import_batch` returns one result per record, in order. A malformed line
+/// is a hard error (propagated, after the records before it are imported); a
+/// per-record engine error is counted in `counts.errored` and logged,
+/// matching the user/client import behavior.
 fn restore_records<T, F>(
     member: &mut dyn BufRead,
     path: &str,
     opts: &ImportOptions,
     counts: &mut EntityCounts,
-    import_one: F,
+    mut import_batch: F,
 ) -> Result<(), BackupError>
 where
     T: serde::de::DeserializeOwned,
-    F: Fn(&T) -> Result<ImportOutcome, BackupError>,
+    F: FnMut(&[T]) -> BatchResults,
 {
+    let mut batch = Vec::new();
     for record in NdjsonRecords::<T>::new(member) {
-        let record = record?;
+        let record = match record {
+            Ok(record) => record,
+            Err(e) => {
+                import_record_batch(&batch, path, counts, &mut import_batch)?;
+                return Err(e);
+            }
+        };
         if opts.dry_run {
             counts.created += 1;
             continue;
         }
-        match import_one(&record) {
+        batch.push(record);
+        if batch.len() == RESTORE_RECORD_BATCH {
+            import_record_batch(&batch, path, counts, &mut import_batch)?;
+            batch.clear();
+        }
+    }
+    import_record_batch(&batch, path, counts, &mut import_batch)
+}
+
+/// The results of a batch import, one per record, in order.
+type BatchResults = Vec<Result<ImportOutcome, BackupError>>;
+
+/// Imports one batch of [`restore_records`] and tallies its results.
+fn import_record_batch<T>(
+    batch: &[T],
+    path: &str,
+    counts: &mut EntityCounts,
+    import_batch: &mut dyn FnMut(&[T]) -> BatchResults,
+) -> Result<(), BackupError> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let results = import_batch(batch);
+    if results.len() != batch.len() {
+        return Err(BackupError::Engine(format!(
+            "the engine returned {} results for {} records of {path}",
+            results.len(),
+            batch.len()
+        )));
+    }
+    for result in results {
+        match result {
             Ok(outcome) => tally(counts, outcome),
             Err(e) => {
                 warn!(member = path, err = %e, "import record failed");
@@ -1986,6 +2059,23 @@ where
         }
     }
     Ok(())
+}
+
+/// A batch import for [`restore_records`] that imports each record of a
+/// member with the one-record import `import_one`: for the members a realm
+/// holds few records of.
+fn each<T>(
+    import_one: impl Fn(&T) -> Result<ImportOutcome, BackupError>,
+) -> impl FnMut(&[T]) -> BatchResults {
+    move |batch| batch.iter().map(&import_one).collect()
+}
+
+/// The results of an engine's batch import, as [`restore_records`] takes them.
+fn engine_results<E: std::fmt::Display>(results: Vec<Result<ImportOutcome, E>>) -> BatchResults {
+    results
+        .into_iter()
+        .map(|result| result.map_err(|e| BackupError::Engine(e.to_string())))
+        .collect()
 }
 
 /// The records of an NDJSON member, read and parsed one line at a time.
@@ -3696,6 +3786,449 @@ mod tests {
 
             assert_eq!(raw.phc_string, "$argon2id$x");
             assert_eq!(raw.created_at_micros, Some(7));
+        }
+    }
+
+    // ── Members that can be large (#896) ──────────────────────────────────────
+
+    /// The realm the batched-member tests restore.
+    const BATCH_REALM: &str = "00000000-0000-0000-0000-000000000896";
+
+    /// The members a realm can hold millions of. A restore must share each
+    /// durable write among many of their records (#896).
+    const LARGE_MEMBERS: &[&str] = &[
+        "mfa_factors.ndjson",
+        "groups.ndjson",
+        "organizations.ndjson",
+        "assignments.ndjson",
+        "group_memberships.ndjson",
+        "organization_memberships.ndjson",
+        "consents.ndjson",
+        "agents.ndjson",
+        "federation_links.ndjson",
+        "scim_mappings.ndjson",
+        "invitations.ndjson",
+        "revocations.ndjson",
+    ];
+
+    /// A UUID of kind `kind`, number `i`.
+    fn test_uuid(kind: u16, i: u32) -> String {
+        format!("00000000-0000-0000-{kind:04x}-{i:012}")
+    }
+
+    /// A 64-character lowercase hex digest, distinct per `i`.
+    fn test_digest(i: u32) -> String {
+        format!("{i:064x}")
+    }
+
+    /// Record `i` of the archive member `member`, as the exporter writes it.
+    /// Records reference users, roles, groups, orgs, clients and IdPs that
+    /// need not exist: the importers write them verbatim.
+    #[allow(clippy::too_many_lines)] // one arm per member
+    fn large_member_record(member: &str, i: u32) -> serde_json::Value {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine as _;
+        use serde_json::json;
+        let user = test_uuid(0x0001, i);
+        match member {
+            // Every other factor is a passkey; every other passkey is
+            // discoverable, so it has two index entries.
+            "mfa_factors.ndjson" if i.is_multiple_of(2) => json!({
+                "kind": "totp",
+                "user_id": user,
+                "state": {
+                    "secret_base32": "JBSWY3DPEHPK3PXP",
+                    "enabled": true,
+                    "recovery_code_hashes": [],
+                    "last_used_step": null,
+                    "enabled_at": 1
+                }
+            }),
+            "mfa_factors.ndjson" => json!({
+                "kind": "passkey",
+                "user_id": user,
+                "credential": {
+                    "credential_id_b64": URL_SAFE_NO_PAD.encode(format!("credential-{i}")),
+                    "cose_public_key_b64": "AQID",
+                    "algorithm": -7,
+                    "sign_count": 0,
+                    "discoverable": i % 4 == 1,
+                    "rp_id": "example.com",
+                    "created_at": 1
+                }
+            }),
+            "groups.ndjson" => json!({
+                "id": test_uuid(0x0002, i),
+                "realm_id": BATCH_REALM,
+                "name": format!("Group {i}"),
+                "slug": format!("group-{i}"),
+                "description": null,
+                "created_at": 1,
+                "updated_at": 1,
+                "yaml_managed": false
+            }),
+            "organizations.ndjson" => json!({
+                "id": test_uuid(0x0003, i),
+                "name": format!("Org {i}"),
+                "slug": format!("org-{i}"),
+                "description": "",
+                "status": "Active",
+                "config": { "max_members": null, "mfa_required": false },
+                "created_at": 1,
+                "updated_at": 1
+            }),
+            "assignments.ndjson" => json!({
+                "id": test_uuid(0x0004, i),
+                "realm_id": BATCH_REALM,
+                "subject": { "type": "user", "id": user },
+                "role_id": test_uuid(0x0005, i % 3),
+                "scope": { "type": "realm" },
+                "assigned_at": 1,
+                "assigned_by": null
+            }),
+            "group_memberships.ndjson" => json!({
+                "group_id": test_uuid(0x0002, i % 7),
+                "member": { "type": "user", "id": user }
+            }),
+            "organization_memberships.ndjson" => json!({
+                "org_id": test_uuid(0x0003, i % 5),
+                "user_id": user,
+                "role": "Member",
+                "joined_at": 1,
+                "invited_by": null
+            }),
+            "consents.ndjson" => {
+                let client = test_uuid(0x0006, i % 3);
+                json!({
+                    "storage_key": format!("oauth:consent:{user}:{client}"),
+                    "record": {
+                        "user_id": user,
+                        "client_id": client,
+                        "granted_scopes": ["openid"],
+                        "disclosure": { "permissions": [], "oidc_scopes": ["openid"], "claims": [] },
+                        "granted_at": 1,
+                        "updated_at": 1,
+                        "granted_by": user,
+                        "granted_via": "web"
+                    }
+                })
+            }
+            "agents.ndjson" => {
+                let agent = test_uuid(0x0007, i);
+                json!({
+                    "agent": {
+                        "id": agent,
+                        "realm_id": BATCH_REALM,
+                        "owner": { "type": "user", "id": user },
+                        "display_name": format!("Agent {i}"),
+                        "description": "",
+                        "capabilities": [],
+                        "status": "active",
+                        "max_delegation_depth": 1,
+                        "created_at": 1,
+                        "updated_at": 1
+                    },
+                    "credentials": [{
+                        "id": test_uuid(0x0008, i),
+                        "agent_id": agent,
+                        "kind": "api_key",
+                        "label": "key",
+                        "credential_hash": test_digest(i),
+                        "created_at": 1,
+                        "revoked_at": null
+                    }]
+                })
+            }
+            "federation_links.ndjson" => json!({
+                "user_id": user,
+                "idp_id": test_uuid(0x0009, i % 2),
+                "external_sub": format!("subject-{i}")
+            }),
+            "scim_mappings.ndjson" => json!({
+                "kind": if i.is_multiple_of(2) { "user" } else { "group" },
+                "external_id": format!("external-{i}"),
+                "subject_id": user
+            }),
+            "invitations.ndjson" => json!({
+                "id": test_uuid(0x000a, i),
+                "org_id": test_uuid(0x0003, i % 5),
+                "email": format!("invitee{i}@example.com"),
+                "role": "Member",
+                "token_hash": test_digest(i),
+                "status": "Pending",
+                "expires_at": 4_000_000_000_000_000_i64,
+                "invited_by": test_uuid(0x0001, 0),
+                "created_at": 1
+            }),
+            // Every kind of revocation. The rig's clock is at 1,000 s, so
+            // the expiries are in the future.
+            "revocations.ndjson" => match i % 5 {
+                0 => json!({ "kind": "jti", "jti": format!("jti-{i}"), "exp": 10_000 }),
+                1 => json!({ "kind": "dpop_jkt", "jkt": format!("jkt-{i}") }),
+                2 => json!({ "kind": "aat_jti", "jti": format!("aat-{i}") }),
+                3 => json!({ "kind": "ra_generation", "user_id": user, "generation": 3 }),
+                _ => json!({
+                    "kind": "ra_consumed",
+                    "marker": "ra-flow",
+                    "hash": test_digest(i),
+                    "expires_at": 10_000
+                }),
+            },
+            other => panic!("no test records for {other}"),
+        }
+    }
+
+    /// `n` records of `member`, one NDJSON line each.
+    fn large_member_lines(member: &str, n: u32) -> String {
+        (0..n)
+            .map(|i| large_member_record(member, i).to_string() + "\n")
+            .collect()
+    }
+
+    /// The counts of `member` in `report`.
+    fn member_counts<'r>(report: &'r ImportReport, member: &str) -> &'r EntityCounts {
+        match member {
+            "mfa_factors.ndjson" => &report.mfa_factors,
+            "groups.ndjson" => &report.groups,
+            "organizations.ndjson" => &report.organizations,
+            "assignments.ndjson" => &report.assignments,
+            "group_memberships.ndjson" => &report.group_memberships,
+            "organization_memberships.ndjson" => &report.organization_memberships,
+            "consents.ndjson" => &report.consents,
+            "agents.ndjson" => &report.agents,
+            "federation_links.ndjson" => &report.federation_links,
+            "scim_mappings.ndjson" => &report.scim_mappings,
+            "invitations.ndjson" => &report.invitations,
+            "revocations.ndjson" => &report.revocations,
+            other => panic!("no counts for {other}"),
+        }
+    }
+
+    /// Restores the realm [`BATCH_REALM`] with the members `extra` and no
+    /// user, and returns the report and the number of WAL fsyncs of the
+    /// restore.
+    fn restore_members(
+        rig: &TestRig,
+        extra: &[(&str, &str)],
+        mode: RestoreMode,
+    ) -> (ImportReport, u64) {
+        let archive_dir = TempDir::new().expect("archive tmpdir");
+        let slug = "batched-members";
+        let archive_path = make_archive(&archive_dir, slug, BATCH_REALM, "", extra, &[]);
+        let reader = BackupArchive::open(&archive_path).expect("open");
+        let opts = ImportOptions {
+            mode,
+            ..opts_with_passphrase()
+        };
+        let before = rig.storage.wal_sync_count();
+        let report = importer(rig)
+            .import_realm(slug, &reader, &opts)
+            .expect("import");
+        (report, rig.storage.wal_sync_count() - before)
+    }
+
+    /// The restore wrote the records of every member but users one per
+    /// durable write. On a cloud disk that is about 175–300 records/s: 10M
+    /// role assignments took 10–16 hours (#896). A restore must share each
+    /// fsync among many records of every member that can be large.
+    #[test]
+    fn a_restore_shares_each_durable_write_among_many_records_of_every_large_member() {
+        // More than one batch, and a partial last batch.
+        let n: u32 = 600;
+        let mut failures = Vec::new();
+        for member in LARGE_MEMBERS {
+            let rig = make_durable_rig();
+            let lines = large_member_lines(member, n);
+
+            let (report, syncs) = restore_members(&rig, &[(member, &lines)], RestoreMode::Skip);
+
+            let counts = member_counts(&report, member);
+            assert_eq!(
+                (counts.created, counts.skipped, counts.errored),
+                (u64::from(n), 0, 0),
+                "{member}: every record is restored"
+            );
+            if syncs > u64::from(n) / 10 {
+                failures.push(format!("{member}: {syncs} durable writes for {n} records"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// In overwrite mode, a record that an earlier line of the same archive
+    /// wrote is replaced, also when both lines are in the same batch. A
+    /// required-action generation is only ever raised, so its repeat is
+    /// skipped; so is a spent marker, which is the fact itself.
+    #[test]
+    fn a_repeated_record_in_the_archive_is_overwritten_in_overwrite_mode() {
+        let n: u32 = 20;
+        for member in LARGE_MEMBERS {
+            let rig = make_rig();
+            let lines = large_member_lines(member, n).repeat(2);
+
+            let (report, _) = restore_members(&rig, &[(member, &lines)], RestoreMode::Overwrite);
+
+            let counts = member_counts(&report, member);
+            let expected = if *member == "revocations.ndjson" {
+                // 4 of every 5 kinds can be overwritten.
+                (u64::from(n), u64::from(n) * 2 / 5, u64::from(n) * 3 / 5, 0)
+            } else {
+                (u64::from(n), 0, u64::from(n), 0)
+            };
+            assert_eq!(
+                (
+                    counts.created,
+                    counts.skipped,
+                    counts.overwritten,
+                    counts.errored
+                ),
+                expected,
+                "{member}: created, skipped, overwritten, errored"
+            );
+        }
+    }
+
+    /// A record whose engine import fails is counted as errored and logged,
+    /// and the other records of its batch are still restored, as one by one.
+    #[test]
+    fn a_refused_record_is_counted_and_the_rest_of_its_batch_restored() {
+        let rig = make_rig();
+        let mut lines = large_member_lines("consents.ndjson", 10);
+        // A consent at a key outside the consent key space is refused.
+        lines.push_str(
+            &serde_json::json!({
+                "storage_key": "user:elsewhere",
+                "record": large_member_record("consents.ndjson", 10)["record"]
+            })
+            .to_string(),
+        );
+        lines.push('\n');
+        lines.push_str(&large_member_lines("consents.ndjson", 12)[..]);
+
+        let (report, _) = restore_members(&rig, &[("consents.ndjson", &lines)], RestoreMode::Skip);
+
+        // Records 0..10 are in the archive twice: the second copy is skipped.
+        assert_eq!(
+            (
+                report.consents.created,
+                report.consents.skipped,
+                report.consents.errored
+            ),
+            (12, 10, 1)
+        );
+    }
+
+    /// A restore into a realm that already holds the records skips each of
+    /// them, in skip and in merge mode.
+    #[test]
+    fn a_second_restore_skips_every_record_of_every_large_member() {
+        let n: u32 = 40;
+        let members: Vec<(&str, String)> = LARGE_MEMBERS
+            .iter()
+            .map(|m| (*m, large_member_lines(m, n)))
+            .collect();
+        let extra: Vec<(&str, &str)> = members.iter().map(|(m, l)| (*m, l.as_str())).collect();
+        let rig = make_rig();
+        restore_members(&rig, &extra, RestoreMode::Skip);
+
+        let (skipped, _) = restore_members(&rig, &extra, RestoreMode::Skip);
+        let (merged, _) = restore_members(&rig, &extra, RestoreMode::Merge);
+
+        for member in LARGE_MEMBERS {
+            for report in [&skipped, &merged] {
+                let counts = member_counts(report, member);
+                assert_eq!(
+                    (counts.created, counts.skipped, counts.errored),
+                    (0, u64::from(n), 0),
+                    "{member}: every record is already there"
+                );
+            }
+        }
+    }
+
+    /// Every record of every large member comes back as it was archived: an
+    /// export of the restored realm holds exactly the archived records, over
+    /// more than one batch of each member (#896).
+    #[test]
+    fn every_large_member_round_trips_through_a_restore() {
+        let n: u32 = 600;
+        let members: Vec<(&str, String)> = LARGE_MEMBERS
+            .iter()
+            .map(|m| (*m, large_member_lines(m, n)))
+            .collect();
+        let extra: Vec<(&str, &str)> = members.iter().map(|(m, l)| (*m, l.as_str())).collect();
+        let rig = make_rig();
+
+        let (report, _) = restore_members(&rig, &extra, RestoreMode::Skip);
+        for member in LARGE_MEMBERS {
+            assert_eq!(
+                member_counts(&report, member).created,
+                u64::from(n),
+                "{member}: every record is restored"
+            );
+        }
+
+        // Export the restored realm and read the members back.
+        let realm = RealmId::new(uuid::Uuid::parse_str(BATCH_REALM).expect("uuid"));
+        let out_dir = TempDir::new().expect("export tmpdir");
+        let out_path = out_dir.path().join("export.hearth-backup");
+        let dek = BackupExporter::generate_dek().expect("generate DEK");
+        let mut writer = BackupArchive::create(&out_path).expect("create archive");
+        let realm_manifest = BackupExporter::new(
+            Arc::clone(&rig.identity),
+            Arc::clone(&rig.audit),
+            Arc::clone(&rig.rbac),
+            Arc::clone(&rig.webhooks),
+        )
+        .snapshot()
+        .expect("snapshot")
+        .export_realm(
+            &realm,
+            &mut writer,
+            &crate::backup::ExportOptions::default(),
+            &dek,
+        )
+        .expect("export");
+        let slug = realm_manifest.slug.clone();
+        let mut manifest = BackupManifest::new(vec![realm_manifest]);
+        manifest.sections_encrypted = true;
+        let (wrapped, params) = wrap_dek(&dek, &test_passphrase()).expect("wrap DEK");
+        manifest.wrapped_dek_b64 = Some(wrapped);
+        manifest.dek_wrapping_params = Some(params);
+        writer.finish(manifest).expect("finish export");
+
+        let reader = BackupArchive::open(&out_path).expect("open export");
+        let paths: Vec<String> = LARGE_MEMBERS
+            .iter()
+            .map(|m| format!("realms/{slug}/{m}"))
+            .collect();
+        let mut exported: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        reader
+            .visit_members_in_order(&paths, &mut |path, raw| {
+                let mut member = open_member(path, raw, Some(&dek))?;
+                let mut lines = Vec::new();
+                for record in NdjsonRecords::<serde_json::Value>::new(&mut *member) {
+                    lines.push(record?.to_string());
+                }
+                let name = path.rsplit('/').next().unwrap_or(path).to_string();
+                exported.insert(name, lines);
+                Ok(())
+            })
+            .expect("read export");
+
+        for member in LARGE_MEMBERS {
+            let mut archived: Vec<String> = (0..n)
+                .map(|i| large_member_record(member, i).to_string())
+                .collect();
+            archived.sort();
+            let mut restored = exported.remove(*member).unwrap_or_default();
+            restored.sort();
+            assert_eq!(restored.len(), archived.len(), "{member}: record count");
+            assert!(
+                restored == archived,
+                "{member}: the export of the restored realm differs from the archive"
+            );
         }
     }
 }

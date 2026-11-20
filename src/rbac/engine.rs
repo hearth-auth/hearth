@@ -13,6 +13,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::sync::{Arc, OnceLock, Weak};
 
 use crate::core::{Clock, ImportOutcome, OrganizationId, RealmId, Uri, UserId};
+use crate::storage::write_pipeline::WritePipeline;
 use crate::storage::{StorageEngine, StorageError};
 
 use super::error::RbacError;
@@ -24,11 +25,18 @@ use super::seed::{self, StoredScope};
 use super::types::{
     AssignRoleRequest, AssignmentId, CreateGroupRequest, CreateRoleRequest, CycleKind, Group,
     GroupId, GroupMember, GroupMembership, GroupMembershipEdge, OrphanKind, OrphanRef, Page,
-    Permission, PermissionRecord, PermissionStatus, ProtectedResource, ResolvedPermissions, Role,
-    RoleAssignment, RoleId, RoleSpec, RoleStatus, RoleSubject, Scope, ScopeExport, ScopeRequest,
-    ScopeSpec, Subject, TraversalKind, UpdateGroupRequest, UpdateRoleRequest, UserPermissionGrant,
+    Permission, PermissionRecord, PermissionStatus, ProtectedResource, RbacImportRecords,
+    ResolvedPermissions, Role, RoleAssignment, RoleId, RoleSpec, RoleStatus, RoleSubject, Scope,
+    ScopeExport, ScopeRequest, ScopeSpec, Subject, TraversalKind, UpdateGroupRequest,
+    UpdateRoleRequest, UserPermissionGrant,
 };
 use super::{RbacEngine, SvBumper};
+
+/// The pipeline a restore writes RBAC records through (#896).
+type RbacPipeline<'s> = WritePipeline<'s, ImportOutcome, RbacError>;
+
+/// The rows of one restored record and its outcome once they are durable.
+type StagedRows = (Vec<(Vec<u8>, Vec<u8>)>, ImportOutcome);
 
 /// Embedded RBAC engine backed by [`StorageEngine`].
 pub struct EmbeddedRbacEngine {
@@ -122,6 +130,137 @@ impl EmbeddedRbacEngine {
         self.storage.delete(realm_id, key)?; // rbac-storage-write-ok
         self.invalidate_realm(realm_id);
         Ok(())
+    }
+
+    /// [`WritePipeline::push_rows`] followed by cache invalidation for the
+    /// realm (#896). The rows are in the memtable once enqueued, as a
+    /// [`Self::write_put_batch`]'s are before its fsync.
+    fn write_pipelined(
+        &self,
+        pipeline: &mut RbacPipeline<'_>,
+        realm_id: &RealmId,
+        rows: &[(Vec<u8>, Vec<u8>)],
+        outcome: ImportOutcome,
+    ) {
+        pipeline.push_rows(rows, outcome); // rbac-storage-write-ok
+        self.invalidate_realm(realm_id);
+    }
+
+    /// Stages each of `records` with `stage` and writes them through one
+    /// [`WritePipeline`], so that many records share each fsync (#896).
+    /// `stage` returns the rows of a record and its outcome, or `None` for a
+    /// record that is skipped. Returns one result per record, in order.
+    fn import_staged<T>(
+        &self,
+        realm_id: &RealmId,
+        records: &[T],
+        stage: impl Fn(&T) -> Result<Option<StagedRows>, RbacError>,
+    ) -> Vec<Result<ImportOutcome, RbacError>> {
+        let mut pipeline = WritePipeline::new(&*self.storage, realm_id, RbacError::from);
+        for record in records {
+            match stage(record) {
+                Ok(None) => pipeline.push_result(Ok(ImportOutcome::Skipped)),
+                Ok(Some((rows, outcome))) => {
+                    self.write_pipelined(&mut pipeline, realm_id, &rows, outcome);
+                }
+                Err(e) => pipeline.push_result(Err(e)),
+            }
+            if pipeline.is_full() {
+                pipeline.settle();
+            }
+        }
+        pipeline.finish()
+    }
+
+    /// The error of a one-record import that returned no result.
+    fn no_result() -> RbacError {
+        RbacError::Storage(Box::new(std::io::Error::other(
+            "a one-record import returned no result",
+        )))
+    }
+
+    /// The outcome of writing a record that exists already (`exists`) or not.
+    fn outcome(exists: bool) -> ImportOutcome {
+        if exists {
+            ImportOutcome::Overwritten
+        } else {
+            ImportOutcome::Created
+        }
+    }
+
+    /// A group with its slug index.
+    fn stage_group(
+        storage: &dyn StorageEngine,
+        realm_id: &RealmId,
+        group: &Group,
+        overwrite: bool,
+    ) -> Result<Option<StagedRows>, RbacError> {
+        let group_key = keys::encode_group(&group.id);
+        let exists = storage.get(realm_id, &group_key)?.is_some();
+        if exists && !overwrite {
+            return Ok(None);
+        }
+        let slug_key = keys::encode_group_slug(realm_id, &group.slug);
+        Ok(Some((
+            vec![
+                (group_key, Self::ser(group)?),
+                (slug_key, Self::ser(&group.id)?),
+            ],
+            Self::outcome(exists),
+        )))
+    }
+
+    /// A role assignment with every secondary index (subject and role).
+    fn stage_assignment(
+        storage: &dyn StorageEngine,
+        realm_id: &RealmId,
+        assignment: &RoleAssignment,
+        overwrite: bool,
+    ) -> Result<Option<StagedRows>, RbacError> {
+        let pri = keys::encode_assignment(&assignment.id);
+        let exists = storage.get(realm_id, &pri)?.is_some();
+        if exists && !overwrite {
+            return Ok(None);
+        }
+        let subject_idx = match &assignment.subject {
+            Subject::User(u) => keys::encode_assign_user(u, &assignment.id),
+            Subject::Group(g) => keys::encode_assign_group(g, &assignment.id),
+        };
+        let role_idx = keys::encode_assign_role(&assignment.role_id, &assignment.id);
+        Ok(Some((
+            vec![
+                (pri, Self::ser(assignment)?),
+                (subject_idx, Self::ser(&assignment.id)?),
+                (role_idx, Self::ser(&assignment.id)?),
+            ],
+            Self::outcome(exists),
+        )))
+    }
+
+    /// Both entries of a group-membership edge, exactly as
+    /// `add_group_member` writes them: the reverse index is what permission
+    /// resolution scans. No session-version bump: import writes verbatim into
+    /// a target that has no sessions of its own, matching the other
+    /// `import_*` helpers.
+    fn stage_group_membership(
+        storage: &dyn StorageEngine,
+        realm_id: &RealmId,
+        edge: &GroupMembershipEdge,
+        overwrite: bool,
+    ) -> Result<Option<StagedRows>, RbacError> {
+        let forward = keys::encode_gm_forward(&edge.group_id, &edge.member);
+        let exists = storage.get(realm_id, &forward)?.is_some();
+        if exists && !overwrite {
+            return Ok(None);
+        }
+        let reverse = keys::encode_gm_reverse(&edge.member, &edge.group_id);
+        Ok(Some((
+            vec![
+                (forward, Self::ser(&edge.member)?),
+                (reverse, Self::ser(&edge.group_id)?),
+            ],
+            Self::outcome(exists),
+        )))
     }
 
     /// Deletes every `rba:org_role:` row under `prefix`, optionally keeping
@@ -2342,24 +2481,13 @@ impl RbacEngine for EmbeddedRbacEngine {
         group: &Group,
         overwrite: bool,
     ) -> Result<ImportOutcome, RbacError> {
-        let group_key = keys::encode_group(&group.id);
-        let exists = self.storage.get(realm_id, &group_key)?.is_some();
-        if exists && !overwrite {
-            return Ok(ImportOutcome::Skipped);
-        }
-        let slug_key = keys::encode_group_slug(realm_id, &group.slug);
-        self.write_put_batch(
+        self.import_records(
             realm_id,
-            &[
-                (group_key, Self::ser(group)?),
-                (slug_key, Self::ser(&group.id)?),
-            ],
-        )?;
-        Ok(if exists {
-            ImportOutcome::Overwritten
-        } else {
-            ImportOutcome::Created
-        })
+            RbacImportRecords::Groups(std::slice::from_ref(group)),
+            overwrite,
+        )
+        .pop()
+        .unwrap_or_else(|| Err(Self::no_result()))
     }
 
     fn import_assignment(
@@ -2368,29 +2496,13 @@ impl RbacEngine for EmbeddedRbacEngine {
         assignment: &RoleAssignment,
         overwrite: bool,
     ) -> Result<ImportOutcome, RbacError> {
-        let pri = keys::encode_assignment(&assignment.id);
-        let exists = self.storage.get(realm_id, &pri)?.is_some();
-        if exists && !overwrite {
-            return Ok(ImportOutcome::Skipped);
-        }
-        let subject_idx = match &assignment.subject {
-            Subject::User(u) => keys::encode_assign_user(u, &assignment.id),
-            Subject::Group(g) => keys::encode_assign_group(g, &assignment.id),
-        };
-        let role_idx = keys::encode_assign_role(&assignment.role_id, &assignment.id);
-        self.write_put_batch(
+        self.import_records(
             realm_id,
-            &[
-                (pri, Self::ser(assignment)?),
-                (subject_idx, Self::ser(&assignment.id)?),
-                (role_idx, Self::ser(&assignment.id)?),
-            ],
-        )?;
-        Ok(if exists {
-            ImportOutcome::Overwritten
-        } else {
-            ImportOutcome::Created
-        })
+            RbacImportRecords::Assignments(std::slice::from_ref(assignment)),
+            overwrite,
+        )
+        .pop()
+        .unwrap_or_else(|| Err(Self::no_result()))
     }
 
     fn import_scope(
@@ -2422,28 +2534,36 @@ impl RbacEngine for EmbeddedRbacEngine {
         edge: &GroupMembershipEdge,
         overwrite: bool,
     ) -> Result<ImportOutcome, RbacError> {
-        let forward = keys::encode_gm_forward(&edge.group_id, &edge.member);
-        let exists = self.storage.get(realm_id, &forward)?.is_some();
-        if exists && !overwrite {
-            return Ok(ImportOutcome::Skipped);
-        }
-        // Both entries, exactly as `add_group_member` writes them: the reverse
-        // index is what permission resolution scans.
-        let reverse = keys::encode_gm_reverse(&edge.member, &edge.group_id);
-        self.write_put_batch(
+        self.import_records(
             realm_id,
-            &[
-                (forward, Self::ser(&edge.member)?),
-                (reverse, Self::ser(&edge.group_id)?),
-            ],
-        )?;
-        // No session-version bump: import writes verbatim into a target that
-        // has no sessions of its own, matching the other `import_*` helpers.
-        Ok(if exists {
-            ImportOutcome::Overwritten
-        } else {
-            ImportOutcome::Created
-        })
+            RbacImportRecords::GroupMemberships(std::slice::from_ref(edge)),
+            overwrite,
+        )
+        .pop()
+        .unwrap_or_else(|| Err(Self::no_result()))
+    }
+
+    fn import_records(
+        &self,
+        realm_id: &RealmId,
+        records: RbacImportRecords<'_>,
+        overwrite: bool,
+    ) -> Vec<Result<ImportOutcome, RbacError>> {
+        match records {
+            RbacImportRecords::Groups(groups) => self.import_staged(realm_id, groups, |group| {
+                Self::stage_group(&*self.storage, realm_id, group, overwrite)
+            }),
+            RbacImportRecords::Assignments(assignments) => {
+                self.import_staged(realm_id, assignments, |assignment| {
+                    Self::stage_assignment(&*self.storage, realm_id, assignment, overwrite)
+                })
+            }
+            RbacImportRecords::GroupMemberships(edges) => {
+                self.import_staged(realm_id, edges, |edge| {
+                    Self::stage_group_membership(&*self.storage, realm_id, edge, overwrite)
+                })
+            }
+        }
     }
 }
 
