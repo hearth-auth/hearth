@@ -56,6 +56,7 @@ use crate::rbac::RbacEngine;
 use crate::webhook::{WebhookEngine, WebhookQuery};
 
 use super::stream::EncryptWriter;
+use super::synced_writer::SyncedWriter;
 use super::{ArchiveWriter, BackupError, DekWrappingParams, RealmManifest, RecordCounts};
 
 const DEK_WRAP_M_COST: u32 = 65_536;
@@ -834,13 +835,15 @@ const SPOOL_BUFFER_LEN: usize = 64 * 1024;
 /// unlinked from the moment it is made, so it is gone when it is dropped.
 struct MemberWriter {
     path: String,
-    out: EncryptWriter<BufWriter<std::fs::File>>,
+    out: EncryptWriter<BufWriter<SyncedWriter<std::fs::File>>>,
     records: u64,
 }
 
 impl MemberWriter {
     fn new(path: String, dek: &[u8; 32]) -> Result<Self, BackupError> {
-        let spool = BufWriter::with_capacity(SPOOL_BUFFER_LEN, tempfile::tempfile()?);
+        // Synced as it is written, as the archive is (#891).
+        let spool = SyncedWriter::for_file(tempfile::tempfile()?)?;
+        let spool = BufWriter::with_capacity(SPOOL_BUFFER_LEN, spool);
         let out = EncryptWriter::new(spool, dek, &path)?;
         Ok(Self {
             path,
@@ -863,7 +866,8 @@ impl MemberWriter {
             .out
             .finish()?
             .into_inner()
-            .map_err(|e| BackupError::Io(e.into_error()))?;
+            .map_err(|e| BackupError::Io(e.into_error()))?
+            .into_inner();
         let len = spool.stream_position()?;
         spool.seek(SeekFrom::Start(0))?;
         writer.add_reader(&self.path, len, spool)
@@ -1061,6 +1065,27 @@ mod tests {
         assert_ne!(
             b1, b2,
             "each wrap must produce a distinct ciphertext (random nonce+salt)"
+        );
+    }
+
+    // #891: a member spool left to the kernel's writeback put gigabytes in
+    // front of every WAL sync on the same disk, and the write limit refused
+    // the writes of other requests. The spool is synced as it is written.
+    #[test]
+    fn a_member_spool_is_synced_as_it_is_written() {
+        use super::super::synced_writer::SYNC_WINDOW;
+        let dek = [7u8; 32];
+        let mut member =
+            MemberWriter::new("realms/r/users.ndjson".to_string(), &dek).expect("member");
+        let line = "x".repeat(1_000);
+        let mut most = 0;
+        for _ in 0..(3 * SYNC_WINDOW / 1_000) {
+            member.record(&line).expect("record");
+            most = most.max(member.out.get_ref().get_ref().unsynced());
+        }
+        assert!(
+            most < SYNC_WINDOW,
+            "the spool had {most} unsynced bytes; the window is {SYNC_WINDOW}"
         );
     }
 

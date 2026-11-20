@@ -549,5 +549,30 @@ class HelpersTest(unittest.TestCase):
             self.assertFalse(good)
 
 
+class SyncedFileTest(unittest.TestCase):
+    """#891: the archive is written on the server's disk. Left to the kernel's writeback,
+    gigabytes of it went to the disk at once, and the server's WAL syncs waited behind them."""
+
+    def test_no_more_than_one_window_is_written_without_a_sync(self):
+        data = bytes(i % 251 for i in range(10_000))
+        with tempfile.TemporaryFile() as raw:
+            synced_at = []
+            out = restore_drill.SyncedFile(raw, window=1_000,
+                                           sync=lambda f: synced_at.append(f.tell()))
+            for i in range(0, len(data), 1_337):
+                out.write(data[i:i + 1_337])
+                self.assertLess(out.unsynced, 1_000)
+            out.sync()
+            raw.seek(0)
+            self.assertEqual(raw.read(), data)
+        self.assertEqual(synced_at, [1_000 * k for k in range(1, 11)] + [10_000])
+
+    def test_the_default_sync_is_fdatasync(self):
+        with tempfile.TemporaryFile() as raw:
+            out = restore_drill.SyncedFile(raw, window=8)
+            self.assertEqual(out.write(b"0123456789"), 10)
+            self.assertEqual(out.unsynced, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

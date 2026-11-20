@@ -854,6 +854,42 @@ def _sign_in_once(target, email, password):
     return token.json()["access_token"]
 
 
+# Bytes the backup client writes between two syncs of the archive (#891).
+SYNC_WINDOW = 1 << 20
+
+
+def _fdatasync(f):
+    f.flush()
+    os.fdatasync(f.fileno())
+
+
+class SyncedFile:
+    """A file that is synced after each `window` bytes (#891). The drill writes the archive
+    on the server's disk. Left to the kernel's writeback, gigabytes of it went to the disk at
+    once, and the server's WAL syncs waited behind them: the write limit refused writes."""
+
+    def __init__(self, f, window=SYNC_WINDOW, sync=_fdatasync):
+        self.f = f
+        self.window = window
+        self._sync = sync
+        self.unsynced = 0
+
+    def write(self, data):
+        view = memoryview(data)
+        while view:
+            n = min(len(view), self.window - self.unsynced)
+            self.f.write(view[:n])
+            self.unsynced += n
+            view = view[n:]
+            if self.unsynced >= self.window:
+                self.sync()
+        return len(data)
+
+    def sync(self):
+        self._sync(self.f)
+        self.unsynced = 0
+
+
 class Admin:
     """The realm admin. A new sign-in replaces a token that has less than 5 minutes left."""
 
@@ -1140,8 +1176,10 @@ def cmd_backup(args):
     admin = Admin(target)
     fd = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "wb") as f:
+        out = SyncedFile(f)
         # The server builds the whole archive before it answers.
-        r = admin.call("POST", "/admin/backup", timeout=3 * 3600, out=f)
+        r = admin.call("POST", "/admin/backup", timeout=3 * 3600, out=out)
+        out.sync()
     if r.status != 200:
         raise DrillError(f"POST /admin/backup: {r.status} {r.excerpt()}")
     log(f"archive: {os.path.getsize(args.output)} bytes")
