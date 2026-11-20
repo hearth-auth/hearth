@@ -426,6 +426,7 @@ mod mfa_single_use;
 pub(super) mod oauth;
 mod operator_token;
 mod orphan_audit;
+mod refresh_commit;
 mod retired_keys;
 mod scim_paging;
 mod scope_grant;
@@ -4319,7 +4320,7 @@ impl EmbeddedIdentityEngine {
             .get(realm_id, &family_key)
             .map_err(Self::storage_err)?
             .ok_or(IdentityError::TokenRevoked)?;
-        let mut family: StoredGrantFamily =
+        let family: StoredGrantFamily =
             serde_json::from_slice(&family_bytes).map_err(|e| IdentityError::Serialization {
                 reason: e.to_string(),
             })?;
@@ -4414,7 +4415,17 @@ impl EmbeddedIdentityEngine {
             self.check_and_record_dpop_jti(realm_id, jti, now_secs)?;
         }
 
-        self.refresh_session(realm_id, session_id)?;
+        // A session that can no longer be refreshed ends the grant here,
+        // before RBAC and the pre-token webhook run. The session's new expiry
+        // is written with the rotation, which checks again (#890).
+        {
+            let row_lock = self.session_row_lock(realm_id, session_id);
+            // INVARIANT: guard held only across the sync load + check; no .await in scope.
+            let _row = row_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.refreshable_session_locked(realm_id, session_id)?;
+        }
 
         // Re-resolve the subject's CURRENT authority instead of copying the
         // presented token's RBAC claims verbatim. The copy re-minted a revoked
@@ -4653,22 +4664,39 @@ impl EmbeddedIdentityEngine {
         let new_access = signing_key.issue_token(&new_access_claims)?;
         let new_refresh = signing_key.issue_token(&new_refresh_claims)?;
 
-        // Claim the presented token's single use, as the last step before the
-        // rotation is persisted — so a refusal above (DPoP, consent, step-up,
-        // webhook) leaves it redeemable. The family lock only queues this
-        // node's racers and the hash check above is a local read: a rotation
-        // that read the family before another node rotated it, and wrote after
-        // leadership moved to its own node, minted a second pair (G4). The
-        // claim is one replicated put-if-absent the Raft state machine
-        // decides; losing it means the token was already rotated, which is
-        // the replay the hash check exists to catch, so it is refused the
+        // Rotate the family's current refresh hash, and extend its expiration
+        // to match the new refresh token (sliding).
+        let mut rotated = family.clone();
+        rotated.current_refresh_hash = Self::sha256_hex(new_refresh.as_bytes());
+        rotated.expires_at = crate::core::Timestamp::from_micros(
+            self.clock.now().as_micros() + refresh_ttl_secs * 1_000_000,
+        );
+        let updated = serde_json::to_vec(&rotated).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+
+        // Claim the presented token's single use, as the last step — so a
+        // refusal above (DPoP, consent, step-up, webhook) leaves it
+        // redeemable. The family lock only queues this node's racers and the
+        // hash check above is a local read: a rotation that read the family
+        // before another node rotated it, and wrote after leadership moved to
+        // its own node, minted a second pair (G4). The claim is a replicated
+        // put-if-absent; losing it means the token was already rotated, which
+        // is the replay the hash check exists to catch, so it is refused the
         // same way.
+        //
+        // The claim is the guard of the rotation's one write, with the family,
+        // the session and the audit event (#890): a refused or failed write
+        // spends nothing, so the client can retry with the same token.
         let presented_hash = Self::sha256_hex(refresh_token.as_bytes());
-        if !self.claim_single_use(
+        let commit = self.commit_refresh_rotation(
             realm_id,
+            session_id,
             &keys::encode_consumed_refresh(&presented_hash),
             crate::core::Timestamp::from_micros(claims.exp.saturating_mul(1_000_000)),
-        )? {
+            (family_key.clone(), updated),
+        )?;
+        if let refresh_commit::RotationCommit::AlreadyClaimed = commit {
             // A revocation spends the family's current token too
             // (`mark_grant_family_revoked`), writing its tombstone first. The
             // claim was decided in the Raft log after that tombstone, so this
@@ -4685,19 +4713,6 @@ impl EmbeddedIdentityEngine {
                 session_id,
             ));
         }
-
-        // Rotate the family's current refresh hash
-        family.current_refresh_hash = Self::sha256_hex(new_refresh.as_bytes());
-        // Extend family expiration to match the new refresh token (sliding).
-        family.expires_at = crate::core::Timestamp::from_micros(
-            self.clock.now().as_micros() + refresh_ttl_secs * 1_000_000,
-        );
-        let updated = serde_json::to_vec(&family).map_err(|e| IdentityError::Serialization {
-            reason: e.to_string(),
-        })?;
-        self.storage
-            .put(realm_id, &family_key, &updated)
-            .map_err(Self::storage_err)?;
 
         Ok(TokenPair::new(new_access, new_refresh))
     }
@@ -9660,20 +9675,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let row = row_lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut session = self
-            .load_session_raw(realm_id, session_id)?
-            .ok_or(IdentityError::SessionNotFound)?;
+        let mut session = self.refreshable_session_locked(realm_id, session_id)?;
 
-        let now = self.clock.now();
-        // Cannot refresh a revoked, TTL-expired, or A-18 policy-expired session.
-        if !session.is_valid(now) || session.is_policy_expired(now) {
-            if session.is_valid(now) && session.is_policy_expired(now) {
-                let _ = self.evict_session_by_policy(realm_id, &session, now);
-            }
-            return Err(IdentityError::SessionNotFound);
-        }
-
-        session.refresh(now, self.config.session.ttl_micros);
+        session.refresh(self.clock.now(), self.config.session.ttl_micros);
         self.persist_session(realm_id, &session)?;
         drop(row);
 
@@ -10459,15 +10463,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::InvalidToken);
         }
 
-        self.record_audit(
-            realm_id,
-            None,
-            AuditAction::TokenRefreshed,
-            "token",
-            &session_id.as_uuid().to_string(),
-        )?;
-
-        // Grant family rotation (if fid is present)
+        // Grant family rotation (if fid is present). Its one durable write
+        // records `TokenRefreshed` (#890).
         if let Some(ref fid) = claims.fid {
             self.rotate_grant_family(
                 realm_id,
@@ -19945,6 +19942,9 @@ mod tests {
     mod par_consume_race;
     /// The admin password email: set-password and reset links.
     mod password_email;
+    /// A refresh-token grant is one durable write; a refused one leaves its
+    /// token redeemable (#890).
+    mod refresh_durable_write;
     /// A retiring key is checked by the kid its material produces, not its label.
     mod retiring_key_import_kid;
     /// Concurrent revocations survive a racing control-cache reload.

@@ -2333,6 +2333,29 @@ impl StorageEngine for ClusterStorageAdapter {
         .map_err(cluster_to_storage_err)
     }
 
+    /// Single node: one atomic WAL record of the local engine, admitted under
+    /// the write limit like [`Self::enqueue_batch`]: a refused call writes
+    /// nothing, neither the guard nor `entries` (#890). Cluster mode: the
+    /// trait default's two proposals, a `PutIfAbsent` of the guard and then a
+    /// `Batch` of `entries`.
+    fn enqueue_batch_if_absent(
+        &self,
+        realm_id: &RealmId,
+        guard_key: &[u8],
+        guard_value: &[u8],
+        entries: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<Option<crate::storage::StorageDurabilityHandle>, crate::storage::StorageError> {
+        if let Some(done) = self.single_node_write(|inner| {
+            inner.enqueue_batch_if_absent(realm_id, guard_key, guard_value, entries)
+        }) {
+            return done;
+        }
+        if !self.put_if_absent(realm_id, guard_key, guard_value)? {
+            return Ok(None);
+        }
+        self.enqueue_batch(realm_id, entries).map(Some)
+    }
+
     fn increment_u64(
         &self,
         realm_id: &RealmId,
@@ -2608,6 +2631,69 @@ mod tests {
             .put(&realm, b"after", b"v")
             .expect("the limit is free again");
         assert_eq!(adapter.get(&realm, b"after").unwrap(), Some(b"v".to_vec()));
+    }
+
+    /// #890: a conditional batch over the write limit is refused before it
+    /// starts, so neither its guard nor its entries are written: a refresh
+    /// refused this way leaves its token unspent. Below the limit, the guard
+    /// and the entries are written together.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_conditional_batch_over_the_limit_writes_neither_the_guard_nor_the_entries() {
+        let dir = tempdir().unwrap();
+        let inner = open_engine(dir.path().join("data").as_path());
+        let parked_writes = ParkedWrites::install(&inner);
+        let adapter = Arc::new(ClusterStorageAdapter::with_max_writes_in_flight(
+            Arc::new(ClusterEngine::single_node(inner)),
+            2,
+        ));
+        let realm = RealmId::generate();
+        let entries = [(b"family".to_vec(), b"rotated".to_vec())];
+
+        let parked: Vec<_> = (0..2u8)
+            .map(|i| {
+                let (adapter, realm) = (Arc::clone(&adapter), realm.clone());
+                std::thread::spawn(move || adapter.put(&realm, &[b'p', i], b"v"))
+            })
+            .collect();
+        wait_for_writes_in_flight(&adapter, 2);
+
+        let refused = adapter.enqueue_batch_if_absent(&realm, b"claim", b"1", &entries);
+        assert!(
+            matches!(
+                refused,
+                Err(crate::storage::StorageError::ClusterUnavailable {
+                    cause: crate::storage::ClusterUnavailableCause::WriteLimit,
+                    ..
+                })
+            ),
+            "a conditional batch over a limit of 2 must be refused: {:?}",
+            refused.map(|handle| handle.is_some())
+        );
+        drop(parked_writes);
+        for writer in parked {
+            writer.join().unwrap().expect("a parked write completes");
+        }
+        assert_eq!(adapter.get(&realm, b"claim").unwrap(), None);
+        assert_eq!(adapter.get(&realm, b"family").unwrap(), None);
+
+        let handle = adapter
+            .enqueue_batch_if_absent(&realm, b"claim", b"1", &entries)
+            .expect("below the limit")
+            .expect("the guard is still absent");
+        adapter.await_batch_durable(handle).expect("durable");
+        assert_eq!(adapter.get(&realm, b"claim").unwrap(), Some(b"1".to_vec()));
+        assert_eq!(
+            adapter.get(&realm, b"family").unwrap(),
+            Some(b"rotated".to_vec())
+        );
+        assert!(
+            adapter
+                .enqueue_batch_if_absent(&realm, b"claim", b"2", &entries)
+                .expect("a present guard is not an error")
+                .is_none(),
+            "a second claim loses"
+        );
     }
 
     /// #836: an audit batch is admitted above the write limit, up to twice

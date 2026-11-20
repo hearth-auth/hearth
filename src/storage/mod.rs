@@ -309,6 +309,38 @@ pub trait StorageEngine: Send + Sync {
         Ok(true)
     }
 
+    /// [`put_if_absent`](Self::put_if_absent) of `guard_key` and
+    /// [`enqueue_batch`](Self::enqueue_batch) of `entries`, as ONE atomic
+    /// batch: when `guard_key` is absent, the guard and `entries` are written
+    /// together, and the caller awaits the returned handle as for
+    /// `enqueue_batch`. `Ok(None)`: the guard was present, and nothing was
+    /// written. Of concurrent callers with one guard, exactly one writes.
+    ///
+    /// For a single-use claim and the record it unlocks (#890): a refresh
+    /// claims the presented token and rotates its grant family in one write,
+    /// so a write that is refused or fails leaves neither, and the token stays
+    /// redeemable.
+    ///
+    /// The default makes two writes: `put_if_absent` of the guard, which
+    /// waits until the guard is durable, then `enqueue_batch` of `entries`. The
+    /// guard is decided as atomically as `put_if_absent` is, but a failed
+    /// second write leaves the guard without `entries`.
+    /// [`EmbeddedStorageEngine`] and a single-node
+    /// [`ClusterStorageAdapter`](crate::cluster::ClusterStorageAdapter) make
+    /// it one write.
+    fn enqueue_batch_if_absent(
+        &self,
+        realm_id: &RealmId,
+        guard_key: &[u8],
+        guard_value: &[u8],
+        entries: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<Option<StorageDurabilityHandle>, StorageError> {
+        if !self.put_if_absent(realm_id, guard_key, guard_value)? {
+            return Ok(None);
+        }
+        self.enqueue_batch(realm_id, entries).map(Some)
+    }
+
     /// Atomically increments the little-endian `u64` counter stored at `key`
     /// and returns the new value. An absent key counts as `0`, so the first
     /// increment returns `1`.
