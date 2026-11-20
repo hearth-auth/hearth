@@ -6,15 +6,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
-## [4.12.3] — 2026-11-20
-
-### Security
-- **SMTP email delivery uses lettre 0.11.24**, which fixes four advisories in lettre 0.11.23:
-  forged SMTP replies after `STARTTLS` (RUSTSEC-2026-0560), SMTP command injection through a bare
-  LF or CR in a message (RUSTSEC-2026-0561), a panic on an `EHLO` reply line of only white space
-  (RUSTSEC-2026-0562), and delivery to a different address for a quoted local part
-  (RUSTSEC-2026-0563).
-
 ### Fixed
 - **Writes that create or delete a user or a live session no longer get slower as SST files
   accumulate** (#905): to keep the exact user and session counts (#644), each such write checked
@@ -25,6 +16,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   check of a new key took 6 µs instead of 73 µs. A restore of 1M users (release build, fsync on
   every write) took 61 s instead of 76 s with background compaction, and 172 s instead of 495 s
   without it.
+
+## [4.12.3] — 2026-11-20
+
+### Security
+- **SMTP email delivery uses lettre 0.11.24**, which fixes four advisories in lettre 0.11.23:
+  forged SMTP replies after `STARTTLS` (RUSTSEC-2026-0560), SMTP command injection through a bare
+  LF or CR in a message (RUSTSEC-2026-0561), a panic on an `EHLO` reply line of only white space
+  (RUSTSEC-2026-0562), and delivery to a different address for a quoted local part
+  (RUSTSEC-2026-0563).
+
+### Fixed
 - **`POST /admin/backup` no longer stops the writes of other requests** (#891): the backup wrote
   its archive (and a temporary copy of each part of it) through the page cache, and the kernel
   wrote gigabytes of it to the disk at once. Each WAL sync on the same disk waited behind that
