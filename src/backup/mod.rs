@@ -77,6 +77,7 @@ pub mod marker;
 pub mod passphrase;
 mod signature;
 mod stream;
+mod synced_writer;
 mod types;
 
 pub use encryption::{decrypt_archive, encrypt_archive};
@@ -164,6 +165,9 @@ impl BackupArchive {
     /// computed checksums) as the final tar entry and close the zstd stream.
     pub fn create(path: &Path) -> Result<ArchiveWriter, BackupError> {
         let file = std::fs::File::create(path)?;
+        // Synced as it is written, so that the archive never queues more
+        // than one window in front of a WAL sync on the same disk (#891).
+        let file = synced_writer::SyncedWriter::for_file(file)?;
         let encoder = zstd::Encoder::new(file, 0)?;
         let builder = tar::Builder::new(encoder);
         Ok(ArchiveWriter {
@@ -251,11 +255,17 @@ impl BackupArchive {
 /// [`add_file`](Self::add_file), then call [`finish`](Self::finish) to
 /// write the manifest and seal the archive.
 pub struct ArchiveWriter {
-    builder: tar::Builder<zstd::Encoder<'static, std::fs::File>>,
+    builder: tar::Builder<zstd::Encoder<'static, synced_writer::SyncedWriter<std::fs::File>>>,
     checksums: BTreeMap<String, String>,
 }
 
 impl ArchiveWriter {
+    /// Bytes of the archive file written since its last sync.
+    #[cfg(test)]
+    fn unsynced(&self) -> u64 {
+        self.builder.get_ref().get_ref().unsynced()
+    }
+
     /// Appends `data` at `archive_path` inside the archive.
     ///
     /// The SHA-256 checksum of `data` is recorded and later written into
@@ -711,6 +721,45 @@ mod tests {
             detached_signature_b64: None,
             signing_key_dek_b64: None,
         }
+    }
+
+    /// `len` bytes that zstd cannot compress, as encrypted members are.
+    fn incompressible(len: usize) -> Vec<u8> {
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        (0..len)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x.to_le_bytes()[0]
+            })
+            .collect()
+    }
+
+    // #891: an archive left to the kernel's writeback put gigabytes in front
+    // of every WAL sync on the same disk, and the write limit refused the
+    // writes of other requests. The archive is synced as it is written.
+    #[test]
+    fn an_archive_is_synced_as_it_is_written() {
+        use super::synced_writer::SYNC_WINDOW;
+        let tmp = NamedTempFile::new().expect("tempfile");
+        let mut writer = BackupArchive::create(tmp.path()).expect("create");
+        let window = usize::try_from(SYNC_WINDOW).expect("window fits");
+        let member = incompressible(3 * window + window / 2);
+        let mut most = 0;
+        for (i, piece) in member.chunks(window / 2).enumerate() {
+            writer
+                .add_file(&format!("realms/r/part{i}.bin"), piece)
+                .expect("add");
+            most = most.max(writer.unsynced());
+        }
+        assert!(
+            most < SYNC_WINDOW,
+            "the archive had {most} unsynced bytes; the window is {SYNC_WINDOW}"
+        );
+        writer.finish(sample_manifest()).expect("finish");
+        let reader = BackupArchive::open(tmp.path()).expect("open");
+        assert_eq!(reader.verify_checksums().expect("intact"), 7);
     }
 
     #[test]

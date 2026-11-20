@@ -14,6 +14,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   (RUSTSEC-2026-0563).
 
 ### Fixed
+- **`POST /admin/backup` no longer stops the writes of other requests** (#891): the backup wrote
+  its archive (and a temporary copy of each part of it) through the page cache, and the kernel
+  wrote gigabytes of it to the disk at once. Each WAL sync on the same disk waited behind that
+  write, for seconds, so the write limit (`storage.max_writes_in_flight`) refused other writes
+  with `503`: on AWS at 10M users, 2.5 % of the requests during the backup. The backup now syncs
+  its files after each 1 MiB, so a WAL sync waits behind at most 1 MiB of it. In a local test
+  with 3M users and the disk capped at 125 MB/s, a backup made 2,844 `503` refusals before and
+  none after, and it took about as long (40 s instead of 39 s).
+  A client that writes the downloaded archive to the server's disk should sync it as it writes
+  it, as the restore drill's client now does.
 - **A restore writes users in batches, not one durable write per user** (#887):
   `hearth backup restore` and `POST /admin/backup/restore` wrote each user of `users.ndjson`
   with its own durable write, and each user waited for two fsyncs. On an AWS gp3 volume that was

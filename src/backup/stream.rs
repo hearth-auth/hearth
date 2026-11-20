@@ -138,6 +138,12 @@ impl<W: Write> EncryptWriter<W> {
         Ok(())
     }
 
+    /// The inner writer.
+    #[cfg(test)]
+    pub(crate) fn get_ref(&self) -> &W {
+        &self.inner
+    }
+
     /// Seals the last chunk and returns the inner writer, flushed.
     ///
     /// # Errors
