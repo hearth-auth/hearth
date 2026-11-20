@@ -293,11 +293,18 @@ impl BloomFilter {
     ///
     /// An empty filter (zero bits) always returns `true` so absent-filter SSTs
     /// are never skipped.
+    #[cfg(test)]
     fn might_contain(&self, realm_id: &RealmId, key: &[u8]) -> bool {
+        self.might_contain_hashes(KeyHashes::new(realm_id, key))
+    }
+
+    /// [`might_contain`](Self::might_contain) for a key whose hashes are
+    /// already computed.
+    fn might_contain_hashes(&self, hashes: KeyHashes) -> bool {
         if self.bits.is_empty() {
             return true;
         }
-        let (h1, h2) = bloom_hashes(realm_id, key);
+        let KeyHashes(h1, h2) = hashes;
         let m = (self.bits.len() * 8) as u64;
         for i in 0..u64::from(self.k) {
             let bit = h1.wrapping_add(i.wrapping_mul(h2)) % m;
@@ -333,6 +340,22 @@ fn bloom_hashes(realm_id: &RealmId, key: &[u8]) -> (u64, u64) {
         u64::from(h.finalize()) | 1 // must be odd: coprime with any 2^k bit-array size
     };
     (h1, h2)
+}
+
+/// The Bloom filter hashes of one `(realm, key)`.
+///
+/// Every SST's filter hashes a key the same way, so a lookup across many SSTs
+/// computes them once (#905). They cost about as much as the rest of a
+/// cached filter check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct KeyHashes(u64, u64);
+
+impl KeyHashes {
+    /// The hashes of `(realm_id, key)`.
+    pub(crate) fn new(realm_id: &RealmId, key: &[u8]) -> Self {
+        let (h1, h2) = bloom_hashes(realm_id, key);
+        Self(h1, h2)
+    }
 }
 
 /// Parsed entries and optional bloom filter returned from [`SstReader::parse_v2_plaintext`].
@@ -1589,6 +1612,66 @@ pub(crate) fn data_block_reads() -> u64 {
     DATA_BLOCK_READS.with(std::cell::Cell::get)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The blocks this thread decrypted, by kind: `[filter, index, data]`.
+    /// A cache hit decrypts nothing (#905).
+    static BLOCK_DECRYPTS: std::cell::Cell<[u64; 3]> = const { std::cell::Cell::new([0; 3]) };
+}
+
+/// The blocks this thread decrypted from blocked SST files so far, by kind:
+/// `[filter, index, data]`. Cache hits are not counted (#905).
+#[cfg(test)]
+pub(crate) fn block_decrypts() -> [u64; 3] {
+    BLOCK_DECRYPTS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn kind_slot(kind: BlockKind) -> usize {
+    match kind {
+        BlockKind::Filter => 0,
+        BlockKind::Index => 1,
+        BlockKind::Data => 2,
+    }
+}
+
+/// How a point lookup uses the shared block cache.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CacheUse {
+    /// Reads blocks from the cache and puts the blocks it decrypts there.
+    Fill,
+    /// Reads every block from the cache, but puts only index and filter
+    /// blocks there: a data block it decrypts stays private (#905).
+    Metadata,
+    /// Neither reads nor fills the cache (HEA-1922, #445).
+    Bypass,
+}
+
+impl CacheUse {
+    /// [`Fill`](Self::Fill) when `cached`, else [`Bypass`](Self::Bypass).
+    fn from_cached(cached: bool) -> Self {
+        if cached {
+            Self::Fill
+        } else {
+            Self::Bypass
+        }
+    }
+
+    /// Whether a lookup looks for a block in the cache first.
+    fn reads(self) -> bool {
+        self != Self::Bypass
+    }
+
+    /// Whether a lookup puts a block of `kind` that it decrypts into the cache.
+    fn fills(self, kind: BlockKind) -> bool {
+        match self {
+            Self::Fill => true,
+            Self::Metadata => kind != BlockKind::Data,
+            Self::Bypass => false,
+        }
+    }
+}
+
 /// An index or filter block of a partition.
 enum Piece {
     /// Held on the heap for the life of the reader: a v3 file's footer holds
@@ -1653,17 +1736,17 @@ impl BlockedBody {
         pp.checked_sub(1)
     }
 
-    /// Reads one block of `kind`: through the shared cache when `cached`, or
-    /// decrypted privately. A one-shot walk (compaction, the cleanup sweep)
-    /// reads uncached, so it does not evict the query path's working set
-    /// (HEA-1922). Surfaces AEAD/format errors rather than a wrong or absent
-    /// value.
+    /// Reads one block of `kind`: from the shared cache, or decrypted, and
+    /// then cached or kept private, as `cache` says. A one-shot walk
+    /// (compaction, the cleanup sweep) reads uncached, so it does not evict
+    /// the query path's working set (HEA-1922). Surfaces AEAD/format errors
+    /// rather than a wrong or absent value.
     fn load(
         &self,
         handle: BlockHandle,
         kind: BlockKind,
         sst_number: u64,
-        cached: bool,
+        cache: CacheUse,
     ) -> Result<Arc<CachedBlock>, StorageError> {
         #[cfg(test)]
         if kind == BlockKind::Data {
@@ -1673,7 +1756,7 @@ impl BlockedBody {
             reader_id: self.reader_id,
             block_index: handle.ordinal,
         };
-        if cached {
+        if cache.reads() {
             if let Some(block) = self.cache.get(id) {
                 if block.block.kind() != kind {
                     return Err(Block::wrong_kind());
@@ -1692,7 +1775,13 @@ impl BlockedBody {
         let plaintext =
             encryption::decrypt_section(&self.backing[start..end], &self.dek, &nonce, &nonce)?;
         let block = Arc::new(CachedBlock::new(Block::decode(kind, plaintext)?));
-        if cached {
+        #[cfg(test)]
+        BLOCK_DECRYPTS.with(|counts| {
+            let mut all = counts.get();
+            all[kind_slot(kind)] += 1;
+            counts.set(all);
+        });
+        if cache.fills(kind) {
             self.cache.insert(id, Arc::clone(&block));
         }
         Ok(block)
@@ -1704,11 +1793,11 @@ impl BlockedBody {
         piece: &Piece,
         kind: BlockKind,
         sst_number: u64,
-        cached: bool,
+        cache: CacheUse,
     ) -> Result<Arc<CachedBlock>, StorageError> {
         match piece {
             Piece::Pinned(block) => Ok(Arc::clone(block)),
-            Piece::Stored(handle) => self.load(*handle, kind, sst_number, cached),
+            Piece::Stored(handle) => self.load(*handle, kind, sst_number, cache),
         }
     }
 
@@ -1718,8 +1807,9 @@ impl BlockedBody {
         &self,
         realm_id: &RealmId,
         key: &[u8],
+        hashes: KeyHashes,
         sst_number: u64,
-        cached: bool,
+        cache: CacheUse,
     ) -> Result<Option<MemtableValue>, StorageError> {
         let Some(partition) = self
             .partition_for_key(realm_id, key)
@@ -1728,12 +1818,12 @@ impl BlockedBody {
             return Ok(None);
         };
         if let Some(filter) = &partition.filter {
-            let filter = self.piece(filter, BlockKind::Filter, sst_number, cached)?;
-            if !filter.block.filter()?.might_contain(realm_id, key) {
+            let filter = self.piece(filter, BlockKind::Filter, sst_number, cache)?;
+            if !filter.block.filter()?.might_contain_hashes(hashes) {
                 return Ok(None);
             }
         }
-        let index = self.piece(&partition.index, BlockKind::Index, sst_number, cached)?;
+        let index = self.piece(&partition.index, BlockKind::Index, sst_number, cache)?;
         let index = index.block.index()?;
         let Some(entry) = index
             .position_for(realm_id, key)
@@ -1741,7 +1831,7 @@ impl BlockedBody {
         else {
             return Ok(None);
         };
-        let block = self.load(entry.handle, BlockKind::Data, sst_number, cached)?;
+        let block = self.load(entry.handle, BlockKind::Data, sst_number, cache)?;
         Ok(block
             .block
             .data()?
@@ -1808,7 +1898,7 @@ impl<'a> BlockWalk<'a> {
             &partition.index,
             BlockKind::Index,
             self.sst_number,
-            self.cached,
+            CacheUse::from_cached(self.cached),
         )
     }
 
@@ -1841,7 +1931,12 @@ impl<'a> BlockWalk<'a> {
                     self.next += 1;
                     return self
                         .body
-                        .load(handle, BlockKind::Data, self.sst_number, self.cached)
+                        .load(
+                            handle,
+                            BlockKind::Data,
+                            self.sst_number,
+                            CacheUse::from_cached(self.cached),
+                        )
                         .map(Some);
                 }
                 None => {
@@ -2476,7 +2571,7 @@ impl SstReader {
         realm_id: &RealmId,
         key: &[u8],
     ) -> Result<Option<MemtableValue>, StorageError> {
-        self.get_with(realm_id, key, true)
+        self.get_with(realm_id, key, None, CacheUse::Fill)
     }
 
     /// A point lookup like [`get`](Self::get) that neither consults nor fills
@@ -2486,14 +2581,42 @@ impl SstReader {
         realm_id: &RealmId,
         key: &[u8],
     ) -> Result<Option<MemtableValue>, StorageError> {
-        self.get_with(realm_id, key, false)
+        self.get_with(realm_id, key, None, CacheUse::Bypass)
     }
 
+    /// A point lookup like [`get`](Self::get) that keeps index and filter
+    /// blocks in the shared cache but no data block it decrypts: the
+    /// existence check of the key-count upkeep, under the lock that orders
+    /// writes (#905).
+    ///
+    /// Most checked keys are new, so a lookup mostly ends at a filter. With
+    /// the filter cached, that is one in-memory check per SST instead of a
+    /// decryption. Index and filter blocks are the query path's working set
+    /// too, so caching them evicts nothing a query needs. A data block is
+    /// read only on a Bloom false positive or for a key the write replaces:
+    /// it is used from the cache when a read put it there, and otherwise not
+    /// cached, so writes do not push the query path's data blocks out
+    /// (#445).
+    ///
+    /// `hashes` are the key's [`KeyHashes`], which the caller computes once
+    /// for all the SSTs it looks in.
+    pub(crate) fn get_caching_metadata(
+        &self,
+        realm_id: &RealmId,
+        key: &[u8],
+        hashes: KeyHashes,
+    ) -> Result<Option<MemtableValue>, StorageError> {
+        self.get_with(realm_id, key, Some(hashes), CacheUse::Metadata)
+    }
+
+    /// A point lookup. `hashes` are the key's [`KeyHashes`] when the caller
+    /// has them; otherwise they are computed once the range check passes.
     fn get_with(
         &self,
         realm_id: &RealmId,
         key: &[u8],
-        cached: bool,
+        hashes: Option<KeyHashes>,
+        cache: CacheUse,
     ) -> Result<Option<MemtableValue>, StorageError> {
         // O(1) range prune: skip SSTs whose key range cannot contain the key
         // (HEA-1773). Cheaper than the Bloom filter's k hashes and also rejects
@@ -2501,9 +2624,10 @@ impl SstReader {
         if !self.may_contain(realm_id, key) {
             return Ok(None);
         }
+        let hashes = hashes.unwrap_or_else(|| KeyHashes::new(realm_id, key));
         // Fast reject: if the bloom filter says "no", the key is definitely absent.
         if let Some(ref filter) = self.bloom_filter {
-            if !filter.might_contain(realm_id, key) {
+            if !filter.might_contain_hashes(hashes) {
                 return Ok(None);
             }
         }
@@ -2514,7 +2638,7 @@ impl SstReader {
                 })
                 .ok()
                 .map(|idx| entries[idx].1.clone())),
-            SstBody::Blocked(body) => body.get(realm_id, key, self.sst_number, cached),
+            SstBody::Blocked(body) => body.get(realm_id, key, hashes, self.sst_number, cache),
         }
     }
 
@@ -3382,7 +3506,7 @@ mod tests {
             .map(|p| {
                 let filter = p.filter.as_ref().expect("a v4 partition has a filter");
                 let block = body
-                    .piece(filter, BlockKind::Filter, 3, false)
+                    .piece(filter, BlockKind::Filter, 3, CacheUse::Bypass)
                     .expect("load filter");
                 block.block.filter().expect("filter block").bits.len()
             })
@@ -4637,6 +4761,57 @@ mod tests {
             "{reads} data blocks read for {} realms in a file of {blocks} blocks",
             realms.len()
         );
+    }
+
+    /// The key-count lookup (#905) keeps a v4 file's filter and index blocks
+    /// in the block cache, but no data block it decrypts (#445): a second
+    /// lookup of a present key decrypts its data block again and nothing
+    /// else, and a lookup of an absent key in the same partition decrypts
+    /// nothing.
+    #[test]
+    fn a_metadata_caching_lookup_caches_filter_and_index_blocks_but_no_data_block() {
+        // A fixed realm keeps the Bloom filter's answers the same on every run.
+        let realm = RealmId::new(Uuid::from_u128(0x905));
+        let entries = fixed_entries(&realm, PARTITIONED_ROWS);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("metadata-caching.sst");
+        let (dek, enc) = test_encryption_context();
+        SstWriter::write_sst(&path, &entries, 1, &dek, &enc).expect("write");
+        let reader = SstReader::open(&path, 1, &dek).expect("open");
+        let decrypted_since = |before: [u64; 3]| {
+            let after = block_decrypts();
+            [0, 1, 2].map(|kind| after[kind] - before[kind])
+        };
+        let present = b"k012345";
+        let absent = b"k012345-absent";
+        let expected = Some(entries[12_345].1.clone());
+
+        let before = block_decrypts();
+        assert_eq!(
+            reader
+                .get_caching_metadata(&realm, present, KeyHashes::new(&realm, present))
+                .expect("get"),
+            expected
+        );
+        assert_eq!(decrypted_since(before), [1, 1, 1], "first lookup");
+
+        let before = block_decrypts();
+        assert_eq!(
+            reader
+                .get_caching_metadata(&realm, present, KeyHashes::new(&realm, present))
+                .expect("get"),
+            expected
+        );
+        assert_eq!(decrypted_since(before), [0, 0, 1], "second lookup");
+
+        let before = block_decrypts();
+        assert_eq!(
+            reader
+                .get_caching_metadata(&realm, absent, KeyHashes::new(&realm, absent))
+                .expect("get"),
+            None
+        );
+        assert_eq!(decrypted_since(before), [0, 0, 0], "absent key");
     }
 
     /// A legacy v1 file holds its entries in memory; its realms come from them.
