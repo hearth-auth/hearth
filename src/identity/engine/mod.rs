@@ -296,6 +296,15 @@ const SESSION_CACHE_MAX: usize = 4096;
 /// short, and one fsync still covers the whole chunk.
 const IMPORT_PIPELINE_DEPTH: usize = 64;
 
+/// Most users a restore enqueues before it waits for their fsync (#903).
+///
+/// The depth sets the users per fsync: at the live import's 64, users were
+/// the slowest member of a restore (about 7,000/s locally), while the other
+/// members share each fsync among [`WRITE_PIPELINE_DEPTH`] records. A restore
+/// stages users as fast as the other members stage records, so it takes their
+/// depth, and the same bound on how long it can hold the group-commit lead.
+const RESTORE_PIPELINE_DEPTH: usize = WRITE_PIPELINE_DEPTH;
+
 /// The rows that store one imported user, as `(key, value)` pairs.
 type ImportRows = Vec<(Vec<u8>, Vec<u8>)>;
 
@@ -413,6 +422,7 @@ use crate::identity::webauthn::{
 };
 use crate::identity::IdentityEngine;
 use crate::rbac::registry::{classify_scope_string, ScopeKind};
+use crate::storage::write_pipeline::WRITE_PIPELINE_DEPTH;
 use crate::storage::StorageEngine;
 
 mod advisory_lock;
@@ -5438,8 +5448,33 @@ impl EmbeddedIdentityEngine {
         Ok((user, entries))
     }
 
-    /// Imports up to [`IMPORT_PIPELINE_DEPTH`] users with shared fsyncs and
-    /// appends one result per request to `results`, in order (#536).
+    /// Imports the users of `requests`, `depth` at a time with shared fsyncs,
+    /// and returns one result per request, in order (#536, #903).
+    fn import_users_in_chunks(
+        &self,
+        realm_id: &RealmId,
+        requests: &[ImportUserRequest],
+        depth: usize,
+    ) -> Vec<Result<User, IdentityError>> {
+        if keys::is_system_realm(realm_id) {
+            return requests
+                .iter()
+                .map(|_| {
+                    Err(IdentityError::SystemRealmProtected {
+                        operation: "import_user",
+                    })
+                })
+                .collect();
+        }
+        let mut results = Vec::with_capacity(requests.len());
+        for chunk in requests.chunks(depth.max(1)) {
+            self.import_user_chunk(realm_id, chunk, &mut results);
+        }
+        results
+    }
+
+    /// Imports one chunk of users with shared fsyncs and appends one result
+    /// per request to `results`, in order (#536).
     ///
     /// Each user's rows and its `UserCreated` event go in ONE WAL record, as
     /// a sign-in writes its session (HEA-1954). Every record of the chunk is
@@ -13346,21 +13381,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         requests: &[ImportUserRequest],
     ) -> Vec<Result<User, IdentityError>> {
-        if keys::is_system_realm(realm_id) {
-            return requests
-                .iter()
-                .map(|_| {
-                    Err(IdentityError::SystemRealmProtected {
-                        operation: "import_user",
-                    })
-                })
-                .collect();
-        }
-        let mut results = Vec::with_capacity(requests.len());
-        for chunk in requests.chunks(IMPORT_PIPELINE_DEPTH) {
-            self.import_user_chunk(realm_id, chunk, &mut results);
-        }
-        results
+        self.import_users_in_chunks(realm_id, requests, IMPORT_PIPELINE_DEPTH)
+    }
+
+    fn restore_users(
+        &self,
+        realm_id: &RealmId,
+        requests: &[ImportUserRequest],
+    ) -> Vec<Result<User, IdentityError>> {
+        self.import_users_in_chunks(realm_id, requests, RESTORE_PIPELINE_DEPTH)
     }
 
     fn import_admin_user(&self, request: &ImportUserRequest) -> Result<User, IdentityError> {
