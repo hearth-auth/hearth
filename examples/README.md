@@ -28,7 +28,7 @@ outside"* — not exhaustive coverage, not a template starter kit.
 The `.rs` files at the top of `examples/` are Cargo examples of the `hearth` crate, not
 demos. They are perf probes that the code or the tests cite: `hot_tier_cost.rs`,
 `http_delta.rs` (with `support/hostenv.rs`, which `tests/perf_quiescence_gate.rs` tests),
-`http_saturation.rs` and `saturation_throughput.rs`. Run one with
+`http_saturation.rs`, `saturation_throughput.rs` and `refresh_write_path.rs` (#890). Run one with
 `cargo run --release --example <name>`.
 
 Contributions welcome — see [Adding a new example](#adding-a-new-example) below.

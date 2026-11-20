@@ -2241,19 +2241,37 @@ impl StorageEngine for EmbeddedStorageEngine {
         key: &[u8],
         value: &[u8],
     ) -> Result<bool, StorageError> {
-        let handle = {
-            let Ok(_guard) = self.put_if_absent_lock.lock() else {
-                return Err(StorageError::Io(std::io::Error::other(
-                    "put_if_absent mutex poisoned",
-                )));
-            };
-            if self.get(realm_id, key)?.is_some() {
-                return Ok(false);
-            }
-            self.enqueue_batch(realm_id, &[(key.to_vec(), value.to_vec())])?
+        let Some(handle) = self.enqueue_batch_if_absent(realm_id, key, value, &[])? else {
+            return Ok(false);
         };
         self.await_batch_durable(handle)?;
         Ok(true)
+    }
+
+    /// The guard check and the enqueue of the guard with `entries`, as one
+    /// WAL record, under [`put_if_absent_lock`](Self::put_if_absent_lock), as
+    /// [`Self::put_if_absent`] does (#890). The enqueue applies the record to
+    /// the memtable, so a racing caller's check sees the guard and loses. The
+    /// caller waits for the sync after the lock is released.
+    fn enqueue_batch_if_absent(
+        &self,
+        realm_id: &RealmId,
+        guard_key: &[u8],
+        guard_value: &[u8],
+        entries: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<Option<StorageDurabilityHandle>, StorageError> {
+        let Ok(_guard) = self.put_if_absent_lock.lock() else {
+            return Err(StorageError::Io(std::io::Error::other(
+                "put_if_absent mutex poisoned",
+            )));
+        };
+        if self.get(realm_id, guard_key)?.is_some() {
+            return Ok(None);
+        }
+        let mut batch = Vec::with_capacity(entries.len() + 1);
+        batch.push((guard_key.to_vec(), guard_value.to_vec()));
+        batch.extend_from_slice(entries);
+        self.enqueue_batch(realm_id, &batch).map(Some)
     }
 
     /// Atomic single-node increment: the read and the write happen under
@@ -3343,6 +3361,110 @@ mod tests {
         assert!(
             engine.get(&realm, b"jti").expect("get").is_some(),
             "the winning write must be durable"
+        );
+    }
+
+    /// #890: a single-use claim and the record it unlocks are ONE WAL record,
+    /// so one sync makes both durable, and a crash keeps both or neither.
+    #[test]
+    fn enqueue_batch_if_absent_writes_the_guard_and_entries_in_one_record() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = StorageConfig::test_config(dir.path().to_path_buf());
+        config.wal_config.sync_mode = SyncMode::EveryWrite;
+        let realm = RealmId::generate();
+        let entries = vec![
+            (b"family".to_vec(), b"rotated".to_vec()),
+            (b"session".to_vec(), b"slid".to_vec()),
+        ];
+        {
+            let engine = EmbeddedStorageEngine::open(config.clone()).expect("open");
+            let (syncs, records) = (engine.wal_sync_count(), engine.wal_commit_profile().entries);
+            let handle = engine
+                .enqueue_batch_if_absent(&realm, b"claim", b"1", &entries)
+                .expect("enqueue")
+                .expect("the guard was absent");
+            engine.await_batch_durable(handle).expect("durable");
+            assert_eq!(engine.wal_sync_count() - syncs, 1, "one sync");
+            assert_eq!(
+                engine.wal_commit_profile().entries - records,
+                1,
+                "the guard and the entries are one WAL record"
+            );
+        }
+        let engine = EmbeddedStorageEngine::open(config).expect("reopen");
+        assert_eq!(
+            engine.get(&realm, b"claim").expect("get"),
+            Some(b"1".to_vec())
+        );
+        for (key, value) in &entries {
+            assert_eq!(engine.get(&realm, key).expect("get").as_ref(), Some(value));
+        }
+    }
+
+    /// #890: when the guard is present, nothing of the batch is written.
+    #[test]
+    fn enqueue_batch_if_absent_writes_nothing_when_the_guard_is_present() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        engine.put(&realm, b"claim", b"first").expect("put");
+
+        let handle = engine
+            .enqueue_batch_if_absent(
+                &realm,
+                b"claim",
+                b"second",
+                &[(b"rec".to_vec(), b"v".to_vec())],
+            )
+            .expect("enqueue");
+
+        assert!(handle.is_none(), "a present guard writes nothing");
+        assert_eq!(
+            engine.get(&realm, b"claim").expect("get"),
+            Some(b"first".to_vec())
+        );
+        assert_eq!(engine.get(&realm, b"rec").expect("get"), None);
+    }
+
+    /// #890: of concurrent callers with one guard, exactly one writes, and
+    /// only its entries are stored.
+    #[test]
+    fn enqueue_batch_if_absent_exactly_one_winner_under_concurrency() {
+        use std::sync::Barrier;
+
+        const N: usize = 16;
+        let (_dir, engine) = setup_engine();
+        let engine = Arc::new(engine);
+        let realm = RealmId::generate();
+        let barrier = Arc::new(Barrier::new(N));
+        let writers: Vec<_> = (0..N)
+            .map(|i| {
+                let (engine, barrier, realm) =
+                    (Arc::clone(&engine), Arc::clone(&barrier), realm.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let value = i.to_string().into_bytes();
+                    let handle = engine
+                        .enqueue_batch_if_absent(
+                            &realm,
+                            b"claim",
+                            b"1",
+                            &[(b"rec".to_vec(), value.clone())],
+                        )
+                        .expect("enqueue")?;
+                    engine.await_batch_durable(handle).expect("durable");
+                    Some(value)
+                })
+            })
+            .collect();
+        let winners: Vec<Vec<u8>> = writers
+            .into_iter()
+            .filter_map(|w| w.join().expect("join"))
+            .collect();
+
+        assert_eq!(winners.len(), 1, "exactly one caller writes");
+        assert_eq!(
+            engine.get(&realm, b"rec").expect("get").as_ref(),
+            winners.first()
         );
     }
 

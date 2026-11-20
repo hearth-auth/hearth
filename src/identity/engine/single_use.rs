@@ -28,6 +28,13 @@ use super::CLOCK_SKEW_SECS;
 /// skew tolerance bounds that difference.
 pub(super) const CONSUMED_MARKER_GRACE_SECS: i64 = CLOCK_SKEW_SECS;
 
+/// The value of a single-use marker for an artifact that expires at
+/// `artifact_expires_at`: the marker's own expiry, in seconds, which is the
+/// artifact's plus [`CONSUMED_MARKER_GRACE_SECS`].
+pub(super) fn single_use_marker(artifact_expires_at: Timestamp) -> [u8; 8] {
+    (artifact_expires_at.as_micros() / 1_000_000 + CONSUMED_MARKER_GRACE_SECS).to_le_bytes()
+}
+
 impl EmbeddedIdentityEngine {
     /// Claims the single use of a redeemable artifact across the whole
     /// deployment.
@@ -43,10 +50,12 @@ impl EmbeddedIdentityEngine {
         marker_key: &[u8],
         artifact_expires_at: Timestamp,
     ) -> Result<bool, IdentityError> {
-        let marker_expires_at =
-            artifact_expires_at.as_micros() / 1_000_000 + CONSUMED_MARKER_GRACE_SECS;
         self.storage
-            .put_if_absent(realm_id, marker_key, &marker_expires_at.to_le_bytes())
+            .put_if_absent(
+                realm_id,
+                marker_key,
+                &single_use_marker(artifact_expires_at),
+            )
             .map_err(Self::storage_err)
     }
 

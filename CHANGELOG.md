@@ -42,6 +42,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   run, up to 60 s, and runs every second again as soon as a run fills a batch. In the same
   test, the idle server now uses 0.8 % of a core. Search results do not change: a search reads
   the pending writes itself.
+- **A refresh-token grant makes one durable write, not four** (#890): a refresh wrote its
+  `TokenRefreshed` audit event, the session's new expiry, the presented token's single use and
+  the grant family's new token as four writes, and each waited for its own WAL fsync. Each write
+  held a place of `storage.max_writes_in_flight` in turn, so on AWS (c7i.large, gp3) the write
+  limit refused refreshes from about 900/s with `503`. A refresh now writes all four in one WAL
+  record. In a local test with a 3.7 ms fsync on two cores, the clean refresh rate went from
+  about 600/s to at least 1,200/s, and the p50 from 28 ms to 7 ms.
+- **A refresh refused with `503` no longer spends its refresh token** (#890): when the write
+  limit refused the grant family's write, the token's single use was already durable. A client
+  that retried with the same token, as `Retry-After` asks, was answered as a token replay: the
+  server returned `400 invalid_grant` and revoked the grant family and the session. A refused or
+  failed refresh now writes nothing, and its retry with the same token succeeds. In cluster mode
+  the claim and the rotation are still two Raft proposals.
 
 ## [4.12.2] — 2026-11-17
 
