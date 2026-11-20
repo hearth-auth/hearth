@@ -144,6 +144,92 @@ fn concurrent_bulk_imports_all_finish() {
     }
 }
 
+/// A restore shares each fsync among as many users as it shares among the
+/// records of the other members, and keeps the import's results and
+/// validation. The live import API keeps its smaller depth: a call holds the
+/// group commit while it stages its users (#903).
+#[test]
+fn a_restore_commits_more_users_with_each_fsync_than_a_live_import() {
+    let (_dir, engine, storage, _audit) = durable_engine();
+    let realm = create_test_realm(&engine);
+    let n = 2 * RESTORE_PIPELINE_DEPTH;
+    let mut restored: Vec<ImportUserRequest> = (0..n)
+        .map(|i| import_request(&format!("restored{i:05}@example.com")))
+        .collect();
+    restored[n - 1] = import_request("restored00007@example.com");
+    let before = storage.wal_sync_count();
+
+    let results = engine.restore_users(&realm, &restored);
+
+    let restore_syncs = storage.wal_sync_count() - before;
+    assert_eq!(results.len(), n);
+    for (i, result) in results.iter().take(n - 1).enumerate() {
+        let user = result.as_ref().expect("restore");
+        assert_eq!(user.email(), format!("restored{i:05}@example.com"));
+    }
+    assert!(
+        matches!(results[n - 1], Err(IdentityError::DuplicateEmail)),
+        "the repeated email: {:?}",
+        results[n - 1].as_ref().map(User::email)
+    );
+    assert!(
+        restore_syncs <= (n / RESTORE_PIPELINE_DEPTH) as u64,
+        "{restore_syncs} durable writes to restore {n} users"
+    );
+
+    let live: Vec<ImportUserRequest> = (0..n)
+        .map(|i| import_request(&format!("live{i:05}@example.com")))
+        .collect();
+    let before = storage.wal_sync_count();
+    let results = engine.import_users(&realm, &live);
+    let live_syncs = storage.wal_sync_count() - before;
+    assert!(results.iter().all(Result::is_ok), "every live user imports");
+    assert!(
+        live_syncs >= (n / IMPORT_PIPELINE_DEPTH) as u64,
+        "{live_syncs} durable writes for {n} users: the live import enqueues \
+         {IMPORT_PIPELINE_DEPTH} users at most before it waits"
+    );
+}
+
+/// Restores and live imports that run at the same time all finish: a
+/// restore's deeper chunks keep the #536 rule, the write that made the
+/// thread the group-commit leader is awaited first.
+#[test]
+fn concurrent_restores_and_live_imports_all_finish() {
+    let (_dir, engine, _storage, _audit) = durable_engine();
+    let engine = Arc::new(engine);
+    let realm = create_test_realm(&engine);
+    let threads = 8;
+    let per_thread = 4 * RESTORE_PIPELINE_DEPTH;
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    for t in 0..threads {
+        let engine = Arc::clone(&engine);
+        let realm = realm.clone();
+        let done = done_tx.clone();
+        std::thread::spawn(move || {
+            let requests: Vec<ImportUserRequest> = (0..per_thread)
+                .map(|i| import_request(&format!("t{t}-{i:05}@example.com")))
+                .collect();
+            let results = if t % 2 == 0 {
+                engine.restore_users(&realm, &requests)
+            } else {
+                engine.import_users(&realm, &requests)
+            };
+            let imported = results.iter().filter(|result| result.is_ok()).count();
+            done.send(imported).expect("send");
+        });
+    }
+    drop(done_tx);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    for _ in 0..threads {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let imported = done_rx
+            .recv_timeout(left)
+            .expect("an import did not finish in 30 s: the imports wait for each other");
+        assert_eq!(imported, per_thread, "every user of the import is imported");
+    }
+}
+
 /// The embedded audit engine, except that it refuses the merged write of
 /// every third event, as an audit engine without one does.
 struct SometimesUnmerged {

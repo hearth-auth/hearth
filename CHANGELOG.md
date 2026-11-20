@@ -43,6 +43,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   revocations bumps the revocation epoch once instead of once per token. Clients, roles,
   permissions, scopes, identity providers, webhook subscriptions and retiring keys, which a
   realm holds few of, are still restored one by one, and so is a restore into a cluster.
+- **A restore shares each fsync among 512 users, not 64** (#903): after #896, users were the
+  slowest part of a restore. A restore shared each fsync among at most 64 users, the depth of
+  `POST /admin/users/import`, while the other members share it among 512 records. A restore now
+  shares each fsync among up to 512 users. In a local test (fsync on every write), a restore of
+  1M users made 1,959 fsyncs instead of 15,630 and took 67 s instead of 132 s (14,900 users/s
+  instead of 7,600). `POST /admin/users/import` keeps 64 users per fsync, so one request holds
+  the shared commit of the other writes no longer than before. Validation, per-user results and
+  the restore modes are unchanged.
 - **A start with `HEARTH_KEK` set no longer reads the whole store** (#888): at each start, the
   check that every stored key opens under `HEARTH_KEK` listed the realms of the store by reading
   and decrypting every record of every SST file, and it held each file's records in memory at

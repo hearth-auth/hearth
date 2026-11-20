@@ -344,9 +344,10 @@ impl BackupUserLine {
 /// Most lines of `users.ndjson` a restore reads before it imports them
 /// together (#887).
 ///
-/// [`IdentityEngine::import_users`] shares each fsync among the users of a
-/// batch. The batch also bounds the users the import pass holds: the restore
-/// streams the archive (#867), so its memory must not grow with the realm.
+/// [`IdentityEngine::restore_users`] shares each fsync among the users of a
+/// batch, up to 512 of them (#903). The batch also bounds the users the import
+/// pass holds: the restore streams the archive (#867), so its memory must not
+/// grow with the realm.
 const RESTORE_USER_BATCH: usize = 512;
 
 /// The password credential on a line of `users.ndjson`.
@@ -1081,11 +1082,12 @@ impl BackupImporter {
     /// Restores a batch of lines of `users.ndjson`: the users and their
     /// password credentials (#867).
     ///
-    /// A tenant realm's batch goes to [`IdentityEngine::import_users`], which
+    /// A tenant realm's batch goes to [`IdentityEngine::restore_users`], which
     /// shares each fsync among many users: one user per durable write took
-    /// about 18 hours for 10M users (#887). Operator accounts go through
-    /// `import_admin_user` one by one — the only import path into the system
-    /// realm, with `import_user`'s validation.
+    /// about 18 hours for 10M users (#887), and 64 users per durable write
+    /// (the live import API's depth) about 22 minutes locally (#903).
+    /// Operator accounts go through `import_admin_user` one by one — the only
+    /// import path into the system realm, with `import_user`'s validation.
     fn import_user_batch(
         &self,
         requests: &[ImportUserRequest],
@@ -1107,7 +1109,7 @@ impl BackupImporter {
         if requests.is_empty() {
             return Ok(());
         }
-        let results = self.identity.import_users(realm_id, requests);
+        let results = self.identity.restore_users(realm_id, requests);
         if results.len() != requests.len() {
             return Err(BackupError::Engine(format!(
                 "the identity engine returned {} results for {} imported users",
@@ -2521,11 +2523,17 @@ mod tests {
     /// two fsyncs: one for its rows, one for its audit event. On a cloud disk
     /// that is about 175 users/s: a restore of 10M users took about 18 hours
     /// (#887). A restore must share each fsync among many users.
+    ///
+    /// With 64 users per fsync, the live import API's depth, users were still
+    /// the slowest member of a restore, about 7,000/s locally: a restore
+    /// shares each fsync among as many users as the other members share it
+    /// among records, [`RESTORE_USER_BATCH`] (#903).
     #[test]
     fn a_restore_shares_each_durable_write_among_many_users() {
         let rig = make_durable_rig();
-        // More than one chunk of users, and a partial last chunk.
-        let n: u32 = 600;
+        // More than one batch of users, and a partial last batch.
+        let batch = RESTORE_USER_BATCH as u32;
+        let n: u32 = 3 * batch + 100;
         let users: String = (0..n).map(|i| numbered_user_line(i) + "\n").collect();
 
         let (report, realm, syncs) = restore_users(&rig, &users, RestoreMode::Skip);
@@ -2546,9 +2554,18 @@ mod tests {
                 "{email} keeps its archived id"
             );
         }
+        // The realm itself takes the durable writes of a restore of one user,
+        // less the one of that user. Each batch of users takes one more.
+        let (_, _, one_user) = restore_users(
+            &make_durable_rig(),
+            &(numbered_user_line(0) + "\n"),
+            RestoreMode::Skip,
+        );
+        let user_syncs = syncs - (one_user - 1);
+        let batches = u64::from(n.div_ceil(batch));
         assert!(
-            syncs <= u64::from(n) / 10,
-            "{syncs} durable writes to restore {n} users"
+            user_syncs <= batches,
+            "{user_syncs} durable writes to restore {n} users in {batches} batches"
         );
     }
 

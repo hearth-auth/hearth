@@ -2455,6 +2455,21 @@ pub trait IdentityEngine: Send + Sync {
         requests: &[ImportUserRequest],
     ) -> Vec<Result<User, IdentityError>>;
 
+    /// Imports a list of users for a backup restore: the same validation and
+    /// results as [`import_users`](Self::import_users), but each durable write
+    /// is shared among as many users as a restore shares it among the records
+    /// of its other members (#903).
+    ///
+    /// `import_users` serves the live `POST /admin/users/import` API and
+    /// shares each durable write among fewer users: while one call stages its
+    /// users, it can hold the group commit that every other write waits for
+    /// (#536).
+    fn restore_users(
+        &self,
+        realm_id: &RealmId,
+        requests: &[ImportUserRequest],
+    ) -> Vec<Result<User, IdentityError>>;
+
     /// Imports a user into the reserved system realm — the restore twin of
     /// [`create_admin_user`](Self::create_admin_user).
     ///
