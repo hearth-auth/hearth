@@ -32,7 +32,7 @@ runs the subcommands in this order:
 
 A snapshot holds, per section, {"ok": true, "value": ...} or {"ok": false, "error": ...}:
   admin         the realm id (the admin token's tid) and the admin's sub
-  user_count    the realm's users: a binary search on the offset cursor of GET /admin/users
+  user_count    the realm's users: the total of GET /admin/users?search=* (one request)
   users         GET /admin/users/{id} of each sampled user: every field that the API returns
   email_index   GET /admin/users?email= of each sampled user: the id that it finds
   known_users   a sign-in of the admin and of each seed user: the sub of the token
@@ -174,22 +174,6 @@ def sample_indexes(users, every):
     if users <= 0:
         return []
     return sorted(set(range(0, users, max(1, every))) | {users - 1})
-
-
-def count_by_probe(has_at):
-    """The exact length n of a list, where has_at(k) is k < n: about 2 log2(n) probes."""
-    if not has_at(0):
-        return 0
-    lo, hi = 0, 1  # an item at lo; none known at hi yet
-    while has_at(hi):
-        lo, hi = hi, hi * 2
-    while hi - lo > 1:
-        mid = (lo + hi) // 2
-        if has_at(mid):
-            lo = mid
-        else:
-            hi = mid
-    return lo + 1
 
 
 def b64url(raw):
@@ -1057,11 +1041,19 @@ def read_email_index(admin, sample):
 
 
 def count_users(admin):
-    def has_at(offset):
-        page = admin.get(f"/admin/users?limit=1&cursor={offset}", "GET /admin/users")
-        return bool(page.get("items"))
+    """The realm's users: the total of a search that matches every user (a glob of stars).
 
-    return count_by_probe(has_at)
+    The server takes that total from the user count that its storage engine keeps exact, so
+    the count is one request at any size. Without search text, GET /admin/users pages by
+    user id and gives no total (#892): counting 10M users that way is 100,000 requests that
+    read every user record.
+    """
+    what = "GET /admin/users?search=*"
+    page = admin.get("/admin/users?search=*&limit=1", what)
+    total = page.get("total")
+    if type(total) is not int or total < 0:
+        raise DrillError(f"{what}: no user total in the response: {short(total)}")
+    return total
 
 
 def sign_in_known_users(target):

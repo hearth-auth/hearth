@@ -12,12 +12,12 @@ import hashlib
 import copy
 import io
 import json
-import math
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import restore_drill  # noqa: E402
@@ -477,18 +477,88 @@ class MainTest(unittest.TestCase):
                 self.assertEqual((code, out), (2, ""))
 
 
+class FakeUsersApi:
+    """GET /admin/users as the server answers it (src/protocol/http/admin.rs), for n users.
+
+    - With search text: offset paging, and the exact total. A search of stars only matches
+      every user.
+    - Without search text: the cursor is the id of the last user of the previous page; any
+      other cursor is 400 invalid cursor (#892). The response has no total.
+    """
+
+    MAX_LIMIT = 100
+
+    def __init__(self, n):
+        self.ids = [f"00000000-0000-4000-8000-{i:012d}" for i in range(n)]
+        self.paths = []
+
+    def user(self, uid):
+        return {"id": uid, "email": f"{uid[-6:]}@h.test", "status": "USER_STATUS_ACTIVE"}
+
+    def get(self, path, what):
+        self.paths.append(path)
+        url = urllib.parse.urlsplit(path)
+        self.assert_path(url.path)
+        q = dict(urllib.parse.parse_qsl(url.query, keep_blank_values=True))
+        limit = min(int(q.get("limit", "20")), self.MAX_LIMIT)
+        if "search" in q:
+            if q["search"].strip("*") != "":
+                raise AssertionError(f"the fake knows only a search of stars: {path}")
+            offset = int(q.get("cursor") or 0)
+            items = [self.user(u) for u in self.ids[offset:offset + limit]]
+            nxt = offset + len(items)
+            return {"items": items, "next_cursor": str(nxt) if nxt < len(self.ids) else None,
+                    "total": len(self.ids)}
+        cursor = q.get("cursor", "")
+        if cursor and cursor not in self.ids:
+            raise restore_drill.DrillError(f'{what}: 400 {{"error":"invalid cursor"}}')
+        start = self.ids.index(cursor) + 1 if cursor else 0
+        page = self.ids[start:start + limit]
+        more = start + limit < len(self.ids)
+        return {"items": [self.user(u) for u in page],
+                "next_cursor": page[-1] if more else None}
+
+    @staticmethod
+    def assert_path(path):
+        if path != "/admin/users":
+            raise AssertionError(path)
+
+
+class CountUsersTest(unittest.TestCase):
+    """#892: the count sent an integer cursor, and the server answered 400 invalid cursor."""
+
+    def test_the_count_is_exact(self):
+        for n in (0, 1, 99, 100, 101, 1_234):
+            with self.subTest(n=n):
+                self.assertEqual(restore_drill.count_users(FakeUsersApi(n)), n)
+
+    def test_the_count_takes_one_request_however_large_the_realm(self):
+        api = FakeUsersApi(2_500)
+        self.assertEqual(restore_drill.count_users(api), 2_500)
+        self.assertEqual(len(api.paths), 1, api.paths)
+
+    def test_a_response_without_a_total_is_an_error(self):
+        class NoTotal(FakeUsersApi):
+            def get(self, path, what):
+                page = super().get(path, what)
+                page.pop("total", None)
+                return page
+
+        with self.assertRaisesRegex(restore_drill.DrillError, "total"):
+            restore_drill.count_users(NoTotal(3))
+
+    def test_a_total_that_is_not_a_count_is_an_error(self):
+        for bad in (None, "3", -1, True, 2.5):
+            class Bad(FakeUsersApi):
+                def get(self, path, what, bad=bad):
+                    return dict(super().get(path, what), total=bad)
+
+            with self.subTest(total=bad), self.assertRaisesRegex(restore_drill.DrillError,
+                                                                 "total"):
+                restore_drill.count_users(Bad(3))
+
+
 class HelpersTest(unittest.TestCase):
-    def test_count_by_probe_finds_the_exact_count_in_few_probes(self):
-        for n in (0, 1, 2, 3, 7, 8, 9, 1000, 1_000_008):
-            probes = []
-
-            def has_at(offset, n=n, probes=probes):
-                probes.append(offset)
-                return offset < n
-
-            self.assertEqual(restore_drill.count_by_probe(has_at), n)
-            self.assertLessEqual(len(probes), 2 * math.log2(n + 1) + 3, n)
-
     def test_the_sample_is_deterministic_and_covers_both_ends(self):
         s = restore_drill.sample_indexes(1_000_000, 1000)
         self.assertEqual(s, restore_drill.sample_indexes(1_000_000, 1000))
