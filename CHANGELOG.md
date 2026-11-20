@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.12.4] — 2026-11-20
+
 ### Fixed
 - **Writes that create or delete a user or a live session no longer get slower as SST files
   accumulate** (#905): to keep the exact user and session counts (#644), each such write checked
