@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.12.3] — 2026-11-20
+
 ### Security
 - **SMTP email delivery uses lettre 0.11.24**, which fixes four advisories in lettre 0.11.23:
   forged SMTP replies after `STARTTLS` (RUSTSEC-2026-0560), SMTP command injection through a bare
