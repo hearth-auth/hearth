@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Fixed
+- **Writes that create or delete a user or a live session no longer get slower as SST files
+  accumulate** (#905): to keep the exact user and session counts (#644), each such write checked
+  whether its key already existed, and that check decrypted a Bloom filter block of every SST file
+  again, while it held the lock that orders all writes. It now keeps those filter blocks (and the
+  index blocks) in the block cache (`storage.block_cache_bytes`), so a new key costs one
+  in-memory filter check per file. The counts stay exact. In a local test with 64 SST files, the
+  check of a new key took 6 µs instead of 73 µs. A restore of 1M users (release build, fsync on
+  every write) took 61 s instead of 76 s with background compaction, and 172 s instead of 495 s
+  without it.
+
 ## [4.12.3] — 2026-11-20
 
 ### Security

@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use crate::core::{RealmId, COUNTED_KEY_PREFIXES};
 use crate::storage::memtable::{Memtable, MemtableValue};
-use crate::storage::sst::SstReader;
+use crate::storage::sst::{KeyHashes, SstReader};
 use crate::storage::wal::{WalEntry, WalOperation};
 use crate::storage::StorageError;
 
@@ -84,7 +84,17 @@ fn touches_counted_keys(puts: &[(Vec<u8>, Vec<u8>)], deletes: &[Vec<u8>]) -> boo
 }
 
 /// The current value of `key`: the memtable (active, then the map that a flush
-/// writes out), then the SSTs, newest first. Nothing is cached.
+/// writes out), then the SSTs, newest first.
+///
+/// This runs under the lock that orders writes, once for each written key
+/// under a counted prefix, and most such keys are new. So each SST lookup
+/// keeps its index and filter blocks in the block cache: an absent key costs
+/// one in-memory filter check per SST, not a decryption, and its Bloom hashes
+/// are computed once for all SSTs (#905). A data block
+/// it decrypts is not cached, so writes do not evict the query path's data
+/// blocks (#445). The hot tier is not read or filled: the lookup must see the
+/// memtable and SST layers themselves, and a write's own lookup must not
+/// promote a value the write is about to replace.
 ///
 /// A flush publishes its SST before it drops the map it writes out, so this
 /// order never misses a key that moves out of the memtable meanwhile. The
@@ -100,8 +110,9 @@ fn current_value(
         Some(MemtableValue::Tombstone) => return Ok(None),
         None => {}
     }
+    let hashes = KeyHashes::new(realm_id, key);
     for reader in ssts().iter() {
-        match reader.get_uncached(realm_id, key)? {
+        match reader.get_caching_metadata(realm_id, key, hashes)? {
             Some(MemtableValue::Data(data)) => return Ok(Some(data)),
             Some(MemtableValue::Tombstone) => return Ok(None),
             None => {}
@@ -505,6 +516,133 @@ mod tests {
 
         assert_eq!(stored_count(&engine, &first), 1);
         assert_eq!(stored_count(&engine, &second), 2);
+    }
+
+    /// The keep-up of a count must not decrypt a block of every SST for each
+    /// written key (#905). Once each SST's filter is in the block cache, a new
+    /// key costs one in-memory filter check per SST: only a Bloom false
+    /// positive (about 1 %) reads an index or data block. Before the fix,
+    /// every new key decrypted the filter block of every SST.
+    #[test]
+    fn a_new_counted_key_decrypts_no_filter_block_once_the_filters_are_cached() {
+        const SSTS: u64 = 16;
+        const NEW_KEYS: u64 = 50;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = StorageConfig::test_config(dir.path().to_path_buf());
+        // Only the explicit flushes below write an SST.
+        config.set_memtable_flush_bytes(64 * 1024 * 1024);
+        let engine = EmbeddedStorageEngine::open(config).expect("open");
+        let realm = RealmId::generate();
+        // Each SST holds keys `00-<sst>` to `19-<sst>`, so every new key
+        // `10-...` sorts inside every SST's key range, as random user ids do:
+        // no range check skips an SST.
+        let mut next = 0_u64;
+        for sst in 0..SSTS {
+            for row in 0..20 {
+                engine
+                    .put(&realm, &user_key(&format!("{row:02}-{sst}")), b"v")
+                    .expect("put");
+                next += 1;
+            }
+            engine.flush_memtable().expect("flush");
+        }
+        // The first write after the flushes reads each SST's filter once.
+        engine
+            .put(&realm, &user_key("10-warm-up"), b"v")
+            .expect("put");
+
+        let before = crate::storage::sst::block_decrypts();
+        for i in 0..NEW_KEYS {
+            engine
+                .put(&realm, &user_key(&format!("10-new-{i}")), b"v")
+                .expect("put");
+        }
+        let after = crate::storage::sst::block_decrypts();
+        let [filters, indexes, data] = [0, 1, 2].map(|kind| after[kind] - before[kind]);
+
+        assert_eq!(
+            filters, 0,
+            "{NEW_KEYS} new keys over {SSTS} SSTs decrypted {filters} filter blocks"
+        );
+        // 800 filter checks; a false positive reads one index and one data block.
+        assert!(
+            indexes + data < NEW_KEYS,
+            "{NEW_KEYS} new keys read {indexes} index and {data} data blocks"
+        );
+        assert_eq!(walked_count(&engine, &realm), next + 1 + NEW_KEYS);
+        assert_eq!(stored_count(&engine, &realm), next + 1 + NEW_KEYS);
+    }
+
+    /// One step of [`proptest_the_kept_count_matches_a_walk`].
+    #[derive(Debug, Clone)]
+    enum Step {
+        Put(u8),
+        Delete(u8),
+        /// One batch puts the first keys and deletes the second ones.
+        Batch(Vec<u8>, Vec<u8>),
+        Flush,
+        Compact,
+        Reopen,
+    }
+
+    fn step() -> impl proptest::strategy::Strategy<Value = Step> {
+        use proptest::prelude::*;
+        let key = 0..24_u8;
+        prop_oneof![
+            4 => key.clone().prop_map(Step::Put),
+            3 => key.clone().prop_map(Step::Delete),
+            2 => (
+                prop::collection::vec(key.clone(), 0..6),
+                prop::collection::vec(key, 0..4)
+            )
+                .prop_map(|(puts, deletes)| Step::Batch(puts, deletes)),
+            1 => Just(Step::Flush),
+            1 => Just(Step::Compact),
+            1 => Just(Step::Reopen),
+        ]
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+        /// The kept count equals the number of keys after any mix of writes,
+        /// flushes, compactions and restarts that replay WAL records whose
+        /// effect an SST already holds. The existence lookups read SST
+        /// filters and indexes through the block cache (#905), so stale
+        /// cached blocks of a replaced reader would show up here.
+        #[test]
+        fn proptest_the_kept_count_matches_a_walk(
+            steps in proptest::collection::vec(step(), 1..60),
+        ) {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let realm = RealmId::generate();
+            let name = |k: u8| user_key(&format!("{:02}", k.wrapping_mul(7) % 24));
+            let mut engine = open(dir.path());
+            for step in steps {
+                match step {
+                    Step::Put(k) => engine.put(&realm, &name(k), b"v").expect("put"),
+                    Step::Delete(k) => engine.delete(&realm, &name(k)).expect("delete"),
+                    Step::Batch(puts, deletes) => {
+                        let puts: Vec<_> =
+                            puts.into_iter().map(|k| (name(k), b"v".to_vec())).collect();
+                        let deletes: Vec<_> = deletes.into_iter().map(name).collect();
+                        engine.write_batch(&realm, &puts, &deletes).expect("batch");
+                    }
+                    Step::Flush => engine.flush_memtable().expect("flush"),
+                    Step::Compact => {
+                        engine.compact_ssts(2).expect("compact");
+                    }
+                    Step::Reopen => {
+                        drop(engine);
+                        engine = open(dir.path());
+                    }
+                }
+                proptest::prop_assert_eq!(
+                    stored_count(&engine, &realm),
+                    walked_count(&engine, &realm)
+                );
+            }
+        }
     }
 
     #[test]
