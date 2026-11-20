@@ -73,7 +73,10 @@ jobs:
   test:
     name: UI tests — ${{ matrix.browser }}
     needs: build
-    runs-on: ubuntu-latest
+    # Pinned: Playwright 1.60 has no browsers for ubuntu-latest (Ubuntu 26.04):
+    # "Playwright does not support chromium on ubuntu26.04-x64". Revisit when a
+    # Playwright release in tests/ui/package-lock.json supports Ubuntu 26.04.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     continue-on-error: true
 
@@ -218,7 +221,10 @@ jobs:
   reference-integration:
     name: Reference integration — full-stack-demo
     needs: build
-    runs-on: ubuntu-latest
+    # Pinned: Playwright 1.60 has no browsers for ubuntu-latest (Ubuntu 26.04):
+    # "Playwright does not support chromium on ubuntu26.04-x64". Revisit when a
+    # Playwright release in tests/ui/package-lock.json supports Ubuntu 26.04.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     continue-on-error: true
 

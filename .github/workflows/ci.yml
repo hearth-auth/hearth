@@ -992,7 +992,10 @@ jobs:
     needs: filter
     # HEA-685: guard with `needs.filter.result == 'success'` — see `quality` above.
     if: (needs.filter.result == 'success' && needs.filter.outputs.ui == 'true') || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    # Pinned: Playwright 1.60 has no browsers for ubuntu-latest (Ubuntu 26.04):
+    # "Playwright does not support chromium on ubuntu26.04-x64". Revisit when a
+    # Playwright release in tests/ui/package-lock.json supports Ubuntu 26.04.
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
 
     steps:
