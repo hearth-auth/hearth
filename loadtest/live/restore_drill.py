@@ -10,6 +10,7 @@ Usage:
                             [--require-webhooks] BEFORE AFTER
   restore_drill.py report   --steps FILE --facts FILE [--findings FILE] [--status TEXT]
                             --json FILE --markdown FILE
+  restore_drill.py threads  --pid PID --out FILE [--interval SECONDS]
 
 ENV is the generator.env that gen-config.sh writes, and CRT the run's CA. restore-drill.sh
 runs the subcommands in this order:
@@ -1215,6 +1216,50 @@ def cmd_verify_key(args):
     return 0
 
 
+def thread_ticks(pid):
+    """{tid: (name, utime + stime in clock ticks)} of the threads of pid; None once it has
+    exited (a zombie that its parent has not reaped yet has exited too)."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            stat = f.read()
+        if stat[stat.rindex(")") + 2] in "ZX":
+            return None
+        tids = os.listdir(f"/proc/{pid}/task")
+    except OSError:
+        return None
+    out = {}
+    for tid in tids:
+        try:
+            with open(f"/proc/{pid}/task/{tid}/stat") as f:
+                stat = f.read()
+        except OSError:
+            continue  # the thread ended
+        # The name is in parentheses and may hold spaces; fields 14 and 15 follow it.
+        name = stat[stat.index("(") + 1:stat.rindex(")")]
+        fields = stat[stat.rindex(")") + 2:].split()
+        out[int(tid)] = (name, int(fields[11]) + int(fields[12]))
+    return out
+
+
+def cmd_threads(args):
+    """Samples the CPU time of each thread of --pid every --interval seconds into --out
+    (CSV: ts,tid,name,cpu_ticks,clk_tck, cumulative ticks), until the process exits. A
+    restore that keeps one thread busy and a restore bound by the disk look the same in
+    the process total; per thread they do not (#912)."""
+    clk = os.sysconf("SC_CLK_TCK")
+    with open(args.out, "w") as f:
+        f.write("ts,tid,name,cpu_ticks,clk_tck\n")
+        while True:
+            ticks = thread_ticks(args.pid)
+            if ticks is None:
+                return 0
+            ts = time.time()
+            for tid, (name, cpu) in sorted(ticks.items()):
+                f.write(f"{ts:.3f},{tid},{name.replace(',', ' ')},{cpu},{clk}\n")
+            f.flush()
+            time.sleep(args.interval)
+
+
 def cmd_report(args):
     findings = load_json(args.findings) if args.findings and os.path.exists(args.findings) \
         else []
@@ -1268,6 +1313,12 @@ def parse_args(argv):
     sp = sub.add_parser("verify-key")
     sp.add_argument("keygen_output", help="what hearth backup keygen printed")
     sp.set_defaults(fn=cmd_verify_key)
+
+    sp = sub.add_parser("threads")
+    sp.add_argument("--pid", type=int, required=True)
+    sp.add_argument("--out", required=True)
+    sp.add_argument("--interval", type=float, default=5.0)
+    sp.set_defaults(fn=cmd_threads)
 
     sp = sub.add_parser("report")
     sp.add_argument("--steps", required=True)

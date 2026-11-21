@@ -5467,27 +5467,21 @@ fn run_backup_restore(
     std::fs::create_dir_all(data_dir)?;
     let storage_config = cli_storage_config(data_dir);
     let storage = Arc::new(EmbeddedStorageEngine::open(storage_config)?);
+    // No server runs the count-triggered compaction here: without it, every
+    // memtable a restore flushed stayed its own SST, and each new key probed
+    // all of them, so a 10M-user restore slowed down as it went (#912).
+    let compaction = hearth::storage::CompactionWorker::start(Arc::clone(&storage))?;
     let (identity, audit, rbac) = build_all_engines(
         Arc::clone(&storage) as Arc<dyn StorageEngine>,
         resolve_cli_kek(config_path)?,
     )?;
 
     let importer = BackupImporter::new(identity, rbac, audit, cli_webhook_engine(&storage));
-    let dek_passphrase: Option<secrecy::SecretString> = if reader.manifest.sections_encrypted {
-        let pp = if let Some(pp) = hearth::backup::passphrase::passphrase_from_env()? {
-            pp
-        } else {
-            secrecy::SecretString::from(rpassword::prompt_password("Enter backup passphrase: ")?)
-        };
-        Some(pp)
-    } else {
-        None
-    };
     let opts = ImportOptions {
         mode,
         dry_run,
         realm_target: None,
-        dek_passphrase,
+        dek_passphrase: restore_dek_passphrase(reader.manifest.sections_encrypted)?,
         allow_missing_signing_key,
         // The CLI runs with full operator authority on the local data
         // directory, so it may restore every realm the archive contains. The
@@ -5528,9 +5522,30 @@ fn run_backup_restore(
             system_report = Some(report);
         }
     }
+    match compaction.stop() {
+        Ok(merged) => tracing::info!(merged, "SST compaction during the restore"),
+        // The merges change nothing until they commit: the store is whole,
+        // and the server compacts it once it runs.
+        Err(e) => tracing::warn!(error = %e, "SST compaction during the restore failed"),
+    }
     report_system_realm_restore(system_report.as_ref(), dry_run);
     warn_unexported_families("This restore did NOT bring back");
     Ok(had_errors)
+}
+
+/// The passphrase that unwraps an archive's data key: `None` when its sections are not
+/// encrypted, else `HEARTH_BACKUP_PASSPHRASE`, else a prompt.
+fn restore_dek_passphrase(
+    encrypted: bool,
+) -> Result<Option<secrecy::SecretString>, Box<dyn std::error::Error>> {
+    if !encrypted {
+        return Ok(None);
+    }
+    if let Some(pp) = hearth::backup::passphrase::passphrase_from_env()? {
+        return Ok(Some(pp));
+    }
+    let pp = rpassword::prompt_password("Enter backup passphrase: ")?;
+    Ok(Some(secrecy::SecretString::from(pp)))
 }
 
 /// Tells the operator whether a restore brought operator-console access back,

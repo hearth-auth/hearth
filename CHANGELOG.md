@@ -6,6 +6,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Added
+- **`hearth backup restore` logs its progress** (#912): every 10 seconds, a `restore progress`
+  line gives the pass (`check`, then `import`), the archive member, the records handled so far,
+  the rate and the elapsed time, and a `restore pass done` line gives each pass's totals. The
+  lines hold counts and rates only. A restore of 10M users used to log nothing for 46 minutes
+  between the integrity check and the summary.
+
+### Fixed
+- **`hearth backup restore` no longer slows down as the restored store grows** (#912): the
+  command did not run the SST compaction that `hearth serve` runs in the background, so every
+  flushed memtable stayed its own SST file, and each new key that a restore wrote was checked
+  against all of them. It now runs the same count-triggered compaction on a second thread while
+  it restores. On 2 CPUs with the disk limited to 125 MB/s, a restore of 10M users took
+  880 s instead of 2,703 s, with at most 27 SST files open instead of 274.
+
 ## [4.12.4] — 2026-11-20
 
 ### Fixed

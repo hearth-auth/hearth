@@ -993,7 +993,10 @@ to your production data directory.
 3. On the spare host, use the same `hearth.yaml`, `HEARTH_MASTER_KEY`,
    `HEARTH_KEK` and `HEARTH_BACKUP_PASSPHRASE`. Restore into an empty data
    directory, and record how long the
-   restore takes.
+   restore takes. Every 10 seconds, `hearth backup restore` logs a `restore progress`
+   line with the pass (`check`, then `import`), the archive member, the records
+   handled so far, the rate and the elapsed time, and a `restore pass done` line
+   at the end of each pass. A restore whose lines stop coming is stuck, not slow.
 4. Start the server, and record the time until `/readyz` answers 200.
 5. Compare. The JWKS and the user records must be equal. The known user must sign
    in. The client must get a token with its secret, and it must be refused without
