@@ -75,6 +75,7 @@ mod export;
 mod import;
 pub mod marker;
 pub mod passphrase;
+mod progress;
 mod signature;
 mod stream;
 mod synced_writer;

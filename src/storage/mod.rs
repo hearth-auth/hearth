@@ -12,6 +12,7 @@
 pub mod auto_size;
 #[allow(dead_code)]
 pub(crate) mod block_cache;
+mod compaction_worker;
 pub mod encryption;
 mod engine;
 pub mod error;
@@ -34,6 +35,7 @@ mod tiered;
 pub mod wal;
 pub(crate) mod write_pipeline;
 
+pub use compaction_worker::CompactionWorker;
 pub use engine::{CompactionConfig, EmbeddedStorageEngine, StorageConfig};
 pub use error::{ClusterUnavailableCause, RetryClass, StorageError};
 pub use fs::{Fs, FsFile, RealFs};

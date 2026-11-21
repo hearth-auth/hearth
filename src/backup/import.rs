@@ -6,6 +6,7 @@
 
 use std::io::{BufRead, Read};
 use std::sync::Arc;
+use std::time::Duration;
 
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -29,6 +30,7 @@ use crate::webhook::{WebhookEngine, WebhookSubscription};
 
 use zeroize::{Zeroize, Zeroizing};
 
+use super::progress::{RestoreProgress, RESTORE_PROGRESS_INTERVAL};
 use super::{decrypt_member, unwrap_dek, ArchiveReader, BackupError, DecryptReader};
 
 /// Every archive member (relative to `realms/<slug>/`) the importer knows how
@@ -523,6 +525,8 @@ pub struct BackupImporter {
     rbac: Arc<dyn RbacEngine>,
     audit: Arc<dyn AuditEngine>,
     webhooks: Arc<dyn WebhookEngine>,
+    /// How often each pass of a restore logs its progress (#912).
+    progress_interval: Duration,
 }
 
 impl BackupImporter {
@@ -541,7 +545,15 @@ impl BackupImporter {
             rbac,
             audit,
             webhooks,
+            progress_interval: RESTORE_PROGRESS_INTERVAL,
         }
+    }
+
+    /// The importer, logging the progress of each pass every `interval`.
+    #[cfg(test)]
+    fn with_progress_interval(mut self, interval: Duration) -> Self {
+        self.progress_interval = interval;
+        self
     }
 
     /// Refuses, before anything is written, an archive that carries a realm
@@ -665,7 +677,13 @@ impl BackupImporter {
             .iter()
             .find(|r| r.slug == realm_slug)
             .is_some_and(|r| r.audit_chain_included);
-        let checked = Self::check_realm(realm_slug, reader, dek, chain_declared)?;
+        let checked = Self::check_realm(
+            realm_slug,
+            reader,
+            dek,
+            chain_declared,
+            self.progress_interval,
+        )?;
 
         // ── Signing key (decrypted, optional) ──────────────────────────────
         //
@@ -820,6 +838,7 @@ impl BackupImporter {
             audit: checked.audit,
             restored_realm_id: None,
             report,
+            progress: RestoreProgress::new("import", self.progress_interval),
         };
         let prefix = format!("realms/{realm_slug}/");
         let paths: Vec<String> = RESTORE_ORDER
@@ -835,6 +854,7 @@ impl BackupImporter {
         })?;
         // A realm with no member after its audit events.
         restore.restored_realm()?;
+        restore.progress.finish();
         Ok(restore.report)
     }
 
@@ -858,9 +878,11 @@ impl BackupImporter {
         reader: &ArchiveReader,
         dek: Option<&[u8; 32]>,
         chain_declared: bool,
+        progress_interval: Duration,
     ) -> Result<CheckedRealm, BackupError> {
         let prefix = format!("realms/{realm_slug}/");
         let mut checked = CheckedRealm::default();
+        let mut progress = RestoreProgress::new("check", progress_interval);
         let mut chain: Option<AuditChainCheck> = None;
         // The audit events came before the chain material: check them again.
         let mut recheck_audit = false;
@@ -871,6 +893,7 @@ impl BackupImporter {
                     path: path.to_string(),
                 });
             };
+            progress.member(name);
             if !checked.present.insert(name) {
                 return Err(BackupError::Engine(format!(
                     "archive member {path} is in the archive twice; refusing to restore an \
@@ -900,17 +923,18 @@ impl BackupImporter {
                         if client?.id_token_signed_response_alg.as_deref() == Some("RS256") {
                             checked.has_rs256_clients = true;
                         }
+                        progress.add(1);
                     }
                 }
                 "audit.ndjson" => {
                     let mut verifier = chain.as_ref().map(AuditChainCheck::verifier);
-                    let audit = check_audit_events(&mut *member, verifier.as_mut())?;
+                    let audit = check_audit_events(&mut *member, verifier.as_mut(), &mut progress)?;
                     checked.audit = Some(CheckedAudit {
                         chain_verified: verifier.is_some(),
                         ..audit
                     });
                 }
-                _ => check_records(name, &mut *member)?,
+                _ => check_records(name, &mut *member, &mut progress)?,
             }
             Ok(())
         })?;
@@ -925,7 +949,11 @@ impl BackupImporter {
                         std::slice::from_ref(&path),
                         &mut |path, raw| {
                             let mut member = open_member(path, raw, dek)?;
-                            check_audit_events(&mut *member, Some(&mut chain.verifier()))?;
+                            check_audit_events(
+                                &mut *member,
+                                Some(&mut chain.verifier()),
+                                &mut progress,
+                            )?;
                             Ok(())
                         },
                     )?;
@@ -951,6 +979,7 @@ impl BackupImporter {
                 }
             }
         }
+        progress.finish();
         Ok(checked)
     }
 
@@ -1403,11 +1432,13 @@ impl AuditChainCheck {
 fn check_audit_events(
     member: &mut dyn BufRead,
     mut verifier: Option<&mut ChainVerifier>,
+    progress: &mut RestoreProgress,
 ) -> Result<CheckedAudit, BackupError> {
     let mut audit = CheckedAudit::default();
     for event in NdjsonRecords::<AuditEvent>::new(member) {
         let event = event?;
         audit.events += 1;
+        progress.add(1);
         // Check the source hashes BEFORE re-signing them. Re-chaining under
         // the destination key discards whatever the archive said, so a
         // tampered audit log used to restore into a chain that verifies clean
@@ -1442,6 +1473,8 @@ struct RealmRestore<'a> {
     /// The ID of the realm the records go to, once its record is restored.
     restored_realm_id: Option<RealmId>,
     report: ImportReport,
+    /// The records the import pass has restored (#912).
+    progress: RestoreProgress,
 }
 
 impl RealmRestore<'_> {
@@ -1527,6 +1560,7 @@ impl RealmRestore<'_> {
     /// Restores the member `name` (at archive path `path`) from its raw bytes.
     #[allow(clippy::too_many_lines)] // one arm per member
     fn member(&mut self, name: &str, path: &str, raw: &mut dyn Read) -> Result<(), BackupError> {
+        self.progress.member(name);
         let mut member = open_member(path, raw, self.dek)?;
         let member = &mut *member;
         if name == "audit.ndjson" {
@@ -1537,6 +1571,7 @@ impl RealmRestore<'_> {
         let opts = self.opts;
         let overwrite = opts.mode == RestoreMode::Overwrite;
         let report = &mut self.report;
+        let progress = &mut self.progress;
         match name {
             "users.ndjson" => {
                 let mut batch = Vec::new();
@@ -1544,10 +1579,12 @@ impl RealmRestore<'_> {
                     batch.push(line?.into_request()?);
                     if batch.len() == RESTORE_USER_BATCH {
                         importer.import_user_batch(&batch, &realm_id, opts, report)?;
+                        progress.add(batch.len() as u64);
                         batch.clear();
                     }
                 }
                 importer.import_user_batch(&batch, &realm_id, opts, report)?;
+                progress.add(batch.len() as u64);
             }
             // After users so the owning records exist. TOTP state is
             // re-encrypted under the destination realm's MFA DEK inside
@@ -1556,6 +1593,7 @@ impl RealmRestore<'_> {
                 member,
                 path,
                 opts,
+                progress,
                 &mut report.mfa_factors,
                 |batch: &[MfaFactorExport]| {
                     engine_results(importer.identity.import_records(
@@ -1568,6 +1606,7 @@ impl RealmRestore<'_> {
             "clients.ndjson" => {
                 for client in NdjsonRecords::<BackupClient>::new(member) {
                     importer.import_client_line(client?, &realm_id, opts, report)?;
+                    progress.add(1);
                 }
             }
             // ── Authorization model (HEA-2160) ─────────────────────────────
@@ -1579,6 +1618,7 @@ impl RealmRestore<'_> {
                 member,
                 path,
                 opts,
+                progress,
                 &mut report.permissions,
                 each(|record: &PermissionRecord| {
                     importer
@@ -1592,6 +1632,7 @@ impl RealmRestore<'_> {
                     member,
                     path,
                     opts,
+                    progress,
                     &mut report.roles,
                     each(|role: &Role| {
                         importer
@@ -1606,6 +1647,7 @@ impl RealmRestore<'_> {
                     member,
                     path,
                     opts,
+                    progress,
                     &mut report.groups,
                     |batch: &[Group]| {
                         engine_results(importer.rbac.import_records(
@@ -1620,6 +1662,7 @@ impl RealmRestore<'_> {
                 member,
                 path,
                 opts,
+                progress,
                 &mut report.organizations,
                 |batch: &[Organization]| {
                     engine_results(importer.identity.import_records(
@@ -1633,6 +1676,7 @@ impl RealmRestore<'_> {
                 member,
                 path,
                 opts,
+                progress,
                 &mut report.assignments,
                 |batch: &[RoleAssignment]| {
                     engine_results(importer.rbac.import_records(
@@ -1650,6 +1694,7 @@ impl RealmRestore<'_> {
                 member,
                 path,
                 opts,
+                progress,
                 &mut report.group_memberships,
                 |batch: &[GroupMembershipEdge]| {
                     engine_results(importer.rbac.import_records(
@@ -1663,6 +1708,7 @@ impl RealmRestore<'_> {
                 member,
                 path,
                 opts,
+                progress,
                 &mut report.organization_memberships,
                 |batch: &[OrganizationMembership]| {
                     engine_results(importer.identity.import_records(
@@ -1676,6 +1722,7 @@ impl RealmRestore<'_> {
                 member,
                 path,
                 opts,
+                progress,
                 &mut report.consents,
                 |batch: &[ConsentExport]| {
                     engine_results(importer.identity.import_records(
@@ -1694,6 +1741,7 @@ impl RealmRestore<'_> {
                 member,
                 path,
                 opts,
+                progress,
                 &mut report.agents,
                 |batch: &[AgentExport]| {
                     engine_results(importer.identity.import_records(
@@ -1709,6 +1757,7 @@ impl RealmRestore<'_> {
                 member,
                 path,
                 opts,
+                progress,
                 &mut report.identity_providers,
                 each(|idp: &IdpConfig| {
                     importer
@@ -1721,6 +1770,7 @@ impl RealmRestore<'_> {
                 member,
                 path,
                 opts,
+                progress,
                 &mut report.federation_links,
                 |batch: &[FederationLinkExport]| {
                     engine_results(importer.identity.import_records(
@@ -1739,6 +1789,7 @@ impl RealmRestore<'_> {
                 for record in NdjsonRecords::<serde::de::IgnoredAny>::new(member) {
                     record?;
                     skipped += 1;
+                    progress.add(1);
                 }
                 report.webhooks.skipped += skipped;
                 if skipped > 0 {
@@ -1754,6 +1805,7 @@ impl RealmRestore<'_> {
                 member,
                 path,
                 opts,
+                progress,
                 &mut report.webhook_subscriptions,
                 each(|sub: &WebhookSubscription| {
                     importer
@@ -1793,6 +1845,7 @@ impl RealmRestore<'_> {
                 member,
                 path,
                 opts,
+                progress,
                 &mut report.scim_mappings,
                 |batch: &[ScimMappingExport]| {
                     engine_results(importer.identity.import_records(
@@ -1806,6 +1859,7 @@ impl RealmRestore<'_> {
                 member,
                 path,
                 opts,
+                progress,
                 &mut report.invitations,
                 |batch: &[OrganizationInvitation]| {
                     engine_results(importer.identity.import_records(
@@ -1819,6 +1873,7 @@ impl RealmRestore<'_> {
                 member,
                 path,
                 opts,
+                progress,
                 &mut report.revocations,
                 |batch: &[RevocationExport]| {
                     engine_results(importer.identity.import_records(
@@ -1832,6 +1887,7 @@ impl RealmRestore<'_> {
                 member,
                 path,
                 opts,
+                progress,
                 &mut report.retiring_signing_keys,
                 each(|key: &RetiringSigningKeyExport| {
                     importer
@@ -1844,6 +1900,7 @@ impl RealmRestore<'_> {
                 member,
                 path,
                 opts,
+                progress,
                 &mut report.retiring_id_token_signing_keys,
                 each(|key: &RetiringSigningKeyExport| {
                     importer
@@ -1856,6 +1913,7 @@ impl RealmRestore<'_> {
                 member,
                 path,
                 opts,
+                progress,
                 &mut report.scopes,
                 each(|scope: &ScopeExport| {
                     importer
@@ -1891,8 +1949,12 @@ impl RealmRestore<'_> {
             return Ok(());
         };
         let mut failure = None;
+        let progress = &mut self.progress;
         let mut events = NdjsonRecords::<AuditEvent>::new(member).map_while(|event| match event {
-            Ok(event) => Some(event),
+            Ok(event) => {
+                progress.add(1);
+                Some(event)
+            }
             Err(e) => {
                 failure = Some(e);
                 None
@@ -1937,12 +1999,18 @@ impl RealmRestore<'_> {
 ///
 /// The first read, authentication or parse error, or a user line whose
 /// credential names another user.
-fn check_records(name: &str, member: &mut dyn BufRead) -> Result<(), BackupError> {
+fn check_records(
+    name: &str,
+    member: &mut dyn BufRead,
+    progress: &mut RestoreProgress,
+) -> Result<(), BackupError> {
     fn parse_all<T: serde::de::DeserializeOwned>(
         member: &mut dyn BufRead,
+        progress: &mut RestoreProgress,
     ) -> Result<(), BackupError> {
         for record in NdjsonRecords::<T>::new(member) {
             record?;
+            progress.add(1);
         }
         Ok(())
     }
@@ -1953,30 +2021,31 @@ fn check_records(name: &str, member: &mut dyn BufRead) -> Result<(), BackupError
                 if let Some(credential) = &line.credential {
                     credential.check_owner(&line.user)?;
                 }
+                progress.add(1);
             }
             Ok(())
         }
-        "mfa_factors.ndjson" => parse_all::<MfaFactorExport>(member),
-        "permissions.ndjson" => parse_all::<PermissionRecord>(member),
-        "roles.ndjson" => parse_all::<Role>(member),
-        "groups.ndjson" => parse_all::<Group>(member),
-        "organizations.ndjson" => parse_all::<Organization>(member),
-        "assignments.ndjson" => parse_all::<RoleAssignment>(member),
-        "group_memberships.ndjson" => parse_all::<GroupMembershipEdge>(member),
-        "organization_memberships.ndjson" => parse_all::<OrganizationMembership>(member),
-        "consents.ndjson" => parse_all::<ConsentExport>(member),
-        "agents.ndjson" => parse_all::<AgentExport>(member),
-        "identity_providers.ndjson" => parse_all::<IdpConfig>(member),
-        "federation_links.ndjson" => parse_all::<FederationLinkExport>(member),
-        "webhooks.ndjson" => parse_all::<serde::de::IgnoredAny>(member),
-        "webhook_subscriptions.ndjson" => parse_all::<WebhookSubscription>(member),
-        "scim_mappings.ndjson" => parse_all::<ScimMappingExport>(member),
-        "invitations.ndjson" => parse_all::<OrganizationInvitation>(member),
-        "revocations.ndjson" => parse_all::<RevocationExport>(member),
+        "mfa_factors.ndjson" => parse_all::<MfaFactorExport>(member, progress),
+        "permissions.ndjson" => parse_all::<PermissionRecord>(member, progress),
+        "roles.ndjson" => parse_all::<Role>(member, progress),
+        "groups.ndjson" => parse_all::<Group>(member, progress),
+        "organizations.ndjson" => parse_all::<Organization>(member, progress),
+        "assignments.ndjson" => parse_all::<RoleAssignment>(member, progress),
+        "group_memberships.ndjson" => parse_all::<GroupMembershipEdge>(member, progress),
+        "organization_memberships.ndjson" => parse_all::<OrganizationMembership>(member, progress),
+        "consents.ndjson" => parse_all::<ConsentExport>(member, progress),
+        "agents.ndjson" => parse_all::<AgentExport>(member, progress),
+        "identity_providers.ndjson" => parse_all::<IdpConfig>(member, progress),
+        "federation_links.ndjson" => parse_all::<FederationLinkExport>(member, progress),
+        "webhooks.ndjson" => parse_all::<serde::de::IgnoredAny>(member, progress),
+        "webhook_subscriptions.ndjson" => parse_all::<WebhookSubscription>(member, progress),
+        "scim_mappings.ndjson" => parse_all::<ScimMappingExport>(member, progress),
+        "invitations.ndjson" => parse_all::<OrganizationInvitation>(member, progress),
+        "revocations.ndjson" => parse_all::<RevocationExport>(member, progress),
         "retiring_signing_keys.json" | "retiring_id_token_signing_keys.json" => {
-            parse_all::<RetiringSigningKeyExport>(member)
+            parse_all::<RetiringSigningKeyExport>(member, progress)
         }
-        "scopes.ndjson" => parse_all::<ScopeExport>(member),
+        "scopes.ndjson" => parse_all::<ScopeExport>(member, progress),
         _ => drain(member),
     }
 }
@@ -2001,6 +2070,7 @@ fn restore_records<T, F>(
     member: &mut dyn BufRead,
     path: &str,
     opts: &ImportOptions,
+    progress: &mut RestoreProgress,
     counts: &mut EntityCounts,
     mut import_batch: F,
 ) -> Result<(), BackupError>
@@ -2013,21 +2083,22 @@ where
         let record = match record {
             Ok(record) => record,
             Err(e) => {
-                import_record_batch(&batch, path, counts, &mut import_batch)?;
+                import_record_batch(&batch, path, counts, progress, &mut import_batch)?;
                 return Err(e);
             }
         };
         if opts.dry_run {
             counts.created += 1;
+            progress.add(1);
             continue;
         }
         batch.push(record);
         if batch.len() == RESTORE_RECORD_BATCH {
-            import_record_batch(&batch, path, counts, &mut import_batch)?;
+            import_record_batch(&batch, path, counts, progress, &mut import_batch)?;
             batch.clear();
         }
     }
-    import_record_batch(&batch, path, counts, &mut import_batch)
+    import_record_batch(&batch, path, counts, progress, &mut import_batch)
 }
 
 /// The results of a batch import, one per record, in order.
@@ -2038,12 +2109,14 @@ fn import_record_batch<T>(
     batch: &[T],
     path: &str,
     counts: &mut EntityCounts,
+    progress: &mut RestoreProgress,
     import_batch: &mut dyn FnMut(&[T]) -> BatchResults,
 ) -> Result<(), BackupError> {
     if batch.is_empty() {
         return Ok(());
     }
     let results = import_batch(batch);
+    progress.add(batch.len() as u64);
     if results.len() != batch.len() {
         return Err(BackupError::Engine(format!(
             "the engine returned {} results for {} records of {path}",
@@ -2566,6 +2639,104 @@ mod tests {
         assert!(
             user_syncs <= batches,
             "{user_syncs} durable writes to restore {n} users in {batches} batches"
+        );
+    }
+
+    /// The `info` lines that `f` logs, as the CLI prints them.
+    fn capture_info_logs(f: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("capture mutex").extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+            type Writer = Capture;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+        let writer = Capture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .with_writer(writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let bytes = writer.0.lock().expect("capture mutex").clone();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// A restore of a large realm ran 46 minutes with no line between the
+    /// integrity check and the summary: an operator could not tell a slow
+    /// restore from a stuck one (#912). Each pass logs the records it handled,
+    /// the rate and the elapsed time at a fixed interval, and its totals at
+    /// the end: counts only, never a record's content.
+    #[test]
+    fn a_restore_logs_its_progress_at_a_fixed_interval() {
+        let rig = make_rig();
+        let n: u32 = 2 * RESTORE_USER_BATCH as u32 + 7;
+        let users: String = (0..n).map(|i| numbered_user_line(i) + "\n").collect();
+        let archive_dir = TempDir::new().expect("archive tmpdir");
+        let slug = "progress-restore";
+        let archive_path = make_archive(
+            &archive_dir,
+            slug,
+            "00000000-0000-0000-0000-000000000912",
+            &users,
+            &[],
+            &[],
+        );
+        let reader = BackupArchive::open(&archive_path).expect("open");
+        // An interval of zero: a line after every batch.
+        let importer = importer(&rig).with_progress_interval(std::time::Duration::ZERO);
+
+        let logs = capture_info_logs(|| {
+            let report = importer
+                .import_realm(slug, &reader, &opts_with_passphrase())
+                .expect("import");
+            assert_eq!(report.users.created, u64::from(n));
+        });
+
+        let progress: Vec<&str> = logs
+            .lines()
+            .filter(|l| l.contains("restore progress"))
+            .collect();
+        let import_lines: Vec<&&str> = progress
+            .iter()
+            .filter(|l| l.contains("pass=\"import\"") && l.contains("member=\"users.ndjson\""))
+            .collect();
+        assert_eq!(
+            import_lines.len(),
+            3,
+            "one import line per batch of users:\n{logs}"
+        );
+        let batch = RESTORE_USER_BATCH;
+        for (line, records) in import_lines.iter().zip([batch, 2 * batch, 2 * batch + 7]) {
+            assert!(line.contains(&format!("records={records}")), "{line}");
+            assert!(line.contains("rate_per_s="), "{line}");
+            assert!(line.contains("elapsed_s="), "{line}");
+        }
+        assert!(
+            progress.iter().any(|l| l.contains("pass=\"check\"")),
+            "the check pass logs its progress too:\n{logs}"
+        );
+        for pass in ["check", "import"] {
+            assert!(
+                logs.lines().any(|l| l.contains("restore pass done")
+                    && l.contains(&format!("pass=\"{pass}\""))
+                    && l.contains(&format!("records={n}"))),
+                "the {pass} pass logs its totals:\n{logs}"
+            );
+        }
+        assert!(
+            !logs.contains("@example.com"),
+            "a progress line names no user:\n{logs}"
         );
     }
 
@@ -3709,7 +3880,12 @@ mod tests {
             }
             let mut line: &[u8] = b"{\"id\": [\n";
             assert!(
-                check_records(name, &mut line).is_err(),
+                check_records(
+                    name,
+                    &mut line,
+                    &mut RestoreProgress::new("check", RESTORE_PROGRESS_INTERVAL)
+                )
+                .is_err(),
                 "the check pass accepts a broken line in {name}"
             );
         }

@@ -26,8 +26,10 @@
 #                     0: a loss is only a warning (ADVISORY).
 #
 # The out dir receives summary.md, timings.json, findings.json, compare.txt, before.json,
-# after.json, steps.txt, facts.txt, the two server logs and the output of each hearth
-# backup command. The archive, the keys and the passwords stay in a private temporary
+# after.json, steps.txt, facts.txt, the two server logs, the output of each hearth
+# backup command, and the samples taken during the restore (restore-samples.csv,
+# restore-threads.csv, restore-vmstat.txt, restore-diskstats-before.txt and
+# restore-diskstats-after.txt). The archive, the keys and the passwords stay in a private temporary
 # directory that the drill deletes. Exit status: 0 when the restored server gives back the
 # same data, 1 when it does not, 2 when the drill could not run.
 set -euo pipefail
@@ -82,8 +84,10 @@ done
 
 work=$(mktemp -d)
 server=
+samplers=()
 cleanup() {
   [ -z "$server" ] || kill "$server" 2> /dev/null || true
+  [ "${#samplers[@]}" -eq 0 ] || kill "${samplers[@]}" 2> /dev/null || true
   wait 2> /dev/null || true
   rm -rf "$work"
 }
@@ -211,11 +215,31 @@ fact data_bytes_before "$(du -sb "$data" | cut -f1)"
 mv "$data" /var/lib/hearth/data-original
 install -d -m 0700 "$data"
 log "restoring into an empty data directory"
+# Where the restore's time goes (#912): the process and the disk once a second
+# (restore-samples.csv, sampler.sh), each thread's CPU every 5 s (restore-threads.csv),
+# the machine's CPU, I/O wait and block I/O every 5 s (restore-vmstat.txt), and the
+# disk counters before and after (restore-diskstats-*.txt).
+cat /proc/diskstats > "$out/restore-diskstats-before.txt"
+bash "$here/sampler.sh" "$out/restore-samples.csv" "" hearth &
+samplers=($!)
+if command -v vmstat > /dev/null; then
+  vmstat -n -t 5 > "$out/restore-vmstat.txt" &
+  samplers+=($!)
+fi
 t=$(now)
 restore_exit=0
 hearth_cli backup restore --input "$archive" --verify-key "$verify_key" --data-dir "$data" \
-  > "$out/restore.txt" 2>&1 || restore_exit=$?
+  > "$out/restore.txt" 2>&1 &
+restore=$!
+drill threads --pid "$restore" --out "$out/restore-threads.csv" --interval 5 &
+threads=$!
+wait "$restore" || restore_exit=$?
 step restore "$t"
+wait "$threads" || log "the thread sampler failed"
+kill "${samplers[@]}" 2> /dev/null || true
+wait "${samplers[@]}" 2> /dev/null || true
+samplers=()
+cat /proc/diskstats > "$out/restore-diskstats-after.txt"
 fact restore_exit "$restore_exit"
 fact data_bytes_after "$(du -sb "$data" | cut -f1)"
 [ "$restore_exit" -eq 0 ] || log "hearth backup restore exited $restore_exit (see restore.txt)"

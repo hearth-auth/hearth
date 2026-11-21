@@ -644,5 +644,44 @@ class SyncedFileTest(unittest.TestCase):
             self.assertEqual(out.unsynced, 2)
 
 
+
+class ThreadSamplerTest(unittest.TestCase):
+    """#912: the restore drill recorded no CPU per thread, so a restore that kept one thread
+    busy could not be told from one that waited for the disk."""
+
+    def test_each_thread_of_the_process_is_sampled_until_it_exits(self):
+        busy = ("import threading, time\n"
+                "def spin():\n"
+                "    end = time.monotonic() + 1.0\n"
+                "    while time.monotonic() < end:\n"
+                "        pass\n"
+                "t = threading.Thread(target=spin)\n"
+                "t.start()\n"
+                "spin()\n"
+                "t.join()\n")
+        child = subprocess.Popen([sys.executable, "-I", "-c", busy])
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "threads.csv")
+            args = restore_drill.parse_args(
+                ["threads", "--pid", str(child.pid), "--out", out, "--interval", "0.1"])
+            # A process that is still running after the sampler returns is not sampled
+            # "until it exits".
+            rc = args.fn(args)
+            self.assertIsNotNone(child.poll(), "the sampler returned before the process exited")
+            self.assertEqual(rc, 0)
+            with open(out) as f:
+                header = f.readline().strip()
+                rows = [line.strip().split(",") for line in f]
+        child.wait()
+        self.assertEqual(header, "ts,tid,name,cpu_ticks,clk_tck")
+        last = {}
+        for ts, tid, name, ticks, clk in rows:
+            last[int(tid)] = int(ticks)
+            self.assertGreater(int(clk), 0)
+        self.assertIn(child.pid, last, "the main thread is sampled")
+        self.assertGreaterEqual(len(last), 2, f"both threads are sampled: {last}")
+        self.assertGreater(sum(last.values()), 0, "a busy process used CPU")
+
+
 if __name__ == "__main__":
     unittest.main()
