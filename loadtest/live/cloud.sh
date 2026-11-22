@@ -299,6 +299,8 @@ install_generator() {
   ssh_to "$ip" "chmod 0755 /opt/stress/launch.sh"
   scp_to "$ip" /opt/stress/k6/ "$here/k6/lib.js" "$here/k6/realms.js" "$here/k6/stress.js" \
     "$here/k6/prepare.js" "$here/k6/verify.js" "$here/k6/fill.js"
+  # stress.js and lib.js import the product adapters (k6/products/, #913).
+  scp_to "$ip" /opt/stress/k6/ -r "$here/k6/products"
 }
 
 # The number of realms in the run's bundle (gen-config.sh REALMS).
@@ -666,7 +668,8 @@ cmd_collect() {
   local budget
   case $JOURNEY in
     introspect | userinfo | admin_lookup) budget=50 ;;
-    refresh | create_user) budget=100 ;;
+    # client_credentials (#913): a token issue like refresh, set before any run.
+    refresh | create_user | client_credentials) budget=100 ;;
     login | mix) budget=1000 ;;
   esac
   if [ "${#raws[@]}" -gt 0 ]; then

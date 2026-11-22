@@ -605,6 +605,15 @@ jobs:
           bash loadtest/live/test_gen_config.sh
           node loadtest/live/k6/test_realms.mjs
 
+      # #913 runs the live journeys against other identity servers through one
+      # adapter per product (k6/products/). The Hearth adapter must send the
+      # requests the #647 rounds sent, and each product's realm setup must
+      # match the Hearth run's settings. Nothing else checks them before AWS.
+      - name: Same-hardware comparison — tests (test_products.mjs, test_realm.py)
+        run: |
+          node loadtest/live/k6/test_products.mjs
+          python3 -I loadtest/compare/keycloak/test_realm.py
+
       # The #[ignore] rule inside `make test-quality` was red at HEAD on a false
       # positive: it matched the literal text `#[ignore` anywhere on a line, so
       # prose saying a test must NOT be ignored reported itself. A gate that

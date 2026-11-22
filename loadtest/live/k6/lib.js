@@ -1,6 +1,10 @@
 // Shared helpers for the live stress scripts: configuration from the
-// environment, sign-in through the hosted login form plus authorization code
-// + PKCE (Hearth has no password grant), and the admin API.
+// environment, sign-in through the product's own login page plus
+// authorization code + PKCE (Hearth has no password grant), and the admin API.
+//
+// PRODUCT (default hearth) picks the product adapter (products/index.js): the
+// endpoints, the login page's steps and the admin API of the server under
+// test. Everything else here is the same for every product (#913).
 //
 // The generator reaches the server by name; `options.hosts` maps that name to
 // the server's address, and SSL_CERT_FILE makes k6 trust the run's CA.
@@ -15,6 +19,10 @@ import { sleep } from 'k6';
 import crypto from 'k6/crypto';
 import encoding from 'k6/encoding';
 import { realmsFromEnv } from './realms.js';
+import { productFor } from './products/index.js';
+
+/** The product adapter of the server under test (PRODUCT). */
+export const product = productFor(__ENV.PRODUCT);
 
 /** The run's realms; realm 1 first. */
 export const realms = realmsFromEnv(__ENV);
@@ -53,129 +61,74 @@ function b64url(bytes) {
   return encoding.b64encode(bytes, 'rawurl');
 }
 
-function randomBytes(n) {
-  return crypto.randomBytes(n);
-}
-
-function pkce() {
-  const verifier = b64url(randomBytes(32));
-  const challenge = crypto.sha256(verifier, 'base64rawurl');
-  return { verifier, challenge };
-}
-
-function hidden(body, name) {
-  const m = new RegExp(`name="${name}" value="([^"]*)"`).exec(body || '');
-  return m ? m[1] : null;
-}
-
-function query(params) {
-  return Object.keys(params)
-    .map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(params[k])}`)
-    .join('&');
-}
-
-function redirectParams(location) {
-  const q = (location || '').split('?')[1] || '';
-  const out = {};
-  for (const pair of q.split('&')) {
-    if (!pair) continue;
-    const [k, v] = pair.split('=');
-    out[decodeURIComponent(k)] = decodeURIComponent((v || '').replace(/\+/g, ' '));
-  }
-  return out;
-}
-
 /**
- * A sign-in form POST that succeeded. It answers a continue page (`200` with
- * `Refresh: 0;url=…`), not a `303` (form-action-safe-sign-in); a refused
- * sign-in answers `200` with the form and no `Refresh` header.
+ * A new sign-in flow: the user, a PKCE pair, a state and the scope. An admin
+ * sign-in adds the product's admin scope (product.adminScope), if it has one.
  */
-function signedIn(res) {
-  const refresh = (res.headers && (res.headers.Refresh || res.headers.refresh)) || '';
-  return res.status === 200 && refresh.startsWith('0;url=');
+function newFlow(email, password, admin) {
+  const verifier = b64url(crypto.randomBytes(32));
+  return {
+    email,
+    password,
+    scope: admin && product.adminScope ? `openid ${product.adminScope}` : 'openid',
+    verifier,
+    challenge: crypto.sha256(verifier, 'base64rawurl'),
+    state: b64url(crypto.randomBytes(12)),
+  };
 }
 
-function stepParams(jar, name, tags) {
-  return {
+function stepParams(jar, name, tags, headers) {
+  const p = {
     jar,
     redirects: 0,
     timeout: TIMEOUT,
     tags: Object.assign({ name }, tags || {}),
   };
+  if (headers) p.headers = headers;
+  return p;
 }
 
-/** The sign-in URLs of realm `r` (an entry of `realms`). */
-const loginUrl = (r) => `${env.base}/ui/realms/${r.name}/login`;
-const authorizeUrl = (r) => `${env.base}/ui/realms/${r.name}/oauth/authorize`;
-const tokenUrl = (r) => `${env.base}/realms/${r.name}/token`;
+/**
+ * Sends a request an adapter built (`{ method, url, body, headers }`) with
+ * k6 params `params`; the spec's headers go first.
+ */
+export function send(spec, params) {
+  const p = Object.assign({}, params || {});
+  if (spec.headers) p.headers = Object.assign({}, spec.headers, p.headers || {});
+  return http.request(spec.method, spec.url, spec.body === undefined ? null : spec.body, p);
+}
+
+/** One login step of flow `f` as an http.batch entry. */
+function batchEntry(step, r, f, tags) {
+  const spec = step.request(env, r, f);
+  return [spec.method, spec.url, spec.body === undefined ? null : spec.body,
+    stepParams(f.jar, step.name, tags, spec.headers)];
+}
 
 /**
- * Signs `email` in to realm `r` through the login form and the code flow.
- * Returns `{ ok, access, refresh, durationMs, failedStep, status }`.
- * `durationMs` is the sum of the four requests' durations.
+ * Signs `email` in to realm `r` through the product's login page and the code
+ * flow (product.loginSteps); `admin` for the realm admin. Returns `{ ok, access, refresh, durationMs,
+ * failedStep, status, errorCode }`. `durationMs` is the sum of the steps'
+ * request durations.
  */
-export function signIn(email, password, tags, r = realms[0]) {
-  const jar = new http.CookieJar();
+export function signIn(email, password, tags, r = realms[0], admin = false) {
+  const f = newFlow(email, password, admin);
+  f.jar = new http.CookieJar();
   let duration = 0;
-  const fail = (step, res) => ({
-    ok: false,
-    failedStep: step,
-    status: res ? res.status : 0,
-    errorCode: res ? res.error_code : 0,
-    durationMs: duration,
-  });
-
-  const page = http.get(loginUrl(r), stepParams(jar, 'login_page', tags));
-  duration += page.timings.duration;
-  if (page.status !== 200) return fail('login_page', page);
-
-  const posted = http.post(
-    loginUrl(r),
-    { _csrf: hidden(page.body, '_csrf') || '', email, password },
-    stepParams(jar, 'login_submit', tags),
-  );
-  duration += posted.timings.duration;
-  if (!signedIn(posted)) return fail('login_submit', posted);
-
-  const { verifier, challenge } = pkce();
-  const state = b64url(randomBytes(12));
-  const authz = http.get(
-    `${authorizeUrl(r)}?${query({
-      response_type: 'code',
-      client_id: r.appClientId,
-      redirect_uri: env.redirectUri,
-      state,
-      scope: 'openid',
-      code_challenge: challenge,
-      code_challenge_method: 'S256',
-    })}`,
-    stepParams(jar, 'authorize', tags),
-  );
-  duration += authz.timings.duration;
-  if (authz.status !== 303) return fail('authorize', authz);
-  const p = redirectParams(authz.headers.Location || authz.headers.location);
-  if (!p.code || p.state !== state) return fail('authorize', authz);
-
-  const token = http.post(
-    tokenUrl(r),
-    {
-      grant_type: 'authorization_code',
-      code: p.code,
-      redirect_uri: env.redirectUri,
-      client_id: r.appClientId,
-      code_verifier: verifier,
-    },
-    stepParams(jar, 'code_exchange', tags),
-  );
-  duration += token.timings.duration;
-  if (token.status !== 200) return fail('code_exchange', token);
-  const body = token.json();
-  return {
-    ok: true,
-    access: body.access_token,
-    refresh: body.refresh_token,
-    durationMs: duration,
-  };
+  for (const step of product.loginSteps) {
+    const res = send(step.request(env, r, f), stepParams(f.jar, step.name, tags));
+    duration += res.timings.duration;
+    if (!step.accept(res, f)) {
+      return {
+        ok: false,
+        failedStep: step.name,
+        status: res.status,
+        errorCode: res.error_code,
+        durationMs: duration,
+      };
+    }
+  }
+  return { ok: true, access: f.access, refresh: f.refresh, durationMs: duration };
 }
 
 /**
@@ -200,78 +153,22 @@ export function signInMany(emails, password, parallel, r = realms[0]) {
 function signInPass(emails, password, parallel, r) {
   const sessions = [];
   const retry = [];
+  const t = { phase: 'setup' };
   for (let i = 0; i < emails.length; i += parallel) {
-    const chunk = emails.slice(i, i + parallel);
-    const flows = chunk.map((email) => ({ email, jar: new http.CookieJar() }));
-    const t = { phase: 'setup' };
-
-    const pages = http.batch(
-      flows.map((f) => ['GET', loginUrl(r), null, stepParams(f.jar, 'login_page', t)]),
-    );
-    const posts = http.batch(
-      flows.map((f, j) => [
-        'POST',
-        loginUrl(r),
-        { _csrf: hidden(pages[j].body, '_csrf') || '', email: f.email, password },
-        stepParams(f.jar, 'login_submit', t),
-      ]),
-    );
-    flows.forEach((f) => {
-      const k = pkce();
-      f.verifier = k.verifier;
-      f.challenge = k.challenge;
-      f.state = b64url(randomBytes(12));
+    let live = emails.slice(i, i + parallel).map((email) => {
+      const f = newFlow(email, password);
+      f.jar = new http.CookieJar();
+      return f;
     });
-    const authzs = http.batch(
-      flows.map((f, j) => [
-        'GET',
-        `${authorizeUrl(r)}?${query({
-          response_type: 'code',
-          client_id: r.appClientId,
-          redirect_uri: env.redirectUri,
-          state: f.state,
-          scope: 'openid',
-          code_challenge: f.challenge,
-          code_challenge_method: 'S256',
-        })}`,
-        null,
-        stepParams(f.jar, 'authorize', t),
-      ]),
-    );
-    const live = [];
-    flows.forEach((f, j) => {
-      const a = authzs[j];
-      const p = redirectParams(a.headers.Location || a.headers.location);
-      if (signedIn(posts[j]) && a.status === 303 && p.code && p.state === f.state) {
-        f.code = p.code;
-        live.push(f);
-      } else {
-        retry.push(f.email);
-      }
-    });
-    if (live.length === 0) continue;
-    const tokens = http.batch(
-      live.map((f) => [
-        'POST',
-        tokenUrl(r),
-        {
-          grant_type: 'authorization_code',
-          code: f.code,
-          redirect_uri: env.redirectUri,
-          client_id: r.appClientId,
-          code_verifier: f.verifier,
-        },
-        stepParams(f.jar, 'code_exchange', t),
-      ]),
-    );
-    tokens.forEach((res, j) => {
-      if (res.status === 200) {
-        const b = res.json();
-        sessions.push({ access: b.access_token, refresh: b.refresh_token });
-      } else {
-        retry.push(live[j].email);
-      }
-    });
+    // Each step runs for the flows still live; a flow whose step fails is retried.
+    for (const step of product.loginSteps) {
+      if (live.length === 0) break;
+      const res = http.batch(live.map((f) => batchEntry(step, r, f, t)));
+      const next = [];
+      live.forEach((f, j) => (step.accept(res[j], f) ? next.push(f) : retry.push(f.email)));
+      live = next;
+    }
+    for (const f of live) sessions.push({ access: f.access, refresh: f.refresh });
   }
   return { sessions, retry };
 }
@@ -281,9 +178,14 @@ export function claims(jwt) {
   return JSON.parse(encoding.b64decode(jwt.split('.')[1], 'rawurl', 's'));
 }
 
+/** Signs realm `r`'s admin in; `tags` tag its requests. */
+export function adminSignIn(tags, r = realms[0]) {
+  return signIn(env.adminEmail, env.adminPassword, tags, r, true);
+}
+
 /** Signs realm `r`'s admin in. Throws when it fails: nothing works without it. */
 export function adminSession(r = realms[0]) {
-  const s = signIn(env.adminEmail, env.adminPassword, { phase: 'setup' }, r);
+  const s = adminSignIn({ phase: 'setup' }, r);
   if (!s.ok) {
     const where = realms.length > 1 ? ` in realm ${r.name}` : '';
     throw new Error(`admin sign-in${where} failed at ${s.failedStep} (status ${s.status})`);
@@ -291,13 +193,17 @@ export function adminSession(r = realms[0]) {
   return s;
 }
 
-/** Headers for the admin API as the realm admin. */
+/**
+ * The product's admin context ({ token, realmId }) for an admin access token:
+ * what the adapter's admin requests take.
+ */
+export function adminContext(token) {
+  return product.admin(token, claims(token));
+}
+
+/** Headers for the product's admin API as the realm admin. */
 export function adminHeaders(adminToken, realmId) {
-  return {
-    Authorization: `Bearer ${adminToken}`,
-    'X-Realm-ID': realmId,
-    'Content-Type': 'application/json',
-  };
+  return product.adminHeaders({ token: adminToken, realmId });
 }
 
 /** Basic auth header for realm `r`'s confidential `api` client. */

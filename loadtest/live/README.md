@@ -11,6 +11,7 @@ fails, and records how it fails. It complements the in-repo load test
 | `k6/realms.js` | The realms of a run with several (`REALMS`), and how VUs and imported users spread over them (`k6/test_realms.mjs` tests it) |
 | `k6/prepare.js` | Makes the `api` client a resource server, regenerates its secret, bulk-imports users |
 | `k6/stress.js` | One open-loop ramp of one journey (or a mix) |
+| `k6/products/` | One adapter per product (`PRODUCT`, default `hearth`): endpoints, login page steps, admin API. The same journeys run against other identity servers for the same-hardware comparison (#913, `loadtest/compare/`); `k6/test_products.mjs` tests them |
 | `k6/verify.js` | Checks every user a `create_user` ramp saw acknowledged still exists |
 | `sampler.sh` | Runs on the server: Hearth CPU, RSS, free memory, disk writes, once a second |
 | `analyze.py` | Per-step table and knees from k6's CSV and the sampler (`test_analyze.py` tests it) |
@@ -52,6 +53,7 @@ resource server.
 | Journey | Requests | Notes |
 |---|---|---|
 | `introspect` | `POST /realms/stress/introspect` | resource server checks a user token |
+| `client_credentials` | `POST /realms/stress/token` (`client_credentials`) | the `api` client gets a token; one new grant per journey |
 | `userinfo` | `GET /realms/stress/userinfo` | |
 | `refresh` | `POST /realms/stress/token` (`refresh_token`) | rotation: each VU owns one chain |
 | `login` | login page, form post, authorize, code exchange | one Argon2id check; latency = sum of the 4 |

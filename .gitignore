@@ -95,6 +95,8 @@ loadtest/target/
 # Live stress runs: per-run secrets and raw results (loadtest/live/README.md).
 loadtest/live/.build/
 loadtest/live/results/
+# Same-hardware comparison (#913): per-product secrets, TLS and k6 output.
+loadtest/compare/.build/
 
 *.tsbuildinfo
 **/.phpunit.cache

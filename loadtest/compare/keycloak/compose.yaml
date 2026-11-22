@@ -1,0 +1,81 @@
+# Keycloak 26.8.2 and its PostgreSQL for the same-hardware comparison (#913).
+# keycloak.sh runs it; the images and their digests come from ../images.env,
+# the secrets and the TLS leaf from the bundle (BUNDLE, outside git). The
+# secrets reach compose as variables (docker compose --env-file
+# $BUNDLE/server.env) and each container gets only the keys named below.
+#
+# Production mode (`start`, not `start-dev`), TLS on Keycloak's own listener,
+# and the settings of Keycloak's production and sizing guides:
+#   https://www.keycloak.org/server/configuration-production
+#   https://www.keycloak.org/high-availability/single-cluster/concepts-memory-and-cpu-sizing
+#   https://www.keycloak.org/high-availability/single-cluster/concepts-database-connections
+#   https://www.keycloak.org/high-availability/single-cluster/deploy-keycloak
+name: compare-keycloak
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:?}
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    environment:
+      POSTGRES_USER: keycloak
+      POSTGRES_DB: keycloak
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?}
+    volumes:
+      - ../postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      # PostgreSQL 18 images keep PGDATA under /var/lib/postgresql/18.
+      - pgdata:/var/lib/postgresql
+    shm_size: 256mb
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "keycloak", "-d", "keycloak"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    # No published port: only Keycloak reaches it, over the compose network.
+
+  keycloak:
+    image: ${KEYCLOAK_IMAGE:?}
+    command: ["start"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_BOOTSTRAP_ADMIN_USERNAME:?}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD:?}
+      KC_DB: postgres
+      KC_DB_PASSWORD: ${DB_PASSWORD:?}
+      KC_DB_URL_HOST: postgres
+      KC_DB_URL_DATABASE: keycloak
+      KC_DB_USERNAME: keycloak
+      # Database connections guide: initial = min = max, so no request waits
+      # for a new connection; 30 as in the guide's deployment example.
+      KC_DB_POOL_INITIAL_SIZE: "30"
+      KC_DB_POOL_MIN_SIZE: "30"
+      KC_DB_POOL_MAX_SIZE: "30"
+      KC_HOSTNAME: "https://${KC_HOST:?}:8443"
+      KC_HTTP_ENABLED: "false"
+      KC_HTTPS_PORT: "8443"
+      KC_HTTPS_CERTIFICATE_FILE: /opt/keycloak/conf/tls/https.crt
+      KC_HTTPS_CERTIFICATE_KEY_FILE: /opt/keycloak/conf/tls/https.key
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+      # Production guide, "Limit the number of queued requests": excess
+      # requests get 503 at once; 1000 as in the deployment example.
+      KC_HTTP_MAX_QUEUED_REQUESTS: "1000"
+      # OWASP Argon2id, Hearth's default (#913): m=19456 KiB, t=2, p=1.
+      # Names from https://www.keycloak.org/server/all-provider-config (26.8.2).
+      KC_SPI_PASSWORD_HASHING__ARGON2__TYPE: id
+      KC_SPI_PASSWORD_HASHING__ARGON2__MEMORY: "19456"
+      KC_SPI_PASSWORD_HASHING__ARGON2__ITERATIONS: "2"
+      KC_SPI_PASSWORD_HASHING__ARGON2__PARALLELISM: "1"
+    volumes:
+      - ${BUNDLE:?}/tls:/opt/keycloak/conf/tls:ro
+    ports:
+      - "${KC_BIND:-127.0.0.1}:8443:8443"
+      # Management interface: /health and /metrics.
+      - "${KC_BIND:-127.0.0.1}:9000:9000"
+    # Sizing guide: the JVM takes 70 % of the container's memory limit as heap.
+    # 2 GiB on the 4 GiB server leaves the rest to PostgreSQL and the OS.
+    mem_limit: ${KEYCLOAK_MEM_LIMIT:-2g}
+
+volumes:
+  pgdata:
