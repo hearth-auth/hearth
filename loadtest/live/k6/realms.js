@@ -4,7 +4,10 @@
 // generator.env describes realm k (1-based) with STRESS_REALM, STRESS_APP_CLIENT_ID,
 // STRESS_API_CLIENT_ID and STRESS_API_SECRET, plus the suffix `_<k>` for k > 1.
 // STRESS_REALMS is the number of realms: 1 when unset (gen-config.sh writes it
-// only for more than one).
+// only for more than one). STRESS_CC_CLIENT_ID and STRESS_CC_SECRET (same
+// suffix) name the client of the client_credentials journey when it is not
+// the api client (Zitadel: a service account, #913); unset, it is the api
+// client, as for Hearth and Keycloak.
 //
 // Each VU works in one realm for all its journeys: VU v takes realm (v - 1) % n.
 
@@ -16,8 +19,9 @@ export function suffix(k) {
 /**
  * The run's realms from the environment `e` (k6's __ENV): one object per realm
  * with its `number` (1-based), `name`, `appClientId`, `apiClientId`,
- * `apiSecret` ('' until prepare.js has set it) and `secretVar` (the variable
- * that holds the secret).
+ * `apiSecret` ('' until prepare.js has set it), `secretVar` (the variable
+ * that holds the secret), and `ccClientId` and `ccSecret` (the
+ * client_credentials client: STRESS_CC_*, else the api client).
  */
 export function realmsFromEnv(e) {
   const raw = e.STRESS_REALMS;
@@ -33,13 +37,18 @@ export function realmsFromEnv(e) {
       if (v === undefined || v === '') throw new Error(`environment variable ${name}${s} is required`);
       return v;
     };
+    const apiClientId = need('STRESS_API_CLIENT_ID');
+    const apiSecret = e[`STRESS_API_SECRET${s}`] || '';
+    const ccClientId = e[`STRESS_CC_CLIENT_ID${s}`] || '';
     out.push({
       number: k,
       name: need('STRESS_REALM'),
       appClientId: need('STRESS_APP_CLIENT_ID'),
-      apiClientId: need('STRESS_API_CLIENT_ID'),
-      apiSecret: e[`STRESS_API_SECRET${s}`] || '',
+      apiClientId,
+      apiSecret,
       secretVar: `STRESS_API_SECRET${s}`,
+      ccClientId: ccClientId || apiClientId,
+      ccSecret: ccClientId ? e[`STRESS_CC_SECRET${s}`] || '' : apiSecret,
     });
   }
   return out;

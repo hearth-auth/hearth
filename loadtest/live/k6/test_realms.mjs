@@ -38,7 +38,29 @@ test('without STRESS_REALMS there is one realm, from the unsuffixed variables', 
       apiClientId: 'api-1',
       apiSecret: 'secret-1',
       secretVar: 'STRESS_API_SECRET',
+      ccClientId: 'api-1',
+      ccSecret: 'secret-1',
     },
+  ]);
+});
+
+test('the client_credentials client is the api client unless STRESS_CC_* name another', () => {
+  // Hearth and Keycloak: the api client, so their Basic header is unchanged.
+  for (const x of r.realmsFromEnv(three)) {
+    assert.equal(x.ccClientId, x.apiClientId);
+    assert.equal(x.ccSecret, x.apiSecret);
+  }
+  // Zitadel: a service account, per realm with the realm's suffix.
+  const cc = Object.assign({}, three, {
+    STRESS_CC_CLIENT_ID: 'cc-1',
+    STRESS_CC_SECRET: 'cc-secret-1',
+    STRESS_CC_CLIENT_ID_3: 'cc-3',
+  });
+  assert.deepEqual(r.realmsFromEnv(cc).map((x) => [x.ccClientId, x.ccSecret]), [
+    ['cc-1', 'cc-secret-1'],
+    ['api-2', 'secret-2'],
+    // A client without its secret stays without one (stress.js refuses the journey).
+    ['cc-3', ''],
   ]);
 });
 

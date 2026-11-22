@@ -609,10 +609,11 @@ jobs:
       # adapter per product (k6/products/). The Hearth adapter must send the
       # requests the #647 rounds sent, and each product's realm setup must
       # match the Hearth run's settings. Nothing else checks them before AWS.
-      - name: Same-hardware comparison — tests (test_products.mjs, test_realm.py)
+      - name: Same-hardware comparison — tests (test_products.mjs, test_realm.py, test_instance.py)
         run: |
           node loadtest/live/k6/test_products.mjs
           python3 -I loadtest/compare/keycloak/test_realm.py
+          python3 -I loadtest/compare/zitadel/test_instance.py
 
       # The #[ignore] rule inside `make test-quality` was red at HEAD on a false
       # positive: it matched the literal text `#[ignore` anywhere on a line, so

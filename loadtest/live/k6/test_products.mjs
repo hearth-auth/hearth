@@ -22,8 +22,9 @@ const load = (f) => import(pathToFileURL(join(dir, f)).href);
 const { PRODUCTS, productFor } = await load('index.js');
 const common = await load('common.js');
 const { loginAction } = await load('keycloak.js');
+const { formPostsTo } = await load('zitadel.js');
 rmSync(dir, { recursive: true, force: true });
-const { hearth, keycloak } = PRODUCTS;
+const { hearth, keycloak, zitadel } = PRODUCTS;
 
 const c = {
   base: 'https://server.stress.test:8443',
@@ -55,6 +56,7 @@ test('PRODUCT picks the adapter; hearth when unset', () => {
   assert.equal(productFor(undefined), hearth);
   assert.equal(productFor(''), hearth);
   assert.equal(productFor('keycloak'), keycloak);
+  assert.equal(productFor('zitadel'), zitadel);
   assert.throws(() => productFor('fusionauth'), /PRODUCT must be one of hearth, keycloak/);
 });
 
@@ -350,4 +352,233 @@ test('keycloak: reads pages by offset, created ids from Location, import counts'
     { imported: 3, failed: 2 },
   );
   assert.equal(keycloak.imported(res(500)), null);
+});
+
+// Zitadel's login UI v1, as v4.20.5 renders it (attributes in its order).
+const ztNamePage = '<form action="/ui/login/loginname" method="POST">'
+  + '<input type="hidden" name="gorilla.csrf.Token" value="csrf1">'
+  + '<input type="hidden" name="authRequestID" value="4007" />'
+  + '<input class="lgn-input" type="text" id="loginName" name="loginName" value="" required></form>';
+const ztPasswordPage = '<form action="/ui/login/password" method="POST">'
+  + '<input type="hidden" name="gorilla.csrf.Token" value="csrf2">'
+  + '<input type="hidden" name="authRequestID" value="4007" />'
+  + '<input type="password" id="password" name="password" required></form>';
+const ztCallback = `${c.base}/oauth/v2/authorize/callback?id=4007`;
+
+// Plays Zitadel for a sign-in that succeeds; `over` replaces a step's answer.
+function ztAnswer(over = {}) {
+  return (name) => {
+    if (name in over) return over[name];
+    if (name === 'authorize') return res(302, { Location: '/ui/login/login?authRequestID=4007' });
+    if (name === 'login_page') return res(200, {}, ztNamePage);
+    if (name === 'login_name') return res(200, {}, ztPasswordPage);
+    if (name === 'login_password') return res(302, { Location: ztCallback });
+    if (name === 'callback') return res(302, { Location: `${c.redirectUri}?code=cd&state=st` });
+    return tokens;
+  };
+}
+
+test('zitadel: login through its own pages (login UI v1) with PKCE', () => {
+  const f = flow();
+  const seen = [];
+  const answer = ztAnswer();
+  const failed = runLogin(zitadel, f, (name, spec) => {
+    seen.push([name, spec]);
+    return answer(name);
+  });
+  assert.equal(failed, null);
+  assert.equal(f.access, 'at');
+  assert.equal(f.refresh, 'rt');
+  assert.deepEqual(seen, [
+    ['authorize', {
+      method: 'GET',
+      // offline_access: Zitadel issues a refresh token only for it.
+      url: `${c.base}/oauth/v2/authorize?response_type=code&client_id=app-id`
+        + `&redirect_uri=${encodeURIComponent(c.redirectUri)}&state=st&scope=openid%20offline_access`
+        + '&code_challenge=chal&code_challenge_method=S256',
+    }],
+    ['login_page', { method: 'GET', url: `${c.base}/ui/login/login?authRequestID=4007` }],
+    ['login_name', {
+      method: 'POST',
+      url: `${c.base}/ui/login/loginname`,
+      body: { 'gorilla.csrf.Token': 'csrf1', authRequestID: '4007', loginName: f.email },
+    }],
+    ['login_password', {
+      method: 'POST',
+      url: `${c.base}/ui/login/password`,
+      // Each page has its own CSRF token.
+      body: { 'gorilla.csrf.Token': 'csrf2', authRequestID: '4007', loginName: f.email, password: 'pw' },
+    }],
+    ['callback', { method: 'GET', url: ztCallback }],
+    ['code_exchange', {
+      method: 'POST',
+      url: `${c.base}/oauth/v2/token`,
+      body: {
+        grant_type: 'authorization_code',
+        code: 'cd',
+        redirect_uri: c.redirectUri,
+        client_id: 'app-id',
+        code_verifier: 'ver',
+      },
+    }],
+  ]);
+  // The flow's scope is left as lib.js made it.
+  assert.equal(f.scope, undefined);
+});
+
+test('zitadel: the admin asks for the API audience and the organization claims', () => {
+  assert.equal(
+    zitadel.adminScope,
+    'urn:zitadel:iam:org:project:id:zitadel:aud urn:zitadel:iam:user:resourceowner',
+  );
+  const f = Object.assign(flow(), { scope: `openid ${zitadel.adminScope}` });
+  assert.match(
+    zitadel.loginSteps[0].request(c, r, f).url,
+    /&scope=openid%20urn%3Azitadel%3Aiam%3Aorg%3Aproject%3Aid%3Azitadel%3Aaud%20urn%3Azitadel%3Aiam%3Auser%3Aresourceowner%20offline_access&/,
+  );
+  assert.deepEqual(
+    zitadel.admin('adm', {
+      sub: '1',
+      'urn:zitadel:iam:user:resourceowner:id': '4006',
+      'urn:zitadel:iam:user:resourceowner:name': 'stress',
+    }),
+    { token: 'adm', realmId: '4006', orgName: 'stress' },
+  );
+});
+
+test('zitadel: a missing form, an unknown user, a refused password and a wrong state fail their step', () => {
+  assert.equal(runLogin(zitadel, flow(), ztAnswer({ authorize: res(400, {}, 'invalid_request') })), 'authorize');
+  assert.equal(runLogin(zitadel, flow(), ztAnswer({ authorize: res(302, { Location: '/ui/login/login' }) })), 'authorize');
+  assert.equal(runLogin(zitadel, flow(), ztAnswer({ login_page: res(200, {}, '<html>error</html>') })), 'login_page');
+  // An unknown login name answers the login name page again.
+  assert.equal(runLogin(zitadel, flow(), ztAnswer({ login_name: res(200, {}, ztNamePage) })), 'login_name');
+  // A refused password answers 200 with the password page again.
+  assert.equal(runLogin(zitadel, flow(), ztAnswer({ login_password: res(200, {}, ztPasswordPage) })), 'login_password');
+  assert.equal(
+    runLogin(zitadel, flow(), ztAnswer({ login_password: res(302, { Location: '/ui/login/mfa/prompt' }) })),
+    'login_password',
+  );
+  assert.equal(
+    runLogin(zitadel, flow(), ztAnswer({ callback: res(302, { Location: `${c.redirectUri}?code=cd&state=other` }) })),
+    'callback',
+  );
+  assert.equal(runLogin(zitadel, flow(), ztAnswer({ code_exchange: res(400, {}, '{"error":"invalid_grant"}') })), 'code_exchange');
+});
+
+test('zitadel: a relative callback location stays on the server', () => {
+  const f = flow();
+  const seen = [];
+  const answer = ztAnswer({ login_password: res(302, { Location: '/oauth/v2/authorize/callback?id=4007' }) });
+  runLogin(zitadel, f, (name, spec) => {
+    seen.push([name, spec.url]);
+    return answer(name);
+  });
+  assert.deepEqual(seen.find(([n]) => n === 'callback'), ['callback', ztCallback]);
+});
+
+test('zitadel: formPostsTo matches a form by its action only', () => {
+  assert.equal(formPostsTo(ztNamePage, '/ui/login/loginname'), true);
+  assert.equal(formPostsTo(ztNamePage, '/ui/login/password'), false);
+  assert.equal(formPostsTo('<a href="/ui/login/password">', '/ui/login/password'), false);
+  assert.equal(formPostsTo(undefined, '/ui/login/password'), false);
+});
+
+test('zitadel: journey and admin requests', () => {
+  const a = { token: 'adm', realmId: '4006', orgName: 'stress' };
+  const h = { Authorization: 'Bearer adm', 'Content-Type': 'application/json' };
+  assert.deepEqual(zitadel.adminHeaders(a), h);
+  assert.deepEqual(zitadel.refresh(c, r, 'rt'), {
+    method: 'POST',
+    url: `${c.base}/oauth/v2/token`,
+    body: { grant_type: 'refresh_token', refresh_token: 'rt', client_id: 'app-id' },
+  });
+  // Zitadel refuses the grant without a scope; `profile` answers an access token only.
+  assert.deepEqual(zitadel.clientCredentials(c, r, 'Basic x'), {
+    method: 'POST',
+    url: `${c.base}/oauth/v2/token`,
+    body: { grant_type: 'client_credentials', scope: 'profile' },
+    headers: { Authorization: 'Basic x' },
+  });
+  assert.deepEqual(zitadel.introspect(c, r, 'at', 'Basic x'), {
+    method: 'POST',
+    url: `${c.base}/oauth/v2/introspect`,
+    body: { token: 'at' },
+    headers: { Authorization: 'Basic x' },
+  });
+  assert.deepEqual(zitadel.userinfo(c, r, 'at'), {
+    method: 'GET',
+    url: `${c.base}/oidc/v1/userinfo`,
+    headers: { Authorization: 'Bearer at' },
+  });
+  assert.deepEqual(zitadel.adminUser(c, r, a, '4008'), { method: 'GET', url: `${c.base}/v2/users/4008`, headers: h });
+  const list = zitadel.listUsers(c, r, a, null);
+  assert.equal(list.method, 'POST');
+  assert.equal(list.url, `${c.base}/v2/users`);
+  assert.deepEqual(JSON.parse(list.body), {
+    query: { offset: '0', limit: 200, asc: true },
+    queries: [{ typeQuery: { type: 'TYPE_HUMAN' } }],
+  });
+  assert.equal(JSON.parse(zitadel.listUsers(c, r, a, '400').body).query.offset, '400');
+  const created = zitadel.createUser(c, r, a, 'e@x');
+  assert.equal(created.url, `${c.base}/v2/users/human`);
+  assert.deepEqual(JSON.parse(created.body), {
+    username: 'e@x',
+    organization: { orgId: '4006' },
+    profile: { givenName: 'Stress', familyName: 'created' },
+    email: { email: 'e@x', isVerified: true },
+  });
+  const hash = '$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$ZGlnZXN0';
+  const zc = Object.assign({}, c, { bulkPasswordHash: hash });
+  const imp = zitadel.importUsers(zc, r, a, [{ email: 'bulk00000007@x', name: 'Bulk 7', index: 7 }]);
+  assert.equal(imp.url, `${c.base}/admin/v1/import`);
+  assert.deepEqual(JSON.parse(imp.body), {
+    dataOrgs: {
+      orgs: [{
+        orgId: '4006',
+        org: { name: 'stress' },
+        humanUsers: [{
+          user: {
+            userName: 'bulk00000007@x',
+            profile: { firstName: 'Bulk', lastName: '7' },
+            email: { email: 'bulk00000007@x', isEmailVerified: true },
+            // Without a password or hash Zitadel gives each user an init code and email.
+            hashedPassword: { value: hash },
+            passwordChangeRequired: false,
+          },
+        }],
+      }],
+    },
+    timeout: '5m',
+  });
+  // Without the run's hash the seed stops instead of making users in their initial state.
+  assert.throws(() => zitadel.importUsers(c, r, a, []), /STRESS_BULK_PASSWORD_HASH is required/);
+  assert.equal(zitadel.regenerateSecret, null);
+});
+
+test('zitadel: reads pages by offset, created ids, import counts', () => {
+  const page = (n) => JSON.stringify({
+    details: { totalResult: '1003' },
+    result: Array.from({ length: n }, (_, i) => ({ userId: `4${i}` })),
+  });
+  const full = zitadel.userPage(res(200, {}, page(200)), '400');
+  assert.equal(full.ids.length, 200);
+  assert.equal(full.next, '600');
+  assert.equal(zitadel.userPage(res(200, {}, page(200)), null).next, '200');
+  assert.deepEqual(zitadel.userPage(res(200, {}, page(2)), '200'), { ids: ['40', '41'], next: null });
+  // An empty last page has no `result` at all.
+  assert.deepEqual(zitadel.userPage(res(200, {}, '{"details":{}}'), '1000'), { ids: [], next: null });
+  assert.equal(zitadel.createdId(res(200, {}, '{"userId":"4009","details":{}}')), '4009');
+  assert.equal(zitadel.createdId(res(200, {}, '{}')), null);
+  assert.equal(zitadel.createdId(res(409, {}, '{"userId":"4009"}')), null);
+  // The existing organization is reported as an error; it is not a failed user.
+  const answer = {
+    errors: [
+      { type: 'org', id: '4006', message: 'ID=V2-zzz Message=Errors.Org.AlreadyExists' },
+      { type: 'human_user', id: '', message: 'Errors.User.AlreadyExists' },
+    ],
+    success: { orgs: [{ orgId: '4006', humanUserIds: ['41', '42'] }] },
+  };
+  assert.deepEqual(zitadel.imported(res(200, {}, JSON.stringify(answer))), { imported: 2, failed: 1 });
+  assert.deepEqual(zitadel.imported(res(200, {}, '{"success":{"orgs":[{"orgId":"4006"}]}}')), { imported: 0, failed: 0 });
+  assert.equal(zitadel.imported(res(504, {}, 'timeout')), null);
 });

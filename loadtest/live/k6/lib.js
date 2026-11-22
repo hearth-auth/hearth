@@ -36,6 +36,9 @@ export const env = {
   userPassword: req('STRESS_USER_PASSWORD'),
   adminEmail: req('STRESS_ADMIN_EMAIL'),
   adminPassword: req('STRESS_ADMIN_PASSWORD'),
+  // The password hash that a product's seed gives its bulk users, when it
+  // needs one ('' otherwise; Zitadel, #913).
+  bulkPasswordHash: __ENV.STRESS_BULK_PASSWORD_HASH || '',
 };
 
 function req(name) {
@@ -209,4 +212,12 @@ export function adminHeaders(adminToken, realmId) {
 /** Basic auth header for realm `r`'s confidential `api` client. */
 export function apiBasic(r = realms[0]) {
   return `Basic ${encoding.b64encode(`${r.apiClientId}:${r.apiSecret}`)}`;
+}
+
+/**
+ * Basic auth header for realm `r`'s client_credentials client: the api client
+ * unless STRESS_CC_* name another (realms.js).
+ */
+export function ccBasic(r = realms[0]) {
+  return `Basic ${encoding.b64encode(`${r.ccClientId}:${r.ccSecret}`)}`;
 }

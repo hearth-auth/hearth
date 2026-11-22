@@ -14,7 +14,7 @@
 // One iteration is one journey:
 //   introspect    POST /realms/<r>/introspect as the `api` resource server
 //   client_credentials  POST /realms/<r>/token grant_type=client_credentials as
-//                 the confidential `api` client
+//                 the confidential `api` client (or STRESS_CC_*, realms.js)
 //   userinfo      GET  /realms/<r>/userinfo with a user access token
 //   refresh       POST /realms/<r>/token grant_type=refresh_token (rotation)
 //   login         hosted login form + authorization code + PKCE (4 requests,
@@ -57,6 +57,7 @@ import {
   adminSession,
   adminSignIn,
   apiBasic,
+  ccBasic,
   claims,
   env,
   hosts,
@@ -68,7 +69,7 @@ import {
   TIMEOUT,
   userEmail,
 } from './lib.js';
-import { ackLine, share, vuRealm, vuSlot } from './realms.js';
+import { ackLine, share, suffix, vuRealm, vuSlot } from './realms.js';
 
 const JOURNEYS = [
   'introspect',
@@ -227,6 +228,9 @@ export function setup() {
     if (!uses.includes(j)) continue;
     for (const r of realms) {
       if (!r.apiSecret) throw new Error(`${r.secretVar} is required for ${j} (run prepare.js first)`);
+      if (j === 'client_credentials' && !r.ccSecret) {
+        throw new Error(`STRESS_CC_SECRET${suffix(r.number)} is required for ${j}`);
+      }
     }
   }
   if (__ENV.START_AT) {
@@ -381,9 +385,10 @@ function introspect(data) {
 }
 
 // A machine client's token. Each journey is one new grant; nothing is kept.
+// The client is the api client unless STRESS_CC_* name another (realms.js).
 function clientCredentials() {
   const r = myRealm();
-  const res = send(product.clientCredentials(env, r, apiBasic(r)), journeyParams('client_credentials'));
+  const res = send(product.clientCredentials(env, r, ccBasic(r)), journeyParams('client_credentials'));
   const ok = res.status === 200 && typeof res.json('access_token') === 'string';
   record('client_credentials', ok, res.timings.duration, ok ? null : res.status === 200 ? 'no_token' : fail(res));
 }
