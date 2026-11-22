@@ -210,3 +210,11 @@ export function adminHeaders(adminToken, realmId) {
 export function apiBasic(r = realms[0]) {
   return `Basic ${encoding.b64encode(`${r.apiClientId}:${r.apiSecret}`)}`;
 }
+
+/**
+ * Basic auth header for realm `r`'s client_credentials client: the api client
+ * unless STRESS_CC_* name another (realms.js).
+ */
+export function ccBasic(r = realms[0]) {
+  return `Basic ${encoding.b64encode(`${r.ccClientId}:${r.ccSecret}`)}`;
+}

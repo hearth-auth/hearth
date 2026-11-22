@@ -1,0 +1,163 @@
+# Zitadel v4.20.5 and its PostgreSQL for the same-hardware comparison (#913).
+# zitadel.sh runs it; the images and their digests come from ../images.env,
+# the secrets and the TLS leaf from the bundle (BUNDLE, outside git). The
+# secrets reach compose as variables (docker compose --env-file
+# $BUNDLE/server.env) and each container gets only the keys named below.
+#
+# Production setup from Zitadel's own guides, the rest at Zitadel's defaults:
+#   https://zitadel.com/docs/self-hosting/manage/production
+#   https://zitadel.com/docs/self-hosting/manage/productionchecklist
+#   https://zitadel.com/docs/self-hosting/manage/updating_scaling (init, setup, start)
+#   https://zitadel.com/docs/self-hosting/manage/tls_modes (TLS mode `enabled`)
+#   https://zitadel.com/docs/self-hosting/manage/tuning (defaults kept: "typically work well")
+#   https://zitadel.com/docs/self-hosting/manage/cache (memory cache for one server)
+#   https://github.com/zitadel/zitadel/blob/v4.20.5/cmd/defaults.yaml (every ZITADEL_* name)
+#
+# Three containers run Zitadel's production split: `init` (database and user,
+# one-shot), `setup` (migrations and the first instance, one-shot) and `start`
+# (the server, the only long-running one). The first instance is the stress
+# realm: its organization holds the users, its human admin is the realm admin
+# (IAM_OWNER), its service account's PAT lets instance.py create the clients.
+#
+# Login: Zitadel's own login UI v1, served by Zitadel itself on its TLS
+# listener. The v4 default for new instances is login v2, a separate Next.js
+# container that the vendor's compose puts behind a path-routing TLS proxy
+# (Traefik); README.md says why this run keeps v1.
+name: compare-zitadel
+
+x-zitadel-db: &zitadel-db
+  ZITADEL_DATABASE_POSTGRES_HOST: postgres
+  ZITADEL_DATABASE_POSTGRES_PORT: "5432"
+  ZITADEL_DATABASE_POSTGRES_DATABASE: zitadel
+  ZITADEL_DATABASE_POSTGRES_USER_USERNAME: zitadel
+  ZITADEL_DATABASE_POSTGRES_USER_PASSWORD: ${DB_PASSWORD:?}
+  # The database runs on the same server, over the compose network.
+  ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE: disable
+
+# Settings that `setup` writes into the first instance and `start` serves.
+x-zitadel-server: &zitadel-server
+  <<: *zitadel-db
+  ZITADEL_MASTERKEY: ${ZITADEL_MASTERKEY:?}
+  ZITADEL_EXTERNALDOMAIN: ${ZT_HOST:?}
+  ZITADEL_EXTERNALPORT: ${ZT_PORT:-8443}
+  ZITADEL_EXTERNALSECURE: "true"
+  # OWASP Argon2id, Hearth's default (#913): m=19456 KiB, t=2, p=1. Names from
+  # defaults.yaml (SystemDefaults.PasswordHasher.Hasher); Memory is in KiB
+  # (passwap's argon2.IDKey). Client secrets keep Zitadel's default
+  # SecretHasher (bcrypt, cost 4).
+  ZITADEL_SYSTEMDEFAULTS_PASSWORDHASHER_HASHER_ALGORITHM: argon2id
+  ZITADEL_SYSTEMDEFAULTS_PASSWORDHASHER_HASHER_TIME: "2"
+  ZITADEL_SYSTEMDEFAULTS_PASSWORDHASHER_HASHER_MEMORY: "19456"
+  ZITADEL_SYSTEMDEFAULTS_PASSWORDHASHER_HASHER_THREADS: "1"
+  # Cache guide: "recommended for single instance setups with a single ZITADEL
+  # server" (caches are off by default and marked beta).
+  ZITADEL_CACHES_CONNECTORS_MEMORY_ENABLED: "true"
+  ZITADEL_CACHES_INSTANCE_CONNECTOR: memory
+  ZITADEL_CACHES_INSTANCE_MAXAGE: 1h
+  ZITADEL_CACHES_ORGANIZATION_CONNECTOR: memory
+  ZITADEL_CACHES_ORGANIZATION_MAXAGE: 1h
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:?}
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD: ${DB_ADMIN_PASSWORD:?}
+    volumes:
+      - ../postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      # PostgreSQL 18 images keep PGDATA under /var/lib/postgresql/18.
+      - pgdata:/var/lib/postgresql
+    shm_size: 256mb
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    # No published port: only Zitadel reaches it, over the compose network.
+
+  # `zitadel init`: creates the zitadel database and its user. Only this
+  # container gets the PostgreSQL admin password.
+  zitadel-init:
+    image: ${ZITADEL_IMAGE:?}
+    command: ["init"]
+    restart: "no"
+    environment:
+      <<: *zitadel-db
+      ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME: postgres
+      ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD: ${DB_ADMIN_PASSWORD:?}
+      ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE: disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # `zitadel setup`: migrations and the first instance (the stress realm).
+  # FirstInstance and DefaultInstance settings take effect here only, once.
+  zitadel-setup:
+    image: ${ZITADEL_IMAGE:?}
+    command: ["setup", "--masterkeyFromEnv", "--tlsMode", "enabled"]
+    restart: "no"
+    # Writes the service account's PAT into the bundle, as the bundle's owner.
+    user: "${HOST_UID:?}:${HOST_GID:?}"
+    environment:
+      <<: *zitadel-server
+      ZITADEL_FIRSTINSTANCE_INSTANCENAME: stress
+      ZITADEL_FIRSTINSTANCE_ORG_NAME: ${ZT_ORG:?}
+      # The realm admin (IAM_OWNER of the instance, as Keycloak's realm-admin):
+      # signs in through the login page like the users.
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_USERNAME: ${ADMIN_EMAIL:?}
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_FIRSTNAME: Realm
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_LASTNAME: Admin
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_EMAIL_ADDRESS: ${ADMIN_EMAIL:?}
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_EMAIL_VERIFIED: "true"
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORD: ${ADMIN_PASSWORD:?}
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORDCHANGEREQUIRED: "false"
+      # A service account (IAM_OWNER) whose PAT instance.py uses.
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_USERNAME: setup
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_NAME: compare setup
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_PAT_EXPIRATIONDATE: "2099-01-01T00:00:00Z"
+      ZITADEL_FIRSTINSTANCE_PATPATH: /bundle/setup.pat
+      # Login UI v1 (README.md); the v4 default for a new instance is v2.
+      ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_REQUIRED: "false"
+      # Access tokens live 1 h, as in the Hearth run (#913). The other
+      # lifetimes are Zitadel's defaults, written out because the four are
+      # set together.
+      ZITADEL_DEFAULTINSTANCE_OIDCSETTINGS_ACCESSTOKENLIFETIME: 1h
+      ZITADEL_DEFAULTINSTANCE_OIDCSETTINGS_IDTOKENLIFETIME: 12h
+      ZITADEL_DEFAULTINSTANCE_OIDCSETTINGS_REFRESHTOKENIDLEEXPIRATION: 720h
+      ZITADEL_DEFAULTINSTANCE_OIDCSETTINGS_REFRESHTOKENEXPIRATION: 2160h
+      # No "set up a second factor" prompt after the password: the users of
+      # every product sign in with a password only (Hearth's realm asks for
+      # no MFA). Zitadel's default asks every 30 days (720h).
+      ZITADEL_DEFAULTINSTANCE_LOGINPOLICY_MFAINITSKIPLIFETIME: 0s
+    volumes:
+      - ${BUNDLE:?}:/bundle
+    depends_on:
+      zitadel-init:
+        condition: service_completed_successfully
+
+  zitadel:
+    image: ${ZITADEL_IMAGE:?}
+    command: ["start", "--masterkeyFromEnv", "--tlsMode", "enabled"]
+    environment:
+      <<: *zitadel-server
+      ZITADEL_PORT: ${ZT_PORT:-8443}
+      ZITADEL_TLS_ENABLED: "true"
+      ZITADEL_TLS_CERTPATH: /tls/https.crt
+      ZITADEL_TLS_KEYPATH: /tls/https.key
+    volumes:
+      - ${BUNDLE:?}/tls:/tls:ro
+    ports:
+      - "${ZT_BIND:-127.0.0.1}:${ZT_PORT:-8443}:${ZT_PORT:-8443}"
+    depends_on:
+      zitadel-setup:
+        condition: service_completed_successfully
+    # The same split as Keycloak on the 4 GiB server (#913): 2 GiB for the
+    # product, the rest for PostgreSQL (shared_buffers 512 MB) and the OS.
+    # Zitadel's production guide: "ZITADEL itself requires approximately 512MB
+    # of RAM"; the Go runtime gets no other memory setting.
+    mem_limit: ${ZITADEL_MEM_LIMIT:-2g}
+
+volumes:
+  pgdata:
