@@ -4687,7 +4687,7 @@ Used by:
   - fixedbitset 0.5.7
   - flate2 1.1.9
   - fnv 1.0.7
-  - form_urlencoded 1.2.2
+  - form_urlencoded 1.2.3
   - fs2 0.4.3
   - hashbrown 0.15.5
   - hashbrown 0.17.1
@@ -4759,7 +4759,7 @@ Used by:
   - unicode-normalization 0.1.25
   - unicode-segmentation 1.13.2
   - unicode-xid 0.2.6
-  - url 2.5.8
+  - url 2.5.9
   - uuid 1.24.0
   - validit 0.2.6
   - version_check 0.9.5

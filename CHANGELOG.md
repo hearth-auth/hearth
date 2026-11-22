@@ -21,6 +21,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   it restores. On 2 CPUs with the disk limited to 125 MB/s, a restore of 10M users took
   880 s instead of 2,703 s, with at most 27 SST files open instead of 274.
 
+### Security
+- **url 2.5.9** (RUSTSEC-2026-0592): the lockfiles move from url 2.5.8, in which
+  `Url::origin()` on a deeply nested `blob:` URL overflows the stack and aborts the process.
+  Hearth's own code does not call `Url::origin()`.
+
 ## [4.12.4] — 2026-11-20
 
 ### Fixed
