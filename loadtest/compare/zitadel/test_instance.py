@@ -87,7 +87,8 @@ class InstanceTest(unittest.TestCase):
             path = os.path.join(d, "generator.env")
             with open(path, "w") as f:
                 f.write("PRODUCT=zitadel\nSTRESS_API_SECRET=old\n")
-            os.chmod(path, 0o644)
+            # Wider than 0600, so the test sees update_env tighten it.
+            os.chmod(path, 0o640)
             instance.update_env(path, {"STRESS_API_SECRET": "new", "STRESS_CC_SECRET": "cc"})
             self.assertEqual(
                 instance.read_env(path),
