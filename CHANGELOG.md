@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+## [4.13.0] — 2026-11-22
+
 ### Added
 - **`hearth backup restore` logs its progress** (#912): every 10 seconds, a `restore progress`
   line gives the pass (`check`, then `import`), the archive member, the records handled so far,
