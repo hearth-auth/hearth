@@ -668,7 +668,8 @@ cmd_collect() {
   local budget
   case $JOURNEY in
     introspect | userinfo | admin_lookup) budget=50 ;;
-    refresh | create_user) budget=100 ;;
+    # client_credentials (#913): a token issue like refresh, set before any run.
+    refresh | create_user | client_credentials) budget=100 ;;
     login | mix) budget=1000 ;;
   esac
   if [ "${#raws[@]}" -gt 0 ]; then
