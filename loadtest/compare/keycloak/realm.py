@@ -152,6 +152,7 @@ class Server:
         self.host, self.port = url.hostname, url.port or 443
         self.ip = g["STRESS_SERVER_IP"]
         self.ctx = ssl.create_default_context(cafile=cafile)
+        self.ctx.minimum_version = ssl.TLSVersion.TLSv1_2
 
     def request(self, method, path, body=None, headers=None, timeout=300):
         conn = http.client.HTTPSConnection(self.host, self.port, context=self.ctx, timeout=timeout)

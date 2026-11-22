@@ -27,14 +27,17 @@ const users = (c, r) => `${c.base}/admin/realms/${r.name}/users`;
 // A page of listUsers: Keycloak pages by offset (`first`) and size (`max`).
 const PAGE = 200;
 
-/** HTML entities that Keycloak's templates escape in an attribute value. */
+/**
+ * HTML entities that Keycloak's templates escape in an attribute value.
+ * `&amp;` goes last, so `&amp;lt;` becomes `&lt;`, not `<`.
+ */
 function unescapeHtml(s) {
   return s
-    .replace(/&amp;/g, '&')
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>');
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
 }
 
 /**

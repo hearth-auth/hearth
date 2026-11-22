@@ -217,6 +217,8 @@ test('keycloak: the login form action, unescaped', () => {
     loginAction(kcPage),
     'https://server.stress.test:8443/realms/stress/login-actions/authenticate?session_code=sc&execution=ex&client_id=app-id&tab_id=tb&client_data=cd',
   );
+  // An escaped entity is unescaped once only.
+  assert.equal(loginAction('<form id="kc-form-login" action="/a?x=&amp;lt;"></form>'), '/a?x=&lt;');
   assert.equal(loginAction('<form id="other" action="/x"></form>'), null);
   assert.equal(loginAction(''), null);
   assert.equal(loginAction(undefined), null);
