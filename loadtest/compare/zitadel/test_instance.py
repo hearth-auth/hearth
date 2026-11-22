@@ -58,6 +58,14 @@ class InstanceTest(unittest.TestCase):
             # Zitadel picks the id.
             self.assertNotIn("userId", u)
 
+    def test_the_unusable_hash_has_the_run_parameters_and_random_salt_and_digest(self):
+        rand = iter([b"s" * 16, b"d" * 32])
+        h = instance.unusable_hash(lambda n: next(rand))
+        # PHC, unpadded base64, as Zitadel (passwap) encodes Argon2id.
+        self.assertEqual(h, "$argon2id$v=19$m=19456,t=2,p=1$c3Nzc3Nzc3Nzc3Nzc3Nzcw$" + "ZGRk" * 10 + "ZGQ")
+        # Two runs get different hashes.
+        self.assertNotEqual(instance.unusable_hash(), instance.unusable_hash())
+
     def test_a_human_without_a_password_has_no_password_field(self):
         self.assertNotIn("password", instance.human("e@x", "Bulk", "7")["user"])
 

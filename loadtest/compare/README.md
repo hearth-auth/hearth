@@ -39,6 +39,17 @@ Hearth and Keycloak do not set them (`k6/test_realms.mjs`).
 | 7 user create | `create_user` | `POST /admin/realms/stress/users` (`201`, id from `Location`) | `POST /v2/users/human` (`200`, `userId` in the body) |
 | 8 the mix | `mix` | the #647 weights | the #647 weights |
 
+### Every product presents its own newest token (`PRESENT=chain`)
+
+Every run of the comparison sets `PRESENT=chain`, for every product, Hearth included: each VU
+presents its own newest access token (a new one after each refresh), as a real client presents
+it. `k6.sh` sets it, and a run of the comparison on other hosts must set it too. The #647 rounds
+keep `stress.js`'s default, `PRESENT=pool`, where the userinfo and introspect journeys present
+the tokens of a shared pool. In the mix, the pool's tokens are the ones the VUs' refresh chains
+replace, and Zitadel revokes an access token when its refresh token is used: with `pool`,
+about 1 in 9 Zitadel mix journeys failed locally on a token that no real client would still
+present. One condition for all products keeps the comparison fair.
+
 ## Running locally
 
 Needs Docker with Compose, `openssl`, `curl` and `python3`. The first `up` writes the bundle to
@@ -108,16 +119,17 @@ From Zitadel's own guides (links in `zitadel/compose.yaml`), the rest at Zitadel
   organization, 1,000 users per request, an existing user counted as failed. The import answers
   once the events are stored; the users reach the user API and the login page only when
   Zitadel's user projection has applied them, so `zitadel.sh seed` waits for that and prints
-  both times. Each password-less user also gets an initialization code, whose email fails
-  (no SMTP is configured) and is logged as an error
+  both times. Each bulk user gets the run's unusable Argon2id hash (`hashedPassword`, the
+  import's documented field for hashes from another system; `instance.py` makes it, with the
+  run's parameters and a random salt and digest, so no password matches it). Without a password
+  or a hash Zitadel puts a user in its initial state: one initialization code and one email per
+  user, work that Hearth's seed (password-less users, no email) does not cause. Zitadel only
+  parses an imported hash, and Argon2id is its configured hasher, so its verifier is on
 
 Two Zitadel behaviours change what a journey sees:
 
 - refreshing revokes the access token of the refresh token used: `userinfo` answers `401` and
-  introspection `active: false` for it. The mix's default (`PRESENT=pool`) presents pool
-  tokens that other VUs' refresh chains have already replaced, so about 1 in 9 mix journeys
-  fails on Zitadel. With `PRESENT=chain` each VU presents its own newest token, as a real
-  client does, and the mix is clean. Which one the Zitadel round uses is the owner's call
-  (#913); Hearth's and Keycloak's access tokens stay valid until they expire
+  introspection `active: false` for it (Hearth's and Keycloak's access tokens stay valid until
+  they expire). The comparison runs with `PRESENT=chain` for every product (above)
 - the client credentials grant needs a scope; the adapter asks for `profile`, which answers
   an access token without an ID token, as the other products do

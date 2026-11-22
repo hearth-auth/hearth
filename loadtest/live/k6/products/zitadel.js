@@ -14,8 +14,8 @@
 //               token only for it.
 //   refresh     refresh_token grant of the public `app` client (Zitadel
 //               rotates refresh tokens and refuses a reused one; it also
-//               revokes the access token of the refresh token used, so the
-//               mix presents valid tokens only with PRESENT=chain, README.md)
+//               revokes the access token of the refresh token used; the
+//               comparison runs with PRESENT=chain, loadtest/compare/README.md)
 //   client credentials  the service account `cc` (STRESS_CC_*): in Zitadel an
 //               API application cannot take that grant
 //   userinfo    GET /oidc/v1/userinfo
@@ -50,13 +50,19 @@ function adminHeaders(a) {
   return { Authorization: `Bearer ${a.token}`, 'Content-Type': 'application/json' };
 }
 
-/** A human of the import (DataHumanUser): the email is also the username; Zitadel picks the id. */
-function importHuman(email, first, last) {
+/**
+ * A human of the import (DataHumanUser): the email is also the username;
+ * Zitadel picks the id. `hash` is the run's unusable Argon2id hash
+ * (STRESS_BULK_PASSWORD_HASH, instance.py): no password matches it, and
+ * without it Zitadel would give each user an initialization code and email.
+ */
+function importHuman(email, first, last, hash) {
   return {
     user: {
       userName: email,
       profile: { firstName: first, lastName: last },
       email: { email, isEmailVerified: true },
+      hashedPassword: { value: hash },
       passwordChangeRequired: false,
     },
   };
@@ -212,26 +218,32 @@ export const zitadel = {
   },
 
   // The bulk path: POST /admin/v1/import (AdminService.ImportData, the
-  // migration guide's "bulk import"), into the existing organization. The
+  // migration guide's "bulk import"), into the existing organization; each
+  // user gets the run's unusable hash (importHuman). The
   // import first tries to create the organization and reports that it exists
   // (an `errors` entry of type "org"); each user is its own command. An
   // existing user fails and is counted as failed, as Hearth's import counts a
   // duplicate.
-  importUsers: (c, r, a, batch) => ({
-    method: 'POST',
-    url: `${c.base}/admin/v1/import`,
-    body: JSON.stringify({
-      dataOrgs: {
-        orgs: [{
-          orgId: a.realmId,
-          org: { name: a.orgName },
-          humanUsers: batch.map((u) => importHuman(u.email, 'Bulk', String(u.index))),
-        }],
-      },
-      timeout: '5m',
-    }),
-    headers: adminHeaders(a),
-  }),
+  importUsers: (c, r, a, batch) => {
+    if (!c.bulkPasswordHash) {
+      throw new Error('STRESS_BULK_PASSWORD_HASH is required to seed Zitadel (instance.py)');
+    }
+    return {
+      method: 'POST',
+      url: `${c.base}/admin/v1/import`,
+      body: JSON.stringify({
+        dataOrgs: {
+          orgs: [{
+            orgId: a.realmId,
+            org: { name: a.orgName },
+            humanUsers: batch.map((u) => importHuman(u.email, 'Bulk', String(u.index), c.bulkPasswordHash)),
+          }],
+        },
+        timeout: '5m',
+      }),
+      headers: adminHeaders(a),
+    };
+  },
   imported: (res) => {
     if (res.status !== 200) return null;
     const b = json(res);

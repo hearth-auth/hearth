@@ -32,7 +32,13 @@ here=$(cd "$(dirname "$0")" && pwd)
   exit 2
 }
 mkdir -p "$bundle/out"
-args=()
+# Every product of the comparison runs with PRESENT=chain (#913): each VU
+# presents its own newest access token, as a real client does. With the
+# #647 default (pool), VUs present tokens of other VUs' refresh chains, which
+# a product that revokes the access token at refresh (Zitadel) refuses. The
+# same condition for all products, Hearth included; stress.js keeps its
+# default for the #647 rounds. A VAR=value below comes later and wins.
+args=(-e PRESENT=chain)
 for kv in "$@"; do
   [[ $kv == *=* ]] || {
     echo "k6: $kv is not VAR=value" >&2

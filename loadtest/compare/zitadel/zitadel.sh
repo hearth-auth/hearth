@@ -8,7 +8,8 @@
 #                 (init, setup, start), wait until Zitadel is ready, create the
 #                 clients and the login users (first time, instance.py)
 #   seed <from> <to>
-#                 import password-less users bulk<from> .. bulk<to - 1> through
+#                 import users without a usable password (instance.py
+#                 unusable_hash) bulk<from> .. bulk<to - 1> through
 #                 POST /admin/v1/import (k6/prepare.js, PRODUCT=zitadel); prints
 #                 the import time (duration_s) from <bundle>/out/seed-<from>-<to>.json,
 #                 then waits until Zitadel's user projection has every seeded

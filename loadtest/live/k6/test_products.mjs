@@ -527,7 +527,9 @@ test('zitadel: journey and admin requests', () => {
     profile: { givenName: 'Stress', familyName: 'created' },
     email: { email: 'e@x', isVerified: true },
   });
-  const imp = zitadel.importUsers(c, r, a, [{ email: 'bulk00000007@x', name: 'Bulk 7', index: 7 }]);
+  const hash = '$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$ZGlnZXN0';
+  const zc = Object.assign({}, c, { bulkPasswordHash: hash });
+  const imp = zitadel.importUsers(zc, r, a, [{ email: 'bulk00000007@x', name: 'Bulk 7', index: 7 }]);
   assert.equal(imp.url, `${c.base}/admin/v1/import`);
   assert.deepEqual(JSON.parse(imp.body), {
     dataOrgs: {
@@ -539,6 +541,8 @@ test('zitadel: journey and admin requests', () => {
             userName: 'bulk00000007@x',
             profile: { firstName: 'Bulk', lastName: '7' },
             email: { email: 'bulk00000007@x', isEmailVerified: true },
+            // Without a password or hash Zitadel gives each user an init code and email.
+            hashedPassword: { value: hash },
             passwordChangeRequired: false,
           },
         }],
@@ -546,6 +550,8 @@ test('zitadel: journey and admin requests', () => {
     },
     timeout: '5m',
   });
+  // Without the run's hash the seed stops instead of making users in their initial state.
+  assert.throws(() => zitadel.importUsers(c, r, a, []), /STRESS_BULK_PASSWORD_HASH is required/);
   assert.equal(zitadel.regenerateSecret, null);
 });
 

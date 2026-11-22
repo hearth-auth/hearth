@@ -36,6 +36,9 @@ export const env = {
   userPassword: req('STRESS_USER_PASSWORD'),
   adminEmail: req('STRESS_ADMIN_EMAIL'),
   adminPassword: req('STRESS_ADMIN_PASSWORD'),
+  // The password hash that a product's seed gives its bulk users, when it
+  // needs one ('' otherwise; Zitadel, #913).
+  bulkPasswordHash: __ENV.STRESS_BULK_PASSWORD_HASH || '',
 };
 
 function req(name) {

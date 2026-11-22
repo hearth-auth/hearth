@@ -10,7 +10,8 @@
 #                 partialImport (k6/prepare.js, PRODUCT=keycloak); prints the
 #                 seed time (duration_s) from <bundle>/out/seed-<from>-<to>.json
 #   restart       restart Keycloak (the data stays)
-#   down          remove the containers and the database volume (the images stay)
+#   down          remove the containers and the database volume, and with them the
+#                 realm (the images and the bundle's passwords stay)
 #
 # Environment:
 #   BUNDLE              the bundle directory (default ../.build/keycloak): CA, TLS
@@ -122,6 +123,8 @@ cmd_restart() {
 
 cmd_down() {
   compose down --volumes --remove-orphans
+  # The realm went with the database: the next `up` makes it again.
+  rm -f "$BUNDLE/realm.done"
 }
 
 case ${1:-} in

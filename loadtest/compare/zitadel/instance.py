@@ -24,11 +24,14 @@ Settings that differ from Zitadel's defaults (the instance-wide ones are in comp
 Zitadel's own choices that stay: refresh tokens rotate (each refresh answers a new one and the old
 one is refused), client secrets are stored with the SecretHasher default (bcrypt, cost 4).
 
-The generated client ids and secrets go to generator.env. No password or secret is printed.
+The generated client ids and secrets go to generator.env, with the hash that the seed gives the
+bulk users (unusable_hash). No password or secret is printed.
 """
+import base64
 import http.client
 import json
 import os
+import secrets
 import socket
 import ssl
 import sys
@@ -36,6 +39,8 @@ import time
 import urllib.parse
 
 LOGIN_BATCH = 100
+# The run's Argon2id parameters (compose.yaml), as Zitadel encodes them.
+ARGON2ID_PARAMS = "$argon2id$v=19$m=19456,t=2,p=1"
 # The machine user of the client credentials journey.
 CC_USERNAME = "cc"
 # ImportData requires a timeout; a batch of 100 password users takes seconds.
@@ -88,6 +93,22 @@ def human(email, first, last, password=None):
     if password is not None:
         user["password"] = password
     return {"user": user}
+
+
+def unusable_hash(rand=secrets.token_bytes):
+    """A well-formed Argon2id hash with the run's parameters and random salt and digest.
+
+    The bulk users get it as their `hashedPassword` (the import's documented field for hashes
+    from another system). No password matches it, so they have no usable password, as Hearth's
+    bulk users. Without any password Zitadel would put each user in its initial state: an
+    initialization code and an email per user, work that a real deployment's users do not cause
+    and Hearth's seed does not do. Zitadel only parses an imported hash (it hashes nothing), and
+    Argon2id is its configured hasher, so its verifier is on.
+    """
+    def b64(b):
+        return base64.b64encode(b).decode().rstrip("=")
+
+    return f"{ARGON2ID_PARAMS}${b64(rand(16))}${b64(rand(32))}"
 
 
 def import_body(org_id, org_name, humans):
@@ -206,6 +227,7 @@ def main(bundle):
             "STRESS_API_SECRET": api["clientSecret"],
             "STRESS_CC_CLIENT_ID": cc_secret["clientId"],
             "STRESS_CC_SECRET": cc_secret["clientSecret"],
+            "STRESS_BULK_PASSWORD_HASH": unusable_hash(),
         },
     )
 
