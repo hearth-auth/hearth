@@ -85,10 +85,14 @@ class InstanceTest(unittest.TestCase):
     def test_update_env_replaces_keys_keeps_others_and_writes_mode_0600(self):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "generator.env")
-            with open(path, "w") as f:
-                f.write("PRODUCT=zitadel\nSTRESS_API_SECRET=old\n")
-            # Wider than 0600, so the test sees update_env tighten it.
-            os.chmod(path, 0o640)
+            # A file wider than 0600 (umask 022: 0644), so the test sees update_env tighten it.
+            umask = os.umask(0o022)
+            try:
+                with open(path, "w") as f:
+                    f.write("PRODUCT=zitadel\nSTRESS_API_SECRET=old\n")
+            finally:
+                os.umask(umask)
+            self.assertNotEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
             instance.update_env(path, {"STRESS_API_SECRET": "new", "STRESS_CC_SECRET": "cc"})
             self.assertEqual(
                 instance.read_env(path),
