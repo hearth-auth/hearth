@@ -1,0 +1,76 @@
+# Ory Kratos v26.2.0 for the same-hardware comparison (#913): the users and
+# their passwords. Hydra (hydra.yaml) asks it to sign users in; the browser
+# pages are Ory's reference UI (compose.yaml). The secrets and the DSN come
+# from the environment (DSN, SECRETS_DEFAULT, SECRETS_COOKIE, SECRETS_CIPHER,
+# SECRETS_PAGINATION; compose.yaml), not from this file.
+#
+# Every key: https://github.com/ory/kratos/blob/v26.2.0/embedx/config.schema.json
+# Production guide: https://www.ory.com/docs/kratos/guides/production
+# Everything not set here is Kratos's default.
+
+serve:
+  # TLS on Kratos's own listeners (#913), both of them, with the run's leaf.
+  public:
+    base_url: https://ory.stress.test:4433/
+    port: 4433
+    tls:
+      cert:
+        path: /tls/https.crt
+      key:
+        path: /tls/https.key
+  admin:
+    base_url: https://ory.stress.test:4434/
+    port: 4434
+    tls:
+      cert:
+        path: /tls/https.crt
+      key:
+        path: /tls/https.key
+
+# Kratos as Hydra's login provider: a login flow started with Hydra's
+# login_challenge accepts Hydra's login request itself and sends the browser
+# back to Hydra (Hydra's admin port).
+oauth2_provider:
+  url: https://ory.stress.test:4445
+
+identity:
+  default_schema_id: default
+  schemas:
+    - id: default
+      url: file:///etc/ory/identity.schema.json
+
+# OWASP Argon2id, Hearth's default (#913): m=19456 KiB, t=2, p=1. Kratos's
+# argon2 hasher is Argon2id (hash/hasher_argon2.go: argon2.IDKey); its memory
+# is a byte size whose KB is 1024 bytes (go-bytesize), so 19456KB is
+# 19456 KiB. Salt and key lengths are Kratos's defaults, written out.
+# Kratos's default is bcrypt, cost 12.
+hashers:
+  algorithm: argon2
+  argon2:
+    memory: 19456KB
+    iterations: 2
+    parallelism: 1
+    salt_length: 16
+    key_length: 32
+
+selfservice:
+  default_browser_return_url: https://ory.stress.test:4455/
+  allowed_return_urls:
+    - https://ory.stress.test:4455
+  methods:
+    password:
+      enabled: true
+  # The reference UI's pages. Verification and recovery stay off (Kratos's
+  # default), so no flow sends a message.
+  flows:
+    error:
+      ui_url: https://ory.stress.test:4455/error
+    login:
+      ui_url: https://ory.stress.test:4455/login
+    registration:
+      ui_url: https://ory.stress.test:4455/registration
+    settings:
+      ui_url: https://ory.stress.test:4455/settings
+    logout:
+      after:
+        default_browser_return_url: https://ory.stress.test:4455/login

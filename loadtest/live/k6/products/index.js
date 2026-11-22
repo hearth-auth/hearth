@@ -8,9 +8,10 @@
 // stay in stress.js and lib.js.
 import { hearth } from './hearth.js';
 import { keycloak } from './keycloak.js';
+import { ory } from './ory.js';
 import { zitadel } from './zitadel.js';
 
-export const PRODUCTS = { hearth, keycloak, zitadel };
+export const PRODUCTS = { hearth, keycloak, ory, zitadel };
 
 /** The adapter named `name` (PRODUCT); hearth when unset. */
 export function productFor(name) {
