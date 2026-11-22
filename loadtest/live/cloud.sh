@@ -299,6 +299,8 @@ install_generator() {
   ssh_to "$ip" "chmod 0755 /opt/stress/launch.sh"
   scp_to "$ip" /opt/stress/k6/ "$here/k6/lib.js" "$here/k6/realms.js" "$here/k6/stress.js" \
     "$here/k6/prepare.js" "$here/k6/verify.js" "$here/k6/fill.js"
+  # stress.js and lib.js import the product adapters (k6/products/, #913).
+  scp_to "$ip" /opt/stress/k6/ -r "$here/k6/products"
 }
 
 # The number of realms in the run's bundle (gen-config.sh REALMS).

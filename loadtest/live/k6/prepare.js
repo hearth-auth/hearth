@@ -5,7 +5,8 @@
 //      would pay for; a regenerated secret is checked with one SHA-256. Its
 //      mode (access_token_authorization: introspection) is declared in
 //      hearth.yaml: Hearth refuses to change it at runtime (409).
-//   2. Password-less users are imported through POST /admin/users/import, in
+//   2. Password-less users are imported through the product's bulk path
+//      (Hearth: POST /admin/users/import; PRODUCT selects the adapter), in
 //      batches, to grow the store: emails bulk<index>@<host> for index in
 //      [IMPORT_FROM, IMPORT_TO). Re-importing an existing email fails that
 //      entry and changes nothing, so a range can be re-run.
@@ -23,10 +24,9 @@
 // Env: lib.js variables, plus IMPORT_FROM (0), IMPORT_TO (0 = no import),
 // IMPORT_ALL_FROM, IMPORT_ALL_TO, IMPORT_BATCH (5000, server maximum 10000),
 // IMPORT_VUS (4), PREPARE_OUT.
-import http from 'k6/http';
 import exec from 'k6/execution';
 import { Counter } from 'k6/metrics';
-import { adminHeaders, adminSession, claims, env, hosts, realms } from './lib.js';
+import { adminContext, adminSession, env, hosts, product, realms, send } from './lib.js';
 import { importBatches, realmBounds } from './realms.js';
 
 const from = parseInt(__ENV.IMPORT_FROM || '0', 10);
@@ -69,20 +69,17 @@ export function setup() {
   const admins = [];
   const apiSecrets = {};
   for (const r of realms) {
-    const admin = adminSession(r);
-    const realmId = claims(admin.access).tid.replace(/^realm_/, '');
-    admins.push({ token: admin.access, realmId });
+    const a = adminContext(adminSession(r).access);
+    admins.push(a);
     if (__ENV.PREPARE_CLIENTS === '1') {
-      const regen = http.post(
-        `${env.base}/admin/applications/${r.apiClientId}/regenerate-secret`,
-        null,
-        { headers: adminHeaders(admin.access, realmId), timeout: '60s' },
-      );
-      if (regen.status !== 200) {
+      if (!product.regenerateSecret) throw new Error(`PREPARE_CLIENTS is not for ${product.name}`);
+      const regen = send(product.regenerateSecret(env, r, a), { timeout: '60s' });
+      const secret = product.newSecret(regen);
+      if (secret === null) {
         const where = realms.length > 1 ? ` in realm ${r.name}` : '';
         throw new Error(`regenerate-secret${where} answered ${regen.status}: ${regen.body}`);
       }
-      apiSecrets[r.secretVar] = regen.json().client_secret;
+      apiSecrets[r.secretVar] = secret;
     }
   }
   return {
@@ -99,24 +96,20 @@ export default function (data) {
   const admin = data.admins[realm];
   const users = [];
   for (let i = start; i < end; i++) {
-    users.push({
-      email: `bulk${String(i).padStart(8, '0')}@${env.host}`,
-      display_name: `Bulk ${i}`,
-    });
+    users.push({ email: `bulk${String(i).padStart(8, '0')}@${env.host}`, name: `Bulk ${i}`, index: i });
   }
-  const res = http.post(`${env.base}/admin/users/import`, JSON.stringify({ users }), {
-    headers: adminHeaders(admin.token, admin.realmId),
+  const res = send(product.importUsers(env, realms[realm], admin, users), {
     timeout: '300s',
     tags: { name: 'import' },
   });
-  if (res.status !== 200) {
+  const body = product.imported(res);
+  if (body === null) {
     batchFailed.add(1);
     importFailed.add(users.length);
     const where = realms.length > 1 ? ` (realm ${realms[realm].name})` : '';
     console.error(`import batch ${start}..${end}${where} answered ${res.status}`);
     return;
   }
-  const body = res.json();
   imported.add(body.imported);
   importFailed.add(body.failed);
 }

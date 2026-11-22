@@ -1,4 +1,7 @@
-// Open-loop stress ramp against one production-mode Hearth server.
+// Open-loop stress ramp against one production-mode server: Hearth, or another
+// product through its adapter (PRODUCT, products/index.js; #913). The
+// journeys, pools and metrics below are the same for every product; the
+// requests are the adapter's. The paths below are Hearth's.
 //
 // The generator offers a fixed arrival rate that steps up until Hearth
 // fails: k6's ramping-arrival-rate executor starts each iteration on
@@ -10,6 +13,8 @@
 //
 // One iteration is one journey:
 //   introspect    POST /realms/<r>/introspect as the `api` resource server
+//   client_credentials  POST /realms/<r>/token grant_type=client_credentials as
+//                 the confidential `api` client
 //   userinfo      GET  /realms/<r>/userinfo with a user access token
 //   refresh       POST /realms/<r>/token grant_type=refresh_token (rotation)
 //   login         hosted login form + authorization code + PKCE (4 requests,
@@ -22,7 +27,7 @@
 // Every iteration is tagged with its step (`step`) and whether the step was
 // ramping up or holding (`phase`), so the analysis can use hold periods only.
 //
-// Env (besides lib.js): JOURNEY, START_RATE, STEP_RATE, STEPS, HOLD_S (60),
+// Env (besides lib.js, which reads PRODUCT): JOURNEY, START_RATE, STEP_RATE, STEPS, HOLD_S (60),
 // RAMP_S (5), VUS (1000), POOL (sessions to sign in for the token pool,
 // default VUS), ADMIN_IDS (user ids to sample, 1000), MIX
 // ("refresh:65,login:15,userinfo:15,admin_lookup:5"), ABORT_FAIL_RATIO (0.5),
@@ -45,17 +50,19 @@
 // name=renew. A ramp ends before its tokens get near their expiry, so this does
 // not change ramps.
 import { sleep } from 'k6';
-import http from 'k6/http';
 import exec from 'k6/execution';
 import { Counter, Rate, Trend } from 'k6/metrics';
 import {
-  adminHeaders,
+  adminContext,
   adminSession,
+  adminSignIn,
   apiBasic,
   claims,
   env,
   hosts,
+  product,
   realms,
+  send,
   signIn,
   signInMany,
   TIMEOUT,
@@ -63,7 +70,15 @@ import {
 } from './lib.js';
 import { ackLine, share, vuRealm, vuSlot } from './realms.js';
 
-const JOURNEYS = ['introspect', 'userinfo', 'refresh', 'login', 'admin_lookup', 'create_user'];
+const JOURNEYS = [
+  'introspect',
+  'client_credentials',
+  'userinfo',
+  'refresh',
+  'login',
+  'admin_lookup',
+  'create_user',
+];
 const journey = __ENV.JOURNEY;
 if (!JOURNEYS.includes(journey) && journey !== 'mix') {
   throw new Error(`JOURNEY must be one of ${JOURNEYS.join(', ')}, mix`);
@@ -163,7 +178,7 @@ export function setup() {
       return {
         admin: admin.access,
         adminLife: life(admin.access),
-        realmId: claims(admin.access).tid.replace(/^realm_/, ''),
+        realmId: adminContext(admin.access).realmId,
         sessions: [],
         userIds: [],
       };
@@ -195,22 +210,23 @@ export function setup() {
     realms.forEach((r, ri) => {
       const d = data.realms[ri];
       const want = share(adminIds, nRealms, ri);
+      const a = { token: d.admin, realmId: d.realmId };
       let cursor = null;
       while (d.userIds.length < want) {
-        const url = `${env.base}/admin/users?limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
-        const res = http.get(url, { headers: adminHeaders(d.admin, d.realmId), tags: { phase: 'setup' } });
+        const res = send(product.listUsers(env, r, a, cursor), { tags: { phase: 'setup' } });
         if (res.status !== 200) throw new Error(`list users${inRealm(r)} answered ${res.status}`);
-        const body = res.json();
-        for (const u of body.items) d.userIds.push(u.id);
-        cursor = body.next_cursor || body.cursor || null;
-        if (!cursor || body.items.length === 0) break;
+        const page = product.userPage(res, cursor);
+        for (const id of page.ids) d.userIds.push(id);
+        cursor = page.next;
+        if (!cursor) break;
       }
       if (d.userIds.length === 0) throw new Error(`no users to look up${inRealm(r)}`);
     });
   }
-  if (uses.includes('introspect')) {
+  for (const j of ['introspect', 'client_credentials']) {
+    if (!uses.includes(j)) continue;
     for (const r of realms) {
-      if (!r.apiSecret) throw new Error(`${r.secretVar} is required for introspect (run prepare.js first)`);
+      if (!r.apiSecret) throw new Error(`${r.secretVar} is required for ${j} (run prepare.js first)`);
     }
   }
   if (__ENV.START_AT) {
@@ -296,6 +312,11 @@ function userToken(data) {
   return own ? own.access : pickSession(data).access;
 }
 
+// This VU's realm admin's context ({ token, realmId }) for the adapter.
+function adminOf(data) {
+  return { token: adminToken(data), realmId: mine(data).realmId };
+}
+
 // This VU's realm admin's token. setup()'s expires after the access-token
 // lifetime, so near its expiry each VU signs the admin in for itself.
 function adminToken(data) {
@@ -303,7 +324,7 @@ function adminToken(data) {
   if (!due(d.adminLife)) return d.admin;
   if (admin === null || due(admin)) {
     renewals.add(1);
-    const s = signIn(env.adminEmail, env.adminPassword, { name: 'renew' }, myRealm());
+    const s = adminSignIn({ name: 'renew' }, myRealm());
     if (s.ok) admin = Object.assign({ access: s.access }, life(s.access));
   }
   return admin ? admin.access : d.admin;
@@ -347,23 +368,28 @@ function pickSession(data) {
   return sessions[exec.scenario.iterationInTest % sessions.length];
 }
 
+// k6 params of a journey's request.
+function journeyParams(name) {
+  return { timeout: TIMEOUT, tags: { name } };
+}
+
 function introspect(data) {
   const r = myRealm();
-  const res = http.post(
-    `${env.base}/realms/${r.name}/introspect`,
-    { token: userToken(data) },
-    { headers: { Authorization: apiBasic(r) }, timeout: TIMEOUT, tags: { name: 'introspect' } },
-  );
+  const res = send(product.introspect(env, r, userToken(data), apiBasic(r)), journeyParams('introspect'));
   const ok = res.status === 200 && res.json('active') === true;
   record('introspect', ok, res.timings.duration, ok ? null : res.status === 200 ? 'inactive' : fail(res));
 }
 
+// A machine client's token. Each journey is one new grant; nothing is kept.
+function clientCredentials() {
+  const r = myRealm();
+  const res = send(product.clientCredentials(env, r, apiBasic(r)), journeyParams('client_credentials'));
+  const ok = res.status === 200 && typeof res.json('access_token') === 'string';
+  record('client_credentials', ok, res.timings.duration, ok ? null : res.status === 200 ? 'no_token' : fail(res));
+}
+
 function userinfo(data) {
-  const res = http.get(`${env.base}/realms/${myRealm().name}/userinfo`, {
-    headers: { Authorization: `Bearer ${userToken(data)}` },
-    timeout: TIMEOUT,
-    tags: { name: 'userinfo' },
-  });
+  const res = send(product.userinfo(env, myRealm(), userToken(data)), journeyParams('userinfo'));
   record('userinfo', res.status === 200, res.timings.duration, fail(res));
 }
 
@@ -379,12 +405,7 @@ function refresh(data) {
     chain = session(signInOwn('rotate'));
     return;
   }
-  const r = myRealm();
-  const res = http.post(
-    `${env.base}/realms/${r.name}/token`,
-    { grant_type: 'refresh_token', refresh_token: own.refresh, client_id: r.appClientId },
-    { timeout: TIMEOUT, tags: { name: 'refresh' } },
-  );
+  const res = send(product.refresh(env, myRealm(), own.refresh), journeyParams('refresh'));
   const ok = res.status === 200;
   record('refresh', ok, res.timings.duration, fail(res));
   if (ok) {
@@ -414,32 +435,21 @@ function login() {
 function adminLookup(data) {
   const d = mine(data);
   const id = d.userIds[exec.scenario.iterationInTest % d.userIds.length];
-  const res = http.get(`${env.base}/admin/users/${id}`, {
-    headers: adminHeaders(adminToken(data), d.realmId),
-    timeout: TIMEOUT,
-    tags: { name: 'admin_lookup' },
-  });
+  const res = send(product.adminUser(env, myRealm(), adminOf(data), id), journeyParams('admin_lookup'));
   record('admin_lookup', res.status === 200, res.timings.duration, fail(res));
 }
 
 function createUser(data) {
   const email = `c-${runId}-${exec.vu.idInTest}-${exec.vu.iterationInInstance}@${env.host}`;
-  const res = http.post(
-    `${env.base}/admin/users`,
-    JSON.stringify({ email, display_name: 'Stress created' }),
-    {
-      headers: adminHeaders(adminToken(data), mine(data).realmId),
-      timeout: TIMEOUT,
-      tags: { name: 'create_user' },
-    },
-  );
-  const ok = res.status === 201;
-  record('create_user', ok, res.timings.duration, fail(res));
-  if (ok) console.log(ackLine(res.json('id'), realmIndex(), nRealms));
+  const res = send(product.createUser(env, myRealm(), adminOf(data), email), journeyParams('create_user'));
+  const id = product.createdId(res);
+  record('create_user', id !== null, res.timings.duration, fail(res));
+  if (id !== null) console.log(ackLine(id, realmIndex(), nRealms));
 }
 
 const run = {
   introspect,
+  client_credentials: clientCredentials,
   userinfo,
   refresh,
   login,
