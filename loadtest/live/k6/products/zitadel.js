@@ -199,6 +199,9 @@ export const zitadel = {
     };
   },
 
+  // Like Hearth's create: no password and no email. The user API v2 adds no
+  // initialization code (unlike the v1 import, see importHuman), and a
+  // verified email gets no email code, so no email is sent.
   createUser: (c, r, a, email) => ({
     method: 'POST',
     url: `${c.base}/v2/users/human`,

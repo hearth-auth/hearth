@@ -36,7 +36,7 @@ Hearth and Keycloak do not set them (`k6/test_realms.mjs`).
 | 4 userinfo | `userinfo` | `GET …/protocol/openid-connect/userinfo` | `GET /oidc/v1/userinfo` |
 | 5 introspect | `introspect` | `POST …/token/introspect` as `api`; the users' tokens carry `api` in `aud` (audience mapper) | `POST /oauth/v2/introspect` as the API application `api` (basic auth); the users' tokens carry its project in `aud` |
 | 6 admin user lookup | `admin_lookup` | `GET /admin/realms/stress/users/{id}`; the realm admin signs in with the `kc-admin-api` scope | `GET /v2/users/{id}`; the realm admin (IAM_OWNER) signs in with the Zitadel API audience scope |
-| 7 user create | `create_user` | `POST /admin/realms/stress/users` (`201`, id from `Location`) | `POST /v2/users/human` (`200`, `userId` in the body) |
+| 7 user create | `create_user` | `POST /admin/realms/stress/users` (`201`, id from `Location`) | `POST /v2/users/human` (`200`, `userId` in the body); no password and a verified email, so, as Hearth, no initialization code and no email |
 | 8 the mix | `mix` | the #647 weights | the #647 weights |
 
 ### Every product presents its own newest token (`PRESENT=chain`)
