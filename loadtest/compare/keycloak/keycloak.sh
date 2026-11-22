@@ -14,7 +14,7 @@
 #
 # Environment:
 #   BUNDLE              the bundle directory (default ../.build/keycloak): CA, TLS
-#                       leaf, keycloak.env, postgres.env, generator.env; mode 0700
+#                       leaf, server.env, generator.env; mode 0700
 #   SERVER_IP           the address the generator dials (default 127.0.0.1)
 #   KC_BIND             the address Keycloak listens on (default 127.0.0.1)
 #   LOGIN_USERS         users with a password (default 1000, as in #647)
@@ -36,7 +36,7 @@ die() {
   log "FAILED: $*"
   exit 2
 }
-compose() { docker compose -f "$here/compose.yaml" "$@"; }
+compose() { docker compose -f "$here/compose.yaml" --env-file "$BUNDLE/server.env" "$@"; }
 password() { openssl rand -base64 24 | tr -d '/+=' | cut -c1-24; }
 
 make_bundle() {
@@ -51,10 +51,9 @@ make_bundle() {
   chmod 0644 "$BUNDLE/tls/https.key" "$BUNDLE/tls/https.crt"
   (
     umask 077
-    db=$(password)
-    printf 'POSTGRES_PASSWORD=%s\n' "$db" > "$BUNDLE/postgres.env"
-    printf 'KC_DB_PASSWORD=%s\nKC_BOOTSTRAP_ADMIN_USERNAME=bootstrap\nKC_BOOTSTRAP_ADMIN_PASSWORD=%s\n' \
-      "$db" "$(password)" > "$BUNDLE/keycloak.env"
+    # Compose variables (compose.yaml hands each container its own keys).
+    printf 'DB_PASSWORD=%s\nKC_BOOTSTRAP_ADMIN_USERNAME=bootstrap\nKC_BOOTSTRAP_ADMIN_PASSWORD=%s\n' \
+      "$(password)" "$(password)" > "$BUNDLE/server.env"
     cat > "$BUNDLE/generator.env" << EOF
 PRODUCT=keycloak
 STRESS_BASE=https://$KC_HOST:8443

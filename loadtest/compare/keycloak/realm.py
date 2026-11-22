@@ -21,7 +21,7 @@ and what Keycloak needs for the journeys: an audience mapper that puts `api` in 
 (introspection), the optional kc-admin-api scope on `app` and the realm-admin role in its scope
 (the admin REST API). Full scope is off on both clients, as Keycloak advises.
 
-The bundle (keycloak.sh up) gives keycloak.env (bootstrap admin) and generator.env (the rest). No
+The bundle (keycloak.sh up) gives server.env (bootstrap admin) and generator.env (the rest). No
 password or secret is printed.
 """
 import http.client
@@ -192,7 +192,7 @@ def admin_auth(s, k):
 
 def main(bundle):
     g = read_env(f"{bundle}/generator.env")
-    k = read_env(f"{bundle}/keycloak.env")
+    k = read_env(f"{bundle}/server.env")
     s = Server(g, f"{bundle}/ca.crt")
     status, _ = s.request("POST", "/admin/realms", json.dumps(realm_rep(g)), admin_auth(s, k))
     if status != 201:

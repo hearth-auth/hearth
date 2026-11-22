@@ -1,6 +1,8 @@
 # Keycloak 26.8.2 and its PostgreSQL for the same-hardware comparison (#913).
 # keycloak.sh runs it; the images and their digests come from ../images.env,
-# the secrets and the TLS leaf from the bundle (BUNDLE, outside git).
+# the secrets and the TLS leaf from the bundle (BUNDLE, outside git). The
+# secrets reach compose as variables (docker compose --env-file
+# $BUNDLE/server.env) and each container gets only the keys named below.
 #
 # Production mode (`start`, not `start-dev`), TLS on Keycloak's own listener,
 # and the settings of Keycloak's production and sizing guides:
@@ -17,7 +19,7 @@ services:
     environment:
       POSTGRES_USER: keycloak
       POSTGRES_DB: keycloak
-    env_file: ["${BUNDLE:?}/postgres.env"]
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?}
     volumes:
       - ../postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
       # PostgreSQL 18 images keep PGDATA under /var/lib/postgresql/18.
@@ -36,9 +38,11 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    env_file: ["${BUNDLE:?}/keycloak.env"]
     environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_BOOTSTRAP_ADMIN_USERNAME:?}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD:?}
       KC_DB: postgres
+      KC_DB_PASSWORD: ${DB_PASSWORD:?}
       KC_DB_URL_HOST: postgres
       KC_DB_URL_DATABASE: keycloak
       KC_DB_USERNAME: keycloak
