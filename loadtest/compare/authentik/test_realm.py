@@ -137,13 +137,14 @@ class RealmTest(unittest.TestCase):
             self.assertEqual(realm.read_env(p)["C"], "4")
             self.assertEqual(stat.S_IMODE(os.stat(p).st_mode), 0o600)
 
-    def test_blueprint_files_are_readable_by_the_workers_user(self):
+    def test_blueprint_files_are_owner_only(self):
         with tempfile.TemporaryDirectory() as d:
             realm.main_bulk(os.path.join(d, "seed"), "h.test", 0, 5, 2)
             names = sorted(os.listdir(os.path.join(d, "seed")))
             self.assertEqual(len(names), 3)
+            self.assertEqual(stat.S_IMODE(os.stat(os.path.join(d, "seed")).st_mode), 0o700)
             for n in names:
-                self.assertEqual(stat.S_IMODE(os.stat(os.path.join(d, "seed", n)).st_mode), 0o644)
+                self.assertEqual(stat.S_IMODE(os.stat(os.path.join(d, "seed", n)).st_mode), 0o600)
 
 
 if __name__ == "__main__":

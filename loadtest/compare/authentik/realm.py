@@ -160,9 +160,10 @@ def bulk_files(host, lo, hi, batch):
 
 
 def write_file(path, content):
-    """Writes `content` to `path` (mode 0644: the worker's image user reads it), atomically."""
-    fd = os.open(path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-    os.fchmod(fd, 0o644)
+    """Writes `content` to `path` (mode 0600), atomically. The one-off containers that apply
+    the blueprints run as this host's user (authentik.sh)."""
+    fd = os.open(path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(content)
     os.replace(path + ".tmp", path)
@@ -293,7 +294,7 @@ def main(bundle):
     )
 
     os.makedirs(f"{bundle}/blueprints", exist_ok=True)
-    os.chmod(f"{bundle}/blueprints", 0o755)
+    os.chmod(f"{bundle}/blueprints", 0o700)
     login_hash = pbkdf2_hash(g["STRESS_USER_PASSWORD"], salt())
     write_file(f"{bundle}/blueprints/logins.yaml", login_blueprint(g, login_hash))
     print(f"realm {g['STRESS_REALM']}: providers, applications and the service account created")
@@ -301,7 +302,7 @@ def main(bundle):
 
 def main_bulk(out, host, lo, hi, batch):
     os.makedirs(out, exist_ok=True)
-    os.chmod(out, 0o755)
+    os.chmod(out, 0o700)
     for name, content in bulk_files(host, lo, hi, batch):
         write_file(os.path.join(out, name), content)
 

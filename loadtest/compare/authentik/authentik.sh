@@ -67,8 +67,9 @@ make_bundle() {
   # bundle directory (0700) keeps other users of this host out.
   chmod 0755 "$BUNDLE/tls"
   chmod 0644 "$BUNDLE/tls/https.key" "$BUNDLE/tls/https.crt"
-  # The blueprints the one-off containers apply (realm.py), same reason.
-  mkdir -m 0755 "$BUNDLE/blueprints"
+  # The blueprints the one-off containers apply (realm.py); those containers
+  # run as this host's user, so the files stay owner-only.
+  mkdir -m 0700 "$BUNDLE/blueprints"
   local admin_password admin_hash
   admin_password=$(password)
   # The akadmin user's password reaches Authentik only as a hash in
@@ -128,12 +129,13 @@ sql() { compose exec -T postgres psql -U authentik -d authentik -At -c "$1"; }
 # transaction) outside the worker's task queue and outside an HTTP request, so
 # the import itself queues no task and writes no audit event. The running
 # worker never sees the files (they are mounted only here), so its blueprint
-# discovery does not parse them every hour.
+# discovery does not parse them every hour. The container runs as this host's
+# user, who owns the (0600) files.
 apply_blueprints() {
   local files=() f
   for f in "$@"; do files+=("compare-seed/$f"); done
-  compose run --rm --no-deps -T -v "$BUNDLE/blueprints:/blueprints/compare-seed:ro" \
-    worker apply_blueprint "${files[@]}" > /dev/null 2>&1
+  compose run --rm --no-deps -T --user "$(id -u):$(id -g)" \
+    -v "$BUNDLE/blueprints:/blueprints/compare-seed:ro" worker apply_blueprint "${files[@]}" > /dev/null 2>&1
 }
 
 # The worker's tasks that are due and not finished.
@@ -155,14 +157,18 @@ cmd_settle() {
 cmd_up() {
   make_bundle
   compose up -d
-  # The server reads the brand's certificate at its start: after the first
-  # start applies tls.yaml, restart it once to serve the run's leaf.
+  # The worker applies the vendor's blueprints (flows, scope mappings) and
+  # tls.yaml at its first start, one by one: realm.py needs them all.
   local i
   for i in $(seq 1 300); do
-    [ "$(sql "SELECT status FROM authentik_blueprints_blueprintinstance WHERE path = 'compare/tls.yaml'" 2> /dev/null)" = successful ] && break
-    [ "$i" -lt 300 ] || die "tls.yaml is not applied after 300 s"
+    [ "$(sql "SELECT status FROM authentik_blueprints_blueprintinstance WHERE path = 'compare/tls.yaml'" 2> /dev/null)" = successful ] &&
+      [ "$(sql "SELECT count(*) FROM authentik_blueprints_blueprintinstance WHERE enabled AND status <> 'successful'" 2> /dev/null)" = 0 ] &&
+      break
+    [ "$i" -lt 300 ] || die "the worker has not applied every blueprint after 300 s"
     sleep 1
   done
+  # The server reads the brand's certificate at its start: after the first
+  # start applies tls.yaml, restart it once to serve the run's leaf.
   if ! ready; then
     log "restarting the server for the run's TLS leaf"
     compose restart server
