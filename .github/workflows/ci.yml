@@ -617,6 +617,20 @@ jobs:
           python3 -I loadtest/compare/ory/test_realm.py
           python3 -I loadtest/compare/authentik/test_realm.py
 
+      # #913's AWS session (loadtest/compare/aws/compare.sh) runs unattended for
+      # hours on a $15-20 budget: the step ladder and its verdicts, the cost
+      # total that stops it, each instance's hard lifetime and the whole driver
+      # (DRY_RUN=1: shims for aws, ssh and scp, no network) are checked here,
+      # before an AWS session can find a mistake at a cost.
+      - name: Same-hardware comparison, AWS session — tests (ladder, cost, lifetime, dry run)
+        run: |
+          node loadtest/live/k6/test_schedule.mjs
+          python3 -I loadtest/live/test_analyze.py
+          python3 -I loadtest/compare/aws/test_ladder.py
+          python3 -I loadtest/compare/aws/test_cost.py
+          bash loadtest/live/test_lifetime.sh
+          bash loadtest/compare/aws/test_dryrun.sh
+
       # The #[ignore] rule inside `make test-quality` was red at HEAD on a false
       # positive: it matched the literal text `#[ignore` anywhere on a line, so
       # prose saying a test must NOT be ignored reported itself. A gate that

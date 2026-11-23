@@ -1,0 +1,25 @@
+{
+  "region": "us-east-1",
+  "currency": "USD",
+  "fetched": "2026-11-22",
+  "note": "On-demand Linux prices, from the JSON files that AWS's own pricing pages load (published 2026-11-21 for EC2 and EBS, 2026-11-19 for VPC). cost.py reads this table; a run's results record the prices it used.",
+  "instance_hour": {
+    "c7i.large": 0.08925,
+    "c7i.xlarge": 0.1785,
+    "c7i.2xlarge": 0.357,
+    "r7i.large": 0.1323
+  },
+  "gp3_gb_month": 0.08,
+  "snapshot_gb_month": 0.05,
+  "public_ipv4_hour": 0.005,
+  "hours_per_month": 730,
+  "sources": {
+    "instance_hour": "https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/ec2-ondemand-without-sec-sel/US%20East%20(N.%20Virginia)/Linux/index.json (the data of https://aws.amazon.com/ec2/pricing/on-demand/)",
+    "gp3_gb_month": "https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/ebs.json, 'Storage General Purpose gp3 GB Mo' (the data of https://aws.amazon.com/ebs/pricing/). The 3,000 IOPS and 125 MB/s that cloud.sh provisions are gp3's included baseline: the file prices only IOPS and throughput above it, and the baseline itself is from AWS's EBS documentation, not from this file.",
+    "snapshot_gb_month": "https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/ebs.json, 'Storage Snapshot Amazon S3 GB Mo' (the standard tier; the data of https://aws.amazon.com/ebs/pricing/)",
+    "public_ipv4_hour": "https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/vpc/USD/current/vpc.json, 'Hourly charge for In use Public IPv4 Addresses per Hrs' (the data of https://aws.amazon.com/vpc/pricing/)",
+    "data_out_gb": "NOT CONFIRMED: AWS's usual first-tier price for data out of us-east-1 to the internet; no machine-readable source was found (the EC2 pricing page's data-transfer file did not load). cost.py counts the bytes collect fetches to this machine at this price, ignoring the 100 GB a month that AWS gives free."
+  },
+  "not_counted": "Data transfer inside one availability zone over private addresses is free; the EC2 API calls are free.",
+  "data_out_gb": 0.09
+}

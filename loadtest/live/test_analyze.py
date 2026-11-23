@@ -126,6 +126,26 @@ class AnalyzeTest(unittest.TestCase):
         self.assertTrue(s0["server_alive"])
         self.assertFalse(r["steps"][2]["server_alive"])
 
+    def test_rates_list_gives_each_step_its_offered_rate(self):
+        # A #913 ladder step list (stress.js RATES_PM): offered rates are the list's.
+        args = analyze.argparse.Namespace(
+            raw=self.raw, summary=self.summary, sampler=self.sampler, journey="refresh",
+            start_rate=0, step_rate=0, steps=3, hold_s=10, ramp_s=5, budget_ms=100,
+            rates="2.5,5,10", out=os.path.join(self.dir, "out3.json"),
+        )
+        r = analyze.analyze(args)
+        self.assertEqual([s["offered_rps"] for s in r["steps"]], [2.5, 5, 10])
+        # dropped_ratio uses the listed rate: 3 dropped of 5/s x 10 s.
+        self.assertEqual(r["steps"][1]["dropped_ratio"], 0.06)
+        args.rates = "1,2"
+        with self.assertRaises(SystemExit):
+            analyze.analyze(args)
+
+    def test_disk_write_bytes(self):
+        r = self.run_analyze(budget=100)
+        # The sampler wrote 0 sectors: 0 MB/s, not missing.
+        self.assertEqual(r["steps"][0]["disk_write_mbps_mean"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
