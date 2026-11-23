@@ -53,8 +53,8 @@
 #                  down every part's runs)
 #   CAP_USD        20  (a part whose estimate, plus what the parts running are
 #                  still expected to cost, would pass it does not start)
-#   MAX_VCPU       56  (the vCPUs of all running instances; set it to the
-#                  account's on-demand standard-instance quota, L-1216C47A)
+#   MAX_VCPU       32  (the vCPUs of all running instances: the account's
+#                  on-demand standard-instance quota, L-1216C47A, is 32)
 #   SEED_SIZE      every seed server's type (default: session-plan.json's
 #                  seed_server: c7i.large, the size 1 server; Authentik
 #                  c7i.2xlarge)
@@ -825,7 +825,7 @@ cmd_session() {
   init_state
   [ -n "${IMAGE:-}" ] || cdie "set IMAGE to the Hearth image (cloud.sh)"
   (aws_check_identity) > /dev/null 2>&1 || cdie "the aws CLI is not logged in: run aws login, then compare.sh session"
-  local max_vcpu=${MAX_VCPU:-56}
+  local max_vcpu=${MAX_VCPU:-32}
   [[ $max_vcpu =~ ^[0-9]+$ ]] || cdie "MAX_VCPU $max_vcpu"
   # The login window starts now: run the session right after `aws login`.
   export LOGIN_AT=${LOGIN_AT:-$(date +%s)}

@@ -2,7 +2,7 @@
   "about": "The #913 AWS session: hours and instances per part, priced by cost.py estimate with prices.json. compare.sh session runs the parts in parallel: a part starts as soon as the parts it comes after are done, its instances fit under MAX_VCPU, its estimate fits the AWS login window and the cost cap. The hours come from the time model below, not from a run.",
   "cap_usd": 20,
   "stop_usd": 20,
-  "max_vcpu": 56,
+  "max_vcpu": 32,
   "login": {
     "window_h": 11.5,
     "margin_min": 15,

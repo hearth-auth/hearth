@@ -54,10 +54,10 @@ settings.
    (`round.sh` with `loadtest/live/plans/913-drill-r7i-large-10m.txt`, unchanged) at once, each
    product's size 1 ramps as soon as its snapshot exists, then, once all size 1 results exist,
    size 2 for Hearth and the other product with the highest geometric mean of the 8 clean rates
-   at size 1 (`ladder.py fastest`) together. Each part is its own `compare.sh` process with its
+   at size 1 (`ladder.py fastest`), together when `MAX_VCPU` allows (48 or more; each needs 24). Each part is its own `compare.sh` process with its
    own runs (`timeline.txt` records each start and end). A part waits while its instances would
-   take the running vCPUs past `MAX_VCPU` (56; set it to the account's on-demand
-   standard-instance quota, L-1216C47A). Results: `loadtest/live/results/compare-<session>/`
+   take the running vCPUs past `MAX_VCPU` (32, the account's on-demand standard-instance quota,
+   L-1216C47A). At 32 the session takes about 13.9 h and 2 logins; at 64, about 10.7 h and 1. Results: `loadtest/live/results/compare-<session>/`
    (`summary.md`).
 
    **AWS login.** An `aws login` session lasts at most 12 h, and a teardown without credentials

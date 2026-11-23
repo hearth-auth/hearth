@@ -160,13 +160,13 @@ grep -q 'would end after the AWS login window' "$tmp/window.out" \
   || fail "launched outside the window"
 
 step plan bash "$c" plan || fail "plan"
-grep -q '^wall clock: about 10.7 h with MAX_VCPU 56' "$tmp/plan.out" && grep -q '^aws logins: 1 ' "$tmp/plan.out" \
-  && grep -q '^wall clock by MAX_VCPU: 24: 17.05 h, 2 login(s); 32: 13.9 h' "$tmp/plan.out" \
-  && pass "plan: the parallel wall clock (10.7 h at 56 vCPUs, 1 login; 17 h at 24)" \
+grep -q '^wall clock: about 13.9 h with MAX_VCPU 32' "$tmp/plan.out" && grep -q '^aws logins: 2 ' "$tmp/plan.out" \
+  && grep -q '; 32: 13.9 h, 2 login(s); 48: 10.7 h, 1 login(s); 64: 10.7 h, 1 login(s)' "$tmp/plan.out" \
+  && pass "plan: the parallel wall clock at the quota (13.9 h at 32 vCPUs, 2 logins; 10.7 h, 1 login at 64)" \
   || fail "plan: $(grep -E '^(wall|aws)' "$tmp/plan.out")"
-MAX_VCPU=32 step plan32 bash "$c" plan || fail "plan32"
-grep -q '^wall clock: about 13.9 h with MAX_VCPU 32' "$tmp/plan32.out" && pass "plan: MAX_VCPU sets the limit" \
-  || fail "plan MAX_VCPU=32: $(grep '^wall' "$tmp/plan32.out")"
+MAX_VCPU=64 step plan64 bash "$c" plan || fail "plan64"
+grep -q '^wall clock: about 10.7 h with MAX_VCPU 64' "$tmp/plan64.out" && grep -q '^aws logins: 1 ' "$tmp/plan64.out" \
+  && pass "plan: MAX_VCPU sets the limit" || fail "plan MAX_VCPU=64: $(grep -E '^(wall|aws)' "$tmp/plan64.out")"
 
 # The parts that ran at once, from a session's timeline.txt (its start and end
 # events in order): the largest number, whether two size 1 parts and the drill
@@ -218,7 +218,7 @@ grep -q 'left for the next login: seed:authentik s1:authentik s2:hearth s2:other
   && [ "$(ledger_open "$s/ledger.jsonl")" = 0 ] \
   && pass "session: 4 seeds, the drill and 4 size 1 parts done, nothing left up" || fail "session 1 state"
 read -r most s1s drill_s1 _ vcpu <<< "$(overlap "$so/timeline.txt")"
-[ "$s1s" = True ] && [ "$drill_s1" = True ] && [ "$most" -ge 4 ] && [ "$vcpu" -le 56 ] \
+[ "$s1s" = True ] && [ "$drill_s1" = True ] && [ "$most" -ge 4 ] && [ "$vcpu" -le 32 ] \
   && pass "session: parts in parallel (at most $most at once, two size 1 parts together, the drill with size 1; $vcpu vCPUs at most)" \
   || fail "session 1 overlap: $most $s1s $drill_s1 $vcpu"
 grep -q '^LOGIN_AT=' "$s/login.env" && pass "session: the login time is recorded" || fail "no LOGIN_AT"
@@ -229,8 +229,9 @@ echo "drys-authentik-s1-1 0" >> "$s/runs.active"
 cp "$so/hearth-s1/login.json" "$tmp/hearth-login-before.json"
 : > "$so/timeline.txt"
 
-# After a new login: the session resumes.
-SESSION=drys step session2 bash "$c" session || fail "session 2"
+# After a new login: the session resumes, with a larger quota (64), so the
+# size 2 parts run together.
+SESSION=drys MAX_VCPU=64 step session2 bash "$c" session || fail "session 2"
 grep -q 'runs left up by an earlier session: drys-authentik-s1-1' "$tmp/session2.out" && [ ! -s "$s/runs.active" ] \
   && grep -q 'results/drys-authentik-s1-2/' "$so/driver-s1-authentik.log" \
   && pass "resume: a run left up goes down first, and its id is not reused" || fail "resume: the lost run"
@@ -265,14 +266,16 @@ PY
 [ -z "$dup" ] && [ "$(ledger_open "$s/ledger.jsonl")" = 0 ] && pass "resume: no ledger entry counted twice, all closed" \
   || fail "counted twice: $dup"
 
-# MAX_VCPU 24: the seeds (16) and the drill (6) start; each size 1 part (10)
-# waits for vCPUs, and size 2 (24 each) runs one at a time.
+# The quota, MAX_VCPU 32 (the default): the seeds (16) and the drill (6) start;
+# one size 1 part (10) fits, the others wait for vCPUs; the size 2 parts (24
+# each) run one after the other.
 sv=$tmp/repo/loadtest/live/results/compare-drysv
-SESSION=drysv MAX_VCPU=24 step session-vcpu bash "$c" session || fail "session MAX_VCPU=24"
+SESSION=drysv step session-vcpu bash "$c" session || fail "session at MAX_VCPU 32"
 read -r _ _ _ s2s vcpu <<< "$(overlap "$sv/timeline.txt")"
-grep -q '^[0-9]* wait-vcpu s1:' "$sv/timeline.txt" && [ "$vcpu" -le 24 ] && [ "$s2s" = False ] && [ -s "$sv/summary.md" ] \
-  && pass "MAX_VCPU 24: parts wait for vCPUs (at most $vcpu running), size 2 one after the other, session done" \
-  || fail "MAX_VCPU 24: max $vcpu, s2 together $s2s"
+grep -q '^[0-9]* wait-vcpu s1:' "$sv/timeline.txt" && grep -q '^[0-9]* wait-vcpu s2:' "$sv/timeline.txt" \
+  && [ "$vcpu" -le 32 ] && [ "$s2s" = False ] && [ -s "$sv/summary.md" ] \
+  && pass "MAX_VCPU 32: parts wait for vCPUs (at most $vcpu running), size 2 one after the other, session done" \
+  || fail "MAX_VCPU 32: max $vcpu, s2 together $s2s"
 
 # The stop at STOP_USD while several parts run: a seed's snapshot ($0.20 a
 # month) passes $0.10; every part stops, every run of every part goes down.

@@ -154,15 +154,19 @@ class Schedule(unittest.TestCase):
         with self.assertRaises(ValueError):
             cost.schedule({**VCPU, "parts": [part("x", 1, vcpu=8)]}, 11.5, 0.25, 6)
 
-    def test_the_session_plan_runs_in_one_login_at_56_vcpus(self):
+    def test_the_session_plan_at_the_quota_of_32_and_at_64_vcpus(self):
         plan = json.load(open(os.path.join(HERE, "session-plan.json")))
+        self.assertEqual(cost.max_vcpu(plan), 32)
         window, margin = cost.login_settings(plan)
-        s = cost.schedule(plan, window, margin, 56)
+        # 32: the two size 2 parts (24 vCPUs each) run one after the other.
+        s = cost.schedule(plan, window, margin, 32)
+        self.assertEqual(s["logins"], 2)
+        self.assertAlmostEqual(s["wall_clock_h"], 13.9, places=1)
+        self.assertLessEqual(s["peak_vcpu"], 32)
+        s = cost.schedule(plan, window, margin, 64)
         self.assertEqual(s["logins"], 1)
         self.assertAlmostEqual(s["wall_clock_h"], 10.7, places=1)
-        self.assertLessEqual(s["peak_vcpu"], 56)
-        # A smaller quota is slower, never wrong.
-        self.assertGreater(cost.schedule(plan, window, margin, 24)["wall_clock_h"], s["wall_clock_h"])
+        self.assertLessEqual(s["peak_vcpu"], 64)
 
 
 class Remaining(unittest.TestCase):

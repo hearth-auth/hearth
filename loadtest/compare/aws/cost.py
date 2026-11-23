@@ -193,7 +193,7 @@ def login_settings(plan):
 
 
 def max_vcpu(plan):
-    return int(os.environ.get("MAX_VCPU") or plan.get("max_vcpu", 56))
+    return int(os.environ.get("MAX_VCPU") or plan.get("max_vcpu", 32))
 
 
 def brief(plan, prices):
@@ -213,7 +213,7 @@ def brief(plan, prices):
     for n, i in enumerate(s["per_login"], 1):
         lines.append(f"  login {n} at +{i['start_h']} h: " + "; ".join(i["parts"]))
     other = []
-    for v in (24, 32, 48, 56, 64, 96):
+    for v in (24, 32, 48, 64, 96):
         try:
             o = schedule(plan, window, margin, v)
             other.append(f"{v}: {o['wall_clock_h']} h, {o['logins']} login(s)")
