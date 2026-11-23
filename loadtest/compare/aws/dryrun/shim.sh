@@ -8,6 +8,9 @@
 # journey takes 5 ms, except at an offered rate of DRY_FAIL_RATE (/s, default
 # 400) or more, where it takes 5 s, so the ladder fails there.
 #
+# DRY_STS_FAIL=1 makes `aws sts get-caller-identity` fail, as after the login
+# has expired.
+#
 # The addresses handed out are documentation ranges, built at run time.
 set -uo pipefail
 
@@ -18,11 +21,15 @@ log() {
   printf 'DRY %s\n' "$*" >> "$state/calls.log"
   printf 'DRY %s\n' "$*" >&2
 }
+# A number unique to this call: the parts of a session call the shims at once.
 counter() {
-  local n
-  n=$(($(cat "$state/n" 2> /dev/null || echo 0) + 1))
-  echo "$n" > "$state/n"
-  echo "$n"
+  (
+    flock 9
+    local n
+    n=$(($(cat "$state/n" 2> /dev/null || echo 0) + 1))
+    echo "$n" > "$state/n"
+    echo "$n"
+  ) 9> "$state/n.lock"
 }
 public_ip() { printf '%d.%d.%d.%d' 198 51 100 "$1"; }
 private_ip() { printf '%d.%d.%d.%d' 10 0 0 "$1"; }
@@ -69,7 +76,11 @@ case $tool in
     log "aws $*"
     n=$(counter)
     case " $* " in
-      *" sts get-caller-identity "*) echo "arn:aws:iam::ACCOUNT:user/hearth-stress-runner" ;;
+      *" sts get-caller-identity "*)
+        # DRY_STS_FAIL=1: the login has expired.
+        [ "${DRY_STS_FAIL:-}" != 1 ] || exit 255
+        echo "arn:aws:iam::ACCOUNT:user/hearth-stress-runner"
+        ;;
       *" ssm get-parameter "*) echo ami-dry ;;
       *" describe-vpcs "*) echo vpc-dry ;;
       *" describe-subnets "*) echo subnet-dry ;;

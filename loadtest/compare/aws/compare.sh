@@ -2,11 +2,13 @@
 # The AWS session of the same-hardware comparison (#913): seeds each product
 # once, keeps its store as an EBS snapshot, then runs every journey's step
 # ladder on the fixed hardware, with a running cost total that stops the
-# session at $15. It drives loadtest/live/cloud.sh (sourced for its functions,
+# session at $20. It drives loadtest/live/cloud.sh (sourced for its functions,
 # and run for up, deploy, import and down) with PROVIDER=aws; nothing here
 # changes how the #647 rounds run.
 #
-#   compare.sh plan                 the session plan: hours and cost per part
+#   compare.sh plan                 the session plan: hours and cost per part,
+#                                   the wall clock and the AWS logins it needs
+#                                   (at MAX_VCPU, and for other limits)
 #   compare.sh seed <product>       one product's seed run (server only): 1M bulk
 #                                   users and 1,000 login users through its own
 #                                   seed tool, the 1M-id listing, the seed time,
@@ -15,10 +17,22 @@
 #                                   a ramp run: size 1 (c7i.large and 2
 #                                   generators) or 2 (c7i.2xlarge and 4); each
 #                                   journey's ladder from a restored store
-#   compare.sh session              all of it: the seeds (in parallel), size 1
-#                                   for the 5 products, the #647 10M restore
-#                                   drill, size 2 for Hearth and the fastest
-#                                   other product
+#   compare.sh session              all of it, in parallel: the 5 seeds and
+#                                   the #647 10M restore drill at once, each
+#                                   product's size 1 ramps as soon as its
+#                                   snapshot exists, then size 2 for Hearth
+#                                   and the fastest other product together.
+#                                   Each part is its own compare.sh process
+#                                   with its own runs; a part waits while its
+#                                   instances would take the running vCPUs
+#                                   past MAX_VCPU. Run it right after `aws
+#                                   login`: a part that would end after the
+#                                   login window does not start, and when
+#                                   nothing else can run the session stops
+#                                   cleanly (exit 4); a rerun after a new
+#                                   login resumes (finished seeds, journeys
+#                                   and the drill are kept, and not counted
+#                                   twice)
 #   compare.sh drill                the #647 10M restore drill (round.sh, a plan
 #                                   with one drill line)
 #   compare.sh cost                 the running total
@@ -35,10 +49,23 @@
 # Settings (environment):
 #   SESSION        the session id (required; letters, digits, -), e.g. 913a
 #   IMAGE          the Hearth image (cloud.sh; needs a revision label)
-#   STOP_USD       15  (the running total that stops and tears down the session)
-#   CAP_USD        20  (a part whose estimate would pass it does not start)
-#   SEED_PARALLEL  5   (seed runs at a time; each is one c7i.large)
-#   SEED_SIZE      c7i.large (#913: the size 1 server)
+#   STOP_USD       20  (the running total that stops the session and tears
+#                  down every part's runs)
+#   CAP_USD        20  (a part whose estimate, plus what the parts running are
+#                  still expected to cost, would pass it does not start)
+#   MAX_VCPU       56  (the vCPUs of all running instances; set it to the
+#                  account's on-demand standard-instance quota, L-1216C47A)
+#   SEED_SIZE      every seed server's type (default: session-plan.json's
+#                  seed_server: c7i.large, the size 1 server; Authentik
+#                  c7i.2xlarge)
+#   LOGIN_WINDOW_H 11.5 (an `aws login` lasts 12 h at most)
+#   LOGIN_MARGIN_MIN 15 (the teardown's share of the window)
+#                  A part (a seed, a product's ramps at one size, the drill)
+#                  and each journey start only if `aws sts
+#                  get-caller-identity` works and their estimate plus the
+#                  margin ends before LOGIN_AT + LOGIN_WINDOW_H. `session`
+#                  records LOGIN_AT (its start) in the state; LOGIN_AT=<epoch
+#                  seconds> overrides it for one command.
 #   DATA_GB        40  (the data volume of a seed, and of each ramp server)
 #   JOURNEYS       the journeys of `ramps` and `session` (default: all 10 at
 #                  size 1, the 8 without the cold reads at size 2)
@@ -80,7 +107,7 @@ esac
 state=$compare_dir/.build/aws-$session
 out=$live/results/compare-$session
 ledger=$state/ledger.jsonl
-stop_usd=${STOP_USD:-15}
+stop_usd=${STOP_USD:-20}
 cap_usd=${CAP_USD:-20}
 data_gb=${DATA_GB:-40}
 
@@ -92,8 +119,8 @@ set -euo pipefail
 
 cost() { python3 -I "$aws_dir/cost.py" "$@"; }
 
-# The seeds run as parallel compare.sh processes that share the state files:
-# each change to one holds the session's lock. $1: file; $2: line to add, or
+# The parts of a session run as parallel compare.sh processes that share the
+# state files: each change to one holds the session's lock. $1: file; $2: line to add, or
 # -d and a sed address of the lines to delete.
 state_edit() {
   local f=$1
@@ -117,26 +144,35 @@ init_state() {
 }
 
 # The running total after a step: printed, appended to cost.txt, and the
-# session stops (every run of it torn down) at STOP_USD.
+# session stops at STOP_USD: every run of it (every part's) goes down, and
+# the STOPPED file tells the session and the other parts.
 spend() {
   local what=$1 total
   total=$(cost check "$ledger" 1000000)
   printf '%s %s total $%s\n' "$(TZ=America/New_York date +'%Y-%m-%d %H:%M %Z')" "$what" "$total" >> "$out/cost.txt"
   clog "cost after $what: \$$total (stop at \$$stop_usd)"
-  if ! cost check "$ledger" "$stop_usd" > /dev/null; then
+  if { [ -n "${PART:-}" ] && [ -e "$state/STOPPED" ]; } || ! cost check "$ledger" "$stop_usd" > /dev/null; then
     clog "the running total \$$total reached \$$stop_usd: stopping, every run goes down"
+    echo "the running total \$$total reached \$$stop_usd" >> "$state/STOPPED"
     down_all
     exit 3
   fi
 }
 
-# Refuses a part whose estimate (USD) would take the total past CAP_USD.
-afford() {
-  local what=$1 est=$2 total
+# Whether a part may start: its estimate (USD), the total so far and what the
+# other parts running are still expected to cost stay within CAP_USD.
+fits_cap() {
+  local what=$1 est=$2 total rest
   total=$(cost check "$ledger" 1000000)
-  python3 -I -c 'import sys; t, e, c = map(float, sys.argv[1:]); sys.exit(t + e > c)' "$total" "$est" "$cap_usd" \
-    || cdie "$what (about \$$est) would take the total \$$total past the \$$cap_usd cap"
+  rest=$(cost remaining "$state/parts.active" "$aws_dir/session-plan.json" "${PART:-}")
+  python3 -I -c 'import sys; t, r, e, c = map(float, sys.argv[1:]); sys.exit(t + r + e > c)' "$total" "$rest" "$est" "$cap_usd" \
+    && return 0
+  clog "$what (about \$$est) would take the total \$$total, plus \$$rest still to come from the parts running, past the \$$cap_usd cap"
+  return 1
 }
+
+# Refuses a part whose estimate would pass CAP_USD.
+afford() { fits_cap "$@" || cdie "$1 does not start"; }
 
 # The estimate (USD) of `hours` on a set of instances: "<type>:<n> ...".
 estimate_usd() {
@@ -149,6 +185,67 @@ print(round(h * sum(int(n) * (p["instance_hour"][t] + p["public_ipv4_hour"])
                     for t, n in (a.split(":") for a in sys.argv[3:])), 2))
 PY
 }
+
+# A value of session-plan.json's model: `plan_model seed_hours authentik`.
+plan_model() { jget model "$@" < "$aws_dir/session-plan.json"; }
+
+# The first run id <prefix>-<n> (n = 1, 2, ...) the ledger has not seen: a
+# resumed session starts new runs and never reopens a finished run's entries.
+fresh_id() {
+  local n=1
+  while grep -q "\"id\": \"$1-$n-server\"" "$ledger" 2> /dev/null; do n=$((n + 1)); done
+  echo "$1-$n"
+}
+
+# ---------------------------------------------------------------- AWS login
+
+login_window_h=${LOGIN_WINDOW_H:-11.5}
+login_margin_min=${LOGIN_MARGIN_MIN:-15}
+export LOGIN_WINDOW_H=$login_window_h LOGIN_MARGIN_MIN=$login_margin_min
+
+login_at() {
+  if [ -n "${LOGIN_AT:-}" ]; then
+    echo "$LOGIN_AT"
+  else
+    sed -n 's/^LOGIN_AT=//p' "$state/login.env" 2> /dev/null | tail -n 1
+  fi
+}
+
+et() { TZ=America/New_York date -d "@${1%.*}" +'%Y-%m-%d %H:%M %Z'; }
+
+# Whether $1 (about $2 hours) may start: the aws CLI answers, and the part
+# plus the teardown margin ends inside the login window. Says why not.
+login_fits() {
+  local what=$1 hours=$2 at end
+  if ! (aws_check_identity) > /dev/null 2>&1; then
+    clog "$what: the aws CLI is not logged in (sts get-caller-identity failed)"
+    return 1
+  fi
+  at=$(login_at)
+  [ -n "$at" ] || return 0
+  end=$(python3 -I -c 'import sys; print(int(float(sys.argv[1]) + float(sys.argv[2]) * 3600))' "$at" "$login_window_h")
+  python3 -I -c 'import sys, time; h, m, end = map(float, sys.argv[1:]); sys.exit(time.time() + h * 3600 + m * 60 > end)' \
+    "$hours" "$login_margin_min" "$end" && return 0
+  clog "$what (about $hours h, plus $login_margin_min min to tear down) would end after the AWS login window ($(et "$end"))"
+  return 1
+}
+
+# Stops at the end of the login window (exit 4). A part of a session
+# (PART set) has torn its own run down and leaves the rest to the session;
+# otherwise every run goes down, and a rerun after a new login resumes.
+login_exit() {
+  if [ -n "${PART:-}" ]; then
+    clog "$PART: stopped before the AWS login window ends"
+    exit 4
+  fi
+  down_all
+  trap - EXIT
+  clog "stopped before the AWS login window ends: run aws login, then compare.sh session again (it resumes; finished seeds, journeys and the drill are kept)"
+  exit 4
+}
+
+# login_fits, or login_exit.
+login_gate() { login_fits "$@" || login_exit; }
 
 # Starts a run: `cloud.sh up` with its own settings, its instances in the
 # ledger from before the launch. $1: run id; $2: server type; $3: generators;
@@ -168,23 +265,34 @@ run_up() {
 # Tears down run $1 (cloud.sh down: instances, group, key; lists what is left)
 # and closes its ledger entries.
 run_down() {
-  local id=$1 gens i bytes
-  gens=$(awk -v r="$id" '$1 == r {print $2}' "$state/runs.active" | tail -n 1)
-  STRESS_RUN=$id "$live/cloud.sh" down 2>&1 | tee "$out/down-$id.txt" >&2 || true
-  cost end "$ledger" "$id-server"
-  for i in $(seq 1 "${gens:-0}"); do cost end "$ledger" "$id-gen$i"; done
-  bytes=$(du -sb "$live/results/$id" 2> /dev/null | cut -f1 || echo 0)
-  cost data-out "$ledger" "${bytes:-0}"
-  state_edit "$state/runs.active" -d "/^$id /"
+  # One process tears a run down (its part, or a stop): the run's lock, and
+  # nothing to do once the run has left runs.active.
+  (
+    flock 8
+    local id=$1 gens i bytes
+    grep -q "^$id " "$state/runs.active" || exit 0
+    gens=$(awk -v r="$id" '$1 == r {print $2}' "$state/runs.active" | tail -n 1)
+    STRESS_RUN=$id "$live/cloud.sh" down 2>&1 | tee "$out/down-$id.txt" >&2 || true
+    cost end "$ledger" "$id-server"
+    for i in $(seq 1 "${gens:-0}"); do cost end "$ledger" "$id-gen$i"; done
+    bytes=$(du -sb "$live/results/$id" 2> /dev/null | cut -f1 || echo 0)
+    cost data-out "$ledger" "${bytes:-0}"
+    state_edit "$state/runs.active" -d "/^$id /"
+  ) 8> "$state/down-$1.lock"
 }
 
+# Every run of the session goes down: one process at a time (several parts
+# may stop at once).
 down_all() {
-  local id
-  while read -r id _; do
-    [ -n "$id" ] || continue
-    clog "tearing down $id"
-    run_down "$id"
-  done < <(cat "$state/runs.active")
+  (
+    flock 9
+    local id
+    while read -r id _; do
+      [ -n "$id" ] || continue
+      clog "tearing down $id"
+      run_down "$id"
+    done < <(cat "$state/runs.active")
+  ) 9> "$state/down.lock"
 }
 
 # In a subshell, with run $1 loaded (cloud.sh's load_run): the rest of the
@@ -250,9 +358,16 @@ self_generator() {
     "$SERVER_ID" "$SERVER_PUBLIC" "$SERVER_PRIVATE" >> "$run/run.env"
 }
 
-seed_estimate_minutes() {
-  python3 -I -c 'import json,sys; print(round(json.load(open(sys.argv[1]))["model"]["seed_hours"][sys.argv[2]] * 60))' \
-    "$aws_dir/session-plan.json" "$1"
+seed_hours() { plan_model seed_hours "$1"; }
+
+# A product's seed server: SEED_SIZE, else the plan's seed_server.
+seed_size_of() {
+  if [ -n "${SEED_SIZE:-}" ]; then
+    echo "$SEED_SIZE"
+  else
+    python3 -I -c 'import json,sys; s=json.load(open(sys.argv[1]))["model"]["seed_server"]; print(s.get(sys.argv[2], s["default"]))' \
+      "$aws_dir/session-plan.json" "$1"
+  fi
 }
 
 # ---------------------------------------------------------------- seed
@@ -262,25 +377,29 @@ cmd_seed() {
   init_state
   [[ " ${PRODUCTS[*]} " == *" $p "* ]] || cdie "unknown product $p"
   [ ! -s "$out/seed-$p.json" ] || cdie "$p is seeded already ($out/seed-$p.json)"
-  local id=$session-seed-$p est minutes size=${SEED_SIZE:-c7i.large}
-  est=$(seed_estimate_minutes "$p")
+  local id est minutes size
+  size=$(seed_size_of "$p")
+  est=$(python3 -I -c "print(round($(seed_hours "$p") * 60))")
   minutes=$(lad seed-minutes "$est")
+  # In a session (PART set), the session checked the login window first.
+  [ -n "${PART:-}" ] || login_gate "seed $p" "$(seed_hours "$p")"
   afford "seed $p" "$(estimate_usd "$(python3 -I -c "print($minutes / 60)")" "$size:1")"
+  id=$(fresh_id "$session-seed-$p")
   clog "seed $p on $size, run $id, lifetime $minutes min (estimate $est min plus 50 %, at most 16 h)"
   run_up "$id" "$size" 0 "$minutes" 30
-  in_run "$id" seed_on_server "$p" "$id"
+  in_run "$id" seed_on_server "$p" "$id" "$size"
   run_down "$id"
   spend "seed $p"
 }
 
 seed_on_server() {
-  local p=$1 id=$2 vol t0 t1 t_usable f="$out/seed-$p.json" log="$out/seed-$p.log"
+  local p=$1 id=$2 server=$3 vol t0 t1 t_usable f="$out/seed-$p.json" log="$out/seed-$p.log"
   self_generator
   load_run
   vol=$(aws_data_volume_id)
   copy_compare
   rsrv data-new "$vol"
-  local idle size settle pull=""
+  local idle size settle pull="" procs=None
   if [ "$p" = hearth ]; then
     rsrv bind-hearth
     "$live/cloud.sh" deploy 2>&1 | tee -a "$log" >&2
@@ -301,8 +420,12 @@ seed_on_server() {
     product_observers "$p"
     pull=$(rsrv pull "$p")
     rsrv product "$p" up 2>&1 | tee -a "$log" >&2
+    # Authentik's seed applies its blueprints in SEED_PROCS processes: 4, as
+    # measured locally, on a larger seed server; its default 2 on c7i.large.
+    procs=2
+    [ "$server" = c7i.large ] || procs=4
     t0=$(date +%s)
-    rsrv product "$p" seed 0 1000000 2>&1 | tee -a "$log" >&2
+    srv "SEED_PROCS=$procs bash /opt/compare/remote.sh product $p seed 0 1000000" 2>&1 | tee -a "$log" >&2
     t1=$(date +%s)
     list_ids "$p"
     t_usable=$(date +%s)
@@ -321,7 +444,8 @@ seed_on_server() {
   python3 -I - "$f" << PY
 import json, sys
 json.dump({
-    "product": "$p", "server": "${SEED_SIZE:-c7i.large}", "users_bulk": 1000000, "users_login": 1000,
+    "product": "$p", "server": "$server", "seed_procs": $procs, "users_bulk": 1000000, "users_login": 1000,
+    "seed_time_comparable_with": "seeds on a $server server only",
     "seed_call_s": $((t1 - t0)), "seed_until_usable_s": $((t_usable - t0)),
     "usable_rule": "the admin API lists 1M users (ids.js)",
     "idle_rss_kb": int("${idle:-0}" or 0), "store_bytes": int("${size:-0}" or 0),
@@ -383,12 +507,21 @@ cmd_ramps() {
     2) server=c7i.2xlarge gens=4 ;;
     *) cdie "size $size (1 or 2)" ;;
   esac
-  local snap dir=$out/$p-s$size n=0 id="" left=0 j
+  local snap dir=$out/$p-s$size id="" left=0 j todo=()
   export COMPARE_PRODUCT=$p
   snap=$(snapshot_of "$p")
   mkdir -p "$dir"
   for j in "${journeys[@]}"; do
-    [ ! -s "$dir/$j.json" ] || { clog "$p size $size $j: done already"; continue; }
+    if [ -s "$dir/$j.json" ]; then clog "$p size $size $j: done already"; else todo+=("$j"); fi
+  done
+  [ "${#todo[@]}" -gt 0 ] || return 0
+  # The part (the journeys left) must end inside the AWS login window, and so
+  # must each journey (an overrun part stops between journeys).
+  local setup_h journey_h
+  setup_h=$(plan_model setup_hours_per_ramp_run)
+  journey_h=$(python3 -I -c "print(round($(plan_model minutes_per_journey) / 60, 3))")
+  [ -n "${PART:-}" ] || login_gate "$p size $size (${#todo[@]} journeys)" "$(python3 -I -c "print(round($setup_h + ${#todo[@]} * $journey_h, 2))")"
+  for j in "${todo[@]}"; do
     # A new set when the current one has less lifetime left than a ladder
     # can take (35 min), so no instance ends in the middle of a ramp.
     if [ -n "$id" ] && [ $((left - $(date +%s))) -lt 2100 ]; then
@@ -396,10 +529,14 @@ cmd_ramps() {
       run_down "$id"
       id=""
     fi
+    if ! login_fits "$p size $size $j" "$(python3 -I -c "print($journey_h + (0 if '$id' else $setup_h))")"; then
+      [ -z "$id" ] || run_down "$id"
+      spend "$p size $size"
+      login_exit
+    fi
     if [ -z "$id" ]; then
-      n=$((n + 1))
-      id=$session-$p-s$size-$n
-      afford "$p size $size set $n" "$(estimate_usd 4 "$server:1" "c7i.xlarge:$gens")"
+      id=$(fresh_id "$session-$p-s$size")
+      afford "$p size $size run $id" "$(estimate_usd 4 "$server:1" "c7i.xlarge:$gens")"
       run_up "$id" "$server" "$gens" 240 40 SERVER_DATA_SNAPSHOT="$snap" AWS_EXTRA_PORTS="$(ports_of "$p")"
       left=$(($(date +%s) + 240 * 60 - 600))
       in_run "$id" ramp_setup "$p" "$size" "$dir"
@@ -594,33 +731,50 @@ watch_ramp() {
 
 # ---------------------------------------------------------------- session
 
-cmd_session() {
-  init_state
-  [ -n "${IMAGE:-}" ] || cdie "set IMAGE to the Hearth image (cloud.sh)"
-  cost estimate "$aws_dir/session-plan.json" > "$out/plan.json"
-  clog "plan: $(jget total < "$out/plan.json") USD, $(jget hours < "$out/plan.json") instance-set hours"
-  trap 'down_all' EXIT
-  # The seeds run in the background, SEED_PARALLEL at a time; each product's
-  # size 1 ramps start when its snapshot exists.
-  local p pids=() running=0
-  for p in "${PRODUCTS[@]}"; do
-    if [ ! -s "$out/seed-$p.json" ]; then
-      while [ "$(jobs -rp | wc -l)" -ge "${SEED_PARALLEL:-5}" ]; do sleep 30; done
-      ("$0" seed "$p" > "$out/seed-$p.driver.log" 2>&1 || touch "$state/seed-$p.failed") &
-      pids+=($!)
-      running=$((running + 1))
-      sleep 5
-    fi
-  done
-  for p in "${PRODUCTS[@]}"; do
-    while [ ! -s "$out/seed-$p.json" ]; do
-      [ ! -e "$state/seed-$p.failed" ] || cdie "the seed of $p failed: $out/seed-$p.driver.log"
-      sleep 60
-    done
-    cmd_ramps "$p" 1
-  done
-  wait
-  # The size 2 product: #913's rule over the size 1 results.
+# The journeys of a ramps part at size $1.
+journeys_of() {
+  if [ -n "${JOURNEYS:-}" ]; then
+    echo "$JOURNEYS"
+  elif [ "$1" = 1 ]; then
+    echo "${ALL_JOURNEYS[*]}"
+  else
+    echo "${SIZE2_JOURNEYS[*]}"
+  fi
+}
+
+# The product of part s2:other (after the size 1 results: fastest.json).
+other_product() {
+  [ -s "$out/fastest.json" ] || return 1
+  jget product < "$out/fastest.json"
+}
+
+# Whether a part of the plan (seed:<p>, s1:<p>, drill, s2:<p>, s2:other) is
+# done: its results exist.
+part_done() {
+  local kind=${1%%:*} p=${1#*:} j
+  case $kind in
+    seed) [ -s "$out/seed-$p.json" ] ;;
+    drill) [ -s "$out/drill.done" ] ;;
+    s1 | s2)
+      if [ "$p" = other ]; then p=$(other_product) || return 1; fi
+      for j in $(journeys_of "${kind#s}"); do [ -s "$out/$p-$kind/$j.json" ] || return 1; done
+      ;;
+  esac
+}
+
+# The compare.sh command of a part.
+part_cmd() {
+  case $1 in
+    seed:*) echo "seed ${1#seed:}" ;;
+    s1:*) echo "ramps ${1#s1:} 1" ;;
+    s2:other) echo "ramps $(other_product) 2" ;;
+    s2:*) echo "ramps ${1#s2:} 2" ;;
+    drill) echo drill ;;
+  esac
+}
+
+# The size 2 product: #913's rule over the size 1 results.
+choose_other() {
   python3 -I - "$out" "${PRODUCTS[@]}" > "$out/size1.json" << 'PY'
 import json, os, sys
 out, products = sys.argv[1], sys.argv[2:]
@@ -634,22 +788,155 @@ for p in products:
 json.dump(res, sys.stdout, indent=1)
 PY
   lad fastest "$out/size1.json" > "$out/fastest.json"
-  local other
-  other=$(jget product < "$out/fastest.json")
-  clog "size 2: hearth and $other (the highest geometric mean of the 8 clean rates at size 1)"
-  cmd_drill
-  cmd_ramps hearth 2
-  cmd_ramps "$other" 2
-  summary
+  clog "size 2: hearth and $(other_product) (the highest geometric mean of the 8 clean rates at size 1)"
+}
+
+timeline() { printf '%s %s\n' "$(date +%s)" "$*" >> "$out/timeline.txt"; }
+
+kill_tree() {
+  local c
+  for c in $(pgrep -P "$1" 2> /dev/null); do kill_tree "$c"; done
+  kill -TERM "$1" 2> /dev/null || true
+}
+
+# The session's running parts, by pid.
+declare -A S_PART=() S_VCPU=()
+S_USED=0
+
+# Stops every running part and tears down every run.
+session_cleanup() {
+  local pid
+  for pid in "${!S_PART[@]}"; do kill_tree "$pid"; done
+  wait 2> /dev/null || true
+  : > "$state/parts.active"
+  down_all
+}
+
+session_stop() {
+  local rc=$1
+  shift
+  clog "$*: stopping every part"
+  session_cleanup
   trap - EXIT
+  exit "$rc"
+}
+
+cmd_session() {
+  init_state
+  [ -n "${IMAGE:-}" ] || cdie "set IMAGE to the Hearth image (cloud.sh)"
+  (aws_check_identity) > /dev/null 2>&1 || cdie "the aws CLI is not logged in: run aws login, then compare.sh session"
+  local max_vcpu=${MAX_VCPU:-56}
+  [[ $max_vcpu =~ ^[0-9]+$ ]] || cdie "MAX_VCPU $max_vcpu"
+  # The login window starts now: run the session right after `aws login`.
+  export LOGIN_AT=${LOGIN_AT:-$(date +%s)}
+  state_edit "$state/login.env" "LOGIN_AT=$LOGIN_AT"
+  clog "AWS login window: until $(et "$(python3 -I -c "print(int($LOGIN_AT + $login_window_h * 3600))")") (LOGIN_WINDOW_H $login_window_h); MAX_VCPU $max_vcpu"
+  # Runs an earlier session left up (its credentials ran out during a part,
+  # say) go down first, and their ledger entries close.
+  if [ -s "$state/runs.active" ]; then
+    clog "runs left up by an earlier session: $(cut -d' ' -f1 "$state/runs.active" | tr '\n' ' ')"
+    down_all
+  fi
+  rm -f "$state/STOPPED"
+  : > "$state/parts.active"
+  MAX_VCPU=$max_vcpu cost estimate "$aws_dir/session-plan.json" > "$out/plan.json"
+  ! grep -q '"error"' "$out/plan.json" || cdie "the plan does not fit: $(jget schedule error < "$out/plan.json")"
+  clog "plan: $(jget total < "$out/plan.json") USD, $(jget hours < "$out/plan.json") instance-set hours, wall clock $(jget schedule wall_clock_h < "$out/plan.json") h, $(jget schedule logins < "$out/plan.json") login(s)"
+  trap session_cleanup EXIT
+  local order=() part
+  read -r -a order <<< "$(python3 -I -c 'import json,sys; print(" ".join(p["id"] for p in json.load(open(sys.argv[1]))["parts"] if p.get("id")))' "$aws_dir/session-plan.json")"
+  local -A status=()
+  for part in "${order[@]}"; do
+    if part_done "$part"; then status[$part]=done; else status[$part]=pending; fi
+  done
+  # Starts every part that can start, in plan order, then waits for one to
+  # end; until nothing runs and nothing can start.
+  local hours vcpu usd fin rc pid args=() q
+  while :; do
+    for part in "${order[@]}"; do
+      [ "${status[$part]}" = pending ] || continue
+      case $part in
+        s1:*) [ "${status[seed:${part#s1:}]}" = done ] || continue ;;
+        s2:*)
+          for q in "${order[@]}"; do
+            [[ $q != s1:* ]] || [ "${status[$q]}" = done ] || continue 2
+          done
+          other_product > /dev/null || choose_other
+          ;;
+      esac
+      read -r hours vcpu usd <<< "$(cost part "$aws_dir/session-plan.json" "$part")"
+      [ "$vcpu" -le "$max_vcpu" ] || cdie "$part needs $vcpu vCPUs, more than MAX_VCPU $max_vcpu"
+      if [ $((S_USED + vcpu)) -gt "$max_vcpu" ]; then
+        if [ "${status[$part.vcpu]:-}" != said ]; then
+          clog "$part waits: its $vcpu vCPUs would make $((S_USED + vcpu)) running, over MAX_VCPU $max_vcpu"
+          timeline "wait-vcpu $part need=$vcpu running=$S_USED"
+          status[$part.vcpu]=said
+        fi
+        continue
+      fi
+      if ! login_fits "$part" "$hours"; then
+        status[$part]=later
+        continue
+      fi
+      if ! fits_cap "$part" "$usd"; then
+        status[$part]=refused
+        continue
+      fi
+      read -r -a args <<< "$(part_cmd "$part")"
+      PART=$part "$0" "${args[@]}" >> "$out/driver-${part/:/-}.log" 2>&1 &
+      pid=$!
+      S_PART[$pid]=$part
+      S_VCPU[$pid]=$vcpu
+      S_USED=$((S_USED + vcpu))
+      status[$part]=running
+      state_edit "$state/parts.active" "$part $usd $hours $(date +%s)"
+      timeline "start $part vcpu=$vcpu running=$S_USED"
+      clog "$part started (compare.sh ${args[*]}; about $hours h, \$$usd, $vcpu vCPUs; $S_USED of $max_vcpu running)"
+    done
+    [ "${#S_PART[@]}" -gt 0 ] || break
+    rc=0
+    wait -n -p fin || rc=$?
+    [ -n "${fin:-}" ] && [ -n "${S_PART[$fin]:-}" ] || continue
+    part=${S_PART[$fin]}
+    S_USED=$((S_USED - S_VCPU[$fin]))
+    unset "S_PART[$fin]" "S_VCPU[$fin]"
+    state_edit "$state/parts.active" -d "\\|^$part |"
+    timeline "end $part rc=$rc"
+    [ ! -e "$state/STOPPED" ] || session_stop 3 "$(tail -n 1 "$state/STOPPED")"
+    case $rc in
+      0) status[$part]=done ;;
+      4) status[$part]=later ;;
+      3) session_stop 3 "$part stopped at STOP_USD" ;;
+      *) session_stop 1 "$part failed (exit $rc): $out/driver-${part/:/-}.log" ;;
+    esac
+    clog "$part ended (exit $rc); $S_USED of $max_vcpu vCPUs running"
+  done
+  trap - EXIT
+  down_all
+  local later=() refused=()
+  for part in "${order[@]}"; do
+    case ${status[$part]} in
+      later | pending) later+=("$part") ;;
+      refused) refused+=("$part") ;;
+    esac
+  done
+  [ "${#refused[@]}" = 0 ] || cdie "not started, over the \$$cap_usd cap: ${refused[*]}"
+  if [ "${#later[@]}" -gt 0 ]; then
+    clog "left for the next login: ${later[*]}"
+    clog "stopped before the AWS login window ends: run aws login, then compare.sh session again (it resumes; finished seeds, journeys and the drill are kept)"
+    exit 4
+  fi
+  summary
   clog "session done: $(cost check "$ledger" 1000000) USD; snapshots kept: compare.sh snapshots"
 }
 
 cmd_drill() {
   init_state
   [ ! -s "$out/drill.done" ] || { clog "the drill ran already"; return 0; }
-  local id=$session-drill
+  [ -n "${PART:-}" ] || login_gate "the #647 drill" "$(cost part "$aws_dir/session-plan.json" drill | cut -d' ' -f1)"
   afford "the #647 drill" "$(estimate_usd 2 r7i.large:1 c7i.xlarge:1)"
+  local id
+  id=$(fresh_id "$session-drill")
   cost start "$ledger" instance "$id-server" r7i.large 150
   # cloud.sh gives every instance of a run the same root disk (AWS_DISK_GB).
   cost start "$ledger" instance "$id-gen1" c7i.xlarge 150
@@ -684,12 +971,21 @@ for f in sorted(glob.glob(os.path.join(out, "*-s[12]", "*.json"))):
     rate = f"{'>= ' if r['at_least'] else ''}{r['clean_rate']}"
     print(f"| {r['product']} | {size} | {r['journey']} | {rate} | {r['p99_ms']} | {r['server_cpu_pct_mean']} "
           f"| {r['server_rss_mb_max']} | {r['disk_write_iops_mean']} | {', '.join(r['flags'])} |")
-print("\n| product | seed call s | until usable s | idle RSS MB | store GB |")
-print("|---|---|---|---|---|")
-for f in sorted(glob.glob(os.path.join(out, "seed-*.json"))):
-    s = json.load(open(f))
-    print(f"| {s['product']} | {s['seed_call_s']} | {s['seed_until_usable_s']} | {s['idle_rss_kb'] / 1024:.0f} "
-          f"| {s['store_bytes'] / 1e9:.2f} |")
+# The seed times compare only between seeds on the same server type: one
+# table per type.
+seeds = [json.load(open(f)) for f in sorted(glob.glob(os.path.join(out, "seed-*.json")))]
+servers = sorted({s["server"] for s in seeds}, key=lambda t: (t != "c7i.large", t))
+for server in servers:
+    others = [t for t in servers if t != server]
+    print(f"\n## Seeds on {server}\n")
+    if others:
+        print(f"Seed times here compare only with each other, not with the seeds on {', '.join(others)}.\n")
+    print("| product | seed server | seed call s | until usable s | idle RSS MB | store GB |")
+    print("|---|---|---|---|---|---|")
+    for s in seeds:
+        if s["server"] == server:
+            print(f"| {s['product']} | {s['server']} | {s['seed_call_s']} | {s['seed_until_usable_s']} "
+                  f"| {s['idle_rss_kb'] / 1024:.0f} | {s['store_bytes'] / 1e9:.2f} |")
 PY
   cat "$out/cost.txt" >> "$out/summary.md" 2> /dev/null || true
 }
@@ -721,7 +1017,10 @@ cmd_delete_snapshots() {
 }
 
 case ${1:-} in
-  plan) cost estimate "$aws_dir/session-plan.json" ;;
+  plan)
+    cost estimate "$aws_dir/session-plan.json"
+    cost brief "$aws_dir/session-plan.json"
+    ;;
   seed) shift; cmd_seed "$@" ;;
   ramps) shift; cmd_ramps "$@" ;;
   session) shift; cmd_session "$@" ;;

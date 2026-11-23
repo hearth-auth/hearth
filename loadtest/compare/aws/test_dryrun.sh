@@ -8,7 +8,13 @@
 #   - its size 1 ramps: the ladder (coarse doubling, the first failing step,
 #     3 fine steps), the clean rate, "at least" when all 8 coarse steps pass
 #   - Hearth's seed and ramp, the cold read's working set
-#   - the cost ledger (every instance closed), cost.txt, the $15 stop
+#   - the cost ledger (every instance closed), cost.txt, the $20 stop (STOP_USD)
+#   - the AWS login window: no part without a login or past the window; a
+#     session that stops at the window, then resumes without redoing work or
+#     counting a cost twice; the plan's wall clock and logins
+#   - the parallel session: parts at once (two size 1 parts, the drill with
+#     size 1, size 2 together), the wait for vCPUs under MAX_VCPU, and the stop
+#     at STOP_USD with several parts running
 #   - snapshot deletion: only the session's own, and only when asked
 #
 # Usage: bash loadtest/compare/aws/test_dryrun.sh [keep]   (keep: leave the
@@ -137,6 +143,160 @@ step snapdel bash "$c" delete-snapshots "$snap" && grep -q "DRY aws .*delete-sna
   && pass "delete-snapshots deletes the one named" || fail "delete-snapshots"
 grep -q 'ec2 delete-snapshot ' "$tmp/seed-keycloak.out" "$tmp/ramps-keycloak.out" && fail "a snapshot was deleted unasked" \
   || pass "no snapshot is deleted unasked"
+
+# The AWS login window: no part starts without a login, or when it would end
+# after the window; the stop is clean (exit 4) and says what to do.
+before=$(grep -c 'run-instances' "$tmp/dry/calls.log")
+DRY_STS_FAIL=1 JOURNEYS=userinfo try sts bash "$c" ramps hearth 1
+rc=$?
+grep -q 'the aws CLI is not logged in' "$tmp/sts.out" && [ "$rc" = 4 ] \
+  && pass "no part starts when the aws CLI is not logged in" || fail "expired login (rc $rc)"
+LOGIN_AT=$(($(date +%s) - 11 * 3600)) JOURNEYS=userinfo try window bash "$c" ramps hearth 1
+rc=$?
+grep -q 'would end after the AWS login window' "$tmp/window.out" \
+  && grep -q 'run aws login, then compare.sh session again' "$tmp/window.out" && [ "$rc" = 4 ] \
+  && pass "a part that would end after the login window does not start (exit 4)" || fail "window (rc $rc)"
+[ "$(grep -c 'run-instances' "$tmp/dry/calls.log")" = "$before" ] && pass "nothing was launched outside the window" \
+  || fail "launched outside the window"
+
+step plan bash "$c" plan || fail "plan"
+grep -q '^wall clock: about 10.7 h with MAX_VCPU 56' "$tmp/plan.out" && grep -q '^aws logins: 1 ' "$tmp/plan.out" \
+  && grep -q '^wall clock by MAX_VCPU: 24: 17.05 h, 2 login(s); 32: 13.9 h' "$tmp/plan.out" \
+  && pass "plan: the parallel wall clock (10.7 h at 56 vCPUs, 1 login; 17 h at 24)" \
+  || fail "plan: $(grep -E '^(wall|aws)' "$tmp/plan.out")"
+MAX_VCPU=32 step plan32 bash "$c" plan || fail "plan32"
+grep -q '^wall clock: about 13.9 h with MAX_VCPU 32' "$tmp/plan32.out" && pass "plan: MAX_VCPU sets the limit" \
+  || fail "plan MAX_VCPU=32: $(grep '^wall' "$tmp/plan32.out")"
+
+# The parts that ran at once, from a session's timeline.txt (its start and end
+# events in order): the largest number, whether two size 1 parts and the drill
+# with a size 1 part ever overlapped, and the most vCPUs.
+overlap() {
+  python3 -I - "$1" << 'PY'
+import sys
+running, most, s1s, drill_s1, s2s, vcpu = set(), 0, False, False, False, 0
+for line in open(sys.argv[1]):
+    f = line.split()
+    if f[1] == "start":
+        running.add(f[2])
+        vcpu = max(vcpu, int(f[4].split("=")[1]))
+    elif f[1] == "end":
+        running.discard(f[2])
+    most = max(most, len(running))
+    s1 = [p for p in running if p.startswith("s1:")]
+    s1s = s1s or len(s1) >= 2
+    drill_s1 = drill_s1 or ("drill" in running and bool(s1))
+    s2s = s2s or len([p for p in running if p.startswith("s2:")]) == 2
+print(most, s1s, drill_s1, s2s, vcpu)
+PY
+}
+ledger_open() {
+  python3 -I - "$1" << 'PY'
+import json, sys
+ends = {}
+for l in open(sys.argv[1]):
+    e = json.loads(l)
+    if "id" in e:
+        ends[e["id"]] = ends.get(e["id"]) if "kind" in e and e.get("end") is None else e.get("end")
+print(sum(1 for k, v in ends.items() if v is None and not k.startswith("snap-")))
+PY
+}
+
+# A session that starts with 4.5 h of its login window left (LOGIN_AT 7 h
+# ago): the Authentik seed (4.5 h plus 15 min) does not fit; the 4 other
+# seeds, the drill and their size 1 ramps (3.4 h each; the dry run takes
+# seconds) do, in parallel; size 2 needs Authentik's size 1, so it stops.
+s=$tmp/repo/loadtest/compare/.build/aws-drys
+so=$tmp/repo/loadtest/live/results/compare-drys
+SESSION=drys LOGIN_AT=$(($(date +%s) - 7 * 3600)) try session1 bash "$c" session
+rc=$?
+grep -q 'left for the next login: seed:authentik s1:authentik s2:hearth s2:other' "$tmp/session1.out" && [ "$rc" = 4 ] \
+  && grep -q 'run aws login, then compare.sh session again' "$tmp/session1.out" \
+  && pass "session: Authentik's seed waits for the next login; the session stops cleanly (exit 4)" \
+  || fail "session 1 (rc $rc): $(grep -v '^DRY' "$tmp/session1.out" | tail -n 5)"
+[ ! -s "$s/runs.active" ] && [ ! -e "$so/seed-authentik.json" ] && [ -s "$so/ory-s1/mix.json" ] && [ -s "$so/drill.done" ] \
+  && [ "$(ledger_open "$s/ledger.jsonl")" = 0 ] \
+  && pass "session: 4 seeds, the drill and 4 size 1 parts done, nothing left up" || fail "session 1 state"
+read -r most s1s drill_s1 _ vcpu <<< "$(overlap "$so/timeline.txt")"
+[ "$s1s" = True ] && [ "$drill_s1" = True ] && [ "$most" -ge 4 ] && [ "$vcpu" -le 56 ] \
+  && pass "session: parts in parallel (at most $most at once, two size 1 parts together, the drill with size 1; $vcpu vCPUs at most)" \
+  || fail "session 1 overlap: $most $s1s $drill_s1 $vcpu"
+grep -q '^LOGIN_AT=' "$s/login.env" && pass "session: the login time is recorded" || fail "no LOGIN_AT"
+# A run the stop could not tear down (its credentials ran out in the middle of
+# Authentik's size 1 ramps, say).
+python3 -I "$here/cost.py" start "$s/ledger.jsonl" instance drys-authentik-s1-1-server c7i.large 30
+echo "drys-authentik-s1-1 0" >> "$s/runs.active"
+cp "$so/hearth-s1/login.json" "$tmp/hearth-login-before.json"
+: > "$so/timeline.txt"
+
+# After a new login: the session resumes.
+SESSION=drys step session2 bash "$c" session || fail "session 2"
+grep -q 'runs left up by an earlier session: drys-authentik-s1-1' "$tmp/session2.out" && [ ! -s "$s/runs.active" ] \
+  && grep -q 'results/drys-authentik-s1-2/' "$so/driver-s1-authentik.log" \
+  && pass "resume: a run left up goes down first, and its id is not reused" || fail "resume: the lost run"
+for p in hearth keycloak zitadel ory authentik; do
+  n=$(grep -c "seed $p on " "$so/driver-seed-$p.log")
+  [ "$n" = 1 ] || fail "seed $p ran $n times"
+done
+started=$(awk '$2 == "start" {print $3}' "$so/timeline.txt" | sort | tr '\n' ' ')
+[ "$started" = "s1:authentik s2:hearth s2:other seed:authentik " ] \
+  && cmp -s "$so/hearth-s1/login.json" "$tmp/hearth-login-before.json" \
+  && ! grep -qE 'drys-(hearth|keycloak|zitadel|ory)-s1-2' "$so"/driver-*.log \
+  && pass "resume: only the parts left start; no finished seed, journey or drill runs again" \
+  || fail "resume started: $started"
+read -r _ _ _ s2s _ <<< "$(overlap "$so/timeline.txt")"
+[ "$s2s" = True ] && pass "size 2: Hearth and the other product at once" || fail "size 2 not in parallel"
+[ "$(jv "$so/seed-authentik.json" server)" = c7i.2xlarge ] && [ "$(jv "$so/seed-authentik.json" seed_procs)" = 4 ] \
+  && [ "$(jv "$so/seed-keycloak.json" server)" = c7i.large ] \
+  && grep -q 'shutdown, -h, "+405"' "$so/driver-seed-authentik.log" \
+  && pass "Authentik seeds on c7i.2xlarge (4 processes, lifetime 270 + 50 % = 405 min), the others on c7i.large" \
+  || fail "seed servers"
+grep -q '^## Seeds on c7i.2xlarge' "$so/summary.md" \
+  && grep -q 'not with the seeds on c7i.large' "$so/summary.md" \
+  && pass "summary: the seed times by server type, Authentik's apart" || fail "summary seed tables"
+[ -s "$so/hearth-s2/mix.json" ] && [ -s "$so/$(jv "$so/fastest.json" product)-s2/mix.json" ] \
+  && pass "resume: size 2 ran for Hearth and $(jv "$so/fastest.json" product)" || fail "resume: size 2"
+dup=$(python3 -I - "$s/ledger.jsonl" << 'PY'
+import collections, json, sys
+starts = collections.Counter(e["id"] for e in map(json.loads, open(sys.argv[1])) if "kind" in e and "id" in e)
+print(" ".join(k for k, n in starts.items() if n > 1))
+PY
+)
+[ -z "$dup" ] && [ "$(ledger_open "$s/ledger.jsonl")" = 0 ] && pass "resume: no ledger entry counted twice, all closed" \
+  || fail "counted twice: $dup"
+
+# MAX_VCPU 24: the seeds (16) and the drill (6) start; each size 1 part (10)
+# waits for vCPUs, and size 2 (24 each) runs one at a time.
+sv=$tmp/repo/loadtest/live/results/compare-drysv
+SESSION=drysv MAX_VCPU=24 step session-vcpu bash "$c" session || fail "session MAX_VCPU=24"
+read -r _ _ _ s2s vcpu <<< "$(overlap "$sv/timeline.txt")"
+grep -q '^[0-9]* wait-vcpu s1:' "$sv/timeline.txt" && [ "$vcpu" -le 24 ] && [ "$s2s" = False ] && [ -s "$sv/summary.md" ] \
+  && pass "MAX_VCPU 24: parts wait for vCPUs (at most $vcpu running), size 2 one after the other, session done" \
+  || fail "MAX_VCPU 24: max $vcpu, s2 together $s2s"
+
+# The stop at STOP_USD while several parts run: a seed's snapshot ($0.20 a
+# month) passes $0.10; every part stops, every run of every part goes down.
+st=$tmp/repo/loadtest/compare/.build/aws-drysst
+sto=$tmp/repo/loadtest/live/results/compare-drysst
+SESSION=drysst STOP_USD=0.1 try session-stop bash "$c" session
+rc=$?
+running_at_stop=$(python3 -I - "$sto/timeline.txt" << 'PY'
+import sys
+running = set()
+for line in open(sys.argv[1]):
+    f = line.split()
+    if f[1] == "start":
+        running.add(f[2])
+    elif f[1] == "end":
+        print(len(running))
+        break
+PY
+)
+[ "$rc" = 3 ] && grep -q 'reached \$0.1' "$tmp/session-stop.out" && [ "${running_at_stop:-0}" -ge 2 ] \
+  && [ ! -s "$st/runs.active" ] && [ "$(ledger_open "$st/ledger.jsonl")" = 0 ] \
+  && ! pgrep -f "$tmp/repo/loadtest/compare/aws/compare.sh" > /dev/null \
+  && pass "STOP_USD with $running_at_stop parts running: all stop, every run down, every ledger entry closed" \
+  || fail "STOP_USD in a session (rc $rc, $running_at_stop running, open $(ledger_open "$st/ledger.jsonl"))"
 
 # No real tool ran: every call went through the shims.
 grep -q '^DRY ' "$tmp/dry/calls.log" && ! grep -q 'unknown tool' "$tmp/dry/calls.log" && pass "all calls went to the shims" \

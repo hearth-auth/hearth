@@ -1,7 +1,20 @@
 {
-  "about": "The #913 AWS session: hours and instances per part, priced by cost.py estimate with prices.json. compare.sh session runs the parts in this order. The hours come from the time model below, not from a run.",
+  "about": "The #913 AWS session: hours and instances per part, priced by cost.py estimate with prices.json. compare.sh session runs the parts in parallel: a part starts as soon as the parts it comes after are done, its instances fit under MAX_VCPU, its estimate fits the AWS login window and the cost cap. The hours come from the time model below, not from a run.",
   "cap_usd": 20,
-  "stop_usd": 15,
+  "stop_usd": 20,
+  "max_vcpu": 56,
+  "login": {
+    "window_h": 11.5,
+    "margin_min": 15,
+    "detail": "an `aws login` session lasts at most 12 h; compare.sh starts a part only if its estimate plus the teardown margin ends inside the window (LOGIN_WINDOW_H, LOGIN_MARGIN_MIN), else it stops cleanly and a rerun after a new login resumes"
+  },
+  "vcpu": {
+    "c7i.large": 2,
+    "c7i.xlarge": 4,
+    "c7i.2xlarge": 8,
+    "r7i.large": 2,
+    "source": "AWS's instance type pages (https://aws.amazon.com/ec2/instance-types/c7i/, .../r7i/): the vCPUs that count toward the on-demand standard-instance quota (L-1216C47A)"
+  },
   "model": {
     "journeys_size_1": "10 per product: the 8 journeys, and the cold read with working sets of 100,000 and 1M users (the 1,000-user set is journey 6, admin user lookup, which also runs after a page-cache drop)",
     "journeys_size_2": "the 8 journeys",
@@ -14,32 +27,180 @@
       "keycloak": 0.75,
       "zitadel": 1.25,
       "ory": 0.5,
-      "authentik": 14
+      "authentik": 4.5
     },
-    "seed_detail": "server only, c7i.large (#913: the size 1 server), 1M bulk users plus 1,000 login users, then the 1M-id listing (ids.js), settle and snapshot. From the local 100k seeds (12 cores) scaled to 2 vCPU: Keycloak 70-87 s, Zitadel 139 s, Ory 39 s per 100k; Hearth's 10M drill seed took 1,408 s on r7i.large. Authentik took about 20 minutes per 100k on 12 cores (blueprints, about 93 users/s with 4 processes): on 2 vCPU about 15 to 25 users/s, so 11 to 18 h, which may pass the 16 h lifetime cap (owner decision)",
+    "seed_detail": "server only, 1M bulk users plus 1,000 login users, then the 1M-id listing (ids.js), settle and snapshot. On c7i.large (#913: the size 1 server), from the local 100k seeds (12 cores) scaled to 2 vCPU: Keycloak 70-87 s, Zitadel 139 s, Ory 39 s per 100k; Hearth's 10M drill seed took 1,408 s on r7i.large. Authentik seeds on c7i.2xlarge (8 vCPU; owner decision 2026-11-23): about 93 users/s with 4 processes on 12 cores locally (blueprints), so about 62 users/s on 8 vCPU with the same 4 processes, 1,001,000 users in about 4.5 h. Its seed time is not comparable with the c7i.large seeds",
     "snapshot_gb_each": 4,
-    "data_out_gb": 5
+    "data_out_gb": 5,
+    "seed_server": {
+      "default": "c7i.large",
+      "authentik": "c7i.2xlarge"
+    }
   },
   "parts": [
-    {"name": "seed hearth (c7i.large, server only)", "hours": 0.4,
-     "instances": {"c7i.large": 1}, "disk_gb": 70, "snapshot_gb": 4},
-    {"name": "seed keycloak", "hours": 0.75, "instances": {"c7i.large": 1}, "disk_gb": 70, "snapshot_gb": 4},
-    {"name": "seed zitadel", "hours": 1.25, "instances": {"c7i.large": 1}, "disk_gb": 70, "snapshot_gb": 4},
-    {"name": "seed ory", "hours": 0.5, "instances": {"c7i.large": 1}, "disk_gb": 70, "snapshot_gb": 4},
-    {"name": "seed authentik", "hours": 14, "instances": {"c7i.large": 1}, "disk_gb": 70, "snapshot_gb": 4},
-    {"name": "size 1 hearth (c7i.large + 2 c7i.xlarge), 10 journeys", "hours": 3.4,
-     "instances": {"c7i.large": 1, "c7i.xlarge": 2}, "disk_gb": 50},
-    {"name": "size 1 keycloak", "hours": 3.4, "instances": {"c7i.large": 1, "c7i.xlarge": 2}, "disk_gb": 50},
-    {"name": "size 1 zitadel", "hours": 3.4, "instances": {"c7i.large": 1, "c7i.xlarge": 2}, "disk_gb": 50},
-    {"name": "size 1 ory", "hours": 3.4, "instances": {"c7i.large": 1, "c7i.xlarge": 2}, "disk_gb": 50},
-    {"name": "size 1 authentik", "hours": 3.4, "instances": {"c7i.large": 1, "c7i.xlarge": 2}, "disk_gb": 50},
-    {"name": "#647 10M restore drill (r7i.large + 1 c7i.xlarge, round.sh)", "hours": 1.5,
-     "instances": {"r7i.large": 1, "c7i.xlarge": 1}, "disk_gb": 90},
-    {"name": "size 2 hearth (c7i.2xlarge + 4 c7i.xlarge), 8 journeys", "hours": 2.8,
-     "instances": {"c7i.2xlarge": 1, "c7i.xlarge": 4}, "disk_gb": 50},
-    {"name": "size 2 fastest other product", "hours": 2.8,
-     "instances": {"c7i.2xlarge": 1, "c7i.xlarge": 4}, "disk_gb": 50},
-    {"name": "results fetched to this machine (5 GB)", "hours": 0, "instances": {}, "snapshot_gb": 0,
-     "data_out_gb": 5}
+    {
+      "id": "seed:hearth",
+      "name": "seed hearth (c7i.large, server only)",
+      "hours": 0.4,
+      "after": [],
+      "instances": {
+        "c7i.large": 1
+      },
+      "disk_gb": 70,
+      "snapshot_gb": 4
+    },
+    {
+      "id": "seed:keycloak",
+      "name": "seed keycloak (c7i.large, server only)",
+      "hours": 0.75,
+      "after": [],
+      "instances": {
+        "c7i.large": 1
+      },
+      "disk_gb": 70,
+      "snapshot_gb": 4
+    },
+    {
+      "id": "seed:zitadel",
+      "name": "seed zitadel (c7i.large, server only)",
+      "hours": 1.25,
+      "after": [],
+      "instances": {
+        "c7i.large": 1
+      },
+      "disk_gb": 70,
+      "snapshot_gb": 4
+    },
+    {
+      "id": "seed:ory",
+      "name": "seed ory (c7i.large, server only)",
+      "hours": 0.5,
+      "after": [],
+      "instances": {
+        "c7i.large": 1
+      },
+      "disk_gb": 70,
+      "snapshot_gb": 4
+    },
+    {
+      "id": "seed:authentik",
+      "name": "seed authentik (c7i.2xlarge, server only)",
+      "hours": 4.5,
+      "after": [],
+      "instances": {
+        "c7i.2xlarge": 1
+      },
+      "disk_gb": 70,
+      "snapshot_gb": 4
+    },
+    {
+      "id": "s1:hearth",
+      "name": "size 1 hearth (c7i.large + 2 c7i.xlarge), 10 journeys",
+      "hours": 3.4,
+      "after": [
+        "seed:hearth"
+      ],
+      "instances": {
+        "c7i.large": 1,
+        "c7i.xlarge": 2
+      },
+      "disk_gb": 50
+    },
+    {
+      "id": "s1:keycloak",
+      "name": "size 1 keycloak",
+      "hours": 3.4,
+      "after": [
+        "seed:keycloak"
+      ],
+      "instances": {
+        "c7i.large": 1,
+        "c7i.xlarge": 2
+      },
+      "disk_gb": 50
+    },
+    {
+      "id": "s1:zitadel",
+      "name": "size 1 zitadel",
+      "hours": 3.4,
+      "after": [
+        "seed:zitadel"
+      ],
+      "instances": {
+        "c7i.large": 1,
+        "c7i.xlarge": 2
+      },
+      "disk_gb": 50
+    },
+    {
+      "id": "s1:ory",
+      "name": "size 1 ory",
+      "hours": 3.4,
+      "after": [
+        "seed:ory"
+      ],
+      "instances": {
+        "c7i.large": 1,
+        "c7i.xlarge": 2
+      },
+      "disk_gb": 50
+    },
+    {
+      "id": "s1:authentik",
+      "name": "size 1 authentik",
+      "hours": 3.4,
+      "after": [
+        "seed:authentik"
+      ],
+      "instances": {
+        "c7i.large": 1,
+        "c7i.xlarge": 2
+      },
+      "disk_gb": 50
+    },
+    {
+      "id": "drill",
+      "name": "#647 10M restore drill (r7i.large + 1 c7i.xlarge, round.sh)",
+      "hours": 1.5,
+      "after": [],
+      "instances": {
+        "r7i.large": 1,
+        "c7i.xlarge": 1
+      },
+      "disk_gb": 90
+    },
+    {
+      "id": "s2:hearth",
+      "name": "size 2 hearth (c7i.2xlarge + 4 c7i.xlarge), 8 journeys",
+      "hours": 2.8,
+      "after": [
+        "s1:*"
+      ],
+      "instances": {
+        "c7i.2xlarge": 1,
+        "c7i.xlarge": 4
+      },
+      "disk_gb": 50
+    },
+    {
+      "id": "s2:other",
+      "name": "size 2 fastest other product",
+      "hours": 2.8,
+      "after": [
+        "s1:*"
+      ],
+      "instances": {
+        "c7i.2xlarge": 1,
+        "c7i.xlarge": 4
+      },
+      "disk_gb": 50
+    },
+    {
+      "name": "results fetched to this machine (5 GB)",
+      "hours": 0,
+      "instances": {},
+      "snapshot_gb": 0,
+      "data_out_gb": 5
+    }
   ]
 }

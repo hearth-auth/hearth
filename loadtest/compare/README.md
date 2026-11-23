@@ -26,11 +26,14 @@ metrics and analysis as Hearth.
 loadtest/compare/aws/compare.sh session`); the header of `compare.sh` lists its commands and
 settings.
 
-1. **Seeds** (`compare.sh seed <product>`), one c7i.large server alone per product: 1M bulk users
+1. **Seeds** (`compare.sh seed <product>`), one server alone per product (c7i.large; Authentik
+   c7i.2xlarge, whose blueprint seed would take 11 to 18 h on 2 vCPUs): 1M bulk users
    and 1,000 login users through the product's own seed tool (`cloud.sh import` for Hearth),
    then `ids.js` lists the first 1M user ids through the admin API. The seed record
    (`seed-<product>.json`) has the time of the seed call, the time until the admin API lists
-   all 1M users, the settle time, the idle RSS and the store size. The store is on a second
+   all 1M users, the settle time, the idle RSS, the store size and the seed server's type (seed
+   times compare only between seeds on the same type; `summary.md` has one table per type). The
+   store is on a second
    EBS volume (made at launch, deleted with the instance), which is kept as a snapshot tagged
    with the seed run's tag. The server's lifetime is the seed estimate plus 50 %, at most 16 h.
 2. **Ramps** (`compare.sh ramps <product> <1|2>`): size 1 is a c7i.large server and 2
@@ -47,18 +50,33 @@ settings.
    class, the server's CPU, RSS and disk writes. The cold read (`cold100k`, `cold1m`) is admin
    user lookup over the first 100,000 or 1M seeded users after the cache drop (the
    1,000-user case is journey 6). Every product runs with `PRESENT=chain`.
-3. **Session** (`compare.sh session`): the seeds in parallel, size 1 for the 5 products as their
-   snapshots complete, the #647 10M restore drill (`round.sh` with
-   `loadtest/live/plans/913-drill-r7i-large-10m.txt`, unchanged), then size 2 for Hearth and the
-   other product with the highest geometric mean of the 8 clean rates at size 1
-   (`ladder.py fastest`). Results: `loadtest/live/results/compare-<session>/` (`summary.md`).
+3. **Session** (`compare.sh session`), in parallel: the 5 seeds and the #647 10M restore drill
+   (`round.sh` with `loadtest/live/plans/913-drill-r7i-large-10m.txt`, unchanged) at once, each
+   product's size 1 ramps as soon as its snapshot exists, then, once all size 1 results exist,
+   size 2 for Hearth and the other product with the highest geometric mean of the 8 clean rates
+   at size 1 (`ladder.py fastest`) together. Each part is its own `compare.sh` process with its
+   own runs (`timeline.txt` records each start and end). A part waits while its instances would
+   take the running vCPUs past `MAX_VCPU` (56; set it to the account's on-demand
+   standard-instance quota, L-1216C47A). Results: `loadtest/live/results/compare-<session>/`
+   (`summary.md`).
+
+   **AWS login.** An `aws login` session lasts at most 12 h, and a teardown without credentials
+   fails. Run `compare.sh session` right after `aws login`: it records the time, and a part (or
+   a journey within a ramps part) starts only if `aws sts get-caller-identity` works and its
+   estimate plus 15 min ends inside `LOGIN_WINDOW_H` (11.5 h). When nothing else can run, the
+   session tears everything down and exits 4 ("run aws login, then compare.sh session again");
+   the rerun first tears down any run left up, then resumes: finished seeds, journeys and the
+   drill are kept, and new runs get new ids, so no cost is counted twice.
 
 **Cost.** `aws/cost.py` keeps a ledger of every instance (from before `up` to after `down`),
 volume, snapshot and the results fetched, priced with `aws/prices.json` (us-east-1 on-demand,
 from AWS's price list files, with sources and the date). The total is printed after every step
-and written to `cost.txt`; at `STOP_USD` ($15) the session tears everything down and stops. A
-part whose estimate would pass `CAP_USD` ($20) does not start. `compare.sh plan` prices
-`aws/session-plan.json`, the hours per part.
+and written to `cost.txt`; at `STOP_USD` ($20) the session stops every part and tears down
+every run. A part whose estimate, plus what the parts running are still expected to cost,
+would pass `CAP_USD` ($20) does not start. The parts share one ledger (each line written under a
+lock). `compare.sh plan` prices `aws/session-plan.json` (the hours per part) and prints the
+wall clock of the parallel timeline at `MAX_VCPU` and at other limits, and the logins it
+needs.
 
 **Safety.** Every instance terminates itself at the end of its lifetime (`cloud.sh`, tested by
 `loadtest/live/test_lifetime.sh`). Snapshots outlive their runs on purpose: `cloud.sh down`
@@ -68,8 +86,9 @@ them (only the session's own). Products' images are pulled on the server by dige
 
 **Without AWS.** `DRY_RUN=1` puts shims for `aws`, `ssh`, `scp`, `docker` and `curl` on the PATH
 (`aws/dryrun/`): every AWS call and remote command is printed and answered, the k6 output is made
-up, nothing leaves the machine. `aws/test_dryrun.sh` runs a seed and the ramps that way and
-checks the result; `aws/test_ladder.py` and `aws/test_cost.py` test the ladder and the cost.
+up, nothing leaves the machine. `aws/test_dryrun.sh` runs seeds, ramps and whole sessions that
+way (parallel parts, the vCPU wait, the stop at `STOP_USD` with several parts running, the
+login window and the resume) and checks the result; `aws/test_ladder.py` and `aws/test_cost.py` test the ladder and the cost.
 
 ## Adapters
 

@@ -71,7 +71,7 @@ class Ledger(unittest.TestCase):
             self.assertEqual(run("start", ledger, "instance", "i-1", "c7i.2xlarge", "30").returncode, 0)
             # 10 h later: about $3.66.
             later = dict(env, COST_NOW=str(10 * H))
-            ok = run("check", ledger, "15", env=later)
+            ok = run("check", ledger, "20", env=later)
             self.assertEqual(ok.returncode, 0, ok.stderr)
             self.assertAlmostEqual(float(ok.stdout), 10 * 0.362 + 30 * 0.08 * 10 / 730, places=2)
             stop = run("check", ledger, "3", env=later)
@@ -96,6 +96,86 @@ class Estimate(unittest.TestCase):
         plan = json.load(open(os.path.join(HERE, "session-plan.json")))
         e = cost.estimate(plan, PRICES)
         self.assertLessEqual(e["total"], plan["cap_usd"])
+        self.assertLessEqual(e["total"], plan["stop_usd"])
+        self.assertEqual(plan["stop_usd"], 20)
+
+    def test_the_seed_parts_match_the_model(self):
+        plan = json.load(open(os.path.join(HERE, "session-plan.json")))
+        m = plan["model"]
+        for p in plan["parts"]:
+            if p.get("id", "").startswith("seed:"):
+                product = p["id"].split(":")[1]
+                self.assertEqual(p["hours"], m["seed_hours"][product], p["name"])
+                server = m["seed_server"].get(product, m["seed_server"]["default"])
+                self.assertEqual(p["instances"], {server: 1}, p["name"])
+        self.assertEqual(m["seed_server"]["authentik"], "c7i.2xlarge")
+
+
+VCPU = {"vcpu": {"c7i.large": 2, "c7i.xlarge": 4}}
+
+
+def part(i, hours, after=(), vcpu=2):
+    return {"id": i, "name": i, "hours": hours, "after": list(after),
+            "instances": {"c7i.large": vcpu // 2}}
+
+
+class Schedule(unittest.TestCase):
+    def test_parts_run_in_parallel_after_what_they_need(self):
+        plan = {**VCPU, "parts": [part("seed:a", 1), part("seed:b", 3), part("s1:a", 2, ["seed:a"]),
+                                  part("s1:b", 2, ["seed:b"]), part("drill", 4), part("s2:x", 1, ["s1:*"])]}
+        s = cost.schedule(plan, 100, 0, 100)
+        # s1:a 1..3 and s1:b 3..5 overlap the drill 0..4; s2:x after both s1: 5..6.
+        self.assertEqual(s["wall_clock_h"], 6)
+        self.assertEqual(s["logins"], 1)
+        self.assertEqual(s["peak_vcpu"], 6)
+
+    def test_a_part_waits_while_it_would_pass_max_vcpu(self):
+        plan = {**VCPU, "parts": [part("a", 2, vcpu=4), part("b", 1, vcpu=4), part("c", 1, vcpu=2)]}
+        s = cost.schedule(plan, 100, 0, 6)
+        # a (4) and c (2) start at 0; b (4) waits for a: 2..3.
+        self.assertEqual(s["wall_clock_h"], 3)
+        self.assertEqual(s["peak_vcpu"], 6)
+
+    def test_a_part_that_would_pass_the_window_waits_for_a_new_login(self):
+        plan = {**VCPU, "parts": [part("a", 1), part("b", 4.5), part("x", 4, ["a"])]}
+        s = cost.schedule(plan, 6, 0.5, 100)
+        # a 0..1, b 0..4.5; x at 1 ends at 5, plus 0.5: inside a 6 h login.
+        self.assertEqual(s["logins"], 1)
+        # In a 5.4 h login it does not fit: the session waits for b (4.5), then
+        # login 2: x 4.5..8.5.
+        s = cost.schedule(plan, 5.4, 0.5, 100)
+        self.assertEqual([i["start_h"] for i in s["per_login"]], [0, 4.5])
+        self.assertEqual(s["per_login"][1]["parts"], ["x"])
+        self.assertEqual(s["wall_clock_h"], 8.5)
+
+    def test_a_part_longer_than_a_login_or_max_vcpu_is_refused(self):
+        with self.assertRaises(ValueError):
+            cost.schedule({**VCPU, "parts": [part("x", 12)]}, 11.5, 0.25, 100)
+        with self.assertRaises(ValueError):
+            cost.schedule({**VCPU, "parts": [part("x", 1, vcpu=8)]}, 11.5, 0.25, 6)
+
+    def test_the_session_plan_runs_in_one_login_at_56_vcpus(self):
+        plan = json.load(open(os.path.join(HERE, "session-plan.json")))
+        window, margin = cost.login_settings(plan)
+        s = cost.schedule(plan, window, margin, 56)
+        self.assertEqual(s["logins"], 1)
+        self.assertAlmostEqual(s["wall_clock_h"], 10.7, places=1)
+        self.assertLessEqual(s["peak_vcpu"], 56)
+        # A smaller quota is slower, never wrong.
+        self.assertGreater(cost.schedule(plan, window, margin, 24)["wall_clock_h"], s["wall_clock_h"])
+
+
+class Remaining(unittest.TestCase):
+    def test_the_running_parts_estimate_still_to_come(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "parts.active")
+            with open(f, "w") as out:
+                out.write("s1:a 2.0 4 0\n")      # half done at 2 h: $1 to come
+                out.write("seed:b 1.0 1 0\n")    # overrun at 2 h: 0
+                out.write("s1:c 3.0 2 7200\n")   # just started: $3
+            self.assertAlmostEqual(cost.remaining(f, PRICES, {}, 2 * H), 4.0)
+            self.assertAlmostEqual(cost.remaining(f, PRICES, {}, 2 * H, "s1:c"), 1.0)
+            self.assertEqual(cost.remaining(os.path.join(d, "none"), PRICES, {}, 0), 0)
 
 
 if __name__ == "__main__":

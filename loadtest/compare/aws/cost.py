@@ -18,8 +18,17 @@ Commands:
   cost.py data-out <ledger> <bytes>                       results fetched
   cost.py total <ledger>                                  {"total": ..., "items": [...]}
   cost.py check <ledger> <stop_at>                        exit 3 when total >= stop_at
-  cost.py estimate <plan.json>                            the plan's hours and cost per part
+  cost.py estimate <plan.json>                            the plan's hours and cost per part,
+                                                          its wall clock and AWS logins
+  cost.py brief <plan.json>                               the same in a few lines, and
+                                                          the wall clock by MAX_VCPU
+  cost.py part <plan.json> <part id>                      "<hours> <vcpus> <usd>"
+  cost.py remaining <parts file> <plan.json> [id]         the estimate still to come of the
+                                                          parts running (but part <id>)
+LOGIN_WINDOW_H, LOGIN_MARGIN_MIN and MAX_VCPU override the plan's login window,
+margin and vCPU limit.
 """
+import fcntl
 import json
 import os
 import sys
@@ -91,8 +100,11 @@ def total(entries, prices, now=None):
 
 
 def append(path, entry):
+    """One line, under an exclusive lock: several parts write the ledger at once."""
     with open(path, "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
         f.write(json.dumps(entry) + "\n")
+        f.flush()
 
 
 def estimate(plan, prices):
@@ -114,6 +126,115 @@ def estimate(plan, prices):
                     "cost": round(cost, 2)})
     return {"parts": out, "total": round(sum(p["cost"] for p in out), 2),
             "hours": round(sum(p["hours"] for p in out), 2)}
+
+
+def part_vcpu(part, plan):
+    """The vCPUs of a part's instances (what counts toward the EC2 quota)."""
+    return sum(n * plan["vcpu"][t] for t, n in part["instances"].items())
+
+
+def depends_on(part, other):
+    """Whether `part` comes after `other` ("s1:*" is every s1 part)."""
+    for a in part.get("after", []):
+        if a == other["id"] or (a.endswith(":*") and other["id"].startswith(a[:-1])):
+            return True
+    return False
+
+
+def schedule(plan, window_h, margin_h, max_vcpu):
+    """The session's wall clock and its AWS logins, as compare.sh session runs the
+    plan: every part starts as soon as the parts it comes after ("after") are done,
+    its vCPUs fit under max_vcpu with the parts running, and its hours plus the
+    teardown margin end inside the current login's window. Parts that could start
+    together start in plan order. When nothing runs and nothing can start, the
+    session has stopped for a new login, which starts then."""
+    parts = [p for p in plan["parts"] if p["hours"] > 0]
+    for p in parts:
+        if p["hours"] + margin_h > window_h:
+            raise ValueError(f"{p['name']}: {p['hours']} h plus the margin does not fit a {window_h} h login")
+        if part_vcpu(p, plan) > max_vcpu:
+            raise ValueError(f"{p['name']}: {part_vcpu(p, plan)} vCPUs is more than MAX_VCPU {max_vcpu}")
+    pending, running, done = list(parts), {}, set()
+    logins = [{"start_h": 0.0, "parts": []}]
+    t, used, peak = 0.0, 0, 0
+    while pending or running:
+        for p in list(pending):
+            deps = [o["id"] for o in parts if depends_on(p, o)]
+            v = part_vcpu(p, plan)
+            if (all(d in done for d in deps) and used + v <= max_vcpu
+                    and t + p["hours"] + margin_h <= logins[-1]["start_h"] + window_h):
+                running[p["id"]] = (t + p["hours"], v)
+                used += v
+                peak = max(peak, used)
+                pending.remove(p)
+                logins[-1]["parts"].append(p["name"])
+        if running:
+            t = min(end for end, _ in running.values())
+            for i, (end, v) in list(running.items()):
+                if end <= t:
+                    del running[i]
+                    done.add(i)
+                    used -= v
+        elif pending:
+            logins.append({"start_h": t, "parts": []})
+    for i in logins:
+        i["start_h"] = round(i["start_h"], 2)
+    return {"wall_clock_h": round(t, 2), "logins": len(logins), "max_vcpu": max_vcpu, "peak_vcpu": peak,
+            "login_window_h": window_h, "margin_h": margin_h, "per_login": logins}
+
+
+def login_settings(plan):
+    """The login window and the teardown margin (hours): LOGIN_WINDOW_H and
+    LOGIN_MARGIN_MIN, else the plan's "login"."""
+    lg = plan.get("login", {})
+    window = float(os.environ.get("LOGIN_WINDOW_H") or lg.get("window_h", 11.5))
+    margin = float(os.environ.get("LOGIN_MARGIN_MIN") or lg.get("margin_min", 15)) / 60
+    return window, margin
+
+
+def max_vcpu(plan):
+    return int(os.environ.get("MAX_VCPU") or plan.get("max_vcpu", 56))
+
+
+def brief(plan, prices):
+    """compare.sh plan's summary lines."""
+    e = estimate(plan, prices)
+    window, margin = login_settings(plan)
+    lines = [f"cost: about ${e['total']} (stop at ${plan['stop_usd']}, a part that would pass "
+             f"${plan['cap_usd']} does not start); {e['hours']} instance-set hours"]
+    try:
+        s = schedule(plan, window, margin, max_vcpu(plan))
+    except ValueError as err:
+        return "\n".join(lines + [f"the plan does not fit: {err}"])
+    lines += [f"wall clock: about {s['wall_clock_h']} h with MAX_VCPU {s['max_vcpu']} (the parts in parallel; "
+              f"at most {s['peak_vcpu']} vCPUs at once)",
+              f"aws logins: {s['logins']} (a login lasts {s['login_window_h']} h; a part starts only if it "
+              f"ends {round(s['margin_h'] * 60)} min before)"]
+    for n, i in enumerate(s["per_login"], 1):
+        lines.append(f"  login {n} at +{i['start_h']} h: " + "; ".join(i["parts"]))
+    other = []
+    for v in (24, 32, 48, 56, 64, 96):
+        try:
+            o = schedule(plan, window, margin, v)
+            other.append(f"{v}: {o['wall_clock_h']} h, {o['logins']} login(s)")
+        except ValueError:
+            other.append(f"{v}: does not fit")
+    lines.append("wall clock by MAX_VCPU: " + "; ".join(other))
+    return "\n".join(lines)
+
+
+def remaining(path, prices, plan, now, exclude=""):
+    """The estimate (USD) still to come of the parts running: each line of the
+    parts file is "<id> <usd> <hours> <start epoch>"; a part's estimate is spent
+    evenly over its hours (an overrun counts 0; the stop at stop_usd covers it)."""
+    total = 0.0
+    if os.path.exists(path):
+        for line in open(path):
+            f = line.split()
+            if len(f) == 4 and f[0] != exclude:
+                usd, h, start = float(f[1]), float(f[2]), float(f[3])
+                total += usd * max(0.0, 1 - (now - start) / (h * 3600)) if h > 0 else 0.0
+    return round(total, 4)
 
 
 def main(argv):
@@ -144,8 +265,24 @@ def main(argv):
         if t >= float(a[1]):
             sys.exit(3)
     elif cmd == "estimate":
-        json.dump(estimate(json.load(open(a[0])), prices), sys.stdout, indent=1)
+        plan = json.load(open(a[0]))
+        e = estimate(plan, prices)
+        try:
+            e["schedule"] = schedule(plan, *login_settings(plan), max_vcpu(plan))
+        except ValueError as err:
+            e["schedule"] = {"error": str(err)}
+        json.dump(e, sys.stdout, indent=1)
         sys.stdout.write("\n")
+    elif cmd == "brief":
+        print(brief(json.load(open(a[0])), prices))
+    elif cmd == "part":
+        plan = json.load(open(a[0]))
+        est = {p["name"]: p["cost"] for p in estimate(plan, prices)["parts"]}
+        p = next(p for p in plan["parts"] if p.get("id") == a[1])
+        print(p["hours"], part_vcpu(p, plan), est[p["name"]])
+    elif cmd == "remaining":
+        plan = json.load(open(a[1]))
+        print(remaining(a[0], prices, plan, now, a[2] if len(a) > 2 else ""))
     else:
         sys.exit(__doc__)
 
