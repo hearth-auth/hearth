@@ -1,0 +1,27 @@
+# The run's TLS leaf (tls.sh) as the web certificate of Authentik's default
+# brand, so Authentik's own HTTPS listener (9443) serves it. A file blueprint:
+# the worker discovers it in /blueprints at its start and applies it
+# (https://docs.goauthentik.io/customize/blueprints/). The leaf and its key
+# are read from the bundle (/compare-tls, compose.yaml); none is stored here.
+version: 1
+metadata:
+  name: compare - TLS
+entries:
+  # The default brand comes from the vendor's blueprint; apply it first.
+  - model: authentik_blueprints.metaapplyblueprint
+    attrs:
+      identifiers:
+        name: Default - Brand
+      required: true
+  - model: authentik_crypto.certificatekeypair
+    id: tls
+    identifiers:
+      name: compare-tls
+    attrs:
+      certificate_data: !File /compare-tls/https.crt
+      key_data: !File /compare-tls/https.key
+  - model: authentik_brands.brand
+    identifiers:
+      domain: authentik-default
+    attrs:
+      web_certificate: !KeyOf tls

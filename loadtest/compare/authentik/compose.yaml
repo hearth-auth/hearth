@@ -1,0 +1,100 @@
+# Authentik 2026.8.6 (server and worker) and its PostgreSQL for the
+# same-hardware comparison (#913). authentik.sh runs it; the images and their
+# digests come from ../images.env, the secrets and the TLS leaf from the bundle
+# (BUNDLE, outside git). The secrets reach compose as variables (docker compose
+# --env-file $BUNDLE/server.env) and each container gets only the keys named
+# below.
+#
+# Production setup from Authentik's own guides, the rest at Authentik's
+# defaults:
+#   https://docs.goauthentik.io/install-config/install/docker-compose/
+#   https://github.com/goauthentik/authentik/blob/version/2026.8.6/lifecycle/container/compose.yml
+#   https://docs.goauthentik.io/install-config/configuration/ (listeners, workers, threads)
+#   https://docs.goauthentik.io/install-config/automated-install/ (bootstrap)
+#   https://docs.goauthentik.io/sys-mgmt/certificates/ (web certificate)
+#   https://docs.goauthentik.io/customize/blueprints/ (tls.yaml)
+#
+# Since 2025.10 Authentik needs no Redis: its cache, sessions and task queue
+# are in PostgreSQL. The product is its two containers, as in the vendor's
+# compose file: the server (the Go router with TLS and the Django app under
+# gunicorn) and the worker (background tasks).
+name: compare-authentik
+
+x-authentik: &authentik
+  image: ${AUTHENTIK_IMAGE:?}
+  environment: &authentik-env
+    AUTHENTIK_POSTGRESQL__HOST: postgres
+    AUTHENTIK_POSTGRESQL__NAME: authentik
+    AUTHENTIK_POSTGRESQL__USER: authentik
+    AUTHENTIK_POSTGRESQL__PASSWORD: ${DB_PASSWORD:?}
+    AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:?}
+    # No calls home: the update check and the startup analytics are off.
+    AUTHENTIK_DISABLE_UPDATE_CHECK: "true"
+    AUTHENTIK_DISABLE_STARTUP_ANALYTICS: "true"
+  # The vendor's compose file gives both 512 MiB of shared memory.
+  shm_size: 512mb
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:?}
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    environment:
+      POSTGRES_USER: authentik
+      POSTGRES_DB: authentik
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?}
+    volumes:
+      - ../postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      # PostgreSQL 18 images keep PGDATA under /var/lib/postgresql/18.
+      - pgdata:/var/lib/postgresql
+    shm_size: 256mb
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "authentik", "-d", "authentik"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    # No published port: only Authentik reaches it, over the compose network.
+
+  # The Go router terminates TLS on Authentik's own HTTPS listener (9443) with
+  # the default brand's web certificate (tls.yaml) and passes requests to
+  # gunicorn: 2 workers with 4 threads each, Authentik's defaults (its
+  # configuration guide: fewer than 2 workers is not recommended).
+  server:
+    <<: *authentik
+    command: server
+    environment:
+      <<: *authentik-env
+      # Plain HTTP off: HTTPS only, on 9443.
+      AUTHENTIK_LISTEN__HTTP: ""
+    volumes:
+      - data:/data
+    ports:
+      - "${AK_BIND:-127.0.0.1}:9443:9443"
+    mem_limit: ${SERVER_MEM_LIMIT:-1280m}
+
+  # Background tasks (Dramatiq on PostgreSQL): 1 process with 2 threads,
+  # Authentik's defaults. The bootstrap variables are read by the worker on
+  # the first start (automated install): the akadmin user (the realm admin)
+  # with its email and password hash, and an API token for realm.py. No
+  # Docker socket: the comparison runs no outposts but the embedded one
+  # (the vendor's guide: the socket is only for managed outposts), so the
+  # worker also keeps the image's own user instead of root.
+  worker:
+    <<: *authentik
+    command: worker
+    environment:
+      <<: *authentik-env
+      AUTHENTIK_BOOTSTRAP_EMAIL: ${ADMIN_EMAIL:?}
+      AUTHENTIK_BOOTSTRAP_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH:?}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${BOOTSTRAP_TOKEN:?}
+    volumes:
+      - data:/data
+      - ./tls.yaml:/blueprints/compare/tls.yaml:ro
+      - ${BUNDLE:?}/tls:/compare-tls:ro
+    mem_limit: ${WORKER_MEM_LIMIT:-768m}
+
+volumes:
+  pgdata:
+  data:
