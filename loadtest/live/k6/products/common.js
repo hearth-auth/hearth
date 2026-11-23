@@ -89,12 +89,31 @@ export function codeExchange(url, f, clientId, redirectUri) {
   };
 }
 
-/** True when a token response succeeded. Sets `f.access` and `f.refresh`. */
+/**
+ * True when a token response succeeded. Sets `f.access`, `f.refresh` and
+ * `f.expiresIn` (the response's `expires_in`, read by tokenLife).
+ */
 export function takeTokens(res, f) {
   if (res.status !== 200) return false;
   const b = json(res);
   if (!b || !b.access_token) return false;
   f.access = b.access_token;
   f.refresh = b.refresh_token;
+  f.expiresIn = b.expires_in;
   return true;
+}
+
+/**
+ * The issue and expiry times (epoch seconds) of an access token received at
+ * `nowS` with the token response's `expires_in` (RFC 6749 section 5.1: the
+ * lifetime in seconds). The same for every product, whatever its token format
+ * (a JWT's claims or an opaque string): the harness never reads the token.
+ * Throws when `expires_in` is missing or not a positive number of seconds; the
+ * harness does not guess a lifetime.
+ */
+export function tokenLife(expiresIn, nowS) {
+  if (typeof expiresIn !== 'number' || !Number.isFinite(expiresIn) || expiresIn <= 0) {
+    throw new Error(`the token response has no valid expires_in (${JSON.stringify(expiresIn)})`);
+  }
+  return { iat: nowS, exp: nowS + expiresIn };
 }

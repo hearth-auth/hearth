@@ -16,15 +16,15 @@ The realm mirrors the Hearth realm of gen-config.sh:
          API application is a resource server only and cannot take that grant)
   users  user000001@<host> ... with one password, as gen-config.sh's seed_users
 
-Settings that differ from Zitadel's defaults (the instance-wide ones are in compose.yaml):
-  accessTokenType JWT        on app and cc: the harness reads iat and exp from the access token,
-                             as Hearth's and Keycloak's tokens carry them (Zitadel's default is an
-                             opaque token)
+The clients keep Zitadel's default access token type, an opaque (bearer) token: the harness takes
+a token's lifetime from the token response's expires_in, for every product. The instance-wide
+settings that differ from Zitadel's defaults are in compose.yaml.
 
 Zitadel's own choices that stay: refresh tokens rotate (each refresh answers a new one and the old
 one is refused), client secrets are stored with the SecretHasher default (bcrypt, cost 4).
 
-The generated client ids and secrets go to generator.env, with the hash that the seed gives the
+The generated client ids and secrets go to generator.env, with the organization's id and name (the
+admin API's context; an opaque token does not carry them) and the hash that the seed gives the
 bulk users (unusable_hash). No password or secret is printed.
 """
 import base64
@@ -141,7 +141,7 @@ def app_rep(g):
         # A browser application without a secret; Zitadel requires PKCE for it.
         "appType": "OIDC_APP_TYPE_USER_AGENT",
         "authMethodType": "OIDC_AUTH_METHOD_TYPE_NONE",
-        "accessTokenType": "OIDC_TOKEN_TYPE_JWT",
+        # No accessTokenType: Zitadel's default, an opaque (bearer) token.
         "devMode": False,
     }
 
@@ -153,7 +153,8 @@ def api_rep():
 
 def cc_rep():
     """The service account of the client credentials journey."""
-    return {"userName": CC_USERNAME, "name": "client credentials", "accessTokenType": "ACCESS_TOKEN_TYPE_JWT"}
+    # No accessTokenType: Zitadel's default, an opaque (bearer) token.
+    return {"userName": CC_USERNAME, "name": "client credentials"}
 
 
 def login_batches(g, batch=LOGIN_BATCH):
@@ -227,6 +228,8 @@ def main(bundle):
             "STRESS_API_SECRET": api["clientSecret"],
             "STRESS_CC_CLIENT_ID": cc_secret["clientId"],
             "STRESS_CC_SECRET": cc_secret["clientSecret"],
+            "STRESS_ORG_ID": org["id"],
+            "STRESS_ORG_NAME": org["name"],
             "STRESS_BULK_PASSWORD_HASH": unusable_hash(),
         },
     )

@@ -95,6 +95,8 @@ export const hearth = {
     headers: { Authorization: basic },
   }),
 
+  /** Hearth's admin context is in its (JWT) access token: lib.adminContext passes the claims. */
+  adminClaims: true,
   /** The admin context from the admin's token claims: Hearth's admin API wants the realm id. */
   admin: (token, claims) => ({ token, realmId: claims.tid.replace(/^realm_/, '') }),
   adminHeaders,

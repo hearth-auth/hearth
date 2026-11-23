@@ -1,0 +1,160 @@
+# Ory Hydra v26.2.0 + Ory Kratos v26.2.0, Ory's reference login and consent
+# UI and their PostgreSQL for the same-hardware comparison (#913). ory.sh runs
+# it; the images and their digests come from ../images.env, the secrets and
+# the TLS leaf from the bundle (BUNDLE, outside git). The secrets reach compose
+# as variables (docker compose --env-file $BUNDLE/server.env) and each
+# container gets only the keys named below.
+#
+# The product is three servers on one host, as Ory deploys it: Hydra (OAuth 2.0
+# and OpenID Connect; it stores no users), Kratos (the users and their
+# passwords) and the login and consent app that Hydra needs, here Ory's own
+# reference app (kratos-selfservice-ui-node, the official image at the same
+# release). README.md says why.
+#
+# Production setup from Ory's own guides, the rest at Ory's defaults:
+#   https://www.ory.com/docs/hydra/self-hosted/production
+#   https://www.ory.com/docs/kratos/guides/production
+#   https://www.ory.com/docs/self-hosted/deployment (database DSN)
+#   https://www.ory.com/docs/oauth2-oidc/skip-consent
+#   https://github.com/ory/kratos/blob/v26.2.0/quickstart.yml (the UI's setup)
+#
+# One host: Kratos and the UI join Hydra's network namespace, so the three
+# listen on one address (ory.stress.test, ports 4444 and 4445 Hydra, 4433
+# and 4434 Kratos, 4455 the UI), as on one server, and reach each other over
+# TLS by that name. PostgreSQL stays on the compose network.
+name: compare-ory
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:?}
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD: ${DB_ADMIN_PASSWORD:?}
+      # initdb.sh makes the hydra and kratos databases and roles with these.
+      HYDRA_DB_PASSWORD: ${HYDRA_DB_PASSWORD:?}
+      KRATOS_DB_PASSWORD: ${KRATOS_DB_PASSWORD:?}
+    volumes:
+      - ../postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./initdb.sh:/docker-entrypoint-initdb.d/ory.sh:ro
+      # PostgreSQL 18 images keep PGDATA under /var/lib/postgresql/18.
+      - pgdata:/var/lib/postgresql
+    shm_size: 256mb
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    # No published port: only Hydra and Kratos reach it, over the compose network.
+
+  # The migrations, one-shot, as Ory's guides run them before `serve`.
+  hydra-migrate:
+    image: ${HYDRA_IMAGE:?}
+    command: ["migrate", "sql", "up", "-e", "--yes"]
+    restart: "no"
+    environment:
+      DSN: postgres://hydra:${HYDRA_DB_PASSWORD:?}@postgres:5432/hydra?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  kratos-migrate:
+    image: ${KRATOS_IMAGE:?}
+    command: ["migrate", "sql", "up", "-e", "--yes"]
+    restart: "no"
+    environment:
+      DSN: postgres://kratos:${KRATOS_DB_PASSWORD:?}@postgres:5432/kratos?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # `hydra serve all` without --dev: both listeners in one process.
+  hydra:
+    image: ${HYDRA_IMAGE:?}
+    command: ["serve", "all", "--config", "/etc/ory/hydra.yaml"]
+    environment:
+      # The database runs on the same server, over the compose network. Pool
+      # at Ory's defaults (max_conns and max_idle_conns from the CPU count).
+      DSN: postgres://hydra:${HYDRA_DB_PASSWORD:?}@postgres:5432/hydra?sslmode=disable
+      SECRETS_SYSTEM: ${HYDRA_SECRET_SYSTEM:?}
+      SECRETS_COOKIE: ${HYDRA_SECRET_COOKIE:?}
+      SECRETS_PAGINATION: ${HYDRA_SECRET_PAGINATION:?}
+    volumes:
+      - ./hydra.yaml:/etc/ory/hydra.yaml:ro
+      - ${BUNDLE:?}/tls:/tls:ro
+    # The host's one name, inside the shared network namespace.
+    extra_hosts:
+      - "${ORY_HOST:?}:127.0.0.1"
+    ports:
+      - "${ORY_BIND:-127.0.0.1}:4444:4444"
+      - "${ORY_BIND:-127.0.0.1}:4445:4445"
+      - "${ORY_BIND:-127.0.0.1}:4433:4433"
+      - "${ORY_BIND:-127.0.0.1}:4434:4434"
+      - "${ORY_BIND:-127.0.0.1}:4455:4455"
+    depends_on:
+      hydra-migrate:
+        condition: service_completed_successfully
+    mem_limit: ${HYDRA_MEM_LIMIT:-512m}
+
+  # `kratos serve` without --dev. No courier: no flow of the run sends a
+  # message (ory.sh messages counts them).
+  kratos:
+    image: ${KRATOS_IMAGE:?}
+    command: ["serve", "--config", "/etc/ory/kratos.yaml"]
+    network_mode: "service:hydra"
+    environment:
+      DSN: postgres://kratos:${KRATOS_DB_PASSWORD:?}@postgres:5432/kratos?sslmode=disable
+      SECRETS_DEFAULT: ${KRATOS_SECRET_DEFAULT:?}
+      SECRETS_COOKIE: ${KRATOS_SECRET_COOKIE:?}
+      SECRETS_CIPHER: ${KRATOS_SECRET_CIPHER:?}
+      SECRETS_PAGINATION: ${KRATOS_SECRET_PAGINATION:?}
+      # No telemetry reports (a flag or environment variable only for Kratos).
+      SQA_OPT_OUT: "true"
+      # Kratos calls Hydra's admin port over TLS: trust the run's CA.
+      SSL_CERT_FILE: /ca.crt
+    volumes:
+      - ./kratos.yaml:/etc/ory/kratos.yaml:ro
+      - ./identity.schema.json:/etc/ory/identity.schema.json:ro
+      - ${BUNDLE:?}/tls:/tls:ro
+      - ${BUNDLE:?}/ca.crt:/ca.crt:ro
+    depends_on:
+      kratos-migrate:
+        condition: service_completed_successfully
+      hydra:
+        condition: service_started
+        restart: true
+    mem_limit: ${KRATOS_MEM_LIMIT:-1g}
+
+  # Ory's reference login, consent and self-service UI: Hydra's login page
+  # starts a Kratos login flow, its consent page accepts at once for a client
+  # with skip_consent (Ory's documented first-party setup). TLS on its own
+  # listener (TLS_CERT_PATH, TLS_KEY_PATH).
+  ui:
+    image: ${UI_IMAGE:?}
+    network_mode: "service:hydra"
+    environment:
+      NODE_ENV: production
+      PORT: "4455"
+      KRATOS_PUBLIC_URL: https://${ORY_HOST:?}:4433
+      KRATOS_BROWSER_URL: https://${ORY_HOST:?}:4433
+      HYDRA_ADMIN_URL: https://${ORY_HOST:?}:4445
+      COOKIE_SECRET: ${UI_COOKIE_SECRET:?}
+      CSRF_COOKIE_NAME: __Host-ory_ui_csrf
+      CSRF_COOKIE_SECRET: ${UI_CSRF_COOKIE_SECRET:?}
+      TLS_CERT_PATH: /tls/https.crt
+      TLS_KEY_PATH: /tls/https.key
+      NODE_EXTRA_CA_CERTS: /ca.crt
+    volumes:
+      - ${BUNDLE:?}/tls:/tls:ro
+      - ${BUNDLE:?}/ca.crt:/ca.crt:ro
+    depends_on:
+      kratos:
+        condition: service_started
+      hydra:
+        condition: service_started
+        restart: true
+    mem_limit: ${UI_MEM_LIMIT:-512m}
+
+volumes:
+  pgdata:

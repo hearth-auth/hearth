@@ -47,18 +47,19 @@
 //
 // Tokens never expire under a run: each VU replaces a token when 10 to 25 % of
 // its lifetime is left (a fraction each VU draws once), by a sign-in tagged
-// name=renew. A ramp ends before its tokens get near their expiry, so this does
+// name=renew. The lifetime is the token response's expires_in, for every
+// product (products/common.js tokenLife). A ramp ends before its tokens get near their expiry, so this does
 // not change ramps.
 import { sleep } from 'k6';
 import exec from 'k6/execution';
 import { Counter, Rate, Trend } from 'k6/metrics';
+import { tokenLife } from './products/common.js';
 import {
   adminContext,
   adminSession,
   adminSignIn,
   apiBasic,
   ccBasic,
-  claims,
   env,
   hosts,
   product,
@@ -178,7 +179,7 @@ export function setup() {
       const admin = adminSession(r);
       return {
         admin: admin.access,
-        adminLife: life(admin.access),
+        adminLife: life(admin.expiresIn),
         realmId: adminContext(admin.access).realmId,
         sessions: [],
         userIds: [],
@@ -204,7 +205,7 @@ export function setup() {
       if (res.sessions.length < Math.ceil(want * 0.9)) {
         throw new Error(`token pool${inRealm(r)}: ${res.failed} of ${want} sign-ins failed`);
       }
-      data.realms[ri].sessions = res.sessions.map((s) => Object.assign(life(s.access), s));
+      data.realms[ri].sessions = res.sessions.map((s) => Object.assign(life(s.expiresIn), s));
     });
   }
   if (uses.includes('admin_lookup')) {
@@ -264,10 +265,16 @@ let chain = null;
 let admin = null;
 const recent = [];
 
-// A token's issue and expiry times (epoch seconds), from its claims.
-function life(jwt) {
-  const c = claims(jwt);
-  return { iat: c.iat, exp: c.exp };
+// A token's issue and expiry times (epoch seconds), from the token response's
+// expires_in, for every product. A response without a valid one stops the run:
+// the harness does not guess a lifetime.
+function life(expiresIn) {
+  try {
+    return tokenLife(expiresIn, Date.now() / 1000);
+  } catch (e) {
+    exec.test.abort(`${product.name}: ${e.message}`);
+    throw e;
+  }
 }
 
 // True when this VU must replace a token with these times.
@@ -278,7 +285,7 @@ function due(t) {
 // A VU session from a sign-in, or 'relogin' when the sign-in failed.
 function session(s) {
   if (!s.ok) return 'relogin';
-  return Object.assign({ refresh: s.refresh, access: s.access, refreshes: 0 }, life(s.access));
+  return Object.assign({ refresh: s.refresh, access: s.access, refreshes: 0 }, life(s.expiresIn));
 }
 
 // Signs this VU's own user in; `name` tags the requests (they are not a journey).
@@ -329,7 +336,7 @@ function adminToken(data) {
   if (admin === null || due(admin)) {
     renewals.add(1);
     const s = adminSignIn({ name: 'renew' }, myRealm());
-    if (s.ok) admin = Object.assign({ access: s.access }, life(s.access));
+    if (s.ok) admin = Object.assign({ access: s.access }, life(s.expiresIn));
   }
   return admin ? admin.access : d.admin;
 }
@@ -417,7 +424,7 @@ function refresh(data) {
     const b = res.json();
     chain = Object.assign(
       { refresh: b.refresh_token, access: b.access_token, refreshes: own.refreshes + 1 },
-      life(b.access_token),
+      life(b.expires_in),
     );
   } else if (res.status === 429 || res.status === 503 || (res.status >= 400 && res.status < 500)) {
     // 429/503: refused before rotation, so the token is still valid.

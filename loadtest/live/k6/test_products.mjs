@@ -23,8 +23,9 @@ const { PRODUCTS, productFor } = await load('index.js');
 const common = await load('common.js');
 const { loginAction } = await load('keycloak.js');
 const { formPostsTo } = await load('zitadel.js');
+const oryHelpers = await load('ory.js');
 rmSync(dir, { recursive: true, force: true });
-const { hearth, keycloak, zitadel } = PRODUCTS;
+const { hearth, keycloak, ory, zitadel } = PRODUCTS;
 
 const c = {
   base: 'https://server.stress.test:8443',
@@ -57,6 +58,7 @@ test('PRODUCT picks the adapter; hearth when unset', () => {
   assert.equal(productFor(''), hearth);
   assert.equal(productFor('keycloak'), keycloak);
   assert.equal(productFor('zitadel'), zitadel);
+  assert.equal(productFor('ory'), ory);
   assert.throws(() => productFor('fusionauth'), /PRODUCT must be one of hearth, keycloak/);
 });
 
@@ -426,24 +428,20 @@ test('zitadel: login through its own pages (login UI v1) with PKCE', () => {
   assert.equal(f.scope, undefined);
 });
 
-test('zitadel: the admin asks for the API audience and the organization claims', () => {
-  assert.equal(
-    zitadel.adminScope,
-    'urn:zitadel:iam:org:project:id:zitadel:aud urn:zitadel:iam:user:resourceowner',
-  );
+test('zitadel: the admin asks for the API audience; its organization comes from the environment', () => {
+  assert.equal(zitadel.adminScope, 'urn:zitadel:iam:org:project:id:zitadel:aud');
   const f = Object.assign(flow(), { scope: `openid ${zitadel.adminScope}` });
   assert.match(
     zitadel.loginSteps[0].request(c, r, f).url,
-    /&scope=openid%20urn%3Azitadel%3Aiam%3Aorg%3Aproject%3Aid%3Azitadel%3Aaud%20urn%3Azitadel%3Aiam%3Auser%3Aresourceowner%20offline_access&/,
+    /&scope=openid%20urn%3Azitadel%3Aiam%3Aorg%3Aproject%3Aid%3Azitadel%3Aaud%20offline_access&/,
   );
-  assert.deepEqual(
-    zitadel.admin('adm', {
-      sub: '1',
-      'urn:zitadel:iam:user:resourceowner:id': '4006',
-      'urn:zitadel:iam:user:resourceowner:name': 'stress',
-    }),
-    { token: 'adm', realmId: '4006', orgName: 'stress' },
-  );
+  // Opaque tokens: no claims; instance.py writes the organization to generator.env.
+  const zc = Object.assign({}, c, { orgId: '4006', orgName: 'stress' });
+  assert.deepEqual(zitadel.admin('adm', null, zc), { token: 'adm', realmId: '4006', orgName: 'stress' });
+  assert.throws(() => zitadel.admin('adm', null, c), /STRESS_ORG_ID and STRESS_ORG_NAME are required/);
+  // Only Hearth's admin context comes from its access token's claims.
+  assert.equal(hearth.adminClaims, true);
+  for (const p of [keycloak, zitadel, ory]) assert.equal(p.adminClaims, undefined);
 });
 
 test('zitadel: a missing form, an unknown user, a refused password and a wrong state fail their step', () => {
@@ -581,4 +579,239 @@ test('zitadel: reads pages by offset, created ids, import counts', () => {
   assert.deepEqual(zitadel.imported(res(200, {}, JSON.stringify(answer))), { imported: 2, failed: 1 });
   assert.deepEqual(zitadel.imported(res(200, {}, '{"success":{"orgs":[{"orgId":"4006"}]}}')), { imported: 0, failed: 0 });
   assert.equal(zitadel.imported(res(504, {}, 'timeout')), null);
+});
+
+// Ory: Hydra's public port is c.base; the UI, Kratos and the admin ports are
+// on the same host.
+const oUi = 'https://server.stress.test:4455';
+const oKratos = 'https://server.stress.test:4433';
+const oFlowAction = `${oKratos}/self-service/login?flow=f1`;
+// The login page as the reference UI renders it (Ory Elements): the CSRF
+// input has attributes between its name and its value.
+const oLoginPage = `<form class="ory_elements__form" action="${oFlowAction}" method="POST" data-testid="login-flow">`
+  + '<input data-testid="node/input/csrf_token" name="csrf_token" type="hidden" autoComplete="" required="" value="csrf1"/>'
+  + '<input class="x" id=":R1:" name="identifier" type="text" autoComplete="username" required="" value=""/>'
+  + '<button type="submit" name="method" value="password"></button></form>';
+const oVerifier = (kind) => `${c.base}/oauth2/auth?client_id=app-id&state=st&${kind}_verifier=v1`;
+
+// Plays Ory for a sign-in that succeeds; `over` replaces a step's answer.
+function oryAnswer(over = {}) {
+  return (name) => {
+    if (name in over) return over[name];
+    const to = (status, location) => res(status, { Location: location });
+    if (name === 'authorize') return to(302, `${oUi}/login?login_challenge=lc1`);
+    if (name === 'login_challenge') {
+      return to(303, `${oKratos}/self-service/login/browser?aal=&refresh=&return_to=&organization=&via=&login_challenge=lc1`);
+    }
+    if (name === 'login_flow') return to(303, `${oUi}/login?flow=f1`);
+    if (name === 'login_page') return res(200, {}, oLoginPage);
+    if (name === 'login_submit') return to(303, oVerifier('login'));
+    if (name === 'login_verifier') return to(302, `${oUi}/consent?consent_challenge=cc1`);
+    if (name === 'consent') return to(302, oVerifier('consent'));
+    if (name === 'consent_verifier') return to(303, `${c.redirectUri}?code=cd&scope=openid+offline_access&state=st`);
+    return res(200, {}, JSON.stringify({ access_token: 'at', refresh_token: 'ory_rt_x' }));
+  };
+}
+
+test('ory: login through Hydra, the reference UI and Kratos with PKCE', () => {
+  const f = flow();
+  const seen = [];
+  const answer = oryAnswer();
+  const failed = runLogin(ory, f, (name, spec) => {
+    seen.push([name, spec]);
+    return answer(name);
+  });
+  assert.equal(failed, null);
+  assert.equal(f.access, 'at');
+  assert.equal(f.refresh, 'ory_rt_x');
+  assert.deepEqual(seen, [
+    ['authorize', {
+      method: 'GET',
+      // offline_access: Hydra issues a refresh token only for it.
+      url: `${c.base}/oauth2/auth?response_type=code&client_id=app-id`
+        + `&redirect_uri=${encodeURIComponent(c.redirectUri)}&state=st&scope=openid%20offline_access`
+        + '&code_challenge=chal&code_challenge_method=S256',
+    }],
+    ['login_challenge', { method: 'GET', url: `${oUi}/login?login_challenge=lc1` }],
+    ['login_flow', {
+      method: 'GET',
+      url: `${oKratos}/self-service/login/browser?aal=&refresh=&return_to=&organization=&via=&login_challenge=lc1`,
+    }],
+    ['login_page', { method: 'GET', url: `${oUi}/login?flow=f1` }],
+    ['login_submit', {
+      method: 'POST',
+      url: oFlowAction,
+      body: { csrf_token: 'csrf1', identifier: f.email, password: 'pw', method: 'password' },
+    }],
+    ['login_verifier', { method: 'GET', url: oVerifier('login') }],
+    ['consent', { method: 'GET', url: `${oUi}/consent?consent_challenge=cc1` }],
+    ['consent_verifier', { method: 'GET', url: oVerifier('consent') }],
+    ['code_exchange', {
+      method: 'POST',
+      url: `${c.base}/oauth2/token`,
+      body: {
+        grant_type: 'authorization_code',
+        code: 'cd',
+        redirect_uri: c.redirectUri,
+        client_id: 'app-id',
+        code_verifier: 'ver',
+      },
+    }],
+  ]);
+  // The flow's scope is left as lib.js made it; Ory has no admin scope.
+  assert.equal(f.scope, undefined);
+  assert.equal(ory.adminScope, undefined);
+});
+
+test('ory: a refused password, a page without the form, a redirect elsewhere and a wrong state fail their step', () => {
+  const fails = (over) => runLogin(ory, flow(), oryAnswer(over));
+  assert.equal(fails({ authorize: res(400, {}, 'invalid_request') }), 'authorize');
+  // Hydra's error page instead of the login page.
+  assert.equal(fails({ authorize: res(302, { Location: `${oUi}/error?error=invalid_client` }) }), 'authorize');
+  assert.equal(fails({ authorize: res(302, { Location: `https://evil.test:4455/login?login_challenge=lc1` }) }), 'authorize');
+  assert.equal(fails({ login_challenge: res(500, {}, 'error') }), 'login_challenge');
+  assert.equal(fails({ login_flow: res(303, { Location: `${oUi}/error?id=e1` }) }), 'login_flow');
+  assert.equal(fails({ login_page: res(200, {}, '<html>error</html>') }), 'login_page');
+  assert.equal(fails({ login_page: res(200, {}, oLoginPage.replace(/name="csrf_token"/, 'name="other"')) }), 'login_page');
+  assert.equal(
+    fails({ login_page: res(200, {}, oLoginPage.replace(oFlowAction, 'https://evil.test/self-service/login?flow=f1')) }),
+    'login_page',
+  );
+  // Kratos sends a refused password back to the UI's login page.
+  assert.equal(fails({ login_submit: res(303, { Location: `${oUi}/login?flow=f1` }) }), 'login_submit');
+  assert.equal(fails({ login_verifier: res(302, { Location: `${oUi}/error?error=x` }) }), 'login_verifier');
+  // A consent page shown (no skip_consent) is not a redirect.
+  assert.equal(fails({ consent: res(200, {}, '<form action="consent">') }), 'consent');
+  assert.equal(
+    fails({ consent_verifier: res(303, { Location: `${c.redirectUri}?code=cd&state=other` }) }),
+    'consent_verifier',
+  );
+  assert.equal(fails({ code_exchange: res(400, {}, '{"error":"invalid_grant"}') }), 'code_exchange');
+});
+
+test('ory: helpers for ports, redirects, the login form and Kratos page links', () => {
+  assert.equal(oryHelpers.at(c, 4445), 'https://server.stress.test:4445');
+  assert.equal(oryHelpers.at({ base: 'https://h.test' }, 4434), 'https://h.test:4434');
+  assert.throws(() => oryHelpers.at({ base: 'h.test' }, 1), /not an http\(s\) URL/);
+  const f = {};
+  assert.equal(oryHelpers.redirectsTo(res(302, { location: `${oUi}/x?a=1&p=2` }), f, `${oUi}/x?`, 'p'), true);
+  assert.equal(f.next, `${oUi}/x?a=1&p=2`);
+  // The parameter must be there and have a value.
+  assert.equal(oryHelpers.redirectsTo(res(302, { Location: `${oUi}/x?p=` }), {}, `${oUi}/x?`, 'p'), false);
+  assert.equal(oryHelpers.redirectsTo(res(302, { Location: `${oUi}/x?xp=1` }), {}, `${oUi}/x?`, 'p'), false);
+  assert.equal(oryHelpers.redirectsTo(res(200, { Location: `${oUi}/x?p=1` }), {}, `${oUi}/x?`, 'p'), false);
+  assert.equal(oryHelpers.loginAction(oLoginPage), oFlowAction);
+  assert.equal(oryHelpers.loginAction('<form action="/a&amp;b" data-testid="login-flow">'), '/a&b');
+  assert.equal(oryHelpers.loginAction('<form action="/other">'), null);
+  assert.equal(oryHelpers.inputValue(oLoginPage, 'csrf_token'), 'csrf1');
+  assert.equal(oryHelpers.inputValue(oLoginPage, 'missing'), null);
+  const link = '</admin/identities?page_size=200&page_token=00000000-0000-0000-0000-000000000000>; rel="first",'
+    + '</admin/identities?page_size=200&page_token=00dc35ee-7949-460b-a2b7-40a9cecbab18>; rel="next"';
+  assert.equal(oryHelpers.nextPageToken(link), '00dc35ee-7949-460b-a2b7-40a9cecbab18');
+  assert.equal(oryHelpers.nextPageToken(link.split(',')[0]), null);
+  assert.equal(oryHelpers.nextPageToken(undefined), null);
+});
+
+test('ory: journey and admin requests', () => {
+  const a = ory.admin('adm', null);
+  assert.deepEqual(a, { token: 'adm', realmId: null });
+  // Kratos's admin API has no authentication of its own: no token is sent.
+  const h = { 'Content-Type': 'application/json' };
+  assert.deepEqual(ory.adminHeaders(a), h);
+  assert.deepEqual(ory.refresh(c, r, 'rt'), {
+    method: 'POST',
+    url: `${c.base}/oauth2/token`,
+    body: { grant_type: 'refresh_token', refresh_token: 'rt', client_id: 'app-id' },
+  });
+  assert.deepEqual(ory.clientCredentials(c, r, 'Basic x'), {
+    method: 'POST',
+    url: `${c.base}/oauth2/token`,
+    body: { grant_type: 'client_credentials' },
+    headers: { Authorization: 'Basic x' },
+  });
+  // Hydra's admin port: no client authentication.
+  assert.deepEqual(ory.introspect(c, r, 'at', 'Basic x'), {
+    method: 'POST',
+    url: 'https://server.stress.test:4445/admin/oauth2/introspect',
+    body: { token: 'at' },
+  });
+  assert.deepEqual(ory.userinfo(c, r, 'at'), {
+    method: 'GET',
+    url: `${c.base}/userinfo`,
+    headers: { Authorization: 'Bearer at' },
+  });
+  const ids = 'https://server.stress.test:4434/admin/identities';
+  assert.deepEqual(ory.adminUser(c, r, a, 'u1'), { method: 'GET', url: `${ids}/u1`, headers: h });
+  assert.deepEqual(ory.listUsers(c, r, a, null), { method: 'GET', url: `${ids}?page_size=200`, headers: h });
+  assert.equal(ory.listUsers(c, r, a, 'u 9').url, `${ids}?page_size=200&page_token=u%209`);
+  const created = ory.createUser(c, r, a, 'e@x');
+  assert.equal(created.method, 'POST');
+  assert.equal(created.url, ids);
+  // No credentials: like Hearth's create, the user has no password.
+  assert.deepEqual(JSON.parse(created.body), {
+    schema_id: 'default',
+    traits: { email: 'e@x', name: { first: 'Stress', last: 'created' } },
+    state: 'active',
+    verifiable_addresses: [{ value: 'e@x', via: 'email', verified: true, status: 'completed' }],
+  });
+  const hash = '$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$ZGlnZXN0';
+  const oc = Object.assign({}, c, { bulkPasswordHash: hash });
+  const imp = ory.importUsers(oc, r, a, [{ email: 'bulk00000007@x', name: 'Bulk 7', index: 7 }]);
+  assert.equal(imp.method, 'PATCH');
+  assert.equal(imp.url, ids);
+  assert.deepEqual(JSON.parse(imp.body), {
+    identities: [{
+      create: {
+        schema_id: 'default',
+        traits: { email: 'bulk00000007@x', name: { first: 'Bulk', last: '7' } },
+        state: 'active',
+        verifiable_addresses: [{ value: 'bulk00000007@x', via: 'email', verified: true, status: 'completed' }],
+        // The run's unusable hash, never a plaintext password.
+        credentials: { password: { config: { hashed_password: hash } } },
+      },
+    }],
+  });
+  assert.throws(() => ory.importUsers(c, r, a, []), /STRESS_BULK_PASSWORD_HASH is required/);
+  assert.equal(ory.regenerateSecret, null);
+});
+
+test('ory: reads pages by page token, created ids, import counts', () => {
+  const link = '</admin/identities?page_size=200&page_token=p2>; rel="next"';
+  const items = (n) => JSON.stringify(Array.from({ length: n }, (_, i) => ({ id: `u${i}` })));
+  const full = ory.userPage(res(200, { Link: link }, items(200)), null);
+  assert.equal(full.ids.length, 200);
+  assert.equal(full.next, 'p2');
+  // A short page is the last, whatever its links say.
+  assert.deepEqual(ory.userPage(res(200, { Link: link }, items(2)), 'p2'), { ids: ['u0', 'u1'], next: null });
+  assert.deepEqual(ory.userPage(res(200, {}, items(200)), 'p2').next, null);
+  assert.equal(ory.createdId(res(201, {}, '{"id":"u9","traits":{}}')), 'u9');
+  assert.equal(ory.createdId(res(201, {}, '{}')), null);
+  assert.equal(ory.createdId(res(409, {}, '{"id":"u9"}')), null);
+  const answer = {
+    identities: [
+      { action: 'create', identity: 'u1' },
+      { action: 'create', identity: 'u2' },
+      { action: 'error', error: { code: 409, message: 'conflict' } },
+    ],
+  };
+  assert.deepEqual(ory.imported(res(200, {}, JSON.stringify(answer))), { imported: 2, failed: 1 });
+  assert.equal(ory.imported(res(400, {}, '{"error":{}}')), null);
+});
+
+test('token lifetimes come from expires_in (RFC 6749 section 5.1) for every product', () => {
+  // takeTokens keeps expires_in from the token response, whatever the token's format.
+  const f = {};
+  assert.equal(common.takeTokens(res(200, {}, '{"access_token":"opaque","refresh_token":"b","expires_in":3599}'), f), true);
+  assert.deepEqual(f, { access: 'opaque', refresh: 'b', expiresIn: 3599 });
+  const g = {};
+  assert.equal(common.takeTokens(res(200, {}, '{"access_token":"a"}'), g), true);
+  assert.equal(g.expiresIn, undefined);
+  // Received at now, lives expires_in seconds.
+  assert.deepEqual(common.tokenLife(3600, 5000), { iat: 5000, exp: 8600 });
+  assert.deepEqual(common.tokenLife(299.5, 10), { iat: 10, exp: 309.5 });
+  // A missing or bad expires_in fails loudly; no lifetime is guessed.
+  for (const bad of [undefined, null, 0, -1, '3600', NaN, Infinity, {}, true]) {
+    assert.throws(() => common.tokenLife(bad, 5000), /the token response has no valid expires_in/, String(bad));
+  }
+  assert.throws(() => common.tokenLife('3600', 5000), /\("3600"\)/);
 });

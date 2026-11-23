@@ -1,0 +1,68 @@
+# Ory Hydra v26.2.0 for the same-hardware comparison (#913): the OAuth 2.0 and
+# OpenID Connect server. Its users are Kratos's (kratos.yaml); the login and
+# consent pages are Ory's reference UI (compose.yaml). The secrets and the DSN
+# come from the environment (DSN, SECRETS_SYSTEM, SECRETS_COOKIE,
+# SECRETS_PAGINATION; compose.yaml), not from this file.
+#
+# Every key: https://github.com/ory/hydra/blob/v26.2.0/spec/config.json
+# Production guide: https://www.ory.com/docs/hydra/self-hosted/production
+# Everything not set here is Hydra's default.
+
+serve:
+  # TLS on Hydra's own listeners (#913), both of them, with the run's leaf.
+  # The public port serves /oauth2/auth, /oauth2/token and /userinfo; the
+  # admin port the login and consent API and /admin/oauth2/introspect.
+  public:
+    port: 4444
+    tls:
+      enabled: true
+      cert:
+        path: /tls/https.crt
+      key:
+        path: /tls/https.key
+  admin:
+    port: 4445
+    tls:
+      enabled: true
+      cert:
+        path: /tls/https.crt
+      key:
+        path: /tls/https.key
+
+urls:
+  self:
+    issuer: https://ory.stress.test:4444
+  # The reference UI (kratos-selfservice-ui-node) serves both pages.
+  login: https://ory.stress.test:4455/login
+  consent: https://ory.stress.test:4455/consent
+  logout: https://ory.stress.test:4455/logout
+  error: https://ory.stress.test:4455/error
+
+# Access tokens live 1 h, as in the Hearth run (#913). The others are Hydra's
+# defaults, written out because they are set together.
+ttl:
+  access_token: 1h
+  refresh_token: 720h
+  id_token: 1h
+  auth_code: 10m
+
+# Access tokens keep Hydra's default format, opaque (`strategies.access_token`
+# unset): every product runs with its own default; the harness takes a token's
+# lifetime from the token response's expires_in.
+
+oauth2:
+  # Client secrets: Hydra's default, PBKDF2-SHA256 with 25,000 iterations
+  # (16-byte salt, 32-byte key); Hydra has no Argon2 option for them.
+  hashers:
+    algorithm: pbkdf2
+    pbkdf2:
+      iterations: 25000
+  # A used refresh token is refused (and its family revoked): no grace
+  # period, Hydra's default.
+  grant:
+    refresh_token:
+      rotation_grace_period: 0s
+
+# No telemetry reports from the server under test.
+sqa:
+  opt_out: true

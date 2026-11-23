@@ -13,6 +13,7 @@ metrics and analysis as Hearth.
 | `tls.sh` | A CA and an HTTPS leaf, the same kind as Hearth's (`gen-config.sh`) |
 | `k6.sh` | Runs a `loadtest/live/k6` script from the pinned k6 image, for a host without k6 |
 | `keycloak/` | Keycloak 26.8.2: `compose.yaml` (Keycloak and PostgreSQL), `realm.py` (the realm, tested by `test_realm.py`), `keycloak.sh` (up, seed, restart, down) |
+| `ory/` | Ory Hydra v26.2.0 and Ory Kratos v26.2.0 with Ory's reference login and consent UI: `compose.yaml` (the three, the migrations and PostgreSQL), `hydra.yaml`, `kratos.yaml`, `identity.schema.json`, `initdb.sh` (the two databases), `realm.py` (the clients and login users, tested by `test_realm.py`), `ory.sh` (up, seed, hashes, messages, restart, down) |
 | `zitadel/` | Zitadel v4.20.5: `compose.yaml` (Zitadel's init, setup and start, and PostgreSQL), `instance.py` (the clients and login users, tested by `test_instance.py`), `zitadel.sh` (up, seed, hashes, restart, down) |
 
 ## Adapters
@@ -28,16 +29,35 @@ The client credentials journey uses the `api` client unless `STRESS_CC_CLIENT_ID
 `STRESS_CC_SECRET` name another (Zitadel, where an API application cannot take that grant);
 Hearth and Keycloak do not set them (`k6/test_realms.mjs`).
 
-| Journey (#913) | `JOURNEY` | Keycloak | Zitadel |
-|---|---|---|---|
-| 1 login | `login` | the authorization endpoint renders Keycloak's login page; its form posts to `login-actions/authenticate`, which answers `302` with the code; code exchange with PKCE (3 requests) | the authorization endpoint answers `302` to login UI v1; the login name page, the password page and the callback (`302` with the code); code exchange with PKCE (6 requests); the scope adds `offline_access`, without which Zitadel issues no refresh token |
-| 2 refresh | `refresh` | `refresh_token` grant of `app` (rotation on: `revokeRefreshToken`) | `refresh_token` grant of `app` (Zitadel always rotates and refuses a reused token) |
-| 3 client credentials | `client_credentials` | `client_credentials` grant of `api` (service account) | `client_credentials` grant of the service account `cc` (`STRESS_CC_*`) with scope `profile` (Zitadel refuses the grant without a scope) |
-| 4 userinfo | `userinfo` | `GET …/protocol/openid-connect/userinfo` | `GET /oidc/v1/userinfo` |
-| 5 introspect | `introspect` | `POST …/token/introspect` as `api`; the users' tokens carry `api` in `aud` (audience mapper) | `POST /oauth/v2/introspect` as the API application `api` (basic auth); the users' tokens carry its project in `aud` |
-| 6 admin user lookup | `admin_lookup` | `GET /admin/realms/stress/users/{id}`; the realm admin signs in with the `kc-admin-api` scope | `GET /v2/users/{id}`; the realm admin (IAM_OWNER) signs in with the Zitadel API audience scope |
-| 7 user create | `create_user` | `POST /admin/realms/stress/users` (`201`, id from `Location`) | `POST /v2/users/human` (`200`, `userId` in the body); no password and a verified email, so, as Hearth, no initialization code and no email |
-| 8 the mix | `mix` | the #647 weights | the #647 weights |
+| Journey (#913) | `JOURNEY` | Keycloak | Zitadel | Ory |
+|---|---|---|---|---|
+| 1 login | `login` | the authorization endpoint renders Keycloak's login page; its form posts to `login-actions/authenticate`, which answers `302` with the code; code exchange with PKCE (3 requests) | the authorization endpoint answers `302` to login UI v1; the login name page, the password page and the callback (`302` with the code); code exchange with PKCE (6 requests); the scope adds `offline_access`, without which Zitadel issues no refresh token | Hydra's authorization endpoint answers `302` to the UI's login page; the UI starts a Kratos browser login flow; the login page (Ory Elements form); the form posts to Kratos, which accepts Hydra's login request (`303` back to Hydra); Hydra sends the browser to the UI's consent page, which accepts at once (`skip_consent`); Hydra answers `303` with the code; code exchange with PKCE (9 requests); the scope adds `offline_access`, without which Hydra issues no refresh token |
+| 2 refresh | `refresh` | `refresh_token` grant of `app` (rotation on: `revokeRefreshToken`) | `refresh_token` grant of `app` (Zitadel always rotates and refuses a reused token) | `refresh_token` grant of `app` (Hydra rotates, refuses a reused token and revokes its family) |
+| 3 client credentials | `client_credentials` | `client_credentials` grant of `api` (service account) | `client_credentials` grant of the service account `cc` (`STRESS_CC_*`) with scope `profile` (Zitadel refuses the grant without a scope) | `client_credentials` grant of `api` (`client_secret_basic`; Hydra keeps the secret as a PBKDF2-SHA256 hash, 25,000 iterations) |
+| 4 userinfo | `userinfo` | `GET …/protocol/openid-connect/userinfo` | `GET /oidc/v1/userinfo` | `GET /userinfo` (Hydra's public port) |
+| 5 introspect | `introspect` | `POST …/token/introspect` as `api`; the users' tokens carry `api` in `aud` (audience mapper) | `POST /oauth/v2/introspect` as the API application `api` (basic auth); the users' tokens carry its project in `aud` | `POST /admin/oauth2/introspect` on Hydra's admin port (4445, TLS), which takes no client authentication |
+| 6 admin user lookup | `admin_lookup` | `GET /admin/realms/stress/users/{id}`; the realm admin signs in with the `kc-admin-api` scope | `GET /v2/users/{id}`; the realm admin (IAM_OWNER) signs in with the Zitadel API audience scope | `GET /admin/identities/{id}` on Kratos's admin port (4434, TLS), which has no authentication of its own: the realm admin signs in like the other products' admins, but no token is sent |
+| 7 user create | `create_user` | `POST /admin/realms/stress/users` (`201`, id from `Location`) | `POST /v2/users/human` (`200`, `userId` in the body); no password and a verified email, so, as Hearth, no initialization code and no email | `POST /admin/identities` (`201`, `id` in the body); no credentials and a verified email, so, as Hearth, no password and no message (`ory.sh messages` stays 0) |
+| 8 the mix | `mix` | the #647 weights | the #647 weights | the #647 weights |
+
+### Every product keeps its own access-token format
+
+Each product issues access tokens in its own default format; the harness never reads a token to
+time it. A token's lifetime is the token response's `expires_in` (RFC 6749 section 5.1), for every
+product: each VU replaces a token when 10 to 25 % of that lifetime is left, and a response
+without a valid `expires_in` stops the run (`tokenLife` in `k6/products/common.js`, tested in
+`k6/test_products.mjs`). The formats, each product's default:
+
+| Product | Access token |
+|---|---|
+| Hearth | JWT, Ed25519 (EdDSA) |
+| Keycloak | JWT, RS256 |
+| Zitadel | opaque (bearer) |
+| Ory Hydra | opaque |
+
+Only Hearth's admin context comes from its access token (the realm id, `tid`). Zitadel's admin
+API takes the organization from the environment (`STRESS_ORG_ID`, `STRESS_ORG_NAME`, written by
+`instance.py`); Keycloak's and Kratos's need none.
 
 ### Every product presents its own newest token (`PRESENT=chain`)
 
@@ -66,7 +86,9 @@ loadtest/compare/keycloak/keycloak.sh down            # removes the containers a
 
 Zitadel is the same with `zitadel/zitadel.sh` and the bundle `.build/zitadel/`; its `up` also
 waits for Zitadel's `setup` (migrations and the first instance, about a minute on the first
-start), and `zitadel.sh hashes` prints the parameters of the stored password hashes.
+start), and `zitadel.sh hashes` prints the parameters of the stored password hashes. Ory is the
+same with `ory/ory.sh` and `.build/ory/`; `ory.sh messages` counts the messages Kratos has
+queued (emails and SMS). Its host name is `ory.stress.test` (five ports, below).
 
 `OUT=<name>` before `k6.sh` also writes k6's per-request CSV and console to the bundle's `out/`.
 
@@ -113,8 +135,7 @@ From Zitadel's own guides (links in `zitadel/compose.yaml`), the rest at Zitadel
   and the login users; access tokens live 1 h; refresh tokens rotate with reuse refused (Zitadel
   has no switch for it); the "set up a second factor" prompt after the password is off
   (`MfaInitSkipLifetime` 0), as no product's users have a second factor; the `app` and `cc`
-  clients get JWT access tokens (Zitadel's default is opaque) because the harness reads `iat`
-  and `exp` from them. Zitadel signs them with RS256, its default key type
+  clients keep Zitadel's default opaque (bearer) access tokens (above)
 - bulk seed: `POST /admin/v1/import` (the admin API's ImportData), into the existing
   organization, 1,000 users per request, an existing user counted as failed. The import answers
   once the events are stored; the users reach the user API and the login page only when
@@ -133,3 +154,50 @@ Two Zitadel behaviours change what a journey sees:
   they expire). The comparison runs with `PRESENT=chain` for every product (above)
 - the client credentials grant needs a scope; the adapter asks for `profile`, which answers
   an access token without an ID token, as the other products do
+
+### Ory settings
+
+From Ory's own guides (links in `ory/compose.yaml`), the rest at Ory's defaults:
+
+- one server with the three parts Ory's self-hosted setup needs: Hydra (OAuth 2.0 and OpenID
+  Connect, no users), Kratos (the users) and a login and consent app. The app is Ory's own reference
+  UI (`kratos-selfservice-ui-node`, the official image of the same release), the one Kratos's
+  quickstart runs, here wired to Hydra (`HYDRA_ADMIN_URL`): its login page starts a Kratos login
+  flow for Hydra's login challenge (Kratos's native Hydra integration, `oauth2_provider.url`,
+  accepts the challenge), and its consent page accepts at once for a client with `skip_consent`,
+  Ory's documented setup for first-party clients. Kratos and the UI share Hydra's network namespace,
+  so the three answer on one name, as on one host: Hydra 4444 (public) and 4445 (admin), Kratos 4433
+  (public) and 4434 (admin), the UI 4455. Each listener terminates TLS itself (`serve.*.tls`, the
+  UI's `TLS_CERT_PATH`); they call each other over TLS by that name
+- production mode: `hydra serve all` and `kratos serve` without `--dev`, the migrations as
+  separate one-shot containers; one PostgreSQL server with a database per part (`initdb.sh`),
+  the shared `postgresql.conf`; connection pools at Ory's defaults (from the CPU count); no
+  telemetry (`sqa.opt_out`, `SQA_OPT_OUT`)
+- Argon2id m=19456 KiB, t=2, p=1 (`hashers.argon2`: `memory: 19456KB`, Kratos counts KB as
+  1,024 bytes; `iterations: 2`, `parallelism: 1`); the stored hashes show
+  `$argon2id$v=19$m=19456,t=2,p=1` (`ory.sh hashes`). Kratos's default is bcrypt. Hydra keeps
+  client secrets as PBKDF2-SHA256 hashes, 25,000 iterations (its default; it has no Argon2
+  option)
+- access tokens live 1 h; refresh tokens rotate with no grace period (Hydra's default: a reused
+  one is refused and its family revoked); access tokens keep Hydra's default opaque format
+  (above), which is also Ory's advice
+- the admin ports have no authentication of their own; Ory's guides say to keep them off the
+  public network (behind a gateway that authenticates). The comparison calls them directly, so
+  the introspect and admin journeys pay for no caller authentication: the report says so
+- container memory 2 GiB in all, as Keycloak's and Zitadel's: Kratos 1 GiB (each concurrent
+  Argon2id check takes 19 MiB), Hydra 512 MiB, the UI 512 MiB (Node.js)
+- no courier (`--watch-courier` is off): no journey and no seed queues a message, which
+  `ory.sh messages` checks; verification and recovery are off (Kratos's defaults), and every
+  address is created verified
+- bulk seed: `PATCH /admin/identities` (Kratos's batch import), 1,000 users per request (its
+  limit), an existing user counted as failed. Each batch is written in one transaction before
+  the call answers, so the users are usable at once (`ory.sh seed` checks the last one). Each
+  bulk user gets the run's unusable Argon2id hash (`hashed_password`, Kratos's documented
+  import of hashes from another system; `realm.py` makes it with the run's parameters and a
+  random salt and digest, so no password matches it). Kratos stores an imported hash without
+  hashing anything, so the seed costs no Argon2id work, as Hearth's. The 1,000 login users and
+  the admin go in through the same API with their password (200 per request at most), which
+  Kratos hashes
+
+One Ory behaviour changes what a journey sees: as Zitadel, refreshing revokes the access token
+of the refresh token used (`PRESENT=chain`, above).
