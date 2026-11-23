@@ -615,6 +615,7 @@ jobs:
           python3 -I loadtest/compare/keycloak/test_realm.py
           python3 -I loadtest/compare/zitadel/test_instance.py
           python3 -I loadtest/compare/ory/test_realm.py
+          python3 -I loadtest/compare/authentik/test_realm.py
 
       # The #[ignore] rule inside `make test-quality` was red at HEAD on a false
       # positive: it matched the literal text `#[ignore` anywhere on a line, so

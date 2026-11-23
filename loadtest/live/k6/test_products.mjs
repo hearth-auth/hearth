@@ -24,8 +24,9 @@ const common = await load('common.js');
 const { loginAction } = await load('keycloak.js');
 const { formPostsTo } = await load('zitadel.js');
 const oryHelpers = await load('ory.js');
+const akHelpers = await load('authentik.js');
 rmSync(dir, { recursive: true, force: true });
-const { hearth, keycloak, ory, zitadel } = PRODUCTS;
+const { authentik, hearth, keycloak, ory, zitadel } = PRODUCTS;
 
 const c = {
   base: 'https://server.stress.test:8443',
@@ -59,6 +60,7 @@ test('PRODUCT picks the adapter; hearth when unset', () => {
   assert.equal(productFor('keycloak'), keycloak);
   assert.equal(productFor('zitadel'), zitadel);
   assert.equal(productFor('ory'), ory);
+  assert.equal(productFor('authentik'), authentik);
   assert.throws(() => productFor('fusionauth'), /PRODUCT must be one of hearth, keycloak/);
 });
 
@@ -796,6 +798,210 @@ test('ory: reads pages by page token, created ids, import counts', () => {
   };
   assert.deepEqual(ory.imported(res(200, {}, JSON.stringify(answer))), { imported: 2, failed: 1 });
   assert.equal(ory.imported(res(400, {}, '{"error":{}}')), null);
+});
+
+// Authentik: the flow interface and the executor of the default
+// authentication flow; its redirects are relative.
+const akQuery = 'response_type=code&client_id=app-id&state=st&next=%2Fapplication%2Fo%2Fauthorize%2F%3Fx%3D1';
+const akExecutor = `${c.base}/api/v3/flows/executor/default-authentication-flow/?query=${encodeURIComponent(akQuery)}`;
+const akBack = `/api/v3/flows/executor/default-authentication-flow/?query=${encodeURIComponent(akQuery)}`;
+const akChallenge = (component, extra = {}) => res(200, {}, JSON.stringify(Object.assign({ component }, extra)));
+
+// Plays Authentik for a sign-in that succeeds; `over` replaces a step's answer.
+function authentikAnswer(over = {}) {
+  return (name) => {
+    if (name in over) return over[name];
+    const to = (status, location) => res(status, { Location: location });
+    if (name === 'authorize') return to(302, `/if/flow/default-authentication-flow/?${akQuery}`);
+    if (name === 'flow_page') return res(200, {}, '<html><ak-flow-executor></ak-flow-executor></html>');
+    if (name === 'identification') return akChallenge('ak-stage-identification');
+    if (name === 'password_challenge') return akChallenge('ak-stage-password');
+    if (name === 'identify' || name === 'password' || name === 'mfa_stage') return to(302, akBack);
+    if (name === 'login_stage') {
+      return akChallenge('xak-flow-redirect', { to: '/application/o/authorize/?client_id=app-id&state=st' });
+    }
+    if (name === 'authorize_code') return to(302, `${c.redirectUri}?code=cd&state=st`);
+    return res(200, {}, JSON.stringify({ access_token: 'at', refresh_token: 'ak_rt', expires_in: 3600 }));
+  };
+}
+
+test('authentik: login through its flow executor with PKCE', () => {
+  const f = flow();
+  const seen = [];
+  const answer = authentikAnswer();
+  const failed = runLogin(authentik, f, (name, spec) => {
+    seen.push([name, spec]);
+    return answer(name);
+  });
+  assert.equal(failed, null);
+  assert.equal(f.access, 'at');
+  assert.equal(f.refresh, 'ak_rt');
+  assert.equal(f.expiresIn, 3600);
+  const accept = { Accept: 'application/json' };
+  const post = { Accept: 'application/json', 'Content-Type': 'application/json' };
+  assert.deepEqual(seen, [
+    ['authorize', {
+      method: 'GET',
+      // offline_access: Authentik issues a refresh token only for it.
+      url: `${c.base}/application/o/authorize/?response_type=code&client_id=app-id`
+        + `&redirect_uri=${encodeURIComponent(c.redirectUri)}&state=st&scope=openid%20offline_access`
+        + '&code_challenge=chal&code_challenge_method=S256',
+    }],
+    ['flow_page', { method: 'GET', url: `${c.base}/if/flow/default-authentication-flow/?${akQuery}` }],
+    ['identification', { method: 'GET', url: akExecutor, headers: accept }],
+    ['identify', {
+      method: 'POST',
+      url: akExecutor,
+      body: JSON.stringify({ component: 'ak-stage-identification', uid_field: f.email }),
+      headers: post,
+    }],
+    ['password_challenge', { method: 'GET', url: akExecutor, headers: accept }],
+    ['password', {
+      method: 'POST',
+      url: akExecutor,
+      body: JSON.stringify({ component: 'ak-stage-password', password: 'pw' }),
+      headers: post,
+    }],
+    ['mfa_stage', { method: 'GET', url: akExecutor, headers: accept }],
+    ['login_stage', { method: 'GET', url: akExecutor, headers: accept }],
+    ['authorize_code', { method: 'GET', url: `${c.base}/application/o/authorize/?client_id=app-id&state=st` }],
+    ['code_exchange', {
+      method: 'POST',
+      url: `${c.base}/application/o/token/`,
+      body: {
+        grant_type: 'authorization_code',
+        code: 'cd',
+        redirect_uri: c.redirectUri,
+        client_id: 'app-id',
+        code_verifier: 'ver',
+      },
+    }],
+  ]);
+});
+
+test('authentik: the admin asks for the API scope', () => {
+  assert.equal(authentik.adminScope, 'goauthentik.io/api');
+  const f = Object.assign(flow(), { scope: 'openid goauthentik.io/api' });
+  assert.match(
+    authentik.loginSteps[0].request(c, r, f).url,
+    /&scope=openid%20goauthentik.io%2Fapi%20offline_access&/,
+  );
+});
+
+test('authentik: a refused password, an error page, a redirect elsewhere and a wrong state fail their step', () => {
+  const fails = (over) => runLogin(authentik, flow(), authentikAnswer(over));
+  assert.equal(fails({ authorize: res(400, {}, 'invalid_request') }), 'authorize');
+  // Authentik's error page for a bad client or redirect URI is not a flow.
+  assert.equal(fails({ authorize: res(200, {}, '<html>error</html>') }), 'authorize');
+  assert.equal(fails({ authorize: res(302, { Location: `https://evil.test/if/flow/x/?${akQuery}` }) }), 'authorize');
+  assert.equal(fails({ flow_page: res(404, {}, 'not found') }), 'flow_page');
+  assert.equal(fails({ identification: akChallenge('ak-stage-access-denied') }), 'identification');
+  assert.equal(fails({ identification: res(200, {}, '<html>') }), 'identification');
+  // An unknown user: the challenge again, with an error.
+  assert.equal(
+    fails({ identify: akChallenge('ak-stage-identification', { response_errors: { uid_field: [{}] } }) }),
+    'identify',
+  );
+  assert.equal(fails({ identify: res(302, { Location: '/if/flow/other/' }) }), 'identify');
+  assert.equal(fails({ password_challenge: akChallenge('ak-stage-identification') }), 'password_challenge');
+  // A refused password: the password challenge again, with an error.
+  assert.equal(
+    fails({ password: akChallenge('ak-stage-password', { response_errors: { password: [{}] } }) }),
+    'password',
+  );
+  assert.equal(fails({ mfa_stage: akChallenge('ak-stage-authenticator-validate') }), 'mfa_stage');
+  assert.equal(fails({ login_stage: akChallenge('ak-stage-access-denied') }), 'login_stage');
+  assert.equal(
+    fails({ login_stage: akChallenge('xak-flow-redirect', { to: 'https://evil.test/application/o/authorize/?a=1' }) }),
+    'login_stage',
+  );
+  // A consent page instead of the code.
+  assert.equal(fails({ authorize_code: res(302, { Location: '/if/flow/default-provider-authorization-explicit-consent/?a=1' }) }), 'authorize_code');
+  assert.equal(
+    fails({ authorize_code: res(302, { Location: `${c.redirectUri}?code=cd&state=other` }) }),
+    'authorize_code',
+  );
+  assert.equal(fails({ code_exchange: res(400, {}, '{"error":"invalid_grant"}') }), 'code_exchange');
+});
+
+test('authentik: helpers for the flow, its challenges and its redirect', () => {
+  const f = {};
+  assert.equal(akHelpers.takeFlow(res(302, { location: `/if/flow/default-authentication-flow/?${akQuery}` }), f, c.base), true);
+  assert.equal(f.flowPage, `${c.base}/if/flow/default-authentication-flow/?${akQuery}`);
+  assert.equal(f.executor, akExecutor);
+  assert.equal(akHelpers.takeFlow(res(302, { Location: '/if/flow/x/' }), {}, c.base), false);
+  assert.equal(akHelpers.takeFlow(res(200, { Location: `/if/flow/x/?${akQuery}` }), {}, c.base), false);
+  assert.equal(akHelpers.challenge(akChallenge('ak-stage-password'), 'ak-stage-password'), true);
+  assert.equal(akHelpers.challenge(res(500, {}, '{"component":"ak-stage-password"}'), 'ak-stage-password'), false);
+  const g = {};
+  assert.equal(akHelpers.takeRedirect(akChallenge('xak-flow-redirect', { to: '/application/o/authorize/?a=1' }), g, c.base), true);
+  assert.equal(g.next, `${c.base}/application/o/authorize/?a=1`);
+  assert.equal(akHelpers.takeRedirect(akChallenge('xak-flow-redirect', { to: '/if/user/' }), {}, c.base), false);
+  assert.equal(akHelpers.takeRedirect(akChallenge('xak-flow-redirect'), {}, c.base), false);
+});
+
+test('authentik: journey and admin requests', () => {
+  const a = authentik.admin('adm', null);
+  assert.deepEqual(a, { token: 'adm', realmId: null });
+  const h = { Authorization: 'Bearer adm', 'Content-Type': 'application/json' };
+  assert.deepEqual(authentik.adminHeaders(a), h);
+  const token = `${c.base}/application/o/token/`;
+  assert.deepEqual(authentik.refresh(c, r, 'rt'), {
+    method: 'POST',
+    url: token,
+    body: { grant_type: 'refresh_token', refresh_token: 'rt', client_id: 'app-id' },
+  });
+  // The service account's app password goes in the Basic secret (ccBasic).
+  assert.deepEqual(authentik.clientCredentials(c, r, 'Basic x'), {
+    method: 'POST',
+    url: token,
+    body: { grant_type: 'client_credentials' },
+    headers: { Authorization: 'Basic x' },
+  });
+  assert.deepEqual(authentik.introspect(c, r, 'at', 'Basic y'), {
+    method: 'POST',
+    url: `${c.base}/application/o/introspect/`,
+    body: { token: 'at' },
+    headers: { Authorization: 'Basic y' },
+  });
+  assert.deepEqual(authentik.userinfo(c, r, 'at'), {
+    method: 'GET',
+    url: `${c.base}/application/o/userinfo/`,
+    headers: { Authorization: 'Bearer at' },
+  });
+  const u = `${c.base}/api/v3/core/users/`;
+  assert.deepEqual(authentik.adminUser(c, r, a, '42'), { method: 'GET', url: `${u}42/`, headers: h });
+  assert.deepEqual(authentik.listUsers(c, r, a, null), {
+    method: 'GET',
+    url: `${u}?ordering=username&page=1&page_size=200&include_groups=false&include_roles=false`,
+    headers: h,
+  });
+  assert.match(authentik.listUsers(c, r, a, '3').url, /[?&]page=3&/);
+  const created = authentik.createUser(c, r, a, 'e@x');
+  assert.equal(created.method, 'POST');
+  assert.equal(created.url, u);
+  // No password: like Hearth's create, the user has none.
+  assert.deepEqual(JSON.parse(created.body), { username: 'e@x', name: 'Stress created', email: 'e@x', is_active: true });
+  // The seed is authentik.sh's, not prepare.js's.
+  assert.throws(() => authentik.importUsers(c, r, a, []), /authentik\.sh seed/);
+  assert.equal(authentik.imported(res(200, {}, '{}')), null);
+  assert.equal(authentik.regenerateSecret, null);
+});
+
+test('authentik: reads pages by page number and created ids', () => {
+  const page = (next, n) => JSON.stringify({
+    pagination: { next, previous: 0, count: 450, current: 1 },
+    results: Array.from({ length: n }, (_, i) => ({ pk: i + 1, username: `u${i}` })),
+  });
+  const first = authentik.userPage(res(200, {}, page(2, 200)), null);
+  assert.equal(first.ids.length, 200);
+  assert.equal(first.ids[0], '1');
+  assert.equal(first.next, '2');
+  // next is 0 on the last page.
+  assert.deepEqual(authentik.userPage(res(200, {}, page(0, 2)), '3'), { ids: ['1', '2'], next: null });
+  assert.equal(authentik.createdId(res(201, {}, '{"pk":77,"username":"e@x"}')), '77');
+  assert.equal(authentik.createdId(res(201, {}, '{}')), null);
+  assert.equal(authentik.createdId(res(400, {}, '{"pk":77}')), null);
 });
 
 test('token lifetimes come from expires_in (RFC 6749 section 5.1) for every product', () => {
