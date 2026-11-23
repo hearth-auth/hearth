@@ -428,24 +428,20 @@ test('zitadel: login through its own pages (login UI v1) with PKCE', () => {
   assert.equal(f.scope, undefined);
 });
 
-test('zitadel: the admin asks for the API audience and the organization claims', () => {
-  assert.equal(
-    zitadel.adminScope,
-    'urn:zitadel:iam:org:project:id:zitadel:aud urn:zitadel:iam:user:resourceowner',
-  );
+test('zitadel: the admin asks for the API audience; its organization comes from the environment', () => {
+  assert.equal(zitadel.adminScope, 'urn:zitadel:iam:org:project:id:zitadel:aud');
   const f = Object.assign(flow(), { scope: `openid ${zitadel.adminScope}` });
   assert.match(
     zitadel.loginSteps[0].request(c, r, f).url,
-    /&scope=openid%20urn%3Azitadel%3Aiam%3Aorg%3Aproject%3Aid%3Azitadel%3Aaud%20urn%3Azitadel%3Aiam%3Auser%3Aresourceowner%20offline_access&/,
+    /&scope=openid%20urn%3Azitadel%3Aiam%3Aorg%3Aproject%3Aid%3Azitadel%3Aaud%20offline_access&/,
   );
-  assert.deepEqual(
-    zitadel.admin('adm', {
-      sub: '1',
-      'urn:zitadel:iam:user:resourceowner:id': '4006',
-      'urn:zitadel:iam:user:resourceowner:name': 'stress',
-    }),
-    { token: 'adm', realmId: '4006', orgName: 'stress' },
-  );
+  // Opaque tokens: no claims; instance.py writes the organization to generator.env.
+  const zc = Object.assign({}, c, { orgId: '4006', orgName: 'stress' });
+  assert.deepEqual(zitadel.admin('adm', null, zc), { token: 'adm', realmId: '4006', orgName: 'stress' });
+  assert.throws(() => zitadel.admin('adm', null, c), /STRESS_ORG_ID and STRESS_ORG_NAME are required/);
+  // Only Hearth's admin context comes from its access token's claims.
+  assert.equal(hearth.adminClaims, true);
+  for (const p of [keycloak, zitadel, ory]) assert.equal(p.adminClaims, undefined);
 });
 
 test('zitadel: a missing form, an unknown user, a refused password and a wrong state fail their step', () => {
@@ -802,3 +798,20 @@ test('ory: reads pages by page token, created ids, import counts', () => {
   assert.equal(ory.imported(res(400, {}, '{"error":{}}')), null);
 });
 
+test('token lifetimes come from expires_in (RFC 6749 section 5.1) for every product', () => {
+  // takeTokens keeps expires_in from the token response, whatever the token's format.
+  const f = {};
+  assert.equal(common.takeTokens(res(200, {}, '{"access_token":"opaque","refresh_token":"b","expires_in":3599}'), f), true);
+  assert.deepEqual(f, { access: 'opaque', refresh: 'b', expiresIn: 3599 });
+  const g = {};
+  assert.equal(common.takeTokens(res(200, {}, '{"access_token":"a"}'), g), true);
+  assert.equal(g.expiresIn, undefined);
+  // Received at now, lives expires_in seconds.
+  assert.deepEqual(common.tokenLife(3600, 5000), { iat: 5000, exp: 8600 });
+  assert.deepEqual(common.tokenLife(299.5, 10), { iat: 10, exp: 309.5 });
+  // A missing or bad expires_in fails loudly; no lifetime is guessed.
+  for (const bad of [undefined, null, 0, -1, '3600', NaN, Infinity, {}, true]) {
+    assert.throws(() => common.tokenLife(bad, 5000), /the token response has no valid expires_in/, String(bad));
+  }
+  assert.throws(() => common.tokenLife('3600', 5000), /\("3600"\)/);
+});

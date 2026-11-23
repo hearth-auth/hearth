@@ -39,6 +39,10 @@ export const env = {
   // The password hash that a product's seed gives its bulk users, when it
   // needs one ('' otherwise; Zitadel, #913).
   bulkPasswordHash: __ENV.STRESS_BULK_PASSWORD_HASH || '',
+  // The organization of the realm admin, when the product's admin API needs
+  // it and its access token does not say ('' otherwise; Zitadel).
+  orgId: __ENV.STRESS_ORG_ID || '',
+  orgName: __ENV.STRESS_ORG_NAME || '',
 };
 
 function req(name) {
@@ -110,8 +114,8 @@ function batchEntry(step, r, f, tags) {
 
 /**
  * Signs `email` in to realm `r` through the product's login page and the code
- * flow (product.loginSteps); `admin` for the realm admin. Returns `{ ok, access, refresh, durationMs,
- * failedStep, status, errorCode }`. `durationMs` is the sum of the steps'
+ * flow (product.loginSteps); `admin` for the realm admin. Returns `{ ok, access, refresh, expiresIn,
+ * durationMs, failedStep, status, errorCode }`. `durationMs` is the sum of the steps'
  * request durations.
  */
 export function signIn(email, password, tags, r = realms[0], admin = false) {
@@ -131,7 +135,7 @@ export function signIn(email, password, tags, r = realms[0], admin = false) {
       };
     }
   }
-  return { ok: true, access: f.access, refresh: f.refresh, durationMs: duration };
+  return { ok: true, access: f.access, refresh: f.refresh, expiresIn: f.expiresIn, durationMs: duration };
 }
 
 /**
@@ -171,7 +175,7 @@ function signInPass(emails, password, parallel, r) {
       live.forEach((f, j) => (step.accept(res[j], f) ? next.push(f) : retry.push(f.email)));
       live = next;
     }
-    for (const f of live) sessions.push({ access: f.access, refresh: f.refresh });
+    for (const f of live) sessions.push({ access: f.access, refresh: f.refresh, expiresIn: f.expiresIn });
   }
   return { sessions, retry };
 }
@@ -198,10 +202,12 @@ export function adminSession(r = realms[0]) {
 
 /**
  * The product's admin context ({ token, realmId }) for an admin access token:
- * what the adapter's admin requests take.
+ * what the adapter's admin requests take. Only an adapter whose admin context
+ * is in its own (JWT) access token's claims (`adminClaims`, Hearth) gets the
+ * claims; the others get null and the run's environment.
  */
 export function adminContext(token) {
-  return product.admin(token, claims(token));
+  return product.admin(token, product.adminClaims ? claims(token) : null, env);
 }
 
 /** Headers for the product's admin API as the realm admin. */

@@ -31,8 +31,8 @@
 //               authentication of its own (same advice); the realm admin still
 //               signs in, as for the other products, but its token is not sent
 //
-// Hydra issues JWT access tokens here (hydra.yaml: its default is opaque), as
-// Zitadel's run does: the harness reads `iat` and `exp` from them.
+// Hydra's access tokens are opaque, its default; the harness takes their
+// lifetime from the token response's expires_in, as for every product.
 import { authorizeQuery, codeExchange, header, json, takeCode, takeTokens } from './common.js';
 
 // The ports of compose.yaml; STRESS_BASE carries Hydra's public one.
@@ -230,7 +230,7 @@ export const ory = {
     body: { token },
   }),
 
-  // Kratos's admin API is the realm's; no scope, no realm id.
+  // Kratos's admin API is the realm's; no scope, no realm id, no claims.
   admin: (token) => ({ token, realmId: null }),
   adminHeaders,
 

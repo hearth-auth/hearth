@@ -23,7 +23,7 @@ G = {
 
 
 class InstanceTest(unittest.TestCase):
-    def test_app_is_a_public_code_client_with_refresh_tokens_and_jwt_access_tokens(self):
+    def test_app_is_a_public_code_client_with_refresh_tokens_and_default_access_tokens(self):
         app = instance.app_rep(G)
         self.assertEqual(app["redirectUris"], ["https://app.stress.test/callback"])
         self.assertEqual(app["responseTypes"], ["OIDC_RESPONSE_TYPE_CODE"])
@@ -32,16 +32,16 @@ class InstanceTest(unittest.TestCase):
         )
         # No secret: Zitadel requires PKCE for it.
         self.assertEqual(app["authMethodType"], "OIDC_AUTH_METHOD_TYPE_NONE")
-        # The harness reads iat and exp from the access token.
-        self.assertEqual(app["accessTokenType"], "OIDC_TOKEN_TYPE_JWT")
+        # Zitadel's default access token type (opaque): the harness reads expires_in.
+        self.assertNotIn("accessTokenType", app)
         # devMode would allow non-https redirect URIs.
         self.assertIs(app["devMode"], False)
 
-    def test_api_introspects_with_basic_auth_and_cc_is_a_service_account_with_jwts(self):
+    def test_api_introspects_with_basic_auth_and_cc_is_a_service_account_with_default_tokens(self):
         self.assertEqual(instance.api_rep(), {"name": "api", "authMethodType": "API_AUTH_METHOD_TYPE_BASIC"})
         cc = instance.cc_rep()
         self.assertEqual(cc["userName"], "cc")
-        self.assertEqual(cc["accessTokenType"], "ACCESS_TOKEN_TYPE_JWT")
+        self.assertEqual(cc, {"userName": "cc", "name": "client credentials"})
 
     def test_login_users_are_named_as_lib_js_names_them_and_carry_the_password(self):
         batches = list(instance.login_batches(G, batch=100))

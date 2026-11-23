@@ -40,6 +40,25 @@ Hearth and Keycloak do not set them (`k6/test_realms.mjs`).
 | 7 user create | `create_user` | `POST /admin/realms/stress/users` (`201`, id from `Location`) | `POST /v2/users/human` (`200`, `userId` in the body); no password and a verified email, so, as Hearth, no initialization code and no email | `POST /admin/identities` (`201`, `id` in the body); no credentials and a verified email, so, as Hearth, no password and no message (`ory.sh messages` stays 0) |
 | 8 the mix | `mix` | the #647 weights | the #647 weights | the #647 weights |
 
+### Every product keeps its own access-token format
+
+Each product issues access tokens in its own default format; the harness never reads a token to
+time it. A token's lifetime is the token response's `expires_in` (RFC 6749 section 5.1), for every
+product: each VU replaces a token when 10 to 25 % of that lifetime is left, and a response
+without a valid `expires_in` stops the run (`tokenLife` in `k6/products/common.js`, tested in
+`k6/test_products.mjs`). The formats, each product's default:
+
+| Product | Access token |
+|---|---|
+| Hearth | JWT, Ed25519 (EdDSA) |
+| Keycloak | JWT, RS256 |
+| Zitadel | opaque (bearer) |
+| Ory Hydra | opaque |
+
+Only Hearth's admin context comes from its access token (the realm id, `tid`). Zitadel's admin
+API takes the organization from the environment (`STRESS_ORG_ID`, `STRESS_ORG_NAME`, written by
+`instance.py`); Keycloak's and Kratos's need none.
+
 ### Every product presents its own newest token (`PRESENT=chain`)
 
 Every run of the comparison sets `PRESENT=chain`, for every product, Hearth included: each VU
@@ -116,8 +135,7 @@ From Zitadel's own guides (links in `zitadel/compose.yaml`), the rest at Zitadel
   and the login users; access tokens live 1 h; refresh tokens rotate with reuse refused (Zitadel
   has no switch for it); the "set up a second factor" prompt after the password is off
   (`MfaInitSkipLifetime` 0), as no product's users have a second factor; the `app` and `cc`
-  clients get JWT access tokens (Zitadel's default is opaque) because the harness reads `iat`
-  and `exp` from them. Zitadel signs them with RS256, its default key type
+  clients keep Zitadel's default opaque (bearer) access tokens (above)
 - bulk seed: `POST /admin/v1/import` (the admin API's ImportData), into the existing
   organization, 1,000 users per request, an existing user counted as failed. The import answers
   once the events are stored; the users reach the user API and the login page only when
@@ -142,15 +160,15 @@ Two Zitadel behaviours change what a journey sees:
 From Ory's own guides (links in `ory/compose.yaml`), the rest at Ory's defaults:
 
 - one server with the three parts Ory's self-hosted setup needs: Hydra (OAuth 2.0 and OpenID
-  Connect, no users), Kratos (the users) and a login and consent app. The app is Ory's own
-  reference UI (`kratos-selfservice-ui-node`, the official image of the same release), the one
-  Kratos's quickstart runs, here wired to Hydra (`HYDRA_ADMIN_URL`): its login page starts a
-  Kratos login flow for Hydra's login challenge (Kratos's native Hydra integration,
-  `oauth2_provider.url`, accepts the challenge), and its consent page accepts at once for a client with `skip_consent`, Ory's
-  documented setup for first-party clients. Kratos and the UI share Hydra's network namespace,
-  so the three answer on one name, as on one host: Hydra 4444 (public) and 4445 (admin), Kratos
-  4433 (public) and 4434 (admin), the UI 4455. Each listener terminates TLS itself
-  (`serve.*.tls`, the UI's `TLS_CERT_PATH`); they call each other over TLS by that name
+  Connect, no users), Kratos (the users) and a login and consent app. The app is Ory's own reference
+  UI (`kratos-selfservice-ui-node`, the official image of the same release), the one Kratos's
+  quickstart runs, here wired to Hydra (`HYDRA_ADMIN_URL`): its login page starts a Kratos login
+  flow for Hydra's login challenge (Kratos's native Hydra integration, `oauth2_provider.url`,
+  accepts the challenge), and its consent page accepts at once for a client with `skip_consent`,
+  Ory's documented setup for first-party clients. Kratos and the UI share Hydra's network namespace,
+  so the three answer on one name, as on one host: Hydra 4444 (public) and 4445 (admin), Kratos 4433
+  (public) and 4434 (admin), the UI 4455. Each listener terminates TLS itself (`serve.*.tls`, the
+  UI's `TLS_CERT_PATH`); they call each other over TLS by that name
 - production mode: `hydra serve all` and `kratos serve` without `--dev`, the migrations as
   separate one-shot containers; one PostgreSQL server with a database per part (`initdb.sh`),
   the shared `postgresql.conf`; connection pools at Ory's defaults (from the CPU count); no
@@ -161,10 +179,8 @@ From Ory's own guides (links in `ory/compose.yaml`), the rest at Ory's defaults:
   client secrets as PBKDF2-SHA256 hashes, 25,000 iterations (its default; it has no Argon2
   option)
 - access tokens live 1 h; refresh tokens rotate with no grace period (Hydra's default: a reused
-  one is refused and its family revoked); access tokens are JWTs (`strategies.access_token:
-  jwt`) because the harness reads `iat` and `exp` from them, as for Zitadel. Hydra's default
-  and Ory's advice is opaque tokens; it signs the JWTs with RS256, its default, and still stores
-  each token, so introspection and revocation work as for opaque ones
+  one is refused and its family revoked); access tokens keep Hydra's default opaque format
+  (above), which is also Ory's advice
 - the admin ports have no authentication of their own; Ory's guides say to keep them off the
   public network (behind a gateway that authenticates). The comparison calls them directly, so
   the introspect and admin journeys pay for no caller authentication: the report says so

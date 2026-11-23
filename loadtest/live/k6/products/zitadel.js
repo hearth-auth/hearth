@@ -29,11 +29,9 @@ import { authorizeQuery, codeExchange, header, hidden, json, takeCode, takeToken
 const tokenUrl = (c) => `${c.base}/oauth/v2/token`;
 // A page of listUsers: the user API v2 pages by offset and limit.
 const PAGE = 200;
-// The admin's scopes besides openid: the Zitadel API audience (the APIs refuse
-// tokens without it) and the organization claims (the admin context).
-const ADMIN_SCOPE = 'urn:zitadel:iam:org:project:id:zitadel:aud urn:zitadel:iam:user:resourceowner';
-const ORG_ID = 'urn:zitadel:iam:user:resourceowner:id';
-const ORG_NAME = 'urn:zitadel:iam:user:resourceowner:name';
+// The admin's scope besides openid: the Zitadel API audience (the APIs refuse
+// tokens without it).
+const ADMIN_SCOPE = 'urn:zitadel:iam:org:project:id:zitadel:aud';
 // The hidden field of the login pages' CSRF token (gorilla/csrf).
 const CSRF = 'gorilla.csrf.Token';
 // Zitadel refuses a client credentials request without a scope. `profile`
@@ -169,8 +167,17 @@ export const zitadel = {
   }),
 
   adminScope: ADMIN_SCOPE,
-  /** The admin context from the admin's token claims: the organization's id and name. */
-  admin: (token, claims) => ({ token, realmId: claims[ORG_ID], orgName: claims[ORG_NAME] }),
+  /**
+   * The admin context: the organization's id and name, from the run's
+   * environment (instance.py writes STRESS_ORG_ID and STRESS_ORG_NAME); the
+   * access tokens are opaque, Zitadel's default.
+   */
+  admin: (token, claims, c) => {
+    if (!c.orgId || !c.orgName) {
+      throw new Error('STRESS_ORG_ID and STRESS_ORG_NAME are required for Zitadel (instance.py)');
+    }
+    return { token, realmId: c.orgId, orgName: c.orgName };
+  },
   adminHeaders,
 
   adminUser: (c, r, a, id) => ({

@@ -46,14 +46,9 @@ ttl:
   id_token: 1h
   auth_code: 10m
 
-# JWT access tokens. Hydra's default is opaque (and Ory advises opaque
-# tokens); the harness reads `iat` and `exp` from the access token
-# (stress.js), so Hydra issues JWTs here, as the Zitadel run does for the same
-# reason. Hydra signs them with its default key for them (RS256, generated at
-# the first start) and still stores each token, so introspection and
-# revocation work as with opaque ones.
-strategies:
-  access_token: jwt
+# Access tokens keep Hydra's default format, opaque (`strategies.access_token`
+# unset): every product runs with its own default; the harness takes a token's
+# lifetime from the token response's expires_in.
 
 oauth2:
   # Client secrets: Hydra's default, PBKDF2-SHA256 with 25,000 iterations
