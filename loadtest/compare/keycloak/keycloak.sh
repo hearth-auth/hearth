@@ -5,6 +5,7 @@
 # Usage: keycloak.sh <command>
 #   up            make the bundle (first time), start PostgreSQL and Keycloak,
 #                 wait until Keycloak is ready, create the realm (first time)
+#   bundle        make the bundle (first time) and nothing else
 #   seed <from> <to>
 #                 import password-less users bulk<from> .. bulk<to - 1> through
 #                 partialImport (k6/prepare.js, PRODUCT=keycloak); prints the
@@ -41,7 +42,10 @@ compose() { docker compose -f "$here/compose.yaml" --env-file "$BUNDLE/server.en
 password() { openssl rand -base64 24 | tr -d '/+=' | cut -c1-24; }
 
 make_bundle() {
-  [ ! -e "$BUNDLE" ] || return 0
+  # A whole bundle (an earlier up's, or a ramp server's copy of the seed's,
+  # whose passwords the store knows) is kept; a new or an empty directory
+  # (remote.sh data-new makes /data/bundle) gets one.
+  [ ! -f "$BUNDLE/server.env" ] || [ ! -f "$BUNDLE/generator.env" ] || return 0
   log "making the bundle in $BUNDLE"
   mkdir -p "$BUNDLE"
   chmod 0700 "$BUNDLE"
@@ -128,6 +132,7 @@ cmd_down() {
 }
 
 case ${1:-} in
+  bundle) make_bundle ;;
   up) cmd_up ;;
   seed) shift && cmd_seed "$@" ;;
   restart) cmd_restart ;;

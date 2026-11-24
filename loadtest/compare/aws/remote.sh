@@ -25,8 +25,11 @@
 #   restore <product>           stop the server under test, replace its store
 #                               with the pristine copy, drop the page cache and
 #                               start it again; prints the restore time
-#   settle <dir>                wait until no file under <dir> has changed for
-#                               60 s; prints the wait
+#   settle <dir>                wait until the device that holds <dir> has
+#                               written less than SETTLE_IDLE_KBPS (512 KiB/s)
+#                               in each SETTLE_STEP_S (10 s) for SETTLE_QUIET_S
+#                               (60 s) in a row, at most SETTLE_MAX_S (7200 s);
+#                               prints the wait
 #   idle <product>              the server's idle RSS: 15 s of the sampler, the
 #                               last row's rss_kb
 #   store-size <product>        bytes of the store on disk
@@ -182,15 +185,28 @@ case $cmd in
     echo "restored in $(($(date +%s) - t0)) s"
     ;;
   settle)
+    # Not "no file changed": Zitadel's projections write their positions
+    # about once a second while idle, so its store never stops changing
+    # (about 80 KB/s of writes, measured locally). The device is the seed
+    # server's data volume, which holds only the store.
     dir=${1:?dir}
-    t0=$(date +%s) last="" quiet=0
-    while [ "$quiet" -lt 60 ]; do
-      now=$(find "$dir" -type f -printf '%p %s %T@\n' 2> /dev/null | sort | md5sum)
-      if [ "$now" = "$last" ]; then quiet=$((quiet + 10)); else quiet=0 last=$now; fi
-      [ $(($(date +%s) - t0)) -lt "${SETTLE_MAX_S:-7200}" ] || die "$dir still changes after ${SETTLE_MAX_S:-7200} s"
-      [ "$quiet" -ge 60 ] || sleep 10
+    step=${SETTLE_STEP_S:-10} need=${SETTLE_QUIET_S:-60} idle=${SETTLE_IDLE_KBPS:-512} max=${SETTLE_MAX_S:-7200}
+    devno=$(findmnt -no MAJ:MIN --target "$dir" | tr -d "[:space:]") && [ -n "$devno" ] || die "no file system holds $dir"
+    # Sectors (512 bytes) written to the device, /proc/diskstats field 10.
+    written() {
+      awk -v d="$devno" '$1 ":" $2 == d {print $10; f = 1} END {exit !f}' "${SETTLE_DISKSTATS:-/proc/diskstats}" \
+        || die "no disk stats for $dir (device $devno)"
+    }
+    t0=$(date +%s) quiet=0
+    last=$(written)
+    while [ "$quiet" -lt "$need" ]; do
+      [ $(($(date +%s) - t0)) -lt "$max" ] || die "$dir still writes more than $idle KiB/s after $max s"
+      sleep "$step"
+      now=$(written)
+      if [ $(((now - last) / 2)) -lt $((idle * step)) ]; then quiet=$((quiet + step)); else quiet=0; fi
+      last=$now
     done
-    echo "settled after $(($(date +%s) - t0 - 60)) s"
+    echo "settled after $(($(date +%s) - t0 - need)) s"
     ;;
   idle)
     p=${1:?product}

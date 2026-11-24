@@ -609,9 +609,13 @@ jobs:
       # adapter per product (k6/products/). The Hearth adapter must send the
       # requests the #647 rounds sent, and each product's realm setup must
       # match the Hearth run's settings. Nothing else checks them before AWS.
-      - name: Same-hardware comparison — tests (test_products.mjs, test_realm.py, test_instance.py)
+      # Each product script must make its bundle in a new or an empty directory
+      # (a seed server's /data/bundle) and keep a whole one (a ramp server's
+      # copy of the seed's); the dry run fakes the servers and cannot see it.
+      - name: Same-hardware comparison — tests (test_products.mjs, test_realm.py, test_instance.py, test_bundle.sh)
         run: |
           node loadtest/live/k6/test_products.mjs
+          bash loadtest/compare/test_bundle.sh
           python3 -I loadtest/compare/keycloak/test_realm.py
           python3 -I loadtest/compare/zitadel/test_instance.py
           python3 -I loadtest/compare/ory/test_realm.py
@@ -622,7 +626,7 @@ jobs:
       # total that stops it, each instance's hard lifetime and the whole driver
       # (DRY_RUN=1: shims for aws, ssh and scp, no network) are checked here,
       # before an AWS session can find a mistake at a cost.
-      - name: Same-hardware comparison, AWS session — tests (ladder, cost, lifetime, dry run)
+      - name: Same-hardware comparison, AWS session — tests (ladder, cost, lifetime, dry run, settle)
         run: |
           node loadtest/live/k6/test_schedule.mjs
           python3 -I loadtest/live/test_analyze.py
@@ -630,6 +634,7 @@ jobs:
           python3 -I loadtest/compare/aws/test_cost.py
           bash loadtest/live/test_lifetime.sh
           bash loadtest/compare/aws/test_dryrun.sh
+          bash loadtest/compare/aws/test_settle.sh
 
       # The #[ignore] rule inside `make test-quality` was red at HEAD on a false
       # positive: it matched the literal text `#[ignore` anywhere on a line, so

@@ -10,6 +10,7 @@
 #                 the applications, the service account and the login users
 #                 (first time, realm.py), then wait until the worker has no
 #                 task left (settle)
+#   bundle        make the bundle (first time) and nothing else
 #   seed <from> <to>
 #                 create users without a password bulk<from> .. bulk<to - 1>:
 #                 realm.py writes them as blueprints (SEED_BATCH users per
@@ -58,7 +59,10 @@ compose() { docker compose -f "$here/compose.yaml" --env-file "$BUNDLE/server.en
 password() { openssl rand -base64 48 | tr -d '/+=' | cut -c1-24; }
 
 make_bundle() {
-  [ ! -e "$BUNDLE" ] || return 0
+  # A whole bundle (an earlier up's, or a ramp server's copy of the seed's,
+  # whose passwords the store knows) is kept; a new or an empty directory
+  # (remote.sh data-new makes /data/bundle) gets one.
+  [ ! -f "$BUNDLE/server.env" ] || [ ! -f "$BUNDLE/generator.env" ] || return 0
   log "making the bundle in $BUNDLE"
   mkdir -p "$BUNDLE"
   chmod 0700 "$BUNDLE"
@@ -238,6 +242,7 @@ cmd_down() {
 }
 
 case ${1:-} in
+  bundle) make_bundle ;;
   up) cmd_up ;;
   seed) shift && cmd_seed "$@" ;;
   settle) cmd_settle ;;
