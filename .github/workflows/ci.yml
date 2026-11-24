@@ -612,10 +612,11 @@ jobs:
       # Each product script must make its bundle in a new or an empty directory
       # (a seed server's /data/bundle) and keep a whole one (a ramp server's
       # copy of the seed's); the dry run fakes the servers and cannot see it.
-      - name: Same-hardware comparison — tests (test_products.mjs, test_realm.py, test_instance.py, test_bundle.sh)
+      - name: Same-hardware comparison — tests (test_products.mjs, test_realm.py, test_instance.py, test_bundle.sh, test_up.sh)
         run: |
           node loadtest/live/k6/test_products.mjs
           bash loadtest/compare/test_bundle.sh
+          bash loadtest/compare/authentik/test_up.sh
           python3 -I loadtest/compare/keycloak/test_realm.py
           python3 -I loadtest/compare/zitadel/test_instance.py
           python3 -I loadtest/compare/ory/test_realm.py
