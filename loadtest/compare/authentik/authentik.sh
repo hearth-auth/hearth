@@ -4,9 +4,11 @@
 # stress realm (realm.py), and the seed.
 #
 # Usage: authentik.sh <command>
-#   up            make the bundle (first time), start PostgreSQL, the server and
-#                 the worker, wait until Authentik answers on its HTTPS listener
-#                 with the run's TLS leaf (tls.yaml), create the providers,
+#   up            make the bundle (first time), start PostgreSQL and the worker
+#                 with 1 thread until it has applied Authentik's blueprints and
+#                 tls.yaml, then the worker with its 2 threads and the server,
+#                 wait until Authentik answers on its HTTPS listener with the
+#                 run's TLS leaf (tls.yaml), create the providers,
 #                 the applications, the service account and the login users
 #                 (first time, realm.py), then wait until the worker has no
 #                 task left (settle)
@@ -158,25 +160,55 @@ cmd_settle() {
   log "the worker has no task left after $(($(date +%s) - start)) s"
 }
 
+# Where the worker is with the blueprints: busy (a blueprint task is queued or
+# running, or the discovery has not found tls.yaml yet), failed (none is left,
+# but a blueprint is not applied) or done.
+blueprint_state() {
+  sql "SELECT CASE
+         WHEN EXISTS (SELECT 1 FROM authentik_tasks_task
+                       WHERE actor_name LIKE 'authentik.blueprints.%'
+                         AND state NOT IN ('done', 'rejected')) THEN 'busy'
+         WHEN NOT EXISTS (SELECT 1 FROM authentik_blueprints_blueprintinstance
+                           WHERE path = 'compare/tls.yaml') THEN 'busy'
+         WHEN EXISTS (SELECT 1 FROM authentik_blueprints_blueprintinstance
+                       WHERE enabled AND status <> 'successful') THEN 'failed'
+         ELSE 'done' END"
+}
+
+# The blueprints not applied, with their status.
+blueprints_not_applied() {
+  sql "SELECT path || ' (' || status || ')' FROM authentik_blueprints_blueprintinstance
+         WHERE enabled AND status <> 'successful' ORDER BY path" | paste -sd ' '
+}
+
 cmd_up() {
   make_bundle
-  compose up -d
-  # The worker applies the vendor's blueprints (flows, scope mappings) and
-  # tls.yaml at its first start, one by one: realm.py needs them all.
-  local i
+  # At its first start the worker applies the vendor's blueprints (flows,
+  # scope mappings; realm.py needs them all) and tls.yaml, each in one
+  # transaction, and the server's start and the worker's both queue a
+  # discovery, so each blueprint is applied twice. With the worker's 2 threads
+  # two of them can overlap and deadlock in PostgreSQL (#913: flow-oobe.yaml
+  # and flow-default-authentication-flow.yaml update the same two stages in
+  # the opposite order), leaving one in `error`, in about 1 of 2 fresh starts.
+  # So the worker starts alone with 1 thread, which applies them one at a
+  # time, and gets its 2 threads (Authentik's default, compose.yaml) back
+  # before the server starts: a run has the same worker as before. A ramp's
+  # store has them all applied already, and the worker finds nothing to apply.
+  AK_WORKER_THREADS=1 compose up -d worker
+  local i state=busy
   for i in $(seq 1 300); do
-    [ "$(sql "SELECT status FROM authentik_blueprints_blueprintinstance WHERE path = 'compare/tls.yaml'" 2> /dev/null)" = successful ] &&
-      [ "$(sql "SELECT count(*) FROM authentik_blueprints_blueprintinstance WHERE enabled AND status <> 'successful'" 2> /dev/null)" = 0 ] &&
-      break
-    [ "$i" -lt 300 ] || die "the worker has not applied every blueprint after 300 s"
+    state=$(blueprint_state 2> /dev/null) || state=busy
+    [ "$state" = busy ] || break
     sleep 1
   done
-  # The server reads the brand's certificate at its start: after the first
-  # start applies tls.yaml, restart it once to serve the run's leaf.
-  if ! ready; then
-    log "restarting the server for the run's TLS leaf"
-    compose restart server
-  fi
+  case $state in
+    done) log "the worker has applied every blueprint after ${i} s" ;;
+    failed) die "the worker has not applied every blueprint: $(blueprints_not_applied)" ;;
+    *) die "the worker has not applied every blueprint after 300 s: $(blueprints_not_applied 2> /dev/null)" ;;
+  esac
+  # The worker again with 2 threads, and the server: it reads the brand's
+  # certificate (tls.yaml, applied) at its start and serves the run's leaf.
+  compose up -d
   wait_ready
   if [ ! -e "$BUNDLE/realm.done" ]; then
     log "creating the providers, the applications, the service account and the login users"

@@ -14,7 +14,7 @@ metrics and analysis as Hearth.
 | `k6.sh` | Runs a `loadtest/live/k6` script from the pinned k6 image, for a host without k6 |
 | `keycloak/` | Keycloak 26.8.2: `compose.yaml` (Keycloak and PostgreSQL), `realm.py` (the realm, tested by `test_realm.py`), `keycloak.sh` (up, seed, restart, down) |
 | `ory/` | Ory Hydra v26.2.0 and Ory Kratos v26.2.0 with Ory's reference login and consent UI: `compose.yaml` (the three, the migrations and PostgreSQL), `hydra.yaml`, `kratos.yaml`, `identity.schema.json`, `initdb.sh` (the two databases), `realm.py` (the clients and login users, tested by `test_realm.py`), `ory.sh` (up, seed, hashes, messages, restart, down) |
-| `authentik/` | Authentik 2026.8.6: `compose.yaml` (Authentik's server and worker, and PostgreSQL), `tls.yaml` (the run's TLS leaf as the web certificate), `realm.py` (the providers, the service account and the blueprints of the login and bulk users, tested by `test_realm.py`), `authentik.sh` (up, seed, settle, hashes, tasks, restart, down) |
+| `authentik/` | Authentik 2026.8.6: `compose.yaml` (Authentik's server and worker, and PostgreSQL), `tls.yaml` (the run's TLS leaf as the web certificate), `realm.py` (the providers, the service account and the blueprints of the login and bulk users, tested by `test_realm.py`), `authentik.sh` (up, seed, settle, hashes, tasks, restart, down; the order of `up` tested by `test_up.sh`) |
 | `zitadel/` | Zitadel v4.20.5: `compose.yaml` (Zitadel's init, setup and start, and PostgreSQL), `instance.py` (the clients and login users, tested by `test_instance.py`), `zitadel.sh` (up, seed, hashes, restart, down) |
 | `aws/` | The AWS session (below): `compare.sh` (the driver), `remote.sh` (its server side), `ladder.py` (rates, verdicts, the size 2 product), `cost.py` and `prices.json` (the running total), `session-plan.json` (hours per part), `compose-sampler.sh` (the sampler for a compose project), `dryrun/` (shims for `DRY_RUN=1`) |
 
@@ -290,8 +290,13 @@ From Authentik's own guides (links in `authentik/compose.yaml`), the rest at Aut
   on one PostgreSQL with the shared `postgresql.conf`. Since 2025.10 Authentik needs no Redis
   (cache, sessions and the task queue are in PostgreSQL). TLS on Authentik's own HTTPS listener
   (9443), plain HTTP off; the run's leaf is the default brand's web certificate (`tls.yaml`, a
-  file blueprint the worker applies at its first start; `up` then restarts the server once, as
-  the server reads the certificate at its start). No update check, no startup analytics
+  file blueprint the worker applies at its first start; the server reads the certificate at its
+  start). No update check, no startup analytics
+- `up` starts the worker alone with 1 thread until it has applied Authentik's first-start
+  blueprints and `tls.yaml`, then the worker with its default 2 threads and the server: with 2
+  threads, two blueprints applied at once deadlocked in PostgreSQL in about 1 of 2 fresh starts
+  (`flow-oobe.yaml` and `flow-default-authentication-flow.yaml` update the same two stages) and
+  left one in `error` (`authentik/test_up.sh`). A run's worker is the one described below
 - tuning at Authentik's defaults: gunicorn 2 workers with 4 threads each (`web.workers`,
   `web.threads`; the configuration guide advises against fewer than 2 workers), the worker 1
   process with 2 threads (`worker.processes`, `worker.threads`), database connections not kept

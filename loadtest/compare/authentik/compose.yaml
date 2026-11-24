@@ -75,12 +75,16 @@ services:
     mem_limit: ${SERVER_MEM_LIMIT:-1280m}
 
   # Background tasks (Dramatiq on PostgreSQL): 1 process with 2 threads,
-  # Authentik's defaults. The bootstrap variables are read by the worker on
-  # the first start (automated install): the akadmin user (the realm admin)
-  # with its email and password hash, and an API token for realm.py. No
-  # Docker socket: the comparison runs no outposts but the embedded one
-  # (the vendor's guide: the socket is only for managed outposts), so the
-  # worker also keeps the image's own user instead of root.
+  # Authentik's defaults. `authentik.sh up` starts the worker alone with 1
+  # thread (AK_WORKER_THREADS=1) until Authentik's first-start blueprints are
+  # applied, then with 2 (AK_WORKER_THREADS unset: the default) before it
+  # starts the server; a run always has the 2. Two blueprints applied at once
+  # can deadlock in PostgreSQL (#913). The bootstrap variables are read by the
+  # worker on the first start (automated install): the akadmin user (the realm
+  # admin) with its email and password hash, and an API token for realm.py. No
+  # Docker socket: the comparison runs no outposts but the embedded one (the
+  # vendor's guide: the socket is only for managed outposts), so the worker
+  # also keeps the image's own user instead of root.
   worker:
     <<: *authentik
     command: worker
@@ -89,6 +93,7 @@ services:
       AUTHENTIK_BOOTSTRAP_EMAIL: ${ADMIN_EMAIL:?}
       AUTHENTIK_BOOTSTRAP_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH:?}
       AUTHENTIK_BOOTSTRAP_TOKEN: ${BOOTSTRAP_TOKEN:?}
+      AUTHENTIK_WORKER__THREADS: ${AK_WORKER_THREADS:-2}
     volumes:
       - data:/data
       - ./tls.yaml:/blueprints/compare/tls.yaml:ro
