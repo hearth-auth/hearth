@@ -21,7 +21,7 @@ fails, and records how it fails. It complements the in-repo load test
 | `provider-aws.sh` | The AWS EC2 versions of `cloud.sh`'s provider commands (`PROVIDER=aws`); each instance's hard lifetime (`test_lifetime.sh` tests it), data volumes and snapshots (#913) |
 | `round.sh` | One round from a plan file: setup, then ramps and soaks, each from a restored store; always `down` at the end |
 | `plans/` | Plan files for `round.sh`; each published report names its plan |
-| `aws-iam.sh`, `aws-policy.json` | Create and delete the scoped IAM user and the local `hearth-stress` profile |
+| `aws-iam.sh`, `aws-policy.json` | Create and delete the scoped IAM user and the local `hearth-stress` profile (`test_aws_policy.py` checks the policy can tag each resource the scripts create, and its size) |
 | `remote/` | Scripts that run on the server: observer, `kill -9`, profiler, `malloc-info.sh` (glibc heap snapshot through gdb) |
 | `ramps.py` | Per-step table for each journey type, with server CPU and generator CPU |
 | `memory.py` | Server memory over a soak: RSS, RssAnon and RssFile at fixed minutes, storage gauges, glibc heap, and the flatness test (`test_memory.py` tests it) |
