@@ -609,9 +609,13 @@ jobs:
       # adapter per product (k6/products/). The Hearth adapter must send the
       # requests the #647 rounds sent, and each product's realm setup must
       # match the Hearth run's settings. Nothing else checks them before AWS.
-      - name: Same-hardware comparison — tests (test_products.mjs, test_realm.py, test_instance.py)
+      # Each product script must make its bundle in a new or an empty directory
+      # (a seed server's /data/bundle) and keep a whole one (a ramp server's
+      # copy of the seed's); the dry run fakes the servers and cannot see it.
+      - name: Same-hardware comparison — tests (test_products.mjs, test_realm.py, test_instance.py, test_bundle.sh)
         run: |
           node loadtest/live/k6/test_products.mjs
+          bash loadtest/compare/test_bundle.sh
           python3 -I loadtest/compare/keycloak/test_realm.py
           python3 -I loadtest/compare/zitadel/test_instance.py
           python3 -I loadtest/compare/ory/test_realm.py

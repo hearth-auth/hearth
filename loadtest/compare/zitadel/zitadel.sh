@@ -7,6 +7,7 @@
 #   up            make the bundle (first time), start PostgreSQL and Zitadel
 #                 (init, setup, start), wait until Zitadel is ready, create the
 #                 clients and the login users (first time, instance.py)
+#   bundle        make the bundle (first time) and nothing else
 #   seed <from> <to>
 #                 import users without a usable password (instance.py
 #                 unusable_hash) bulk<from> .. bulk<to - 1> through
@@ -57,7 +58,10 @@ password() { printf '%sa-A1' "$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-
 masterkey() { openssl rand -base64 48 | tr -d '/+=' | cut -c1-32; }
 
 make_bundle() {
-  [ ! -e "$BUNDLE" ] || return 0
+  # A whole bundle (an earlier up's, or a ramp server's copy of the seed's,
+  # whose passwords the store knows) is kept; a new or an empty directory
+  # (remote.sh data-new makes /data/bundle) gets one.
+  [ ! -f "$BUNDLE/server.env" ] || [ ! -f "$BUNDLE/generator.env" ] || return 0
   log "making the bundle in $BUNDLE"
   mkdir -p "$BUNDLE"
   chmod 0700 "$BUNDLE"
@@ -183,6 +187,7 @@ cmd_down() {
 }
 
 case ${1:-} in
+  bundle) make_bundle ;;
   up) cmd_up ;;
   seed) shift && cmd_seed "$@" ;;
   hashes) cmd_hashes ;;
