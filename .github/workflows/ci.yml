@@ -626,7 +626,7 @@ jobs:
       # total that stops it, each instance's hard lifetime and the whole driver
       # (DRY_RUN=1: shims for aws, ssh and scp, no network) are checked here,
       # before an AWS session can find a mistake at a cost.
-      - name: Same-hardware comparison, AWS session — tests (ladder, cost, lifetime, dry run)
+      - name: Same-hardware comparison, AWS session — tests (ladder, cost, lifetime, dry run, settle)
         run: |
           node loadtest/live/k6/test_schedule.mjs
           python3 -I loadtest/live/test_analyze.py
@@ -634,6 +634,7 @@ jobs:
           python3 -I loadtest/compare/aws/test_cost.py
           bash loadtest/live/test_lifetime.sh
           bash loadtest/compare/aws/test_dryrun.sh
+          bash loadtest/compare/aws/test_settle.sh
 
       # The #[ignore] rule inside `make test-quality` was red at HEAD on a false
       # positive: it matched the literal text `#[ignore` anywhere on a line, so
