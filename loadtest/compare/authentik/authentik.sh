@@ -160,16 +160,21 @@ cmd_settle() {
   log "the worker has no task left after $(($(date +%s) - start)) s"
 }
 
-# Where the worker is with the blueprints: busy (a blueprint task is queued or
-# running, or the discovery has not found tls.yaml yet), failed (none is left,
-# but a blueprint is not applied) or done.
+# Where the worker is with the blueprints, given the time (UTC) it was started:
+# busy (it has not finished a discovery since, or a blueprint task is queued
+# or running), failed (none is left, but a blueprint is not applied) or done.
+# Authentik's migrations make the instances (status unknown) before the
+# worker's first discovery queues their tasks.
 blueprint_state() {
   sql "SELECT CASE
+         WHEN NOT EXISTS (SELECT 1 FROM authentik_tasks_task
+                           WHERE actor_name = 'authentik.blueprints.v1.tasks.blueprints_discovery'
+                             AND state = 'done' AND mtime >= '$1'::timestamptz) THEN 'busy'
          WHEN EXISTS (SELECT 1 FROM authentik_tasks_task
                        WHERE actor_name LIKE 'authentik.blueprints.%'
                          AND state NOT IN ('done', 'rejected')) THEN 'busy'
          WHEN NOT EXISTS (SELECT 1 FROM authentik_blueprints_blueprintinstance
-                           WHERE path = 'compare/tls.yaml') THEN 'busy'
+                           WHERE path = 'compare/tls.yaml') THEN 'failed'
          WHEN EXISTS (SELECT 1 FROM authentik_blueprints_blueprintinstance
                        WHERE enabled AND status <> 'successful') THEN 'failed'
          ELSE 'done' END"
@@ -194,17 +199,18 @@ cmd_up() {
   # time, and gets its 2 threads (Authentik's default, compose.yaml) back
   # before the server starts: a run has the same worker as before. A ramp's
   # store has them all applied already, and the worker finds nothing to apply.
+  local since i state=busy
+  since=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
   AK_WORKER_THREADS=1 compose up -d worker
-  local i state=busy
-  for i in $(seq 1 300); do
-    state=$(blueprint_state 2> /dev/null) || state=busy
+  for i in $(seq 1 600); do
+    state=$(blueprint_state "$since" 2> /dev/null) || state=busy
     [ "$state" = busy ] || break
     sleep 1
   done
   case $state in
     done) log "the worker has applied every blueprint after ${i} s" ;;
     failed) die "the worker has not applied every blueprint: $(blueprints_not_applied)" ;;
-    *) die "the worker has not applied every blueprint after 300 s: $(blueprints_not_applied 2> /dev/null)" ;;
+    *) die "the worker has not applied every blueprint after 600 s: $(blueprints_not_applied 2> /dev/null)" ;;
   esac
   # The worker again with 2 threads, and the server: it reads the brand's
   # certificate (tls.yaml, applied) at its start and serves the run's leaf.
