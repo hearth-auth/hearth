@@ -11,12 +11,14 @@ fails, and records how it fails. It complements the in-repo load test
 | `k6/realms.js` | The realms of a run with several (`REALMS`), and how VUs and imported users spread over them (`k6/test_realms.mjs` tests it) |
 | `k6/prepare.js` | Makes the `api` client a resource server, regenerates its secret, bulk-imports users |
 | `k6/stress.js` | One open-loop ramp of one journey (or a mix) |
+| `k6/schedule.js` | The ramp's steps: `start + i * step`, or a list of rates (`RATES_PM`); `k6/test_schedule.mjs` tests it |
+| `k6/ids.js` | Lists the first `IDS_COUNT` user ids through the admin API (the #913 cold read's working sets) |
 | `k6/products/` | One adapter per product (`PRODUCT`, default `hearth`): endpoints, login page steps, admin API. The same journeys run against other identity servers for the same-hardware comparison (#913, `loadtest/compare/`); `k6/test_products.mjs` tests them |
 | `k6/verify.js` | Checks every user a `create_user` ramp saw acknowledged still exists |
 | `sampler.sh` | Runs on the server: Hearth CPU, RSS, free memory, disk writes, once a second |
 | `analyze.py` | Per-step table and knees from k6's CSV and the sampler (`test_analyze.py` tests it) |
 | `cloud.sh` | Orchestration on DigitalOcean or AWS: `up`, `deploy`, `import`, `ramp`, `restart`, `verify`, `down` |
-| `provider-aws.sh` | The AWS EC2 versions of `cloud.sh`'s provider commands (`PROVIDER=aws`) |
+| `provider-aws.sh` | The AWS EC2 versions of `cloud.sh`'s provider commands (`PROVIDER=aws`); each instance's hard lifetime (`test_lifetime.sh` tests it), data volumes and snapshots (#913) |
 | `round.sh` | One round from a plan file: setup, then ramps and soaks, each from a restored store; always `down` at the end |
 | `plans/` | Plan files for `round.sh`; each published report names its plan |
 | `aws-iam.sh`, `aws-policy.json` | Create and delete the scoped IAM user and the local `hearth-stress` profile |
@@ -68,7 +70,11 @@ resource server.
   down. When every VU is busy, k6 drops the journey and counts it
   (`dropped`).
 - **Steps.** Each step ramps for 5 s, then holds for `hold_s`. Only hold
-  seconds are measured.
+  seconds are measured. The rates are `start + i * step`, or, with `RATES_PM` (#913's
+  doubling ladders), a list of total journeys per minute (`k6/schedule.js`, tested by
+  `k6/test_schedule.mjs`); such a ramp also opens k6's REST API on the generator
+  (`localhost:6565`), from which `loadtest/compare/aws/compare.sh` stops a ramp at its
+  first failing step.
 - **Knees.** Latency knee: p99 over the journey's budget. Error knee: more
   than 1% failed. Collapse: more than 50% failed or the process is gone.
   Sustained: the highest offered rate with ≤ 1% errors, p99 within budget and
@@ -96,8 +102,11 @@ loadtest/live/cloud.sh down                   # always: deletes every resource o
 availability zone). Later commands read the provider from the run. It needs
 an AWS CLI profile (default `hearth-stress`) for an IAM user with EC2 rights
 on resources tagged `hearth-stress` in one region only; it refuses the
-account root. Each instance terminates itself after `AWS_MAX_HOURS` (10) in
-case `down` never runs. `SERVER_SIZE` and `GENERATOR_SIZE` may also be c7i.2xlarge, r7i.large
+account root. Each instance terminates itself after `AWS_MAX_MINUTES` (240) in
+case `down` never runs: it launches with `--instance-initiated-shutdown-behavior terminate` and
+schedules its own shutdown at first boot (`test_lifetime.sh` checks both). `SERVER_MAX_MINUTES`
+and `GENERATOR_MAX_MINUTES` set it per instance; `AWS_MAX_HOURS` still works (times 60). A
+round that takes longer than 4 hours (round C took 5.3 h) must raise it. `SERVER_SIZE` and `GENERATOR_SIZE` may also be c7i.2xlarge, r7i.large
 (2 vCPU, 16 GiB, for 10M users) or t3.medium (2 vCPU, 4 GiB, about half the price of c7i.large). Use t3.medium for long memory
 soaks, not for latency: it starts in unlimited mode, so it never loses CPU when its credits run
 out, but its CPUs are older and slower.
@@ -149,7 +158,8 @@ soaks on the same servers. A round on AWS takes 2–3 hours and costs a few doll
      PLAN_FILE=loadtest/live/plans/<plan>.txt loadtest/live/round.sh
    ```
    `round.sh` runs `cloud.sh down` at the end, also after a failure. Each instance also stops
-   itself after `AWS_MAX_HOURS` (default 10).
+   itself after `AWS_MAX_MINUTES` (default 240): set `AWS_MAX_MINUTES` (or `AWS_MAX_HOURS`)
+   above the round's length, with an hour to spare.
 5. **Analyse** the results in `results/<run>/`:
    ```bash
    python3 loadtest/live/ramps.py results/<run>/<name> ...   # per-step table per journey type

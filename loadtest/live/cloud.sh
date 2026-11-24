@@ -55,6 +55,13 @@
 #   PROFILE_AT, PROFILE_S
 #                    profile Hearth for PROFILE_S seconds, PROFILE_AT seconds
 #                    into a ramp (perf + offcputime; needs an unstripped binary)
+#   RATES_PM         a ramp's step rates as a list of total journeys per minute
+#                    (e.g. "120,240,480"; each a multiple of the generator
+#                    count) instead of <start> + i * <step>; the ramp's <start>,
+#                    <step> and <steps> are then ignored. k6 serves its REST API
+#                    on each generator's localhost:6565 for the ramp, so a
+#                    driver can follow each step and stop the run early
+#                    (loadtest/compare/aws, #913)
 #
 # Security: SSH (22) is open only to this machine's public address and to
 # this run's Droplets (for move-store); Hearth's port (8443) only to this
@@ -62,7 +69,7 @@
 # on the Droplets, which `down` destroys.
 set -euo pipefail
 
-here=$(cd "$(dirname "$0")" && pwd)
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo=$(cd "$here/../.." && pwd)
 build=$here/.build
 region=${DO_REGION:-nyc1}
@@ -298,7 +305,7 @@ install_generator() {
   scp_to "$ip" /opt/stress/ "$here/sampler.sh" "$here/remote/launch.sh"
   ssh_to "$ip" "chmod 0755 /opt/stress/launch.sh"
   scp_to "$ip" /opt/stress/k6/ "$here/k6/lib.js" "$here/k6/realms.js" "$here/k6/stress.js" \
-    "$here/k6/prepare.js" "$here/k6/verify.js" "$here/k6/fill.js"
+    "$here/k6/prepare.js" "$here/k6/verify.js" "$here/k6/fill.js" "$here/k6/schedule.js" "$here/k6/ids.js"
   # stress.js and lib.js import the product adapters (k6/products/, #913).
   scp_to "$ip" /opt/stress/k6/ -r "$here/k6/products"
 }
@@ -308,6 +315,12 @@ bundle_realms() {
   local n
   n=$(sed -n 's/^STRESS_REALMS=//p' "$run/bundle/generator.env" 2> /dev/null)
   echo "${n:-1}"
+}
+
+# Whether the server under test runs. loadtest/compare/aws/compare.sh, which
+# sources this file, redefines it for a product other than Hearth.
+server_active() {
+  ssh_to "$SERVER_PUBLIC" "systemctl is-active --quiet hearth"
 }
 
 hearth_ready() {
@@ -561,9 +574,18 @@ cmd_ramp() {
   local journey=${2:?} start=${3:?} step=${4:?} steps=${5:?} hold=${6:-60} kill_at=${7:-}
   local out=$results/$name
   [ ! -e "$out" ] || die "$out exists; pick another name"
+  local rates_pm=${RATES_PM:-} gen_rates="" r
+  if [ -n "$rates_pm" ]; then
+    for r in ${rates_pm//,/ }; do
+      [[ $r =~ ^[1-9][0-9]*$ ]] && [ $((r % GEN_COUNT)) = 0 ] \
+        || die "RATES_PM: $r must be a whole number of journeys per minute that divides across $GEN_COUNT generators"
+      gen_rates+=${gen_rates:+,}$((r / GEN_COUNT))
+    done
+    start=0 step=0 steps=$(tr ',' '\n' <<< "$rates_pm" | wc -l)
+  fi
   [ $((start % GEN_COUNT)) = 0 ] && [ $((step % GEN_COUNT)) = 0 ] \
     || die "start ($start) and step ($step) must divide evenly across $GEN_COUNT generators"
-  ssh_to "$SERVER_PUBLIC" "systemctl is-active --quiet hearth" || die "Hearth is not running; cloud.sh restart"
+  server_active || die "the server is not running; cloud.sh restart"
   mkdir -p "$out"
 
   local grace=${SETUP_GRACE:-}
@@ -590,6 +612,7 @@ RUN_S=$run_s
 GENERATORS=$GEN_COUNT
 K6_ENV=${K6_ENV:-}
 EOF
+  [ -z "$rates_pm" ] || echo "RATES_PM=$rates_pm" >> "$out/params.env"
 
   log "ramp $name: $journey from $start/s by $step/s, $steps steps of ${hold}s, on $GEN_COUNT generators; starts in ${grace}s"
   ssh_to "$SERVER_PUBLIC" "systemctl reset-failed observe-$name 2> /dev/null || true
@@ -606,6 +629,7 @@ EOF
   fi
   local i extra=""
   [ -z "${K6_ENV:-}" ] || extra=$(tr ' ' '\n' <<< "$K6_ENV")
+  [ -z "$rates_pm" ] || extra=$(printf 'RATES_PM=%s\nK6_ADDRESS=localhost:6565\n%s' "$gen_rates" "$extra")
   for i in $(seq 1 "$GEN_COUNT"); do
     launch_on_generator "$i" "$name" << EOF
 JOURNEY=$journey
@@ -628,7 +652,7 @@ cmd_collect() {
   local name=${1:?usage: cloud.sh collect <name>}
   local out=$results/$name
   [ -f "$out/params.env" ] || die "$out/params.env is missing: no ramp $name"
-  local JOURNEY START_RATE STEP_RATE STEPS HOLD_S RUN_S START_AT
+  local JOURNEY START_RATE STEP_RATE STEPS HOLD_S RUN_S START_AT RATES_PM=""
   # shellcheck disable=SC1091
   . "$out/params.env"
   local now limit
@@ -672,11 +696,14 @@ cmd_collect() {
     refresh | create_user | client_credentials) budget=100 ;;
     login | mix) budget=1000 ;;
   esac
+  # A RATES_PM ramp: analyze.py takes each step's offered rate in journeys/s.
+  local rates=()
+  [ -z "$RATES_PM" ] || rates=(--rates "$(tr ',' '\n' <<< "$RATES_PM" | awk '{printf "%s%g", (NR > 1 ? "," : ""), $1 / 60}')")
   if [ "${#raws[@]}" -gt 0 ]; then
     python3 "$here/analyze.py" --raw "${raws[@]}" --summary "${summaries[@]}" \
       --sampler "$out/sampler.csv" --gen-sampler "${gsamplers[@]}" --journey "$JOURNEY" \
       --start-rate "$START_RATE" --step-rate "$STEP_RATE" --steps "$STEPS" --hold-s "$HOLD_S" \
-      --budget-ms "$budget" --out "$out/report.json" | tee "$out/report.md"
+      "${rates[@]}" --budget-ms "$budget" --out "$out/report.json" | tee "$out/report.md"
   fi
   log "ramp $name collected: $out"
 }
@@ -820,6 +847,11 @@ case ${provider:-do} in
   *) die "unknown PROVIDER '$provider' (do or aws)" ;;
 esac
 
+# Sourced (loadtest/compare/aws/compare.sh): the functions only.
+if [ "${BASH_SOURCE[0]}" != "$0" ]; then
+  return 0
+fi
+
 case ${1:-} in
   up) shift; cmd_up "$@" ;;
   up-resume) shift; cmd_up_resume "$@" ;;
@@ -844,7 +876,7 @@ case ${1:-} in
     cmd_down "$@"
     ;;
   *)
-    sed -n '2,58p' "$0"
+    sed -n '2,69p' "$0"
     exit 2
     ;;
 esac

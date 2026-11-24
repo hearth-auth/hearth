@@ -1,0 +1,6 @@
+# #913 session, last part: the #647 10M restore drill on r7i.large (2 vCPU, 16 GB), through
+# round.sh and restore-drill.sh unchanged. loadtest/compare/aws/compare.sh drill runs it with
+# SETUP=1 USERS=1000 SERVER_SIZE=r7i.large AWS_DISK_GB=150 GENERATORS=1: the drill replaces
+# the server's data with its own 10M-user seed, so the setup imports only 1,000 users.
+#     name      users
+drill drill-10m 10000000

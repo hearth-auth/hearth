@@ -8,6 +8,9 @@ Inputs:
   --gen-sampler generator sampler CSV (sampler.sh following k6), optional:
               shows whether the generator, not the server, ran out of CPU
   --start-rate/--step-rate/--steps/--hold-s/--ramp-s  the ramp, as passed to stress.js
+  --rates     the offered rate of each step (/s, comma-separated), for a ramp
+              whose steps are a list (stress.js RATES_PM, #913) instead of
+              start + i * step; --steps is then the list's length
   --budget-ms the p99 latency budget for this journey
   --out       report JSON path; a Markdown table goes to stdout
 
@@ -123,8 +126,9 @@ def _read_k6_file(path, start_s, step_s, args, lat, ok, failed, classes, dropped
 
 
 def read_sampler(path, start_s, args):
-    """Per-step server CPU %, peak RSS, minimum MemAvailable, write IOPS, liveness."""
-    out = defaultdict(lambda: {"cpu": [], "rss_kb": [], "mem_avail_kb": [], "w_iops": [], "alive": []})
+    """Per-step server CPU %, peak RSS, minimum MemAvailable, write IOPS and MB/s, liveness."""
+    out = defaultdict(lambda: {"cpu": [], "rss_kb": [], "mem_avail_kb": [], "w_iops": [], "w_mbps": [],
+                               "alive": []})
     step_s = args.ramp_s + args.hold_s
     prev = None
     with open_text(path) as f:
@@ -134,6 +138,7 @@ def read_sampler(path, start_s, args):
                 "ts": ts,
                 "ticks": int(row["cpu_ticks"]) if row["cpu_ticks"] else None,
                 "writes": int(row["disk_writes"]),
+                "sectors": int(row.get("disk_write_sectors") or 0),
             }
             step, phase = step_of(int(ts), start_s, step_s, args.steps, args.ramp_s)
             if phase == "hold":
@@ -147,8 +152,21 @@ def read_sampler(path, start_s, args):
                     if cur["ticks"] is not None and prev["ticks"] is not None:
                         s["cpu"].append(100.0 * (cur["ticks"] - prev["ticks"]) / int(row["clk_tck"]) / dt)
                     s["w_iops"].append((cur["writes"] - prev["writes"]) / dt)
+                    # /proc/diskstats sectors are 512 bytes.
+                    s["w_mbps"].append((cur["sectors"] - prev["sectors"]) * 512 / 1e6 / dt)
             prev = cur
     return out
+
+
+def offered_rates(args):
+    """The offered rate of each step: --rates, else start + i * step."""
+    if getattr(args, "rates", None):
+        rates = [float(x) for x in args.rates.split(",")]
+        if len(rates) != args.steps:
+            sys.exit(f"analyze: --rates lists {len(rates)} steps, --steps says {args.steps}")
+        # Whole rates print as before (100, not 100.0).
+        return [int(r) if r == int(r) else r for r in rates]
+    return [args.start_rate + i * args.step_rate for i in range(args.steps)]
 
 
 def mean(xs):
@@ -181,8 +199,9 @@ def analyze(args):
     gens = [read_sampler(p, start_s, args) for p in as_list(getattr(args, "gen_sampler", None))]
 
     rows = []
+    rates = offered_rates(args)
     for step in range(args.steps):
-        offered = args.start_rate + step * args.step_rate
+        offered = rates[step]
         values = sorted(lat.get(step, []))
         finished = ok.get(step, 0) + failed.get(step, 0)
         if finished == 0 and step not in server:
@@ -190,6 +209,8 @@ def analyze(args):
         row = {
             "step": step,
             "offered_rps": offered,
+            "finished": finished,
+            "failed": failed.get(step, 0),
             "completed_rps": round(finished / args.hold_s, 1),
             "ok_rps": round(ok.get(step, 0) / args.hold_s, 1),
             "error_ratio": round(failed.get(step, 0) / finished, 4) if finished else None,
@@ -211,6 +232,7 @@ def analyze(args):
                     "server_rss_mb_max": round(max(s["rss_kb"]) / 1024, 1) if s["rss_kb"] else None,
                     "mem_available_mb_min": round(min(s["mem_avail_kb"]) / 1024, 1),
                     "disk_write_iops_mean": round(mean(s["w_iops"]), 1) if s["w_iops"] else None,
+                    "disk_write_mbps_mean": round(mean(s["w_mbps"]), 2) if s["w_mbps"] else None,
                     "server_alive": min(s["alive"]) == 1 if s["alive"] else None,
                 }
             )
@@ -305,6 +327,7 @@ def main(argv=None):
     p.add_argument("--start-rate", type=int, required=True)
     p.add_argument("--step-rate", type=int, required=True)
     p.add_argument("--steps", type=int, required=True)
+    p.add_argument("--rates", help="offered rate of each step (/s, comma-separated)")
     p.add_argument("--hold-s", type=int, default=60)
     p.add_argument("--ramp-s", type=int, default=5)
     p.add_argument("--budget-ms", type=float, required=True)

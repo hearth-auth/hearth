@@ -6,6 +6,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 
 ## [Unreleased]
 
+### Security
+- **cookie 0.18.3** (RUSTSEC-2026-0594): the lockfiles move from cookie 0.18.1, whose private
+  (encrypted) cookies can repeat a nonce in a process that forks. Hearth gets cookie only through
+  ureq's cookie store, which does not enable private cookies.
+
 ## [4.13.0] — 2026-11-22
 
 ### Added

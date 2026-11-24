@@ -36,7 +36,11 @@
 // start together), CHAIN_REFRESHES (0: after this many refreshes, a VU signs
 // in again and starts a new chain, so a soak keeps making new token families;
 // 0 = never), PRESENT (pool: the tokens userinfo and introspect present;
-// see userToken()).
+// see userToken()), RATES_PM (a list of step rates per minute instead of the
+// linear START_RATE + i * STEP_RATE; schedule.js, #913), ADMIN_IDS_FILE (a
+// file of user ids, one per line, that admin_lookup reads in turn instead of
+// the ADMIN_IDS listed in setup: the #913 cold read's working sets of 100,000
+// and 1M users, which k6 shares between VUs; ids.js writes it).
 //
 // Several realms (STRESS_REALMS > 1, gen-config.sh REALMS): each VU works in
 // one realm for all its journeys, VU v in realm (v - 1) % STRESS_REALMS
@@ -51,6 +55,7 @@
 // product (products/common.js tokenLife). A ramp ends before its tokens get near their expiry, so this does
 // not change ramps.
 import { sleep } from 'k6';
+import { SharedArray } from 'k6/data';
 import exec from 'k6/execution';
 import { Counter, Rate, Trend } from 'k6/metrics';
 import { tokenLife } from './products/common.js';
@@ -71,6 +76,7 @@ import {
   userEmail,
 } from './lib.js';
 import { ackLine, share, suffix, vuRealm, vuSlot } from './realms.js';
+import { liveThresholds, schedule } from './schedule.js';
 
 const JOURNEYS = [
   'introspect',
@@ -86,9 +92,8 @@ if (!JOURNEYS.includes(journey) && journey !== 'mix') {
   throw new Error(`JOURNEY must be one of ${JOURNEYS.join(', ')}, mix`);
 }
 
-const startRate = num('START_RATE');
-const stepRate = num('STEP_RATE');
-const steps = num('STEPS');
+const sched = schedule(__ENV);
+const steps = sched.steps;
 const holdS = num('HOLD_S', 60);
 const rampS = num('RAMP_S', 5);
 const vus = num('VUS', 1000);
@@ -142,15 +147,11 @@ const rotations = new Counter('chain_rotations');
 // Sign-ins that replace a token before it expires.
 const renewals = new Counter('token_renewals');
 
-function stages() {
-  const out = [];
-  for (let i = 0; i < steps; i++) {
-    const target = startRate + i * stepRate;
-    out.push({ duration: `${rampS}s`, target });
-    out.push({ duration: `${holdS}s`, target });
-  }
-  return out;
-}
+// The working set of admin_lookup from ADMIN_IDS_FILE (#913 cold read), or
+// null: then setup() lists ADMIN_IDS users. One realm only.
+const fileIds = __ENV.ADMIN_IDS_FILE
+  ? new SharedArray('admin_ids', () => open(__ENV.ADMIN_IDS_FILE).split('\n').filter((l) => l !== ''))
+  : null;
 
 export const options = {
   hosts,
@@ -161,15 +162,16 @@ export const options = {
   scenarios: {
     stress: {
       executor: 'ramping-arrival-rate',
-      startRate,
-      timeUnit: '1s',
+      startRate: sched.startRate,
+      timeUnit: sched.timeUnit,
       preAllocatedVUs: vus,
       maxVUs: vus,
-      stages: stages(),
+      stages: sched.stages,
       gracefulStop: '15s',
     },
   },
 };
+if (__ENV.RATES_PM) options.thresholds = liveThresholds(steps);
 
 // setup()'s data: one entry per realm, in the order of `realms`, with that
 // realm's admin token, its id, its token pool and the user ids to look up.
@@ -208,7 +210,10 @@ export function setup() {
       data.realms[ri].sessions = res.sessions.map((s) => Object.assign(life(s.expiresIn), s));
     });
   }
-  if (uses.includes('admin_lookup')) {
+  if (fileIds !== null) {
+    if (nRealms > 1) throw new Error('ADMIN_IDS_FILE works with one realm only');
+    if (fileIds.length === 0) throw new Error(`no user ids in ${__ENV.ADMIN_IDS_FILE}`);
+  } else if (uses.includes('admin_lookup')) {
     realms.forEach((r, ri) => {
       const d = data.realms[ri];
       const want = share(adminIds, nRealms, ri);
@@ -446,7 +451,8 @@ function login() {
 
 function adminLookup(data) {
   const d = mine(data);
-  const id = d.userIds[exec.scenario.iterationInTest % d.userIds.length];
+  const ids = fileIds !== null ? fileIds : d.userIds;
+  const id = ids[exec.scenario.iterationInTest % ids.length];
   const res = send(product.adminUser(env, myRealm(), adminOf(data), id), journeyParams('admin_lookup'));
   record('admin_lookup', res.status === 200, res.timings.duration, fail(res));
 }
