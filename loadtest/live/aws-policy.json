@@ -18,7 +18,7 @@
                   "arn:aws:ec2:us-east-1:ACCOUNT_ID:security-group/*",
                   "arn:aws:ec2:us-east-1:ACCOUNT_ID:key-pair/*"]},
     {"Sid": "TagOnCreate", "Effect": "Allow", "Action": "ec2:CreateTags",
-     "Resource": "arn:aws:ec2:us-east-1:ACCOUNT_ID:*/*",
+     "Resource": ["arn:aws:ec2:us-east-1:ACCOUNT_ID:*/*", "arn:aws:ec2:us-east-1::snapshot/*"],
      "Condition": {"StringEquals": {"ec2:CreateAction": ["RunInstances", "CreateSecurityGroup", "ImportKeyPair",
                                                      "CreateSnapshot"]}}},
     {"Sid": "CreateTaggedGroupAndKey", "Effect": "Allow",
