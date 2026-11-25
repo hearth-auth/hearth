@@ -33,6 +33,8 @@ Commands (JSON on stdout):
                                                    during a run: {"stop": step} for
                                                    the first finished step that
                                                    fails for sure, else null
+  ladder.py ran <verdicts.json>                    the number of the phase's steps that
+                                                   ran (0: none, and the journey fails)
   ladder.py journey <product> <journey> <coarse.json> [<fine.json>]
                                                    the journey's result from the two
                                                    phases' report.json
@@ -187,6 +189,12 @@ def live_stop(journey, metrics, now, start_at, hold_s=60, ramp_s=RAMP_S):
     return None
 
 
+def steps_run(verdicts):
+    """The number of a phase's steps that ran, clean or not. 0: k6 never ran a step (it did
+    not start, say), and compare.sh fails the journey rather than report a clean rate of 0."""
+    return sum(1 for v in verdicts if v["clean"] is not None)
+
+
 def next_phase(verdicts):
     """After the coarse phase: the fine rates, or None (the 8th step was clean, or the
     coarse run ended before a failing step: then the coarse phase must go on)."""
@@ -291,6 +299,8 @@ def main(argv):
                 pass  # a generator whose k6 has ended or not started
         # a[0] is the product, unused like judge's.
         out = {"stop": live_stop(a[1], metrics, float(a[2]), float(a[3]), int(a[4]))}
+    elif cmd == "ran":
+        out = steps_run(json.load(open(a[0])))
     elif cmd == "next":
         out = {"fine": next_phase(json.load(open(a[1])))}
     elif cmd == "resume":

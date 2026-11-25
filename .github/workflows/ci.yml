@@ -630,7 +630,7 @@ jobs:
       # total that stops it, each instance's hard lifetime and the whole driver
       # (DRY_RUN=1: shims for aws, ssh and scp, no network) are checked here,
       # before an AWS session can find a mistake at a cost.
-      - name: Same-hardware comparison, AWS session — tests (ladder, cost, lifetime, dry run, settle, seed bundle, IAM policy)
+      - name: Same-hardware comparison, AWS session — tests (ladder, cost, lifetime, generator env, dry run, settle, seed bundle, IAM policy)
         run: |
           python3 -I loadtest/live/test_aws_policy.py
           node loadtest/live/k6/test_schedule.mjs
@@ -638,6 +638,7 @@ jobs:
           python3 -I loadtest/compare/aws/test_ladder.py
           python3 -I loadtest/compare/aws/test_cost.py
           bash loadtest/live/test_lifetime.sh
+          bash loadtest/live/test_env.sh
           bash loadtest/compare/aws/test_dryrun.sh
           bash loadtest/compare/aws/test_settle.sh
           bash loadtest/compare/aws/test_seed_bundle.sh

@@ -22,7 +22,7 @@ fails, and records how it fails. It complements the in-repo load test
 | `round.sh` | One round from a plan file: setup, then ramps and soaks, each from a restored store; always `down` at the end |
 | `plans/` | Plan files for `round.sh`; each published report names its plan |
 | `aws-iam.sh`, `aws-policy.json` | Create and delete the scoped IAM user and the local `hearth-stress` profile (`test_aws_policy.py` checks the policy can tag each resource the scripts create, and its size) |
-| `remote/` | Scripts that run on the server: observer, `kill -9`, profiler, `malloc-info.sh` (glibc heap snapshot through gdb) |
+| `remote/` | Scripts that run on the server: observer, `kill -9`, profiler, `malloc-info.sh` (glibc heap snapshot through gdb); on a generator, `launch.sh` (one k6 job) and `env.sh`, which reads `generator.env` as data, never as shell code (`test_env.sh` tests both) |
 | `ramps.py` | Per-step table for each journey type, with server CPU and generator CPU |
 | `memory.py` | Server memory over a soak: RSS, RssAnon and RssFile at fixed minutes, storage gauges, glibc heap, and the flatness test (`test_memory.py` tests it) |
 | `restore-drill.sh`, `restore_drill.py` | The weekly restore drill: seed, back up, restore, compare, time (`test_restore_drill.py` tests the comparison) |

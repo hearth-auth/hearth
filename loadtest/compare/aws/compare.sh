@@ -705,7 +705,8 @@ wait_hearth() {
 }
 
 # One journey's ladder: the coarse phase, then the fine phase, each after a
-# restore; the result in <dir>/<journey>.json.
+# restore; the result in <dir>/<journey>.json, and none when a phase ran no
+# step (phase fails the part).
 ladder() {
   local p=$1 jk=$2 dir=$3 journey=$2 env="PRESENT=chain"
   case $jk in
@@ -765,6 +766,11 @@ phase() {
   # shellcheck disable=SC2086
   lad judge "$p" "$results/$name/report.json" "$stopped" $rates > "$verdicts"
   echo "$stopped" > "$results/$name/stopped-at"
+  # A phase in which no step ran (k6 never started, say) measured nothing: the
+  # journey gets no result and the part fails, so a rerun with the same
+  # SESSION runs the journey again.
+  [ "$(lad ran "$verdicts")" -gt 0 ] \
+    || cdie "$p $jk $kind: no step ran ($results/$name): no result for $jk; the part fails, and a rerun with SESSION=$session runs it again"
 }
 
 # While ramp $4 runs: every 15 s, each generator's k6 REST API; at the first

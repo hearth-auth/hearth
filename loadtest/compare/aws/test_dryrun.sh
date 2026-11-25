@@ -9,6 +9,9 @@
 #     server that stops answering over SSH ends the listing at once
 #   - its size 1 ramps: the ladder (coarse doubling, the first failing step,
 #     3 fine steps), the clean rate, "at least" when all 8 coarse steps pass
+#   - k6 that never starts on a generator: the ramp fails at once with the
+#     unit's journal lines; a phase in which no step ran gives no result (the
+#     part fails), and a rerun runs the journey
 #   - Hearth's seed and ramp, the cold read's working set
 #   - the cost ledger (every instance closed), cost.txt, the $20 stop (STOP_USD)
 #   - the AWS login window: no part without a login or past the window; a
@@ -130,6 +133,33 @@ grep -q 'K6_ENV=PRESENT=chain' "$tmp"/repo/loadtest/live/results/dry-keycloak-s1
   && pass "a restore (store, cache drop, restart) before each of the 4 phases" || fail "restores"
 grep -q 'shutdown, -h, "+240"' "$tmp/ramps-keycloak.out" && grep -q 'SnapshotId=snap-dry' "$tmp/ramps-keycloak.out" \
   && pass "the ramp server: 240 min lifetime, data volume from the seed's snapshot" || fail "ramp launch"
+
+# k6 that never starts (session attempts 4 and 5: launch.sh could not read
+# generator.env, its unit exited at once, and the driver waited out the ramp,
+# resumed it, then wrote a result with every step "not run"). DRY_FAIL: no
+# k6.exit, and the unit is gone. The ramp fails at the wait's first check
+# with the unit's last journal lines; the phase ran no step, so the journey
+# has no result and the part fails; a rerun (same SESSION) runs it.
+ko=$tmp/repo/loadtest/live/results/compare-dryk
+SESSION=dryk step seed-dryk bash "$c" seed keycloak || fail "seed keycloak (dryk)"
+# The wait's checks of this job's k6.exit (the shim's log; ssh_to drops its stderr).
+k6_checks() { grep -c ': test -f /opt/stress/out/refresh-coarse-1/k6.exit *$' "$tmp/dry/calls.log"; }
+before=$(k6_checks)
+SESSION=dryk JOURNEYS=refresh DRY_FAIL='refresh-coarse-1/k6.exit' try k6gone bash "$c" ramps keycloak 1
+rc=$?
+checks=$(($(k6_checks) - before))
+[ "$rc" != 0 ] && [ "$checks" -le 2 ] && ! grep -q 'did not end within' "$tmp/k6gone.out" \
+  && grep -q 'generator 1: the unit stress-refresh-coarse-1 ended without k6.exit' "$tmp/k6gone.out" \
+  && grep -q '^  stress-refresh-coarse-1.service: Main process exited, code=exited, status=1/FAILURE' "$tmp/k6gone.out" \
+  && pass "k6 that never starts fails the ramp at the wait's first check ($checks), with the unit's journal lines" \
+  || fail "k6 that never starts (rc $rc, $checks checks): $(grep -v '^DRY' "$tmp/k6gone.out" | tail -n 4)"
+[ ! -e "$ko/keycloak-s1/refresh.json" ] && ! grep -q 'resuming at' "$tmp/k6gone.out" \
+  && grep -q 'FAILED: keycloak refresh coarse: no step ran' "$tmp/k6gone.out" \
+  && pass "a phase in which no step ran gives no result: the journey and the part fail" \
+  || fail "no step ran: $(ls "$ko/keycloak-s1" 2>&1 | tr '\n' ' ')"
+SESSION=dryk JOURNEYS=refresh step k6gone-rerun bash "$c" ramps keycloak 1 || fail "the rerun after k6 never started"
+[ "$(jv "$ko/keycloak-s1/refresh.json" clean_rate 2> /dev/null)" = 350.0 ] \
+  && pass "a rerun with the same SESSION runs the journey" || fail "the rerun gave no refresh result"
 
 # Hearth: seed, then the cold read over 1M users.
 step seed-hearth bash "$c" seed hearth || fail "seed hearth"

@@ -12,7 +12,8 @@
 # has expired.
 #
 # DRY_FAIL=<text> makes an ssh or scp call whose command line contains <text>
-# fail (exit 1), as a remote step that breaks.
+# fail (exit 1), as a remote step that breaks. DRY_FAIL=<job>/k6.exit: k6
+# of that job never starts (no k6.exit, its unit gone; cloud.sh wait_job).
 #
 # DRY_SSH_GONE_AFTER=<text>: the host of the ssh call whose command line
 # contains <text> stops answering after that call, as a server that reached
@@ -131,6 +132,9 @@ case $tool in
       *"/admin/bootstrap"*) echo 404 ;;
       *"prepare.json"*"api_secrets"*) echo STRESS_API_SECRET=dry-not-a-secret ;;
       *"cat /opt/stress/out/"*"/k6.exit"*) echo 0 ;;
+      *"journalctl -u stress-"*)
+        unit=${cmd#*journalctl -u }
+        printf '%s.service: Main process exited, code=exited, status=1/FAILURE\n' "${unit%% *}" ;;
       *"remote.sh idle"*) echo 204800 ;;
       *"remote.sh store-size"*) echo 4000000000 ;;
       *"remote.sh data-pristine"*) echo "read 42949672960 bytes in 300 s" ;;
