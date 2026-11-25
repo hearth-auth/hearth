@@ -25,6 +25,8 @@ Commands:
   cost.py part <plan.json> <part id>                      "<hours> <vcpus> <usd>"
   cost.py remaining <parts file> <plan.json> [id]         the estimate still to come of the
                                                           parts running (but part <id>)
+  cost.py after <plan.json>                               "<part id> <the ids it comes after>..."
+                                                          per part, in plan order
 LOGIN_WINDOW_H, LOGIN_MARGIN_MIN and MAX_VCPU override the plan's login window,
 margin and vCPU limit.
 """
@@ -139,6 +141,14 @@ def depends_on(part, other):
         if a == other["id"] or (a.endswith(":*") and other["id"].startswith(a[:-1])):
             return True
     return False
+
+
+def after(plan):
+    """Each part with an id, in plan order, with the ids of the parts it comes after
+    ("s1:*" expanded): compare.sh session starts a part once they are all done, and
+    skips it once one of them has failed or was skipped."""
+    parts = [p for p in plan["parts"] if p.get("id")]
+    return [(p["id"], [o["id"] for o in parts if depends_on(p, o)]) for p in parts]
 
 
 def schedule(plan, window_h, margin_h, max_vcpu):
@@ -283,6 +293,9 @@ def main(argv):
     elif cmd == "remaining":
         plan = json.load(open(a[1]))
         print(remaining(a[0], prices, plan, now, a[2] if len(a) > 2 else ""))
+    elif cmd == "after":
+        for ident, deps in after(json.load(open(a[0]))):
+            print(" ".join([ident, *deps]))
     else:
         sys.exit(__doc__)
 
