@@ -12,10 +12,11 @@ metrics and analysis as Hearth.
 | `postgres/postgresql.conf` | The one PostgreSQL config for every product that needs PostgreSQL (`fsync=on`, `synchronous_commit=on`) |
 | `tls.sh` | A CA and an HTTPS leaf, the same kind as Hearth's (`gen-config.sh`) |
 | `k6.sh` | Runs a `loadtest/live/k6` script from the pinned k6 image, for a host without k6 |
-| `keycloak/` | Keycloak 26.8.2: `compose.yaml` (Keycloak and PostgreSQL), `realm.py` (the realm, tested by `test_realm.py`), `keycloak.sh` (up, seed, restart, down) |
+| `test_bundle.sh`, `test_ids.sh` | The product scripts' bundle, and their `ids` (the cold read's ids from PostgreSQL), with Docker stood in for |
+| `keycloak/` | Keycloak 26.8.2: `compose.yaml` (Keycloak and PostgreSQL), `realm.py` (the realm, tested by `test_realm.py`), `keycloak.sh` (up, seed, ids, restart, down) |
 | `ory/` | Ory Hydra v26.2.0 and Ory Kratos v26.2.0 with Ory's reference login and consent UI: `compose.yaml` (the three, the migrations and PostgreSQL), `hydra.yaml`, `kratos.yaml`, `identity.schema.json`, `initdb.sh` (the two databases), `realm.py` (the clients and login users, tested by `test_realm.py`), `ory.sh` (up, seed, hashes, messages, restart, down) |
-| `authentik/` | Authentik 2026.8.6: `compose.yaml` (Authentik's server and worker, and PostgreSQL), `tls.yaml` (the run's TLS leaf as the web certificate), `realm.py` (the providers, the service account and the blueprints of the login and bulk users, tested by `test_realm.py`), `authentik.sh` (up, seed, settle, hashes, tasks, restart, down; the order of `up` tested by `test_up.sh`) |
-| `zitadel/` | Zitadel v4.20.5: `compose.yaml` (Zitadel's init, setup and start, and PostgreSQL), `instance.py` (the clients and login users, tested by `test_instance.py`), `zitadel.sh` (up, seed, hashes, restart, down) |
+| `authentik/` | Authentik 2026.8.6: `compose.yaml` (Authentik's server and worker, and PostgreSQL), `tls.yaml` (the run's TLS leaf as the web certificate), `realm.py` (the providers, the service account and the blueprints of the login and bulk users, tested by `test_realm.py`), `authentik.sh` (up, seed, ids, settle, hashes, tasks, restart, down; the order of `up` tested by `test_up.sh`) |
+| `zitadel/` | Zitadel v4.20.5: `compose.yaml` (Zitadel's init, setup and start, and PostgreSQL), `instance.py` (the clients and login users, tested by `test_instance.py`), `zitadel.sh` (up, seed, ids, hashes, restart, down) |
 | `aws/` | The AWS session (below): `compare.sh` (the driver), `remote.sh` (its server side), `ladder.py` (rates, verdicts, the size 2 product), `cost.py` and `prices.json` (the running total), `session-plan.json` (hours per part), `compose-sampler.sh` (the sampler for a compose project), `dryrun/` (shims for `DRY_RUN=1`) |
 
 ## The AWS session (`aws/`)
@@ -29,11 +30,18 @@ settings.
 1. **Seeds** (`compare.sh seed <product>`), one server alone per product (c7i.large; Authentik
    c7i.2xlarge, whose blueprint seed would take 11 to 18 h on 2 vCPUs): 1M bulk users
    and 1,000 login users through the product's own seed tool (`cloud.sh import` for Hearth),
-   then `ids.js` lists the first 1M user ids through the admin API. The seed record
-   (`seed-<product>.json`) has the time of the seed call, the time until the admin API lists
-   all 1M users, the settle time, the idle RSS, the store size and the seed server's type (seed
-   times compare only between seeds on the same type; `summary.md` has one table per type). The
-   store is on a second
+   then the first 1M user ids, in the admin API's order, into the bundle (the cold read's
+   working sets): through the admin API where it pages by cursor (`ids.js`: Hearth, and Ory's
+   Kratos with its keyset `page_token`), else from the product's PostgreSQL (`<product>.sh ids`:
+   Keycloak, Zitadel and Authentik, whose admin APIs page by offset: through 1M users, about
+   45 min for Keycloak and 2 h for Zitadel on 2 vCPUs, more than a day for Authentik). The seed
+   is usable, by one rule for every product, when the admin API answers the cold read's own
+   lookup for the first and every 1,000th of those ids (1,001 lookups, all `200`; `ids.js` with
+   `IDS_CHECK`). A server that stops answering over SSH (gone at its lifetime) ends the seed at
+   once. The seed record (`seed-<product>.json`) has the time of the seed call, the time until
+   usable (without the id listing itself, whose time, `ids_s`, and source, `ids_from`, it
+   records too), the settle time, the idle RSS, the store size and the seed server's type (seed times compare only between seeds on the same type;
+   `summary.md` has one table per type). The store is on a second
    EBS volume (made at launch, deleted with the instance), which is kept as a snapshot tagged
    with the seed run's tag. The server's lifetime is the seed estimate plus 50 %, at most 16 h.
 2. **Ramps** (`compare.sh ramps <product> <1|2>`): size 1 is a c7i.large server and 2

@@ -15,6 +15,13 @@
 #                 the import time (duration_s) from <bundle>/out/seed-<from>-<to>.json,
 #                 then waits until Zitadel's user projection has every seeded
 #                 user and prints the time until then (the seed time)
+#   ids <n> <file>
+#                 write the ids of the instance's first <n> human users, one
+#                 per line, to <file>, in the user API v2's order (ListUsers:
+#                 by id), read from the user projection that API reads: the
+#                 #913 cold read's working set in seconds (paging the API by
+#                 offset through 1M users takes about 2 h on 2 vCPUs); fails,
+#                 and writes no <file>, when there are fewer
 #   hashes        print the parameters of the stored password hashes (no hash)
 #   restart       restart Zitadel (the data stays)
 #   down          remove the containers and the database volume, and with them the
@@ -163,6 +170,29 @@ PY
   log "the user projection has every seeded user after $(($(date +%s) - start)) s"
 }
 
+# The ids of the first $1 human users of the organization's instance in the
+# order of the user API v2's ListUsers (by id; the realm admin is IAM_OWNER,
+# who sees every user of the instance), from projections.users14, the table
+# that API reads, into the file $2 (#913: compare.sh's 1M-id listing).
+cmd_ids() {
+  local n=${1:?usage: zitadel.sh ids <n> <file>} file=${2:?usage: zitadel.sh ids <n> <file>} org got
+  [[ $n =~ ^[1-9][0-9]*$ ]] || die "ids: $n is not a positive number"
+  org=$(sed -n 's/^STRESS_ORG_ID=//p' "$BUNDLE/generator.env")
+  [[ $org =~ ^[0-9]+$ ]] || die "ids: no organization id in $BUNDLE/generator.env"
+  if ! compose exec -T postgres psql -U postgres -d zitadel -v ON_ERROR_STOP=1 -Atq -c "COPY (
+      SELECT u.id FROM projections.users14 u
+       WHERE u.instance_id = (SELECT instance_id FROM projections.users14 WHERE resource_owner = '$org' LIMIT 1)
+         AND u.type = 1
+       ORDER BY u.id LIMIT $n) TO STDOUT" > "$file.part"; then
+    rm -f "$file.part"
+    die "ids: the query failed"
+  fi
+  got=$(wc -l < "$file.part")
+  [ "$got" -eq "$n" ] || { rm -f "$file.part"; die "ids: the projection has $got human users, fewer than $n"; }
+  mv "$file.part" "$file"
+  log "ids: the first $n users' ids in $file"
+}
+
 # The parameters of the stored password hashes, counted by PHC prefix (the
 # part before the salt), from the events that carry a password hash. No hash
 # is printed.
@@ -190,6 +220,7 @@ case ${1:-} in
   bundle) make_bundle ;;
   up) cmd_up ;;
   seed) shift && cmd_seed "$@" ;;
+  ids) shift && cmd_ids "$@" ;;
   hashes) cmd_hashes ;;
   restart) cmd_restart ;;
   down) cmd_down ;;

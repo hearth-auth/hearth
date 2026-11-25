@@ -21,6 +21,15 @@
 #                 file in one transaction); prints the time until the last
 #                 file is applied (the users are then usable) and the number
 #                 of users created
+#   ids <n> <file>
+#                 write the ids (pk) of the first <n> users, one per line, to
+#                 <file>, in the users API's order (/api/v3/core/users/
+#                 ?ordering=username, without the anonymous user), read from
+#                 PostgreSQL: the #913 cold read's working set in seconds
+#                 (paging the API by page number through 1M users takes more
+#                 than a day: 100 users a page, 15 s a page past the first
+#                 25,000 users on 8 vCPUs); fails, and writes no <file>, when
+#                 there are fewer
 #   settle        wait until the worker has no task queued or running
 #   hashes        print the parameters of the stored password hashes (no hash)
 #   tasks         print the worker's tasks by name and state, and the number of
@@ -252,6 +261,25 @@ cmd_seed() {
   rm -rf "${BUNDLE:?}/blueprints/$dir"
 }
 
+# The ids (pk) of the first $1 users in the order of the users API's list with
+# ordering=username (k6/products/authentik.js listUsers; the API leaves out
+# django-guardian's AnonymousUser), into the file $2 (#913: compare.sh's
+# 1M-id listing).
+cmd_ids() {
+  local n=${1:?usage: authentik.sh ids <n> <file>} file=${2:?usage: authentik.sh ids <n> <file>} got
+  [[ $n =~ ^[1-9][0-9]*$ ]] || die "ids: $n is not a positive number"
+  if ! compose exec -T postgres psql -U authentik -d authentik -v ON_ERROR_STOP=1 -Atq -c "COPY (
+      SELECT id FROM authentik_core_user WHERE username <> 'AnonymousUser'
+       ORDER BY username LIMIT $n) TO STDOUT" > "$file.part"; then
+    rm -f "$file.part"
+    die "ids: the query failed"
+  fi
+  got=$(wc -l < "$file.part")
+  [ "$got" -eq "$n" ] || { rm -f "$file.part"; die "ids: there are $got users, fewer than $n"; }
+  mv "$file.part" "$file"
+  log "ids: the first $n users' ids in $file"
+}
+
 # The parameters of the stored password hashes (Django's format: algorithm and
 # iterations, the part before the salt), counted. No hash is printed.
 cmd_hashes() {
@@ -283,6 +311,7 @@ case ${1:-} in
   bundle) make_bundle ;;
   up) cmd_up ;;
   seed) shift && cmd_seed "$@" ;;
+  ids) shift && cmd_ids "$@" ;;
   settle) cmd_settle ;;
   hashes) cmd_hashes ;;
   tasks) cmd_tasks ;;

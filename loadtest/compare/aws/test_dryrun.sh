@@ -4,7 +4,9 @@
 # make up the k6 output, in which every step at DRY_FAIL_RATE (400/s) or more
 # is too slow. Checks:
 #   - a product's seed: a server-only run with the seed lifetime, the data
-#     volume, a snapshot, the seed record, torn down
+#     volume, a snapshot, the seed record, torn down; the 1M ids from the
+#     product's store or its admin API (cursor paging), the usable check; a
+#     server that stops answering over SSH ends the listing at once
 #   - its size 1 ramps: the ladder (coarse doubling, the first failing step,
 #     3 fine steps), the clean rate, "at least" when all 8 coarse steps pass
 #   - Hearth's seed and ramp, the cold read's working set
@@ -77,6 +79,31 @@ grep -q 'DRY aws .*create-snapshot --volume-id vol-0dry0000000000001' "$tmp/seed
 [ "$(jv "$out/seed-keycloak.json" idle_rss_kb)" = 204800 ] && [ "$(jv "$out/seed-keycloak.json" store_bytes)" = 4000000000 ] \
   && pass "the seed record has the idle RSS and the store size" || fail "seed record: $(cat "$out/seed-keycloak.json")"
 grep -q 'terminate-instances' "$tmp/seed-keycloak.out" && pass "the seed run is torn down" || fail "seed run left up"
+# The 1M ids: offset paging through Keycloak's admin API takes about 45 min
+# on 2 vCPUs (in 913a it did not end); its PostgreSQL lists them in the API's
+# order in seconds.
+grep -q 'DRY ssh .*remote.sh product keycloak ids 1000000 /data/bundle/out/ids.txt' "$tmp/seed-keycloak.out" \
+  && ! grep -q 'ids.js IDS_COUNT' "$tmp/seed-keycloak.out" \
+  && pass "Keycloak's 1M ids come from its store (keycloak.sh ids), not from offset paging" \
+  || fail "Keycloak's ids: $(grep -o 'DRY ssh .*ids.*' "$tmp/seed-keycloak.out" | head -n 2)"
+grep -qF "awk 'NR == 1 || NR % 1000 == 0' /data/bundle/out/ids.txt > /data/bundle/out/ids-check.txt" "$tmp/seed-keycloak.out" \
+  && grep -q 'DRY ssh .*k6.sh /data/bundle ids.js IDS_CHECK=/out/ids-check.txt' "$tmp/seed-keycloak.out" \
+  && grep -q 'DRY ssh .*mv /data/bundle/out/ids.txt /data/bundle/ids-1000000.txt' "$tmp/seed-keycloak.out" \
+  && pass "usable: the admin API looks up the first and every 1,000th id, then the ids go to the bundle" \
+  || fail "no usable check through the admin API"
+grep -q 'the admin API answers the cold read' <<< "$(jv "$out/seed-keycloak.json" usable_rule)" \
+  && [ "$(jv "$out/seed-keycloak.json" ids_from)" = "store" ] && [ -n "$(jv "$out/seed-keycloak.json" ids_s)" ] \
+  && pass "the seed record has the usable rule, where the ids came from and the listing time" \
+  || fail "seed record: $(cat "$out/seed-keycloak.json")"
+
+# A server that stops answering over SSH (gone at its lifetime) during the
+# listing ends the seed at once, with one clear error, not 120 retries.
+SESSION=dryg DRY_SSH_GONE_AFTER='product zitadel seed 0 1000000' try gone bash "$c" seed zitadel
+rc=$?
+[ "$rc" != 0 ] && [ "$(grep -c 'does not answer over SSH' "$tmp/gone.out")" = 1 ] \
+  && ! grep -q 'yet (2)' "$tmp/gone.out" \
+  && pass "an unreachable server ends the listing at once, with one error" \
+  || fail "unreachable server (rc $rc): $(grep -v '^DRY' "$tmp/gone.out" | tail -n 3 | tr '\n' ' ')"
 
 # Its ramps: refresh fails at 400/s (coarse 25..3200), login (2..256) never does.
 JOURNEYS="refresh login" step ramps-keycloak bash "$c" ramps keycloak 1 || fail "ramps keycloak"
@@ -104,6 +131,11 @@ grep -q 'shutdown, -h, "+240"' "$tmp/ramps-keycloak.out" && grep -q 'SnapshotId=
 step seed-hearth bash "$c" seed hearth || fail "seed hearth"
 grep -q 'DRY ssh .*remote.sh bind-hearth' "$tmp/seed-hearth.out" && pass "Hearth's seed store is on the data volume" \
   || fail "Hearth seed: no bind"
+grep -q 'DRY ssh .*IDS_COUNT=1000000 IDS_OUT=/data/bundle/out/ids.txt .*k6 run -q ids.js' "$tmp/seed-hearth.out" \
+  && grep -q 'DRY ssh .*IDS_CHECK=/data/bundle/out/ids-check.txt .*k6 run -q ids.js' "$tmp/seed-hearth.out" \
+  && [ "$(jv "$out/seed-hearth.json" ids_from)" = "admin API" ] \
+  && pass "Hearth's ids come from its admin API (cursor paging), then the same usable check" \
+  || fail "Hearth's ids: $(grep -o 'DRY ssh .*ids.js.*' "$tmp/seed-hearth.out" | head -n 2)"
 JOURNEYS=cold1m step ramps-hearth bash "$c" ramps hearth 1 || fail "ramps hearth"
 grep -q 'ADMIN_IDS_FILE=/opt/stress/ids-1000000.txt' "$tmp"/repo/loadtest/live/results/dry-hearth-s1-1/cold1m-coarse-1/params.env \
   && pass "the cold read walks the 1M-id working set" || fail "cold1m params"
@@ -239,6 +271,15 @@ for p in hearth keycloak zitadel ory authentik; do
   n=$(grep -c "seed $p on " "$so/driver-seed-$p.log")
   [ "$n" = 1 ] || fail "seed $p ran $n times"
 done
+# Where each product's ids come from: Ory's admin API pages by cursor (keyset),
+# Zitadel's and Authentik's by offset, so theirs come from their store.
+grep -q 'DRY ssh .*k6.sh /data/bundle ids.js IDS_COUNT=1000000 IDS_OUT=/out/ids.txt' "$so/driver-seed-ory.log" \
+  && ! grep -q 'remote.sh product ory ids' "$so/driver-seed-ory.log" \
+  && grep -q 'DRY ssh .*remote.sh product zitadel ids 1000000 ' "$so/driver-seed-zitadel.log" \
+  && grep -q 'DRY ssh .*remote.sh product authentik ids 1000000 ' "$so/driver-seed-authentik.log" \
+  && [ "$(grep -l 'IDS_CHECK=' "$so"/driver-seed-*.log | wc -l)" = 5 ] \
+  && pass "ids: Ory's from its admin API, Zitadel's and Authentik's from their store; every product's usable check" \
+  || fail "ids per product"
 started=$(awk '$2 == "start" {print $3}' "$so/timeline.txt" | sort | tr '\n' ' ')
 [ "$started" = "s1:authentik s2:hearth s2:other seed:authentik " ] \
   && cmp -s "$so/hearth-s1/login.json" "$tmp/hearth-login-before.json" \

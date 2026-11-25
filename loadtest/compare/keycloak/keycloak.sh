@@ -10,6 +10,13 @@
 #                 import password-less users bulk<from> .. bulk<to - 1> through
 #                 partialImport (k6/prepare.js, PRODUCT=keycloak); prints the
 #                 seed time (duration_s) from <bundle>/out/seed-<from>-<to>.json
+#   ids <n> <file>
+#                 write the ids of the realm's first <n> users, one per line,
+#                 to <file>, in the admin API's order (GET .../users: by
+#                 username, no service account), read from PostgreSQL: the
+#                 #913 cold read's working set in seconds (paging the admin
+#                 API by offset through 1M users takes about 45 min on 2
+#                 vCPUs); fails, and writes no <file>, when the realm has fewer
 #   restart       restart Keycloak (the data stays)
 #   down          remove the containers and the database volume, and with them the
 #                 realm (the images and the bundle's passwords stay)
@@ -120,6 +127,27 @@ print(f"seed: {r['users_imported']} imported, {r['users_import_failed']} failed,
 PY
 }
 
+# The ids of the realm's first $1 users in the order of the admin API's user
+# list (Keycloak's JPA user search: the realm's users without service
+# accounts, by username), into the file $2 (#913: compare.sh's 1M-id listing).
+cmd_ids() {
+  local n=${1:?usage: keycloak.sh ids <n> <file>} file=${2:?usage: keycloak.sh ids <n> <file>} realm got
+  [[ $n =~ ^[1-9][0-9]*$ ]] || die "ids: $n is not a positive number"
+  realm=$(sed -n 's/^STRESS_REALM=//p' "$BUNDLE/generator.env")
+  [[ $realm =~ ^[a-z0-9-]+$ ]] || die "ids: no realm name in $BUNDLE/generator.env"
+  if ! compose exec -T postgres psql -U keycloak -d keycloak -v ON_ERROR_STOP=1 -Atq -c "COPY (
+      SELECT u.id FROM user_entity u JOIN realm r ON r.id = u.realm_id
+       WHERE r.name = '$realm' AND u.service_account_client_link IS NULL
+       ORDER BY u.username LIMIT $n) TO STDOUT" > "$file.part"; then
+    rm -f "$file.part"
+    die "ids: the query failed"
+  fi
+  got=$(wc -l < "$file.part")
+  [ "$got" -eq "$n" ] || { rm -f "$file.part"; die "ids: the realm has $got users, fewer than $n"; }
+  mv "$file.part" "$file"
+  log "ids: the first $n users' ids in $file"
+}
+
 cmd_restart() {
   compose restart keycloak
   wait_ready
@@ -135,6 +163,7 @@ case ${1:-} in
   bundle) make_bundle ;;
   up) cmd_up ;;
   seed) shift && cmd_seed "$@" ;;
+  ids) shift && cmd_ids "$@" ;;
   restart) cmd_restart ;;
   down) cmd_down ;;
   *) sed -n '2,/^set -euo/p' "$0" | sed '$d' >&2 && exit 2 ;;

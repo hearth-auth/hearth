@@ -12,7 +12,7 @@ fails, and records how it fails. It complements the in-repo load test
 | `k6/prepare.js` | Makes the `api` client a resource server, regenerates its secret, bulk-imports users |
 | `k6/stress.js` | One open-loop ramp of one journey (or a mix) |
 | `k6/schedule.js` | The ramp's steps: `start + i * step`, or a list of rates (`RATES_PM`); `k6/test_schedule.mjs` tests it |
-| `k6/ids.js` | Lists the first `IDS_COUNT` user ids through the admin API (the #913 cold read's working sets) |
+| `k6/ids.js` | Lists the first `IDS_COUNT` user ids through the admin API (the #913 cold read's working sets; for a cursor-paged API), or with `IDS_CHECK` looks each id of a file up through it (the #913 seed's usable check) |
 | `k6/products/` | One adapter per product (`PRODUCT`, default `hearth`): endpoints, login page steps, admin API. The same journeys run against other identity servers for the same-hardware comparison (#913, `loadtest/compare/`); `k6/test_products.mjs` tests them |
 | `k6/verify.js` | Checks every user a `create_user` ramp saw acknowledged still exists |
 | `sampler.sh` | Runs on the server: Hearth CPU, RSS, free memory, disk writes, once a second |
