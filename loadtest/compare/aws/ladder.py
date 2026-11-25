@@ -2,7 +2,7 @@
 verdict of each step, the clean rate of a journey, and the rule that picks the second
 product of size 2. compare.sh calls the command line below; test_ladder.py tests it.
 
-The method, fixed in #913 before any run:
+The method, fixed in #913 before any run (one rule changed since: the last one below):
 
 - Start rates: login 2/s; the mix 5/s; refresh, client credentials and user create 25/s;
   userinfo, introspect and admin lookup (and the cold read) 100/s.
@@ -12,9 +12,12 @@ The method, fixed in #913 before any run:
   journey whose 8th coarse step is clean reports "at least" that rate.
 - Each phase is one k6 run after a restore, a cache drop and a restart, and starts with
   one warm-up minute at the phase's first rate (step 0, never judged).
-- A step is clean when no journey was dropped, errors other than the password-hash
-  sheds stay below 0.1 %, the p99 is within the journey's budget (cloud.sh collect's),
-  and the server stayed alive. A product's own queue-full 503 counts as an error.
+- A step is clean when no journey was dropped, errors stay below 0.1 %, the p99 is
+  within the journey's budget (cloud.sh collect's), and the server stayed alive.
+- Every failed journey is an error, for every product: a 429 or 503 counts, whether it
+  is a product's queue-full 503 or a password-hash (KDF) shed such as Hearth's
+  `login_submit:503`. Changed on 2026-11-24, after the first Hearth ramp: until then
+  Hearth's login sheds did not count, a rule no other product had.
 
 Commands (JSON on stdout):
   ladder.py coarse <journey>                       the coarse rates (/s)
@@ -36,6 +39,7 @@ Commands (JSON on stdout):
   ladder.py next <product> <coarse.json>           {"fine": [...]} or {"fine": null}
   ladder.py fastest <results.json>                 the fastest other product
   ladder.py seed-minutes <estimate_minutes>        a seed instance's lifetime
+judge, live and next take <product> but do not use it: every product gets the same rule.
 """
 import json
 import math
@@ -68,13 +72,6 @@ JOURNEYS = ["login", "refresh", "client_credentials", "userinfo", "introspect",
 COARSE_STEPS = 8
 FINE_STEPS = 3
 ERROR_LIMIT = 0.001
-# Password-hash sheds that do not count as errors: the failure classes (k6 `cls`,
-# "<login step>:<status>") of a product's Argon2 or hash gate. Only Hearth has one:
-# its KDF gate refuses a sign-in with 429 or 503 at the password step. No other product
-# sheds password checks; their queue-full 503s count as errors.
-SHED_CLASSES = {
-    "hearth": {"login_submit:429", "login_submit:503"},
-}
 # The busiest generator's k6 above this CPU % (of 400 on a c7i.xlarge) means the
 # generators, not the server, may have set the limit: the result is flagged.
 GENERATOR_BOUND_PCT = 300
@@ -105,18 +102,16 @@ def rates_pm(generators, rates):
     return out
 
 
-def judge_step(row, budget_ms, shed=frozenset()):
-    """(clean, reasons) of one analyze.py step row."""
+def judge_step(row, budget_ms):
+    """(clean, reasons) of one analyze.py step row. Every failed journey is an error."""
     reasons = []
     finished = row.get("finished")
     if finished is None:
         # A report from before the counts: rebuild them from the rates.
         finished = round((row.get("completed_rps") or 0) * row.get("hold_s", 60))
-    failed = row.get("failed")
-    if failed is None:
-        failed = round((row.get("error_ratio") or 0) * finished)
-    shed_n = sum(n for cls, n in (row.get("fail_classes") or {}).items() if cls in shed)
-    errors = max(0, failed - shed_n)
+    errors = row.get("failed")
+    if errors is None:
+        errors = round((row.get("error_ratio") or 0) * finished)
     if finished == 0:
         reasons.append("no journey finished")
     elif errors / finished >= ERROR_LIMIT:
@@ -131,13 +126,13 @@ def judge_step(row, budget_ms, shed=frozenset()):
     return (not reasons, reasons)
 
 
-def judge(product, journey, report, rates, ran=-1):
+def judge(journey, report, rates, ran=-1):
     """The verdict of each judged step of a phase: step i + 1 of the report is rates[i]
     (step 0 is the warm-up minute). A step with no row, or after `ran` when the driver
     stopped the run at step `ran` (-1: it ran to its end), did not run. Judging stops
-    at the first failing step: the steps after it do not count."""
+    at the first failing step: the steps after it do not count. The rule is the same
+    for every product."""
     budget = BUDGET_MS[journey]
-    shed = SHED_CLASSES.get(product, set())
     rows = {r["step"]: r for r in report.get("steps", []) if ran < 0 or r["step"] <= ran}
     out = []
     for i, rate in enumerate(rates):
@@ -145,7 +140,7 @@ def judge(product, journey, report, rates, ran=-1):
         if row is None:
             out.append({"rate": rate, "clean": None, "reasons": ["not run"]})
             break
-        clean, reasons = judge_step(row, budget, shed)
+        clean, reasons = judge_step(row, budget)
         out.append({
             "rate": rate,
             "clean": clean,
@@ -173,14 +168,13 @@ LIVE_ERROR_LIMIT = 0.01
 RAMP_S = 5
 
 
-def live_stop(product, journey, metrics, now, start_at, hold_s=60, ramp_s=RAMP_S):
+def live_stop(journey, metrics, now, start_at, hold_s=60, ramp_s=RAMP_S):
     """The first judged step (>= 1) that has finished and fails for sure on any
-    generator, or None. `metrics` is one k6 /v1/metrics answer per generator."""
+    generator, or None. `metrics` is one k6 /v1/metrics answer per generator. The rule
+    is the same for every product and journey."""
     budget = BUDGET_MS[journey]
     step_s = ramp_s + hold_s
     finished = int((now - start_at) // step_s)  # steps 0 .. finished-1 are over
-    # Hearth's KDF sheds are not errors: its login and mix are judged live on latency only.
-    errors_count = not (SHED_CLASSES.get(product) and journey in ("login", "mix"))
     for step in range(1, finished):
         for m in metrics:
             by_id = {d["id"]: d["attributes"]["sample"] for d in m.get("data", [])}
@@ -188,7 +182,7 @@ def live_stop(product, journey, metrics, now, start_at, hold_s=60, ramp_s=RAMP_S
             ok = by_id.get(f"journey_ok{{step:{step},phase:hold}}", {})
             if (lat.get("p(95)") or 0) > budget:
                 return step
-            if errors_count and ok.get("rate") is not None and ok["rate"] < 1 - LIVE_ERROR_LIMIT:
+            if ok.get("rate") is not None and ok["rate"] < 1 - LIVE_ERROR_LIMIT:
                 return step
     return None
 
@@ -285,8 +279,9 @@ def main(argv):
     elif cmd == "rates-pm":
         out = rates_pm(int(a[0]), [float(x) for x in a[1:]])
     elif cmd == "judge":
+        # a[0] is the product: compare.sh names it, the rule does not use it.
         report = json.load(open(a[1]))
-        out = judge(a[0], report["journey"], report, [float(x) for x in a[3:]], int(a[2]))
+        out = judge(report["journey"], report, [float(x) for x in a[3:]], int(a[2]))
     elif cmd == "live":
         metrics = []
         for path in a[5:]:
@@ -294,7 +289,8 @@ def main(argv):
                 metrics.append(json.load(open(path)))
             except (OSError, ValueError):
                 pass  # a generator whose k6 has ended or not started
-        out = {"stop": live_stop(a[0], a[1], metrics, float(a[2]), float(a[3]), int(a[4]))}
+        # a[0] is the product, unused like judge's.
+        out = {"stop": live_stop(a[1], metrics, float(a[2]), float(a[3]), int(a[4]))}
     elif cmd == "next":
         out = {"fine": next_phase(json.load(open(a[1])))}
     elif cmd == "resume":

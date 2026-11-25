@@ -45,9 +45,11 @@ settings.
    While a phase runs, the driver reads each generator's k6 REST API every 15 s and stops the
    run at the first step that fails for sure (p95 over the budget, or 1 % errors); afterwards
    `aws/ladder.py` judges each step with the clean-step rule (no dropped journey, errors below
-   0.1 % not counting Hearth's password-hash sheds, p99 within the budget, the server alive)
-   and stops at the first failing one. Per step it records the rate, the p99, the errors by
-   class, the server's CPU, RSS and disk writes. The cold read (`cold100k`, `cold1m`) is admin
+   0.1 %, p99 within the budget, the server alive) and stops at the first failing one. Both
+   rules count every failed journey as an error, for every product: a 429 or 503 counts,
+   Hearth's password-hash (KDF) sheds included (since 2026-11-24; before, Hearth's login
+   sheds did not count, a rule no other product had). Per step it records the rate, the p99,
+   the errors by class, the server's CPU, RSS and disk writes. The cold read (`cold100k`, `cold1m`) is admin
    user lookup over the first 100,000 or 1M seeded users after the cache drop (the
    1,000-user case is journey 6). Every product runs with `PRESENT=chain`.
 3. **Session** (`compare.sh session`), in parallel: the 5 seeds and the #647 10M restore drill

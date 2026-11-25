@@ -3,8 +3,12 @@ fastest-product rule and the seed lifetime.
 
 Usage: python3 -I loadtest/compare/aws/test_ladder.py
 """
+import contextlib
+import io
+import json
 import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -65,68 +69,115 @@ class Judge(unittest.TestCase):
         self.assertFalse(ladder.judge_step(row(1, alive=False), 50)[0])
         self.assertFalse(ladder.judge_step(row(1, finished=0, p99=None), 50)[0])
 
-    def test_only_hearths_kdf_sheds_are_not_errors(self):
-        r = row(1, finished=1000, failed=50, classes={"login_submit:503": 50})
-        self.assertTrue(ladder.judge_step(r, 1000, ladder.SHED_CLASSES["hearth"])[0])
-        # The same 503s from another product: its queue is full, an error.
-        self.assertFalse(ladder.judge_step(r, 1000, ladder.SHED_CLASSES.get("keycloak", set()))[0])
-        # A shed plus a real error.
-        r = row(1, finished=1000, failed=52, classes={"login_submit:503": 50, "code_exchange:500": 2})
-        self.assertFalse(ladder.judge_step(r, 1000, ladder.SHED_CLASSES["hearth"])[0])
+    def test_a_password_hash_shed_is_an_error(self):
+        # Hearth's KDF gate refuses a sign-in with 503 or 429: errors, like any product's
+        # queue-full 503 (#913, changed on 2026-11-24).
+        for cls in ("login_submit:503", "login_submit:429"):
+            r = row(1, finished=1000, failed=50, classes={cls: 50})
+            self.assertEqual(ladder.judge_step(r, 1000), (False, ["errors 5.00%"]))
+        rep = report("login", [row(0), row(1, finished=1000, failed=800,
+                                            classes={"login_submit:503": 800})])
+        v = ladder.judge("login", rep, [256])
+        self.assertEqual([x["clean"] for x in v], [False])
+        self.assertEqual(v[0]["reasons"], ["errors 80.00%"])
 
     def test_the_warm_up_step_is_never_judged_and_judging_stops_at_the_first_fail(self):
         rates = [100, 200, 400, 800]
         rep = report("userinfo", [row(0, p99=999), row(1), row(2), row(3, p99=80), row(4)])
-        v = ladder.judge("keycloak", "userinfo", rep, rates)
+        v = ladder.judge("userinfo", rep, rates)
         self.assertEqual([x["clean"] for x in v], [True, True, False])
         self.assertEqual(v[2]["rate"], 400)
         self.assertIn("p99 80 ms > 50 ms", v[2]["reasons"])
 
     def test_a_step_the_run_did_not_reach_is_not_run(self):
         rep = report("refresh", [row(0), row(1)])
-        v = ladder.judge("hearth", "refresh", rep, [25, 50])
+        v = ladder.judge("refresh", rep, [25, 50])
         self.assertEqual(v[-1], {"rate": 50, "clean": None, "reasons": ["not run"]})
 
     def test_steps_after_a_live_stop_did_not_run(self):
         # Stopped at step 2 (clean after all): step 3 has sampler rows only.
         rep = report("refresh", [row(0), row(1), row(2), row(3, finished=0, p99=None)])
-        v = ladder.judge("hearth", "refresh", rep, [25, 50, 100], ran=2)
+        v = ladder.judge("refresh", rep, [25, 50, 100], ran=2)
         self.assertEqual([x["clean"] for x in v], [True, True, None])
-        v = ladder.judge("hearth", "refresh", rep, [25, 50, 100])
+        v = ladder.judge("refresh", rep, [25, 50, 100])
         self.assertEqual([x["clean"] for x in v], [True, True, False])
 
 
+def k6_metrics(steps):
+    """A k6 /v1/metrics answer: steps maps step -> (p95 ms, ok rate)."""
+    data = []
+    for st, (p95, rate) in steps.items():
+        data.append({"id": f"journey_ms{{step:{st},phase:hold}}", "attributes": {"sample": {"p(95)": p95}}})
+        data.append({"id": f"journey_ok{{step:{st},phase:hold}}", "attributes": {"sample": {"rate": rate}}})
+    data.append({"id": "journey_ms", "attributes": {"sample": {"p(95)": 999}}})
+    return {"data": data}
+
+
 class Live(unittest.TestCase):
-    def metrics(self, steps):
-        """A k6 /v1/metrics answer: steps maps step -> (p95 ms, ok rate)."""
-        data = []
-        for st, (p95, rate) in steps.items():
-            data.append({"id": f"journey_ms{{step:{st},phase:hold}}", "attributes": {"sample": {"p(95)": p95}}})
-            data.append({"id": f"journey_ok{{step:{st},phase:hold}}", "attributes": {"sample": {"rate": rate}}})
-        data.append({"id": "journey_ms", "attributes": {"sample": {"p(95)": 999}}})
-        return {"data": data}
 
     def test_stops_at_the_first_finished_step_that_fails_for_sure(self):
-        m = self.metrics({0: (900, 0.5), 1: (10, 1.0), 2: (60, 1.0), 3: (70, 1.0)})
+        m = k6_metrics({0: (900, 0.5), 1: (10, 1.0), 2: (60, 1.0), 3: (70, 1.0)})
         # Steps are 65 s; at 200 s steps 0, 1 and 2 are over. Step 0 is the warm-up.
-        self.assertEqual(ladder.live_stop("ory", "userinfo", [m], 200, 0), 2)
+        self.assertEqual(ladder.live_stop("userinfo", [m], 200, 0), 2)
         # At 190 s step 2 is not over yet.
-        self.assertIsNone(ladder.live_stop("ory", "userinfo", [m], 190, 0))
+        self.assertIsNone(ladder.live_stop("userinfo", [m], 190, 0))
 
     def test_any_generator_and_errors_count(self):
-        good = self.metrics({1: (10, 1.0), 2: (10, 1.0)})
-        bad = self.metrics({1: (10, 1.0), 2: (10, 0.98)})
-        self.assertEqual(ladder.live_stop("keycloak", "refresh", [good, bad], 200, 0), 2)
+        good = k6_metrics({1: (10, 1.0), 2: (10, 1.0)})
+        bad = k6_metrics({1: (10, 1.0), 2: (10, 0.98)})
+        self.assertEqual(ladder.live_stop("refresh", [good, bad], 200, 0), 2)
         # 0.5 % errors: not for sure (the judge decides after the run).
-        meh = self.metrics({1: (10, 1.0), 2: (10, 0.995)})
-        self.assertIsNone(ladder.live_stop("keycloak", "refresh", [meh], 200, 0))
+        meh = k6_metrics({1: (10, 1.0), 2: (10, 0.995)})
+        self.assertIsNone(ladder.live_stop("refresh", [meh], 200, 0))
 
-    def test_hearths_login_is_stopped_on_latency_only(self):
-        shed = self.metrics({1: (100, 0.9)})
-        self.assertIsNone(ladder.live_stop("hearth", "login", [shed], 140, 0))
-        self.assertEqual(ladder.live_stop("zitadel", "login", [shed], 140, 0), 1)
-        slow = self.metrics({1: (1500, 1.0)})
-        self.assertEqual(ladder.live_stop("hearth", "login", [slow], 140, 0), 1)
+    def test_errors_stop_a_login_or_mix_run_too(self):
+        # 10 % of the journeys refused (Hearth's KDF sheds, for one): the run stops.
+        shed = k6_metrics({1: (100, 0.9)})
+        slow = k6_metrics({1: (1500, 1.0)})
+        for journey in ("login", "mix"):
+            self.assertEqual(ladder.live_stop(journey, [shed], 140, 0), 1)
+            self.assertEqual(ladder.live_stop(journey, [slow], 140, 0), 1)
+
+
+class CommandLine(unittest.TestCase):
+    """compare.sh's `judge` and `live` calls: they name the product, and every product
+    gets the same rule."""
+    PRODUCTS = ("hearth", "keycloak", "zitadel", "ory", "authentik")
+
+    def setUp(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.dir = d.name
+
+    def write(self, name, obj):
+        path = os.path.join(self.dir, name)
+        with open(path, "w") as f:
+            json.dump(obj, f)
+        return path
+
+    def run_cli(self, *args):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            ladder.main(["ladder.py", *args])
+        return json.loads(out.getvalue())
+
+    def test_judge_fails_a_step_of_password_hash_sheds_for_every_product(self):
+        # #913's first Hearth ramp: 80 % of the logins at 256/s refused with 503.
+        for cls in ("login_submit:503", "login_submit:429"):
+            rep = self.write("report.json", report("login", [
+                row(0), row(1, p99=400, finished=1000, failed=800, classes={cls: 800})]))
+            for product in self.PRODUCTS:
+                v = self.run_cli("judge", product, rep, "-1", "256")
+                self.assertEqual(len(v), 1, (product, cls))
+                self.assertIs(v[0]["clean"], False, (product, cls))
+                self.assertEqual(v[0]["reasons"], ["errors 80.00%"], (product, cls))
+
+    def test_live_stops_a_login_or_mix_step_of_sheds_for_every_product(self):
+        m = self.write("metrics.json", k6_metrics({1: (100, 0.2)}))
+        for product in self.PRODUCTS:
+            for journey in ("login", "mix"):
+                self.assertEqual(self.run_cli("live", product, journey, "140", "0", "60", m),
+                                 {"stop": 1}, (product, journey))
 
 
 class Phases(unittest.TestCase):
