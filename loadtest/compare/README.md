@@ -51,9 +51,12 @@ settings.
    a page-cache drop and a restart, a warm-up minute, then the coarse phase (doubling from the
    #913 start rate, at most 8 steps), then 3 fine steps, each phase one k6 run (`RATES_PM`).
    While a phase runs, the driver reads each generator's k6 REST API every 15 s and stops the
-   run at the first step that fails for sure (p95 over the budget, or 1 % errors); afterwards
+   run at the first step that fails for sure (p95 over the budget, or 1 % errors; a step counts
+   once it has journeys and is over, from the generator's scenario start, which is later than
+   `START_AT` when the k6 setup overruns it); afterwards
    `aws/ladder.py` judges each step with the clean-step rule (no dropped journey, errors below
-   0.1 %, p99 within the budget, the server alive) and stops at the first failing one. Both
+   0.1 %, p99 within the budget, the server alive) and stops at the first failing one; a step
+   the run ended inside of is never clean (it did not run, unless its journeys already fail). Both
    rules count every failed journey as an error, for every product: a 429 or 503 counts,
    Hearth's password-hash (KDF) sheds included (since 2026-11-24; before, Hearth's login
    sheds did not count, a rule no other product had). Per step it records the rate, the p99,

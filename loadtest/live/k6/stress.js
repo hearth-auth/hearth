@@ -57,7 +57,7 @@
 import { sleep } from 'k6';
 import { SharedArray } from 'k6/data';
 import exec from 'k6/execution';
-import { Counter, Rate, Trend } from 'k6/metrics';
+import { Counter, Gauge, Rate, Trend } from 'k6/metrics';
 import { tokenLife } from './products/common.js';
 import {
   adminContext,
@@ -138,6 +138,14 @@ const nRealms = realms.length;
 const journeyMs = new Trend('journey_ms', true);
 // 1 when the journey succeeded, 0 when it failed.
 const journeyOk = new Rate('journey_ok');
+// One per journey (one per journey_ok sample). k6's REST API shows an empty
+// Rate or Trend as 0, like one of failed 0 ms journeys; this count tells the
+// #913 live watcher (ladder.py live) whether a step has journeys at all.
+const journeys = new Counter('journeys');
+// The scenario's start (epoch seconds), set by its first iteration: the
+// moment the steps count from, which is later than START_AT when setup()
+// overran it. ladder.py live counts finished steps from it.
+const scenarioStart = new Gauge('scenario_start_s');
 // Failed journeys by class (HTTP status, or k6's transport error code).
 const journeyFail = new Counter('journey_fail');
 // Refresh chains restarted by a fresh sign-in after an unknown outcome.
@@ -368,6 +376,7 @@ function record(name, ok, ms, cls) {
   const tags = { journey: name };
   journeyMs.add(ms, tags);
   journeyOk.add(ok ? 1 : 0, tags);
+  journeys.add(1, tags);
   if (!ok) journeyFail.add(1, Object.assign({ cls }, tags));
   recent.push(ok ? 0 : 1);
   if (recent.length > 200) recent.shift();
@@ -486,7 +495,10 @@ function pickMix() {
 
 export default function (data) {
   // cloud.sh waits for this line to time a kill -9 from the scenario start.
-  if (exec.scenario.iterationInTest === 0) console.log('STRESS_STARTED');
+  if (exec.scenario.iterationInTest === 0) {
+    console.log('STRESS_STARTED');
+    scenarioStart.add(exec.scenario.startTime / 1000);
+  }
   tagIteration();
   const name = journey === 'mix' ? pickMix() : journey;
   run[name](data);
@@ -496,7 +508,7 @@ export function handleSummary(data) {
   const summary = `${JSON.stringify(summaryObject(data), null, 2)}\n`;
   const out = { stdout: summary };
   // The analysis reads started_at from this file to place sampler rows and
-  // dropped iterations in their steps.
+  // dropped iterations in their steps, and ended_at to find a cut-short step.
   if (__ENV.SUMMARY_OUT) out[__ENV.SUMMARY_OUT] = summary;
   return out;
 }
@@ -507,6 +519,9 @@ function summaryObject(data) {
   return {
     journey,
     started_at: data.setup_data ? data.setup_data.startedAt : null,
+    // When the run ended (stopped, aborted or done): analyze.py marks a step
+    // whose hold it did not reach as cut short.
+    ended_at: Date.now(),
     journeys: (v('journey_ok', 'passes') || 0) + (v('journey_ok', 'fails') || 0),
     ok_rate: v('journey_ok', 'rate'),
     p50_ms: v('journey_ms', 'med'),

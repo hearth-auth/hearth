@@ -146,6 +146,40 @@ class AnalyzeTest(unittest.TestCase):
         # The sampler wrote 0 sectors: 0 MB/s, not missing.
         self.assertEqual(r["steps"][0]["disk_write_mbps_mean"], 0.0)
 
+    def summary_ended(self, name, ended_s):
+        path = os.path.join(self.dir, name)
+        with open(path, "w") as f:
+            json.dump({"started_at": START * 1000, "ended_at": ended_s * 1000}, f)
+        return path
+
+    def test_a_step_whose_hold_the_run_did_not_reach_is_not_complete(self):
+        # #913: k6 stopped 1 s into step 1's hold (Ory, 2026-11-25): its 23 journeys
+        # are not a step. Holds end at START + 15, + 30, + 45.
+        self.summary = self.summary_ended("cut.json", START + 31)
+        r = self.run_analyze(budget=100)
+        self.assertEqual([s["hold_complete"] for s in r["steps"]], [True, True, False])
+        self.summary = self.summary_ended("full.json", START + 45)
+        r = self.run_analyze(budget=100)
+        self.assertEqual([s["hold_complete"] for s in r["steps"]], [True, True, True])
+
+    def test_every_generator_must_reach_the_hold_end(self):
+        raw2 = os.path.join(self.dir, "raw2.csv")
+        with open(self.raw) as src, open(raw2, "w") as dst:
+            dst.write(src.read())
+        args = analyze.argparse.Namespace(
+            raw=[self.raw, raw2],
+            summary=[self.summary_ended("g1.json", START + 50), self.summary_ended("g2.json", START + 40)],
+            sampler=None, gen_sampler=[], journey="refresh", start_rate=10, step_rate=10, steps=3,
+            hold_s=10, ramp_s=5, budget_ms=100, out=os.path.join(self.dir, "out4.json"),
+        )
+        r = analyze.analyze(args)
+        self.assertEqual([s["hold_complete"] for s in r["steps"]], [True, True, False])
+
+    def test_a_summary_without_an_end_marks_no_step(self):
+        # A summary from before ended_at: the steps are as complete as before.
+        r = self.run_analyze(budget=100)
+        self.assertEqual([s.get("hold_complete") for s in r["steps"]], [None, None, None])
+
 
 if __name__ == "__main__":
     unittest.main()

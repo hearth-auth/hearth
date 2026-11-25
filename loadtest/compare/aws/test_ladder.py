@@ -103,14 +103,95 @@ class Judge(unittest.TestCase):
         self.assertEqual([x["clean"] for x in v], [True, True, False])
 
 
-def k6_metrics(steps):
-    """A k6 /v1/metrics answer: steps maps step -> (p95 ms, ok rate)."""
+FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "testdata",
+                       "k6-metrics-setup-overran.json")
+# The 2026-11-25 Authentik refresh ramp: its setup signed the token pool in past
+# START_AT, and the driver asked at START_AT + 130 s, before any journey had run.
+SETUP_OVERRAN_START_AT = 1795604176
+SETUP_OVERRAN_NOW = 1795604306
+
+
+class CutShort(unittest.TestCase):
+    """A step whose hold the run did not reach (analyze.py's hold_complete False) is
+    never clean: when what it ran looks clean, or it ran no journey, it did not run;
+    when what it ran already fails (k6's failure-ratio guard aborted the run, say), it
+    fails."""
+
+    def test_the_2026_11_25_ory_step_is_not_clean(self):
+        # Stopped 1 s into step 1's hold: 23 of 1,500 journeys, 0 errors, p99 17 ms.
+        cut = dict(row(1, p99=16.98, finished=23), hold_complete=False)
+        rep = report("refresh", [dict(row(0), hold_complete=True), cut])
+        v = ladder.judge("refresh", rep, [25, 50], ran=1)
+        self.assertEqual(len(v), 1)
+        self.assertIsNone(v[0]["clean"])
+        self.assertEqual(v[0]["reasons"], ["cut short: the run ended before its hold did"])
+        self.assertEqual(ladder.steps_run(v), 0)
+        # The coarse phase goes on from that rate, not from the next one.
+        self.assertEqual(ladder.resume_from("refresh", v)[:2], [25, 50])
+
+    def test_a_cut_short_step_that_already_fails_fails(self):
+        # The failure-ratio guard (stress.js ABORT_FAIL_RATIO) ended the run mid-step.
+        cut = dict(row(2, finished=900, failed=600, classes={"503": 600}), hold_complete=False)
+        v = ladder.judge("refresh", report("refresh", [row(1), cut]), [25, 50])
+        self.assertEqual([x["clean"] for x in v], [True, False])
+        self.assertEqual(v[1]["reasons"], ["errors 66.67%", "cut short: the run ended before its hold did"])
+
+    def test_a_cut_short_step_without_journeys_did_not_run(self):
+        cut = dict(row(1, p99=None, finished=0), hold_complete=False)
+        v = ladder.judge("refresh", report("refresh", [cut]), [25])
+        self.assertIsNone(v[0]["clean"])
+
+    def test_a_complete_step_and_an_old_report_are_judged_as_before(self):
+        for extra in ({"hold_complete": True}, {}):
+            rep = report("refresh", [dict(row(1), **extra), dict(row(2, p99=500), **extra)])
+            v = ladder.judge("refresh", rep, [25, 50])
+            self.assertEqual([x["clean"] for x in v], [True, False], extra)
+
+    def test_cut_short_after_a_failing_step_does_not_matter(self):
+        rep = report("refresh", [row(1, p99=500), dict(row(2), hold_complete=False)])
+        v = ladder.judge("refresh", rep, [25, 50])
+        self.assertEqual([x["clean"] for x in v], [False])
+
+
+def k6_metrics(steps, start=0):
+    """A k6 /v1/metrics answer of stress.js: steps maps step -> (p95 ms, ok rate) or
+    (p95 ms, ok rate, journeys); `start` is the scenario start (epoch s), None before
+    the scenario started."""
     data = []
-    for st, (p95, rate) in steps.items():
+    for st, v in steps.items():
+        p95, rate, n = v if len(v) == 3 else (*v, 100)
         data.append({"id": f"journey_ms{{step:{st},phase:hold}}", "attributes": {"sample": {"p(95)": p95}}})
         data.append({"id": f"journey_ok{{step:{st},phase:hold}}", "attributes": {"sample": {"rate": rate}}})
+        data.append({"id": f"journeys{{step:{st},phase:hold}}",
+                     "attributes": {"sample": {"count": n, "rate": 0}}})
     data.append({"id": "journey_ms", "attributes": {"sample": {"p(95)": 999}}})
+    if start is not None:
+        data.append({"id": "scenario_start_s", "attributes": {"sample": {"value": start}}})
     return {"data": data}
+
+
+def setup_overran(stress_js="old", start=None, steps=None):
+    """The saved 2026-11-25 answer (k6 pre-declares every thresholded submetric, so
+    each step reads p95 0 and rate 0 before a journey ran). stress_js="new" adds what
+    stress.js now reports: each step's journey count (0) and, once its scenario
+    started, the start. `steps` maps step -> (p95, rate, journeys) to fill in."""
+    with open(FIXTURE) as f:
+        m = json.load(f)
+    if stress_js == "new":
+        for st in range(9):
+            m["data"].append({"id": f"journeys{{step:{st},phase:hold}}", "attributes": {
+                "type": "counter", "contains": "default", "tainted": None,
+                "sample": {"count": 0, "rate": 0}}})
+        if start is not None:
+            m["data"].append({"id": "scenario_start_s", "attributes": {
+                "type": "gauge", "contains": "default", "tainted": None,
+                "sample": {"value": start}}})
+    by_id = {d["id"]: d["attributes"]["sample"] for d in m["data"]}
+    for st, (p95, rate, n) in (steps or {}).items():
+        by_id[f"journey_ms{{step:{st},phase:hold}}"]["p(95)"] = p95
+        by_id[f"journey_ok{{step:{st},phase:hold}}"]["rate"] = rate
+        by_id[f"journeys{{step:{st},phase:hold}}"]["count"] = n
+    return m
 
 
 class Live(unittest.TestCase):
@@ -118,25 +199,59 @@ class Live(unittest.TestCase):
     def test_stops_at_the_first_finished_step_that_fails_for_sure(self):
         m = k6_metrics({0: (900, 0.5), 1: (10, 1.0), 2: (60, 1.0), 3: (70, 1.0)})
         # Steps are 65 s; at 200 s steps 0, 1 and 2 are over. Step 0 is the warm-up.
-        self.assertEqual(ladder.live_stop("userinfo", [m], 200, 0), 2)
+        self.assertEqual(ladder.live_stop("userinfo", [m], 200), 2)
         # At 190 s step 2 is not over yet.
-        self.assertIsNone(ladder.live_stop("userinfo", [m], 190, 0))
+        self.assertIsNone(ladder.live_stop("userinfo", [m], 190))
 
     def test_any_generator_and_errors_count(self):
         good = k6_metrics({1: (10, 1.0), 2: (10, 1.0)})
         bad = k6_metrics({1: (10, 1.0), 2: (10, 0.98)})
-        self.assertEqual(ladder.live_stop("refresh", [good, bad], 200, 0), 2)
+        self.assertEqual(ladder.live_stop("refresh", [good, bad], 200), 2)
         # 0.5 % errors: not for sure (the judge decides after the run).
         meh = k6_metrics({1: (10, 1.0), 2: (10, 0.995)})
-        self.assertIsNone(ladder.live_stop("refresh", [meh], 200, 0))
+        self.assertIsNone(ladder.live_stop("refresh", [meh], 200))
 
     def test_errors_stop_a_login_or_mix_run_too(self):
         # 10 % of the journeys refused (Hearth's KDF sheds, for one): the run stops.
         shed = k6_metrics({1: (100, 0.9)})
         slow = k6_metrics({1: (1500, 1.0)})
         for journey in ("login", "mix"):
-            self.assertEqual(ladder.live_stop(journey, [shed], 140, 0), 1)
-            self.assertEqual(ladder.live_stop(journey, [slow], 140, 0), 1)
+            self.assertEqual(ladder.live_stop(journey, [shed], 140), 1)
+            self.assertEqual(ladder.live_stop(journey, [slow], 140), 1)
+
+    def test_the_2026_11_25_answer_before_any_journey_stops_nothing(self):
+        # Every step reads rate 0, but no journey ran: the run must go on, with the
+        # stress.js of that day (no counts, no start) and with today's.
+        for stress_js in ("old", "new"):
+            m = setup_overran(stress_js)
+            for now in (SETUP_OVERRAN_NOW, SETUP_OVERRAN_START_AT + 3600):
+                self.assertIsNone(ladder.live_stop("refresh", [m, m], now), (stress_js, now))
+
+    def test_steps_count_from_the_scenario_start_not_start_at(self):
+        # Setup ran 130 s past START_AT. At START_AT + 200 s, START_AT says steps 0-2
+        # are over; the scenario has run 70 s, so only step 0 is.
+        start = SETUP_OVERRAN_START_AT + 130
+        m = setup_overran("new", start, {1: (40, 0.5, 300)})
+        self.assertIsNone(ladder.live_stop("refresh", [m], SETUP_OVERRAN_START_AT + 200))
+        self.assertIsNone(ladder.live_stop("refresh", [m], start + 129))
+        self.assertEqual(ladder.live_stop("refresh", [m], start + 130), 1)
+
+    def test_a_finished_step_without_journeys_is_not_judged(self):
+        # Step 1 is over but recorded no journey (its rate and p95 read 0): only the
+        # judge, after the run, rules on it. Step 2 ran and fails.
+        m = k6_metrics({1: (0, 0, 0), 2: (10, 0.5, 40)})
+        self.assertIsNone(ladder.live_stop("refresh", [m], 194))
+        self.assertEqual(ladder.live_stop("refresh", [m], 195), 2)
+
+    def test_each_generator_counts_from_its_own_start(self):
+        early = k6_metrics({1: (10, 1.0)}, start=0)
+        late = k6_metrics({1: (10, 0.5)}, start=60)
+        # At 140 s step 1 is over on the early generator only: the late one's is half run.
+        self.assertIsNone(ladder.live_stop("refresh", [early, late], 140))
+        self.assertEqual(ladder.live_stop("refresh", [early, late], 200), 1)
+        # A generator whose scenario has not started yet counts no step.
+        waiting = k6_metrics({1: (10, 0.5)}, start=None)
+        self.assertIsNone(ladder.live_stop("refresh", [early, waiting], 1000))
 
 
 class CommandLine(unittest.TestCase):
@@ -182,7 +297,7 @@ class CommandLine(unittest.TestCase):
         m = self.write("metrics.json", k6_metrics({1: (100, 0.2)}))
         for product in self.PRODUCTS:
             for journey in ("login", "mix"):
-                self.assertEqual(self.run_cli("live", product, journey, "140", "0", "60", m),
+                self.assertEqual(self.run_cli("live", product, journey, "140", "60", m),
                                  {"stop": 1}, (product, journey))
 
 
