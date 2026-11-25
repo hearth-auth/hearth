@@ -12,11 +12,17 @@
 #   - k6 that never starts on a generator: the ramp fails at once with the
 #     unit's journal lines; a phase in which no step ran gives no result (the
 #     part fails), and a rerun runs the journey
+#   - a slow setup() (a slow product's token pool, past START_AT + the run +
+#     15 min) is waited for within SETUP_TIMEOUT_S; a k6 stuck in it past
+#     that fails the ramp
+#   - the instance lifetime: a phase whose worst case passes what is left of
+#     the set's runs on a new set; one longer than a whole set never starts
 #   - Hearth's seed and ramp, the cold read's working set
 #   - the cost ledger (every instance closed), cost.txt, the $20 stop (STOP_USD)
-#   - the AWS login window: no part without a login or past the window; a
-#     session that stops at the window, then resumes without redoing work or
-#     counting a cost twice; the plan's wall clock and logins
+#   - the AWS login window: no part without a login or past the window, no
+#     phase whose worst case would end after it; a session that stops at the
+#     window, then resumes without redoing work or counting a cost twice; the
+#     plan's wall clock and logins
 #   - the parallel session: parts at once (two size 1 parts, the drill with
 #     size 1, size 2 together), the wait for vCPUs under MAX_VCPU, and the stop
 #     at STOP_USD with several parts running
@@ -161,6 +167,63 @@ SESSION=dryk JOURNEYS=refresh step k6gone-rerun bash "$c" ramps keycloak 1 || fa
 [ "$(jv "$ko/keycloak-s1/refresh.json" clean_rate 2> /dev/null)" = 350.0 ] \
   && pass "a rerun with the same SESSION runs the journey" || fail "the rerun gave no refresh result"
 
+# A setup() that runs long (913a: Authentik signs in the refresh and mix
+# token pools at 0.76 sign-ins/s, about 44 min per phase at size 1). Here 180
+# checks (45 min) in setup, far past START_AT + the run + 15 min (about 27
+# min), where the wait used to fail the ramp. The wait follows the
+# generators: while a setup() still runs within SETUP_TIMEOUT_S, the ramp
+# waits, and the run gets its full time from its real start.
+job_checks() { grep -c ": test -f /opt/stress/out/$1/k6.exit *$" "$tmp/dry/calls.log"; }
+before=$(job_checks mix-coarse-1)
+SESSION=dryk JOURNEYS=mix DRY_SETUP='mix-coarse-1:180' try slowsetup bash "$c" ramps keycloak 1
+rc=$?
+checks=$(($(job_checks mix-coarse-1) - before))
+[ "$rc" = 0 ] && [ "$checks" -gt 360 ] && ! grep -q 'did not end within' "$tmp/slowsetup.out" \
+  && [ -n "$(jv "$ko/keycloak-s1/mix.json" clean_rate 2> /dev/null)" ] \
+  && pass "a setup() of 45 min (past START_AT + the run + 15 min) is waited for, and the ladder ends ($checks checks)" \
+  || fail "slow setup (rc $rc, $checks checks): $(grep -v '^DRY' "$tmp/slowsetup.out" | tail -n 3 | tr '\n' ' ')"
+grep -q '^SETUP_TIMEOUT_S=3600$' "$tmp/dry/gen-params-mix-coarse-1.env" \
+  && grep -q '^SETUP_TIMEOUT_S=3600$' "$tmp"/repo/loadtest/live/results/dryk-keycloak-s1-*/mix-coarse-1/params.env \
+  && grep -q '^LAUNCHED_AT=[0-9]' "$tmp"/repo/loadtest/live/results/dryk-keycloak-s1-*/mix-coarse-1/params.env \
+  && pass "k6 gets SETUP_TIMEOUT_S (60 min), and the ramp's params.env records it and the launch" \
+  || fail "SETUP_TIMEOUT_S: $(cat "$tmp/dry/gen-params-mix-coarse-1.env" 2>&1 | tr '\n' ' ')"
+# A k6 that stays in setup() past SETUP_TIMEOUT_S (it should have ended
+# itself) fails the ramp: the wait is no longer moved on after that.
+before=$(job_checks introspect-coarse-1)
+SESSION=dryk JOURNEYS=introspect DRY_SETUP='introspect-coarse-1:100000' try hung bash "$c" ramps keycloak 1
+rc=$?
+checks=$(($(job_checks introspect-coarse-1) - before))
+# 2 generators: setup until 3,600 s, then the run (9 x 65 s) and 900 s.
+[ "$rc" != 0 ] && grep -q 'job introspect-coarse-1 did not end within' "$tmp/hung.out" \
+  && [ "$checks" -ge 480 ] && [ "$checks" -le $((2 * (3600 + 585 + 900) / 15 + 10)) ] \
+  && pass "a k6 still in setup() past SETUP_TIMEOUT_S fails the ramp ($checks checks)" \
+  || fail "hung setup (rc $rc, $checks checks): $(grep -v '^DRY' "$tmp/hung.out" | tail -n 3 | tr '\n' ' ')"
+
+# The instance lifetime: a phase starts only when the run's instances outlive
+# its worst case (setup up to SETUP_TIMEOUT_S for the refresh and mix pools,
+# the run, the restore and collect); else a new set. Each restore takes 100
+# min on the dry run's clock (DRY_TICK): the set's restore, then refresh's
+# coarse phase (worst 85 min) with 130 min left; its fine phase (worst 79
+# min) then has 30 min left, so it runs on a new set.
+SESSION=dryl step seed-dryl bash "$c" seed keycloak || fail "seed keycloak (dryl)"
+lo=$tmp/repo/loadtest/live/results
+SESSION=dryl JOURNEYS=refresh DRY_TICK='remote.sh restore:6000' step lifetime bash "$c" ramps keycloak 1 \
+  || fail "ramps with the lifetime clock"
+[ "$(grep -c 'near its lifetime' "$tmp/lifetime.out")" = 1 ] \
+  && [ -d "$lo/dryl-keycloak-s1-1/refresh-coarse-1" ] && [ ! -e "$lo/dryl-keycloak-s1-1/refresh-fine-1" ] \
+  && [ -d "$lo/dryl-keycloak-s1-2/refresh-fine-1" ] \
+  && [ "$(jv "$lo/compare-dryl/keycloak-s1/refresh.json" clean_rate 2> /dev/null)" = 350.0 ] \
+  && pass "a phase whose worst case passes the set's lifetime runs on a new set; the journey's result joins both" \
+  || fail "lifetime: $(grep -E 'near its lifetime|clean rate' "$tmp/lifetime.out" | tr '\n' ' ') $(ls "$lo" | grep dryl | tr '\n' ' ')"
+# A phase longer than a whole set's lifetime does not start at all.
+before=$(grep -c 'run-instances' "$tmp/dry/calls.log")
+SESSION=dryl JOURNEYS=mix SETUP_TIMEOUT_S=14000 try toolong bash "$c" ramps keycloak 1
+rc=$?
+[ "$rc" != 0 ] && grep -q 'longer than the lifetime of an instance set' "$tmp/toolong.out" \
+  && [ "$(grep -c 'run-instances' "$tmp/dry/calls.log")" = "$before" ] \
+  && pass "a phase longer than an instance set's lifetime fails the part before any launch" \
+  || fail "too long (rc $rc): $(grep -v '^DRY' "$tmp/toolong.out" | tail -n 2 | tr '\n' ' ')"
+
 # Hearth: seed, then the cold read over 1M users.
 step seed-hearth bash "$c" seed hearth || fail "seed hearth"
 grep -q 'DRY ssh .*remote.sh bind-hearth' "$tmp/seed-hearth.out" && pass "Hearth's seed store is on the data volume" \
@@ -224,14 +287,24 @@ grep -q 'would end after the AWS login window' "$tmp/window.out" \
   && pass "a part that would end after the login window does not start (exit 4)" || fail "window (rc $rc)"
 [ "$(grep -c 'run-instances' "$tmp/dry/calls.log")" = "$before" ] && pass "nothing was launched outside the window" \
   || fail "launched outside the window"
+# Each phase must end inside the window at its worst case: refresh's coarse
+# phase can take 85 min (its token pool's setup up to SETUP_TIMEOUT_S), plus
+# the set's setup (0.4 h), which 1.5 h of window minus the 15 min margin does
+# not hold (the 18-min journey estimate would).
+LOGIN_AT=$(($(date +%s) - 10 * 3600)) JOURNEYS=refresh try window-phase bash "$c" ramps hearth 1
+rc=$?
+grep -q 'hearth size 1 refresh coarse (about 1.81 h, plus 15 min to tear down) would end after the AWS login window' \
+  "$tmp/window-phase.out" && [ "$rc" = 4 ] && [ "$(grep -c 'run-instances' "$tmp/dry/calls.log")" = "$before" ] \
+  && pass "a phase whose worst case would end after the login window does not start (exit 4)" \
+  || fail "window per phase (rc $rc): $(grep -v '^DRY' "$tmp/window-phase.out" | tail -n 2 | tr '\n' ' ')"
 
 step plan bash "$c" plan || fail "plan"
-grep -q '^wall clock: about 13.9 h with MAX_VCPU 32' "$tmp/plan.out" && grep -q '^aws logins: 2 ' "$tmp/plan.out" \
-  && grep -q '; 32: 13.9 h, 2 login(s); 48: 10.7 h, 1 login(s); 64: 10.7 h, 1 login(s)' "$tmp/plan.out" \
-  && pass "plan: the parallel wall clock at the quota (13.9 h at 32 vCPUs, 2 logins; 10.7 h, 1 login at 64)" \
+grep -q '^wall clock: about 20.1 h with MAX_VCPU 32' "$tmp/plan.out" && grep -q '^aws logins: 3 ' "$tmp/plan.out" \
+  && grep -q '; 32: 20.1 h, 3 login(s); 48: 13.9 h, 2 login(s); 64: 13.9 h, 2 login(s)' "$tmp/plan.out" \
+  && pass "plan: the parallel wall clock at the quota (20.1 h at 32 vCPUs, 3 logins; 13.9 h, 2 logins at 64)" \
   || fail "plan: $(grep -E '^(wall|aws)' "$tmp/plan.out")"
 MAX_VCPU=64 step plan64 bash "$c" plan || fail "plan64"
-grep -q '^wall clock: about 10.7 h with MAX_VCPU 64' "$tmp/plan64.out" && grep -q '^aws logins: 1 ' "$tmp/plan64.out" \
+grep -q '^wall clock: about 13.9 h with MAX_VCPU 64' "$tmp/plan64.out" && grep -q '^aws logins: 2 ' "$tmp/plan64.out" \
   && pass "plan: MAX_VCPU sets the limit" || fail "plan MAX_VCPU=64: $(grep -E '^(wall|aws)' "$tmp/plan64.out")"
 
 # The parts that ran at once, from a session's timeline.txt (its start and end

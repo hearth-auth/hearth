@@ -49,6 +49,9 @@
 #   VUS              1000  (k6 VUs per generator: the most journeys in flight)
 #   SETUP_GRACE      seconds between launch and the ramps' common start
 #                    (default: 30, plus time to sign in the token pools)
+#   SETUP_TIMEOUT_S  3600  (k6's limit on a ramp's setup(), stress.js
+#                    setupTimeout; collect waits for a setup that still runs
+#                    within it)
 #   K6_ENV           extra k6 settings for a ramp, e.g. "MIX=refresh:70,login:30"
 #   KILL_RESTART=1   after a ramp's kill -9, start Hearth again at once and time
 #                    it to ready (remote/timed-start.sh; the "start" file)
@@ -79,6 +82,12 @@ generators=${GENERATORS:-2}
 docker_image=${IMAGE:-hearth-stress:local}
 login_users=${LOGIN_USERS:-1000}
 vus=${VUS:-1000}
+# k6's limit on stress.js setup() for a ramp (s). A slow product's token pool
+# needs most of it: Authentik signs in about 0.76 users/s on c7i.large (913a,
+# PBKDF2 and a 10-request flow), so the 1,000 sessions of each of the 2
+# generators (refresh, mix) take about 44 min. 60 min leaves a 27 % slower
+# rate room; 45 min left 70 s.
+setup_timeout_s=${SETUP_TIMEOUT_S:-3600}
 image=ubuntu-24-04-x64
 k6_version=2.0.0
 
@@ -550,8 +559,16 @@ launch_on_generator() {
 # before k6 ended: an env file that does not load, say) fails the job at the
 # next check, not at $2, with the unit's last journal lines (secrets left out:
 # env.sh redact).
+# A ramp also gives $3, the seconds from its scenario start to the end of its
+# wait (its run and the margin), and $4, the seconds until k6 ends a setup()
+# that still runs (SETUP_TIMEOUT_S after the launch). While a generator's
+# setup() runs (no STRESS_STARTED in its console.log yet) within $4, the wait
+# goes on to at least $3 from now: a setup that overruns START_AT (a slow
+# product's token pool) is waited for, and once the scenario has started the
+# limit follows its real start. After $4 the limit no longer moves.
 wait_job() {
-  local name=$1 limit=$2 waited=0 i ip finished
+  local name=$1 limit=$2 run_s=${3:-} setup_s=${4:-0} waited=0 i ip finished
+  local -A started=()
   while [ "$waited" -lt "$limit" ]; do
     finished=0
     for i in $(seq 1 "$GEN_COUNT"); do
@@ -563,6 +580,12 @@ wait_job() {
         ssh_to "$ip" ". /opt/stress/env.sh && journalctl -u stress-$name -n 20 --no-pager -o cat 2>&1 \
           | redact /opt/stress/generator.env" 2> /dev/null | sed 's/^/  /' >&2 || true
         die "job $name: k6 did not run to its end on generator $i"
+      elif [ -n "$run_s" ] && [ -z "${started[$i]:-}" ] && [ "$waited" -lt "$setup_s" ]; then
+        if ssh_to "$ip" "grep -qs STRESS_STARTED /opt/stress/out/$name/console.log" 2> /dev/null; then
+          started[$i]=1
+        elif [ "$limit" -lt $((waited + run_s)) ]; then
+          limit=$((waited + run_s))
+        fi
       fi
     done
     [ "$finished" -lt "$GEN_COUNT" ] || return 0
@@ -631,14 +654,17 @@ HOLD_S=$hold
 KILL_AT=$kill_at
 START_AT=$start_at
 RUN_S=$run_s
+LAUNCHED_AT=$now
+SETUP_TIMEOUT_S=$setup_timeout_s
 GENERATORS=$GEN_COUNT
 K6_ENV=${K6_ENV:-}
 EOF
   [ -z "$rates_pm" ] || echo "RATES_PM=$rates_pm" >> "$out/params.env"
 
   log "ramp $name: $journey from $start/s by $step/s, $steps steps of ${hold}s, on $GEN_COUNT generators; starts in ${grace}s"
+  # Until collect stops it: a setup() may run up to SETUP_TIMEOUT_S.
   ssh_to "$SERVER_PUBLIC" "systemctl reset-failed observe-$name 2> /dev/null || true
-    systemd-run --unit=observe-$name --collect --quiet /opt/hearth/observe.sh $name $((grace + run_s + 300))"
+    systemd-run --unit=observe-$name --collect --quiet /opt/hearth/observe.sh $name $((setup_timeout_s + run_s + 300))"
   if [ -n "$kill_at" ]; then
     ssh_to "$SERVER_PUBLIC" "systemd-run --unit=kill-$name --collect --quiet \
       --on-active=\$(( $start_at + $kill_at - \$(date +%s) ))s /opt/hearth/kill.sh $name ${KILL_RESTART:+restart}"
@@ -662,6 +688,7 @@ HOLD_S=$hold
 VUS=$vus
 RUN_ID=$name-g$i
 START_AT=$start_at
+SETUP_TIMEOUT_S=$setup_timeout_s
 SUMMARY_OUT=/opt/stress/out/$name/summary.json
 $extra
 EOF
@@ -674,14 +701,17 @@ cmd_collect() {
   local name=${1:?usage: cloud.sh collect <name>}
   local out=$results/$name
   [ -f "$out/params.env" ] || die "$out/params.env is missing: no ramp $name"
-  local JOURNEY START_RATE STEP_RATE STEPS HOLD_S RUN_S START_AT RATES_PM=""
+  local JOURNEY START_RATE STEP_RATE STEPS HOLD_S RUN_S START_AT RATES_PM="" LAUNCHED_AT="" SETUP_TIMEOUT_S=0
   # shellcheck disable=SC1091
   . "$out/params.env"
   local now limit
   now=$(date +%s)
   limit=$((START_AT + RUN_S + 900 - now))
   [ "$limit" -gt 60 ] || limit=60
-  wait_job "$name" "$limit"
+  # The run and 15 min from the scenario's real start, which a setup() that
+  # overruns START_AT moves on (wait_job); a ramp from before LAUNCHED_AT and
+  # SETUP_TIMEOUT_S were recorded waits from START_AT only.
+  wait_job "$name" "$limit" "$((RUN_S + 900))" "$((${LAUNCHED_AT:-$START_AT} + SETUP_TIMEOUT_S - now))"
   ssh_to "$SERVER_PUBLIC" "systemctl stop observe-$name 2> /dev/null || true"
 
   local i ip remote=/opt/stress/out/$name status

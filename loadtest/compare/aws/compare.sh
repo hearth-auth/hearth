@@ -196,6 +196,14 @@ print(round(h * sum(int(n) * (p["instance_hour"][t] + p["public_ipv4_hour"])
 PY
 }
 
+# Seconds since the epoch, for the instances' lifetime. A dry run adds the
+# seconds its shims made pass (dryrun/shim.sh DRY_TICK).
+clock() {
+  local skew=0
+  [ "${DRY_RUN:-}" != 1 ] || skew=$(cat "$DRY_STATE/clock" 2> /dev/null || echo 0)
+  echo $(($(date +%s) + skew))
+}
+
 # A value of session-plan.json's model: `plan_model seed_hours authentik`.
 plan_model() { jget model "$@" < "$aws_dir/session-plan.json"; }
 
@@ -576,7 +584,10 @@ cmd_ramps() {
     2) server=c7i.2xlarge gens=4 ;;
     *) cdie "size $size (1 or 2)" ;;
   esac
-  local snap dir=$out/$p-s$size id="" left=0 j todo=()
+  local snap dir=$out/$p-s$size id="" left=0 j todo=() next kind rates worst
+  # The instances' lifetime (min), and the part of it a set has for phases.
+  local lifetime=240 life_s
+  life_s=$((lifetime * 60 - 600))
   export COMPARE_PRODUCT=$p
   snap=$(snapshot_of "$p")
   mkdir -p "$dir"
@@ -585,34 +596,48 @@ cmd_ramps() {
   done
   [ "${#todo[@]}" -gt 0 ] || return 0
   # The part (the journeys left) must end inside the AWS login window, and so
-  # must each journey (an overrun part stops between journeys).
-  local setup_h journey_h
+  # must each phase at its worst case (an overrun part stops between phases).
+  local setup_h journey_h setup_s
   setup_h=$(plan_model setup_hours_per_ramp_run)
+  setup_s=$(python3 -I -c "print(int($setup_h * 3600))")
   journey_h=$(python3 -I -c "print(round($(plan_model minutes_per_journey) / 60, 3))")
   [ -n "${PART:-}" ] || login_gate "$p size $size (${#todo[@]} journeys)" "$(python3 -I -c "print(round($setup_h + ${#todo[@]} * $journey_h, 2))")"
+  # Phase by phase (ladder_next): each phase starts only when its worst case
+  # fits what is left of the set's lifetime and of the AWS login window.
   for j in "${todo[@]}"; do
-    # A new set when the current one has less lifetime left than a ladder
-    # can take (35 min), so no instance ends in the middle of a ramp.
-    if [ -n "$id" ] && [ $((left - $(date +%s))) -lt 2100 ]; then
-      clog "$p size $size: run $id is near its lifetime; a new set"
-      run_down "$id"
-      id=""
-    fi
-    if ! login_fits "$p size $size $j" "$(python3 -I -c "print($journey_h + (0 if '$id' else $setup_h))")"; then
-      [ -z "$id" ] || run_down "$id"
-      spend "$p size $size"
-      login_exit
-    fi
-    if [ -z "$id" ]; then
-      id=$(fresh_id "$session-$p-s$size")
-      afford "$p size $size run $id" "$(estimate_usd 4 "$server:1" "c7i.xlarge:$gens")"
-      run_up "$id" "$server" "$gens" 240 40 SERVER_DATA_SNAPSHOT="$snap" AWS_EXTRA_PORTS="$(ports_of "$p")"
-      left=$(($(date +%s) + 240 * 60 - 600))
-      in_run "$id" ramp_setup "$p" "$size" "$dir"
-      spend "$p size $size setup"
-    fi
-    in_run "$id" ladder "$p" "$j" "$dir"
-    spend "$p size $size $j"
+    while :; do
+      next=$(ladder_next "$p" "$j" "$dir")
+      [ "$next" != done ] || break
+      kind=${next%% *} rates=${next#* }
+      worst=$(phase_worst_s "$j" "$rates")
+      [ $((worst + setup_s)) -le "$life_s" ] \
+        || cdie "$p $j $kind: its worst case ($((worst / 60)) min) and a set's setup ($((setup_s / 60)) min) are longer than the lifetime of an instance set ($((life_s / 60)) min)"
+      # A new set when the current one has less lifetime left than this phase
+      # can take, so no instance ends in the middle of a ramp.
+      if [ -n "$id" ] && [ $((left - $(clock))) -lt "$worst" ]; then
+        clog "$p size $size: run $id is near its lifetime ($j $kind can take $((worst / 60)) min); a new set"
+        run_down "$id"
+        id=""
+      fi
+      if ! login_fits "$p size $size $j $kind" "$(python3 -I -c "print(round($worst / 3600 + (0 if '$id' else $setup_h), 2))")"; then
+        [ -z "$id" ] || run_down "$id"
+        spend "$p size $size"
+        login_exit
+      fi
+      if [ -z "$id" ]; then
+        id=$(fresh_id "$session-$p-s$size")
+        afford "$p size $size run $id" "$(estimate_usd 4 "$server:1" "c7i.xlarge:$gens")"
+        run_up "$id" "$server" "$gens" "$lifetime" 40 SERVER_DATA_SNAPSHOT="$snap" AWS_EXTRA_PORTS="$(ports_of "$p")"
+        left=$(($(clock) + life_s))
+        in_run "$id" ramp_setup "$p" "$size" "$dir"
+        spend "$p size $size setup"
+      fi
+      [ "$kind" != coarse2 ] || clog "$p $j: the coarse run ended early; resuming at $rates"
+      in_run "$id" phase "$p" "$j" "$(journey_of "$j")" "$(journey_env "$j")" "$kind" "$rates" "$dir/$j.$kind.json"
+      [ "$kind" != coarse2 ] || merge_coarse "$dir/$j"
+      spend "$p size $size $j $kind"
+    done
+    ladder_result "$p" "$j" "$dir"
   done
   [ -z "$id" ] || run_down "$id"
   spend "$p size $size"
@@ -705,39 +730,86 @@ wait_hearth() {
 }
 
 # One journey's ladder: the coarse phase, then the fine phase, each after a
-# restore; the result in <dir>/<journey>.json, and none when a phase ran no
-# step (phase fails the part).
-ladder() {
-  local p=$1 jk=$2 dir=$3 journey=$2 env="PRESENT=chain"
-  case $jk in
-    cold100k) journey=admin_lookup env+=" ADMIN_IDS_FILE=/opt/stress/ids-100000.txt" ;;
-    cold1m) journey=admin_lookup env+=" ADMIN_IDS_FILE=/opt/stress/ids-1000000.txt" ;;
+# restore, each a call of phase from cmd_ramps; the result in
+# <dir>/<journey>.json, and none when a phase ran no step (phase fails the
+# part). Its state is its phases' verdicts (<dir>/<journey>.<phase>.json), so
+# a ladder goes on where it stopped: on a new instance set, or in a rerun.
+
+# The k6 journey of ladder $1, and its K6_ENV.
+journey_of() {
+  case $1 in
+    cold100k | cold1m) echo admin_lookup ;;
+    *) echo "$1" ;;
   esac
-  local coarse fine phase_rates resumed=0
-  coarse=$(lad coarse "$journey")
-  phase "$p" "$jk" "$journey" "$env" coarse "$coarse" "$dir/$jk.coarse.json"
-  # A coarse run that ended before its first failing step and before its 8th
-  # step (a lost generator, say) goes on from the next rate, once.
-  phase_rates=$(lad resume "$journey" "$dir/$jk.coarse.json")
-  if [ "$phase_rates" != "[]" ] && [ "$resumed" = 0 ]; then
-    resumed=1
-    clog "$p $jk: the coarse run ended early; resuming at $phase_rates"
-    phase "$p" "$jk" "$journey" "$env" coarse2 "$phase_rates" "$dir/$jk.coarse2.json"
-    python3 -I - "$dir/$jk.coarse.json" "$dir/$jk.coarse2.json" << 'PY'
+}
+journey_env() {
+  case $1 in
+    cold100k) echo "PRESENT=chain ADMIN_IDS_FILE=/opt/stress/ids-100000.txt" ;;
+    cold1m) echo "PRESENT=chain ADMIN_IDS_FILE=/opt/stress/ids-1000000.txt" ;;
+    *) echo PRESENT=chain ;;
+  esac
+}
+
+# Whether the phase of verdicts file $1 ran a step (a file from a phase that
+# ran none does not count).
+phase_ran() { [ -s "$1" ] && [ "$(lad ran "$1")" -gt 0 ]; }
+
+# The next phase of ladder $2 (product $1, files in $3): "<kind> <rates>"
+# (coarse; coarse2, the coarse run going on once after it ended before its
+# first failing step and before its 8th, a lost generator say; fine), or
+# "done".
+ladder_next() {
+  local p=$1 jk=$2 dir=$3 journey rates
+  journey=$(journey_of "$jk")
+  if ! phase_ran "$dir/$jk.coarse.json"; then
+    echo "coarse $(lad coarse "$journey")"
+    return 0
+  fi
+  if ! phase_ran "$dir/$jk.coarse2.json"; then
+    rates=$(lad resume "$journey" "$dir/$jk.coarse.json")
+    if [ "$rates" != "[]" ]; then
+      echo "coarse2 $rates"
+      return 0
+    fi
+  fi
+  rates=$(lad next "$p" "$dir/$jk.coarse.json" | jget fine)
+  if [ "$rates" != None ] && [ "$rates" != null ] && ! phase_ran "$dir/$jk.fine.json"; then
+    echo "fine $rates"
+    return 0
+  fi
+  echo done
+}
+
+# The coarse run's verdicts ($1.coarse.json) with the resumed run's after them.
+merge_coarse() {
+  python3 -I - "$1.coarse.json" "$1.coarse2.json" << 'PY'
 import json, sys
 a = [v for v in json.load(open(sys.argv[1])) if v["clean"] is not None]
 json.dump(a + json.load(open(sys.argv[2])), open(sys.argv[1], "w"))
 PY
-  fi
-  fine=$(lad next "$p" "$dir/$jk.coarse.json" | jget fine)
-  local args=("$dir/$jk.coarse.json")
-  if [ "$fine" != None ] && [ "$fine" != null ]; then
-    phase "$p" "$jk" "$journey" "$env" fine "$fine" "$dir/$jk.fine.json"
-    args+=("$dir/$jk.fine.json")
-  fi
+}
+
+# The result of ladder $2 from its phases' verdicts.
+ladder_result() {
+  local p=$1 jk=$2 dir=$3 args=("$3/$2.coarse.json")
+  [ ! -s "$dir/$jk.fine.json" ] || args+=("$dir/$jk.fine.json")
   lad journey "$p" "$jk" "${args[@]}" > "$dir/$jk.json"
   clog "$p $jk: clean rate $(jget clean_rate < "$dir/$jk.json")/s$(
     [ "$(jget at_least < "$dir/$jk.json")" = True ] && echo " (at least)") $(jget flags < "$dir/$jk.json")"
+}
+
+# The most seconds a phase of ladder $1 with rates $2 (JSON) can take: its
+# setup() at worst, its warm-up and steps (cmd_ramp's run: 65 s each), and 15
+# min for the restore and the collect (cmd_collect's margin). The setup() of
+# refresh and mix signs in a token pool of VUS sessions per generator, so it
+# can run up to SETUP_TIMEOUT_S (a slow product: Authentik, about 44 min at
+# size 1); the others sign in at most 50 per generator (userinfo, introspect:
+# about 2 min for Authentik), so 5 min.
+phase_worst_s() {
+  local setup=300 n
+  case $1 in refresh | mix) setup=$setup_timeout_s ;; esac
+  n=$(python3 -I -c 'import json,sys; print(len(json.loads(sys.argv[1])))' "$2")
+  echo $((setup + (n + 1) * 65 + 900))
 }
 
 # One phase: restore, then one k6 run of a warm-up minute at the first rate

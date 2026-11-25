@@ -159,13 +159,14 @@ class Schedule(unittest.TestCase):
         self.assertEqual(cost.max_vcpu(plan), 32)
         window, margin = cost.login_settings(plan)
         # 32: the two size 2 parts (24 vCPUs each) run one after the other.
+        # Authentik's size 1 (6.6 h: its slow token pools) starts in login 2.
         s = cost.schedule(plan, window, margin, 32)
-        self.assertEqual(s["logins"], 2)
-        self.assertAlmostEqual(s["wall_clock_h"], 13.9, places=1)
+        self.assertEqual(s["logins"], 3)
+        self.assertAlmostEqual(s["wall_clock_h"], 20.1, places=1)
         self.assertLessEqual(s["peak_vcpu"], 32)
         s = cost.schedule(plan, window, margin, 64)
-        self.assertEqual(s["logins"], 1)
-        self.assertAlmostEqual(s["wall_clock_h"], 10.7, places=1)
+        self.assertEqual(s["logins"], 2)
+        self.assertAlmostEqual(s["wall_clock_h"], 13.9, places=1)
         self.assertLessEqual(s["peak_vcpu"], 64)
 
 

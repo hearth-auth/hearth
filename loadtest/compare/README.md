@@ -62,7 +62,11 @@ settings.
    sheds did not count, a rule no other product had). Per step it records the rate, the p99,
    the errors by class, the server's CPU, RSS and disk writes. The cold read (`cold100k`, `cold1m`) is admin
    user lookup over the first 100,000 or 1M seeded users after the cache drop (the
-   1,000-user case is journey 6). Every product runs with `PRESENT=chain`.
+   1,000-user case is journey 6). Every product runs with `PRESENT=chain`. A phase starts only
+   on an instance set whose lifetime outlasts its worst case (its setup up to `SETUP_TIMEOUT_S`,
+   60 min, for the refresh and mix token pools, 5 min for the others; the run; 15 min for the
+   restore and the collect), else on a new set, where the ladder goes on from its phases' files;
+   the collect waits for a setup that still runs within `SETUP_TIMEOUT_S`.
 3. **Session** (`compare.sh session`), in parallel: the 5 seeds and the #647 10M restore drill
    (`round.sh` with `loadtest/live/plans/913-drill-r7i-large-10m.txt`, unchanged) at once, each
    product's size 1 ramps as soon as its snapshot exists, then, once all size 1 results exist,
@@ -70,7 +74,7 @@ settings.
    at size 1 (`ladder.py fastest`), together when `MAX_VCPU` allows (48 or more; each needs 24). Each part is its own `compare.sh` process with its
    own runs (`timeline.txt` records each start and end). A part waits while its instances would
    take the running vCPUs past `MAX_VCPU` (32, the account's on-demand standard-instance quota,
-   L-1216C47A). At 32 the session takes about 13.9 h and 2 logins; at 64, about 10.7 h and 1. Results: `loadtest/live/results/compare-<session>/`
+   L-1216C47A). At 32 the session takes about 20.1 h and 3 logins; at 64, about 13.9 h and 2 (Authentik's size 1 takes 6.6 h: its slow token pools). Results: `loadtest/live/results/compare-<session>/`
    (`summary.md`).
 
    **A part that fails** stops alone: its runs go down, the parts after it (`after` in

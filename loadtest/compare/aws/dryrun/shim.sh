@@ -20,6 +20,18 @@
 # its lifetime: every later ssh call to it fails as ssh does (exit 255,
 # "Connection timed out").
 #
+# DRY_SETUP=<job>:<n>: on each generator, k6 of that job stays in setup() for
+# the first <n> checks of cloud.sh wait_job (its unit active, no k6.exit, no
+# STRESS_STARTED in its console.log), then its scenario starts, and k6 ends 2
+# checks later. A slow product's token pool (#913: Authentik, 0.76 sign-ins/s).
+#
+# DRY_TICK=<text>:<s>: an ssh call whose command line contains <text> moves
+# the dry run's clock (DRY_STATE/clock, which compare.sh's clock adds) on by
+# <s> seconds: a step that takes that long, for the instance lifetime rule.
+#
+# The params.env a generator gets (cloud.sh launch_on_generator) is kept in
+# DRY_STATE/gen-params-<job>.env.
+#
 # The addresses handed out are documentation ranges, built at run time.
 set -uo pipefail
 
@@ -117,7 +129,18 @@ case $tool in
     cmd="$*"
     log "ssh ${host:-?}: $(tr '\n' ' ' <<< "$cmd" | tr -s ' ' | cut -c1-400)"
     # Every remote command that reads stdin (cat > file, tar -x) gets it.
-    [ -t 0 ] || cat > /dev/null
+    if [[ $cmd == *"cat > /opt/stress/out/"*"/params.env"* ]]; then
+      job=${cmd#*cat > /opt/stress/out/}
+      cat > "$state/gen-params-${job%%/*}.env"
+    else
+      [ -t 0 ] || cat > /dev/null
+    fi
+    if [ -n "${DRY_TICK:-}" ] && [[ $cmd == *"${DRY_TICK%:*}"* ]]; then
+      (
+        flock 9
+        echo $(($(cat "$state/clock" 2> /dev/null || echo 0) + ${DRY_TICK##*:})) > "$state/clock"
+      ) 9> "$state/clock.lock"
+    fi
     if [ -n "${DRY_SSH_GONE_AFTER:-}" ]; then
       if [ -e "$state/gone-${host:-?}" ]; then
         echo "ssh: connect to host ${host:-?} port 22: Connection timed out" >&2
@@ -126,6 +149,23 @@ case $tool in
       [[ $cmd != *"$DRY_SSH_GONE_AFTER"* ]] || touch "$state/gone-${host:-?}"
     fi
     ! fails "$cmd" || exit 1
+    if [ -n "${DRY_SETUP:-}" ]; then
+      job=${DRY_SETUP%:*} polls=$state/setup-polls-${host:-?}-${DRY_SETUP%:*}
+      case $cmd in
+        # job_gone: the unit is active.
+        *"systemctl is-active stress-$job)"*) exit 0 ;;
+        "test -f /opt/stress/out/$job/k6.exit")
+          n=$(($(cat "$polls" 2> /dev/null || echo 0) + 1))
+          echo "$n" > "$polls"
+          [ "$n" -gt $((${DRY_SETUP##*:} + 2)) ] || exit 1
+          exit 0
+          ;;
+        *"STRESS_STARTED /opt/stress/out/$job/console.log"*)
+          [ "$(cat "$polls" 2> /dev/null || echo 0)" -gt "${DRY_SETUP##*:}" ] || exit 1
+          exit 0
+          ;;
+      esac
+    fi
     case $cmd in
       *"date +%s"*) date +%s ;;
       *"/v1/metrics"*) exit 7 ;;
