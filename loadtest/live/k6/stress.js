@@ -40,7 +40,9 @@
 // linear START_RATE + i * STEP_RATE; schedule.js, #913), ADMIN_IDS_FILE (a
 // file of user ids, one per line, that admin_lookup reads in turn instead of
 // the ADMIN_IDS listed in setup: the #913 cold read's working sets of 100,000
-// and 1M users, which k6 shares between VUs; ids.js writes it).
+// and 1M users, which k6 shares between VUs; ids.js writes it),
+// SETUP_TIMEOUT_S (3600: k6's limit on setup(), whose token pool a slow
+// product signs in slowly).
 //
 // Several realms (STRESS_REALMS > 1, gen-config.sh REALMS): each VU works in
 // one realm for all its journeys, VU v in realm (v - 1) % STRESS_REALMS
@@ -163,7 +165,8 @@ const fileIds = __ENV.ADMIN_IDS_FILE
 
 export const options = {
   hosts,
-  setupTimeout: '45m',
+  // cloud.sh's SETUP_TIMEOUT_S (Authentik's token pool: about 44 min, #913).
+  setupTimeout: `${num('SETUP_TIMEOUT_S', 3600)}s`,
   // Per-request rows go to the CSV output; keep the end-of-test summary
   // small and exact.
   summaryTrendStats: ['count', 'min', 'med', 'p(90)', 'p(99)', 'p(99.9)', 'max'],

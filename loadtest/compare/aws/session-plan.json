@@ -20,6 +20,7 @@
     "journeys_size_2": "the 8 journeys",
     "minutes_per_journey": 18,
     "minutes_per_journey_detail": "coarse phase: restore 3, setup grace 1, warm-up 1.1, about 5 steps of 65 s (the run stops at the first step that fails for sure), collect 1 = 11.5; fine phase: restore 3, grace 1, warm-up and 3 steps 4.3, collect 1 = 9.3; less when a coarse step fails early, more when all 8 coarse steps are clean (no fine phase then)",
+    "authentik_size_1_detail": "6.6 h, not 3.4: Authentik signs in about 0.76 users/s on c7i.large (913a: PBKDF2 with 1M iterations, a 10-request flow), so each refresh and mix phase first spends about 44 min on its token pool (1,000 sessions per generator, 2 generators): about 101 min per journey, not 18. And a phase starts only on a set whose lifetime outlasts its worst case (a pool phase 85 min, another 30), so the part takes 2 sets: about 207 + 187 min",
     "setup_hours_per_ramp_run": 0.4,
     "setup_detail": "up and SSH 5 min, k6 on the generators, Docker and the images (or Hearth's deploy) 10 min, reading the snapshot volume once 5 min, the first restore 3 min",
     "seed_hours": {
@@ -148,7 +149,7 @@
     {
       "id": "s1:authentik",
       "name": "size 1 authentik",
-      "hours": 3.4,
+      "hours": 6.6,
       "after": [
         "seed:authentik"
       ],
