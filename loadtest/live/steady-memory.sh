@@ -134,10 +134,10 @@ fi
 
 k6_env() {
   cd "$here/k6"
-  set -a
-  # shellcheck disable=SC1091
-  . "$work/generator.env"
-  set +a
+  # generator.env is data, never shell code (remote/env.sh).
+  # shellcheck source=remote/env.sh
+  . "$here/remote/env.sh"
+  load_env "$work/generator.env" || die "cannot load $work/generator.env"
   export SSL_CERT_FILE=$work/trust.pem
   "$@"
 }

@@ -172,6 +172,12 @@ class CommandLine(unittest.TestCase):
                 self.assertIs(v[0]["clean"], False, (product, cls))
                 self.assertEqual(v[0]["reasons"], ["errors 80.00%"], (product, cls))
 
+    def test_ran_prints_the_number_of_steps_that_ran(self):
+        none = self.write("none.json", [{"rate": 25, "clean": None, "reasons": ["not run"]}])
+        some = self.write("some.json", [{"rate": 25, "clean": True}, {"rate": 50, "clean": False}])
+        self.assertEqual(self.run_cli("ran", none), 0)
+        self.assertEqual(self.run_cli("ran", some), 2)
+
     def test_live_stops_a_login_or_mix_step_of_sheds_for_every_product(self):
         m = self.write("metrics.json", k6_metrics({1: (100, 0.2)}))
         for product in self.PRODUCTS:
@@ -214,6 +220,13 @@ class Phases(unittest.TestCase):
         r = ladder.journey_result("hearth", "login", self.verdicts("login", 8))
         self.assertEqual(r["clean_rate"], 256)
         self.assertTrue(r["at_least"])
+
+    def test_steps_run_counts_the_judged_steps(self):
+        # A phase whose k6 never started (#913: generator.env did not load) has no step
+        # row: its first step did not run.
+        self.assertEqual(ladder.steps_run(ladder.judge("refresh", report("refresh", []), [25, 50])), 0)
+        self.assertEqual(ladder.steps_run(self.verdicts("refresh", 0)), 1)  # ran, and failed
+        self.assertEqual(ladder.steps_run(self.verdicts("mix", 2, fail=False) + [{"rate": 20, "clean": None}]), 2)
 
     def test_no_clean_step_gives_0(self):
         coarse = self.verdicts("login", 0)

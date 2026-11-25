@@ -143,12 +143,12 @@ scp_from() {
     -o StrictHostKeyChecking=accept-new -o BatchMode=yes "root@$ip:$src" "$dest"
 }
 
-# k6 in the foreground on generator 1, with the run's environment.
-# $1: extra env assignments.
+# k6 in the foreground on generator 1, with the run's environment
+# (generator.env read as data: remote/env.sh). $1: extra env assignments.
 k6_on_generator() {
   local envs=$1
   shift
-  ssh_to "$GEN_PUBLIC" "cd /opt/stress/k6 && set -a && . /opt/stress/generator.env && set +a && \
+  ssh_to "$GEN_PUBLIC" "cd /opt/stress/k6 && . /opt/stress/env.sh && load_env /opt/stress/generator.env && \
     export SSL_CERT_FILE=/opt/stress/trust.pem $envs && ulimit -n 1048576 && /usr/local/bin/k6 $*"
 }
 
@@ -302,7 +302,7 @@ install_generator() {
     install -m 0600 /tmp/generator.env /opt/stress/generator.env
     rm -f /tmp/ca.crt /tmp/generator.env
     sysctl -q -w net.ipv4.ip_local_port_range='10240 65535' net.ipv4.tcp_tw_reuse=1"
-  scp_to "$ip" /opt/stress/ "$here/sampler.sh" "$here/remote/launch.sh"
+  scp_to "$ip" /opt/stress/ "$here/sampler.sh" "$here/remote/launch.sh" "$here/remote/env.sh"
   ssh_to "$ip" "chmod 0755 /opt/stress/launch.sh"
   scp_to "$ip" /opt/stress/k6/ "$here/k6/lib.js" "$here/k6/realms.js" "$here/k6/stress.js" \
     "$here/k6/prepare.js" "$here/k6/verify.js" "$here/k6/fill.js" "$here/k6/schedule.js" "$here/k6/ids.js"
@@ -546,13 +546,23 @@ launch_on_generator() {
 }
 
 # Waits until job $1 has ended on every generator; $2: most seconds to wait.
+# A generator whose job unit has ended without k6.exit (launch.sh or k6 died
+# before k6 ended: an env file that does not load, say) fails the job at the
+# next check, not at $2, with the unit's last journal lines (secrets left out:
+# env.sh redact).
 wait_job() {
-  local name=$1 limit=$2 waited=0 i finished
+  local name=$1 limit=$2 waited=0 i ip finished
   while [ "$waited" -lt "$limit" ]; do
     finished=0
     for i in $(seq 1 "$GEN_COUNT"); do
-      if ssh_to "$(gen_public "$i")" "test -f /opt/stress/out/$name/k6.exit" 2> /dev/null; then
+      ip=$(gen_public "$i")
+      if ssh_to "$ip" "test -f /opt/stress/out/$name/k6.exit" 2> /dev/null; then
         finished=$((finished + 1))
+      elif job_gone "$ip" "$name"; then
+        log "generator $i: the unit stress-$name ended without k6.exit; its last journal lines:"
+        ssh_to "$ip" ". /opt/stress/env.sh && journalctl -u stress-$name -n 20 --no-pager -o cat 2>&1 \
+          | redact /opt/stress/generator.env" 2> /dev/null | sed 's/^/  /' >&2 || true
+        die "job $name: k6 did not run to its end on generator $i"
       fi
     done
     [ "$finished" -lt "$GEN_COUNT" ] || return 0
@@ -560,6 +570,18 @@ wait_job() {
     waited=$((waited + 15))
   done
   die "job $name did not end within ${limit}s; resume with: cloud.sh collect $name"
+}
+
+# Whether job $2's unit on generator $1 has ended without k6.exit. k6.exit is
+# looked for again after the unit's state, so a job that ends between the two
+# checks is not taken for one that died. An SSH failure (255) is no answer.
+job_gone() {
+  local rc=0
+  ssh_to "$1" "case \$(systemctl is-active stress-$2) in
+      active | activating | deactivating | reloading | refreshing) ;;
+      *) test -f /opt/stress/out/$2/k6.exit ;;
+    esac" 2> /dev/null || rc=$?
+  [ "$rc" != 0 ] && [ "$rc" != 255 ]
 }
 
 cmd_fill() {
@@ -726,7 +748,7 @@ cmd_verify() {
   local name=${1:?usage: cloud.sh verify <name>} i ip
   for i in $(seq 1 "$GEN_COUNT"); do
     ip=$(gen_public "$i")
-    ssh_to "$ip" "cd /opt/stress/k6 && set -a && . /opt/stress/generator.env && set +a && \
+    ssh_to "$ip" "cd /opt/stress/k6 && . /opt/stress/env.sh && load_env /opt/stress/generator.env && \
       SSL_CERT_FILE=/opt/stress/trust.pem ACK_FILE=/opt/stress/out/$name/console.log \
       VERIFY_OUT=/opt/stress/out/$name/verify.json /usr/local/bin/k6 run -q verify.js" > /dev/null 2>&1 || true
     scp_from "$ip" "/opt/stress/out/$name/verify.json" "$results/$name/verify-g$i.json"
