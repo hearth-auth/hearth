@@ -3,7 +3,8 @@
 
 Inputs:
   --raw       k6 CSV output (.csv or .csv.gz) of stress.js
-  --summary   stress.js summary JSON (SUMMARY_OUT); gives the start time
+  --summary   stress.js summary JSON (SUMMARY_OUT); gives the start time and,
+              from stress.js's ended_at, the end
   --sampler   server sampler CSV (sampler.sh), optional
   --gen-sampler generator sampler CSV (sampler.sh following k6), optional:
               shows whether the generator, not the server, ran out of CPU
@@ -25,6 +26,9 @@ Definitions (per step):
   error_ratio  failed / finished journeys
   dropped      iterations k6 could not start because every VU was busy:
                the server was too slow to keep up with the offered rate
+  hold_complete  every generator's k6 ran to the end of the step's hold (false:
+               the run was stopped or ended inside it, so the step's journeys
+               are a part of a step); missing when a summary has no ended_at
 Knees:
   latency_knee  first step whose p99 exceeds --budget-ms
   error_knee    first step whose error ratio exceeds 1%
@@ -183,15 +187,18 @@ def analyze(args):
     raws, summaries = as_list(args.raw), as_list(args.summary)
     if len(summaries) not in (1, len(raws)):
         sys.exit("analyze: give one --summary, or one per --raw")
-    starts = []
+    starts, spans = [], []
     for path in summaries:
         with open(path) as f:
-            started_at = json.load(f).get("started_at")
+            summary = json.load(f)
+        started_at = summary.get("started_at")
         if started_at is None:
             sys.exit(f"analyze: the ramp never started (setup failed); see {path}")
         starts.append(started_at // 1000)
+        spans.append((started_at, summary.get("ended_at")))
     if len(starts) == 1:
         starts = starts * len(raws)
+    step_s = args.ramp_s + args.hold_s
     # The samplers are placed in steps from the earliest generator's start.
     start_s = min(starts)
     lat, ok, failed, classes, dropped = read_k6(list(zip(raws, starts)), args)
@@ -223,6 +230,9 @@ def analyze(args):
             "p999_ms": percentile(values, 99.9),
             "max_ms": values[-1] if values else None,
         }
+        if all(end is not None for _, end in spans):
+            # Each generator's steps count from its own start (ms).
+            row["hold_complete"] = all(end >= start + (step + 1) * step_s * 1000 for start, end in spans)
         s = server.get(step)
         if s:
             row.update(

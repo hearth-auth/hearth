@@ -29,10 +29,12 @@ Commands (JSON on stdout):
                                                    steps after <ran> (the step the
                                                    run was stopped at; -1: none)
                                                    did not run
-  ladder.py live <product> <journey> <now> <start_at> <hold_s> <metrics.json>...
+  ladder.py live <product> <journey> <now> <hold_s> <metrics.json>...
                                                    during a run: {"stop": step} for
-                                                   the first finished step that
-                                                   fails for sure, else null
+                                                   the first finished step with
+                                                   journeys that fails for sure,
+                                                   else null (steps count from each
+                                                   generator's scenario start)
   ladder.py ran <verdicts.json>                    the number of the phase's steps that
                                                    ran (0: none, and the journey fails)
   ladder.py journey <product> <journey> <coarse.json> [<fine.json>]
@@ -128,12 +130,17 @@ def judge_step(row, budget_ms):
     return (not reasons, reasons)
 
 
+CUT_SHORT = "cut short: the run ended before its hold did"
+
+
 def judge(journey, report, rates, ran=-1):
     """The verdict of each judged step of a phase: step i + 1 of the report is rates[i]
-    (step 0 is the warm-up minute). A step with no row, or after `ran` when the driver
-    stopped the run at step `ran` (-1: it ran to its end), did not run. Judging stops
-    at the first failing step: the steps after it do not count. The rule is the same
-    for every product."""
+    (step 0 is the warm-up minute). A step with no row, after `ran` when the driver
+    stopped the run at step `ran` (-1: it ran to its end), did not run. A step cut
+    short (the run ended inside its hold: analyze.py's hold_complete false) is never
+    clean: it did not run, unless it has journeys and fails on them. Judging stops at
+    the first failing step, or at one that did not run: the steps after it do not
+    count. The rule is the same for every product."""
     budget = BUDGET_MS[journey]
     rows = {r["step"]: r for r in report.get("steps", []) if ran < 0 or r["step"] <= ran}
     out = []
@@ -143,6 +150,13 @@ def judge(journey, report, rates, ran=-1):
             out.append({"rate": rate, "clean": None, "reasons": ["not run"]})
             break
         clean, reasons = judge_step(row, budget)
+        if row.get("hold_complete") is False:
+            # A part of a step: its few journeys can look clean, so that is no verdict;
+            # what already fails on them (the failure-ratio guard's abort) fails.
+            if clean or not row.get("finished"):
+                out.append({"rate": rate, "clean": None, "reasons": [CUT_SHORT]})
+                break
+            reasons = reasons + [CUT_SHORT]
         out.append({
             "rate": rate,
             "clean": clean,
@@ -170,16 +184,32 @@ LIVE_ERROR_LIMIT = 0.01
 RAMP_S = 5
 
 
-def live_stop(journey, metrics, now, start_at, hold_s=60, ramp_s=RAMP_S):
+def live_stop(journey, metrics, now, hold_s=60, ramp_s=RAMP_S):
     """The first judged step (>= 1) that has finished and fails for sure on any
     generator, or None. `metrics` is one k6 /v1/metrics answer per generator. The rule
-    is the same for every product and journey."""
+    is the same for every product and journey.
+
+    k6 lists every thresholded submetric from the start: before a step has a journey,
+    its p95 and its rate read 0, the same as after failed journeys of 0 ms. So a step
+    counts only when stress.js's `journeys` counter has a journey in it. Its steps
+    count from that generator's scenario start (stress.js's `scenario_start_s`), not
+    from START_AT: a setup() that overruns START_AT starts the scenario late. A
+    generator without a start has not started its steps (or runs an older stress.js):
+    none of its steps is judged."""
     budget = BUDGET_MS[journey]
     step_s = ramp_s + hold_s
-    finished = int((now - start_at) // step_s)  # steps 0 .. finished-1 are over
-    for step in range(1, finished):
-        for m in metrics:
-            by_id = {d["id"]: d["attributes"]["sample"] for d in m.get("data", [])}
+    gens = []
+    for m in metrics:
+        by_id = {d["id"]: d["attributes"]["sample"] for d in m.get("data", [])}
+        start = by_id.get("scenario_start_s", {}).get("value")
+        if start is not None:
+            gens.append((by_id, int((now - start) // step_s)))  # steps 0 .. n-1 are over
+    for step in range(1, max((n for _, n in gens), default=0)):
+        for by_id, finished in gens:
+            if step >= finished:
+                continue
+            if not by_id.get(f"journeys{{step:{step},phase:hold}}", {}).get("count"):
+                continue
             lat = by_id.get(f"journey_ms{{step:{step},phase:hold}}", {})
             ok = by_id.get(f"journey_ok{{step:{step},phase:hold}}", {})
             if (lat.get("p(95)") or 0) > budget:
@@ -292,13 +322,13 @@ def main(argv):
         out = judge(report["journey"], report, [float(x) for x in a[3:]], int(a[2]))
     elif cmd == "live":
         metrics = []
-        for path in a[5:]:
+        for path in a[4:]:
             try:
                 metrics.append(json.load(open(path)))
             except (OSError, ValueError):
                 pass  # a generator whose k6 has ended or not started
         # a[0] is the product, unused like judge's.
-        out = {"stop": live_stop(a[1], metrics, float(a[2]), float(a[3]), int(a[4]))}
+        out = {"stop": live_stop(a[1], metrics, float(a[2]), int(a[3]))}
     elif cmd == "ran":
         out = steps_run(json.load(open(a[0])))
     elif cmd == "next":

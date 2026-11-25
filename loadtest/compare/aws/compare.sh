@@ -775,21 +775,22 @@ phase() {
 
 # While ramp $4 runs: every 15 s, each generator's k6 REST API; at the first
 # step that fails for sure, stops k6 everywhere. Prints the step it stopped
-# at, or -1.
+# at, or -1. Steps count from each generator's scenario start, which stress.js
+# reports (START_AT is later when setup overruns it), and a step without
+# journeys is not judged (ladder.py live).
 watch_ramp() {
-  local p=$1 journey=$2 name=$3 ramp=$4 i start_at stop
+  local p=$1 journey=$2 name=$3 ramp=$4 i stop
   local dir=$results/$name
   while kill -0 "$ramp" 2> /dev/null; do
     sleep 15
     [ -f "$dir/params.env" ] || continue
-    start_at=$(sed -n 's/^START_AT=//p' "$dir/params.env")
     local files=()
     for i in $(seq 1 "$GEN_COUNT"); do
       ssh_to "$(gen_public "$i")" "curl -fsS -m 5 localhost:6565/v1/metrics" > "$dir/live-g$i.json" 2> /dev/null \
         && files+=("$dir/live-g$i.json")
     done
     [ "${#files[@]}" -gt 0 ] || continue
-    stop=$(lad live "$p" "$journey" "$(date +%s)" "$start_at" 60 "${files[@]}" | jget stop)
+    stop=$(lad live "$p" "$journey" "$(date +%s)" 60 "${files[@]}" | jget stop)
     if [ "$stop" != None ]; then
       clog "$p $journey: step $stop fails for sure; stopping the run"
       for i in $(seq 1 "$GEN_COUNT"); do

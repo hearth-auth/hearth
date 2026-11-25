@@ -56,9 +56,14 @@ test('the live thresholds name each step hold submetric and always pass', () => 
   assert.deepEqual(Object.keys(t), [
     'journey_ms{step:0,phase:hold}',
     'journey_ok{step:0,phase:hold}',
+    'journeys{step:0,phase:hold}',
     'journey_ms{step:1,phase:hold}',
     'journey_ok{step:1,phase:hold}',
+    'journeys{step:1,phase:hold}',
   ]);
   assert.deepEqual(t['journey_ms{step:1,phase:hold}'], ['p(95)>=0']);
   assert.deepEqual(t['journey_ok{step:0,phase:hold}'], ['rate>=0']);
+  // k6 shows a step's p95 and rate as 0 before it has a sample, and after samples
+  // of 0: only the count tells the live watcher that the step ran (#913).
+  assert.deepEqual(t['journeys{step:1,phase:hold}'], ['count>=0']);
 });

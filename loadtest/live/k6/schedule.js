@@ -48,16 +48,19 @@ export function schedule(e) {
 
 /**
  * Thresholds that only make k6 keep per-step submetrics, so its REST API
- * (K6_ADDRESS) shows each step's hold latency (p95) and success rate while
- * the ramp runs: the #913 ladder driver reads them to end a coarse phase at
- * its first failing step. They always pass, so they never change k6's exit
- * status. Only for RATES_PM ramps; the #647 rounds keep their options.
+ * (K6_ADDRESS) shows each step's hold latency (p95), success rate and
+ * journey count while the ramp runs: the #913 ladder driver reads them to end
+ * a coarse phase at its first failing step. k6 lists these submetrics from
+ * the start, at p95 0 and rate 0 before any sample; only the count tells a
+ * step that ran from one that did not. They always pass, so they never change
+ * k6's exit status. Only for RATES_PM ramps; the #647 rounds keep their options.
  */
 export function liveThresholds(steps) {
   const out = {};
   for (let i = 0; i < steps; i++) {
     out[`journey_ms{step:${i},phase:hold}`] = ['p(95)>=0'];
     out[`journey_ok{step:${i},phase:hold}`] = ['rate>=0'];
+    out[`journeys{step:${i},phase:hold}`] = ['count>=0'];
   }
   return out;
 }
