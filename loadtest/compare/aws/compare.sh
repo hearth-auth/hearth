@@ -11,8 +11,9 @@
 #                                   (at MAX_VCPU, and for other limits)
 #   compare.sh seed <product>       one product's seed run (server only): 1M bulk
 #                                   users and 1,000 login users through its own
-#                                   seed tool, the 1M-id listing, the seed time,
-#                                   idle RSS and store size, then a snapshot
+#                                   seed tool, the first 1M users' ids (store or
+#                                   admin API) and the usable check, the seed
+#                                   time, idle RSS and store size, then a snapshot
 #   compare.sh ramps <product> <size> [journey...]
 #                                   a ramp run: size 1 (c7i.large and 2
 #                                   generators) or 2 (c7i.2xlarge and 4); each
@@ -416,7 +417,7 @@ seed_on_server() {
     scp_from "$GEN_PUBLIC" /opt/stress/generator.env "$state/hearth-bundle.new/generator.env"
     rm -rf "$state/hearth-bundle"
     mv "$state/hearth-bundle.new" "$state/hearth-bundle"
-    list_ids "$p"
+    list_ids "$p" "$log"
     t_usable=$(date +%s)
     settle=$(rsrv settle /var/lib/hearth)
   else
@@ -432,7 +433,7 @@ seed_on_server() {
     t0=$(date +%s)
     srv "SEED_PROCS=$procs bash /opt/compare/remote.sh product $p seed 0 1000000" 2>&1 | tee -a "$log" >&2
     t1=$(date +%s)
-    list_ids "$p"
+    list_ids "$p" "$log"
     t_usable=$(date +%s)
     [ "$p" != authentik ] || rsrv product authentik settle 2>&1 | tee -a "$log" >&2
     settle=$(rsrv settle /var/lib/docker/volumes)
@@ -451,8 +452,8 @@ import json, sys
 json.dump({
     "product": "$p", "server": "$server", "seed_procs": $procs, "users_bulk": 1000000, "users_login": 1000,
     "seed_time_comparable_with": "seeds on a $server server only",
-    "seed_call_s": $((t1 - t0)), "seed_until_usable_s": $((t_usable - t0)),
-    "usable_rule": "the admin API lists 1M users (ids.js)",
+    "seed_call_s": $((t1 - t0)), "seed_until_usable_s": $((t_usable - t0 - IDS_S)),
+    "ids_from": "$(ids_from "$p")", "ids_s": $IDS_S, "usable_rule": "$USABLE_RULE",
     "idle_rss_kb": int("${idle:-0}" or 0), "store_bytes": int("${size:-0}" or 0),
     "settle": "$settle", "pull": "$pull", "snapshot": "$snap", "run": "$id",
 }, open(sys.argv[1], "w"), indent=1)
@@ -460,31 +461,74 @@ PY
   clog "seed $p: $(cat "$f" | tr -d '\n')"
 }
 
-# Lists the first 1M users' ids through the admin API (ids.js) into the
-# bundle on the data volume, retrying until the API lists them all (Zitadel's
-# projection applies an import after it answers).
+# Where list_ids takes a product's ids from: its admin API (ids.js, for the
+# APIs that page by cursor: Hearth's, Kratos's keyset page_token) or its store
+# (<product>.sh ids: PostgreSQL, in the admin API's order). Keycloak's,
+# Zitadel's and Authentik's APIs page by offset, each page costlier the
+# further it is: in session 913a (c7i.large) neither Keycloak's listing nor
+# Zitadel's ended before the seed's lifetime; measured locally on 2 vCPUs,
+# 1M users take about 45 min (Keycloak) and 2 h (Zitadel), and more than a
+# day through Authentik's (15 s per page of 100 past its first 25,000 users).
+ids_from() {
+  case $1 in
+    hearth | ory) echo "admin API" ;;
+    *) echo store ;;
+  esac
+}
+
+# The seed's usable rule, the same for every product (seed-<product>.json).
+USABLE_RULE="the admin API answers the cold read's lookup (adminUser) of the first and every 1,000th of \
+the first 1M users' ids, 1,001 lookups, all 200 (ids.js IDS_CHECK); seed_until_usable_s leaves out the \
+id listing itself (ids_s), which reads the store for some products and the admin API for others (ids_from)"
+
+# One try at the first 1M users' ids, into /data/bundle/out/ids.txt on the
+# data volume, one per line, in the admin API's order.
+ids_listed() {
+  local p=$1
+  srv "mkdir -p /data/bundle/out && rm -f /data/bundle/out/ids.txt" || return
+  if [ "$(ids_from "$p")" = store ]; then
+    srv "bash /opt/compare/remote.sh product $p ids 1000000 /data/bundle/out/ids.txt"
+  elif [ "$p" = hearth ]; then
+    # The server is its own generator here (self_generator).
+    k6_on_generator "IDS_COUNT=1000000 IDS_OUT=/data/bundle/out/ids.txt" run -q ids.js
+  else
+    srv "cd /opt/compare/loadtest/compare && bash k6.sh /data/bundle ids.js IDS_COUNT=1000000 IDS_OUT=/out/ids.txt"
+  fi
+}
+
+# One try at the usable check (USABLE_RULE) over the listed ids; then the ids
+# go to the bundle (ids-1000000.txt), where the ramps take their working sets.
+ids_usable() {
+  local p=$1
+  srv "awk 'NR == 1 || NR % 1000 == 0' /data/bundle/out/ids.txt > /data/bundle/out/ids-check.txt" || return
+  if [ "$p" = hearth ]; then
+    k6_on_generator "IDS_CHECK=/data/bundle/out/ids-check.txt" run -q ids.js || return
+  else
+    srv "cd /opt/compare/loadtest/compare && bash k6.sh /data/bundle ids.js IDS_CHECK=/out/ids-check.txt" || return
+  fi
+  srv "mv /data/bundle/out/ids.txt /data/bundle/ids-1000000.txt"
+}
+
+# The first 1M users' ids into the bundle, then the usable check; both again
+# while they fail (an admin API that does not serve every user yet), as long
+# as the server answers over SSH. A server that does not answer (gone at its
+# lifetime) ends the seed at once. Sets IDS_S: the seconds of the listing
+# that succeeded. k6's and the store's output go to the seed log too (no
+# secret: k6 prints no request header).
 list_ids() {
-  local p=$1 i
+  local p=$1 log=$2 i t
   for i in $(seq 1 120); do
-    if [ "$p" = hearth ]; then
-      # The server is its own generator here (self_generator).
-      launch_on_generator 1 ids-$i << EOF
-K6_SCRIPT=ids.js
-K6_NO_CSV=1
-IDS_COUNT=1000000
-IDS_OUT=/opt/stress/out/ids-$i/ids.txt
-EOF
-      wait_job "ids-$i" 3600
-      srv "test \"\$(cat /opt/stress/out/ids-$i/k6.exit)\" = 0 && mkdir -p /data/bundle \
-        && mv /opt/stress/out/ids-$i/ids.txt /data/bundle/ids-1000000.txt" && return 0
-    else
-      srv "cd /opt/compare/loadtest/compare && bash k6.sh /data/bundle ids.js IDS_COUNT=1000000 IDS_OUT=/out/ids.txt > /dev/null 2>&1 \
-        && mv /data/bundle/out/ids.txt /data/bundle/ids-1000000.txt" && return 0
+    t=$(date +%s)
+    if ids_listed "$p" 2>&1 | tee -a "$log" >&2; then
+      IDS_S=$(($(date +%s) - t))
+      ids_usable "$p" 2>&1 | tee -a "$log" >&2 && return 0
     fi
-    clog "seed $p: the admin API does not list 1M users yet ($i)"
+    srv true 2> /dev/null \
+      || cdie "seed $p: the server ($SERVER_PUBLIC) does not answer over SSH (gone at its lifetime, or unreachable): no retry"
+    clog "seed $p: the first 1M users' ids are not listed and usable yet ($i; $log)"
     sleep 30
   done
-  cdie "seed $p: the admin API never listed 1M users"
+  cdie "seed $p: the first 1M users' ids were never listed and usable"
 }
 
 # ---------------------------------------------------------------- ramps
@@ -985,12 +1029,15 @@ for server in servers:
     print(f"\n## Seeds on {server}\n")
     if others:
         print(f"Seed times here compare only with each other, not with the seeds on {', '.join(others)}.\n")
-    print("| product | seed server | seed call s | until usable s | idle RSS MB | store GB |")
-    print("|---|---|---|---|---|---|")
+    print("| product | seed server | seed call s | until usable s | ids from | ids s | idle RSS MB | store GB |")
+    print("|---|---|---|---|---|---|---|---|")
     for s in seeds:
         if s["server"] == server:
             print(f"| {s['product']} | {s['server']} | {s['seed_call_s']} | {s['seed_until_usable_s']} "
+                  f"| {s.get('ids_from', 'admin API')} | {s.get('ids_s', '')} "
                   f"| {s['idle_rss_kb'] / 1024:.0f} | {s['store_bytes'] / 1e9:.2f} |")
+    rules = sorted({s.get("usable_rule", "") for s in seeds if s["server"] == server})
+    print(f"\nUsable: {'; '.join(rules)}.")
 PY
   cat "$out/cost.txt" >> "$out/summary.md" 2> /dev/null || true
 }

@@ -14,6 +14,11 @@
 # DRY_FAIL=<text> makes an ssh or scp call whose command line contains <text>
 # fail (exit 1), as a remote step that breaks.
 #
+# DRY_SSH_GONE_AFTER=<text>: the host of the ssh call whose command line
+# contains <text> stops answering after that call, as a server that reached
+# its lifetime: every later ssh call to it fails as ssh does (exit 255,
+# "Connection timed out").
+#
 # The addresses handed out are documentation ranges, built at run time.
 set -uo pipefail
 
@@ -112,6 +117,13 @@ case $tool in
     log "ssh ${host:-?}: $(tr '\n' ' ' <<< "$cmd" | tr -s ' ' | cut -c1-400)"
     # Every remote command that reads stdin (cat > file, tar -x) gets it.
     [ -t 0 ] || cat > /dev/null
+    if [ -n "${DRY_SSH_GONE_AFTER:-}" ]; then
+      if [ -e "$state/gone-${host:-?}" ]; then
+        echo "ssh: connect to host ${host:-?} port 22: Connection timed out" >&2
+        exit 255
+      fi
+      [[ $cmd != *"$DRY_SSH_GONE_AFTER"* ]] || touch "$state/gone-${host:-?}"
+    fi
     ! fails "$cmd" || exit 1
     case $cmd in
       *"date +%s"*) date +%s ;;

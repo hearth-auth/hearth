@@ -26,10 +26,10 @@
       "hearth": 0.4,
       "keycloak": 0.75,
       "zitadel": 1.25,
-      "ory": 0.5,
+      "ory": 0.75,
       "authentik": 4.5
     },
-    "seed_detail": "server only, 1M bulk users plus 1,000 login users, then the 1M-id listing (ids.js), settle and snapshot. On c7i.large (#913: the size 1 server), from the local 100k seeds (12 cores) scaled to 2 vCPU: Keycloak 70-87 s, Zitadel 139 s, Ory 39 s per 100k; Hearth's 10M drill seed took 1,408 s on r7i.large. Authentik seeds on c7i.2xlarge (8 vCPU; owner decision 2026-11-23): about 93 users/s with 4 processes on 12 cores locally (blueprints), so about 62 users/s on 8 vCPU with the same 4 processes, 1,001,000 users in about 4.5 h. Its seed time is not comparable with the c7i.large seeds",
+    "seed_detail": "server only, 1M bulk users plus 1,000 login users, then the first 1M users' ids (from the store for Keycloak, Zitadel and Authentik, whose admin APIs page by offset; through the admin API for Hearth and Ory, which page by cursor) and the usable check (1,001 admin API lookups), settle and snapshot. Measured on c7i.large in session 913a, launch to teardown: Hearth 14 min (import 99 s, ids 34 s), Ory 36.5 min (seed 1,577 s, ids 96 s); Keycloak's import took 1,405-1,433 s and Zitadel's seed until its projection 2,452 s; a part takes about 4 to 5 min before the seed (boot, Docker, pull, start) and 5 to 7 min after it (snapshot, teardown). The ids and the check, timed locally on the 2 hyperthreads of one core (Ory's 1M listing took 76 s there and 96 s on c7i.large, so about x1.3): Keycloak 3-4 s and 10 s, Zitadel 1 s and 10 s, Ory 76-110 s and 3 s, so under 2.5 min on c7i.large. Each estimate is the measured part plus at least 20 %: Hearth 0.4 h (14 min), Keycloak 0.75 h (about 37 min), Zitadel 1.25 h (about 53 min), Ory 0.75 h (37 min; 0.5 h was below the measured part). Authentik seeds on c7i.2xlarge (8 vCPU; owner decision 2026-11-23): about 93 users/s with 4 processes on 12 cores locally (blueprints), so about 62 users/s on 8 vCPU with the same 4 processes, 1,001,000 users in about 4.5 h; its ids from the store take seconds (0.4 s per 100k locally) and the check 1 to 3 min (8 to 18 s per 101 lookups on 8 hyperthreads). Its seed time is not comparable with the c7i.large seeds",
     "snapshot_gb_each": 4,
     "data_out_gb": 5,
     "seed_server": {
@@ -74,7 +74,7 @@
     {
       "id": "seed:ory",
       "name": "seed ory (c7i.large, server only)",
-      "hours": 0.5,
+      "hours": 0.75,
       "after": [],
       "instances": {
         "c7i.large": 1
