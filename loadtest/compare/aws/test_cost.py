@@ -169,6 +169,28 @@ class Schedule(unittest.TestCase):
         self.assertLessEqual(s["peak_vcpu"], 64)
 
 
+class After(unittest.TestCase):
+    def test_each_part_in_plan_order_with_the_parts_it_comes_after(self):
+        plan = {**VCPU, "parts": [part("seed:a", 1), part("s1:a", 2, ["seed:a"]), part("s1:b", 2),
+                                  part("s2:x", 1, ["s1:*"]), {"name": "results", "hours": 0, "instances": {}}]}
+        self.assertEqual(cost.after(plan), [("seed:a", []), ("s1:a", ["seed:a"]), ("s1:b", []),
+                                            ("s2:x", ["s1:a", "s1:b"])])
+
+    def test_the_session_plan_on_the_command_line(self):
+        # compare.sh session reads it: a part needs these done before it
+        # starts, and does not start once one of them has failed.
+        r = subprocess.run([sys.executable, "-I", os.path.join(HERE, "cost.py"), "after",
+                            os.path.join(HERE, "session-plan.json")], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = r.stdout.splitlines()
+        s1 = " ".join(f"s1:{p}" for p in ("hearth", "keycloak", "zitadel", "ory", "authentik"))
+        self.assertEqual(lines[0], "seed:hearth")
+        self.assertIn("s1:keycloak seed:keycloak", lines)
+        self.assertIn("drill", lines)
+        self.assertEqual(lines[-2:], [f"s2:hearth {s1}", f"s2:other {s1}"])
+        self.assertEqual(len(lines), 13)
+
+
 class Remaining(unittest.TestCase):
     def test_the_running_parts_estimate_still_to_come(self):
         with tempfile.TemporaryDirectory() as d:

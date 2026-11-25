@@ -70,6 +70,14 @@ settings.
    L-1216C47A). At 32 the session takes about 13.9 h and 2 logins; at 64, about 10.7 h and 1. Results: `loadtest/live/results/compare-<session>/`
    (`summary.md`).
 
+   **A part that fails** stops alone: its runs go down, the parts after it (`after` in
+   `aws/session-plan.json`: a product's size 1 after its seed, size 2 after every size 1 part)
+   do not start and the session says why, and every other part runs to its end (parts waiting
+   for vCPUs still start). The session then lists how each part ended (done; failed, with its
+   `driver-<part>.log`; skipped, and which failure) and exits 1. A rerun with the same `SESSION`
+   runs only the parts not done: the failed one and the ones it skipped. `STOP_USD` still stops
+   every part.
+
    **AWS login.** An `aws login` session lasts at most 12 h, and a teardown without credentials
    fails. Run `compare.sh session` right after `aws login`: it records the time, and a part (or
    a journey within a ramps part) starts only if `aws sts get-caller-identity` works and its
@@ -97,8 +105,8 @@ them (only the session's own). Products' images are pulled on the server by dige
 **Without AWS.** `DRY_RUN=1` puts shims for `aws`, `ssh`, `scp`, `docker` and `curl` on the PATH
 (`aws/dryrun/`): every AWS call and remote command is printed and answered, the k6 output is made
 up, nothing leaves the machine. `aws/test_dryrun.sh` runs seeds, ramps and whole sessions that
-way (parallel parts, the vCPU wait, the stop at `STOP_USD` with several parts running, the
-login window and the resume) and checks the result; `aws/test_ladder.py` and `aws/test_cost.py` test the ladder and the cost.
+way (parallel parts, the vCPU wait, the stop at `STOP_USD` with several parts running, a part
+that fails, the login window and the resume) and checks the result; `aws/test_ladder.py` and `aws/test_cost.py` test the ladder and the cost.
 
 ## Adapters
 

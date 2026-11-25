@@ -33,7 +33,16 @@
 #                                   cleanly (exit 4); a rerun after a new
 #                                   login resumes (finished seeds, journeys
 #                                   and the drill are kept, and not counted
-#                                   twice)
+#                                   twice). A part that fails stops alone:
+#                                   its runs go down, the parts after it
+#                                   (session-plan.json's "after") are
+#                                   skipped, every other part runs to its
+#                                   end; then the session exits 1 with how
+#                                   each part ended (done, failed and its
+#                                   log, skipped and why), and a rerun with
+#                                   the same SESSION runs the failed and
+#                                   skipped parts. STOP_USD still stops
+#                                   every part
 #   compare.sh drill                the #647 10M restore drill (round.sh, a plan
 #                                   with one drill line)
 #   compare.sh cost                 the running total
@@ -257,7 +266,7 @@ run_up() {
   shift 5
   cost start "$ledger" instance "$id-server" "$server" "$((disk + data_gb))"
   for i in $(seq 1 "$gens"); do cost start "$ledger" instance "$id-gen$i" c7i.xlarge 30; done
-  state_edit "$state/runs.active" "$id $gens"
+  state_edit "$state/runs.active" "$id $gens${PART:+ $PART}"
   env STRESS_RUN="$id" SERVER_SIZE="$server" GENERATOR_SIZE=c7i.xlarge GENERATORS="$gens" \
     SERVER_MAX_MINUTES="$minutes" SERVER_DATA_GB="$data_gb" AWS_DISK_GB="$disk" "$@" "$live/cloud.sh" up \
     || cdie "up $id failed; its instances end at their lifetime, or: STRESS_RUN=$id cloud.sh down"
@@ -294,6 +303,17 @@ down_all() {
       run_down "$id"
     done < <(cat "$state/runs.active")
   ) 9> "$state/down.lock"
+}
+
+# The runs of part $1 go down, and only those (runs.active's third field: the
+# part that started the run). A part that fails leaves its run up.
+part_down() {
+  local id p
+  while read -r id _ p; do
+    [ "$p" = "$1" ] || continue
+    clog "tearing down $id ($1)"
+    run_down "$id"
+  done < <(cat "$state/runs.active")
 }
 
 # In a subshell, with run $1 loaded (cloud.sh's load_run): the rest of the
@@ -852,7 +872,8 @@ kill_tree() {
 declare -A S_PART=() S_VCPU=()
 S_USED=0
 
-# Stops every running part and tears down every run.
+# Stops every running part and tears down every run: at STOP_USD, and when the
+# session itself ends early (a signal, an error of its own).
 session_cleanup() {
   local pid
   for pid in "${!S_PART[@]}"; do kill_tree "$pid"; done
@@ -892,27 +913,38 @@ cmd_session() {
   ! grep -q '"error"' "$out/plan.json" || cdie "the plan does not fit: $(jget schedule error < "$out/plan.json")"
   clog "plan: $(jget total < "$out/plan.json") USD, $(jget hours < "$out/plan.json") instance-set hours, wall clock $(jget schedule wall_clock_h < "$out/plan.json") h, $(jget schedule logins < "$out/plan.json") login(s)"
   trap session_cleanup EXIT
-  local order=() part
-  read -r -a order <<< "$(python3 -I -c 'import json,sys; print(" ".join(p["id"] for p in json.load(open(sys.argv[1]))["parts"] if p.get("id")))' "$aws_dir/session-plan.json")"
-  local -A status=()
+  # The parts in plan order, each with the parts it comes after (the plan's
+  # "after"): it starts once they are all done, and is skipped once one of
+  # them has failed or was skipped.
+  local order=() part plan_after deps
+  local -A status=() after=()
+  plan_after=$(cost after "$aws_dir/session-plan.json")
+  while read -r part deps; do
+    order+=("$part")
+    after[$part]=$deps
+  done <<< "$plan_after"
   for part in "${order[@]}"; do
     if part_done "$part"; then status[$part]=done; else status[$part]=pending; fi
   done
   # Starts every part that can start, in plan order, then waits for one to
   # end; until nothing runs and nothing can start.
-  local hours vcpu usd fin rc pid args=() q
+  local hours vcpu usd fin rc pid args=() q why
   while :; do
     for part in "${order[@]}"; do
       [ "${status[$part]}" = pending ] || continue
-      case $part in
-        s1:*) [ "${status[seed:${part#s1:}]}" = done ] || continue ;;
-        s2:*)
-          for q in "${order[@]}"; do
-            [[ $q != s1:* ]] || [ "${status[$q]}" = done ] || continue 2
-          done
-          other_product > /dev/null || choose_other
-          ;;
-      esac
+      for q in ${after[$part]}; do
+        case ${status[$q]} in
+          failed) status[$part.cause]=$q why="which failed" ;;
+          skipped) status[$part.cause]=${status[$q.cause]} why="skipped because ${status[$q.cause]} failed" ;;
+          *) continue ;;
+        esac
+        status[$part]=skipped
+        clog "$part skipped: it needs $q, $why ($out/driver-${status[$part.cause]/:/-}.log)"
+        timeline "skip $part after=$q cause=${status[$part.cause]}"
+        continue 2
+      done
+      for q in ${after[$part]}; do [ "${status[$q]}" = done ] || continue 2; done
+      [[ $part != s2:* ]] || other_product > /dev/null || choose_other
       read -r hours vcpu usd <<< "$(cost part "$aws_dir/session-plan.json" "$part")"
       [ "$vcpu" -le "$max_vcpu" ] || cdie "$part needs $vcpu vCPUs, more than MAX_VCPU $max_vcpu"
       if [ $((S_USED + vcpu)) -gt "$max_vcpu" ]; then
@@ -956,22 +988,48 @@ cmd_session() {
       0) status[$part]=done ;;
       4) status[$part]=later ;;
       3) session_stop 3 "$part stopped at STOP_USD" ;;
-      *) session_stop 1 "$part failed (exit $rc): $out/driver-${part/:/-}.log" ;;
+      *)
+        # A part that fails stops alone: its runs go down, the parts after it
+        # are skipped (above), and every other part goes on.
+        status[$part]=failed
+        status[$part.rc]=$rc
+        clog "$part failed (exit $rc): $out/driver-${part/:/-}.log: only it stops; the parts after it do not start"
+        part_down "$part"
+        ;;
     esac
     clog "$part ended (exit $rc); $S_USED of $max_vcpu vCPUs running"
   done
   trap - EXIT
   down_all
-  local later=() refused=()
+  # How each part ended.
+  local later=() refused=() failed=() skipped=()
+  clog "the parts:"
   for part in "${order[@]}"; do
     case ${status[$part]} in
-      later | pending) later+=("$part") ;;
-      refused) refused+=("$part") ;;
+      done) clog "  $part: done" ;;
+      failed)
+        failed+=("$part")
+        clog "  $part: failed (exit ${status[$part.rc]}): $out/driver-${part/:/-}.log"
+        ;;
+      skipped)
+        skipped+=("$part")
+        clog "  $part: skipped (${status[$part.cause]} failed)"
+        ;;
+      refused)
+        refused+=("$part")
+        clog "  $part: not started, over the \$$cap_usd cap"
+        ;;
+      later | pending)
+        later+=("$part")
+        clog "  $part: left for the next login"
+        ;;
     esac
   done
+  [ "${#later[@]}" = 0 ] || clog "left for the next login: ${later[*]}"
+  [ "${#failed[@]}" = 0 ] \
+    || cdie "${failed[*]}; skipped: ${skipped[*]:-none}; see each log above, then compare.sh session again with SESSION=$session (it runs only the parts not done)"
   [ "${#refused[@]}" = 0 ] || cdie "not started, over the \$$cap_usd cap: ${refused[*]}"
   if [ "${#later[@]}" -gt 0 ]; then
-    clog "left for the next login: ${later[*]}"
     clog "stopped before the AWS login window ends: run aws login, then compare.sh session again (it resumes; finished seeds, journeys and the drill are kept)"
     exit 4
   fi
@@ -989,7 +1047,7 @@ cmd_drill() {
   cost start "$ledger" instance "$id-server" r7i.large 150
   # cloud.sh gives every instance of a run the same root disk (AWS_DISK_GB).
   cost start "$ledger" instance "$id-gen1" c7i.xlarge 150
-  state_edit "$state/runs.active" "$id 1"
+  state_edit "$state/runs.active" "$id 1${PART:+ $PART}"
   # The #647 path, unchanged: round.sh with a plan of one drill line. The
   # drill seeds its own 10M users on an empty store, so the setup's import
   # (round.sh SETUP=1) is only the 1,000 login users' worth (USERS=1000).

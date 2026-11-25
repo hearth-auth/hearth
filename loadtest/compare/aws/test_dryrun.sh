@@ -17,6 +17,10 @@
 #   - the parallel session: parts at once (two size 1 parts, the drill with
 #     size 1, size 2 together), the wait for vCPUs under MAX_VCPU, and the stop
 #     at STOP_USD with several parts running
+#   - a part that fails: it stops alone (its run goes down), the parts after
+#     it are skipped, the others run to their end; the session exits 1 with
+#     each part's end, and a rerun runs only the failed and skipped parts;
+#     STOP_USD still stops every part after a failure
 #   - snapshot deletion: only the session's own, and only when asked
 #
 # Usage: bash loadtest/compare/aws/test_dryrun.sh [keep]   (keep: leave the
@@ -341,6 +345,93 @@ PY
   && ! pgrep -f "$tmp/repo/loadtest/compare/aws/compare.sh" > /dev/null \
   && pass "STOP_USD with $running_at_stop parts running: all stop, every run down, every ledger entry closed" \
   || fail "STOP_USD in a session (rc $rc, $running_at_stop running, open $(ledger_open "$st/ledger.jsonl"))"
+
+# A part that fails stops alone (owner decision 2026-11-25; in 913a one failed
+# part stopped every part, an Authentik seed 2.5 h into its 4.5 h with them).
+# Hearth's seed, the first part started, fails at its store bind (DRY_FAIL):
+# its run goes down at once, the parts after it (s1:hearth; size 2, after
+# every size 1 part) do not start and say why, every other part runs to its
+# end, and the parts that wait still start. The session then exits 1 with how
+# each part ended. One journey per ramps part (JOURNEYS) keeps it short.
+fs=$tmp/repo/loadtest/compare/.build/aws-drysf
+fo=$tmp/repo/loadtest/live/results/compare-drysf
+SESSION=drysf JOURNEYS=login DRY_FAIL='remote.sh bind-hearth' try session-fail bash "$c" session
+rc=$?
+# From the timeline: the parts running when the session saw the failure,
+# whether each of them then ended with exit 0, and the parts started after.
+read -r at_fail ran_on started_after <<< "$(python3 -I - "$fo/timeline.txt" << 'PY'
+import sys
+running, at_fail, ends, after = set(), None, {}, 0
+for line in open(sys.argv[1]):
+    f = line.split()
+    if f[1] == "start":
+        running.add(f[2])
+        after += at_fail is not None
+    elif f[1] == "end":
+        running.discard(f[2])
+        if f[2] == "seed:hearth":
+            at_fail = set(running)
+        elif at_fail is not None:
+            ends[f[2]] = f[3]
+at_fail = at_fail or set()
+print(len(at_fail), all(ends.get(p) == "rc=0" for p in at_fail), after)
+PY
+)"
+[ "$rc" = 1 ] && grep -q "seed:hearth failed (exit 1): $fo/driver-seed-hearth.log" "$tmp/session-fail.out" \
+  && grep -q 'tearing down drysf-seed-hearth-1 (seed:hearth)' "$tmp/session-fail.out" \
+  && [ "${at_fail:-0}" -ge 1 ] && [ "$ran_on" = True ] \
+  && pass "a failed part stops alone: its run goes down, the $at_fail parts running then run to their end" \
+  || fail "a failed part (rc $rc, $at_fail running at the failure, they ran on: $ran_on): $(grep -v '^DRY' "$tmp/session-fail.out" | tail -n 5)"
+grep -q 's1:hearth skipped: it needs seed:hearth, which failed' "$tmp/session-fail.out" \
+  && grep -q 's2:hearth skipped: it needs s1:hearth, skipped because seed:hearth failed' "$tmp/session-fail.out" \
+  && grep -q 's2:other skipped: it needs s1:hearth, skipped because seed:hearth failed' "$tmp/session-fail.out" \
+  && ! grep -qE '^[0-9]+ start (s1:hearth|s2:)' "$fo/timeline.txt" \
+  && pass "the parts after it do not start, each says why (s1:hearth; size 2, after s1:hearth)" \
+  || fail "skipped parts: $(grep 'skipped' "$tmp/session-fail.out" | head -n 3)"
+indep=0
+for p in keycloak zitadel ory authentik; do
+  [ -s "$fo/seed-$p.json" ] && [ -s "$fo/$p-s1/login.json" ] && indep=$((indep + 1))
+done
+[ "$indep" = 4 ] && [ -s "$fo/drill.done" ] && [ "${started_after:-0}" -ge 1 ] \
+  && pass "the parts that do not need it start and finish (4 seeds, their size 1, the drill; $started_after started after the failure)" \
+  || fail "independent parts: $indep of 4 products, drill $([ -s "$fo/drill.done" ] && echo done), $started_after started after"
+grep -qF "  seed:hearth: failed (exit 1): $fo/driver-seed-hearth.log" "$tmp/session-fail.out" \
+  && grep -qF '  s1:hearth: skipped (seed:hearth failed)' "$tmp/session-fail.out" \
+  && grep -qF '  s2:other: skipped (seed:hearth failed)' "$tmp/session-fail.out" \
+  && grep -qF '  seed:authentik: done' "$tmp/session-fail.out" && grep -qF '  s1:ory: done' "$tmp/session-fail.out" \
+  && grep -qF '  drill: done' "$tmp/session-fail.out" \
+  && grep -q 'FAILED: seed:hearth; skipped: s1:hearth s2:hearth s2:other' "$tmp/session-fail.out" \
+  && [ ! -s "$fs/runs.active" ] && [ "$(ledger_open "$fs/ledger.jsonl")" = 0 ] \
+  && ! pgrep -f "$tmp/repo/loadtest/compare/aws/compare.sh" > /dev/null \
+  && pass "the session exits 1 with each part's end (done; failed and its log; skipped and why); nothing left up" \
+  || fail "the end of a session with a failed part: $(grep -v '^DRY' "$tmp/session-fail.out" | tail -n 4)"
+
+# The rerun (same SESSION) runs the failed part and the parts it skipped, and
+# nothing else.
+: > "$fo/timeline.txt"
+SESSION=drysf JOURNEYS=login step session-fail2 bash "$c" session || fail "the rerun after a failed part"
+started=$(awk '$2 == "start" {print $3}' "$fo/timeline.txt" | sort | tr '\n' ' ')
+once=0
+for p in keycloak zitadel ory authentik; do
+  [ "$(grep -c "seed $p on " "$fo/driver-seed-$p.log")" = 1 ] && once=$((once + 1))
+done
+[ "$started" = "s1:hearth s2:hearth s2:other seed:hearth " ] && [ "$once" = 4 ] \
+  && [ -s "$fo/hearth-s2/login.json" ] && [ -s "$fo/summary.md" ] && [ "$(ledger_open "$fs/ledger.jsonl")" = 0 ] \
+  && pass "rerun: only the failed part and the parts it skipped run, then the session is done" \
+  || fail "rerun after a failed part started: $started (seeds run once: $once of 4)"
+
+# After a part failed, the stop at STOP_USD still stops every part: the third
+# seed's snapshot ($0.20 a month each) passes $0.50, after Hearth's seed failed.
+sfs=$tmp/repo/loadtest/compare/.build/aws-drysfs
+SESSION=drysfs JOURNEYS=login STOP_USD=0.5 DRY_FAIL='remote.sh bind-hearth' try session-fail-stop bash "$c" session
+rc=$?
+failed_at=$(grep -n 'seed:hearth failed (exit 1)' "$tmp/session-fail-stop.out" | head -n 1 | cut -d: -f1)
+stopped_at=$(grep -n 'reached \$0.5' "$tmp/session-fail-stop.out" | head -n 1 | cut -d: -f1)
+[ "$rc" = 3 ] && [ -n "$failed_at" ] && [ -n "$stopped_at" ] && [ "$failed_at" -lt "$stopped_at" ] \
+  && [ ! -s "$sfs/runs.active" ] && [ "$(ledger_open "$sfs/ledger.jsonl")" = 0 ] \
+  && ! pgrep -f "$tmp/repo/loadtest/compare/aws/compare.sh" > /dev/null \
+  && pass "after a part failed, STOP_USD still stops every part (exit 3), every run down, every ledger entry closed" \
+  || fail "STOP_USD after a failed part (rc $rc, failure at line ${failed_at:-none}, stop at ${stopped_at:-none})"
 
 # No real tool ran: every call went through the shims.
 grep -q '^DRY ' "$tmp/dry/calls.log" && ! grep -q 'unknown tool' "$tmp/dry/calls.log" && pass "all calls went to the shims" \
