@@ -408,9 +408,14 @@ seed_on_server() {
     "$live/cloud.sh" import 0 1000000 > "$out/import-$p.json" 2>> "$log"
     t1=$(date +%s)
     # The seed's bundle goes with its store (keys, passwords); the ramp runs
-    # deploy it. The generator's copy of generator.env is the one in use.
-    cp -a "$run/bundle" "$state/hearth-bundle"
-    scp_from "$GEN_PUBLIC" /opt/stress/generator.env "$state/hearth-bundle/generator.env"
+    # deploy it. The generator's copy of generator.env is the one in use. It
+    # replaces an earlier attempt's bundle whole (`cp -a` into it would nest
+    # this one in it), and only once it is complete.
+    rm -rf "$state/hearth-bundle.new"
+    cp -a "$run/bundle" "$state/hearth-bundle.new"
+    scp_from "$GEN_PUBLIC" /opt/stress/generator.env "$state/hearth-bundle.new/generator.env"
+    rm -rf "$state/hearth-bundle"
+    mv "$state/hearth-bundle.new" "$state/hearth-bundle"
     list_ids "$p"
     t_usable=$(date +%s)
     settle=$(rsrv settle /var/lib/hearth)

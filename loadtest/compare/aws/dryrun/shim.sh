@@ -11,6 +11,9 @@
 # DRY_STS_FAIL=1 makes `aws sts get-caller-identity` fail, as after the login
 # has expired.
 #
+# DRY_FAIL=<text> makes an ssh or scp call whose command line contains <text>
+# fail (exit 1), as a remote step that breaks.
+#
 # The addresses handed out are documentation ranges, built at run time.
 set -uo pipefail
 
@@ -31,6 +34,7 @@ counter() {
     echo "$n"
   ) 9> "$state/n.lock"
 }
+fails() { [ -n "${DRY_FAIL:-}" ] && [[ $1 == *"$DRY_FAIL"* ]]; }
 public_ip() { printf '%d.%d.%d.%d' 198 51 100 "$1"; }
 private_ip() { printf '%d.%d.%d.%d' 10 0 0 "$1"; }
 
@@ -108,6 +112,7 @@ case $tool in
     log "ssh ${host:-?}: $(tr '\n' ' ' <<< "$cmd" | tr -s ' ' | cut -c1-400)"
     # Every remote command that reads stdin (cat > file, tar -x) gets it.
     [ -t 0 ] || cat > /dev/null
+    ! fails "$cmd" || exit 1
     case $cmd in
       *"date +%s"*) date +%s ;;
       *"/v1/metrics"*) exit 7 ;;
@@ -129,6 +134,7 @@ case $tool in
     args=()
     for a in "$@"; do args+=("$a"); done
     log "scp ${args[*]}"
+    ! fails "${args[*]}" || exit 1
     last=${args[-1]}
     src=${args[-2]}
     case $src in
