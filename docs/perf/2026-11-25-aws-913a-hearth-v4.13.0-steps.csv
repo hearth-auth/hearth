@@ -1,0 +1,165 @@
+size,server,journey,phase,offered_per_s,clean,reasons,error_pct,fail_classes,dropped,p99_ms,p99_budget_ms,server_cpu_pct,server_cpu_max_pct,server_rss_mb_max,disk_write_iops,generator_cpu_pct_busiest
+1,c7i.large,login,coarse,2,yes,,0.0,,0,106.8,1000,7.7,200,405.9,59.8,1.6
+1,c7i.large,login,coarse,4,yes,,0.0,,0,113.99,1000,16.2,200,420.8,119.9,1.4
+1,c7i.large,login,coarse,8,yes,,0.0,,0,115.61,1000,32.2,200,452.7,240.3,3.1
+1,c7i.large,login,coarse,16,yes,,0.0,,0,112.87,1000,63.5,200,515.7,478.9,5.2
+1,c7i.large,login,coarse,32,yes,,0.0,,0,184.72,1000,116.9,200,521.2,877.7,4.6
+1,c7i.large,login,coarse,64,no,errors 23.20%,23.2,login_submit:503x891,0,462.88,1000,154.7,200,546.7,884.5,9.0
+1,c7i.large,login,fine,40,yes,,0.0,,0,207.93,1000,141.1,200,531.4,883.6,6.6
+1,c7i.large,login,fine,48,yes,,0.0,,0,278.28,1000,152.5,200,553.7,888.0,7.7
+1,c7i.large,login,fine,56,no,errors 10.12%,10.12,login_submit:503x340,0,468.24,1000,152.6,200,577.1,886.7,8.5
+1,c7i.large,refresh,coarse,25,yes,,0.0,,0,9.03,100,4.0,200,470.2,75.4,4.8
+1,c7i.large,refresh,coarse,50,yes,,0.0,,0,8.93,100,6.7,200,474.6,151.3,5.3
+1,c7i.large,refresh,coarse,100,yes,,0.0,,0,8.59,100,11.1,200,482.6,300.2,6.4
+1,c7i.large,refresh,coarse,200,yes,,0.0,,0,8.15,100,17.6,200,496.2,600.4,12.8
+1,c7i.large,refresh,coarse,400,yes,,0.0,,0,26.5,100,33.4,200,516.6,905.8,17.2
+1,c7i.large,refresh,coarse,800,yes,,0.0,,0,56.19,100,61.0,200,549.5,904.7,28.3
+1,c7i.large,refresh,coarse,1600,yes,,0.01,503x12,0,40.47,100,116.0,200,621.5,766.8,44.3
+1,c7i.large,refresh,coarse,3200,no,errors 0.79%; 41897 dropped; p99 1444.48264 ms > 100 ms,0.79,503x1187,41897,1444.48,100,183.0,200,677.5,676.0,60.2
+1,c7i.large,refresh,fine,2000,no,errors 0.38%; p99 139.464546 ms > 100 ms,0.38,503x454,0,139.46,100,144.2,200,633.4,701.9,54.5
+1,c7i.large,client_credentials,coarse,25,yes,,0.0,,0,1.45,100,2.1,200,411.7,0.7,3.2
+1,c7i.large,client_credentials,coarse,50,yes,,0.0,,0,1.39,100,3.1,200,413.3,0.4,3.4
+1,c7i.large,client_credentials,coarse,100,yes,,0.0,,0,1.37,100,4.6,200,413.7,0.3,6.1
+1,c7i.large,client_credentials,coarse,200,yes,,0.0,,0,1.17,100,7.0,200,418.0,1.2,12.4
+1,c7i.large,client_credentials,coarse,400,yes,,0.0,,0,1.07,100,11.2,200,421.8,0.3,18.7
+1,c7i.large,client_credentials,coarse,800,yes,,0.0,,0,0.94,100,15.8,200,427.9,0.7,28.5
+1,c7i.large,client_credentials,coarse,1600,yes,,0.0,,0,0.85,100,23.7,200,435.7,0.7,49.9
+1,c7i.large,client_credentials,coarse,3200,yes,,0.0,,0,0.84,100,47.4,200,436.2,0.9,92.5
+1,c7i.large,userinfo,coarse,100,yes,,0.0,,0,1.35,50,3.8,200,416.8,0.8,6.2
+1,c7i.large,userinfo,coarse,200,yes,,0.0,,0,1.18,50,5.7,200,418.0,0.6,10.6
+1,c7i.large,userinfo,coarse,400,yes,,0.0,,0,1.04,50,8.8,200,422.3,0.4,17.9
+1,c7i.large,userinfo,coarse,800,yes,,0.0,,0,0.93,50,13.8,200,431.8,0.3,26.2
+1,c7i.large,userinfo,coarse,1600,yes,,0.0,,0,0.76,50,13.9,200,435.4,0.3,46.4
+1,c7i.large,userinfo,coarse,3200,yes,,0.0,,0,0.84,50,25.5,200,448.3,0.9,85.9
+1,c7i.large,userinfo,coarse,6400,yes,,0.0,,0,3.47,50,46.5,200,448.7,0.3,173.1
+1,c7i.large,userinfo,coarse,12800,no,754 dropped; p99 125.247185 ms > 50 ms,0.0,,754,125.25,50,125.2,200,448.9,0.3,339.0
+1,c7i.large,userinfo,fine,8000,yes,,0.0,,0,6.17,50,61.4,200,449.3,0.2,212.6
+1,c7i.large,userinfo,fine,9600,yes,,0.0,,0,7.24,50,79.5,200,448.7,1.4,252.7
+1,c7i.large,userinfo,fine,11200,yes,,0.0,,0,12.57,50,98.0,200,448.5,0.6,288.8
+1,c7i.large,introspect,coarse,100,yes,,0.0,,0,1.38,50,4.9,200,424.4,0.7,6.8
+1,c7i.large,introspect,coarse,200,yes,,0.0,,0,1.21,50,7.8,200,425.5,0.5,12.9
+1,c7i.large,introspect,coarse,400,yes,,0.0,,0,1.12,50,13.0,200,430.2,0.4,19.8
+1,c7i.large,introspect,coarse,800,yes,,0.0,,0,0.97,50,18.9,200,439.5,0.9,29.7
+1,c7i.large,introspect,coarse,1600,yes,,0.0,,0,1.01,50,29.3,200,438.8,0.4,53.0
+1,c7i.large,introspect,coarse,3200,yes,,0.0,,0,0.97,50,61.5,200,439.0,0.2,95.7
+1,c7i.large,introspect,coarse,6400,yes,,0.0,,0,30.57,50,139.1,200,439.3,0.3,194.5
+1,c7i.large,introspect,coarse,12800,no,274585 dropped; p99 691.303059 ms > 50 ms,0.0,,274585,691.3,50,196.2,200,439.0,0.9,247.2
+1,c7i.large,introspect,fine,8000,no,p99 242.377957 ms > 50 ms,0.0,,0,242.38,50,192.3,200,437.5,0.4,241.9
+1,c7i.large,admin_lookup,coarse,100,yes,,0.0,,0,1.25,50,3.6,200,415.6,0.9,6.8
+1,c7i.large,admin_lookup,coarse,200,yes,,0.0,,0,1.1,50,4.7,200,416.5,0.8,12.3
+1,c7i.large,admin_lookup,coarse,400,yes,,0.0,,0,0.99,50,7.4,200,420.9,0.7,19.0
+1,c7i.large,admin_lookup,coarse,800,yes,,0.0,,0,0.89,50,12.0,200,430.0,0.4,29.0
+1,c7i.large,admin_lookup,coarse,1600,yes,,0.0,,0,0.85,50,12.0,200,431.1,0.9,51.5
+1,c7i.large,admin_lookup,coarse,3200,yes,,0.0,,0,0.75,50,21.2,200,443.2,0.3,94.7
+1,c7i.large,admin_lookup,coarse,6400,yes,,0.0,,0,7.29,50,39.3,200,455.9,0.3,189.8
+1,c7i.large,admin_lookup,coarse,12800,yes,,0.0,,0,11.57,50,97.9,200,457.7,0.2,377.7
+1,c7i.large,create_user,coarse,25,yes,,0.0,,0,15.94,100,5.2,200,483.0,150.6,3.9
+1,c7i.large,create_user,coarse,50,yes,,0.0,,0,16.47,100,7.7,200,505.9,300.4,4.2
+1,c7i.large,create_user,coarse,100,yes,,0.0,,0,15.85,100,12.9,200,555.8,600.2,8.3
+1,c7i.large,create_user,coarse,200,yes,,0.0,,0,40.38,100,22.9,200,612.6,950.3,14.3
+1,c7i.large,create_user,coarse,400,yes,,0.0,,0,57.14,100,39.7,200,740.8,966.8,22.4
+1,c7i.large,create_user,coarse,800,yes,,0.0,,0,59.62,100,81.3,200,894.5,954.9,35.9
+1,c7i.large,create_user,coarse,1600,no,errors 1.42%,1.42,503x1360,0,53.46,100,133.8,200,1281.0,904.4,61.3
+1,c7i.large,create_user,fine,1000,yes,,0.09,503x52,0,59.67,100,92.4,200,960.6,923.7,41.7
+1,c7i.large,create_user,fine,1200,no,errors 0.15%,0.15,503x106,0,58.44,100,106.8,200,1285.6,952.1,45.7
+1,c7i.large,mix,coarse,5,yes,,0.0,,0,61.77,1000,2.8,200,426.9,32.4,3.6
+1,c7i.large,mix,coarse,10,yes,,0.0,,0,93.72,1000,5.6,200,450.9,62.1,6.8
+1,c7i.large,mix,coarse,20,yes,,0.0,,0,96.48,1000,11.1,200,480.2,132.0,8.0
+1,c7i.large,mix,coarse,40,yes,,0.0,,0,100.2,1000,20.5,200,487.0,259.1,4.9
+1,c7i.large,mix,coarse,80,yes,,0.0,,0,108.43,1000,38.7,200,505.4,481.7,5.3
+1,c7i.large,mix,coarse,160,yes,,0.0,,0,158.56,1000,84.9,200,531.0,766.7,10.4
+1,c7i.large,mix,coarse,320,no,errors 1.34%,1.34,login_submit:503x257,0,387.22,1000,160.8,200,575.2,842.0,14.7
+1,c7i.large,mix,fine,200,yes,,0.0,,0,172.13,1000,98.7,200,543.9,835.4,10.4
+1,c7i.large,mix,fine,240,yes,,0.0,,0,258.57,1000,126.4,200,580.0,849.8,14.0
+1,c7i.large,mix,fine,280,no,errors 0.18%,0.18,login_submit:503x30,0,323.82,1000,144.9,200,590.2,844.7,15.0
+1,c7i.large,cold100k,coarse,100,yes,,0.0,,0,1.52,50,4.8,200,422.6,0.3,5.9
+1,c7i.large,cold100k,coarse,200,yes,,0.0,,0,1.3,50,7.5,200,430.3,0.4,10.4
+1,c7i.large,cold100k,coarse,400,yes,,0.0,,0,1.02,50,9.8,200,443.8,0.8,17.2
+1,c7i.large,cold100k,coarse,800,yes,,0.0,,0,0.97,50,13.9,200,491.4,1.0,28.8
+1,c7i.large,cold100k,coarse,1600,yes,,0.0,,0,0.97,50,14.2,200,496.7,0.3,52.1
+1,c7i.large,cold100k,coarse,3200,yes,,0.0,,0,0.84,50,24.0,200,505.9,0.6,101.3
+1,c7i.large,cold100k,coarse,6400,yes,,0.0,,0,9.36,50,46.3,200,510.5,0.2,208.4
+1,c7i.large,cold100k,coarse,12800,no,p99 82.245031 ms > 50 ms,0.0,,0,82.25,50,106.3,200,512.5,0.9,392.9
+1,c7i.large,cold100k,fine,8000,yes,,0.0,,0,7.92,50,57.9,200,510.2,0.8,254.8
+1,c7i.large,cold100k,fine,9600,yes,,0.0,,0,8.82,50,69.8,200,511.9,0.4,301.1
+1,c7i.large,cold100k,fine,11200,yes,,0.0,,0,21.57,50,87.6,200,512.3,0.3,347.9
+1,c7i.large,cold1m,coarse,100,yes,,0.0,,0,1.33,50,4.3,200,422.6,0.3,5.5
+1,c7i.large,cold1m,coarse,200,yes,,0.0,,0,1.21,50,7.1,200,430.6,0.3,9.1
+1,c7i.large,cold1m,coarse,400,yes,,0.0,,0,1.06,50,10.4,200,443.9,0.4,16.1
+1,c7i.large,cold1m,coarse,800,yes,,0.0,,0,0.96,50,12.7,200,492.5,1.0,28.3
+1,c7i.large,cold1m,coarse,1600,yes,,0.0,,0,0.99,50,14.0,200,529.4,0.7,52.1
+1,c7i.large,cold1m,coarse,3200,yes,,0.0,,0,0.85,50,25.2,200,600.4,0.4,98.7
+1,c7i.large,cold1m,coarse,6400,yes,,0.0,,0,8.55,50,51.8,200,743.5,0.3,206.0
+1,c7i.large,cold1m,coarse,12800,no,7089 dropped; p99 122.821668 ms > 50 ms,0.0,,7089,122.82,50,129.7,200,952.1,0.9,390.6
+1,c7i.large,cold1m,fine,8000,yes,,0.0,,0,8.83,50,69.7,200,825.0,0.3,250.5
+1,c7i.large,cold1m,fine,9600,yes,,0.0,,0,19.64,50,88.4,200,946.4,1.0,297.3
+1,c7i.large,cold1m,fine,11200,yes,,0.0,,0,21.51,50,109.1,200,893.5,0.7,342.5
+2,c7i.2xlarge,login,coarse,2,yes,,0.0,,0,134.7,1000,5.4,800,451.0,36.2,1.5
+2,c7i.2xlarge,login,coarse,4,yes,,0.0,,0,136.52,1000,10.8,800,466.3,74.9,1.0
+2,c7i.2xlarge,login,coarse,8,yes,,0.0,,0,132.34,1000,20.4,800,499.8,149.3,2.2
+2,c7i.2xlarge,login,coarse,16,yes,,0.0,,0,130.45,1000,40.2,800,563.6,287.0,2.8
+2,c7i.2xlarge,login,coarse,32,yes,,0.0,,0,128.69,1000,78.5,800,646.8,588.3,4.9
+2,c7i.2xlarge,login,coarse,64,yes,,0.0,,0,203.42,1000,152.6,800,672.5,878.0,6.6
+2,c7i.2xlarge,login,coarse,128,yes,,0.0,,0,180.2,1000,287.0,800,755.4,894.2,9.9
+2,c7i.2xlarge,login,coarse,256,no,errors 15.27%,15.27,login_submit:503x2345,0,396.01,1000,564.9,800,865.1,812.4,15.4
+2,c7i.2xlarge,login,fine,160,yes,,0.0,,0,170.91,1000,365.5,800,803.2,902.5,12.2
+2,c7i.2xlarge,login,fine,192,yes,,0.0,,0,156.34,1000,484.4,800,872.5,860.7,12.5
+2,c7i.2xlarge,login,fine,224,no,errors 3.56%,3.56,login_submit:503x478,0,394.7,1000,561.8,800,879.2,808.9,14.8
+2,c7i.2xlarge,refresh,coarse,25,yes,,0.0,,0,12.6,100,3.8,800,492.7,45.8,9.4
+2,c7i.2xlarge,refresh,coarse,50,yes,,0.0,,0,12.33,100,5.4,800,520.3,80.9,4.7
+2,c7i.2xlarge,refresh,coarse,100,yes,,0.0,,0,12.25,100,8.5,800,528.4,156.4,4.9
+2,c7i.2xlarge,refresh,coarse,200,yes,,0.0,,0,12.47,100,14.0,800,555.7,322.7,5.2
+2,c7i.2xlarge,refresh,coarse,400,yes,,0.0,,0,19.82,100,26.5,800,574.9,666.2,9.7
+2,c7i.2xlarge,refresh,coarse,800,yes,,0.0,,0,61.12,100,50.7,800,615.4,833.5,14.3
+2,c7i.2xlarge,refresh,coarse,1600,yes,,0.0,,0,55.86,100,95.5,800,693.8,855.3,24.3
+2,c7i.2xlarge,refresh,coarse,3200,no,errors 0.20%,0.2,503x386,0,9.78,100,176.9,800,751.0,875.6,41.8
+2,c7i.2xlarge,refresh,fine,2000,no,errors 0.11%,0.11,503x137,0,9.8,100,118.4,800,699.1,869.0,28.1
+2,c7i.2xlarge,client_credentials,coarse,25,yes,,0.0,,0,1.51,100,2.5,800,452.1,0.3,2.8
+2,c7i.2xlarge,client_credentials,coarse,50,yes,,0.0,,0,1.38,100,2.9,800,476.7,0.3,2.3
+2,c7i.2xlarge,client_credentials,coarse,100,yes,,0.0,,0,1.4,100,3.8,800,480.1,0.8,4.1
+2,c7i.2xlarge,client_credentials,coarse,200,yes,,0.0,,0,1.3,100,4.8,800,482.0,0.6,5.9
+2,c7i.2xlarge,client_credentials,coarse,400,yes,,0.0,,0,1.23,100,8.5,800,489.6,3.1,9.0
+2,c7i.2xlarge,client_credentials,coarse,800,yes,,0.0,,0,1.19,100,15.2,800,498.4,1.2,15.5
+2,c7i.2xlarge,client_credentials,coarse,1600,yes,,0.0,,0,1.11,100,25.2,800,511.6,0.2,25.9
+2,c7i.2xlarge,client_credentials,coarse,3200,yes,,0.0,,0,1.05,100,47.7,800,525.2,0.8,45.9
+2,c7i.2xlarge,userinfo,coarse,100,yes,,0.0,,0,1.22,50,3.0,800,481.9,0.7,2.9
+2,c7i.2xlarge,userinfo,coarse,200,yes,,0.0,,0,1.18,50,4.1,800,486.1,0.3,5.8
+2,c7i.2xlarge,userinfo,coarse,400,yes,,0.0,,0,1.12,50,7.0,800,487.3,0.1,8.3
+2,c7i.2xlarge,userinfo,coarse,800,yes,,0.0,,0,1.1,50,12.7,800,497.9,0.9,14.9
+2,c7i.2xlarge,userinfo,coarse,1600,yes,,0.0,,0,1.04,50,17.6,800,517.2,0.3,25.2
+2,c7i.2xlarge,userinfo,coarse,3200,yes,,0.0,,0,0.96,50,30.3,800,526.6,0.2,43.5
+2,c7i.2xlarge,userinfo,coarse,6400,yes,,0.0,,0,0.96,50,57.4,800,548.9,0.4,82.2
+2,c7i.2xlarge,userinfo,coarse,12800,yes,,0.0,,0,2.23,50,90.0,800,550.5,0.8,171.9
+2,c7i.2xlarge,introspect,coarse,100,yes,,0.0,,0,1.47,50,3.9,800,482.1,0.6,3.3
+2,c7i.2xlarge,introspect,coarse,200,yes,,0.0,,0,1.39,50,5.7,800,502.4,0.3,6.2
+2,c7i.2xlarge,introspect,coarse,400,yes,,0.0,,0,1.32,50,10.2,800,503.0,0.4,9.3
+2,c7i.2xlarge,introspect,coarse,800,yes,,0.0,,0,1.28,50,19.6,800,512.9,0.8,14.6
+2,c7i.2xlarge,introspect,coarse,1600,yes,,0.0,,0,1.19,50,33.2,800,533.4,0.3,25.4
+2,c7i.2xlarge,introspect,coarse,3200,yes,,0.0,,0,1.11,50,60.8,800,530.6,0.3,47.9
+2,c7i.2xlarge,introspect,coarse,6400,yes,,0.0,,0,1.05,50,121.5,800,531.3,0.4,86.3
+2,c7i.2xlarge,introspect,coarse,12800,yes,,0.0,,0,2.24,50,242.0,800,532.2,0.8,186.8
+2,c7i.2xlarge,admin_lookup,coarse,100,yes,,0.0,,0,1.18,50,2.6,800,481.1,0.9,3.1
+2,c7i.2xlarge,admin_lookup,coarse,200,yes,,0.0,,0,1.17,50,3.3,800,484.8,0.3,5.8
+2,c7i.2xlarge,admin_lookup,coarse,400,yes,,0.0,,0,1.11,50,5.4,800,486.8,0.7,10.1
+2,c7i.2xlarge,admin_lookup,coarse,800,yes,,0.0,,0,1.1,50,10.0,800,495.5,0.8,15.3
+2,c7i.2xlarge,admin_lookup,coarse,1600,yes,,0.0,,0,1.01,50,15.5,800,517.1,0.9,26.3
+2,c7i.2xlarge,admin_lookup,coarse,3200,yes,,0.0,,0,0.99,50,26.8,800,515.5,1.2,48.8
+2,c7i.2xlarge,admin_lookup,coarse,6400,yes,,0.0,,0,0.94,50,49.3,800,538.3,3.1,91.0
+2,c7i.2xlarge,admin_lookup,coarse,12800,yes,,0.0,,0,7.53,50,81.5,800,565.3,0.4,192.7
+2,c7i.2xlarge,create_user,coarse,25,yes,,0.0,,0,18.66,100,5.2,800,526.6,76.8,3.0
+2,c7i.2xlarge,create_user,coarse,50,yes,,0.0,,0,17.95,100,6.6,800,575.5,151.8,2.7
+2,c7i.2xlarge,create_user,coarse,100,yes,,0.0,,0,17.71,100,10.6,800,627.6,302.2,4.7
+2,c7i.2xlarge,create_user,coarse,200,yes,,0.0,,0,18.42,100,20.2,800,687.9,607.7,7.1
+2,c7i.2xlarge,create_user,coarse,400,yes,,0.0,,0,35.92,100,37.1,800,810.4,841.8,11.8
+2,c7i.2xlarge,create_user,coarse,800,yes,,0.0,,0,68.67,100,79.9,800,991.1,842.4,18.7
+2,c7i.2xlarge,create_user,coarse,1600,no,errors 1.13%,1.13,503x1087,0,61.75,100,125.2,800,1354.2,891.1,31.4
+2,c7i.2xlarge,create_user,fine,1000,yes,,0.07,503x40,0,67.29,100,90.1,800,1078.9,841.1,22.9
+2,c7i.2xlarge,create_user,fine,1200,no,errors 0.27%,0.27,503x191,0,66.44,100,103.5,800,1386.1,875.0,26.4
+2,c7i.2xlarge,mix,coarse,5,yes,,0.0,,0,95.79,1000,2.2,800,449.9,25.3,2.8
+2,c7i.2xlarge,mix,coarse,10,yes,,0.0,,0,97.98,1000,4.7,800,472.0,59.5,4.8
+2,c7i.2xlarge,mix,coarse,20,yes,,0.0,,0,98.48,1000,9.3,800,515.7,122.5,8.0
+2,c7i.2xlarge,mix,coarse,40,yes,,0.0,,0,100.12,1000,17.3,800,590.2,245.5,9.9
+2,c7i.2xlarge,mix,coarse,80,yes,,0.0,,0,110.05,1000,31.1,800,606.1,454.8,4.5
+2,c7i.2xlarge,mix,coarse,160,yes,,0.0,,0,141.07,1000,55.7,800,644.2,697.0,7.0
+2,c7i.2xlarge,mix,coarse,320,yes,,0.0,,0,146.68,1000,115.8,800,742.0,856.1,9.1
+2,c7i.2xlarge,mix,coarse,640,yes,,0.0,,0,136.91,1000,246.2,800,849.5,865.5,14.6
