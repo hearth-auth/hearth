@@ -203,7 +203,7 @@ A removed ID is kept in a replicated retired-ID set (a system meta row, not in `
 
 ### 12. Fit with `cluster-read-fencing`
 
-That change (parked, now being resumed) closes reads during a snapshot install and records leader contact in `server.rs`. This change adds identity checks in `server.rs` and depends on P-2, which rewrites `install_snapshot`. Rules: the identity check runs before the contact is recorded (an RPC from the wrong node is not contact); P-2 closes the read gate before its first delete, as `cluster-read-fencing` requires of today's Phase 1. A learner that is out of contact or installing a snapshot is refused reads under that change; this change does not alter the gate.
+That change (merged and archived 2026-11-27, as is P-2's `cluster-file-snapshots`) closes reads during a snapshot install and records leader contact in `server.rs`. This change adds identity checks in `server.rs` and depends on P-2, which rewrites `install_snapshot`. Rules: the identity check runs before the contact is recorded (an RPC from the wrong node is not contact); P-2 closes the read gate before its first delete, as `cluster-read-fencing` requires of today's Phase 1. A learner that is out of contact or installing a snapshot is refused reads under that change; this change does not alter the gate.
 
 ## Failure cases
 
