@@ -527,12 +527,16 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
         // The whole key-space was replaced — node-local projections derived
         // from it (revoked-JTI blocklist, …) must be rebuilt from storage
         // (audit 2026-08-28 §4.16#5). The rebuild scans storage, so it runs
-        // on the blocking pool like the restore itself.
+        // on the blocking pool like the restore itself, and reads the local
+        // engine: the gate refuses every read until the install ends. A
+        // failed rebuild fails the install, so the gate stays closed (R4).
         if let Some(obs) = self.observer.get() {
             let obs = Arc::clone(obs);
-            spawn_blocking(move || obs.on_replicated_reset())
+            let engine = Arc::clone(&self.engine);
+            spawn_blocking(move || obs.on_replicated_reset(engine.as_ref()))
                 .await
-                .map_err(join_err)?;
+                .map_err(join_err)?
+                .map_err(|e| io_write_err(std::io::Error::other(e)))?;
         }
 
         self.last_applied = meta.last_log_id;

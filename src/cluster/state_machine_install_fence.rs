@@ -7,7 +7,8 @@
 //!
 //! The storage stub records whether the gate allowed a read when Phase 2
 //! starts, which is the point between the two phases; the observer stub
-//! records it when the cache rebuild runs.
+//! records it when the cache rebuild runs, and what the store it is handed
+//! holds then.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -121,20 +122,36 @@ impl StorageEngine for PhaseStorage {
     }
 }
 
-/// Records whether the gate allowed a read while caches were rebuilt.
+/// Records whether the gate allowed a read while caches were rebuilt, and
+/// the snapshot's key as the store handed to the rebuild reads it. Fails
+/// the rebuild while `fail` is set.
 struct ResetObserver {
     gate: Arc<ReadGate>,
     seen_at_reset: Mutex<Vec<bool>>,
+    read_at_reset: Mutex<Vec<Option<Vec<u8>>>>,
+    fail: AtomicBool,
 }
 
 impl ReplicatedWriteObserver for ResetObserver {
     fn on_replicated_put(&self, _: &RealmId, _: &[u8], _: &[u8]) {}
     fn on_replicated_delete(&self, _: &RealmId, _: &[u8]) {}
-    fn on_replicated_reset(&self) {
+    fn on_replicated_reset(
+        &self,
+        store: &dyn StorageEngine,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.seen_at_reset
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(self.gate.allows());
+        let read = store.get(&RealmId::new(Uuid::from_u128(7)), b"new")?;
+        self.read_at_reset
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(read);
+        if self.fail.load(Ordering::SeqCst) {
+            return Err("rebuild fails".into());
+        }
+        Ok(())
     }
     fn on_leadership_acquired(&self) {}
 }
@@ -158,6 +175,8 @@ async fn fixture() -> Fixture {
     let observer = Arc::new(ResetObserver {
         gate: Arc::clone(&gate),
         seen_at_reset: Mutex::new(Vec::new()),
+        read_at_reset: Mutex::new(Vec::new()),
+        fail: AtomicBool::new(false),
     });
     let slot: Arc<OnceLock<Arc<dyn ReplicatedWriteObserver>>> = Arc::new(OnceLock::new());
     let _ = slot.set(Arc::clone(&observer) as Arc<dyn ReplicatedWriteObserver>);
@@ -232,6 +251,14 @@ async fn an_install_fences_reads_until_a_contact_after_it() {
 
     assert_eq!(seen(&f.storage.seen_between_phases), [false]);
     assert_eq!(seen(&f.observer.seen_at_reset), [false]);
+    assert_eq!(
+        *f.observer
+            .read_at_reset
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner),
+        [Some(b"v".to_vec())],
+        "the rebuild reads the installed snapshot through the gate it closed"
+    );
     assert!(!f.gate.allows(), "the end of an install opens nothing");
     assert_eq!(
         f.gate.refusal_at(f.gate.now_ms()),
@@ -257,6 +284,30 @@ async fn a_failed_install_leaves_the_gate_closed() {
     );
     f.gate.record_contact_at(f.gate.now_ms());
     assert!(!f.gate.allows(), "no contact reopens a failed install");
+    assert_eq!(
+        f.gate.refusal_at(f.gate.now_ms()),
+        Some(Refusal::InstallingSnapshot)
+    );
+}
+
+/// `cluster-consistency` R4: a failed cache rebuild fails the install and
+/// leaves the gate closed. A node that reopened then would serve credentials
+/// from caches that predate the snapshot.
+#[tokio::test]
+async fn a_failed_cache_rebuild_fails_the_install_and_leaves_the_gate_closed() {
+    let mut f = fixture().await;
+    let snap = snapshot_from(f.dirs[1].path()).await;
+    let snap = super::tests::transfer(&mut f.sm, snap).await;
+    f.observer.fail.store(true, Ordering::SeqCst);
+
+    let result = f.sm.install_snapshot(&snap.meta, snap.snapshot).await;
+
+    assert!(
+        result.is_err_and(|e| e.to_string().contains("rebuild fails")),
+        "a failed rebuild fails the install"
+    );
+    f.gate.record_contact_at(f.gate.now_ms());
+    assert!(!f.gate.allows(), "no contact reopens it");
     assert_eq!(
         f.gate.refusal_at(f.gate.now_ms()),
         Some(Refusal::InstallingSnapshot)

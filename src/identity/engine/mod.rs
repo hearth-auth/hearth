@@ -1271,29 +1271,29 @@ impl crate::cluster::ReplicatedWriteObserver for EmbeddedIdentityEngine {
         self.control.on_leadership_acquired();
     }
 
-    fn on_replicated_reset(&self) {
+    fn on_replicated_reset(
+        &self,
+        store: &dyn StorageEngine,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.rbac.on_replicated_snapshot();
         self.audit.on_replicated_snapshot();
         // The whole key-space was replaced: rebuild every control cache. This
         // runs on the blocking pool (see the state machine), so reloading
-        // inline is fine; on failure the background reloader keeps retrying.
-        // The snapshot may carry a lower control epoch than this node had
-        // recorded, so the reload re-bases the epoch bookkeeping on it.
-        // On a cluster node the read gate is closed for the whole install,
-        // so this reload is refused and the background reloader rebuilds the
-        // caches as soon as the gate reopens (OpenSpec change
-        // `cluster-read-fencing`).
-        match self.control.reload_after_reset() {
-            Ok(()) => {}
-            Err(e) if control::is_read_fence(&e) => tracing::debug!(
+        // inline is fine. The snapshot may carry a lower control epoch than
+        // this node had recorded, so the reload re-bases the epoch
+        // bookkeeping on it. It reads `store`, not the gated storage: the
+        // read gate refuses every read for the whole install, and must not
+        // reopen before the caches show the snapshot (OpenSpec change
+        // `cluster-read-fencing`, R4). On failure the install fails and the
+        // gate stays closed; a reset reload is queued for the background
+        // reloader all the same.
+        self.control.reload_after_reset(store).map_err(|e| {
+            tracing::error!(
                 error = %e,
-                "control caches are rebuilt once the read gate reopens after the snapshot install"
-            ),
-            Err(e) => tracing::error!(
-                error = %e,
-                "failed to rebuild the control caches after snapshot install; retrying"
-            ),
-        }
+                "failed to rebuild the control caches after snapshot install"
+            );
+            Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+        })
     }
 }
 
