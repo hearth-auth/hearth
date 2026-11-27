@@ -328,7 +328,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// Whether `err` is a cluster node's read gate refusing the read: the node is
 /// out of contact with its leader, still applying a backlog, or installing a
 /// snapshot (OpenSpec change `cluster-read-fencing`).
-pub(super) fn is_read_fence(err: &IdentityError) -> bool {
+fn is_read_fence(err: &IdentityError) -> bool {
     use crate::storage::{ClusterUnavailableCause as Cause, StorageError};
     let IdentityError::Storage(source) = err else {
         return false;
@@ -689,13 +689,19 @@ impl ControlPlane {
     ///
     /// The first storage or decoding error of the scan.
     pub(super) fn reload(&self) -> Result<(), IdentityError> {
-        self.reload_inner(false)
+        self.reload_inner(self.storage.as_ref(), false)
     }
 
     /// [`Self::reload`] after the whole key space was replaced (a Raft
-    /// snapshot install). The persisted epoch may now be LOWER than the one
-    /// these caches recorded — the snapshot came from a node whose count was
-    /// behind this one's — so the bookkeeping is re-based on the epoch read:
+    /// snapshot install), reading `store`: this node's own storage, which the
+    /// read gate does not fence. The gate refuses every read until the
+    /// install ends, so the reload cannot go through the engine's storage,
+    /// and the gate must not reopen before the caches show the snapshot
+    /// (`cluster-consistency` R4).
+    ///
+    /// The persisted epoch may now be LOWER than the one these caches
+    /// recorded — the snapshot came from a node whose count was behind this
+    /// one's — so the bookkeeping is re-based on the epoch read:
     /// `applied` and `target` are set to it and the parked local epochs are
     /// dropped. Keeping the old, higher `applied` would make every later
     /// control at or below it look already applied, and it would never bind
@@ -711,8 +717,11 @@ impl ControlPlane {
     /// # Errors
     ///
     /// The first storage or decoding error of the scan.
-    pub(super) fn reload_after_reset(&self) -> Result<(), IdentityError> {
-        let outcome = self.reload_inner(true);
+    pub(super) fn reload_after_reset(
+        &self,
+        store: &dyn StorageEngine,
+    ) -> Result<(), IdentityError> {
+        let outcome = self.reload_inner(store, true);
         if outcome.is_err() {
             self.reset.store(true, Ordering::Release);
             self.request_full_reload();
@@ -720,9 +729,9 @@ impl ControlPlane {
         outcome
     }
 
-    fn reload_inner(&self, reset: bool) -> Result<(), IdentityError> {
+    fn reload_inner(&self, storage: &dyn StorageEngine, reset: bool) -> Result<(), IdentityError> {
         let _exclusive = lock(&self.reload_exclusive);
-        let scan = self.scan_recording()?;
+        let scan = self.scan_recording(storage)?;
         let mut revoked = self.caches.revoked_jti.prepare(scan.revoked_jti);
         let mut blocked = self
             .caches
@@ -779,7 +788,7 @@ impl ControlPlane {
             // re-read and signal, so it still causes a reload. If the re-read
             // fails that control could go unnoticed: queue another reset
             // reload, which re-reads (and retries with backoff) in turn.
-            match self.read_persisted_epoch() {
+            match Self::read_persisted_epoch(storage) {
                 Ok(persisted) => self.signal(persisted),
                 Err(e) => {
                     tracing::warn!(
@@ -803,17 +812,17 @@ impl ControlPlane {
 
     /// Reads the persisted epoch, starts recording, and scans. Stops recording
     /// again if the scan fails.
-    fn scan_recording(&self) -> Result<Scan, IdentityError> {
+    fn scan_recording(&self, storage: &dyn StorageEngine) -> Result<Scan, IdentityError> {
         // Read before the scan: a control bumped after this read may be
         // missing from the scan, and must leave the persisted epoch ahead of
         // what this reload records, so that it causes another one.
-        let epoch = self.read_persisted_epoch()?;
+        let epoch = Self::read_persisted_epoch(storage)?;
         {
             let mut journal = lock(&self.journal);
             journal.recording = true;
             journal.ops.clear();
         }
-        let scanned = self.scan(epoch);
+        let scanned = self.scan(storage, epoch);
         #[cfg(test)]
         {
             let hook = lock(&self.scan_hook).clone();
@@ -829,8 +838,8 @@ impl ControlPlane {
         scanned
     }
 
-    fn scan(&self, epoch: u64) -> Result<Scan, IdentityError> {
-        let realms = self.scan_realms()?;
+    fn scan(&self, storage: &dyn StorageEngine, epoch: u64) -> Result<Scan, IdentityError> {
+        let realms = Self::scan_realms(storage)?;
         let mut realm_status = HashMap::new();
         for realm in &realms {
             if !keys::is_system_realm(realm.id()) {
@@ -850,14 +859,13 @@ impl ControlPlane {
         Ok(Scan {
             epoch,
             realm_status,
-            revoked_jti: self.scan_revoked_jtis(&realm_ids)?,
-            blocked_jkt: self.scan_blocked_jkts(&realm_ids)?,
+            revoked_jti: self.scan_revoked_jtis(storage, &realm_ids)?,
+            blocked_jkt: Self::scan_blocked_jkts(storage, &realm_ids)?,
         })
     }
 
-    fn read_persisted_epoch(&self) -> Result<u64, IdentityError> {
-        let raw = self
-            .storage
+    fn read_persisted_epoch(storage: &dyn StorageEngine) -> Result<u64, IdentityError> {
+        let raw = storage
             .get(&keys::system_realm_id(), &keys::encode_control_epoch())
             .map_err(|e| IdentityError::Storage(Box::new(e)))?;
         crate::storage::decode_u64_counter(raw.as_deref())
@@ -866,12 +874,11 @@ impl ControlPlane {
 
     /// Every realm record. Fail-closed: a corrupted record is an error, not a
     /// realm silently missing from the status cache (which reads as active).
-    fn scan_realms(&self) -> Result<Vec<Realm>, IdentityError> {
+    fn scan_realms(storage: &dyn StorageEngine) -> Result<Vec<Realm>, IdentityError> {
         let sys_realm = keys::system_realm_id();
         let prefix = keys::realm_id_scan_prefix();
         let end = keys::prefix_end(&prefix);
-        let entries = self
-            .storage
+        let entries = storage
             .scan(&sys_realm, &prefix, &end)
             .map_err(|e| IdentityError::Storage(Box::new(e)))?;
         entries
@@ -894,14 +901,17 @@ impl ControlPlane {
     /// `oauth:revjti:*` in every realm, minus entries already expired. Two
     /// value formats: an 8-byte little-endian expiry, or the legacy `b"1"`
     /// (no expiry; never self-evicts — the `exp` claim check catches it).
-    fn scan_revoked_jtis(&self, realms: &[RealmId]) -> Result<HashMap<String, i64>, IdentityError> {
+    fn scan_revoked_jtis(
+        &self,
+        storage: &dyn StorageEngine,
+        realms: &[RealmId],
+    ) -> Result<HashMap<String, i64>, IdentityError> {
         let now_secs = self.clock.now().as_micros() / 1_000_000;
         let prefix = keys::revoked_jti_scan_prefix();
         let end = keys::prefix_end(&prefix);
         let mut map = HashMap::new();
         for realm in realms {
-            let entries = self
-                .storage
+            let entries = storage
                 .scan(realm, &prefix, &end)
                 .map_err(|e| IdentityError::Storage(Box::new(e)))?;
             for entry in entries {
@@ -917,13 +927,15 @@ impl ControlPlane {
     }
 
     /// `agt:dpop:block:jkt:*` in every realm.
-    fn scan_blocked_jkts(&self, realms: &[RealmId]) -> Result<HashSet<String>, IdentityError> {
+    fn scan_blocked_jkts(
+        storage: &dyn StorageEngine,
+        realms: &[RealmId],
+    ) -> Result<HashSet<String>, IdentityError> {
         let prefix = keys::blocked_dpop_jkt_scan_prefix();
         let end = keys::prefix_end(&prefix);
         let mut set = HashSet::new();
         for realm in realms {
-            let entries = self
-                .storage
+            let entries = storage
                 .scan(realm, &prefix, &end)
                 .map_err(|e| IdentityError::Storage(Box::new(e)))?;
             for entry in entries {
@@ -1041,12 +1053,14 @@ impl ControlPlane {
             let forced = self.force.swap(false, Ordering::AcqRel);
             let reset = forced && self.reset.swap(false, Ordering::AcqRel);
             last_start = Some(Instant::now());
-            let outcome = catch_unwind(AssertUnwindSafe(|| self.reload_inner(reset)))
-                .unwrap_or_else(|_| {
-                    Err(IdentityError::Internal {
-                        reason: "control-cache reload panicked".to_string(),
-                    })
-                });
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                self.reload_inner(self.storage.as_ref(), reset)
+            }))
+            .unwrap_or_else(|_| {
+                Err(IdentityError::Internal {
+                    reason: "control-cache reload panicked".to_string(),
+                })
+            });
             match outcome {
                 Ok(()) => {
                     backoff = RETRY_MIN;
@@ -1068,8 +1082,12 @@ impl ControlPlane {
                     // contact resumes, and then serves at once: backing off
                     // would leave every control applied meanwhile unbound for
                     // up to RETRY_MAX after the node serves again. Validation
-                    // is refused while the gate is closed, so nothing is
-                    // served from the stale caches until then.
+                    // is refused while the gate is closed; once contact
+                    // resumes it serves these caches until this retry lands
+                    // (RETRY_MIN, RELOAD_MIN_SPACING and one scan later). A
+                    // snapshot install does not rely on this: it rebuilds the
+                    // caches from the local engine before its gate can
+                    // reopen (`on_replicated_reset`).
                     if is_read_fence(&err) {
                         tracing::debug!(
                             error = %err,

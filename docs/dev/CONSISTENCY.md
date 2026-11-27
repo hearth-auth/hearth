@@ -140,6 +140,17 @@ Evidence:
   `replication_lag` or `installing_snapshot`. The heartbeat is 250 ms and the threshold may not
   be below 500 ms, so a healthy follower stays in contact between heartbeats. No read uses
   `ensure_linearizable` or a read index: R2 is bounded staleness, not linearizability.
+- **R2 assumption (contact check, `cluster-read-fencing`).** A follower counts an
+  `AppendEntries` as contact only if a quorum acknowledged its leader less than 2,000 ms
+  (lease − 1 s) before it was sent. That excludes a deposed leader only if the request reaches
+  the follower **within 1 s of being sent**. Hearth assumes this and does not enforce it:
+  openraft's call timeout stops the sender waiting, not a request already on the wire (for
+  example one held in a TCP buffer during a partition and delivered when it heals). If a
+  deposed leader's request arrives `d` > 1 s after it was sent, at a follower that has not yet
+  learned the new term, the follower counts it as contact. For `read_lag_threshold_ms` after
+  that arrival its reads can miss writes the new leader acknowledged, so R2's bound is exceeded
+  by up to `d` − 1 s. The follower refuses the deposed leader's requests once it learns the new
+  term.
 - **R3, R4.** `install_snapshot` sets the gate's install hold before Phase 1 of
   `restore_snapshot_in_place` deletes a key. It clears the hold only after `on_replicated_reset`
   has rebuilt the node-local caches, and leaves the deadline at zero, so only an

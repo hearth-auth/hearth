@@ -462,6 +462,67 @@ fn reload_after_a_read_fence(cause: crate::storage::ClusterUnavailableCause) {
     );
 }
 
+/// `cluster-consistency` R4 and V2: a snapshot install rebuilds the control
+/// caches before the read gate reopens, so the first credential check after
+/// the install already sees what the snapshot carries. The rebuild read
+/// through the gated storage, which refuses every read for the whole
+/// install, so it always failed and was left to the background reloader:
+/// for 100-300 ms after the next heartbeat the node accepted a token of a
+/// realm the snapshot had suspended.
+///
+/// The snapshot's suspension is one this node never applied as a log entry,
+/// and the snapshot's control epoch is no higher than this node's, so the
+/// epoch sync does not catch it either. The background reloader is stopped:
+/// the install must rebuild the caches by itself.
+#[test]
+fn a_snapshot_install_rebuilds_the_control_caches_before_the_gate_reopens() {
+    use crate::storage::ClusterUnavailableCause as Cause;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shared = open_storage(&dir);
+    let fault = FaultStorage::over(Arc::clone(&shared));
+    let validator_storage = Arc::clone(&fault) as Arc<dyn StorageEngine>;
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+
+    let other_node = engine_over(&shared, &clock);
+    let (realm, token) = seed_token(&other_node);
+    let mut validator = engine_over(&validator_storage, &clock);
+    stop_background_reloader(&mut validator);
+    validator.validate_token(&realm, &token).expect("warm");
+
+    // The install: the gate refuses every read while the snapshot, which
+    // carries the suspension and this node's own epoch, replaces the store.
+    *fault
+        .fence_scans
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Cause::InstallingSnapshot);
+    suspend(&other_node, &realm);
+    shared
+        .put(
+            &keys::system_realm_id(),
+            &keys::encode_control_epoch(),
+            &validator.control.applied_epoch().to_le_bytes(),
+        )
+        .expect("snapshot-installed epoch");
+    validator
+        .on_replicated_reset(shared.as_ref())
+        .expect("rebuild from the local engine");
+
+    // The gate reopens: the very first check refuses the token.
+    *fault
+        .fence_scans
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    clock.advance(EPOCH_SYNC_INTERVAL_MICROS + 1);
+    let first = validator.validate_token(&realm, &token);
+    assert!(
+        matches!(first, Err(IdentityError::RealmSuspended)),
+        "the first check after the install accepted a token of a realm the snapshot suspended: \
+         {:?}",
+        first.map(|_| "accepted")
+    );
+}
+
 /// A replicated revoked-JTI row is projected into the cache and nothing else:
 /// no storage write, so no epoch bump and no Raft proposal from inside the
 /// state machine's own apply.
@@ -720,7 +781,8 @@ fn a_control_after_a_snapshot_lowered_the_epoch_still_binds() {
     storage
         .put(&sys, &epoch_key, &(high - 5).to_le_bytes())
         .expect("snapshot-installed epoch");
-    node.on_replicated_reset();
+    node.on_replicated_reset(storage.as_ref())
+        .expect("rebuild after the reset");
 
     // Another node suspends the realm: one bump above the snapshot's epoch,
     // still below the old high-water mark.
@@ -897,7 +959,7 @@ fn a_failed_epoch_reread_after_a_reset_requeues_the_reset() {
         corrupting.put(&sys_h, &key_h, b"bad").expect("corrupt");
     })));
     assert!(!node.control.reset_reload_queued_for_test());
-    let _ = node.control.reload_after_reset();
+    let _ = node.control.reload_after_reset(storage.as_ref());
     node.control.set_scan_hook(None);
     assert!(
         node.control.reset_reload_queued_for_test(),
