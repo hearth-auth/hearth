@@ -23,6 +23,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   `leader_quorum_ack_age_ms`. A node of this release counts no contact from an older-build
   leader, so upgrade every node together. There are no deployed clusters to migrate.
 
+### Security
+- **PHP SDK: symfony/serializer 7.4.24** (CVE-2026-133761, CVE-2026-133752): the SDK now requires
+  `symfony/serializer` `^6.4.51 || ^7.4.24` (was `^6.4 || ^7.0`), so Composer no longer installs a
+  release where a deeply nested CSV header makes `CsvEncoder::decode()` crash or exhaust memory,
+  or where denormalizing through a discriminator map or `object_to_populate` writes properties
+  marked `#[Ignore]`. The lockfile moves from 7.4.23 to 7.4.24. Run
+  `composer update symfony/serializer` in apps that use the SDK.
+
 ## [4.14.0] — 2026-11-24
 
 ### Security
