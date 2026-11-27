@@ -3668,6 +3668,18 @@ impl ClusterOutage {
 }
 
 impl StorageEngine for ClusterOutage {
+    /// `mode` 4: the node's read gate is closed (out of contact with the
+    /// leader) while every read and write still works, so only a caller that
+    /// asks the gate is refused.
+    fn serves_reads(&self) -> Result<(), crate::storage::StorageError> {
+        if self.mode.load(std::sync::atomic::Ordering::SeqCst) == 4 {
+            return Err(crate::storage::StorageError::ClusterUnavailable {
+                cause: crate::storage::ClusterUnavailableCause::NotInContact,
+                reason: "not in contact; redirect to 10.9.9.9:8421".to_string(),
+            });
+        }
+        Ok(())
+    }
     fn get(
         &self,
         r: &crate::core::RealmId,
@@ -3834,6 +3846,100 @@ async fn a_cluster_outage_answers_503_with_retry_after_and_a_stable_code() {
         assert!(
             !body.to_string().contains("10.9.9.9"),
             "mode {mode}: internal detail leaked: {body}"
+        );
+    }
+}
+
+/// A node out of contact with the cluster leader answers a bearer request
+/// `503` `HEARTH_CLUSTER_UNAVAILABLE`, never `401` or `403`, although the
+/// token sits in its claims cache (cluster-read-fencing 2.3, V2). A `401`
+/// would tell a client to drop a valid token; a `503` tells it to retry on
+/// another node.
+#[cfg(feature = "dev-endpoints")]
+#[tokio::test]
+async fn a_node_out_of_contact_answers_a_bearer_request_503_not_401() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let config = StorageConfig::dev(temp_dir.path().to_path_buf());
+    let storage = Arc::new(ClusterOutage {
+        inner: Arc::new(EmbeddedStorageEngine::open(config).expect("open storage")),
+        mode: std::sync::atomic::AtomicU8::new(0),
+    });
+    let clock = Arc::new(SystemClock) as Arc<dyn crate::core::Clock>;
+    let rbac: Arc<dyn RbacEngine> = Arc::new(EmbeddedRbacEngine::new(
+        Arc::clone(&storage) as Arc<dyn StorageEngine>,
+        Arc::clone(&clock),
+    ));
+    let audit = Arc::new(EmbeddedAuditEngine::new(
+        Arc::clone(&storage) as Arc<dyn StorageEngine>,
+        Arc::clone(&clock),
+    ));
+    let identity = EmbeddedIdentityEngine::with_rbac(
+        Arc::clone(&storage) as Arc<dyn StorageEngine>,
+        Arc::clone(&clock),
+        IdentityConfig {
+            credential: CredentialConfig::fast_for_testing(),
+            ..IdentityConfig::default()
+        },
+        Arc::clone(&rbac),
+        Arc::clone(&audit) as Arc<dyn AuditEngine>,
+    )
+    .expect("identity engine");
+    let state = Arc::new(AppState::new_dev(
+        Arc::new(identity),
+        rbac,
+        audit as Arc<dyn AuditEngine>,
+    ));
+    let (realm_id, token) = bootstrap_dev(&state).await;
+    let get = |uri: &str| {
+        axum::http::Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header("X-Realm-ID", &realm_id)
+            .header("Authorization", format!("Bearer {token}"))
+            .body(axum::body::Body::empty())
+            .expect("request")
+    };
+    // Warm the caches: the token is valid on a node in contact.
+    let resp = router(Arc::clone(&state))
+        .oneshot(get("/admin/users"))
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    storage.mode.store(4, std::sync::atomic::Ordering::SeqCst);
+    let decide = || {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri("/oauth/authorize")
+            .header("X-Realm-ID", &realm_id)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/json")
+            .body(axum::body::Body::from(r#"{"permission":"docs.read"}"#))
+            .expect("request")
+    };
+    for uri in ["/admin/users", "/userinfo", "/oauth/authorize"] {
+        let request = if uri == "/oauth/authorize" {
+            decide()
+        } else {
+            get(uri)
+        };
+        let resp = router(Arc::clone(&state))
+            .oneshot(request)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE, "{uri}");
+        let b = axum::body::to_bytes(resp.into_body(), 8_000)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&b).expect("json");
+        assert_eq!(
+            body["error_code"],
+            crate::protocol::error_codes::CLUSTER_UNAVAILABLE,
+            "{uri}: {body}"
+        );
+        assert!(
+            !body.to_string().contains("10.9.9.9"),
+            "{uri}: internal detail leaked: {body}"
         );
     }
 }

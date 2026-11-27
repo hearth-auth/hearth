@@ -83,11 +83,13 @@ pub(crate) fn extract_admin_auth(
     let claims = state
         .identity
         .validate_token(&realm_id, token)
-        .map_err(|_| {
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "invalid token"})),
-            )
+        .map_err(|e| {
+            credential_unavailable_response(&e).unwrap_or_else(|| {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({"error": "invalid token"})),
+                )
+            })
         })?;
 
     // sub is "user_{uuid}" — strip prefix to get raw UUID
@@ -1018,6 +1020,25 @@ pub(crate) fn identity_error_to_response(
         Json(serde_json::json!({"error": message, "error_code": error_code})),
     )
 }
+/// The `503` for a credential this node could not check: its storage is
+/// temporarily unavailable, such as a cluster node out of contact with the
+/// leader (`cluster-consistency` V2). `None` for every other error, which
+/// the caller answers as an invalid credential.
+///
+/// A bearer check must answer this rather than `401`: a `401` tells the
+/// client to drop a token that may be valid, a `503` to retry on another
+/// node.
+pub(crate) fn credential_unavailable_response(
+    err: &crate::identity::IdentityError,
+) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    let crate::identity::IdentityError::Storage(e) = err else {
+        return None;
+    };
+    let class = crate::storage::StorageError::retry_class_of(&**e)?;
+    tracing::warn!(error = %e, "credential check refused: temporarily unavailable (503)");
+    Some(cluster_unavailable_response(class))
+}
+
 /// The `503` body for a transient cluster failure: a fixed message per
 /// [`RetryClass`](crate::storage::RetryClass) and its stable `error_code`,
 /// never the operator-facing detail behind it.
@@ -1332,11 +1353,13 @@ pub(crate) fn validate_user_token_with_dpop(
     let claims = state
         .identity
         .validate_token(realm_id, token)
-        .map_err(|_| {
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "invalid_token"})),
-            )
+        .map_err(|e| {
+            credential_unavailable_response(&e).unwrap_or_else(|| {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({"error": "invalid_token"})),
+                )
+            })
         })?;
 
     // Resource servers MUST verify the DPoP proof for cnf-bound tokens

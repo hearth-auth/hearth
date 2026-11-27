@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 // ── Throwaway mTLS bundle ────────────────────────────────────────────────────
 
-fn generate_cluster_certs(dir: &Path, n_nodes: usize) -> (PathBuf, Vec<(PathBuf, PathBuf)>) {
+pub fn generate_cluster_certs(dir: &Path, n_nodes: usize) -> (PathBuf, Vec<(PathBuf, PathBuf)>) {
     let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
     ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
     let ca_key = rcgen::KeyPair::generate().unwrap();
@@ -45,7 +45,7 @@ fn generate_cluster_certs(dir: &Path, n_nodes: usize) -> (PathBuf, Vec<(PathBuf,
     (ca_path, leafs)
 }
 
-fn pick_free_loopback_ports(n: usize) -> Vec<u16> {
+pub fn pick_free_loopback_ports(n: usize) -> Vec<u16> {
     let listeners: Vec<std::net::TcpListener> = (0..n)
         .map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap())
         .collect();

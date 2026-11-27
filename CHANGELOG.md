@@ -12,9 +12,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   of the last `AppendEntries` it accepted from a leader that a quorum acknowledged less than
   2 s earlier, once it has applied that leader's commit index; a leader only within that
   threshold of its last quorum acknowledgement. Otherwise reads answer `503` with
-  `HEARTH_CLUSTER_UNAVAILABLE`, where they used to return data that could be stale. Token
-  validation is not fenced yet. A single node is not affected. `/readyz` on such a node answers
+  `HEARTH_CLUSTER_UNAVAILABLE`, where they used to return data that could be stale. A single
+  node is not affected. `/readyz` on such a node answers
   `503` with `"cluster": "not_in_contact"` (or `"replication_lag"` while it applies a backlog).
+- **A cluster node out of contact accepts no credential**: bearer token validation, session
+  lookups, refresh, token introspection, `/oauth/authorize` permission decisions and token
+  exchange answer `503` `HEARTH_CLUSTER_UNAVAILABLE`, also for a token or session the node has
+  cached. They used to accept it, or answer `401`, `active: false` or `allowed: false`. Retry a
+  `503` on another node. Browser sign-in sessions on such a node are sent to the sign-in page.
 - **Raft heartbeat 250 ms, `cluster.read_lag_threshold_ms` at least 500 ms**: the heartbeat
   goes from 500 ms to 250 ms (openraft also uses it as the `AppendEntries` timeout), and
   `hearth config validate` and `serve` refuse a threshold below twice the heartbeat. The
