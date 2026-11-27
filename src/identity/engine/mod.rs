@@ -3912,6 +3912,17 @@ impl EmbeddedIdentityEngine {
         IdentityError::Storage(Box::new(e))
     }
 
+    /// Refuses every credential while this node's storage serves no reads:
+    /// a cluster node out of contact with the leader, or lagging it beyond
+    /// the threshold (`cluster-consistency` V2). Token validation and the
+    /// session lookup serve from caches that the storage-level read fence
+    /// never sees, so they ask first. One atomic load and a clock read when
+    /// the node serves; never refuses on single-node storage.
+    #[inline]
+    fn require_serving_reads(&self) -> Result<(), IdentityError> {
+        self.storage.serves_reads().map_err(Self::storage_err)
+    }
+
     /// Serializes a stored credential to binary bytes (postcard).
     fn serialize_credential(cred: &StoredCredential) -> Result<Vec<u8>, IdentityError> {
         crate::codec::encode(cred).map_err(|reason| IdentityError::Serialization { reason })
@@ -4963,6 +4974,10 @@ impl EmbeddedIdentityEngine {
             )
             .entered()
         });
+
+        // Before the session cache: a node out of contact may hold a session
+        // the cluster has revoked (V2).
+        self.require_serving_reads()?;
 
         let now = self.clock.now();
 
@@ -10231,6 +10246,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .entered()
         });
 
+        // Before any cache: a node out of contact with the cluster leader
+        // may hold claims, a session or a control the cluster has since
+        // revoked (cluster-consistency V2).
+        self.require_serving_reads()?;
+
         // Observe controls asserted on another node BEFORE the claims-cache
         // lookup below. A warm cache hit returns without ever reaching
         // signature verification, so a sync placed there — as the signing-key
@@ -10445,6 +10465,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         bind_ctx: Option<&RefreshBindContext>,
         resource: Option<&str>,
     ) -> Result<TokenPair, IdentityError> {
+        // A node out of contact accepts no refresh token (V2), whatever it
+        // would read first.
+        self.require_serving_reads()?;
+
         // Verify the Ed25519 signature against the realm's own key (and any
         // in-grace retiring key). There is no global-key fallback — a realm
         // with no key of its own fails closed. Rejects forged/tampered tokens
@@ -10828,6 +10852,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &crate::identity::oidc::TokenIntrospectionRequest,
     ) -> Result<crate::identity::oidc::IntrospectionResponse, IdentityError> {
+        // A node out of contact cannot tell whether the token is active, so
+        // it answers unavailable, not `active: false` (V2).
+        self.require_serving_reads()?;
         // A suspended or archived realm's tokens are not active (audit
         // 2026-08-28 §4.19#6). RFC 7662 semantics: report `active: false`
         // rather than erroring, and fail closed on any status-read error.
@@ -10842,6 +10869,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &crate::identity::oidc::DecidePermissionRequest,
     ) -> Result<crate::identity::oidc::DecidePermissionResponse, IdentityError> {
+        // A node out of contact cannot judge the token: unavailable, not a
+        // denial a resource server would act on (V2).
+        self.require_serving_reads()?;
         // Fail closed: a non-active realm authorizes nothing (audit
         // 2026-08-28 §4.19#6).
         if self.require_active_realm(realm_id).is_err() {
@@ -18127,6 +18157,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // validate_token checks Ed25519 signature against the realm's key, expiry,
         // and realm binding — a token signed by a different realm's key is rejected
         // here, making a separate tid guard unnecessary.
+        // A node out of contact answers unavailable, not `invalid_grant` for
+        // a subject token that may be valid (V2).
+        self.require_serving_reads()?;
         let subject_claims = self
             .validate_token(realm_id, &request.subject_token)
             .map_err(|_| IdentityError::TokenExchangeRejected {
@@ -19506,6 +19539,9 @@ mod tests {
 
     /// Hot-path epoch reconciliation: debounced storage reads, bounded staleness.
     mod epoch_sync_debounce;
+    /// A node whose storage serves no reads accepts no credential, also
+    /// from a warm cache (cluster-read-fencing V2).
+    mod read_fence;
 
     /// Every spelling of a resource reads the one consent record (G6).
     mod authorize_resource_consent;

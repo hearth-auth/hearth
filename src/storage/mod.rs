@@ -162,6 +162,23 @@ pub trait StorageEngine: Send + Sync {
         true
     }
 
+    /// Whether this node may serve a read now, as the error a refused read
+    /// returns (`cluster-consistency` V2). Always `Ok` for local storage,
+    /// hence the default; in cluster mode it follows the node's read gate.
+    ///
+    /// Reads through this handle check the gate themselves. A caller that
+    /// serves from an in-memory cache, and so reads nothing, asks this
+    /// first: token validation and the session lookup on the hot path. The
+    /// `Ok` answer allocates nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::ClusterUnavailable`] when the node is out of contact
+    /// with the leader or lags it beyond the threshold.
+    fn serves_reads(&self) -> Result<(), StorageError> {
+        Ok(())
+    }
+
     /// Writes a row that belongs to **this node only** and must not replicate.
     ///
     /// Defaults to [`Self::put`], which is correct for local storage: there is

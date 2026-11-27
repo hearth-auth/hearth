@@ -87,12 +87,15 @@ async fn invoke_tool(
     };
     let claims = match state.identity.validate_token(&realm_id, &raw_token) {
         Ok(c) => c,
-        Err(_) => {
+        Err(e) => {
+            if let Some(unavailable) = super::auth::credential_unavailable_response(&e) {
+                return unavailable.into_response();
+            }
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({"error": "invalid_token"})),
             )
-                .into_response()
+                .into_response();
         }
     };
 

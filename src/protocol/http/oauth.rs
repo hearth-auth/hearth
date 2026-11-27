@@ -2065,22 +2065,29 @@ async fn register_client_dynamic(
             // as a plain Bearer to register clients in this realm (HEA-2039).
             // Global route ⇒ plain `Uri` yields the full request path.
             let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
-            let Ok(claims) = validate_user_token_with_dpop(
+            let claims = match validate_user_token_with_dpop(
                 &headers,
                 &state,
                 &realm_id,
                 &token,
                 method.as_str(),
                 &htu,
-            ) else {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    Json(serde_json::json!({
-                        "error": "unauthorized",
-                        "error_description": "a valid bearer token is required to register clients in this realm"
-                    })),
-                )
-                    .into_response();
+            ) {
+                Ok(claims) => claims,
+                // A node out of contact answers `503`, not `401` (V2).
+                Err(unavailable) if unavailable.0 == StatusCode::SERVICE_UNAVAILABLE => {
+                    return unavailable.into_response();
+                }
+                Err(_) => {
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        Json(serde_json::json!({
+                            "error": "unauthorized",
+                            "error_description": "a valid bearer token is required to register clients in this realm"
+                        })),
+                    )
+                        .into_response();
+                }
             };
             if let Err(resp) = require_dcr_initial_access(&state, &realm_id, &claims) {
                 return resp;
@@ -3474,10 +3481,17 @@ async fn oauth_decide_permission(
     // decision, so DPoP failure denies (`allowed: false`) rather than leaking a
     // distinguishable error (HEA-2031).
     let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
-    if validate_user_token_with_dpop(&headers, &state, &realm_id, &token, method.as_str(), &htu)
-        .is_err()
+    match validate_user_token_with_dpop(&headers, &state, &realm_id, &token, method.as_str(), &htu)
     {
-        return (StatusCode::OK, Json(serde_json::json!({"allowed": false}))).into_response();
+        Ok(_) => {}
+        // A node out of contact cannot judge the token: `503`, never a
+        // denial (cluster-consistency V2).
+        Err(unavailable) if unavailable.0 == StatusCode::SERVICE_UNAVAILABLE => {
+            return unavailable.into_response();
+        }
+        Err(_) => {
+            return (StatusCode::OK, Json(serde_json::json!({"allowed": false}))).into_response();
+        }
     }
 
     let permission = match body.get("permission").and_then(|v| v.as_str()) {
@@ -4793,22 +4807,29 @@ async fn realm_register_client_dynamic(
             // preserves the `/realms/{name}` prefix so a legitimate proof's
             // `htu` matches the full request path.
             let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
-            let Ok(claims) = validate_user_token_with_dpop(
+            let claims = match validate_user_token_with_dpop(
                 &headers,
                 &state,
                 &realm_id,
                 &token,
                 method.as_str(),
                 &htu,
-            ) else {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    Json(serde_json::json!({
-                        "error": "unauthorized",
-                        "error_description": "a valid bearer token is required to register clients in this realm"
-                    })),
-                )
-                    .into_response();
+            ) {
+                Ok(claims) => claims,
+                // A node out of contact answers `503`, not `401` (V2).
+                Err(unavailable) if unavailable.0 == StatusCode::SERVICE_UNAVAILABLE => {
+                    return unavailable.into_response();
+                }
+                Err(_) => {
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        Json(serde_json::json!({
+                            "error": "unauthorized",
+                            "error_description": "a valid bearer token is required to register clients in this realm"
+                        })),
+                    )
+                        .into_response();
+                }
             };
             if let Err(resp) = require_dcr_initial_access(&state, &realm_id, &claims) {
                 return resp;

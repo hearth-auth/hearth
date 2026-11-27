@@ -2297,6 +2297,15 @@ impl StorageEngine for ClusterStorageAdapter {
         self.engine.accepts_writes()
     }
 
+    /// The read gate's answer: one atomic load and a monotonic clock read.
+    fn serves_reads(&self) -> Result<(), crate::storage::StorageError> {
+        if self.engine.reads_ok() {
+            Ok(())
+        } else {
+            Err(cluster_to_storage_err(self.engine.reads_fenced()))
+        }
+    }
+
     /// Bypasses Raft: the row is this node's own and must not replicate.
     ///
     /// The identity engine's rate-limit trackers are per-node by design — each
@@ -2779,6 +2788,40 @@ mod tests {
     }
 
     // ── The read gate (cluster-read-fencing 1.1) ──────────────────────────────
+
+    /// Task 2.1: `StorageEngine::serves_reads` is the gate the identity
+    /// engine checks before it serves a credential from a cache. It never
+    /// refuses on single-node storage, and follows the gate on a cluster node.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn serves_reads_follows_the_read_gate_only_on_a_cluster_node() {
+        let dir = tempdir().unwrap();
+        let local = open_engine(dir.path());
+        let ok = |s: &dyn StorageEngine| s.serves_reads().map_err(|e| e.to_string());
+        assert_eq!(ok(local.as_ref()), Ok(()));
+        let single =
+            ClusterStorageAdapter::new(Arc::new(ClusterEngine::single_node(Arc::clone(&local))));
+        assert_eq!(ok(&single), Ok(()));
+
+        let gate = Arc::new(ReadGate::new(60_000));
+        let clustered = ClusterStorageAdapter::new(Arc::new(ClusterEngine::with_read_gate(
+            local,
+            Arc::clone(&gate),
+        )));
+        let refused = clustered.serves_reads().unwrap_err();
+        assert!(
+            matches!(
+                refused,
+                crate::storage::StorageError::ClusterUnavailable {
+                    cause: ClusterUnavailableCause::NotInContact,
+                    ..
+                }
+            ),
+            "{refused:?}"
+        );
+        gate.record_contact_at(gate.now_ms());
+        assert_eq!(ok(&clustered), Ok(()));
+    }
 
     /// `/readyz` reports a node whose read gate is closed as not ready, with
     /// the gate's reason (task 4.1).

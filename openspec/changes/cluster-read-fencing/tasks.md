@@ -14,10 +14,10 @@
 
 ## 2. Token validation obeys the gate (V2)
 
-- [ ] 2.1 Test first: a unit test shows `StorageEngine`'s new read-gate method answers `true` for single-node storage and follows the deadline for `ClusterStorageAdapter`. Then add the method
-- [ ] 2.2 Test first: a test in `src/identity/engine/tests/` with a closed gate shows `validate_token` returns the unavailable storage error on a warm claims-cache hit. Then check the gate in `validate_token`, the session lookup and the refresh path
-- [ ] 2.3 Test first: a protocol test shows a closed gate answers a bearer request `503` with `HEARTH_CLUSTER_UNAVAILABLE`, never `401` or `403`
-- [ ] 2.4 Prove the hot path is unchanged: the allocation-count test for `validate_token` still counts zero, and `make bench-gate` passes
+- [x] 2.1 Test first: a unit test shows `StorageEngine`'s new read-gate method (`serves_reads`) answers `Ok` for single-node storage and follows the deadline for `ClusterStorageAdapter`. Then add the method
+- [x] 2.2 Test first: a test in `src/identity/engine/tests/` with a closed gate shows `validate_token` returns the unavailable storage error on a warm claims-cache hit. Then check the gate in `validate_token`, the session lookup and the refresh path
+- [x] 2.3 Test first: a protocol test shows a closed gate answers a bearer request `503` with `HEARTH_CLUSTER_UNAVAILABLE`, never `401` or `403`
+- [x] 2.4 Prove the hot path is unchanged: the allocation-count test for `validate_token` still counts zero, and `make bench-gate` passes
 
 ## 3. The snapshot install fence (R3, R4)
 
