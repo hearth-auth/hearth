@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use tokio::task::spawn_blocking;
 use tracing::{debug, info, instrument};
 
+use crate::cluster::read_gate::ReadGate;
 use crate::cluster::types::{HearthLogResponse, HearthNode, HearthRaftConfig, RaftCommand};
 use crate::cluster::ReplicatedWriteObserver;
 use crate::core::RealmId;
@@ -234,6 +235,10 @@ pub struct HearthStateMachine {
     /// this slot and the server composition root fills it after construction
     /// via [`super::engine::ClusterEngine::set_replicated_write_observer`].
     observer: Arc<OnceLock<Arc<dyn ReplicatedWriteObserver>>>,
+    /// The node's read gate, told the applied index after every apply and
+    /// install (see [`ReadGate::note_applied`]). `None` in tests that need
+    /// no gate.
+    read_gate: Option<Arc<ReadGate>>,
 }
 
 impl HearthStateMachine {
@@ -270,7 +275,26 @@ impl HearthStateMachine {
             last_membership,
             current_snapshot: Arc::default(),
             observer,
+            read_gate: None,
         })
+    }
+
+    /// Tells `gate` the applied index after every apply and install,
+    /// starting with the one loaded from storage.
+    #[must_use]
+    pub(crate) fn with_read_gate(mut self, gate: Arc<ReadGate>) -> Self {
+        if let Some(applied) = self.last_applied {
+            gate.note_applied(applied.index);
+        }
+        self.read_gate = Some(gate);
+        self
+    }
+
+    /// Tells the read gate the applied index, if both exist.
+    fn note_applied(&self) {
+        if let (Some(gate), Some(applied)) = (&self.read_gate, self.last_applied) {
+            gate.note_applied(applied.index);
+        }
     }
 
     /// Whether this state machine found no persisted applied state when it
@@ -337,6 +361,7 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
 
             responses.push(response);
         }
+        self.note_applied();
 
         let elapsed = start.elapsed();
         if count > 0 {
@@ -420,6 +445,7 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
 
         self.last_applied = meta.last_log_id;
         self.last_membership = meta.last_membership.clone();
+        self.note_applied();
 
         snapshot_slot_offer(
             &self.current_snapshot,
@@ -1054,6 +1080,26 @@ mod tests {
     }
 
     // ── Put / Delete / Batch ──────────────────────────────────────────────────
+
+    /// Task 1.7: each apply tells the read gate its applied index, which
+    /// completes a contact waiting for the leader's commit index.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn an_apply_completes_a_contact_waiting_for_its_commit_index() {
+        let dir = tempdir().unwrap();
+        let gate = Arc::new(ReadGate::new(500));
+        let mut sm = open_sm(dir.path()).with_read_gate(Arc::clone(&gate));
+        let blank = |index: u64| Entry {
+            log_id: make_log_id(index),
+            payload: EntryPayload::Blank,
+        };
+        let now = gate.now_ms();
+        gate.record_contact_once_applied(now, Some(2));
+        sm.apply([blank(1)]).await.unwrap();
+        assert!(!gate.allows_at(now), "index 2 is not applied yet");
+        sm.apply([blank(2)]).await.unwrap();
+        assert!(gate.allows_at(now), "applied: the contact counts");
+    }
 
     /// §4.9#4: a record and the removal of its old index must reach every node
     /// in ONE log entry, or a follower can apply half of them.

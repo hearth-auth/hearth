@@ -413,13 +413,20 @@ impl ClusterEngine {
             Arc::new(OnceLock::new());
         // The state machine loads its persisted applied state (storage reads:
         // on the blocking pool).
+        let threshold = config
+            .read_lag_threshold_ms
+            .unwrap_or(ClusterConfig::DEFAULT_READ_LAG_THRESHOLD_MS);
+        // Closed until the first contact: a node that has just started has
+        // not yet heard from any leader.
+        let read_gate = Arc::new(ReadGate::new(threshold));
         let slot = Arc::clone(&observer_slot);
         let state_machine = tokio::task::spawn_blocking(move || {
             HearthStateMachine::with_observer_slot(sm_engine, slot)
         })
         .await
         .map_err(|e| ClusterBuildError::RaftInit(e.to_string()))?
-        .map_err(|e| ClusterBuildError::RaftInit(e.to_string()))?;
+        .map_err(|e| ClusterBuildError::RaftInit(e.to_string()))?
+        .with_read_gate(Arc::clone(&read_gate));
         if state_machine.has_no_applied_state() {
             let log_state = openraft::storage::RaftLogStorage::get_log_state(&mut log_store)
                 .await
@@ -427,12 +434,6 @@ impl ClusterEngine {
             refuse_restart_without_applied_state(log_state.last_purged_log_id)?;
         }
 
-        let threshold = config
-            .read_lag_threshold_ms
-            .unwrap_or(ClusterConfig::DEFAULT_READ_LAG_THRESHOLD_MS);
-        // Closed until the first contact: a node that has just started has
-        // not yet heard from any leader.
-        let read_gate = Arc::new(ReadGate::new(threshold));
         let cert_pem = tokio::fs::read(&config.tls_cert_path).await?;
         let key_pem = tokio::fs::read(&config.tls_key_path).await?;
         let ca_pem = tokio::fs::read(&config.tls_ca_cert_path).await?;
@@ -1741,7 +1742,7 @@ fn note_append_entries(
 ) {
     let leader_acked = leader_quorum_ack_age_ms.is_some_and(|age| age < MAX_LEADER_ACK_AGE_MS);
     if leader_acked && accepted_through_commit(reach, resp) {
-        gate.record_contact_at(received_ms);
+        gate.record_contact_once_applied(received_ms, reach.leader_commit);
     }
 }
 
@@ -2908,6 +2909,7 @@ mod tests {
         use openraft::raft::AppendEntriesResponse as R;
 
         let gate = ReadGate::new(500);
+        gate.note_applied(7);
         let reach = LogReach::of(&append_request(Some(7), &[], Some(7)));
         let age = Some(100);
         note_append_entries(&gate, 1_000, age, reach, &R::Conflict);
@@ -3003,6 +3005,21 @@ mod tests {
         ));
     }
 
+    /// Task 1.7: an accepted `AppendEntries` counts only once this node has
+    /// applied the leader's commit index, dated from its arrival.
+    #[test]
+    fn an_append_entries_counts_once_its_commit_index_is_applied() {
+        use openraft::raft::AppendEntriesResponse as R;
+        let gate = ReadGate::new(500);
+        gate.note_applied(5);
+        let reach = LogReach::of(&append_request(Some(7), &[], Some(7)));
+        note_append_entries(&gate, 1_000, Some(100), reach, &R::Success);
+        assert!(!gate.allows_at(1_000), "index 7 is not applied yet");
+        gate.note_applied(7);
+        assert!(gate.allows_at(1_000));
+        assert!(!gate.allows_at(1_500), "dated from the arrival");
+    }
+
     /// Task 1.6: a deposed leader cut off with this follower. Its heartbeats
     /// are accepted (the follower knows no higher term), but no quorum has
     /// acknowledged it for longer than the lease allows.
@@ -3010,6 +3027,7 @@ mod tests {
     fn an_append_entries_from_a_leader_without_a_recent_quorum_is_no_contact() {
         use openraft::raft::AppendEntriesResponse as R;
         let gate = ReadGate::new(500);
+        gate.note_applied(7);
         let reach = LogReach::of(&append_request(Some(7), &[], Some(7)));
         note_append_entries(
             &gate,

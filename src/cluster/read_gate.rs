@@ -32,8 +32,14 @@
 //! a follower counts the request as contact only while the age is below the
 //! leader lease less 1 s: a deposed leader cut off with a follower would
 //! otherwise keep it serving the deposed leader's frozen state.
+//!
+//! A follower's contact waits until it has applied the leader's commit index
+//! of the request ([`ReadGate::record_contact_once_applied`]), then counts
+//! from the request's arrival. The applied index and the waiting contact sit
+//! under a mutex that only the writers take, never a read.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
 /// Bit set while the apply-lag check fails.
@@ -66,6 +72,18 @@ pub(crate) struct ReadGate {
     /// When a quorum last acknowledged this node as leader, in deadline-clock
     /// milliseconds, or [`NO_ACK`]. Off the hot path.
     quorum_ack_ms: AtomicU64,
+    /// The state machine's applied index and the contact waiting for it.
+    /// Off the hot path: only the peer server and the state machine take it.
+    applied: Mutex<Applied>,
+}
+
+/// See [`ReadGate::record_contact_once_applied`].
+#[derive(Debug, Default)]
+struct Applied {
+    /// The last index the state machine applied, if any.
+    index: Option<u64>,
+    /// A contact waiting for its leader's commit index: `(at_ms, commit)`.
+    waiting: Option<(u64, u64)>,
 }
 
 impl ReadGate {
@@ -76,6 +94,7 @@ impl ReadGate {
             threshold_ms,
             origin: Instant::now(),
             quorum_ack_ms: AtomicU64::new(NO_ACK),
+            applied: Mutex::new(Applied::default()),
         }
     }
 
@@ -84,6 +103,38 @@ impl ReadGate {
         u64::try_from(self.origin.elapsed().as_millis())
             .unwrap_or(DEADLINE)
             .min(DEADLINE)
+    }
+
+    /// Records a follower's contact at `at_ms` from a request whose leader
+    /// had committed through `leader_commit`, once this node has applied
+    /// that index.
+    ///
+    /// A follower that holds the committed entries but has not applied them
+    /// serves state older than the contact claims, and the lag hold does
+    /// not cover a gap under the threshold. Until the apply, the contact
+    /// waits; a later one replaces it (it reaches at least as far). It then
+    /// counts from `at_ms`, not from the apply.
+    pub(crate) fn record_contact_once_applied(&self, at_ms: u64, leader_commit: Option<u64>) {
+        let mut applied = self.applied.lock().unwrap_or_else(PoisonError::into_inner);
+        match leader_commit {
+            Some(commit) if applied.index.is_none_or(|index| index < commit) => {
+                applied.waiting = Some((at_ms, commit));
+            }
+            _ => self.record_contact_at(at_ms),
+        }
+    }
+
+    /// Records that the state machine applied through `index`, which may
+    /// complete the waiting contact.
+    pub(crate) fn note_applied(&self, index: u64) {
+        let mut applied = self.applied.lock().unwrap_or_else(PoisonError::into_inner);
+        applied.index = applied.index.max(Some(index));
+        if let Some((at_ms, commit)) = applied.waiting {
+            if index >= commit {
+                applied.waiting = None;
+                self.record_contact_at(at_ms);
+            }
+        }
     }
 
     /// Records that a quorum acknowledged this node as leader at `at_ms`.
@@ -375,6 +426,52 @@ mod tests {
         assert_eq!(
             leader_contact(2, None, None, 3, T),
             LeaderContact::NotLeader
+        );
+    }
+
+    /// Task 1.7: a follower that holds the leader's committed entries but
+    /// has not applied them serves state older than the contact claims.
+    #[test]
+    fn a_contact_waits_until_its_leader_commit_is_applied() {
+        let gate = ReadGate::new(T);
+        gate.note_applied(10);
+        gate.record_contact_once_applied(1_000, Some(12));
+        assert!(!gate.allows_at(1_000), "index 12 is not applied yet");
+        gate.note_applied(11);
+        assert!(!gate.allows_at(1_000));
+        gate.note_applied(12);
+        assert!(
+            gate.allows_at(1_000),
+            "the contact counts once 12 is applied"
+        );
+        assert!(
+            !gate.allows_at(1_000 + T),
+            "dated from its arrival, not from the apply"
+        );
+    }
+
+    #[test]
+    fn a_contact_whose_commit_is_applied_counts_at_once() {
+        let gate = ReadGate::new(T);
+        gate.note_applied(12);
+        gate.record_contact_once_applied(1_000, Some(12));
+        assert!(gate.allows_at(1_000));
+        let fresh = ReadGate::new(T);
+        fresh.record_contact_once_applied(1_000, None);
+        assert!(fresh.allows_at(1_000), "nothing committed yet");
+    }
+
+    #[test]
+    fn a_later_contact_replaces_a_waiting_one() {
+        let gate = ReadGate::new(T);
+        gate.record_contact_once_applied(1_000, Some(12));
+        gate.record_contact_once_applied(1_200, Some(14));
+        gate.note_applied(12);
+        assert!(!gate.allows_at(1_000), "the waiting contact needs 14 now");
+        gate.note_applied(14);
+        assert!(
+            gate.allows_at(1_200 + T - 1),
+            "dated from the later arrival"
         );
     }
 
