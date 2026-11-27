@@ -48,7 +48,7 @@ test FAILs. The format, with an illustrative xfail line:
 
 ```
 PASS        noop
-XFAIL G1    staleness
+XFAIL G4    audit
 1 pass, 0 fail, 1 xfail, 0 xpass: run PASSED
 ```
 

@@ -3,7 +3,7 @@
 > **⚠ EXPERIMENTAL — multi-node is NOT supported for production.** Single-node is the only
 > supported deployment. **Do not** use a multi-node cluster:
 >
-> - for **load-balanced traffic** — writes and logins on a follower now succeed (they are forwarded to the leader, [H-3](#h-3--writes-to-a-follower-forwarded-to-the-leader-fixed)), but reads served by a follower may be stale ([C-5](#c-5--follower-cache-invalidation-is-partial-was-followers-never-invalidate)) and per-node state (below) differs between nodes;
+> - for **load-balanced traffic** — writes and logins on a follower now succeed (they are forwarded to the leader, [H-3](#h-3--writes-to-a-follower-forwarded-to-the-leader-fixed)), but a follower's caches are only partly invalidated ([C-5](#c-5--follower-cache-invalidation-is-partial-was-followers-never-invalidate)) and per-node state (below) differs between nodes;
 > - as **HA failover** — membership is fixed at bootstrap ([C-6](#c-6--cluster-membership-is-immutable-after-bootstrap)), and per-node state (below) does not survive a node switch.
 >
 > A cold cluster *does* start as of task 26.46 ([G-1](#g-1--a-cold-cluster-could-not-be-bootstrapped-fixed), fixed). Starting is not the same as being fit for production: the defects below still apply to a running cluster. (An earlier revision of this banner said a cluster could not start at all; that described the pre-fix state.)
@@ -73,8 +73,13 @@ bootstrap node. Verified on three nodes on 2026-09-21; the transcript is in
   while the node knows no leader, and with `"cluster": "no_quorum"` while it
   leads but no quorum has acknowledged it for over 3 s. A node restarted on
   its own last vote resumes as a leader with no quorum, so it reports
-  `no_quorum` until a quorum is back. A follower whose leader died stays ready
-  until its own election timeout (1.5–3 s) passes.
+  `no_quorum` until a quorum is back. It answers `503` with
+  `"cluster": "not_in_contact"` when the node is out of contact (see
+  [Reads on a node out of contact](#reads-on-a-node-out-of-contact)): a follower
+  whose leader died reports it within `cluster.read_lag_threshold_ms`, before its
+  own election timeout (1.5–3 s) passes. It reports `"replication_lag"` while the
+  node's applied entries lag beyond the threshold, and `"installing_snapshot"`
+  while it installs a snapshot.
 * A `cluster:` section with an empty `peers` list does **not** self-initialise,
   so it never gets a leader. When start-up has anything to write, the process
   exits before it serves HTTP (seen 2026-10-06 while writing
@@ -103,10 +108,10 @@ both followers and a token revocation on the leader binding promptly on both fol
 
 **What is still not established:** this is an allow-list of forwarded row types, not a general
 cache-coherence protocol, and no test proves coherence for every cached type (for example
-session-lookup caches). Treat any read served by a follower as potentially stale, and do not rely
-on a follower for an access decision that must reflect the latest revocation. The target model
-(bounded staleness, and a node that loses contact with the leader refuses reads) is in
-[CONSISTENCY.md](../dev/CONSISTENCY.md); the contact check is not yet implemented (G1).
+session-lookup caches). Treat a read served by a follower as up to `cluster.read_lag_threshold_ms`
+behind the leader, plus the cache delays of [CONSISTENCY.md](../dev/CONSISTENCY.md) V1. A node
+that loses contact with the leader refuses reads and credentials with `503` (R2, V2; see
+[Reads on a node out of contact](#reads-on-a-node-out-of-contact)).
 
 ### C-6 — Cluster membership is immutable after bootstrap
 
@@ -172,10 +177,37 @@ follower's write waits for the election within that bound and then fails with
 `HEARTH_CLUSTER_UNAVAILABLE`.
 
 **What did not change.** Only writes are forwarded. Reads are still served locally by every node
-and may be stale (C-5); the cold-start write set still runs only on the leader
+in contact, up to `cluster.read_lag_threshold_ms` behind the leader (C-5); the cold-start write set still runs only on the leader
 ([G-1](#g-1--a-cold-cluster-could-not-be-bootstrapped-fixed)). Covered by
 `tests/cluster_follower_write_forwarding.rs` (writes, a login and a single-use claim issued to a
 follower; a lost reply applied once and never retried; the leader killed mid-forwarding).
+
+### Reads on a node out of contact
+
+A cluster node serves a read, and accepts a token or session, only while it is **in contact**
+([CONSISTENCY.md](../dev/CONSISTENCY.md) R2, V2):
+
+* a **follower**, within `cluster.read_lag_threshold_ms` (default and minimum 500 ms) of the last
+  `AppendEntries` it accepted from a leader that a quorum had acknowledged less than 2 s before,
+  once it has applied that leader's commit index;
+* a **leader**, within `cluster.read_lag_threshold_ms` of its last quorum acknowledgement.
+
+A node that is not in contact, whose applied entries lag beyond the threshold, or that is installing
+a snapshot answers reads **`503 Service Unavailable`** with `HEARTH_CLUSTER_UNAVAILABLE` and a
+`Retry-After` header. Bearer token checks, session lookups, refresh, introspection and
+`/oauth/authorize` answer the same `503`, even for a token or session the node has cached: the
+node cannot tell whether it was revoked. `/readyz` reports `"cluster": "not_in_contact"`,
+`"replication_lag"` or `"installing_snapshot"`. A snapshot install keeps the node refusing until
+the first `AppendEntries` after the install and its cache rebuild, whatever the threshold.
+
+**What to do.** Put the nodes behind a load balancer that honours `/readyz`, and have clients
+retry a `503` `HEARTH_CLUSTER_UNAVAILABLE` on another node. Do not treat it as a sign-out: the
+token may still be valid. A browser whose request reaches such a node is sent to the sign-in
+page; route browser traffic by `/readyz` too.
+
+The Raft heartbeat is 250 ms, so a healthy follower hears from the leader twice within the
+smallest threshold. `hearth config validate` and `hearth serve` refuse a
+`cluster.read_lag_threshold_ms` below 500 ms.
 
 ### Peer transport and message sizes
 
@@ -234,7 +266,7 @@ The Wave 5 roadmap items covering clustering are:
 - **P-2** — Persist Raft snapshots to disk
 
 Hearth ships **no supported multi-node path** until these items and the open items in
-[CONSISTENCY.md](../dev/CONSISTENCY.md) (G1–G9) are done.
+[CONSISTENCY.md](../dev/CONSISTENCY.md) (G3–G9) are done.
 
 Until then, the production deployment model is a single node with external backups and a tested restore ([Disaster Recovery Guide](./disaster-recovery.md#supported-deployment-shape)). If your reliability requirements exceed what a single node provides, contact us to understand the timeline.
 
@@ -390,9 +422,11 @@ session and its audit record are ordinary writes, proposed through Raft: once th
 token validates on **every** node, and revoking its session on the leader revokes it on every node
 in contact with the leader
 (`tests/cluster_three_node_control_coherence.rs::an_operator_token_minted_on_the_leader_validates_and_revokes_on_both_followers`).
-A node cut off from the cluster never learns of the revocation and goes on accepting the token: in
-the Jepsen `revocation-isolated` test (2026-10-06) the cut-off node accepted a revoked session for
-the whole 4 s it was watched ([CONSISTENCY.md](../dev/CONSISTENCY.md) G1).
+A node cut off from the cluster never learns of the revocation, so it accepts no token at all:
+within `cluster.read_lag_threshold_ms` of losing contact it answers every bearer request `503`
+`HEARTH_CLUSTER_UNAVAILABLE` ([CONSISTENCY.md](../dev/CONSISTENCY.md) V2). Before this check, in
+the Jepsen `revocation-isolated` test (2026-10-06), the cut-off node accepted a revoked session for
+the whole 4 s it was watched.
 On a follower both the console login and the mint are writes that the follower forwards to the
 leader ([H-3](#h-3--writes-to-a-follower-forwarded-to-the-leader-fixed)), so they work there too.
 Keep the whole console session on one node, though: the session-cookie secret is per node unless
@@ -472,9 +506,9 @@ channel and answers once the write is committed and applied on the follower itse
 leader awareness and a client reads its own write on the node it wrote to. A forwarded write
 costs one extra peer round trip; routing writes to the leader avoids it.
 
-Reads may be stale on any node other than the one you wrote to. Routing all traffic to the leader
-narrows this but does not remove it: a leader that has lost its quorum does not step down and keeps
-serving reads. See [CONSISTENCY.md](../dev/CONSISTENCY.md) §3. A write whose forwarded outcome
+Reads may be up to `cluster.read_lag_threshold_ms` stale on any node other than the one you wrote
+to. See [CONSISTENCY.md](../dev/CONSISTENCY.md) §3 and
+[Reads on a node out of contact](#reads-on-a-node-out-of-contact). A write whose forwarded outcome
 is unknown (the leader died mid-call) fails with `503` / `HEARTH_CLUSTER_WRITE_OUTCOME_UNKNOWN`
 rather than being retried — re-read before retrying it.
 
@@ -584,6 +618,6 @@ systemctl stop hearth
 
 ### Backups
 
-Take backups from the **leader**, and only while its `/readyz` answers `200`. A follower that is cut off from the leader, or a deposed leader, keeps serving its own state with no time limit ([CONSISTENCY.md](../dev/CONSISTENCY.md) G1), so a backup taken there can be missing recent writes and revocations, and nothing tells you.
+Take backups from the **leader**, and only while its `/readyz` answers `200`. A follower's archive can miss the last `cluster.read_lag_threshold_ms` of writes and revocations, and nothing tells you. A node out of contact refuses the admin token with `503` ([CONSISTENCY.md](../dev/CONSISTENCY.md) V2).
 
 See the [Backup and Restore Guide](./backup.md#cluster-deployments) for the full procedure.

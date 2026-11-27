@@ -1,5 +1,5 @@
 (ns jepsen.hearth.snapshot
-  "The snapshot-install workload (R3, R4, xfail G2; design decision 7). Hearth
+  "The snapshot-install workload (R3, R4; design decision 7). Hearth
   has no API that forces a snapshot, so each round makes one: it cuts the
   target node (the last of the test) off from the other nodes, writes past
   openraft's snapshot point (a snapshot every 5,000 applied entries, then a
@@ -10,12 +10,12 @@
   that user on the target in a loop; the rest pad the log.
 
   The suite runs it with cluster.read_lag_threshold_ms raised (see the
-  catalog): with the default, the lag monitor happens to fence reads before
-  the restore deletes a key, which hides G2.
+  catalog): with the default, the lag hold may fence reads before the
+  restore deletes a key, which would hide a missing install fence.
 
   Checker: the target's reads never go backwards (R3) and never miss the
-  user (R4). With G2 open, an install deletes every key before it writes the
-  snapshot, and reads are not fenced meanwhile, so the test is xfail."
+  user (R4). An install deletes every key before it writes the snapshot, so
+  the node must refuse reads meanwhile (G2, closed)."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [jepsen [checker :as checker]

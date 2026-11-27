@@ -1,13 +1,12 @@
 (ns jepsen.hearth.staleness
-  "The bounded-staleness workload (R2, xfail G1; design decision 7): one
+  "The bounded-staleness workload (R2; design decision 7): one
   writer thread writes increasing values to one user's display_name; every
   other client thread reads it on its own node, during partitions that cut
   off one side or the leader.
 
   Checker: a read invoked more than `read-lag-ms` after a write was
   acknowledged shows that write or a later one. A node that cannot keep up
-  must answer unavailable, never serve the older value. With G1 open, a
-  cut-off node keeps serving reads, so the test is xfail."
+  must answer unavailable, never serve the older value (G1, closed)."
   (:require [jepsen [checker :as checker]
                     [client :as client]
                     [generator :as gen]]

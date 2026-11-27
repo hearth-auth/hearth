@@ -847,10 +847,12 @@ Rotate old archives with a retention tool (e.g., `find /backups -name "*.hearth-
 
 Cluster mode is experimental ([Clustering Guide](./clustering.md)). In a
 multi-node cluster, **take backups from the leader**, and only while its
-`/readyz` answers `200`. A follower that is cut off from the leader, or a
-deposed leader, keeps serving its own state with no time limit
-([CONSISTENCY.md](../dev/CONSISTENCY.md) G1). A backup taken there can be
-missing recent writes and revocations, and nothing in the archive tells you.
+`/readyz` answers `200`. A follower is behind the leader by up to
+`cluster.read_lag_threshold_ms`, so its archive can miss the latest writes and
+revocations, and nothing in the archive tells you. A node out of contact with
+the leader refuses the admin token with `503`
+([CONSISTENCY.md](../dev/CONSISTENCY.md) R2, V2), but an export that started
+while it was in contact runs to the end.
 
 Find the leader with `GET /admin/cluster/status` (`"role":"leader"`), then
 point the `POST /admin/backup` call at that node's own admin listener. A

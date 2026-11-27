@@ -1,12 +1,14 @@
 # Cluster Consistency
 
 Status: **Reference. Cluster mode is incomplete.** The normative promises — the ones Hearth
-meets today — are in `openspec/specs/cluster-consistency/spec.md`. Three parked OpenSpec
-changes propose more promises, under
-`openspec/parked/{cluster-read-fencing,cluster-local-state-and-clock,cluster-audit-chain}/`.
-They are not part of the contract until they move back to `openspec/changes/`.
+meets today — are in `openspec/specs/cluster-consistency/spec.md`. The active OpenSpec change
+`openspec/changes/cluster-read-fencing/` adds the read and revocation promises R2, R3, R4 and V2;
+its delta specs are part of the contract until it is archived. Two parked changes propose more
+promises, under `openspec/parked/{cluster-local-state-and-clock,cluster-audit-chain}/`. They are
+not part of the contract until they move back to `openspec/changes/`.
 The Jepsen harness that tests them is described in [`jepsen/README.md`](../../jepsen/README.md).
-This document keeps the target model, the evidence for each status and the open items (G1–G9).
+This document keeps the target model, the evidence for each status and the open items (G3–G9;
+G1 and G2 are closed).
 Requirement levels follow RFC 2119 (MUST / SHOULD / MAY).
 Scope: what a client of a multi-node Hearth cluster may rely on — for writes, reads,
 revocations, clocks and membership. The implementation lives under `src/cluster/`, with the
@@ -92,21 +94,35 @@ that has lost its quorum does not know it is deposed and keeps serving reads.
 | ID | Promise | Status |
 |---|---|---|
 | **R1** | **Read-your-writes on the same node.** After a write is acknowledged by node N, a read on node N shows it. | Implemented |
-| **R2** | **Bounded staleness.** A node MUST serve reads only while it is **in contact**. Otherwise it MUST answer **unavailable**. A read served by a node in contact misses no write acknowledged more than `read_lag_threshold_ms` before the read began. | Not yet implemented (G1) |
-| **R3** | **Monotonic reads on one node.** Two reads on the same node never go backwards in log order. | Not yet implemented (G2) — holds except during a snapshot install |
-| **R4** | **No partial state.** No read observes a partly installed snapshot. | Not yet implemented (G2) |
+| **R2** | **Bounded staleness.** A node MUST serve reads only while it is **in contact**. Otherwise it MUST answer **unavailable**. A read served by a node in contact misses no write acknowledged more than `read_lag_threshold_ms` before the read began. | Implemented (cluster-read-fencing) |
+| **R3** | **Monotonic reads on one node.** Two reads on the same node never go backwards in log order. | Implemented (cluster-read-fencing) |
+| **R4** | **No partial state.** No read observes a partly installed snapshot. | Implemented (cluster-read-fencing) |
 | **R5** | A client that reads on a different node than the one it wrote to gets R2, not R1. | Implemented (as a statement of scope) |
 
 Evidence:
 
 - **R1.** The follower waits for its own apply before it answers a forwarded write
   (`engine.rs:891-902`, `await_applied` at `:895`). The leader answers after its own apply.
-- **R2 today.** A background task sets `reads_allowed` every 50 ms (`run_lag_monitor`, `engine.rs:1511-1528`). It
-  estimates lag as `(last_log_index − last_applied) × 5 ms` (`compute_lag_ms`,
-  `engine.rs:1545-1553`). That measures only entries the node has received and not applied. A
-  node that receives nothing — a partitioned follower, or a deposed leader — shows lag `0` and
-  keeps serving reads with no time limit. No read uses `ensure_linearizable`, a read index or a
-  leader lease.
+- **R2.** Every read, and every credential check (V2), asks the node's read gate
+  (`src/cluster/read_gate.rs`): one atomic word that holds a deadline on a monotonic clock and
+  two holds. A **follower** moves the deadline to `read_lag_threshold_ms` after the arrival of
+  each `AppendEntries` it accepts, under three conditions: the leader's quorum acknowledged it
+  less than 2 s before it sent the request (`leader_quorum_ack_age_ms`, so a deposed leader cut
+  off with one follower cannot keep that follower in contact); the request reaches the leader's
+  commit index; and the follower has applied that index (`record_contact_once_applied`). A
+  **leader** moves it to `read_lag_threshold_ms` after its last quorum acknowledgement
+  (`millis_since_quorum_ack`, read by the 50 ms lag monitor). The lag hold still closes the gate
+  when `(last_log_index − last_applied) × 5 ms` exceeds the threshold. A closed gate answers
+  `503` `HEARTH_CLUSTER_UNAVAILABLE`, and `/readyz` reports `not_in_contact`,
+  `replication_lag` or `installing_snapshot`. The heartbeat is 250 ms and the threshold may not
+  be below 500 ms, so a healthy follower stays in contact between heartbeats. No read uses
+  `ensure_linearizable` or a read index: R2 is bounded staleness, not linearizability.
+- **R3, R4.** `install_snapshot` sets the gate's install hold before Phase 1 of
+  `restore_snapshot_in_place` deletes a key. It clears the hold only after `on_replicated_reset`
+  has rebuilt the node-local caches, and leaves the deadline at zero, so only an
+  `AppendEntries` after the install opens the gate. A contact during the install is ignored; a
+  failed install never clears the hold. The fence does not depend on `read_lag_threshold_ms`
+  (`src/cluster/state_machine_install_fence.rs`).
 
 ---
 
@@ -118,7 +134,7 @@ revoked must stop working on every node.
 | ID | Promise | Status |
 |---|---|---|
 | **V1** | After a revocation is acknowledged, every node **in contact** rejects the revoked session, token (JTI) or permission within: replication delay + `RELOAD_MIN_SPACING` (200 ms) + `EPOCH_SYNC_INTERVAL_MICROS` (200 ms). | Implemented — bound not yet measured under faults |
-| **V2** | A node that is not in contact MUST NOT accept a credential that it cannot prove is still live. It MUST answer unavailable instead (same rule as R2). | Not yet implemented (G1) |
+| **V2** | A node that is not in contact MUST NOT accept a credential that it cannot prove is still live. It MUST answer unavailable instead (same rule as R2). | Implemented (cluster-read-fencing) |
 | **V3** | A revocation that cannot bump the control epoch is never forgotten. It is retried until it succeeds, or covered by the next leader's election bump. | Implemented |
 
 Evidence:
@@ -132,6 +148,13 @@ Evidence:
   apart (`control.rs:122`).
 - An owed bump is retried with backoff. A node that becomes leader bumps the epoch once
   (`control.rs:74-88`).
+- **V2.** `validate_token`, the session lookup, refresh, introspection, the `/oauth/authorize`
+  permission decision and token exchange ask `StorageEngine::serves_reads` before any cache. On
+  a cluster node that is the read gate (R2); on a single node it is always `Ok`. A refusal
+  answers `503` `HEARTH_CLUSTER_UNAVAILABLE`, never `401`, `active: false` or
+  `allowed: false`, so a client retries on another node instead of dropping a token that may be
+  valid (`src/identity/engine/tests/read_fence.rs`). The warm `validate_token` path still
+  allocates nothing (`tests/cluster_read_gate_hot_path.rs`).
 - Access tokens already issued stay valid until they expire. That is the normal JWT trade-off
   and is outside V1 — see the `rbac-token-claims` spec ([openspec/specs/rbac-token-claims/spec.md](../../openspec/specs/rbac-token-claims/spec.md)) and the [session-version guide](../guides/session-version-revocation.md).
 
@@ -200,8 +223,6 @@ are build steps for finishing cluster mode, not regressions.
 
 | ID | Blocks | Today | To build |
 |---|---|---|---|
-| **G1** | R2, V2 | The read gate measures only unapplied backlog (`engine.rs:1545-1553`). A partitioned follower or a deposed leader serves reads with no time limit. openraft 0.9 does not step a leader down on a lost quorum. Partial mitigation (2026-10-06): `/readyz` answers `503` on a node with no known leader, or a leader no quorum has acknowledged for over 3 s, so a load balancer that honours readiness stops routing to it. The node itself still serves those reads. | A contact check: refuse reads when the node has not heard from a current leader (follower) or a quorum (leader) within `read_lag_threshold_ms`. |
-| **G2** | R3, R4 | Snapshot install deletes every key, then writes the snapshot, on the live engine (`restore_snapshot_in_place`, `state_machine.rs:920`). Reads are not fenced meanwhile (`read_inline`, `engine.rs:795-805`). | Refuse reads (unavailable) while an install runs. |
 | **G3** | Section 7 | The snapshot builder skips only the two applied-state rows (`state_machine.rs:155`). Tracker rows travel to the installing node and replace its own. | Exclude node-local key families from snapshot build and from the install's delete phase. |
 | **G4** | W7 | The audit chain head is read and written under a per-node mutex, then written with a plain `write_batch` (`src/audit/engine.rs:682`, `850`, `1166-1199`). Nothing stops two nodes from chaining from the same head. | Make the head advance a conditional Raft command, or append on the leader only. |
 | **G5** | Section 6 | No `add_learner` / `change_membership`. | Online membership changes (joint consensus) with an admin API. |
@@ -209,6 +230,13 @@ are build steps for finishing cluster mode, not regressions.
 | **G7** | W6 | `RaftCommand` has no request ID. No idempotency key exists. | A client request ID, deduplicated in the state machine. |
 | **G8** | C3 | `leader_timestamp` is discarded at apply (`state_machine.rs:499-531`). | Apply the leader's timestamp to replicated records, or drop the C3 promise. |
 | **G9** | Section 6 | Replacing a node reuses its ID with an empty data directory, which discards its saved vote. If that node is the lowest ID, it also self-initialises on start (`engine.rs:493-497`). The leader also still records the entries the node had: in a Jepsen `replace` run (2026-10-07) a node replicating to the wiped node aborted on an integer underflow in openraft's progress tracking (`progress/entry/mod.rs:267`; the release profile checks overflow and aborts on panic). | A replacement procedure that does not reuse a voter's identity — needs G5. |
+
+Closed:
+
+| ID | Blocked | Closed by |
+|---|---|---|
+| **G1** | R2, V2 | OpenSpec change `cluster-read-fencing` (2026-11): the read gate's contact check, the leader's quorum-ack age on each `AppendEntries`, the apply wait, and the credential checks that ask the gate before any cache. Before it, the gate measured only the unapplied backlog, and a partitioned follower or a deposed leader served reads and accepted revoked sessions with no time limit. |
+| **G2** | R3, R4 | The same change: a snapshot install holds the gate closed from before its delete phase until a contact after the cache rebuild. Before it, reads during an install saw a partly installed store. |
 
 ---
 
@@ -227,19 +255,20 @@ G-item and flips to **pass** when the G-item lands (`jepsen/expectations.edn`).
 | W5 | none | — | — | Unit tests only (see below) | unit tests |
 | W7 | `audit` | Audited admin changes on every node at once; every node verifies the audit chain | none | The chain verifies on every node | xfail (G4) |
 | R1 | `same-node` | Write, then read back on the same node | Partitions, leader isolation | The read shows the write | pass |
-| R2 | `staleness` | One writer writes increasing values; every node reads | Partitions, leader isolation | No read returns less than a write acknowledged more than `read_lag_threshold_ms` before it began | xfail (G1) |
-| R3, R4 | `snapshot` | Cut one node off, write past the snapshot point, heal; read the node while it installs the snapshot | Timed partition; `read_lag_threshold_ms` raised for this test only | No read goes backwards or misses data; at least one install logged | xfail (G2) |
+| R2 | `staleness` | One writer writes increasing values; every node reads | Partitions, leader isolation | No read returns less than a write acknowledged more than `read_lag_threshold_ms` before it began | pass |
+| R3, R4 | `snapshot` | Cut one node off, write past the snapshot point, heal; read the node while it installs the snapshot | Timed partition; `read_lag_threshold_ms` raised for this test only | No read goes backwards or misses data; at least one install logged | pass |
 | V1 | `revocation` | Revoke a session, then validate it on every node | Delays on the peer links | Rejected on every node within the V1 bound | pass |
-| V2 | `revocation-isolated` | Cut one node off, revoke a session elsewhere, validate it on the cut-off node | Timed partition | The cut-off node never accepts the session after the bound | xfail (G1) |
+| V2 | `revocation-isolated` | Cut one node off, revoke a session elsewhere, validate it on the cut-off node | Timed partition | The cut-off node never accepts the session after the bound | pass |
 | Section 6 | `replace` | The `set` workload while the lowest Raft ID is replaced: killed, data directory emptied, restarted with the same ID | Partitions, the replacement | The `set` checkers | xfail (G9) |
 | — | `noop` | No client operations | none | Setup, faults, log collection and convergence work | pass |
 
-The `snapshot` test raises `cluster.read_lag_threshold_ms`. With the default (500 ms), the lag
-monitor happens to refuse reads within 50 ms of a snapshot's arrival, before the restore
-deletes a key, so a client cannot see G2. G2 stays open: the install itself does not refuse
-reads, and an operator who raises the threshold gets partial reads. Mid-install, the realm
-admin's token is refused `401` or `403` because the session, grant or client behind it is
-gone; the test counts that as missing data.
+The `snapshot` test raises `cluster.read_lag_threshold_ms`, so the lag hold cannot hide a
+partial install: only the install fence (R4) keeps reads away from it. Before G2 closed, the
+realm admin's token was refused `401` or `403` mid-install, because the session, grant or client
+behind it was gone; the test counts that as missing data. A read answered `503` is a failed
+operation, which the checker does not count.
+
+JEPSEN_RUN_PLACEHOLDER
 
 C1 has no test. Docker containers share one kernel clock, so a node cannot be given its own
 skew; C1 needs VMs.

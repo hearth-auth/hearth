@@ -7,8 +7,8 @@
  "single-use" :pass
  "same-node"  :pass
  "revocation" :pass
- "revocation-isolated" {:xfail "G1"}
- "staleness"  {:xfail "G1"}
+ "revocation-isolated" :pass
+ "staleness"  :pass
  "audit"      {:xfail "G4"}
- "snapshot"   {:xfail "G2"}
+ "snapshot"   :pass
  "replace"    {:xfail "G9"}}
