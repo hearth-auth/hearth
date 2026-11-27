@@ -41,16 +41,28 @@
                [(sorted-map) nil])
        first))
 
+(defn- indeterminate-values
+  "The values of the :info writes: their outcome is unknown, so each may
+  land at any time after its invocation, also after a later acknowledged
+  write (a write that timed out on a cut-off leader is forwarded to the new
+  leader once the partition heals)."
+  [history]
+  (into #{}
+        (comp (filter #(and (= :write (:f %)) (= :info (:type %))))
+              (map :value))
+        history))
+
 (defn checker
   "Valid when no :ok read invoked more than the test map's :read-lag-ms
   (default `read-lag-ms`) after a write was acknowledged returned a lower
-  value, and at least one read had such a write to check against (a run with
+  value (other than one an indeterminate write wrote), and at least one read had such a write to check against (a run with
   none proves nothing). Each read carries the :node it ran on."
   []
   (reify checker/Checker
     (check [_ test history _opts]
       (let [lag     (* ns-per-ms (:read-lag-ms test read-lag-ms))
             floor   (floors history)
+            late-ok (indeterminate-values history)
             checked (for [op    (filter #(and (= :read (:f %)) (= :ok (:type %))) history)
                           :let  [start (:time (h/invocation history op))
                                  [_ [v at]] (first (rsubseq floor <= (- start lag)))]
@@ -59,7 +71,9 @@
                        :read              (:value op)
                        :expected-at-least v
                        :after-ms          (quot (- start at) ns-per-ms)})
-            stale   (vec (filter #(< (or (:read %) -1) (:expected-at-least %)) checked))]
+            stale   (vec (filter #(and (< (or (:read %) -1) (:expected-at-least %))
+                                       (not (late-ok (:read %))))
+                                 checked))]
         (cond
           (empty? checked)
           {:valid?      false
@@ -75,6 +89,19 @@
 
           :else
           {:valid? true :read-lag-ms (quot lag ns-per-ms) :checked (count checked)})))))
+
+(defn write-outcome
+  "The completion of a write from its attempts' HTTP results, in order. A
+  write any attempt of which has an unknown outcome is :info unless a later
+  attempt succeeded: the earlier attempt may still land, after the refusals
+  that followed it."
+  [results]
+  (let [last-result (peek (vec results))
+        completion  (http/outcome :write last-result)]
+    (if (and (not= :ok (:type completion))
+             (some #(= :info (:type (http/outcome :write %))) results))
+      (assoc completion :type :info)
+      completion)))
 
 (defrecord Client [db state node]
   client/Client
@@ -97,15 +124,17 @@
       (case (:f op)
         ; Tries each node in turn, from this client's own: the writes must
         ; reach the side of the partition that can commit them.
-        :write (loop [[at & more] (cons node (remove #{node} (:nodes test)))]
-                 (let [r (admin/request! db at path
-                                         {:method  :patch
-                                          :timeout write-timeout-ms
-                                          :json    {"display_name"
-                                                    (register/render-value (:value op))}})]
+        :write (loop [[at & more] (cons node (remove #{node} (:nodes test)))
+                      results     []]
+                 (let [r       (admin/request! db at path
+                                               {:method  :patch
+                                                :timeout write-timeout-ms
+                                                :json    {"display_name"
+                                                          (register/render-value (:value op))}})
+                       results (conj results r)]
                    (if (and (not= 200 (:status r)) (seq more))
-                     (recur more)
-                     (assoc (http/complete op :write r) :written-on at))))
+                     (recur more results)
+                     (assoc (merge op (write-outcome results)) :written-on at))))
         :read  (let [r (admin/request! db node path {})]
                  (if (= 200 (:status r))
                    (assoc op :type :ok :node node

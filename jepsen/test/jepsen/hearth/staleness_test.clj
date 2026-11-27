@@ -50,3 +50,26 @@
   (let [r (check (write 1 0 10 :ok) (read 1 "n2" 100 nil))]
     (is (false? (:valid? r)))
     (is (re-find #"no read" (:error r)) (pr-str r))))
+
+(deftest a-read-of-an-indeterminate-write-may-follow-a-later-one
+  (testing "a write whose outcome is unknown can land after a later acknowledged write"
+    (let [r (check (write 1 0 10 :ok)
+                   (write 2 20 3020 :info)     ; timed out on its node
+                   (write 3 3030 3040 :ok)
+                   (read 1 "n2" 4000 2))]      ; the late write 2 landed
+      (is (true? (:valid? r)) (pr-str r))))
+  (testing "a value no write left indeterminate is still stale"
+    (let [r (check (write 1 0 10 :ok)
+                   (write 2 20 3020 :info)
+                   (write 3 3030 3040 :ok)
+                   (read 1 "n2" 4000 1))]
+      (is (false? (:valid? r)) (pr-str r)))))
+
+(deftest a-write-with-one-indeterminate-attempt-is-indeterminate
+  (let [timeout     {:error :timeout}
+        unavailable {:status 503 :body {"error_code" "HEARTH_CLUSTER_UNAVAILABLE"}}
+        ok          {:status 200 :body {}}]
+    (testing "a timeout, then refusals elsewhere: the first attempt may still land"
+      (is (= :info (:type (staleness/write-outcome [timeout unavailable unavailable])))))
+    (is (= :ok (:type (staleness/write-outcome [timeout ok]))))
+    (is (= :fail (:type (staleness/write-outcome [unavailable unavailable]))))))
