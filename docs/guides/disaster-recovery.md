@@ -378,6 +378,10 @@ Hearth's Raft snapshot install is a two-phase operation:
 - **Phase 1** — delete all realm keys from the local data directory.
 - **Phase 2** — replay the leader's snapshot data into the now-empty directory.
 
+The snapshot itself is a file the node received into `{data_dir}/raft-snapshots/`
+and checked whole before Phase 1. Files there are rebuilt or received again as needed:
+the directory needs no backup, and at startup the node removes files it cannot use.
+
 Before Phase 1 begins, the engine writes `{data_dir}/SNAPSHOT_RESTORE_IN_PROGRESS`
 durably to disk. After Phase 2 completes, the marker is removed. If the node is
 killed between the two phases, the marker remains and the data directory contains

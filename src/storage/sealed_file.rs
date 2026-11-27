@@ -86,8 +86,14 @@ impl SealedFiles {
     #[cfg(test)]
     #[allow(clippy::unwrap_used)]
     pub(crate) fn for_tests(dir: &Path) -> Self {
-        use crate::storage::fs::RealFs;
-        let fs: Arc<dyn Fs> = Arc::new(RealFs);
+        Self::for_tests_with(dir, Arc::new(crate::storage::fs::RealFs))
+    }
+
+    /// Sealed files for tests over `fs`, keyed by a fresh system KEK kept in
+    /// `dir`.
+    #[cfg(test)]
+    #[allow(clippy::unwrap_used)]
+    pub(crate) fn for_tests_with(dir: &Path, fs: Arc<dyn Fs>) -> Self {
         let registry = Arc::new(KeyRegistry::load_with_fs(dir, Arc::clone(&fs), true).unwrap());
         let realm = RealmId::new(uuid::Uuid::from_u128(1));
         registry.ensure_kek_for_realm(&realm).unwrap();

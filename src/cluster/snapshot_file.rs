@@ -10,24 +10,26 @@
 //!   next call (write-behind);
 //! - `shutdown` of a received file seals its last chunk, syncs it and reads it
 //!   all back through the stream reader ([`snapshot_stream::verify`]), so a
-//!   bad transfer fails the transfer, before the state machine sees it.
-
-// Used by the state machine from task 3.2 of `cluster-file-snapshots` on;
-// until then only its tests use it.
-#![cfg_attr(not(test), allow(dead_code))]
+//!   bad transfer fails the transfer, before the state machine sees it;
+//! - a failed write or seek of a received file removes what was written
+//!   (`Mode::Reset`). openraft keeps the same file for the snapshot id, and
+//!   the leader sends that snapshot again from offset 0: the seek to 0 starts
+//!   a new file at the same path.
 
 use std::fmt;
 use std::future::Future;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{ready, Context, Poll};
 
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 use tokio::task::JoinHandle;
+use tracing::warn;
 
 use crate::cluster::snapshot_stream::{self, Summary};
-use crate::storage::{SealedFiles, SealedReader, SealedWriter, SEALED_CHUNK_LEN};
+use crate::storage::{Fs, SealedFiles, SealedReader, SealedWriter, SEALED_CHUNK_LEN};
 
 /// Most bytes one read or write moves through memory: the transfer chunk,
 /// [`SNAPSHOT_CHUNK_BYTES`](crate::cluster::wire::SNAPSHOT_CHUNK_BYTES).
@@ -41,13 +43,23 @@ enum Mode {
     Read(SealedReader),
     /// A received snapshot, sealed and checked.
     Verified(Summary),
-    /// A write failed or the file was closed.
+    /// A write or seek of a received snapshot failed. The file was removed;
+    /// only a seek to offset 0 (the leader sending again) is accepted, and
+    /// it starts a new file at the same path.
+    Reset,
+    /// The check at shutdown failed, or the file was taken.
     Closed,
 }
 
 /// The state the blocking pool works on.
 struct Inner {
     mode: Mode,
+    /// The sealed files and the path, to remove and start over a received
+    /// file after a failure.
+    files: SealedFiles,
+    path: PathBuf,
+    /// The write in flight failed and reset the file (see `Mode::Reset`).
+    just_reset: bool,
     /// Bytes read ahead and not yet returned (read mode), or waiting to be
     /// written (write mode).
     buf: Vec<u8>,
@@ -69,6 +81,38 @@ pub struct SnapshotFile {
     seek: Option<SeekFrom>,
     /// A read is on the blocking pool; its bytes go to the next `poll_read`.
     reading: bool,
+    /// A received file not taken by [`SnapshotFile::take_received`] is
+    /// removed when dropped (a transfer that failed or was replaced).
+    discard_on_drop: bool,
+}
+
+impl Drop for SnapshotFile {
+    fn drop(&mut self) {
+        if self.discard_on_drop {
+            // One unlink; a blocking-pool call still holding the file writes
+            // to the unlinked inode.
+            remove_file_off_runtime(self.files.fs(), self.path.clone());
+        }
+    }
+}
+
+/// Removes `path` without blocking a runtime thread (unlinking a large file
+/// is blocking I/O): on the blocking pool when called on a tokio runtime,
+/// else right here. Logs a failure other than "not found". A removal lost
+/// to a runtime shutting down is done by the next start-up's recovery.
+pub(crate) fn remove_file_off_runtime(fs: &Arc<dyn Fs>, path: PathBuf) {
+    let remove = {
+        let fs = Arc::clone(fs);
+        move || match fs.remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => warn!(path = %path.display(), error = %e, "could not remove a snapshot file"),
+        }
+    };
+    match tokio::runtime::Handle::try_current() {
+        Ok(runtime) => drop(runtime.spawn_blocking(remove)),
+        Err(_) => remove(),
+    }
 }
 
 impl fmt::Debug for SnapshotFile {
@@ -87,7 +131,9 @@ impl SnapshotFile {
     /// Any error creating the file.
     pub(crate) fn create(files: &SealedFiles, path: &Path) -> io::Result<Self> {
         let writer = files.create(path).map_err(io::Error::other)?;
-        Ok(Self::new(files, path, Mode::Write(writer)))
+        let mut file = Self::new(files, path, Mode::Write(writer));
+        file.discard_on_drop = true;
+        Ok(file)
     }
 
     /// Opens the finished sealed file at `path` to send it.
@@ -106,17 +152,40 @@ impl SnapshotFile {
             path: path.to_path_buf(),
             state: State::Idle(Some(Box::new(Inner {
                 mode,
+                files: files.clone(),
+                path: path.to_path_buf(),
+                just_reset: false,
                 buf: Vec::new(),
                 buf_pos: 0,
             }))),
             seek: None,
             reading: false,
+            discard_on_drop: false,
         }
+    }
+
+    /// Takes a received file that `shutdown` checked: its path and what the
+    /// check found. The file is then the caller's to keep or remove.
+    ///
+    /// # Errors
+    ///
+    /// [`io::ErrorKind::InvalidInput`] for a file that is not a received
+    /// file checked by `shutdown`.
+    pub(crate) fn take_received(mut self) -> io::Result<(PathBuf, Summary)> {
+        let State::Idle(Some(inner)) = &mut self.state else {
+            return Err(not_received());
+        };
+        let Mode::Verified(summary) = std::mem::replace(&mut inner.mode, Mode::Closed) else {
+            return Err(not_received());
+        };
+        self.discard_on_drop = false;
+        Ok((self.path.clone(), summary))
     }
 
     /// The check of a received file that `shutdown` made: its META, realms
     /// and rows. `None` before `shutdown` completed, or for a file opened
     /// to send.
+    #[cfg(test)]
     pub(crate) fn verified(&self) -> Option<&Summary> {
         match &self.state {
             State::Idle(Some(inner)) => match &inner.mode {
@@ -137,6 +206,13 @@ fn poll_idle(state: &mut State, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         return Poll::Ready(result);
     }
     Poll::Ready(Ok(()))
+}
+
+fn not_received() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "snapshot file is not a received snapshot checked at shutdown",
+    )
 }
 
 fn busy() -> io::Error {
@@ -162,13 +238,37 @@ where
     let mut inner = slot.take().ok_or_else(busy)?;
     *state = State::Busy(tokio::task::spawn_blocking(move || {
         let result = op(&mut inner);
-        if result.is_err() && matches!(inner.mode, Mode::Write(_)) {
-            // A partly written file stays partial: refuse later calls.
-            inner.mode = Mode::Closed;
-        }
         (inner, result)
     }));
     Ok(())
+}
+
+/// After a failed write or seek of a received file: drops the writer and
+/// removes the file, so a failed attempt holds no disk space (the failure may
+/// be a full disk). Runs on the blocking pool.
+fn reset(inner: &mut Inner) {
+    inner.mode = Mode::Reset;
+    inner.buf.clear();
+    match inner.files.fs().remove_file(&inner.path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => warn!(
+            path = %inner.path.display(),
+            error = %e,
+            "could not remove a failed snapshot transfer"
+        ),
+    }
+}
+
+/// Starts a received file over at offset 0, after [`reset`].
+fn restart(inner: &mut Inner) -> io::Result<()> {
+    let writer = inner.files.create(&inner.path).map_err(io::Error::other)?;
+    inner.mode = Mode::Write(writer);
+    Ok(())
+}
+
+fn send_again() -> io::Error {
+    io::Error::other("an earlier snapshot write failed; the transfer restarts at offset 0")
 }
 
 fn wrong_mode(what: &'static str) -> io::Error {
@@ -252,8 +352,10 @@ impl AsyncWrite for SnapshotFile {
         let this = self.get_mut();
         ready!(poll_idle(&mut this.state, cx))?;
         let inner = idle(&mut this.state)?;
-        if !matches!(inner.mode, Mode::Write(_)) {
-            return Poll::Ready(Err(wrong_mode("snapshot file is not open for writing")));
+        match inner.mode {
+            Mode::Write(_) => {}
+            Mode::Reset => return Poll::Ready(Err(send_again())),
+            _ => return Poll::Ready(Err(wrong_mode("snapshot file is not open for writing"))),
         }
         let take = data.len().min(MAX_IO);
         inner.buf.clear();
@@ -264,6 +366,10 @@ impl AsyncWrite for SnapshotFile {
             };
             let result = writer.write_all(&inner.buf);
             inner.buf.clear();
+            if result.is_err() {
+                reset(inner);
+                inner.just_reset = true;
+            }
             result
         })?;
         Poll::Ready(Ok(take))
@@ -279,9 +385,8 @@ impl AsyncWrite for SnapshotFile {
         match idle(&mut this.state)?.mode {
             Mode::Write(_) => {}
             Mode::Read(_) | Mode::Verified(_) => return Poll::Ready(Ok(())),
-            Mode::Closed => {
-                return Poll::Ready(Err(io::Error::other("snapshot file write failed earlier")))
-            }
+            Mode::Reset => return Poll::Ready(Err(send_again())),
+            Mode::Closed => return Poll::Ready(Err(wrong_mode("snapshot file is closed"))),
         }
         let files = this.files.clone();
         spawn(&mut this.state, move |inner| {
@@ -305,9 +410,20 @@ impl AsyncSeek for SnapshotFile {
 
     fn poll_complete(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<u64>> {
         let this = self.get_mut();
-        ready!(poll_idle(&mut this.state, cx))?;
+        let pending = ready!(poll_idle(&mut this.state, cx));
         let seek = this.seek.take();
         let inner = idle(&mut this.state)?;
+        let just_reset = std::mem::take(&mut inner.just_reset);
+        if let Err(e) = pending {
+            // A write that failed and reset the file: the mode now refuses
+            // every call but a restart at offset 0, so the failure need not
+            // stop the seek that restarts (tokio's `seek` first waits here
+            // for the call in flight, with no target yet). Any other failure,
+            // a failed restart included, is reported.
+            if !just_reset {
+                return Poll::Ready(Err(e));
+            }
+        }
         let target = match &mut inner.mode {
             Mode::Read(reader) => {
                 // Bytes read ahead are not returned yet: the logical position
@@ -344,12 +460,25 @@ impl AsyncSeek for SnapshotFile {
                     }
                 }
             }
+            Mode::Reset => match seek {
+                // Nothing written is kept.
+                None => return Poll::Ready(Ok(0)),
+                Some(SeekFrom::Start(0)) => 0,
+                Some(_) => return Poll::Ready(Err(send_again())),
+            },
             Mode::Verified(_) | Mode::Closed => {
                 return Poll::Ready(Err(wrong_mode("snapshot file is closed")))
             }
         };
         spawn(&mut this.state, move |inner| match &mut inner.mode {
-            Mode::Write(writer) => writer.seek_to(target),
+            Mode::Write(writer) => {
+                let result = writer.seek_to(target);
+                if result.is_err() {
+                    reset(inner);
+                }
+                result
+            }
+            Mode::Reset => restart(inner),
             _ => Err(wrong_mode("snapshot file is not open for writing")),
         })?;
         // `seek` is now empty: the next poll reports the new position.
@@ -364,8 +493,11 @@ impl AsyncSeek for SnapshotFile {
 mod tests {
     use super::*;
     use crate::cluster::snapshot_stream::{Record, StreamReader, StreamWriter};
+    use crate::cluster::test_fs::{eventually, TestFs};
     use crate::core::RealmId;
+    use crate::storage::Fs;
     use openraft::{CommittedLeaderId, LogId, SnapshotMeta, StoredMembership};
+    use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
     fn files_in(dir: &Path) -> SealedFiles {
@@ -413,6 +545,109 @@ mod tests {
             file.write_all(part).await.unwrap();
             offset += part.len() as u64;
         }
+    }
+
+    /// One request the way openraft's `Streaming::receive` handles it: a
+    /// seek when `at` is not the next offset (`next`, the bytes openraft
+    /// counts as written), then the write.
+    async fn receive_chunk(
+        file: &mut SnapshotFile,
+        next: &mut u64,
+        at: u64,
+        data: &[u8],
+    ) -> io::Result<()> {
+        if at != *next {
+            file.seek(SeekFrom::Start(at)).await?;
+            *next = at;
+        }
+        file.write_all(data).await?;
+        *next += data.len() as u64;
+        Ok(())
+    }
+
+    /// openraft keeps the same `SnapshotFile` after a failed request and
+    /// the leader sends the same snapshot again from offset 0: the retry
+    /// installs, and the failed attempt's bytes do not hold the disk.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_transfer_that_ran_out_of_space_can_be_sent_again_from_the_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = TestFs::new();
+        let files = SealedFiles::for_tests_with(dir.path(), Arc::clone(&fs) as Arc<dyn Fs>);
+        let bytes = stream(1_000);
+        let chunk = 1 << 20;
+        assert!(bytes.len() > 4 * chunk);
+        let path = dir.path().join("recv.part");
+        let mut file = SnapshotFile::create(&files, &path).unwrap();
+
+        fs.set_space(2 * chunk as u64);
+        let mut next = 0u64;
+        let mut failed_at = None;
+        for (i, part) in bytes.chunks(chunk).enumerate() {
+            if receive_chunk(&mut file, &mut next, (i * chunk) as u64, part)
+                .await
+                .is_err()
+            {
+                failed_at = Some(i);
+                break;
+            }
+        }
+        assert!(failed_at.is_some(), "the disk filled up mid-transfer");
+        assert!(
+            eventually(|| std::fs::metadata(&path).map_or(true, |m| m.len() == 0)).await,
+            "the failed attempt's bytes are released"
+        );
+
+        // Space is freed; the leader starts the same snapshot again.
+        fs.set_space(u64::MAX);
+        for (i, part) in bytes.chunks(chunk).enumerate() {
+            receive_chunk(&mut file, &mut next, (i * chunk) as u64, part)
+                .await
+                .unwrap();
+        }
+        file.shutdown().await.unwrap();
+        assert_eq!(file.verified().unwrap().rows, 1_000);
+    }
+
+    /// A retry may also restart with the seek that reports the failure.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_seek_to_the_start_after_a_failed_write_starts_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = TestFs::new();
+        let files = SealedFiles::for_tests_with(dir.path(), Arc::clone(&fs) as Arc<dyn Fs>);
+        let bytes = stream(400);
+        let path = dir.path().join("recv.part");
+        let mut file = SnapshotFile::create(&files, &path).unwrap();
+        fs.set_space(100_000);
+        // Write-behind: the failure is reported by the next call.
+        file.write_all(&bytes[..1 << 20]).await.unwrap();
+        assert!(eventually(|| fs.refused_writes() > 0).await);
+        fs.set_space(u64::MAX);
+        assert_eq!(file.seek(SeekFrom::Start(0)).await.unwrap(), 0);
+        file.write_all(&bytes).await.unwrap();
+        file.shutdown().await.unwrap();
+        assert_eq!(file.verified().unwrap().rows, 400);
+    }
+
+    /// Unlinking a large file is blocking I/O: a dropped received file is
+    /// removed on the blocking pool, not on the runtime thread.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_dropped_received_file_is_removed_off_the_runtime_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = TestFs::new();
+        let files = SealedFiles::for_tests_with(dir.path(), Arc::clone(&fs) as Arc<dyn Fs>);
+        let path = dir.path().join("recv.part");
+        let mut file = SnapshotFile::create(&files, &path).unwrap();
+        file.write_all(&stream(3)).await.unwrap();
+        file.flush().await.unwrap();
+        drop(file);
+        assert!(eventually(|| !path.exists()).await, "the file is removed");
+        let removers = fs.removers_of(&path);
+        let me = std::thread::current().id();
+        assert_ne!(removers.len(), 0, "the file was removed through the fs");
+        assert!(
+            removers.iter().all(|t| *t != me),
+            "removed on the runtime thread"
+        );
     }
 
     #[test]
@@ -495,6 +730,32 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_received_file_is_removed_unless_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = files_in(dir.path());
+        let dropped = dir.path().join("dropped.part");
+        let mut file = SnapshotFile::create(&files, &dropped).unwrap();
+        file.write_all(&stream(3)).await.unwrap();
+        drop(file);
+        assert!(
+            eventually(|| !dropped.exists()).await,
+            "an abandoned transfer leaves no file"
+        );
+
+        let taken = dir.path().join("taken.part");
+        let mut file = SnapshotFile::create(&files, &taken).unwrap();
+        file.write_all(&stream(3)).await.unwrap();
+        file.shutdown().await.unwrap();
+        let (path, summary) = file.take_received().unwrap();
+        assert_eq!((path.as_path(), summary.rows), (taken.as_path(), 3));
+        assert!(taken.exists(), "a taken file stays");
+
+        let unchecked = SnapshotFile::create(&files, &dir.path().join("u.part")).unwrap();
+        let err = unchecked.take_received().unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_seek_past_the_written_end_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let files = files_in(dir.path());
@@ -502,7 +763,7 @@ mod tests {
         file.write_all(b"abc").await.unwrap();
         let err = file.seek(SeekFrom::Start(100)).await.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
-        // The file is closed after a failed call; shutdown says so.
+        // A failed call drops what was written; shutdown says so.
         assert!(file.shutdown().await.is_err());
     }
 

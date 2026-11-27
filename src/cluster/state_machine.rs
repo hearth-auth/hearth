@@ -7,31 +7,35 @@
 //! engine from an async context MUST use `tokio::task::spawn_blocking` to
 //! avoid blocking the Tokio executor thread pool under load.
 //!
-//! ## Snapshot format
-//! Snapshots are serialised with `ciborium` (CBOR) and then compressed with
-//! `flate2` (gzip).  CBOR is chosen because it encodes `Vec<u8>` as compact
-//! byte strings, not arrays of integers, keeping snapshot sizes small.
+//! ## Snapshots
+//! A snapshot is a file in `{data_dir}/raft-snapshots/` (`cluster-file-snapshots`):
+//! the record stream of [`super::snapshot_stream`] in a sealed file. It is
+//! built from one point-in-time storage view, sent and received in chunks,
+//! checked whole before an install changes the store, and restored a batch of
+//! rows at a time, so neither side holds the store in memory.
 
-use std::io::{Cursor, Read as _, Write as _};
+use std::io::{BufReader, Read};
+use std::ops::ControlFlow;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-use flate2::read::GzDecoder;
-use flate2::write::GzEncoder;
-use flate2::Compression;
 use openraft::storage::RaftSnapshotBuilder;
 use openraft::storage::RaftStateMachine;
 use openraft::{
     EntryPayload, LogId, Snapshot, SnapshotMeta, StorageError, StorageIOError, StoredMembership,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::task::spawn_blocking;
 use tracing::{debug, info, instrument};
 
+use crate::cluster::snapshot_file::{remove_file_off_runtime, SnapshotFile};
+use crate::cluster::snapshot_store::{Part, SnapshotStore, StoredSnapshot};
+use crate::cluster::snapshot_stream::{Record, StreamReader, StreamWriter};
 use crate::cluster::types::{HearthLogResponse, HearthNode, HearthRaftConfig, RaftCommand};
 use crate::cluster::ReplicatedWriteObserver;
 use crate::core::RealmId;
-use crate::storage::StorageEngine;
+use crate::storage::{EmbeddedStorageEngine, StorageEngine, SEALED_CHUNK_LEN};
 
 // ── Error helpers ─────────────────────────────────────────────────────────────
 
@@ -55,33 +59,11 @@ fn to_read_err<E: std::error::Error + Send + Sync + 'static>(e: E) -> StorageErr
     io_read_err(e)
 }
 
-// ── Snapshot wire format ──────────────────────────────────────────────────────
-
-/// A single realm's full key-space at snapshot time.
-#[derive(Serialize, Deserialize)]
-struct RealmData {
-    realm_id: RealmId,
-    /// All (key, value) pairs for this realm, sorted by key.
-    entries: Vec<(Vec<u8>, Vec<u8>)>,
-}
-
-/// The full snapshot payload serialised via CBOR then gzip-compressed.
-#[derive(Serialize, Deserialize)]
-struct SnapshotPayload {
-    realms: Vec<RealmData>,
-}
-
-// ── Stored snapshot ───────────────────────────────────────────────────────────
-
-struct StoredSnapshot {
-    meta: SnapshotMeta<u64, HearthNode>,
-    /// Compressed (gzip) CBOR-encoded `SnapshotPayload`.
-    data: Vec<u8>,
-}
+// ── Current snapshot ──────────────────────────────────────────────────────────
 
 /// The node's current snapshot, shared by the state machine (install, serve)
 /// and its snapshot builders (build). The lock is held only to swap or clone
-/// the `Arc`, never across an `.await` or while copying snapshot bytes.
+/// the `Arc`, never across an `.await` or during file I/O.
 type SnapshotSlot = Arc<std::sync::Mutex<Option<Arc<StoredSnapshot>>>>;
 
 fn snapshot_slot_get(slot: &SnapshotSlot) -> Option<Arc<StoredSnapshot>> {
@@ -91,26 +73,55 @@ fn snapshot_slot_get(slot: &SnapshotSlot) -> Option<Arc<StoredSnapshot>> {
 }
 
 /// Stores `snap` unless the slot already holds a snapshot that covers more
-/// of the log (a build racing an install must not roll the slot back).
-fn snapshot_slot_offer(slot: &SnapshotSlot, snap: StoredSnapshot) {
-    let mut guard = slot
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let newer = guard
-        .as_ref()
-        .is_none_or(|cur| cur.meta.last_log_id <= snap.meta.last_log_id);
-    if newer {
-        *guard = Some(Arc::new(snap));
+/// of the log (a build racing an install must not roll the slot back). The
+/// snapshot that loses is retired: its file goes when its last sender drops
+/// it.
+fn snapshot_slot_offer(slot: &SnapshotSlot, snap: Arc<StoredSnapshot>) {
+    // Declared before the guard, so a file is unlinked after the lock is
+    // released.
+    let loser;
+    {
+        let mut guard = slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let newer = guard
+            .as_ref()
+            .is_none_or(|cur| cur.meta.last_log_id <= snap.meta.last_log_id);
+        loser = if newer {
+            guard.replace(snap)
+        } else {
+            Some(snap)
+        };
     }
+    if let Some(old) = &loser {
+        old.retire();
+    }
+}
+
+/// Opens a stored snapshot to send it (blocking file I/O).
+fn open_for_send(
+    store: &SnapshotStore,
+    snap: &StoredSnapshot,
+) -> Result<Snapshot<HearthRaftConfig>, StorageError<u64>> {
+    let file = SnapshotFile::open(store.files(), snap.path()).map_err(io_read_err)?;
+    Ok(Snapshot {
+        meta: snap.meta.clone(),
+        snapshot: Box::new(file),
+    })
+}
+
+fn join_err(e: tokio::task::JoinError) -> StorageError<u64> {
+    io_write_err(std::io::Error::other(e.to_string()))
 }
 
 // ── HearthSnapshotBuilder ─────────────────────────────────────────────────────
 
-/// Builds a snapshot by scanning the full key-space of every realm on disk.
+/// Builds a snapshot file from one point-in-time view of the store.
 ///
-/// Returned by [`HearthStateMachine::get_snapshot_builder`].  The builder
-/// holds its own `Arc` to the engine so snapshot creation doesn't block
-/// the state machine from continuing to apply entries concurrently.
+/// Returned by [`HearthStateMachine::get_snapshot_builder`], which takes the
+/// view: it holds exactly the entries applied up to `last_applied`, however
+/// long the build takes and whatever the state machine applies meanwhile
+/// (#818). The build streams the view's rows into the file one at a time.
 ///
 /// Realms are enumerated with [`StorageEngine::list_realms`] — the same source
 /// [`restore_snapshot_in_place`] uses for its Phase 1 clear (audit 2026-08-28
@@ -119,89 +130,120 @@ fn snapshot_slot_offer(slot: &SnapshotSlot, snap: StoredSnapshot) {
 /// leader built a snapshot omitting every realm on its own disk, and installing
 /// it deleted those realms from every follower.
 pub struct HearthSnapshotBuilder {
-    engine: Arc<dyn StorageEngine>,
+    /// The storage view at `last_applied`, or why it could not be taken.
+    view: Result<Arc<dyn StorageEngine>, String>,
     last_applied: Option<LogId<u64>>,
     last_membership: StoredMembership<u64, HearthNode>,
     /// Where the built snapshot is kept, so the node can serve it.
     current: SnapshotSlot,
+    store: SnapshotStore,
 }
 
 impl RaftSnapshotBuilder<HearthRaftConfig> for HearthSnapshotBuilder {
     #[instrument(skip(self), name = "snapshot_build")]
     async fn build_snapshot(&mut self) -> Result<Snapshot<HearthRaftConfig>, StorageError<u64>> {
-        let engine = Arc::clone(&self.engine);
-        let last_applied = self.last_applied;
-        let last_membership = self.last_membership.clone();
-
-        let snapshot_id = format!(
-            "snap-{}-{}",
-            last_applied.as_ref().map(|id| id.index).unwrap_or(0),
-            uuid::Uuid::new_v4()
-        );
-
-        // Enumerate and scan every realm on disk inside spawn_blocking —
-        // StorageEngine::list_realms and ::scan are synchronous calls.
-        let payload: SnapshotPayload = spawn_blocking(move || {
-            let realms = engine.list_realms().map_err(io_read_err)?;
-            let mut realm_data_vec = Vec::with_capacity(realms.len());
-            for realm_id in &realms {
-                let entries = engine
-                    .scan(realm_id, &[], &[0xFF; 256])
-                    .map_err(|e| io_read_err(e))?
-                    .into_iter()
-                    // The applied-state rows are this node's own record, not
-                    // replicated data: the installing node writes the
-                    // snapshot's applied state itself.
-                    .filter(|e| !is_state_machine_meta_key(&e.key))
-                    .map(|e| (e.key, e.value))
-                    .collect::<Vec<_>>();
-                if entries.is_empty() {
-                    continue;
-                }
-                realm_data_vec.push(RealmData {
-                    realm_id: realm_id.clone(),
-                    entries,
-                });
-            }
-            Ok::<SnapshotPayload, StorageError<u64>>(SnapshotPayload {
-                realms: realm_data_vec,
-            })
+        let view = self
+            .view
+            .clone()
+            .map_err(|e| io_read_err(std::io::Error::other(e)))?;
+        let meta = SnapshotMeta {
+            last_log_id: self.last_applied,
+            last_membership: self.last_membership.clone(),
+            snapshot_id: format!(
+                "snap-{}-{}",
+                self.last_applied.as_ref().map_or(0, |id| id.index),
+                uuid::Uuid::new_v4()
+            ),
+        };
+        let store = self.store.clone();
+        let current = Arc::clone(&self.current);
+        let build_meta = meta.clone();
+        let (snapshot, realms, rows) = spawn_blocking(move || {
+            let (stored, realms, rows) = write_snapshot(view.as_ref(), &store, build_meta)?;
+            let snapshot = open_for_send(&store, &stored)?;
+            // Keep it: this node serves it to any follower whose next entry
+            // the log no longer holds. Returning it to openraft alone kept
+            // nothing, so a leader that had purged its log failed "snapshot
+            // not found" and its Raft core stopped.
+            snapshot_slot_offer(&current, stored);
+            Ok::<_, StorageError<u64>>((snapshot, realms, rows))
         })
         .await
-        .map_err(|e| io_read_err(std::io::Error::other(e.to_string())))??;
-
-        // Serialise to CBOR then gzip-compress.
-        let compressed = compress_payload(&payload)?;
-
-        let meta = SnapshotMeta {
-            last_log_id: last_applied,
-            last_membership,
-            snapshot_id: snapshot_id.clone(),
-        };
+        .map_err(join_err)??;
 
         info!(
-            snapshot_id = %snapshot_id,
-            realms = payload.realms.len(),
-            compressed_bytes = compressed.len(),
+            snapshot_id = %meta.snapshot_id,
+            realms,
+            rows,
             "snapshot built"
         );
+        Ok(snapshot)
+    }
+}
 
-        // Keep it: this node serves it to any follower whose next entry the
-        // log no longer holds. Returning it to openraft alone kept nothing, so
-        // a leader that had purged its log failed "snapshot not found" and its
-        // Raft core stopped.
-        snapshot_slot_offer(
-            &self.current,
-            StoredSnapshot {
-                meta: meta.clone(),
-                data: compressed.clone(),
-            },
-        );
-
-        Ok(Snapshot {
-            meta,
-            snapshot: Box::new(Cursor::new(compressed)),
-        })
+/// Blocking: streams every row of `view` (except the applied-state rows)
+/// into a new snapshot file and keeps it. Returns it with its realm and row
+/// counts.
+fn write_snapshot(
+    view: &dyn StorageEngine,
+    store: &SnapshotStore,
+    meta: SnapshotMeta<u64, HearthNode>,
+) -> Result<(Arc<StoredSnapshot>, u64, u64), StorageError<u64>> {
+    let part = store.new_part(Part::Build);
+    let written = (|| {
+        let writer = store.files().create(&part).map_err(io_write_err)?;
+        let mut stream = StreamWriter::new(writer, &meta).map_err(io_write_err)?;
+        let (mut realms, mut rows) = (0u64, 0u64);
+        for realm in view.list_realms().map_err(io_read_err)? {
+            let mut started = false;
+            let mut failed = None;
+            view.visit_entries(&realm, &[], &[0xFF; 256], &mut |key, value| {
+                // The applied-state rows are this node's own record, not
+                // replicated data: the installing node writes the
+                // snapshot's applied state itself.
+                if is_state_machine_meta_key(key) {
+                    return ControlFlow::Continue(());
+                }
+                let row = if started {
+                    stream.row(key, value)
+                } else {
+                    started = true;
+                    stream
+                        .begin_realm(&realm)
+                        .and_then(|()| stream.row(key, value))
+                };
+                match row {
+                    Ok(()) => {
+                        rows += 1;
+                        ControlFlow::Continue(())
+                    }
+                    Err(e) => {
+                        failed = Some(e);
+                        ControlFlow::Break(())
+                    }
+                }
+            })
+            .map_err(io_read_err)?;
+            if let Some(e) = failed {
+                return Err(io_write_err(e));
+            }
+            realms += u64::from(started);
+        }
+        stream
+            .finish()
+            .and_then(crate::storage::SealedWriter::finish)
+            .map_err(io_write_err)?;
+        Ok((realms, rows))
+    })();
+    match written {
+        Ok((realms, rows)) => {
+            let stored = store.keep(&part, meta).map_err(io_write_err)?;
+            Ok((stored, realms, rows))
+        }
+        Err(e) => {
+            store.discard(&part);
+            Err(e)
+        }
     }
 }
 
@@ -226,6 +268,8 @@ pub struct HearthStateMachine {
     last_membership: StoredMembership<u64, HearthNode>,
     /// Most recently built or installed snapshot (kept for `get_current_snapshot`).
     current_snapshot: SnapshotSlot,
+    /// The snapshot files of this node.
+    store: SnapshotStore,
     /// Slot for the node-local projection observer (audit 2026-08-28 §4.16#5).
     ///
     /// A shared `OnceLock` rather than a direct field because the state
@@ -240,13 +284,15 @@ impl HearthStateMachine {
     /// Create a state machine wrapping an existing storage engine.
     ///
     /// Loads the applied state persisted by earlier applies (see
-    /// [`load_applied_state`]); synchronous storage reads — call it from the
-    /// blocking pool in async code.
+    /// [`load_applied_state`]) and the newest snapshot file that checks and
+    /// is not ahead of it (reading that file whole). Synchronous storage and
+    /// file reads — call it from the blocking pool in async code.
     ///
     /// # Errors
     ///
-    /// A storage error, or a persisted applied-state row that does not decode.
-    pub fn new(engine: Arc<dyn StorageEngine>) -> Result<Self, StorageError<u64>> {
+    /// A storage error, a persisted applied-state row that does not decode,
+    /// or an error creating or listing the snapshot directory.
+    pub fn new(engine: Arc<EmbeddedStorageEngine>) -> Result<Self, StorageError<u64>> {
         Self::with_observer_slot(engine, Arc::new(OnceLock::new()))
     }
 
@@ -260,15 +306,20 @@ impl HearthStateMachine {
     ///
     /// As [`Self::new`].
     pub fn with_observer_slot(
-        engine: Arc<dyn StorageEngine>,
+        engine: Arc<EmbeddedStorageEngine>,
         observer: Arc<OnceLock<Arc<dyn ReplicatedWriteObserver>>>,
     ) -> Result<Self, StorageError<u64>> {
+        let store =
+            SnapshotStore::open(engine.sealed_files(), engine.data_dir()).map_err(io_read_err)?;
+        let engine: Arc<dyn StorageEngine> = engine;
         let (last_applied, last_membership) = load_applied_state(engine.as_ref())?;
+        let current = store.recover(last_applied).map_err(io_read_err)?;
         Ok(Self {
             engine,
             last_applied,
             last_membership,
-            current_snapshot: Arc::default(),
+            current_snapshot: Arc::new(std::sync::Mutex::new(current.map(Arc::new))),
+            store,
             observer,
         })
     }
@@ -353,33 +404,55 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
     }
 
     async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder {
+        // The view is taken here, between two applies, so it holds exactly
+        // the entries up to `last_applied` (#818). Taking it flushes the
+        // memtable: blocking I/O.
+        let engine = Arc::clone(&self.engine);
+        let view = match spawn_blocking(move || engine.read_snapshot()).await {
+            Ok(Ok(Some(view))) => Ok(view),
+            Ok(Ok(None)) => Err("the storage engine cannot make a point-in-time view".to_string()),
+            Ok(Err(e)) => Err(e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
         HearthSnapshotBuilder {
-            engine: Arc::clone(&self.engine),
+            view,
             last_applied: self.last_applied,
             last_membership: self.last_membership.clone(),
             current: Arc::clone(&self.current_snapshot),
+            store: self.store.clone(),
         }
     }
 
-    async fn begin_receiving_snapshot(
-        &mut self,
-    ) -> Result<Box<Cursor<Vec<u8>>>, StorageError<u64>> {
-        Ok(Box::new(Cursor::new(Vec::new())))
+    async fn begin_receiving_snapshot(&mut self) -> Result<Box<SnapshotFile>, StorageError<u64>> {
+        let store = self.store.clone();
+        let file = spawn_blocking(move || {
+            SnapshotFile::create(store.files(), &store.new_part(Part::Receive))
+        })
+        .await
+        .map_err(join_err)?
+        .map_err(io_write_err)?;
+        Ok(Box::new(file))
     }
 
     #[instrument(skip(self, snapshot), name = "sm_install_snapshot")]
     async fn install_snapshot(
         &mut self,
         meta: &SnapshotMeta<u64, HearthNode>,
-        snapshot: Box<Cursor<Vec<u8>>>,
+        snapshot: Box<SnapshotFile>,
     ) -> Result<(), StorageError<u64>> {
-        let compressed = snapshot.into_inner();
-
-        // Decompress and deserialise the payload.
-        let payload = decompress_payload(&compressed)?;
-
-        // Count the realms before moving payload into spawn_blocking.
-        let realm_count = payload.realms.len();
+        // openraft's `shutdown` of the transfer read the file whole and
+        // checked it (cluster-file-snapshots, design decision 5): a bad
+        // transfer failed there and was sent again.
+        let (part, summary) = snapshot.take_received().map_err(io_read_err)?;
+        // Until it is kept, a file the install fails on is removed: it must
+        // not hold the disk until the next start-up.
+        let mut unkept = UnkeptFile::new(&self.store, &part);
+        if summary.meta != *meta {
+            return Err(io_read_err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the received snapshot's META does not match the install request",
+            )));
+        }
 
         let engine = Arc::clone(&self.engine);
         let snapshot_id = meta.snapshot_id.clone();
@@ -401,11 +474,25 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
         // removes it after Phase 2.  A crash between the two phases leaves the
         // marker on disk; the engine refuses to start on next open rather than
         // silently serving mixed data (HEA-2132).
+        let files = self.store.files().clone();
+        let restore_from = part.clone();
         spawn_blocking(move || {
-            restore_snapshot_in_place(&engine, &payload, &snapshot_id, &meta_rows)
+            let stream = open_stream(&files, &restore_from)?;
+            restore_snapshot_in_place(&engine, stream, &snapshot_id, &meta_rows)
         })
         .await
-        .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;
+        .map_err(join_err)??;
+
+        // The store holds the snapshot now: keep its file as this node's
+        // snapshot, durably, before the install is acknowledged (design
+        // decision 7).
+        let store = self.store.clone();
+        let kept_meta = meta.clone();
+        let stored = spawn_blocking(move || store.keep(&part, kept_meta))
+            .await
+            .map_err(join_err)?
+            .map_err(io_write_err)?;
+        unkept.kept();
 
         // The whole key-space was replaced — node-local projections derived
         // from it (revoked-JTI blocklist, …) must be rebuilt from storage
@@ -415,23 +502,18 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
             let obs = Arc::clone(obs);
             spawn_blocking(move || obs.on_replicated_reset())
                 .await
-                .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))?;
+                .map_err(join_err)?;
         }
 
         self.last_applied = meta.last_log_id;
         self.last_membership = meta.last_membership.clone();
 
-        snapshot_slot_offer(
-            &self.current_snapshot,
-            StoredSnapshot {
-                meta: meta.clone(),
-                data: compressed,
-            },
-        );
+        snapshot_slot_offer(&self.current_snapshot, stored);
 
         info!(
             snapshot_id = %meta.snapshot_id,
-            realms = realm_count,
+            realms = summary.realms,
+            rows = summary.rows,
             "snapshot installed"
         );
 
@@ -441,16 +523,47 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
     async fn get_current_snapshot(
         &mut self,
     ) -> Result<Option<Snapshot<HearthRaftConfig>>, StorageError<u64>> {
-        Ok(
-            snapshot_slot_get(&self.current_snapshot).map(|snap| Snapshot {
-                meta: snap.meta.clone(),
-                snapshot: Box::new(Cursor::new(snap.data.clone())),
-            }),
-        )
+        let Some(snap) = snapshot_slot_get(&self.current_snapshot) else {
+            return Ok(None);
+        };
+        // The `Arc` keeps a retired file on disk until it is open.
+        let store = self.store.clone();
+        spawn_blocking(move || open_for_send(&store, &snap).map(Some))
+            .await
+            .map_err(join_err)?
     }
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
+
+/// A received file the install has not kept yet: removed (off the runtime
+/// thread) when dropped before [`UnkeptFile::kept`].
+struct UnkeptFile {
+    store: SnapshotStore,
+    path: Option<PathBuf>,
+}
+
+impl UnkeptFile {
+    fn new(store: &SnapshotStore, path: &Path) -> Self {
+        Self {
+            store: store.clone(),
+            path: Some(path.to_path_buf()),
+        }
+    }
+
+    /// The file is the node's snapshot now: keep it.
+    fn kept(&mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for UnkeptFile {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            remove_file_off_runtime(self.store.files().fs(), path);
+        }
+    }
+}
 
 impl HearthStateMachine {
     /// Writes applied-state rows that belong to no data realm (a blank or a
@@ -855,30 +968,77 @@ fn increment_once(
     Ok(Increment::Applied(next))
 }
 
-/// Compress a [`SnapshotPayload`] to CBOR + gzip bytes.
-fn compress_payload(payload: &SnapshotPayload) -> Result<Vec<u8>, StorageError<u64>> {
-    let mut cbor_buf = Vec::new();
-    ciborium::into_writer(payload, &mut cbor_buf)
-        .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))?;
+/// Most rows in one restore write batch (Phase 1 deletes, Phase 2 puts).
+const RESTORE_BATCH_ROWS: usize = 4096;
+/// Most key and value bytes in one restore write batch.
+const RESTORE_BATCH_BYTES: usize = 4 * 1024 * 1024;
 
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(&cbor_buf).map_err(to_write_err)?;
-    encoder.finish().map_err(to_write_err)
+/// Opens the snapshot file at `path` and reads its META (blocking).
+fn open_stream(
+    files: &crate::storage::SealedFiles,
+    path: &Path,
+) -> Result<StreamReader<impl Read>, StorageError<u64>> {
+    let reader = files.open(path).map_err(io_read_err)?;
+    StreamReader::new(BufReader::with_capacity(SEALED_CHUNK_LEN, reader)).map_err(to_read_err)
 }
 
-/// Decompress gzip + CBOR bytes back to a [`SnapshotPayload`].
-fn decompress_payload(data: &[u8]) -> Result<SnapshotPayload, StorageError<u64>> {
-    let mut decoder = GzDecoder::new(data);
-    let mut cbor_buf = Vec::new();
-    decoder.read_to_end(&mut cbor_buf).map_err(to_read_err)?;
-    ciborium::from_reader(&cbor_buf[..])
-        .map_err(|e| io_read_err(std::io::Error::other(e.to_string())))
+/// Deletes every live key of `realm`, a batch of keys at a time.
+fn clear_realm(engine: &Arc<dyn StorageEngine>, realm: &RealmId) -> Result<(), StorageError<u64>> {
+    let mut start = Vec::new();
+    loop {
+        let mut keys: Vec<Vec<u8>> = Vec::new();
+        let mut bytes = 0;
+        engine
+            .visit_keys(realm, &start, &[0xFF; 256], &mut |key| {
+                bytes += key.len();
+                keys.push(key.to_vec());
+                if keys.len() >= RESTORE_BATCH_ROWS || bytes >= RESTORE_BATCH_BYTES {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            })
+            .map_err(to_write_err)?;
+        let Some(last) = keys.last() else {
+            return Ok(());
+        };
+        let full = keys.len() >= RESTORE_BATCH_ROWS || bytes >= RESTORE_BATCH_BYTES;
+        // The next batch starts just after the last key of this one.
+        start.clone_from(last);
+        start.push(0);
+        engine
+            .write_batch(realm, &[], &keys)
+            .map_err(to_write_err)?;
+        if !full {
+            return Ok(());
+        }
+    }
+}
+
+/// Writes a restore batch of `realm`'s rows and empties it.
+fn put_rows(
+    engine: &Arc<dyn StorageEngine>,
+    realm: Option<&RealmId>,
+    rows: &mut Vec<(Vec<u8>, Vec<u8>)>,
+    bytes: &mut usize,
+) -> Result<(), StorageError<u64>> {
+    if let Some(realm) = realm {
+        if !rows.is_empty() {
+            engine.put_batch(realm, rows).map_err(to_write_err)?;
+        }
+    }
+    rows.clear();
+    *bytes = 0;
+    Ok(())
 }
 
 /// Blocking: apply a Raft snapshot in-place through the live engine.
 ///
 /// Clears every live key for every realm currently present on disk (memtable
-/// and SST files), then replays all entries from the snapshot via `put_batch`.
+/// and SST files), then replays the snapshot's rows via `put_batch`, reading
+/// them from `stream` one at a time. Both phases write batches of at most
+/// [`RESTORE_BATCH_ROWS`] rows or [`RESTORE_BATCH_BYTES`] bytes, so the
+/// restore's memory does not grow with the store.
 /// Because this operates on the same `Arc<dyn StorageEngine>` that the server
 /// reads through (the `inner` handle from `build_clustered`), all reads via
 /// the server's original `Arc` immediately observe the post-snapshot state —
@@ -917,9 +1077,9 @@ fn decompress_payload(data: &[u8]) -> Result<SnapshotPayload, StorageError<u64>>
 /// Note: the directory-swap this replaces was also not crash-atomic — the OS
 /// advisory lock file was moved with `data_dir` and immediately unlinked,
 /// leaving the directory unprotected after any install (HEA-2126 bug 3).
-fn restore_snapshot_in_place(
+fn restore_snapshot_in_place<R: Read>(
     engine: &Arc<dyn StorageEngine>,
-    payload: &SnapshotPayload,
+    mut stream: StreamReader<R>,
     snapshot_id: &str,
     meta_rows: &[(Vec<u8>, Vec<u8>)],
 ) -> Result<(), StorageError<u64>> {
@@ -937,25 +1097,29 @@ fn restore_snapshot_in_place(
     // snapshot builder enumerates from the same call (audit §4.9#3).
     let on_disk_realms = engine.list_realms().map_err(to_write_err)?;
     for realm_id in &on_disk_realms {
-        let keys = engine
-            .scan(realm_id, &[], &[0xFF; 256])
-            .map_err(to_write_err)?
-            .into_iter()
-            .map(|e| e.key)
-            .collect::<Vec<_>>();
-        if !keys.is_empty() {
-            engine
-                .write_batch(realm_id, &[], &keys)
-                .map_err(to_write_err)?;
-        }
+        clear_realm(engine, realm_id)?;
     }
 
     // Phase 2: replay the snapshot data, then this node's applied state.
-    for realm_data in &payload.realms {
-        engine
-            .put_batch(&realm_data.realm_id, &realm_data.entries)
-            .map_err(to_write_err)?;
+    let mut realm: Option<RealmId> = None;
+    let mut rows = Vec::new();
+    let mut bytes = 0;
+    while let Some(record) = stream.next_record().map_err(to_read_err)? {
+        match record {
+            Record::Realm(next) => {
+                put_rows(engine, realm.as_ref(), &mut rows, &mut bytes)?;
+                realm = Some(next);
+            }
+            Record::Row(key, value) => {
+                bytes += key.len() + value.len();
+                rows.push((key, value));
+                if rows.len() >= RESTORE_BATCH_ROWS || bytes >= RESTORE_BATCH_BYTES {
+                    put_rows(engine, realm.as_ref(), &mut rows, &mut bytes)?;
+                }
+            }
+        }
     }
+    put_rows(engine, realm.as_ref(), &mut rows, &mut bytes)?;
     engine
         .write_batch(&meta_realm(), meta_rows, &[])
         .map_err(to_write_err)?;
@@ -1051,6 +1215,79 @@ mod tests {
         let config = StorageConfig::dev(dir.to_path_buf());
         let engine = EmbeddedStorageEngine::open(config).expect("open engine");
         HearthStateMachine::new(Arc::new(engine)).expect("state machine")
+    }
+
+    /// Sends `snap` to `to` the way openraft does: into the file `to` opens
+    /// for receiving, in 4 MiB chunks, then `shutdown` (which checks it).
+    #[allow(clippy::unwrap_used)]
+    pub(super) async fn transfer(
+        to: &mut HearthStateMachine,
+        snap: Snapshot<HearthRaftConfig>,
+    ) -> Snapshot<HearthRaftConfig> {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+        let mut from = snap.snapshot;
+        from.seek(std::io::SeekFrom::Start(0)).await.unwrap();
+        let mut received = to.begin_receiving_snapshot().await.unwrap();
+        let mut buf = Vec::with_capacity(4 << 20);
+        loop {
+            buf.clear();
+            while buf.len() < buf.capacity() {
+                if from.read_buf(&mut buf).await.unwrap() == 0 {
+                    break;
+                }
+            }
+            if buf.is_empty() {
+                break;
+            }
+            received.write_all(&buf).await.unwrap();
+        }
+        received.shutdown().await.unwrap();
+        Snapshot {
+            meta: snap.meta,
+            snapshot: received,
+        }
+    }
+
+    /// Sends `snap` to `to` and installs it there.
+    async fn install_received(
+        to: &mut HearthStateMachine,
+        snap: Snapshot<HearthRaftConfig>,
+    ) -> Result<(), openraft::StorageError<u64>> {
+        to.install_snapshot(&snap.meta, snap.snapshot).await
+    }
+
+    pub(super) async fn install(
+        to: &mut HearthStateMachine,
+        snap: Snapshot<HearthRaftConfig>,
+    ) -> Result<(), openraft::StorageError<u64>> {
+        let snap = transfer(to, snap).await;
+        to.install_snapshot(&snap.meta, snap.snapshot).await
+    }
+
+    /// The bytes of a snapshot file opened to send.
+    #[allow(clippy::unwrap_used)]
+    pub(super) async fn snapshot_bytes(file: &mut SnapshotFile) -> Vec<u8> {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        file.seek(std::io::SeekFrom::Start(0)).await.unwrap();
+        let mut out = Vec::new();
+        file.read_to_end(&mut out).await.unwrap();
+        out
+    }
+
+    /// The rows of a snapshot file opened to send, as (realm, key, value).
+    #[allow(clippy::unwrap_used)]
+    pub(super) async fn snapshot_rows(file: &mut SnapshotFile) -> Vec<(RealmId, Vec<u8>, Vec<u8>)> {
+        let bytes = snapshot_bytes(file).await;
+        let mut stream = StreamReader::new(&bytes[..]).unwrap();
+        let mut realm = None;
+        let mut rows = Vec::new();
+        while let Some(record) = stream.next_record().unwrap() {
+            match record {
+                Record::Realm(r) => realm = Some(r),
+                Record::Row(k, v) => rows.push((realm.clone().unwrap(), k, v)),
+            }
+        }
+        rows
     }
 
     // ── Put / Delete / Batch ──────────────────────────────────────────────────
@@ -1350,9 +1587,7 @@ mod tests {
         )])
         .await
         .unwrap();
-        sm_b.install_snapshot(&snapshot.meta, snapshot.snapshot)
-            .await
-            .unwrap();
+        install(&mut sm_b, snapshot).await.unwrap();
 
         let prefix = crate::core::USER_RECORD_KEY_PREFIX;
         let walked = sm_b
@@ -1399,9 +1634,7 @@ mod tests {
 
         // Node B: install the snapshot then verify key-space matches.
         let mut sm_b = open_sm(&data_dir_b);
-        sm_b.install_snapshot(&snapshot.meta, snapshot.snapshot)
-            .await
-            .unwrap();
+        install(&mut sm_b, snapshot).await.unwrap();
 
         // Snapshot correctness: same realms on disk and same entries for each realm.
         // (The meta realm holds node B's own applied-state rows, not data.)
@@ -1434,29 +1667,6 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::unwrap_used)]
-    async fn snapshot_compress_decompress_roundtrip() {
-        let payload = SnapshotPayload {
-            realms: vec![RealmData {
-                realm_id: make_realm(),
-                entries: vec![
-                    (b"key1".to_vec(), b"value1".to_vec()),
-                    (b"key2".to_vec(), b"value2".to_vec()),
-                ],
-            }],
-        };
-
-        let compressed = compress_payload(&payload).unwrap();
-        assert_ne!(compressed, [] as [u8; 0]);
-
-        let decoded = decompress_payload(&compressed).unwrap();
-        assert_eq!(decoded.realms.len(), 1);
-        assert_eq!(decoded.realms[0].entries.len(), 2);
-        assert_eq!(decoded.realms[0].entries[0].0, b"key1");
-        assert_eq!(decoded.realms[0].entries[1].1, b"value2");
-    }
-
-    #[tokio::test]
-    #[allow(clippy::unwrap_used)]
     async fn get_current_snapshot_none_initially() {
         let dir = tempdir().unwrap();
         let mut sm = open_sm(dir.path().join("data").as_path());
@@ -1482,10 +1692,8 @@ mod tests {
 
         let mut builder = sm.get_snapshot_builder().await;
         let snap = builder.build_snapshot().await.unwrap();
-        let meta = snap.meta.clone();
-        let data = snap.snapshot.clone();
 
-        sm.install_snapshot(&meta, data).await.unwrap();
+        install(&mut sm, snap).await.unwrap();
         assert!(sm.get_current_snapshot().await.unwrap().is_some());
     }
 
@@ -1523,7 +1731,404 @@ mod tests {
             .unwrap()
             .expect("the snapshot this node built must be served to followers");
         assert_eq!(current.meta.snapshot_id, built.meta.snapshot_id);
-        assert_eq!(current.snapshot.into_inner(), built.snapshot.into_inner());
+        let (mut current, mut built) = (current.snapshot, built.snapshot);
+        assert_eq!(
+            snapshot_bytes(&mut current).await,
+            snapshot_bytes(&mut built).await
+        );
+    }
+
+    // ── File-backed snapshots (cluster-file-snapshots) ───────────────────────
+
+    /// Every key of `realm` on `sm`'s engine.
+    #[allow(clippy::unwrap_used)]
+    fn keys_of(sm: &HearthStateMachine, realm: &RealmId) -> Vec<Vec<u8>> {
+        sm.engine
+            .scan(realm, &[], &[0xFF; 256])
+            .unwrap()
+            .into_iter()
+            .map(|e| e.key)
+            .filter(|k| !is_state_machine_meta_key(k))
+            .collect()
+    }
+
+    /// #818: the build read the live engine, so entries applied while it ran
+    /// reached the snapshot although its META declared an earlier index.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn a_snapshot_holds_the_state_at_its_index_only() {
+        let dir = tempdir().unwrap();
+        let mut sm = open_sm(&dir.path().join("a"));
+        let realm = make_realm();
+        sm.apply([make_put_entry(
+            1,
+            realm.clone(),
+            b"k1".to_vec(),
+            b"v1".to_vec(),
+        )])
+        .await
+        .unwrap();
+        let mut builder = sm.get_snapshot_builder().await;
+        // Applied after openraft asked for the builder, before it ran.
+        sm.apply([make_put_entry(
+            2,
+            realm.clone(),
+            b"k2".to_vec(),
+            b"v2".to_vec(),
+        )])
+        .await
+        .unwrap();
+        let snap = builder.build_snapshot().await.unwrap();
+        assert_eq!(snap.meta.last_log_id, Some(make_log_id(1)));
+
+        let mut sm_b = open_sm(&dir.path().join("b"));
+        install(&mut sm_b, snap).await.unwrap();
+        assert_eq!(keys_of(&sm_b, &realm), vec![b"k1".to_vec()]);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn a_snapshot_survives_a_restart() {
+        let dir = tempdir().unwrap();
+        let data = dir.path().join("data");
+        let built = {
+            let mut sm = open_sm(&data);
+            sm.apply([make_put_entry(
+                1,
+                make_realm(),
+                b"k".to_vec(),
+                b"v".to_vec(),
+            )])
+            .await
+            .unwrap();
+            let mut built = sm
+                .get_snapshot_builder()
+                .await
+                .build_snapshot()
+                .await
+                .unwrap();
+            snapshot_bytes(&mut built.snapshot).await
+        };
+        let mut sm = open_sm(&data);
+        let mut current = sm
+            .get_current_snapshot()
+            .await
+            .unwrap()
+            .expect("the snapshot is served again after a restart");
+        assert_eq!(current.meta.last_log_id, Some(make_log_id(1)));
+        assert_eq!(snapshot_bytes(&mut current.snapshot).await, built);
+        let files: Vec<_> = std::fs::read_dir(data.join(super::super::snapshot_store::DIR_NAME))
+            .unwrap()
+            .collect();
+        assert_eq!(files.len(), 1, "one snapshot file is kept");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn an_installed_snapshot_survives_a_restart() {
+        let dir = tempdir().unwrap();
+        let mut sm = open_sm(&dir.path().join("a"));
+        sm.apply([make_put_entry(
+            4,
+            make_realm(),
+            b"k".to_vec(),
+            b"v".to_vec(),
+        )])
+        .await
+        .unwrap();
+        let snap = sm
+            .get_snapshot_builder()
+            .await
+            .build_snapshot()
+            .await
+            .unwrap();
+        let follower = dir.path().join("b");
+        {
+            let mut sm_b = open_sm(&follower);
+            install(&mut sm_b, snap).await.unwrap();
+        }
+        let mut sm_b = open_sm(&follower);
+        let current = sm_b.get_current_snapshot().await.unwrap().unwrap();
+        assert_eq!(current.meta.last_log_id, Some(make_log_id(4)));
+    }
+
+    fn put_if_absent_entry(index: u64, realm: RealmId, key: &[u8]) -> Entry<HearthRaftConfig> {
+        Entry {
+            log_id: make_log_id(index),
+            payload: EntryPayload::Normal(RaftCommand::PutIfAbsent {
+                leader_timestamp: 0,
+                realm,
+                key: key.to_vec(),
+                value: b"claimed".to_vec(),
+            }),
+        }
+    }
+
+    /// S1, "A conditional write after the snapshot point": a follower that
+    /// installs the snapshot of index N and then applies entry N+1 answers
+    /// as the leader did.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn a_conditional_write_after_the_snapshot_point_answers_alike() {
+        let dir = tempdir().unwrap();
+        let mut leader = open_sm(&dir.path().join("a"));
+        let realm = make_realm();
+        leader
+            .apply([make_put_entry(
+                1,
+                realm.clone(),
+                b"k".to_vec(),
+                b"v".to_vec(),
+            )])
+            .await
+            .unwrap();
+        let mut builder = leader.get_snapshot_builder().await;
+        let on_leader = leader
+            .apply([put_if_absent_entry(2, realm.clone(), b"claim")])
+            .await
+            .unwrap();
+        let snap = builder.build_snapshot().await.unwrap();
+
+        let mut follower = open_sm(&dir.path().join("b"));
+        install(&mut follower, snap).await.unwrap();
+        let on_follower = follower
+            .apply([put_if_absent_entry(2, realm.clone(), b"claim")])
+            .await
+            .unwrap();
+        assert!(on_leader[0].success, "the claim is new on the leader");
+        assert_eq!(on_follower[0].success, on_leader[0].success);
+    }
+
+    /// S3: no snapshot file holds a store value in plaintext.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn snapshot_files_hold_no_plaintext() {
+        const MARKER: &[u8] = b"PLAINTEXT-MARKER-5c1f";
+        let dir = tempdir().unwrap();
+        let mut sm = open_sm(&dir.path().join("a"));
+        let realm = make_realm();
+        sm.apply([make_put_entry(
+            1,
+            realm.clone(),
+            b"k".to_vec(),
+            MARKER.repeat(64),
+        )])
+        .await
+        .unwrap();
+        let snap = sm
+            .get_snapshot_builder()
+            .await
+            .build_snapshot()
+            .await
+            .unwrap();
+        let mut sm_b = open_sm(&dir.path().join("b"));
+        install(&mut sm_b, snap).await.unwrap();
+
+        for node in ["a", "b"] {
+            let snaps = dir
+                .path()
+                .join(node)
+                .join(super::super::snapshot_store::DIR_NAME);
+            let files: Vec<_> = std::fs::read_dir(&snaps)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .collect();
+            assert_eq!(files.len(), 1, "{node}: one snapshot file");
+            let name = files[0].file_name().unwrap().to_string_lossy().into_owned();
+            assert!(name.starts_with("snap-"), "{node}: {name}");
+            let raw = std::fs::read(&files[0]).unwrap();
+            for needle in [MARKER, b"HRSNAP01".as_slice()] {
+                assert!(
+                    !raw.windows(needle.len()).any(|w| w == needle),
+                    "{node}: {} found in {name}",
+                    String::from_utf8_lossy(needle)
+                );
+            }
+        }
+    }
+
+    /// S4: a changed byte fails the transfer, the store is unchanged, and
+    /// the same snapshot sent again installs.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn a_corrupted_transfer_is_refused_and_can_be_sent_again() {
+        use tokio::io::AsyncWriteExt;
+        let dir = tempdir().unwrap();
+        let mut leader = open_sm(&dir.path().join("a"));
+        let realm = make_realm();
+        leader
+            .apply([make_put_entry(
+                1,
+                realm.clone(),
+                b"new".to_vec(),
+                vec![3u8; 9000],
+            )])
+            .await
+            .unwrap();
+        let mut snap = leader
+            .get_snapshot_builder()
+            .await
+            .build_snapshot()
+            .await
+            .unwrap();
+        let bytes = snapshot_bytes(&mut snap.snapshot).await;
+
+        let follower_dir = dir.path().join("b");
+        let mut follower = open_sm(&follower_dir);
+        follower
+            .apply([make_put_entry(
+                1,
+                realm.clone(),
+                b"old".to_vec(),
+                b"v".to_vec(),
+            )])
+            .await
+            .unwrap();
+        let mut corrupt = bytes.clone();
+        let mid = corrupt.len() / 2;
+        corrupt[mid] ^= 0x40;
+        let mut received = follower.begin_receiving_snapshot().await.unwrap();
+        received.write_all(&corrupt).await.unwrap();
+        assert!(
+            received.shutdown().await.is_err(),
+            "the changed byte is caught"
+        );
+        drop(received);
+        assert_eq!(keys_of(&follower, &realm), vec![b"old".to_vec()]);
+        let snaps = follower_dir.join(super::super::snapshot_store::DIR_NAME);
+        assert!(
+            crate::cluster::test_fs::eventually(|| std::fs::read_dir(&snaps).unwrap().count() == 0)
+                .await,
+            "the refused file is removed"
+        );
+
+        install(&mut follower, snap).await.unwrap();
+        assert_eq!(keys_of(&follower, &realm), vec![b"new".to_vec()]);
+    }
+
+    /// A received file the install cannot use is removed, not left to hold
+    /// the disk until the next restart.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn a_failed_install_leaves_no_received_file() {
+        let dir = tempdir().unwrap();
+        let mut sm = open_sm(&dir.path().join("a"));
+        let realm = make_realm();
+        sm.apply([make_put_entry(
+            1,
+            realm.clone(),
+            b"new".to_vec(),
+            b"v".to_vec(),
+        )])
+        .await
+        .unwrap();
+        let snap = sm
+            .get_snapshot_builder()
+            .await
+            .build_snapshot()
+            .await
+            .unwrap();
+
+        let follower = dir.path().join("b");
+        let snaps = follower.join(super::super::snapshot_store::DIR_NAME);
+        let mut sm_b = open_sm(&follower);
+        let snap = transfer(&mut sm_b, snap).await;
+        // The checked file changes on disk before the install reads it.
+        let recv: Vec<_> = std::fs::read_dir(&snaps)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(recv.len(), 1);
+        let mut raw = std::fs::read(&recv[0]).unwrap();
+        raw[100] ^= 1;
+        std::fs::write(&recv[0], raw).unwrap();
+
+        assert!(install_received(&mut sm_b, snap).await.is_err());
+        assert_eq!(keys_of(&sm_b, &realm), Vec::<Vec<u8>>::new());
+        assert!(
+            crate::cluster::test_fs::eventually(|| std::fs::read_dir(&snaps).unwrap().count() == 0)
+                .await,
+            "the received file is removed"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn a_received_snapshot_with_another_meta_changes_nothing() {
+        let dir = tempdir().unwrap();
+        let mut sm = open_sm(&dir.path().join("a"));
+        let realm = make_realm();
+        sm.apply([make_put_entry(
+            1,
+            realm.clone(),
+            b"new".to_vec(),
+            b"v".to_vec(),
+        )])
+        .await
+        .unwrap();
+        let snap = sm
+            .get_snapshot_builder()
+            .await
+            .build_snapshot()
+            .await
+            .unwrap();
+
+        let mut sm_b = open_sm(&dir.path().join("b"));
+        sm_b.apply([make_put_entry(
+            1,
+            realm.clone(),
+            b"old".to_vec(),
+            b"v".to_vec(),
+        )])
+        .await
+        .unwrap();
+        let snap = transfer(&mut sm_b, snap).await;
+        let mut other = snap.meta.clone();
+        other.last_log_id = Some(make_log_id(99));
+        assert!(sm_b.install_snapshot(&other, snap.snapshot).await.is_err());
+        assert_eq!(keys_of(&sm_b, &realm), vec![b"old".to_vec()]);
+    }
+
+    /// The restore clears and writes in batches: more rows than one batch
+    /// holds, on both sides, still end in exactly the snapshot's rows.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn an_install_across_many_batches_leaves_exactly_the_snapshot() {
+        let dir = tempdir().unwrap();
+        let realm = make_realm();
+        let rows = |prefix: &str, n: usize| -> Vec<(Vec<u8>, Vec<u8>)> {
+            (0..n)
+                .map(|i| (format!("{prefix}{i:06}").into_bytes(), vec![7u8; 40]))
+                .collect()
+        };
+        let mut sm = open_sm(&dir.path().join("a"));
+        let mut expected: Vec<Vec<u8>> = Vec::new();
+        for batch in rows("lead:", 3 * RESTORE_BATCH_ROWS + 5).chunks(1000) {
+            sm.engine.put_batch(&realm, batch).unwrap();
+            expected.extend(batch.iter().map(|(k, _)| k.clone()));
+        }
+        sm.apply([make_put_entry(
+            1,
+            realm.clone(),
+            b"zz".to_vec(),
+            b"v".to_vec(),
+        )])
+        .await
+        .unwrap();
+        expected.push(b"zz".to_vec());
+        let snap = sm
+            .get_snapshot_builder()
+            .await
+            .build_snapshot()
+            .await
+            .unwrap();
+
+        let mut sm_b = open_sm(&dir.path().join("b"));
+        for batch in rows("stale:", 2 * RESTORE_BATCH_ROWS + 9).chunks(1000) {
+            sm_b.engine.put_batch(&realm, batch).unwrap();
+        }
+        install(&mut sm_b, snap).await.unwrap();
+        assert_eq!(keys_of(&sm_b, &realm), expected);
     }
 
     // ── HEA-2131 regression pins ──────────────────────────────────────────────
@@ -1550,18 +2155,14 @@ mod tests {
             Arc::new(EmbeddedStorageEngine::open(config).expect("open engine"));
         leader_engine.put(&realm, b"survives", b"restart").unwrap();
 
-        let mut sm_a =
-            HearthStateMachine::new(Arc::clone(&leader_engine) as Arc<dyn StorageEngine>)
-                .expect("state machine");
+        let mut sm_a = HearthStateMachine::new(Arc::clone(&leader_engine)).expect("state machine");
 
         let mut builder = sm_a.get_snapshot_builder().await;
         let snapshot = builder.build_snapshot().await.unwrap();
 
         // Follower: install that snapshot and check the realm reached it.
         let mut sm_b = open_sm(dir_b.path().join("data").as_path());
-        sm_b.install_snapshot(&snapshot.meta, snapshot.snapshot)
-            .await
-            .unwrap();
+        install(&mut sm_b, snapshot).await.unwrap();
 
         assert_eq!(
             sm_b.engine.get(&realm, b"survives").unwrap(),
@@ -1608,8 +2209,7 @@ mod tests {
             Arc::new(EmbeddedStorageEngine::open(config).expect("open engine"));
         inner.put(&realm, b"stale", b"stale_val").unwrap();
 
-        let mut sm = HearthStateMachine::new(Arc::clone(&inner) as Arc<dyn StorageEngine>)
-            .expect("state machine");
+        let mut sm = HearthStateMachine::new(Arc::clone(&inner)).expect("state machine");
         assert_eq!(
             sm.last_applied, None,
             "precondition: fresh state machine has applied nothing"
@@ -1620,9 +2220,7 @@ mod tests {
             "precondition: the stale key is on disk before the install"
         );
 
-        sm.install_snapshot(&snap.meta, snap.snapshot)
-            .await
-            .unwrap();
+        install(&mut sm, snap).await.unwrap();
 
         assert_eq!(
             inner.get(&realm, b"keep").unwrap(),
@@ -1675,16 +2273,13 @@ mod tests {
             Arc::new(EmbeddedStorageEngine::open(config).expect("open engine"));
         inner.put(&realm_stale, b"stale_key", b"stale_val").unwrap();
 
-        let mut sm = HearthStateMachine::new(Arc::clone(&inner) as Arc<dyn StorageEngine>)
-            .expect("state machine");
+        let mut sm = HearthStateMachine::new(Arc::clone(&inner)).expect("state machine");
         assert_eq!(
             sm.last_applied, None,
             "precondition: no prior applies on this state machine"
         );
 
-        sm.install_snapshot(&snap.meta, snap.snapshot)
-            .await
-            .unwrap();
+        install(&mut sm, snap).await.unwrap();
 
         assert_eq!(
             inner.get(&realm_stale, b"stale_key").unwrap(),
@@ -1722,8 +2317,7 @@ mod tests {
             Arc::new(EmbeddedStorageEngine::open(config).expect("open engine"));
 
         // State machine wraps the same object — mirrors build_clustered.
-        let sm_engine: Arc<dyn StorageEngine> = Arc::clone(&inner) as Arc<dyn StorageEngine>;
-        let mut sm = HearthStateMachine::new(sm_engine).expect("state machine");
+        let mut sm = HearthStateMachine::new(Arc::clone(&inner)).expect("state machine");
         let realm = make_realm();
 
         // Build a snapshot from a separate node (different data).
@@ -1742,9 +2336,7 @@ mod tests {
             builder.build_snapshot().await.unwrap()
         };
 
-        sm.install_snapshot(&snap.meta, snap.snapshot)
-            .await
-            .unwrap();
+        install(&mut sm, snap).await.unwrap();
 
         // Reads through the ORIGINAL Arc must see the snapshot data.
         let via_inner = inner.get(&realm, b"snap_key").unwrap();
@@ -1781,9 +2373,8 @@ mod tests {
 
         let mut builder = sm.get_snapshot_builder().await;
         let snap = builder.build_snapshot().await.unwrap();
-        let meta = snap.meta.clone();
 
-        sm.install_snapshot(&meta, snap.snapshot).await.unwrap();
+        install(&mut sm, snap).await.unwrap();
 
         // The exclusive lock on data_dir must still be held — a second open
         // on the same directory must return AlreadyLocked.
@@ -1840,8 +2431,8 @@ mod tests {
         }
 
         // Snapshot must include all pairs.
-        let payload = decompress_payload(&snap.snapshot.into_inner()).unwrap();
-        assert_eq!(payload.realms[0].entries.len(), 20);
+        let mut file = snap.snapshot;
+        assert_eq!(snapshot_rows(&mut file).await.len(), 20);
     }
 
     // ── Follower revoked-JTI projection (audit 2026-08-28 §4.16#5) ────────────
@@ -1868,9 +2459,10 @@ mod tests {
         use crate::rbac::RbacEngine as _;
 
         let dir = tempdir().unwrap();
-        let storage: Arc<dyn StorageEngine> = Arc::new(
+        let embedded = Arc::new(
             EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().join("data"))).unwrap(),
         );
+        let storage: Arc<dyn StorageEngine> = Arc::clone(&embedded) as Arc<dyn StorageEngine>;
         let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
         let identity_config = IdentityConfig {
             credential: CredentialConfig::fast_for_testing(),
@@ -1963,7 +2555,7 @@ mod tests {
         let observer_slot: Arc<OnceLock<Arc<dyn ReplicatedWriteObserver>>> =
             Arc::new(OnceLock::new());
         let mut sm = HearthStateMachine::with_observer_slot(
-            Arc::clone(&storage),
+            Arc::clone(&embedded),
             Arc::clone(&observer_slot),
         )
         .expect("state machine");
@@ -2002,6 +2594,7 @@ mod restart_tests {
     use openraft::{CommittedLeaderId, Entry, EntryPayload, LogId, Membership};
     use tempfile::tempdir;
 
+    use super::tests::install;
     use super::*;
     use crate::cluster::log_store::HearthLogStore;
     use crate::storage::{EmbeddedStorageEngine, StorageConfig};
@@ -2049,7 +2642,7 @@ mod restart_tests {
         }
     }
 
-    fn engine(dir: &std::path::Path) -> Arc<dyn StorageEngine> {
+    fn engine(dir: &std::path::Path) -> Arc<EmbeddedStorageEngine> {
         Arc::new(EmbeddedStorageEngine::open(StorageConfig::dev(dir.join("data"))).unwrap())
     }
 
@@ -2188,23 +2781,17 @@ mod restart_tests {
             .build_snapshot()
             .await
             .unwrap();
-        let payload = decompress_payload(snapshot.snapshot.get_ref()).unwrap();
+        let mut snapshot = snapshot;
+        let rows = super::tests::snapshot_rows(&mut snapshot.snapshot).await;
         assert!(
-            payload
-                .realms
-                .iter()
-                .flat_map(|r| &r.entries)
-                .all(|(k, _)| !is_state_machine_meta_key(k)),
+            rows.iter().all(|(_, k, _)| !is_state_machine_meta_key(k)),
             "the applied-state rows are node-local, not snapshot data"
         );
 
         let dir = tempdir().unwrap();
         {
             let mut follower = HearthStateMachine::new(engine(dir.path())).unwrap();
-            follower
-                .install_snapshot(&snapshot.meta, snapshot.snapshot)
-                .await
-                .unwrap();
+            install(&mut follower, snapshot).await.unwrap();
         }
         let mut follower = HearthStateMachine::new(engine(dir.path())).unwrap();
         let (last, stored_membership) = follower.applied_state().await.unwrap();
