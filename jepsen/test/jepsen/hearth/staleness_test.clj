@@ -50,3 +50,80 @@
   (let [r (check (write 1 0 10 :ok) (read 1 "n2" 100 nil))]
     (is (false? (:valid? r)))
     (is (re-find #"no read" (:error r)) (pr-str r))))
+
+(deftest a-read-of-an-indeterminate-write-may-follow-a-later-one
+  (testing "a write whose outcome is unknown can land after a later acknowledged write"
+    (let [r (check (write 1 0 10 :ok)
+                   (write 2 20 3020 :info)     ; timed out on its node
+                   (write 3 3030 3040 :ok)
+                   (read 1 "n2" 3600 3)
+                   (read 1 "n2" 4000 2)        ; the late write 2 landed, over 3
+                   (read 2 "n3" 4100 2))]
+      (is (true? (:valid? r)) (pr-str r))))
+  (testing "a value no write left indeterminate is still stale"
+    (let [r (check (write 1 0 10 :ok)
+                   (write 2 20 3020 :info)
+                   (write 3 3030 3040 :ok)
+                   (read 1 "n2" 4000 1))]
+      (is (false? (:valid? r)) (pr-str r)))))
+
+(deftest a-node-frozen-on-an-indeterminate-value-is-stale
+  (testing "planted violation: n3 keeps showing 2, which landed before 3 was written"
+    (let [r (check (write 1 0 10 :ok)
+                   (write 2 20 3020 :info)     ; landed, but its answer timed out
+                   (read 1 "n2" 100 2)         ; 2 is in the register before 3 is written
+                   (write 3 3030 3040 :ok)
+                   (read 1 "n2" 3600 3)
+                   (read 2 "n3" 4000 2)        ; 960 ms after 3: stale
+                   (read 2 "n3" 9000 2))]
+      (is (false? (:valid? r)) (pr-str r))
+      (is (= [{:node "n3" :read 2 :expected-at-least 3 :after-ms 960}
+              {:node "n3" :read 2 :expected-at-least 3 :after-ms 5960}]
+             (:stale r))
+          (pr-str r))))
+  (testing "planted violation: a node showed 2 and then 3, so 3 overwrote 2"
+    (let [r (check (write 1 0 10 :ok)
+                   (write 2 20 3020 :info)
+                   (write 3 3030 3040 :ok)
+                   (read 1 "n2" 3035 2)        ; ends after 3 was invoked
+                   (read 1 "n2" 3100 3)        ; same node, later: 3 came after 2
+                   (read 2 "n3" 5000 2))]
+      (is (false? (:valid? r)) (pr-str r))
+      (is (= [{:node "n3" :read 2 :expected-at-least 3 :after-ms 1960}] (:stale r))
+          (pr-str r))))
+  (testing "a late write overwrites the acknowledged ones, and the next write overwrites it"
+    (let [r (check (write 1 0 10 :ok)
+                   (write 2 20 3020 :info)     ; held by a cut-off leader
+                   (write 3 3030 3040 :ok)
+                   (read 1 "n2" 3600 3)
+                   (read 1 "n2" 4000 2)        ; 2 committed after the heal, over 3
+                   (read 2 "n3" 4100 2)
+                   (write 4 5000 5010 :ok)
+                   (read 1 "n2" 5600 4)
+                   (read 2 "n3" 6000 2))]      ; 4 overwrote 2: stale
+      (is (false? (:valid? r)) (pr-str r))
+      (is (= [{:node "n3" :read 2 :expected-at-least 4 :after-ms 990}] (:stale r))
+          (pr-str r))))
+  (testing "a write with two unknown attempts may land twice: once before 3, once after"
+    (let [r (check (write 1 0 10 :ok)
+                   [{:process 0 :type :invoke :f :write :value 2 :time (* 20 ms)}
+                    {:process 0 :type :info :f :write :value 2 :unknown-attempts 2
+                     :time (* 6020 ms)}]
+                   (read 1 "n2" 100 2)
+                   (write 3 6030 6040 :ok)
+                   (read 1 "n2" 6600 3)
+                   (read 2 "n3" 8000 2))]  ; the second attempt landed after 3
+      (is (true? (:valid? r)) (pr-str r)))))
+
+(deftest a-write-with-one-indeterminate-attempt-is-indeterminate
+  (let [timeout     {:error :timeout}
+        unavailable {:status 503 :body {"error_code" "HEARTH_CLUSTER_UNAVAILABLE"}}
+        ok          {:status 200 :body {}}]
+    (testing "a timeout, then refusals elsewhere: the first attempt may still land"
+      (is (= {:type :info :unknown-attempts 1}
+             (select-keys (staleness/write-outcome [timeout unavailable unavailable])
+                          [:type :unknown-attempts]))))
+    (testing "every attempt that timed out may land"
+      (is (= 2 (:unknown-attempts (staleness/write-outcome [timeout timeout unavailable])))))
+    (is (= :ok (:type (staleness/write-outcome [timeout ok]))))
+    (is (= :fail (:type (staleness/write-outcome [unavailable unavailable]))))))

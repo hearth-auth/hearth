@@ -63,24 +63,22 @@
    "same-node"  {:workload "same-node" :nemesis [:partition :partition-leader]}
    ; V1: delay on the peer links.
    "revocation" {:workload "revocation" :nemesis [:packet]}
-   ; V2 (xfail G1): the same rounds under partitions. A node cut off from
-   ; the cluster never learns of the revocation and goes on accepting the
-   ; session after the bound; V2 says it must answer unavailable instead.
+   ; V2: the same rounds under partitions. A node cut off from the cluster
+   ; never learns of the revocation, so it must answer unavailable, never
+   ; accept the session after the bound (G1, closed).
    "revocation-isolated" {:workload "revocation-isolated" :nemesis [:partition]}
-   ; R2 (xfail G1): reads on every node while a minority or the leader is
-   ; cut off. A cut-off node goes on serving its older data after
-   ; read_lag_threshold_ms; R2 says it must answer unavailable instead.
+   ; R2: reads on every node while a minority or the leader is cut off. A
+   ; cut-off node must answer unavailable after read_lag_threshold_ms, never
+   ; serve its older data (G1, closed).
    "staleness"  {:workload "staleness" :nemesis [:partition :partition-leader]}
    ; W7 (xfail G4): audited admin changes on every node at once. Two nodes
    ; can chain an event from the same head, and the chain stops verifying.
    "audit"      {:workload "audit" :nemesis []}
-   ; R3, R4 (xfail G2): reads on a node while it installs a snapshot. The
-   ; install deletes every key before it writes the snapshot, and reads are
-   ; not fenced meanwhile. The workload times its own partition. With the
-   ; default read_lag_threshold_ms the lag monitor happens to fence reads
-   ; within 50 ms of the snapshot's arrival, before the restore deletes a
-   ; key; this test raises it, so only a fence of the install itself (the G2
-   ; fix) makes it pass.
+   ; R3, R4: reads on a node while it installs a snapshot. The install
+   ; deletes every key before it writes the snapshot, so it must fence reads
+   ; (G2, closed). The workload times its own partition. This test raises
+   ; read_lag_threshold_ms, so the lag hold cannot hide a partial install:
+   ; only the install fence makes it pass.
    "snapshot"   {:workload "snapshot" :nemesis [:partition]
                  :read-lag-threshold-ms 3600000}
    ; Section 6 (xfail G9): the set workload while the lowest Raft ID is

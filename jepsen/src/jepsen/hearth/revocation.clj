@@ -144,10 +144,10 @@
    :checker   (checker)})
 
 (defn isolated-workload
-  "V2 (xfail G1): rounds that cut one node off between the control
-  validation and the revocation, so the cut-off node holds a session the
-  rest of the cluster revokes. It must answer unavailable, never accept;
-  with G1 open it accepts. The round drives the partition itself, so the
+  "V2: rounds that cut one node off between the control validation and
+  the revocation, so the cut-off node holds a session the rest of the
+  cluster revokes. It must answer unavailable, never accept; before G1
+  closed it accepted. The round drives the partition itself, so the
   workload replaces the fault schedule (:combined-generator)."
   [opts db]
   (let [w (workload opts db)]
