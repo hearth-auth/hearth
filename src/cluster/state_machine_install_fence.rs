@@ -152,27 +152,27 @@ struct Fixture {
 async fn fixture() -> Fixture {
     let dir = tempdir().expect("tempdir");
     let gate = Arc::new(ReadGate::new(60_000));
-    let inner = Arc::new(
+    let engine = Arc::new(
         EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().to_path_buf())).expect("open"),
-    ) as Arc<dyn StorageEngine>;
-    let storage = Arc::new(PhaseStorage {
-        inner,
-        gate: Arc::clone(&gate),
-        seen_between_phases: Mutex::new(Vec::new()),
-        fail_phase_two: AtomicBool::new(false),
-    });
+    );
     let observer = Arc::new(ResetObserver {
         gate: Arc::clone(&gate),
         seen_at_reset: Mutex::new(Vec::new()),
     });
     let slot: Arc<OnceLock<Arc<dyn ReplicatedWriteObserver>>> = Arc::new(OnceLock::new());
     let _ = slot.set(Arc::clone(&observer) as Arc<dyn ReplicatedWriteObserver>);
-    let mut sm = HearthStateMachine::with_observer_slot(
-        Arc::clone(&storage) as Arc<dyn StorageEngine>,
-        slot,
-    )
-    .expect("state machine")
-    .with_read_gate(Arc::clone(&gate));
+    let mut sm = HearthStateMachine::with_observer_slot(engine, slot)
+        .expect("state machine")
+        .with_read_gate(Arc::clone(&gate));
+    // The state machine opens its snapshot store from the concrete engine;
+    // its reads and writes then go through the stub.
+    let storage = Arc::new(PhaseStorage {
+        inner: Arc::clone(&sm.engine),
+        gate: Arc::clone(&gate),
+        seen_between_phases: Mutex::new(Vec::new()),
+        fail_phase_two: AtomicBool::new(false),
+    });
+    sm.engine = Arc::clone(&storage) as Arc<dyn StorageEngine>;
     sm.apply([put_entry(1, b"old")]).await.expect("apply");
     gate.record_contact_at(gate.now_ms());
     assert!(gate.allows(), "precondition: the follower is in contact");
@@ -225,6 +225,7 @@ async fn an_install_fences_reads_until_a_contact_after_it() {
     // A contact waiting for commit index 9, which the snapshot reaches.
     f.gate.record_contact_once_applied(f.gate.now_ms(), Some(9));
 
+    let snap = super::tests::transfer(&mut f.sm, snap).await;
     f.sm.install_snapshot(&snap.meta, snap.snapshot)
         .await
         .expect("install");
@@ -245,6 +246,7 @@ async fn an_install_fences_reads_until_a_contact_after_it() {
 async fn a_failed_install_leaves_the_gate_closed() {
     let mut f = fixture().await;
     let snap = snapshot_from(f.dirs[1].path()).await;
+    let snap = super::tests::transfer(&mut f.sm, snap).await;
     f.storage.fail_phase_two.store(true, Ordering::SeqCst);
 
     let result = f.sm.install_snapshot(&snap.meta, snap.snapshot).await;

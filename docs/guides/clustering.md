@@ -216,11 +216,22 @@ Every Raft entry a node applies is synced to disk on its own; applies are not ba
 
 **Consequence:** size cluster evaluations for low write rates. A single node does not have this limit.
 
-### P-2 — Raft snapshots are kept in memory only
+### ~~P-2 — Raft snapshots are kept in memory only~~ (fixed)
 
-A node holds its latest Raft snapshot in memory. After a restart, it has no snapshot on disk: it rebuilds state from its local store and log, and a lagging follower may need the leader to build and send a fresh snapshot. No committed data is lost, because the storage engine and the Raft log are durable, but catch-up after a restart costs more than it needs to.
+A node keeps its latest Raft snapshot as a file in `{data_dir}/raft-snapshots/`, encrypted under
+its system KEK like its SST and WAL files. The snapshot is built from one point-in-time view of the
+store. It is streamed to a follower in 4 MiB chunks into a file there, and checked whole (counts and a
+SHA-256) before the follower's store changes. The install then restores it a batch of rows at a
+time. Neither side holds the store in memory: at 1,000,000 users a build or an install needs
+well under 512 MiB of extra memory (`examples/snapshot_memory.rs`, `docs/perf/snapshot-memory.md`).
+After a restart the node serves its snapshot file again.
 
-**Consequence:** expect slower recovery of a restarted node in a large realm.
+Disk: during a build, the node holds the new file, the previous one, and the SST files that the
+build's storage view pins. Allow about twice the compressed store size free in the data directory.
+The `raft-snapshots/` directory needs no backup: a node rebuilds or receives a snapshot when it
+needs one. Snapshot files from before this release do not exist (snapshots were in memory), so
+nothing migrates. Every node of a cluster must run a release with the same snapshot format,
+because the format changed.
 
 ---
 
@@ -231,7 +242,7 @@ The Wave 5 roadmap items covering clustering are:
 - **HEA-2178 (W5-2)** — Online membership changes via `add_learner` / `change_membership` (C-6)
 - ~~**HEA-2173 (W3-3)** — Follower-write 307 redirect to leader instead of HTTP 500 (H-3)~~ — superseded: followers forward writes to the leader inside the cluster (H-3, fixed)
 - **P-1** — Batch the disk sync per applied batch of Raft entries (group commit on apply)
-- **P-2** — Persist Raft snapshots to disk
+- ~~**P-2** — Persist Raft snapshots to disk~~ — done (`cluster-file-snapshots`)
 
 Hearth ships **no supported multi-node path** until these items and the open items in
 [CONSISTENCY.md](../dev/CONSISTENCY.md) (G1–G9) are done.
