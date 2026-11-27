@@ -1279,11 +1279,20 @@ impl crate::cluster::ReplicatedWriteObserver for EmbeddedIdentityEngine {
         // inline is fine; on failure the background reloader keeps retrying.
         // The snapshot may carry a lower control epoch than this node had
         // recorded, so the reload re-bases the epoch bookkeeping on it.
-        if let Err(e) = self.control.reload_after_reset() {
-            tracing::error!(
+        // On a cluster node the read gate is closed for the whole install,
+        // so this reload is refused and the background reloader rebuilds the
+        // caches as soon as the gate reopens (OpenSpec change
+        // `cluster-read-fencing`).
+        match self.control.reload_after_reset() {
+            Ok(()) => {}
+            Err(e) if control::is_read_fence(&e) => tracing::debug!(
+                error = %e,
+                "control caches are rebuilt once the read gate reopens after the snapshot install"
+            ),
+            Err(e) => tracing::error!(
                 error = %e,
                 "failed to rebuild the control caches after snapshot install; retrying"
-            );
+            ),
         }
     }
 }

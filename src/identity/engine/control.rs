@@ -326,9 +326,9 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// Whether `err` is a cluster node's read gate refusing the read: the node is
-/// out of contact with its leader or still applying a backlog
-/// (OpenSpec change `cluster-read-fencing`).
-fn is_read_fence(err: &IdentityError) -> bool {
+/// out of contact with its leader, still applying a backlog, or installing a
+/// snapshot (OpenSpec change `cluster-read-fencing`).
+pub(super) fn is_read_fence(err: &IdentityError) -> bool {
     use crate::storage::{ClusterUnavailableCause as Cause, StorageError};
     let IdentityError::Storage(source) = err else {
         return false;
@@ -336,7 +336,7 @@ fn is_read_fence(err: &IdentityError) -> bool {
     matches!(
         source.downcast_ref::<StorageError>(),
         Some(StorageError::ClusterUnavailable {
-            cause: Cause::NotInContact | Cause::ReplicationLag,
+            cause: Cause::NotInContact | Cause::ReplicationLag | Cause::InstallingSnapshot,
             ..
         })
     )
