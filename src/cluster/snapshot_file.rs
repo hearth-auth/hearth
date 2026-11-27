@@ -12,10 +12,6 @@
 //!   all back through the stream reader ([`snapshot_stream::verify`]), so a
 //!   bad transfer fails the transfer, before the state machine sees it.
 
-// Used by the state machine from task 3.2 of `cluster-file-snapshots` on;
-// until then only its tests use it.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::fmt;
 use std::future::Future;
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -69,6 +65,19 @@ pub struct SnapshotFile {
     seek: Option<SeekFrom>,
     /// A read is on the blocking pool; its bytes go to the next `poll_read`.
     reading: bool,
+    /// A received file not taken by [`SnapshotFile::take_received`] is
+    /// removed when dropped (a transfer that failed or was replaced).
+    discard_on_drop: bool,
+}
+
+impl Drop for SnapshotFile {
+    fn drop(&mut self) {
+        if self.discard_on_drop {
+            // One unlink; a blocking-pool call still holding the file writes
+            // to the unlinked inode.
+            let _ = self.files.fs().remove_file(&self.path);
+        }
+    }
 }
 
 impl fmt::Debug for SnapshotFile {
@@ -87,7 +96,9 @@ impl SnapshotFile {
     /// Any error creating the file.
     pub(crate) fn create(files: &SealedFiles, path: &Path) -> io::Result<Self> {
         let writer = files.create(path).map_err(io::Error::other)?;
-        Ok(Self::new(files, path, Mode::Write(writer)))
+        let mut file = Self::new(files, path, Mode::Write(writer));
+        file.discard_on_drop = true;
+        Ok(file)
     }
 
     /// Opens the finished sealed file at `path` to send it.
@@ -111,12 +122,32 @@ impl SnapshotFile {
             }))),
             seek: None,
             reading: false,
+            discard_on_drop: false,
         }
+    }
+
+    /// Takes a received file that `shutdown` checked: its path and what the
+    /// check found. The file is then the caller's to keep or remove.
+    ///
+    /// # Errors
+    ///
+    /// [`io::ErrorKind::InvalidInput`] for a file that is not a received
+    /// file checked by `shutdown`.
+    pub(crate) fn take_received(mut self) -> io::Result<(PathBuf, Summary)> {
+        let State::Idle(Some(inner)) = &mut self.state else {
+            return Err(not_received());
+        };
+        let Mode::Verified(summary) = std::mem::replace(&mut inner.mode, Mode::Closed) else {
+            return Err(not_received());
+        };
+        self.discard_on_drop = false;
+        Ok((self.path.clone(), summary))
     }
 
     /// The check of a received file that `shutdown` made: its META, realms
     /// and rows. `None` before `shutdown` completed, or for a file opened
     /// to send.
+    #[cfg(test)]
     pub(crate) fn verified(&self) -> Option<&Summary> {
         match &self.state {
             State::Idle(Some(inner)) => match &inner.mode {
@@ -137,6 +168,13 @@ fn poll_idle(state: &mut State, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         return Poll::Ready(result);
     }
     Poll::Ready(Ok(()))
+}
+
+fn not_received() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "snapshot file is not a received snapshot checked at shutdown",
+    )
 }
 
 fn busy() -> io::Error {
@@ -492,6 +530,29 @@ mod tests {
         let good = stream(200);
         cut.write_all(&good[..good.len() - 10]).await.unwrap();
         assert!(cut.shutdown().await.is_err(), "a cut stream is refused");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_received_file_is_removed_unless_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = files_in(dir.path());
+        let dropped = dir.path().join("dropped.part");
+        let mut file = SnapshotFile::create(&files, &dropped).unwrap();
+        file.write_all(&stream(3)).await.unwrap();
+        drop(file);
+        assert!(!dropped.exists(), "an abandoned transfer leaves no file");
+
+        let taken = dir.path().join("taken.part");
+        let mut file = SnapshotFile::create(&files, &taken).unwrap();
+        file.write_all(&stream(3)).await.unwrap();
+        file.shutdown().await.unwrap();
+        let (path, summary) = file.take_received().unwrap();
+        assert_eq!((path.as_path(), summary.rows), (taken.as_path(), 3));
+        assert!(taken.exists(), "a taken file stays");
+
+        let unchecked = SnapshotFile::create(&files, &dir.path().join("u.part")).unwrap();
+        let err = unchecked.take_received().unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -19,10 +19,6 @@
 //! do not match, and any byte after END. Error messages never carry key or
 //! value bytes.
 
-// Used by the state machine from task 3.2 of `cluster-file-snapshots` on;
-// until then only its tests use it.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::io::{self, BufReader, Read, Write};
 
 use openraft::SnapshotMeta;

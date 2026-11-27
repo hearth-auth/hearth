@@ -30,6 +30,11 @@ use crate::cluster::rpc::{
 use crate::cluster::types::{HearthNode, HearthRaftConfig};
 use crate::cluster::wire::{self, APPEND_BATCH_BYTES, MAX_PEER_MESSAGE_BYTES};
 
+/// How long the leader waits for the answer to a snapshot chunk other than
+/// the last: one 4 MiB write into the follower's snapshot file
+/// (`cluster-file-snapshots`).
+const SNAPSHOT_CHUNK_TIMEOUT: Duration = Duration::from_secs(60);
+
 // ── TLS credential bundle ────────────────────────────────────────────────────
 
 /// PEM-encoded TLS credentials shared by all peer connections from this node.
@@ -403,19 +408,33 @@ impl RaftNetwork<HearthRaftConfig> for HearthPeerNetwork {
         RPCError<u64, HearthNode, RaftError<u64, InstallSnapshotError>>,
     > {
         self.gate().await.map_err(net_err_ise)?;
+        let last_chunk = rpc.done;
         let payload = encode_bounded(&wire::WireInstallSnapshot::from(rpc)).map_err(net_err_ise)?;
         let ch = self.get_or_connect().await.map_err(net_err_ise)?;
         let mut client = RaftServiceClient::new(ch)
             .max_decoding_message_size(MAX_PEER_MESSAGE_BYTES)
             .max_encoding_message_size(MAX_PEER_MESSAGE_BYTES);
 
-        let resp = client
-            .install_snapshot(GrpcIsr { payload })
-            .await
-            .map_err(|e| {
-                self.invalidate_channel();
-                net_err_ise(TransportError::Rpc(e))
-            })?;
+        // openraft bounds every chunk by `install_snapshot_timeout`, sized
+        // for the last chunk, whose answer waits for the follower's check
+        // and restore. Any other chunk is one write: a follower that does not
+        // answer it within `SNAPSHOT_CHUNK_TIMEOUT` is not waited for.
+        let call = client.install_snapshot(GrpcIsr { payload });
+        let answer = if last_chunk {
+            call.await
+        } else {
+            match tokio::time::timeout(SNAPSHOT_CHUNK_TIMEOUT, call).await {
+                Ok(answer) => answer,
+                Err(_) => {
+                    self.invalidate_channel();
+                    return Err(net_err_ise(TransportError::Timeout(SNAPSHOT_CHUNK_TIMEOUT)));
+                }
+            }
+        };
+        let resp = answer.map_err(|e| {
+            self.invalidate_channel();
+            net_err_ise(TransportError::Rpc(e))
+        })?;
 
         wire::decode(&resp.into_inner().payload)
             .map_err(|e| net_err_ise(TransportError::Deserialize(e)))
