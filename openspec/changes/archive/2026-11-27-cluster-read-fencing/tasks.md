@@ -40,4 +40,4 @@
 - [x] 6.2 `docs/guides/clustering.md`: replace the stale-read and revocation warnings with the new `503` behaviour, and tell operators to retry `503` on another node
 - [x] 6.3 `docs/guides/configuration-reference.md`: `read_lag_threshold_ms` describes the contact check and its `500 ms` floor
 - [x] 6.4 `CHANGELOG.md` under `### Changed`: a cluster node out of contact, or installing a snapshot, now answers `503` to reads and token validation
-- [ ] 6.5 `make check` and `make ci-local-fast` pass; `openspec validate cluster-read-fencing --strict` passes
+- [x] 6.5 `make check` and `make ci-local-fast` pass; `openspec validate cluster-read-fencing --strict` passes

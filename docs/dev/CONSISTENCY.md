@@ -1,9 +1,9 @@
 # Cluster Consistency
 
 Status: **Reference. Cluster mode is incomplete.** The normative promises — the ones Hearth
-meets today — are in `openspec/specs/cluster-consistency/spec.md`. The active OpenSpec change
-`openspec/changes/cluster-read-fencing/` adds the read and revocation promises R2, R3, R4 and V2;
-its delta specs are part of the contract until it is archived. Two parked changes propose more
+meets today — are in `openspec/specs/cluster-consistency/spec.md`, including R2, R3, R4 and V2
+(`cluster-read-fencing`) and S1–S5 (`cluster-file-snapshots`), both archived 2026-11-27 under
+`openspec/changes/archive/`. Two parked changes propose more
 promises, under `openspec/parked/{cluster-local-state-and-clock,cluster-audit-chain}/`. They are
 not part of the contract until they move back to `openspec/changes/`.
 The Jepsen harness that tests them is described in [`jepsen/README.md`](../../jepsen/README.md).

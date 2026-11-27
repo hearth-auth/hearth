@@ -140,3 +140,110 @@ Attempt trackers (user login, IP login, MFA, magic link, password reset, registr
 - **WHEN** the session-cookie secret is not configured
 - **AND** a browser sends a session cookie issued by node A to node B
 - **THEN** node B does not accept the cookie
+
+### Requirement: S1 A snapshot holds one point in time
+A Raft snapshot that declares last log index N SHALL hold the effects of every entry up to N and of no entry after N. It SHALL hold this while the building node keeps applying entries.
+
+#### Scenario: Entries apply during a build
+- **WHEN** a node starts a snapshot build at applied index N
+- **AND** the node applies entries N+1 to N+100 before the build ends
+- **THEN** the snapshot holds the effects of entries up to N only
+
+#### Scenario: A conditional write after the snapshot point
+- **WHEN** entry N+1 is a `PutIfAbsent` that applies while a snapshot of index N is built
+- **AND** a follower installs that snapshot and then applies entry N+1
+- **THEN** the follower's response for entry N+1 matches the leader's
+
+### Requirement: S2 Snapshot memory is bounded
+Building, sending, receiving and installing a snapshot SHALL use memory that does not grow with the size of the store. On a store of 1,000,000 users, a build and an install SHALL each raise the node's anonymous resident memory by less than 512 MiB.
+
+#### Scenario: A 1M-user snapshot
+- **WHEN** a node builds a snapshot of a 1,000,000-user store
+- **AND** another node installs it
+- **THEN** neither node's anonymous resident memory rises by 512 MiB or more
+
+### Requirement: S3 Snapshot files are encrypted at rest
+A node SHALL keep snapshots as files under its data directory. Every snapshot file, including a partial one, SHALL be encrypted with a per-file key wrapped by the node's storage key-encryption key, as its SST and WAL files are. No snapshot file SHALL hold a key or value of the store in plaintext.
+
+#### Scenario: A plaintext marker in the store
+- **WHEN** a node builds a snapshot of a store that holds a value with a known marker string
+- **THEN** no file under the data directory's snapshot directory contains that marker
+
+### Requirement: S4 A received snapshot is checked before it changes the store
+A node SHALL check a received snapshot end to end (every encrypted chunk, the record stream, the row and realm counts and the digest) before it deletes or writes any key of its store. A snapshot that fails the check SHALL leave the store unchanged, SHALL NOT stop the node's Raft core, and the leader SHALL be able to send it again.
+
+#### Scenario: A corrupted transfer
+- **WHEN** a byte of a snapshot changes between the leader and the receiving node
+- **THEN** the receiving node refuses the snapshot
+- **AND** its store holds the same keys and values as before the transfer
+- **AND** a later transfer of the same snapshot installs
+
+### Requirement: S5 A snapshot survives a restart
+A node SHALL make a built or installed snapshot durable before it reports it: the file, its name and its directory SHALL be synced to disk. After a restart the node SHALL serve that snapshot without building a new one. A node SHALL NOT report a snapshot whose last log index is above its applied index. Partial snapshot files left by a crash SHALL be removed when the node starts.
+
+#### Scenario: A restart after a build
+- **WHEN** a node builds a snapshot and is then killed with `kill -9` and restarted
+- **THEN** the node reports the same snapshot after the restart
+- **AND** it does not build a snapshot at start-up
+
+#### Scenario: A crash during a build
+- **WHEN** a node is killed during a snapshot build
+- **THEN** at the next start the partial file is gone
+- **AND** the node reports the snapshot it had before the build, or none
+
+### Requirement: R2 Bounded staleness
+A node SHALL serve a read only while it is in contact. A node that is not in contact SHALL answer the read with `503` and `HEARTH_CLUSTER_UNAVAILABLE`. A read served in contact SHALL show every write acknowledged over `read_lag_threshold_ms` before it began. A leader SHALL count as in contact only while a quorum acknowledged it within the threshold. A follower SHALL count a leader message as contact only if a quorum acknowledged that leader under `2000 ms` before it was sent.
+
+#### Scenario: A follower is cut off from the leader
+- **WHEN** a follower has not heard from the leader for longer than `read_lag_threshold_ms`
+- **THEN** every read on that follower answers `503` with `HEARTH_CLUSTER_UNAVAILABLE`
+
+#### Scenario: A leader loses its quorum
+- **WHEN** a leader has had no quorum acknowledgement for longer than `read_lag_threshold_ms`
+- **THEN** every read on that leader answers `503` with `HEARTH_CLUSTER_UNAVAILABLE`
+
+#### Scenario: A follower of a deposed leader
+- **WHEN** a leader and one follower are cut off from the other voters
+- **AND** the other voters elect a new leader and acknowledge a write
+- **THEN** a read on that follower answers `503` with `HEARTH_CLUSTER_UNAVAILABLE`, or shows the write
+
+#### Scenario: A follower in contact
+- **WHEN** a write is acknowledged on the leader
+- **AND** a read begins on a follower in contact more than `read_lag_threshold_ms` later
+- **THEN** the read shows the write
+
+#### Scenario: A threshold below the heartbeat floor
+- **WHEN** `cluster.read_lag_threshold_ms` is less than `2 ×` the Raft heartbeat interval of `250 ms`, that is less than `500 ms`
+- **THEN** `hearth config validate` exits with `1` and names `cluster.read_lag_threshold_ms`
+
+### Requirement: R3 Monotonic reads on one node
+Two reads on the same node SHALL NOT go backwards in log order. A read that begins after another read on the same node completed SHALL show the same state or a later one. This SHALL hold while the node installs a snapshot.
+
+#### Scenario: Reads during a snapshot install
+- **WHEN** a node installs a snapshot while a client reads one record on it in a loop
+- **THEN** no read returns an older value than a read on that node that completed before it began
+
+### Requirement: R4 No partial state
+No read SHALL observe a partly installed snapshot. From the start of a snapshot install until the install and the rebuild of node-local caches finish, the node SHALL answer reads with `503` and `HEARTH_CLUSTER_UNAVAILABLE`. This SHALL hold for any value of `read_lag_threshold_ms`.
+
+#### Scenario: A read arrives mid-install
+- **WHEN** a read arrives on a node while it installs a snapshot
+- **THEN** the node answers `503` with `HEARTH_CLUSTER_UNAVAILABLE`
+- **AND** the node never answers that a record that exists before and after the install is missing
+
+#### Scenario: A credential checked mid-install
+- **WHEN** a valid admin token is presented to a node while it installs a snapshot
+- **THEN** the node answers `503`, never `401` or `403`
+
+### Requirement: V2 A node out of contact accepts no credential
+A node that is not in contact SHALL NOT accept a session, an access token or a refresh token. It SHALL answer `503` with `HEARTH_CLUSTER_UNAVAILABLE` instead. This SHALL apply to token validation served from in-memory caches, too. A node SHALL NOT accept a credential while it installs a snapshot.
+
+#### Scenario: A session revoked while a node is cut off
+- **WHEN** a node is cut off from the cluster
+- **AND** the rest of the cluster revokes a session
+- **THEN** the cut-off node answers `503` to that session after `read_lag_threshold_ms`
+- **AND** it never accepts the session again before it learns of the revocation
+
+#### Scenario: Single-node mode
+- **WHEN** `hearth.yaml` has no `cluster:` section
+- **THEN** token validation never answers `503` for lack of contact
