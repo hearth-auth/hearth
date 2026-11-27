@@ -49,6 +49,18 @@ pub trait FsFile: Send + Sync {
     /// Reads the entire file contents into a buffer.
     fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize>;
 
+    /// Reads up to `buf.len()` bytes at the current position, as
+    /// [`io::Read::read`] does. Sealed files read one chunk at a time with it.
+    ///
+    /// The default refuses: only file types that sealed files use need it.
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let _ = buf;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this file type has no partial read",
+        ))
+    }
+
     /// Flushes and syncs the file to durable storage.
     fn sync_all(&self) -> io::Result<()>;
 
@@ -164,6 +176,10 @@ impl FsFile for RealFsFile {
 
     fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
         io::Read::read_to_end(&mut self.0, buf)
+    }
+
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        io::Read::read(&mut self.0, buf)
     }
 
     fn sync_all(&self) -> io::Result<()> {

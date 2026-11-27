@@ -16,12 +16,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   validation is not fenced yet. A single node is not affected. `/readyz` on such a node answers
   `503` with `"cluster": "not_in_contact"` (or `"replication_lag"` while it applies a backlog).
 - **Raft heartbeat 250 ms, `cluster.read_lag_threshold_ms` at least 500 ms**: the heartbeat
-  goes from 100 ms to 250 ms (openraft also uses it as the `AppendEntries` timeout), and
+  goes from 500 ms to 250 ms (openraft also uses it as the `AppendEntries` timeout), and
   `hearth config validate` and `serve` refuse a threshold below twice the heartbeat. The
   default stays 500 ms.
 - **Peer wire format**: the cluster `AppendEntries` message gains the field
   `leader_quorum_ack_age_ms`. A node of this release counts no contact from an older-build
   leader, so upgrade every node together. There are no deployed clusters to migrate.
+- **Raft snapshots are files, streamed, not held in memory** (P-2, `cluster-file-snapshots`):
+  a clustered node keeps its snapshot in `{data_dir}/raft-snapshots/`, encrypted at rest under
+  its system KEK, and serves it again after a restart. A build and an install each need well
+  under 512 MiB of extra memory at 1,000,000 users, where the old in-memory snapshot (about
+  2 GB) could exhaust a 4 GiB node. A received snapshot is checked whole (counts and SHA-256)
+  before it changes the store. Allow free disk of about twice the compressed store in the data
+  directory during a build. **Breaking for clusters:** the snapshot wire format changed, so
+  every node must run this release or later. Mixed-version clusters cannot exchange
+  snapshots. The leader now waits up to 15 minutes for a follower to acknowledge an install
+  (openraft's `install_snapshot_timeout`, previously 200 ms, which made large installs repeat).
+
+### Fixed
+- **A Raft snapshot holds exactly the state at its index** (#818): the build read the live
+  store while the node kept applying entries, so a snapshot could hold writes after the index
+  its metadata declared. It now reads one point-in-time view taken when the build is asked for.
 
 ### Security
 - **PHP SDK: symfony/serializer 7.4.24** (CVE-2026-133761, CVE-2026-133752): the SDK now requires

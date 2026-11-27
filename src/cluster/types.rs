@@ -240,6 +240,6 @@ openraft::declare_raft_types!(
         NodeId        = u64,
         Node          = HearthNode,
         Entry         = openraft::Entry<HearthRaftConfig>,
-        SnapshotData  = std::io::Cursor<Vec<u8>>,
+        SnapshotData  = crate::cluster::snapshot_file::SnapshotFile,
         AsyncRuntime  = openraft::TokioRuntime,
 );
