@@ -20,7 +20,7 @@
     "psr/http-message": "^1.0 || ^2.0",
     "psr/http-server-handler": "^1.0",
     "psr/http-server-middleware": "^1.0",
-    "symfony/serializer": "^6.4 || ^7.0"
+    "symfony/serializer": "^6.4.51 || ^7.4.24"
   },
   "require-dev": {
     "jane-php/open-api-3": "7.14.4",
