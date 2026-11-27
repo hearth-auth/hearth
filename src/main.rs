@@ -1715,6 +1715,11 @@ async fn run_serve(
             )))
         };
 
+    // Start-up reads skip the read gate's contact check, so a node that cannot
+    // reach a quorum still starts and reports why on `/readyz`. Dropped just
+    // before the listeners start: every served read needs contact.
+    let start_up_reads = cluster_engine.start_up_reads();
+
     // `storage` is the app-layer storage handle: always a ClusterStorageAdapter,
     // which routes through Raft in cluster mode and is a thin passthrough otherwise.
     let storage: Arc<dyn StorageEngine> = Arc::new(
@@ -3331,6 +3336,10 @@ async fn run_serve(
             &stats,
         );
     }
+
+    // From here on every read needs contact with the leader
+    // (`cluster-consistency` R2).
+    drop(start_up_reads);
 
     // Set when a graceful drain runs out of deadline with requests still in
     // flight. Reported at the very end so every cleanup step still runs.

@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: R2 Bounded staleness
-A node SHALL serve a read only while it is in contact. A node that is not in contact SHALL answer the read with `503` and `HEARTH_CLUSTER_UNAVAILABLE`. A read that a node in contact serves SHALL show every write acknowledged more than `read_lag_threshold_ms` before the read began. A leader SHALL count as in contact only while a quorum of voters acknowledged it within `read_lag_threshold_ms`. `hearth config validate` SHALL refuse a `cluster.read_lag_threshold_ms` below `2 ×` the Raft heartbeat interval.
+A node SHALL serve a read only while it is in contact. A node that is not in contact SHALL answer the read with `503` and `HEARTH_CLUSTER_UNAVAILABLE`. A read that a node in contact serves SHALL show every write acknowledged more than `read_lag_threshold_ms` before the read began. A leader SHALL count as in contact only while a quorum of voters acknowledged it within `read_lag_threshold_ms`.
 
 #### Scenario: A follower is cut off from the leader
 - **WHEN** a follower has not heard from the leader for longer than `read_lag_threshold_ms`

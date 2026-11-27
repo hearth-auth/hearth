@@ -65,19 +65,22 @@ async fn readyz(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         );
     }
 
+    // Before the storage verdict: a cluster node out of contact refuses the
+    // storage probe's read too, and the cluster reason says why.
+    if let Some(reason) = state.cluster.as_ref().and_then(|c| c.not_ready_reason()) {
+        let storage = if healthy { "ok" } else { "unavailable" };
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "not_ready", "storage": storage, "cluster": reason
+            })),
+        );
+    }
+
     if !healthy {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({"status": "not_ready", "storage": "unavailable"})),
-        );
-    }
-
-    if let Some(reason) = state.cluster.as_ref().and_then(|c| c.not_ready_reason()) {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({
-                "status": "not_ready", "storage": "ok", "cluster": reason
-            })),
         );
     }
 

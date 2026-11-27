@@ -1,13 +1,13 @@
 ## 0. Prerequisite
 
-- [ ] 0.1 `cluster-jepsen-harness` is archived, so `openspec/specs/cluster-consistency/spec.md` exists. Proof: `openspec validate cluster-read-fencing --strict` passes against it
+- [x] 0.1 `cluster-jepsen-harness` is archived, so `openspec/specs/cluster-consistency/spec.md` exists. Proof: `openspec validate cluster-read-fencing --strict` passes against it (done on main before 2026-11-26)
 
 ## 1. The gate
 
-- [ ] 1.1 Test first: a unit test in `src/cluster/engine.rs` shows a deadline gate that allows a read before its deadline, refuses it after, and refuses it at once when closed. Then add the `AtomicU64` deadline that replaces `reads_allowed`
-- [ ] 1.2 Test first: a unit test shows that the apply-lag check above `read_lag_threshold_ms` closes the gate. Then move `reads_allowed_for_lag` onto the deadline
-- [ ] 1.3 Test first: a unit test shows a leader whose `millis_since_quorum_ack` exceeds the threshold is out of contact, and a sole voter never is. Then set the leader's deadline from the lag monitor
-- [ ] 1.4 Test first: a test in `src/cluster/server.rs` shows an accepted `AppendEntries` from the current leader moves the deadline forward, and a refused one does not. Then record contact in the peer server
+- [x] 1.1 Test first: a unit test in a new `src/cluster/read_gate.rs` (`engine.rs` is over 3,000 lines) shows a deadline gate that allows a read before its deadline, refuses it after, and refuses it at once when closed. Then add the `AtomicU64` deadline that replaces `reads_allowed`. The gate starts closed, so `serve`'s start-up reads (cache builds, no client) skip the contact check, not the holds, until its listeners start
+- [x] 1.2 Test first: a unit test shows that the apply-lag check above `read_lag_threshold_ms` closes the gate. Then move `reads_allowed_for_lag` onto the deadline
+- [x] 1.3 Test first: a unit test shows a leader whose `millis_since_quorum_ack` exceeds the threshold is out of contact, and a sole voter never is. Then set the leader's deadline from the lag monitor
+- [x] 1.4 Test first: a unit test in `src/cluster/engine.rs` shows an accepted `AppendEntries` from the current leader moves the deadline forward, and a refused one does not. Then record contact in `ClusterEngine`'s `IncomingRpcDispatch::append_entries`, which the peer server calls (`src/cluster/server.rs` only routes the RPC). An accepted request whose log ends before its `leader_commit` (a heartbeat to a follower that is behind, one catch-up batch) is no contact either: the `2026-10-07` branch's Jepsen `staleness` run found that gap
 - [ ] 1.5 Test first: `tests/cli_config.rs` shows `hearth config validate` refuses `read_lag_threshold_ms: 150` and accepts `200`. Then add the floor and lower the heartbeat to `100 ms`
 
 ## 2. Token validation obeys the gate (V2)
