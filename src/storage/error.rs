@@ -172,6 +172,10 @@ pub enum ClusterUnavailableCause {
     /// has had no quorum acknowledgement, within
     /// `cluster.read_lag_threshold_ms` (`cluster-consistency` R2).
     NotInContact,
+    /// This node's reads are fenced: it is installing a snapshot, from the
+    /// start of the install until the next contact after it
+    /// (`cluster-consistency` R3).
+    InstallingSnapshot,
     /// Single node: `storage.max_writes_in_flight` writes were already in
     /// progress, so this one was refused before it started (#596).
     WriteLimit,
@@ -184,6 +188,7 @@ impl fmt::Display for ClusterUnavailableCause {
             Self::LeaderBusy => "leader busy",
             Self::ReplicationLag => "replication lag",
             Self::NotInContact => "not in contact",
+            Self::InstallingSnapshot => "installing a snapshot",
             Self::WriteLimit => "write limit full",
         })
     }

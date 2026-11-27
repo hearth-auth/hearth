@@ -426,6 +426,11 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
         // removes it after Phase 2.  A crash between the two phases leaves the
         // marker on disk; the engine refuses to start on next open rather than
         // silently serving mixed data (HEA-2132).
+        // No read until a contact after the install (`cluster-consistency`
+        // R3): an error below leaves the gate closed.
+        if let Some(gate) = &self.read_gate {
+            gate.begin_install();
+        }
         spawn_blocking(move || {
             restore_snapshot_in_place(&engine, &payload, &snapshot_id, &meta_rows)
         })
@@ -446,6 +451,9 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
         self.last_applied = meta.last_log_id;
         self.last_membership = meta.last_membership.clone();
         self.note_applied();
+        if let Some(gate) = &self.read_gate {
+            gate.end_install();
+        }
 
         snapshot_slot_offer(
             &self.current_snapshot,
@@ -993,6 +1001,10 @@ fn restore_snapshot_in_place(
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[path = "state_machine_install_fence.rs"]
+mod install_fence_tests;
 
 #[cfg(test)]
 mod tests {

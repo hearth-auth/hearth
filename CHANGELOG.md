@@ -20,6 +20,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   exchange answer `503` `HEARTH_CLUSTER_UNAVAILABLE`, also for a token or session the node has
   cached. They used to accept it, or answer `401`, `active: false` or `allowed: false`. Retry a
   `503` on another node. Browser sign-in sessions on such a node are sent to the sign-in page.
+- **A cluster node installing a snapshot refuses reads and credentials**: from the start of the
+  install until the first leader contact after it, reads and token or session checks answer
+  `503` `HEARTH_CLUSTER_UNAVAILABLE`, and `/readyz` reports `"cluster": "installing_snapshot"`.
+  They used to see a partly installed store, so a valid token could get `401` or `403`, whatever
+  `cluster.read_lag_threshold_ms` was set to. A failed install keeps the node refusing until it
+  restarts.
 - **Raft heartbeat 250 ms, `cluster.read_lag_threshold_ms` at least 500 ms**: the heartbeat
   goes from 100 ms to 250 ms (openraft also uses it as the `AppendEntries` timeout), and
   `hearth config validate` and `serve` refuse a threshold below twice the heartbeat. The

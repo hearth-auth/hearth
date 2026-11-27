@@ -21,12 +21,12 @@
 
 ## 3. The snapshot install fence (R3, R4)
 
-- [ ] 3.1 Test first: a test in `src/cluster/state_machine.rs` shows a read during `restore_snapshot_in_place` is refused, with a storage stub that pauses between Phase 1 and Phase 2. Then close the gate in `install_snapshot` before Phase 1
-- [ ] 3.2 Test first: the same test shows the gate stays closed until `on_replicated_reset` returns, and stays closed after a failed install, and that an install drops a contact waiting for its apply (1.7). Then reopen it only through a fresh heartbeat
+- [x] 3.1 Test first: a test in `src/cluster/state_machine.rs` shows a read during `restore_snapshot_in_place` is refused, with a storage stub that pauses between Phase 1 and Phase 2. Then close the gate in `install_snapshot` before Phase 1
+- [x] 3.2 Test first: the same test shows the gate stays closed until `on_replicated_reset` returns, and stays closed after a failed install, and that an install drops a contact waiting for its apply (1.7). Then reopen it only through a fresh heartbeat
 
 ## 4. Readiness
 
-- [ ] 4.1 Test first: `tests/cluster_serve_admin_status.rs` shows a follower cut off from the leader reports `/readyz` `503` with `"cluster": "not_in_contact"`. Then add the reason to `not_ready_reason`
+- [x] 4.1 Test first: `tests/cluster_serve_admin_status.rs` shows a follower cut off from the leader reports `/readyz` `503` with `"cluster": "not_in_contact"`. Then add the reason to `not_ready_reason`
 
 ## 5. Jepsen
 
