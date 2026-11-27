@@ -35,6 +35,10 @@
 #   store-size <product>        bytes of the store on disk
 #   freeze <product>            stop the product (and Docker), flush, and
 #                               unmount /data, ready for a snapshot
+#   variant <product> <name>    a labelled variant (compare.sh VARIANT): every
+#                               later start of the product here runs with
+#                               <product>/variant-<name>.yaml over its
+#                               compose.yaml (COMPARE_VARIANT in variant.env)
 #   scale <factor>              size 2 (#913: "Size 2 scales both by 4"): the
 #                               products' container memory limits and this
 #                               server's copy of postgres/postgresql.conf
@@ -89,6 +93,9 @@ product() {
   set -a
   # shellcheck disable=SC1091
   [ ! -f "$top/scale.env" ] || . "$top/scale.env"
+  # The variant (variant), if any: COMPARE_VARIANT for <product>.sh.
+  # shellcheck disable=SC1091
+  [ ! -f "$top/variant.env" ] || . "$top/variant.env"
   set +a
   env BUNDLE="$(bundle)" SERVER_IP=127.0.0.1 "$(bind_var "$p")=0.0.0.0" \
     bash "$compare/$p/$p.sh" "$@"
@@ -235,6 +242,13 @@ case $cmd in
     fi
     sync
     umount /data
+    ;;
+  variant)
+    p=${1:?product} v=${2:?variant}
+    [[ $v =~ ^[a-z0-9]+$ ]] || die "variant $v"
+    [ -f "$compare/$p/variant-$v.yaml" ] || die "no variant $v for $p ($compare/$p/variant-$v.yaml)"
+    echo "COMPARE_VARIANT=$v" > "$top/variant.env"
+    echo "variant $v: $p/variant-$v.yaml over $p/compose.yaml"
     ;;
   scale)
     f=${1:?factor}

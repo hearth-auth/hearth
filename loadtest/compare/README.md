@@ -13,11 +13,11 @@ metrics and analysis as Hearth.
 | `tls.sh` | A CA and an HTTPS leaf, the same kind as Hearth's (`gen-config.sh`) |
 | `k6.sh` | Runs a `loadtest/live/k6` script from the pinned k6 image, for a host without k6 |
 | `test_bundle.sh`, `test_ids.sh` | The product scripts' bundle, and their `ids` (the cold read's ids from PostgreSQL), with Docker stood in for |
-| `keycloak/` | Keycloak 26.8.2: `compose.yaml` (Keycloak and PostgreSQL), `realm.py` (the realm, tested by `test_realm.py`), `keycloak.sh` (up, seed, ids, restart, down) |
-| `ory/` | Ory Hydra v26.2.0 and Ory Kratos v26.2.0 with Ory's reference login and consent UI: `compose.yaml` (the three, the migrations and PostgreSQL), `hydra.yaml`, `kratos.yaml`, `identity.schema.json`, `initdb.sh` (the two databases), `realm.py` (the clients and login users, tested by `test_realm.py`), `ory.sh` (up, seed, hashes, messages, restart, down) |
+| `keycloak/` | Keycloak 26.8.2: `compose.yaml` (Keycloak and PostgreSQL), `realm.py` (the realm, tested by `test_realm.py`), `keycloak.sh` (up, seed, ids, restart, down), `variant-durable.yaml` (the `durable` variant, below) |
+| `ory/` | Ory Hydra v26.2.0 and Ory Kratos v26.2.0 with Ory's reference login and consent UI: `compose.yaml` (the three, the migrations and PostgreSQL), `hydra.yaml`, `kratos.yaml`, `identity.schema.json`, `initdb.sh` (the two databases), `realm.py` (the clients and login users, tested by `test_realm.py`), `ory.sh` (up, seed, hashes, messages, restart, down), `variant-pool20.yaml` (the `pool20` variant, below) |
 | `authentik/` | Authentik 2026.8.6: `compose.yaml` (Authentik's server and worker, and PostgreSQL), `tls.yaml` (the run's TLS leaf as the web certificate), `realm.py` (the providers, the service account and the blueprints of the login and bulk users, tested by `test_realm.py`), `authentik.sh` (up, seed, ids, settle, hashes, tasks, restart, down; the order of `up` tested by `test_up.sh`) |
 | `zitadel/` | Zitadel v4.20.5: `compose.yaml` (Zitadel's init, setup and start, and PostgreSQL), `instance.py` (the clients and login users, tested by `test_instance.py`), `zitadel.sh` (up, seed, ids, hashes, restart, down) |
-| `aws/` | The AWS session (below): `compare.sh` (the driver), `remote.sh` (its server side), `ladder.py` (rates, verdicts, the size 2 product), `cost.py` and `prices.json` (the running total), `session-plan.json` (hours per part), `compose-sampler.sh` (the sampler for a compose project), `dryrun/` (shims for `DRY_RUN=1`) |
+| `aws/` | The AWS session (below): `compare.sh` (the driver), `remote.sh` (its server side), `ladder.py` (rates, verdicts, the size 2 product), `cost.py` and `prices.json` (the running total), `session-plan.json` (hours per part), `variants-plan.json` (the labelled variants and their parts), `compose-sampler.sh` (the sampler for a compose project), `dryrun/` (shims for `DRY_RUN=1`) |
 
 ## The AWS session (`aws/`)
 
@@ -93,12 +93,45 @@ settings.
    the rerun first tears down any run left up, then resumes: finished seeds, journeys and the
    drill are kept, and new runs get new ids, so no cost is counted twice.
 
+4. **Variants** (owner decisions 2026-11-26, after 913a): a labelled run of one product with one
+   setting changed, shown in the report beside its default run. `aws/variants-plan.json` defines
+   them: `durable`, Keycloak with `--spi-connections-jpa--quarkus--async-commit=false` (by
+   default Keycloak commits the transactions that change only sessions or events with
+   `synchronous_commit = off`, so its login, refresh and mix wait for no WAL flush; Keycloak's
+   database guide, "Asynchronous commits"), on login, refresh and mix; and `pool20`, Ory with
+   `max_conns=20&max_idle_conns=4` in both the Hydra and the Kratos DSN (Ory's deployment
+   examples; the default run has the code default, 4 on size 1), on introspect, userinfo and
+   client credentials. Each is a compose override (`<product>/variant-<name>.yaml`) that
+   `<product>.sh` adds when `COMPARE_VARIANT` is set; on a ramp server `remote.sh variant` sets it
+   before the product first starts. `VARIANT=<name> compare.sh ramps <product> 1` runs one; its
+   runs are `<session>-<product>-<variant>-s1-<n>` (the instances' `Name` and `hearth-stress`
+   tags), its results go to `<product>-<variant>-s1/` (never over the default
+   `<product>-s1/`), and each journey's result, `report.json` and `inventory.txt` record the
+   variant and its exact setting (`summary.md` has a variant column). A variant never seeds:
+   it ramps from the seed snapshot of the base session (`BASE_SESSION`, the plan's
+   `base_session`: 913a, `keycloak-5` and `ory-4`). `PLAN=variants-plan.json compare.sh session`
+   runs both in parallel (about 1.3 h). Locally (2026-11-26, the pinned images, 70 logins at
+   2/s and 174 refreshes at 5/s), PostgreSQL's client backends flushed the WAL themselves
+   (`pg_stat_io` fsyncs) 0.03 times per login and 0.01 per refresh by default, and 1.04 and
+   1.05 times with the `durable` option: with it, each session commit waits for its flush.
+
+   **Ledger.** A variant session (913b) has its own ledger, which starts empty, and carries the
+   base session's: every total (`cost.txt`, `compare.sh cost`), the stop and the cap add the
+   base ledger's total, read from its state (`.build/aws-<base>/`, or `BASE_STATE`; a session
+   without it does not start). So `STOP_USD` and `CAP_USD` (22, the plan's) stay the owner's cap
+   for the whole comparison, and 913b may spend what 913a left: $22 - $20.05 = $1.95.
+   `compare.sh plan` with the plan says so (from the base ledger when it is on the machine,
+   else from the plan's `base_spent_usd`): Keycloak's variant about $0.62, both about $1.33
+   with the results fetched.
+
 **Cost.** `aws/cost.py` keeps a ledger of every instance (from before `up` to after `down`),
 volume, snapshot and the results fetched, priced with `aws/prices.json` (us-east-1 on-demand,
 from AWS's price list files, with sources and the date). The total is printed after every step
 and written to `cost.txt`; at `STOP_USD` ($20) the session stops every part and tears down
 every run. A part whose estimate, plus what the parts running are still expected to cost,
-would pass `CAP_USD` ($20) does not start. The parts share one ledger (each line written under a
+would pass `CAP_USD` ($20) does not start; within a ramps part, each instance set is priced
+for the journeys still to run on it (the time model: the set's setup plus `minutes_per_journey`
+each, at most its 4 h lifetime; a run past it is caught by `STOP_USD`). The parts share one ledger (each line written under a
 lock). `compare.sh plan` prices `aws/session-plan.json` (the hours per part) and prints the
 wall clock of the parallel timeline at `MAX_VCPU` and at other limits, and the logins it
 needs.
@@ -275,7 +308,8 @@ From Ory's own guides (links in `ory/compose.yaml`), the rest at Ory's defaults:
   UI's `TLS_CERT_PATH`); they call each other over TLS by that name
 - production mode: `hydra serve all` and `kratos serve` without `--dev`, the migrations as
   separate one-shot containers; one PostgreSQL server with a database per part (`initdb.sh`),
-  the shared `postgresql.conf`; connection pools at Ory's defaults (from the CPU count); no
+  the shared `postgresql.conf`; connection pools at Ory's defaults (from the CPU count; the
+  `pool20` variant sets Ory's example values, above); no
   telemetry (`sqa.opt_out`, `SQA_OPT_OUT`)
 - Argon2id m=19456 KiB, t=2, p=1 (`hashers.argon2`: `memory: 19456KB`, Kratos counts KB as
   1,024 bytes; `iterations: 2`, `parallelism: 1`); the stored hashes show

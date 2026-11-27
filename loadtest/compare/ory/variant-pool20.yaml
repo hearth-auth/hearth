@@ -1,0 +1,14 @@
+# Variant `pool20` of the Ory run (#913, owner decision 2026-11-26), a
+# compose override of compose.yaml (ory.sh adds it when COMPARE_VARIANT is
+# pool20). The default run keeps Hydra's and Kratos's database pools at their
+# code default (max_conns 2 per CPU: 4 on size 1); Ory's own deployment
+# examples set max_conns=20&max_idle_conns=4 in the DSN
+# (https://www.ory.com/docs/self-hosted/deployment). This variant sets that in
+# both DSNs, the only change from the default run.
+services:
+  hydra:
+    environment:
+      DSN: postgres://hydra:${HYDRA_DB_PASSWORD:?}@postgres:5432/hydra?sslmode=disable&max_conns=20&max_idle_conns=4
+  kratos:
+    environment:
+      DSN: postgres://kratos:${KRATOS_DB_PASSWORD:?}@postgres:5432/kratos?sslmode=disable&max_conns=20&max_idle_conns=4

@@ -31,6 +31,13 @@
 #     each part's end, and a rerun runs only the failed and skipped parts;
 #     STOP_USD still stops every part after a failure
 #   - snapshot deletion: only the session's own, and only when asked
+#   - the labelled variants (VARIANT, PLAN=variants-plan.json): no seed, the
+#     base session's snapshot (BASE_SESSION), the variant on the server before
+#     the product starts, its run ids, results and metadata labelled, the
+#     default results untouched, the base ledger carried into every total and
+#     the cap; both variants in one session without a Hearth image; the plan's
+#     carried total and estimates; refusals (unknown, wrong product, a seed,
+#     no base ledger)
 #
 # Usage: bash loadtest/compare/aws/test_dryrun.sh [keep]   (keep: leave the
 # temporary tree and print its path)
@@ -535,6 +542,105 @@ stopped_at=$(grep -n 'reached \$0.5' "$tmp/session-fail-stop.out" | head -n 1 | 
   && ! pgrep -f "$tmp/repo/loadtest/compare/aws/compare.sh" > /dev/null \
   && pass "after a part failed, STOP_USD still stops every part (exit 3), every run down, every ledger entry closed" \
   || fail "STOP_USD after a failed part (rc $rc, failure at line ${failed_at:-none}, stop at ${stopped_at:-none})"
+
+# Labelled variants (#913, owner decisions 2026-11-26): a new session runs a
+# product with one setting changed (VARIANT, variants-plan.json), on the seed
+# snapshots of an earlier session (BASE_SESSION), whose ledger it carries.
+# The base: Keycloak's and Ory's seeds, and a default Keycloak result.
+vbo=$tmp/repo/loadtest/live/results/compare-dryvb
+SESSION=dryvb step seed-vb-keycloak bash "$c" seed keycloak || fail "seed keycloak (dryvb)"
+SESSION=dryvb step seed-vb-ory bash "$c" seed ory || fail "seed ory (dryvb)"
+SESSION=dryvb JOURNEYS=login step ramps-vb bash "$c" ramps keycloak 1 || fail "ramps keycloak (dryvb)"
+cp "$vbo/keycloak-s1/login.json" "$tmp/vb-login-before.json"
+kc_snap=$(jv "$vbo/seed-keycloak.json" snapshot)
+base_total=$(python3 -I "$here/cost.py" check "$tmp/repo/loadtest/compare/.build/aws-dryvb/ledger.jsonl" 1000000)
+before=$(grep -c 'run-instances' "$tmp/dry/calls.log")
+SESSION=dryv BASE_SESSION=dryvb VARIANT=fast try v-unknown bash "$c" ramps keycloak 1
+rc1=$?
+SESSION=dryv BASE_SESSION=dryvb VARIANT=durable try v-product bash "$c" ramps ory 1
+rc2=$?
+SESSION=dryv BASE_SESSION=dryvb VARIANT=durable try v-seed bash "$c" seed keycloak
+rc3=$?
+SESSION=dryv BASE_SESSION=dryvnone VARIANT=durable try v-nobase bash "$c" ramps keycloak 1
+rc4=$?
+[ "$rc1" != 0 ] && grep -q 'unknown variant fast (durable pool20)' "$tmp/v-unknown.out" \
+  && [ "$rc2" != 0 ] && grep -q 'variant durable is a keycloak variant, not ory' "$tmp/v-product.out" \
+  && [ "$rc3" != 0 ] && grep -q 'a variant reuses the seed of its base session' "$tmp/v-seed.out" \
+  && [ "$rc4" != 0 ] && grep -q 'no ledger of the base session dryvnone' "$tmp/v-nobase.out" \
+  && [ "$(grep -c 'run-instances' "$tmp/dry/calls.log")" = "$before" ] \
+  && pass "variants: an unknown one, one for another product, a variant seed and a missing base ledger start nothing" \
+  || fail "variant refusals: $rc1 $rc2 $rc3 $rc4: $(grep -h FAILED "$tmp"/v-{unknown,product,seed,nobase}.out | tr '\n' ' ')"
+
+# Keycloak durable alone: its 3 journeys on the base session's snapshot.
+vo=$tmp/repo/loadtest/live/results/compare-dryv
+vr=$tmp/repo/loadtest/live/results/dryv-keycloak-durable-s1-1
+setting=--spi-connections-jpa--quarkus--async-commit=false
+SESSION=dryv BASE_SESSION=dryvb VARIANT=durable step v-kc bash "$c" ramps keycloak 1 || fail "ramps keycloak durable"
+grep -q "SnapshotId=$kc_snap" "$tmp/v-kc.out" && ! grep -q 'remote.sh product keycloak seed' "$tmp/v-kc.out" \
+  && grep -q 'Key=Name,Value=hearth-stress-dryv-keycloak-durable-s1-1' "$tmp/v-kc.out" \
+  && grep -q 'Key=hearth-stress,Value=hearth-stress-dryv-keycloak-durable-s1-1' "$tmp/v-kc.out" \
+  && pass "variant: no seed; the data volume from the base session's snapshot; the instances named and tagged with it" \
+  || fail "variant launch: $(grep -o 'Key=Name,Value=[^}]*' "$tmp/v-kc.out" | head -n 1)"
+first_variant=$(grep -n 'DRY ssh .*remote.sh variant keycloak durable' "$tmp/v-kc.out" | head -n 1 | cut -d: -f1)
+first_restore=$(grep -n 'DRY ssh .*remote.sh restore keycloak' "$tmp/v-kc.out" | head -n 1 | cut -d: -f1)
+[ -n "$first_variant" ] && [ -n "$first_restore" ] && [ "$first_variant" -lt "$first_restore" ] \
+  && pass "variant: the server gets it (remote.sh variant) before Keycloak first starts" \
+  || fail "remote.sh variant at ${first_variant:-none}, the first restore at ${first_restore:-none}"
+got=$(cd "$vo/keycloak-durable-s1" 2> /dev/null && ls ./*.json | grep -v '\.\(coarse\|coarse2\|fine\)\.json' | sort | tr '\n' ' ')
+[ "$got" = "./login.json ./mix.json ./refresh.json " ] && [ ! -e "$vo/keycloak-s1" ] \
+  && cmp -s "$vbo/keycloak-s1/login.json" "$tmp/vb-login-before.json" && [ ! -e "$vbo/keycloak-durable-s1" ] \
+  && pass "variant: its journeys (login refresh mix) in keycloak-durable-s1/; the default results untouched" \
+  || fail "variant results: $got"
+[ "$(jv "$vo/keycloak-durable-s1/login.json" variant)" = durable ] \
+  && [ "$(jv "$vo/keycloak-durable-s1/mix.json" variant_setting)" = "$setting" ] \
+  && [ "$(jv "$vr/login-coarse-1/report.json" variant)" = durable ] \
+  && [ "$(jv "$vr/login-coarse-1/report.json" variant_setting)" = "$setting" ] \
+  && grep -qxF "variant: durable ($setting, keycloak/variant-durable.yaml)" "$vr/inventory.txt" \
+  && grep -qF -- "$setting" "$tmp/repo/loadtest/compare/keycloak/variant-durable.yaml" \
+  && pass "variant: the verdict, report.json and the inventory record it and its exact setting" \
+  || fail "variant metadata: $(jv "$vo/keycloak-durable-s1/login.json" variant 2>&1) $(grep variant "$vr/inventory.txt")"
+own=$(python3 -I "$here/cost.py" check "$tmp/repo/loadtest/compare/.build/aws-dryv/ledger.jsonl" 1000000)
+line=$(tail -n 1 "$vo/cost.txt")
+# The total adds the unrounded totals: within a cent of the two rounded ones.
+python3 -I -c 'import re, sys
+t = float(re.search(r"total \$([0-9.]+) ", sys.argv[1]).group(1))
+sys.exit(abs(t - float(sys.argv[2]) - float(sys.argv[3])) > 0.011)' "$line" "$base_total" "$own" \
+  && grep -qF "(this session \$$own, carried \$$base_total from session dryvb)" <<< "$line" \
+  && pass "variant: the running total carries the base session's ledger (\$$base_total + \$$own)" \
+  || fail "variant cost.txt: $(tail -n 1 "$vo/cost.txt")"
+# The cap counts what the base session spent: a set (about $0.62 for the 3
+# journeys) does not start when the base total plus it passes CAP_USD.
+before=$(grep -c 'run-instances' "$tmp/dry/calls.log")
+SESSION=dryvc BASE_SESSION=dryvb VARIANT=durable CAP_USD=$(python3 -I -c "print($base_total + 0.3)") \
+  try v-cap bash "$c" ramps keycloak 1
+rc=$?
+[ "$rc" != 0 ] && grep -q "would take the total \$$base_total, plus" "$tmp/v-cap.out" \
+  && [ "$(grep -c 'run-instances' "$tmp/dry/calls.log")" = "$before" ] \
+  && pass "variant: the cap counts the carried total; over it, nothing starts" \
+  || fail "variant cap (rc $rc): $(grep -v '^DRY' "$tmp/v-cap.out" | tail -n 2 | tr '\n' ' ')"
+
+# Both variants in one session (PLAN=variants-plan.json), without a Hearth
+# image: Ory's pool20 on its 3 journeys, beside Keycloak's durable.
+vso=$tmp/repo/loadtest/live/results/compare-dryvs
+SESSION=dryvs BASE_SESSION=dryvb PLAN=variants-plan.json env -u IMAGE bash "$c" session < /dev/null > "$tmp/v-session.out" 2>&1 \
+  || { fail "the variants session"; grep -v '^DRY' "$tmp/v-session.out" | tail -n 8; }
+started=$(awk '$2 == "start" {print $3}' "$vso/timeline.txt" 2> /dev/null | sort | tr '\n' ' ')
+got=$(cd "$vso/ory-pool20-s1" 2> /dev/null && ls ./*.json | grep -v '\.\(coarse\|coarse2\|fine\)\.json' | sort | tr '\n' ' ')
+[ "$started" = "s1:keycloak@durable s1:ory@pool20 " ] && [ "$got" = "./client_credentials.json ./introspect.json ./userinfo.json " ] \
+  && [ -s "$vso/keycloak-durable-s1/refresh.json" ] \
+  && grep -q 'DRY ssh .*remote.sh variant ory pool20' "$vso/driver-s1-ory@pool20.log" \
+  && [ "$(jv "$vso/ory-pool20-s1/introspect.json" variant_setting)" = "max_conns=20&max_idle_conns=4" ] \
+  && grep -q '^| ory | pool20 | 1 | introspect |' "$vso/summary.md" \
+  && grep -q '^| keycloak | durable | 1 | login |' "$vso/summary.md" \
+  && pass "variants session: both parts, each on its journeys, labelled in summary.md" \
+  || fail "variants session: started $started; ory: $got"
+SESSION=dryvs BASE_SESSION=dryvb PLAN=variants-plan.json step v-plan bash "$c" plan || fail "variants plan"
+grep -qF "carried: \$$base_total (session dryvb's ledger)" "$tmp/v-plan.out" \
+  && grep -q 'this session may spend \$[0-9.]* of the \$22 cap' "$tmp/v-plan.out" \
+  && grep -q '^  size 1 keycloak, variant durable .*: about \$0\.6[0-9]' "$tmp/v-plan.out" \
+  && grep -q '^  size 1 ory, variant pool20 .*: about \$0\.6[0-9]' "$tmp/v-plan.out" \
+  && pass "variants plan: the carried total, what the session may spend, each variant's estimate" \
+  || fail "variants plan: $(grep -E 'carried|may spend|variant' "$tmp/v-plan.out" | tr '\n' ' ')"
 
 # No real tool ran: every call went through the shims.
 grep -q '^DRY ' "$tmp/dry/calls.log" && ! grep -q 'unknown tool' "$tmp/dry/calls.log" && pass "all calls went to the shims" \
