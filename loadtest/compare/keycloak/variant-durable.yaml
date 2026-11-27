@@ -1,0 +1,12 @@
+# Variant `durable` of the Keycloak run (#913, owner decision 2026-11-26), a
+# compose override of compose.yaml (keycloak.sh adds it when COMPARE_VARIANT
+# is durable). By default Keycloak commits the transactions that change only
+# persisted user and client sessions or events with PostgreSQL's
+# `synchronous_commit = off`, so a login or a refresh does not wait for its
+# WAL flush (Keycloak database guide, "Asynchronous commits":
+# https://www.keycloak.org/server/db). This variant opts out, as that guide
+# says, so every commit waits for the flush, as Hearth's writes and Ory's do.
+# The only change from the default run.
+services:
+  keycloak:
+    command: ["start", "--spi-connections-jpa--quarkus--async-commit=false"]

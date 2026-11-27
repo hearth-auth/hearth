@@ -43,6 +43,8 @@
 #                                   the same SESSION runs the failed and
 #                                   skipped parts. STOP_USD still stops
 #                                   every part
+#                                   With PLAN=variants-plan.json: the labelled
+#                                   variants' parts (below)
 #   compare.sh drill                the #647 10M restore drill (round.sh, a plan
 #                                   with one drill line)
 #   compare.sh cost                 the running total
@@ -79,12 +81,34 @@
 #   DATA_GB        40  (the data volume of a seed, and of each ramp server)
 #   JOURNEYS       the journeys of `ramps` and `session` (default: all 10 at
 #                  size 1, the 8 without the cold reads at size 2)
+#   PLAN           the plan of `plan` and `session`: a file in aws/ or a path
+#                  (default session-plan.json; variants-plan.json with VARIANT).
+#                  Its stop_usd and cap_usd are the defaults of STOP_USD and
+#                  CAP_USD, its base_session that of BASE_SESSION
+#   VARIANT        a labelled variant of one product (variants-plan.json's
+#                  "variants", owner decisions 2026-11-26): durable (Keycloak,
+#                  --spi-connections-jpa--quarkus--async-commit=false) or
+#                  pool20 (Ory, max_conns=20&max_idle_conns=4 in both DSNs).
+#                  `ramps <its product> 1` runs that product with
+#                  <product>/variant-<name>.yaml over its compose.yaml, on the
+#                  variant's journeys (unless JOURNEYS or arguments say
+#                  otherwise); its runs are <session>-<product>-<variant>-s1-<n>
+#                  (the instances' Name and hearth-stress tags), its results in
+#                  <product>-<variant>-s1/, and each journey's result, report.json
+#                  and inventory.txt record the variant and its exact setting.
+#                  A variant never seeds: it ramps from BASE_SESSION's snapshot
+#   BASE_SESSION   the session whose seed snapshots a session without its own
+#                  takes, and whose ledger it carries: every total (cost.txt,
+#                  `cost`, STOP_USD, CAP_USD) adds that ledger's, so the caps
+#                  stay the whole comparison's (variants-plan.json: 913a, $22).
+#                  Its state (.build/aws-<base>/, or BASE_STATE: that
+#                  directory in another checkout) must be on this machine
 #   DRY_RUN=1      no AWS and no SSH: PATH shims (dryrun/bin) print every AWS
 #                  call and remote command instead, with canned answers
 #                  (test_dryrun.sh)
 #
 # Results: loadtest/live/results/compare-<session>/ (git-ignored): one JSON per
-# seed (seed-<product>.json), per journey (<product>-s<size>/<journey>.json,
+# seed (seed-<product>.json), per journey (<product>[-<variant>]-s<size>/<journey>.json,
 # with every step's verdict), the cost after each step (cost.txt), the
 # fastest-product rule (fastest.json) and the session summary (summary.md).
 # State (run ids, snapshot ids, the cost ledger) is in
@@ -117,8 +141,34 @@ esac
 state=$compare_dir/.build/aws-$session
 out=$live/results/compare-$session
 ledger=$state/ledger.jsonl
-stop_usd=${STOP_USD:-20}
-cap_usd=${CAP_USD:-20}
+
+# The plan (PLAN), and the labelled variant (VARIANT) with its definition.
+variant=${VARIANT:-}
+variants_file=$aws_dir/variants-plan.json
+plan_file=${PLAN:-}
+if [ -z "$plan_file" ]; then
+  if [ -n "$variant" ]; then plan_file=variants-plan.json; else plan_file=session-plan.json; fi
+fi
+[[ $plan_file == /* ]] || plan_file=$aws_dir/$plan_file
+[ -f "$plan_file" ] || cdie "no plan $plan_file"
+pget() { python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "$plan_file" "$1"; }
+# A field of variant $1's definition (a list as words).
+vdef() {
+  python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1]))["variants"][sys.argv[2]][sys.argv[3]]
+print(" ".join(v) if isinstance(v, list) else v)' "$variants_file" "$1" "$2"
+}
+if [ -n "$variant" ]; then
+  known=$(python3 -I -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1]))["variants"]))' "$variants_file")
+  [[ " $known " == *" $variant "* ]] || cdie "unknown variant $variant ($known)"
+fi
+# The base session: its snapshots and its ledger (carried).
+base=${BASE_SESSION:-$(pget base_session)}
+base_state=${BASE_STATE:-$compare_dir/.build/aws-$base}
+base_ledger=$base_state/ledger.jsonl
+carried=()
+[ -z "$base" ] || carried=("$base_ledger")
+stop_usd=${STOP_USD:-$(pget stop_usd)}
+cap_usd=${CAP_USD:-$(pget cap_usd)}
 data_gb=${DATA_GB:-40}
 
 # cloud.sh's functions (ssh_to, load_run, cmd_ramp, cmd_collect, ...). Its
@@ -150,6 +200,11 @@ init_state() {
   umask 077
   mkdir -p "$state" "$out"
   touch "$state/runs.active" "$state/snapshots.env"
+  if [ -n "$base" ]; then
+    [ "$base" != "$session" ] || cdie "BASE_SESSION is this session ($session)"
+    [ -s "$base_ledger" ] \
+      || cdie "no ledger of the base session $base ($base_ledger): its total counts toward the caps; run from the checkout that holds .build/aws-$base/, or set BASE_STATE to it"
+  fi
   [ ! -e "$live/.build/HOLD-DOWN" ] || cdie "$live/.build/HOLD-DOWN exists: cloud.sh down would leave runs up"
 }
 
@@ -157,11 +212,12 @@ init_state() {
 # session stops at STOP_USD: every run of it (every part's) goes down, and
 # the STOPPED file tells the session and the other parts.
 spend() {
-  local what=$1 total
-  total=$(cost check "$ledger" 1000000)
-  printf '%s %s total $%s\n' "$(TZ=America/New_York date +'%Y-%m-%d %H:%M %Z')" "$what" "$total" >> "$out/cost.txt"
-  clog "cost after $what: \$$total (stop at \$$stop_usd)"
-  if { [ -n "${PART:-}" ] && [ -e "$state/STOPPED" ]; } || ! cost check "$ledger" "$stop_usd" > /dev/null; then
+  local what=$1 total parts=""
+  total=$(cost check "$ledger" 1000000 "${carried[@]}")
+  [ -z "$base" ] || parts=" (this session \$$(cost check "$ledger" 1000000), carried \$$(cost check "$base_ledger" 1000000) from session $base)"
+  printf '%s %s total $%s%s\n' "$(TZ=America/New_York date +'%Y-%m-%d %H:%M %Z')" "$what" "$total" "$parts" >> "$out/cost.txt"
+  clog "cost after $what: \$$total$parts (stop at \$$stop_usd)"
+  if { [ -n "${PART:-}" ] && [ -e "$state/STOPPED" ]; } || ! cost check "$ledger" "$stop_usd" "${carried[@]}" > /dev/null; then
     clog "the running total \$$total reached \$$stop_usd: stopping, every run goes down"
     echo "the running total \$$total reached \$$stop_usd" >> "$state/STOPPED"
     down_all
@@ -169,12 +225,13 @@ spend() {
   fi
 }
 
-# Whether a part may start: its estimate (USD), the total so far and what the
-# other parts running are still expected to cost stay within CAP_USD.
+# Whether a part may start: its estimate (USD), the total so far (with the
+# base session's) and what the other parts running are still expected to cost
+# stay within CAP_USD.
 fits_cap() {
   local what=$1 est=$2 total rest
-  total=$(cost check "$ledger" 1000000)
-  rest=$(cost remaining "$state/parts.active" "$aws_dir/session-plan.json" "${PART:-}")
+  total=$(cost check "$ledger" 1000000 "${carried[@]}")
+  rest=$(cost remaining "$state/parts.active" "$plan_file" "${PART:-}")
   python3 -I -c 'import sys; t, r, e, c = map(float, sys.argv[1:]); sys.exit(t + r + e > c)' "$total" "$rest" "$est" "$cap_usd" \
     && return 0
   clog "$what (about \$$est) would take the total \$$total, plus \$$rest still to come from the parts running, past the \$$cap_usd cap"
@@ -405,6 +462,7 @@ cmd_seed() {
   local p=${1:?usage: compare.sh seed <product>}
   init_state
   [[ " ${PRODUCTS[*]} " == *" $p "* ]] || cdie "unknown product $p"
+  [ -z "$variant" ] || cdie "VARIANT $variant: a variant reuses the seed of its base session; seed without VARIANT"
   [ ! -s "$out/seed-$p.json" ] || cdie "$p is seeded already ($out/seed-$p.json)"
   local id est minutes size
   size=$(seed_size_of "$p")
@@ -561,20 +619,43 @@ list_ids() {
 
 # ---------------------------------------------------------------- ramps
 
+# Product $1's seed snapshot: the session's, else the base session's.
 snapshot_of() {
   local v
   v=$(sed -n "s/^SNAP_$1=//p" "$state/snapshots.env" | tail -n 1)
+  [ -n "$v" ] || [ -z "$base" ] || v=$(sed -n "s/^SNAP_$1=//p" "$base_state/snapshots.env" 2> /dev/null | tail -n 1)
   [ -n "$v" ] || cdie "no snapshot for $1: compare.sh seed $1"
   echo "$v"
+}
+
+# Adds the variant, its exact setting and its compose override to the JSON
+# object in file $1; nothing without a variant.
+label_variant() {
+  [ -n "$variant" ] || return 0
+  python3 -I - "$1" "$variant" "$(vdef "$variant" setting)" "$(vdef "$variant" file)" << 'PY'
+import json, sys
+f, name, setting, path = sys.argv[1:]
+r = json.load(open(f))
+r.update(variant=name, variant_setting=setting, variant_file=path)
+json.dump(r, open(f, "w"), indent=1)
+PY
 }
 
 cmd_ramps() {
   local p=${1:?usage: compare.sh ramps <product> <size> [journey...]} size=${2:?}
   shift 2
   init_state
+  # A variant: its product, at size 1; its runs and results carry its name.
+  local pv=$p
+  if [ -n "$variant" ]; then
+    [ "$(vdef "$variant" product)" = "$p" ] || cdie "variant $variant is a $(vdef "$variant" product) variant, not $p"
+    [ "$size" = 1 ] || cdie "variant $variant runs at size 1"
+    pv=$p-$variant
+  fi
   local journeys=("$@")
   if [ "${#journeys[@]}" = 0 ]; then
     if [ -n "${JOURNEYS:-}" ]; then read -r -a journeys <<< "$JOURNEYS"
+    elif [ -n "$variant" ]; then read -r -a journeys <<< "$(vdef "$variant" journeys)"
     elif [ "$size" = 1 ]; then journeys=("${ALL_JOURNEYS[@]}")
     else journeys=("${SIZE2_JOURNEYS[@]}"); fi
   fi
@@ -584,7 +665,7 @@ cmd_ramps() {
     2) server=c7i.2xlarge gens=4 ;;
     *) cdie "size $size (1 or 2)" ;;
   esac
-  local snap dir=$out/$p-s$size id="" left=0 j todo=() next kind rates worst
+  local snap dir=$out/$pv-s$size id="" left=0 j todo=() next kind rates worst k nleft set_h
   # The instances' lifetime (min), and the part of it a set has for phases.
   local lifetime=240 life_s
   life_s=$((lifetime * 60 - 600))
@@ -592,7 +673,7 @@ cmd_ramps() {
   snap=$(snapshot_of "$p")
   mkdir -p "$dir"
   for j in "${journeys[@]}"; do
-    if [ -s "$dir/$j.json" ]; then clog "$p size $size $j: done already"; else todo+=("$j"); fi
+    if [ -s "$dir/$j.json" ]; then clog "$pv size $size $j: done already"; else todo+=("$j"); fi
   done
   [ "${#todo[@]}" -gt 0 ] || return 0
   # The part (the journeys left) must end inside the AWS login window, and so
@@ -601,7 +682,7 @@ cmd_ramps() {
   setup_h=$(plan_model setup_hours_per_ramp_run)
   setup_s=$(python3 -I -c "print(int($setup_h * 3600))")
   journey_h=$(python3 -I -c "print(round($(plan_model minutes_per_journey) / 60, 3))")
-  [ -n "${PART:-}" ] || login_gate "$p size $size (${#todo[@]} journeys)" "$(python3 -I -c "print(round($setup_h + ${#todo[@]} * $journey_h, 2))")"
+  [ -n "${PART:-}" ] || login_gate "$pv size $size (${#todo[@]} journeys)" "$(python3 -I -c "print(round($setup_h + ${#todo[@]} * $journey_h, 2))")"
   # Phase by phase (ladder_next): each phase starts only when its worst case
   # fits what is left of the set's lifetime and of the AWS login window.
   for j in "${todo[@]}"; do
@@ -611,36 +692,42 @@ cmd_ramps() {
       kind=${next%% *} rates=${next#* }
       worst=$(phase_worst_s "$j" "$rates")
       [ $((worst + setup_s)) -le "$life_s" ] \
-        || cdie "$p $j $kind: its worst case ($((worst / 60)) min) and a set's setup ($((setup_s / 60)) min) are longer than the lifetime of an instance set ($((life_s / 60)) min)"
+        || cdie "$pv $j $kind: its worst case ($((worst / 60)) min) and a set's setup ($((setup_s / 60)) min) are longer than the lifetime of an instance set ($((life_s / 60)) min)"
       # A new set when the current one has less lifetime left than this phase
       # can take, so no instance ends in the middle of a ramp.
       if [ -n "$id" ] && [ $((left - $(clock))) -lt "$worst" ]; then
-        clog "$p size $size: run $id is near its lifetime ($j $kind can take $((worst / 60)) min); a new set"
+        clog "$pv size $size: run $id is near its lifetime ($j $kind can take $((worst / 60)) min); a new set"
         run_down "$id"
         id=""
       fi
-      if ! login_fits "$p size $size $j $kind" "$(python3 -I -c "print(round($worst / 3600 + (0 if '$id' else $setup_h), 2))")"; then
+      if ! login_fits "$pv size $size $j $kind" "$(python3 -I -c "print(round($worst / 3600 + (0 if '$id' else $setup_h), 2))")"; then
         [ -z "$id" ] || run_down "$id"
-        spend "$p size $size"
+        spend "$pv size $size"
         login_exit
       fi
       if [ -z "$id" ]; then
-        id=$(fresh_id "$session-$p-s$size")
-        afford "$p size $size run $id" "$(estimate_usd 4 "$server:1" "c7i.xlarge:$gens")"
+        id=$(fresh_id "$session-$pv-s$size")
+        # The set's estimate: the time model of the journeys still to run on
+        # it (the set's setup and minutes_per_journey each), at most its
+        # lifetime. A run past it is caught by STOP_USD.
+        nleft=0
+        for k in "${todo[@]}"; do [ -s "$dir/$k.json" ] || nleft=$((nleft + 1)); done
+        set_h=$(python3 -I -c "print(min($lifetime / 60, round($setup_h + $nleft * $journey_h, 2)))")
+        afford "$pv size $size run $id (about $set_h h)" "$(estimate_usd "$set_h" "$server:1" "c7i.xlarge:$gens")"
         run_up "$id" "$server" "$gens" "$lifetime" 40 SERVER_DATA_SNAPSHOT="$snap" AWS_EXTRA_PORTS="$(ports_of "$p")"
         left=$(($(clock) + life_s))
         in_run "$id" ramp_setup "$p" "$size" "$dir"
-        spend "$p size $size setup"
+        spend "$pv size $size setup"
       fi
-      [ "$kind" != coarse2 ] || clog "$p $j: the coarse run ended early; resuming at $rates"
+      [ "$kind" != coarse2 ] || clog "$pv $j: the coarse run ended early; resuming at $rates"
       in_run "$id" phase "$p" "$j" "$(journey_of "$j")" "$(journey_env "$j")" "$kind" "$rates" "$dir/$j.$kind.json"
       [ "$kind" != coarse2 ] || merge_coarse "$dir/$j"
-      spend "$p size $size $j $kind"
+      spend "$pv size $size $j $kind"
     done
     ladder_result "$p" "$j" "$dir"
   done
   [ -z "$id" ] || run_down "$id"
-  spend "$p size $size"
+  spend "$pv size $size"
 }
 
 # The server and generators of a ramp run: the seeded store from the snapshot
@@ -675,6 +762,9 @@ ramp_setup() {
     rsrv install-docker >&2
     product_observers "$p"
     [ "$size" = 1 ] || rsrv scale 4 >&2
+    # The variant's compose override, for every start of the product here
+    # (the restores).
+    [ -z "$variant" ] || rsrv variant "$p" "$variant" | tee "$dir/variant-$RUN_ID.txt" >&2
     rsrv pull "$p" | tee "$dir/pull-$RUN_ID.txt" >&2
     mkdir -p "$bundle"
     chmod 0700 "$bundle"
@@ -695,7 +785,12 @@ ramp_setup() {
   done
   # Hearth's deploy wrote cloud.sh's inventory; a product's is written here.
   [ "$p" = hearth ] || product_inventory "$p"
-  { echo "product: $p"; echo "size: $size"; echo "snapshot volume: $vol"; } >> "$results/inventory.txt"
+  {
+    echo "product: $p"
+    [ -z "$variant" ] || echo "variant: $variant ($(vdef "$variant" setting), $(vdef "$variant" file))"
+    echo "size: $size"
+    echo "snapshot volume: $vol"
+  } >> "$results/inventory.txt"
 }
 
 product_inventory() {
@@ -794,6 +889,7 @@ ladder_result() {
   local p=$1 jk=$2 dir=$3 args=("$3/$2.coarse.json")
   [ ! -s "$dir/$jk.fine.json" ] || args+=("$dir/$jk.fine.json")
   lad journey "$p" "$jk" "${args[@]}" > "$dir/$jk.json"
+  label_variant "$dir/$jk.json"
   clog "$p $jk: clean rate $(jget clean_rate < "$dir/$jk.json")/s$(
     [ "$(jget at_least < "$dir/$jk.json")" = True ] && echo " (at least)") $(jget flags < "$dir/$jk.json")"
 }
@@ -835,6 +931,7 @@ phase() {
   [ -f "$results/$name/report.json" ] || echo '{"steps": []}' > "$results/$name/report.json"
   python3 -I -c 'import json,sys; r=json.load(open(sys.argv[1])); r.setdefault("journey", sys.argv[2]); json.dump(r, open(sys.argv[1], "w"))' \
     "$results/$name/report.json" "$journey"
+  label_variant "$results/$name/report.json"
   # shellcheck disable=SC2086
   lad judge "$p" "$results/$name/report.json" "$stopped" $rates > "$verdicts"
   echo "$stopped" > "$results/$name/stopped-at"
@@ -879,10 +976,12 @@ watch_ramp() {
 
 # ---------------------------------------------------------------- session
 
-# The journeys of a ramps part at size $1.
+# The journeys of a ramps part at size $1 (of variant $2, if any).
 journeys_of() {
   if [ -n "${JOURNEYS:-}" ]; then
     echo "$JOURNEYS"
+  elif [ -n "${2:-}" ]; then
+    vdef "$2" journeys
   elif [ "$1" = 1 ]; then
     echo "${ALL_JOURNEYS[*]}"
   else
@@ -896,25 +995,30 @@ other_product() {
   jget product < "$out/fastest.json"
 }
 
-# Whether a part of the plan (seed:<p>, s1:<p>, drill, s2:<p>, s2:other) is
-# done: its results exist.
+# Whether a part of the plan (seed:<p>, s1:<p>, s1:<p>@<variant>, drill,
+# s2:<p>, s2:other) is done: its results exist.
 part_done() {
-  local kind=${1%%:*} p=${1#*:} j
+  local kind=${1%%:*} p=${1#*:} j v=""
+  case $p in *@*) v=${p#*@} p=${p%@*} ;; esac
   case $kind in
     seed) [ -s "$out/seed-$p.json" ] ;;
     drill) [ -s "$out/drill.done" ] ;;
     s1 | s2)
       if [ "$p" = other ]; then p=$(other_product) || return 1; fi
-      for j in $(journeys_of "${kind#s}"); do [ -s "$out/$p-$kind/$j.json" ] || return 1; done
+      for j in $(journeys_of "${kind#s}" "$v"); do [ -s "$out/$p${v:+-$v}-$kind/$j.json" ] || return 1; done
       ;;
   esac
 }
 
+# The variant of a part (s1:<p>@<variant>), or nothing.
+part_variant() { case $1 in *@*) echo "${1#*@}" ;; esac; }
+
 # The compare.sh command of a part.
 part_cmd() {
+  local q
   case $1 in
     seed:*) echo "seed ${1#seed:}" ;;
-    s1:*) echo "ramps ${1#s1:} 1" ;;
+    s1:*) q=${1#s1:} && echo "ramps ${q%@*} 1" ;;
     s2:other) echo "ramps $(other_product) 2" ;;
     s2:*) echo "ramps ${1#s2:} 2" ;;
     drill) echo drill ;;
@@ -972,7 +1076,8 @@ session_stop() {
 
 cmd_session() {
   init_state
-  [ -n "${IMAGE:-}" ] || cdie "set IMAGE to the Hearth image (cloud.sh)"
+  # Hearth's image, for a plan with a Hearth part.
+  ! grep -q ':hearth' <<< "$(cost after "$plan_file")" || [ -n "${IMAGE:-}" ] || cdie "set IMAGE to the Hearth image (cloud.sh)"
   (aws_check_identity) > /dev/null 2>&1 || cdie "the aws CLI is not logged in: run aws login, then compare.sh session"
   local max_vcpu=${MAX_VCPU:-32}
   [[ $max_vcpu =~ ^[0-9]+$ ]] || cdie "MAX_VCPU $max_vcpu"
@@ -988,7 +1093,7 @@ cmd_session() {
   fi
   rm -f "$state/STOPPED"
   : > "$state/parts.active"
-  MAX_VCPU=$max_vcpu cost estimate "$aws_dir/session-plan.json" > "$out/plan.json"
+  MAX_VCPU=$max_vcpu cost estimate "$plan_file" > "$out/plan.json"
   ! grep -q '"error"' "$out/plan.json" || cdie "the plan does not fit: $(jget schedule error < "$out/plan.json")"
   clog "plan: $(jget total < "$out/plan.json") USD, $(jget hours < "$out/plan.json") instance-set hours, wall clock $(jget schedule wall_clock_h < "$out/plan.json") h, $(jget schedule logins < "$out/plan.json") login(s)"
   trap session_cleanup EXIT
@@ -997,7 +1102,7 @@ cmd_session() {
   # them has failed or was skipped.
   local order=() part plan_after deps
   local -A status=() after=()
-  plan_after=$(cost after "$aws_dir/session-plan.json")
+  plan_after=$(cost after "$plan_file")
   while read -r part deps; do
     order+=("$part")
     after[$part]=$deps
@@ -1024,7 +1129,7 @@ cmd_session() {
       done
       for q in ${after[$part]}; do [ "${status[$q]}" = done ] || continue 2; done
       [[ $part != s2:* ]] || other_product > /dev/null || choose_other
-      read -r hours vcpu usd <<< "$(cost part "$aws_dir/session-plan.json" "$part")"
+      read -r hours vcpu usd <<< "$(cost part "$plan_file" "$part")"
       [ "$vcpu" -le "$max_vcpu" ] || cdie "$part needs $vcpu vCPUs, more than MAX_VCPU $max_vcpu"
       if [ $((S_USED + vcpu)) -gt "$max_vcpu" ]; then
         if [ "${status[$part.vcpu]:-}" != said ]; then
@@ -1043,7 +1148,7 @@ cmd_session() {
         continue
       fi
       read -r -a args <<< "$(part_cmd "$part")"
-      PART=$part "$0" "${args[@]}" >> "$out/driver-${part/:/-}.log" 2>&1 &
+      PART=$part VARIANT=$(part_variant "$part") PLAN=$plan_file "$0" "${args[@]}" >> "$out/driver-${part/:/-}.log" 2>&1 &
       pid=$!
       S_PART[$pid]=$part
       S_VCPU[$pid]=$vcpu
@@ -1147,15 +1252,17 @@ summary() {
 import glob, json, os, sys
 out = sys.argv[1]
 print("# #913 session results\n")
-print("| product | size | journey | clean rate /s | p99 ms | CPU % | RSS MB | write IOPS | flags |")
-print("|---|---|---|---|---|---|---|---|---|")
+print("| product | variant | size | journey | clean rate /s | p99 ms | CPU % | RSS MB | write IOPS | flags |")
+print("|---|---|---|---|---|---|---|---|---|---|")
 for f in sorted(glob.glob(os.path.join(out, "*-s[12]", "*.json"))):
+    # <product>[-<variant>]-s<size>/<journey>.json
     if f.endswith((".coarse.json", ".coarse2.json", ".fine.json")):
         continue
     r = json.load(open(f))
     size = os.path.basename(os.path.dirname(f)).rsplit("-s", 1)[1]
     rate = f"{'>= ' if r['at_least'] else ''}{r['clean_rate']}"
-    print(f"| {r['product']} | {size} | {r['journey']} | {rate} | {r['p99_ms']} | {r['server_cpu_pct_mean']} "
+    variant = r.get("variant", "default")
+    print(f"| {r['product']} | {variant} | {size} | {r['journey']} | {rate} | {r['p99_ms']} | {r['server_cpu_pct_mean']} "
           f"| {r['server_rss_mb_max']} | {r['disk_write_iops_mean']} | {', '.join(r['flags'])} |")
 # The seed times compare only between seeds on the same server type: one
 # table per type.
@@ -1207,14 +1314,19 @@ cmd_delete_snapshots() {
 
 case ${1:-} in
   plan)
-    cost estimate "$aws_dir/session-plan.json"
-    cost brief "$aws_dir/session-plan.json"
+    cost estimate "$plan_file"
+    # A session after another carries its ledger: its total, when it is here.
+    if [ -n "$base" ] && [ -s "$base_ledger" ]; then
+      CARRIED_USD=$(cost check "$base_ledger" 1000000) CARRIED_FROM="session $base's ledger" cost brief "$plan_file"
+    else
+      cost brief "$plan_file"
+    fi
     ;;
   seed) shift; cmd_seed "$@" ;;
   ramps) shift; cmd_ramps "$@" ;;
   session) shift; cmd_session "$@" ;;
   drill) shift; cmd_drill "$@" ;;
-  cost) init_state; cost total "$ledger" ;;
+  cost) init_state; cost total "$ledger" "${carried[@]}" ;;
   snapshots) cmd_snapshots ;;
   delete-snapshots) shift; cmd_delete_snapshots "$@" ;;
   down-all) init_state; down_all ;;

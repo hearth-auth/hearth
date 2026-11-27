@@ -111,6 +111,73 @@ class Estimate(unittest.TestCase):
         self.assertEqual(m["seed_server"]["authentik"], "c7i.2xlarge")
 
 
+class Carried(unittest.TestCase):
+    """A later session (the variants, 913b) keeps its own ledger and carries the total of the
+    session before it (913a): the stop and the cap count both, so the cap stays the owner's
+    cap for the whole comparison."""
+
+    def run_cost(self, *a, env=None):
+        return subprocess.run([sys.executable, "-I", os.path.join(HERE, "cost.py"), *a],
+                              env=dict(os.environ, COST_NOW=str(H), **(env or {})),
+                              capture_output=True, text=True)
+
+    def test_check_and_total_add_the_carried_ledgers(self):
+        with tempfile.TemporaryDirectory() as d:
+            own, base = os.path.join(d, "own.jsonl"), os.path.join(d, "base.jsonl")
+            with open(base, "w") as f:
+                f.write(json.dumps({"kind": "data_out", "bytes": 200 * 10**9}) + "\n")  # $18
+            with open(own, "w") as f:
+                f.write(json.dumps({"kind": "data_out", "bytes": 10 * 10**9}) + "\n")  # $0.90
+            ok = self.run_cost("check", own, "22", base)
+            self.assertEqual(ok.returncode, 0, ok.stderr)
+            self.assertEqual(ok.stdout.strip(), "18.90")
+            self.assertEqual(self.run_cost("check", own, "18.5", base).returncode, 3)
+            self.assertEqual(self.run_cost("check", own, "18.5").returncode, 0)
+            t = json.loads(self.run_cost("total", own, base).stdout)
+            self.assertEqual((t["total"], t["session"], t["carried"]), (18.9, 0.9, {base: 18.0}))
+            self.assertEqual(len(t["items"]), 1)
+
+    def test_the_variants_plan_fits_what_913a_left_of_the_cap(self):
+        plan = json.load(open(os.path.join(HERE, "variants-plan.json")))
+        self.assertEqual((plan["base_session"], plan["base_spent_usd"]), ("913a", 20.05))
+        self.assertEqual((plan["cap_usd"], plan["stop_usd"]), (22, 22))
+        e = cost.estimate(plan, PRICES)
+        self.assertLessEqual(e["total"] + plan["base_spent_usd"], plan["cap_usd"])
+
+    def test_each_variant_part_is_its_journeys_on_the_time_model(self):
+        plan = json.load(open(os.path.join(HERE, "variants-plan.json")))
+        m = json.load(open(os.path.join(HERE, "session-plan.json")))["model"]
+        v = plan["variants"]
+        self.assertEqual(v["durable"]["product"], "keycloak")
+        self.assertEqual(v["durable"]["journeys"], ["login", "refresh", "mix"])
+        self.assertEqual(v["durable"]["setting"], "--spi-connections-jpa--quarkus--async-commit=false")
+        self.assertEqual(v["pool20"]["product"], "ory")
+        self.assertEqual(v["pool20"]["journeys"], ["introspect", "userinfo", "client_credentials"])
+        self.assertEqual(v["pool20"]["setting"], "max_conns=20&max_idle_conns=4")
+        ids = [p["id"] for p in plan["parts"] if p.get("id")]
+        self.assertEqual(ids, ["s1:keycloak@durable", "s1:ory@pool20"])
+        for p in plan["parts"]:
+            if not p.get("id"):
+                continue
+            name = p["id"].split("@")[1]
+            want = m["setup_hours_per_ramp_run"] + len(v[name]["journeys"]) * m["minutes_per_journey"] / 60
+            self.assertAlmostEqual(p["hours"], round(want, 2), msg=p["id"])
+            self.assertEqual(p["instances"], {"c7i.large": 1, "c7i.xlarge": 2})
+            self.assertEqual(p["after"], [])
+            # Each setting is the one its compose override sets.
+            with open(os.path.join(HERE, "..", v[name]["file"])) as f:
+                self.assertIn(v[name]["setting"], f.read())
+
+    def test_the_plan_says_what_the_session_may_spend(self):
+        out = self.run_cost("brief", os.path.join(HERE, "variants-plan.json"),
+                            env={"CARRIED_USD": "20.05", "CARRIED_FROM": "session 913a's ledger"})
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("carried: $20.05 (session 913a's ledger)", out.stdout)
+        self.assertIn("this session may spend $1.95 of the $22 cap", out.stdout)
+        self.assertRegex(out.stdout, r"  size 1 keycloak, variant durable .*: about \$0\.\d\d")
+        self.assertRegex(out.stdout, r"  size 1 ory, variant pool20 .*: about \$0\.\d\d")
+
+
 VCPU = {"vcpu": {"c7i.large": 2, "c7i.xlarge": 4}}
 
 

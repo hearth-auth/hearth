@@ -16,8 +16,9 @@ Commands:
   cost.py start <ledger> <kind> <id> <type-or-gb> [disk_gb]   open an entry (now)
   cost.py end <ledger> <id>                               close it (now)
   cost.py data-out <ledger> <bytes>                       results fetched
-  cost.py total <ledger>                                  {"total": ..., "items": [...]}
-  cost.py check <ledger> <stop_at>                        exit 3 when total >= stop_at
+  cost.py total <ledger> [carried...]                     {"total": ..., "session": ..., "carried":
+                                                          {<ledger>: ...}, "items": [...]}
+  cost.py check <ledger> <stop_at> [carried...]           exit 3 when total >= stop_at
   cost.py estimate <plan.json>                            the plan's hours and cost per part,
                                                           its wall clock and AWS logins
   cost.py brief <plan.json>                               the same in a few lines, and
@@ -29,6 +30,12 @@ Commands:
                                                           per part, in plan order
 LOGIN_WINDOW_H, LOGIN_MARGIN_MIN and MAX_VCPU override the plan's login window,
 margin and vCPU limit.
+
+A session after another one (the variants after 913a: variants-plan.json's
+base_session) keeps its own ledger and carries the other's: the carried ledgers
+of `total` and `check` add their totals, so the stop and the cap count what the
+comparison spent in all. `brief` prints a carried total from CARRIED_USD
+(CARRIED_FROM says where it comes from), else the plan's base_spent_usd.
 """
 import fcntl
 import json
@@ -99,6 +106,11 @@ def total(entries, prices, now=None):
     for e in fold(entries):
         items.append({**e, "cost": round(item_cost(e, prices, now), 4)})
     return {"total": round(sum(i["cost"] for i in items), 4), "items": items}
+
+
+def carried_total(paths, prices, now):
+    """The totals of the ledgers a session carries, by path."""
+    return {p: total(read_ledger(p), prices, now)["total"] for p in paths}
 
 
 def append(path, entry):
@@ -212,6 +224,19 @@ def brief(plan, prices):
     window, margin = login_settings(plan)
     lines = [f"cost: about ${e['total']} (stop at ${plan['stop_usd']}, a part that would pass "
              f"${plan['cap_usd']} does not start); {e['hours']} instance-set hours"]
+    if plan.get("base_session"):
+        if os.environ.get("CARRIED_USD"):
+            carried = float(os.environ["CARRIED_USD"])
+            source = os.environ.get("CARRIED_FROM") or f"session {plan['base_session']}"
+        else:
+            carried = plan["base_spent_usd"]
+            source = (f"session {plan['base_session']} at its end, from the plan: its ledger is not "
+                      "on this machine")
+        left = round(plan["cap_usd"] - carried, 2)
+        lines += [f"carried: ${carried:.2f} ({source}); the stop and the cap count it",
+                  f"this session may spend ${left:.2f} of the ${plan['cap_usd']} cap; this plan: about "
+                  f"${e['total']} ({'fits' if e['total'] <= left else 'DOES NOT FIT'})"]
+    lines += [f"  {p['name']}: about ${p['cost']} ({p['hours']} h)" for p in e["parts"]]
     try:
         s = schedule(plan, window, margin, max_vcpu(plan))
     except ValueError as err:
@@ -267,10 +292,14 @@ def main(argv):
     elif cmd == "data-out":
         append(a[0], {"kind": "data_out", "bytes": int(a[1])})
     elif cmd == "total":
-        json.dump(total(read_ledger(a[0]), prices, now), sys.stdout)
+        t = total(read_ledger(a[0]), prices, now)
+        carried = carried_total(a[1:], prices, now)
+        t = {"total": round(t["total"] + sum(carried.values()), 4), "session": t["total"],
+             "carried": carried, "items": t["items"]}
+        json.dump(t, sys.stdout)
         sys.stdout.write("\n")
     elif cmd == "check":
-        t = total(read_ledger(a[0]), prices, now)["total"]
+        t = total(read_ledger(a[0]), prices, now)["total"] + sum(carried_total(a[2:], prices, now).values())
         print(f"{t:.2f}")
         if t >= float(a[1]):
             sys.exit(3)

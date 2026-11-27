@@ -1,0 +1,62 @@
+{
+  "about": "The labelled variants of #913 (owner decisions 2026-11-26), run in a session after 913a: each is one product with one setting changed from its default run, on that product's 913a seed snapshot (no reseed), at size 1, on the journeys the decision names. The report shows each beside the default run. compare.sh runs a variant with VARIANT=<name> (ramps) or this plan (PLAN=variants-plan.json, session). The session's own ledger starts empty and carries 913a's (base_session): every total, the stop and the cap add 913a's ledger total, so the cap stays the owner's $22 for the whole comparison and the session may spend what 913a left of it (base_spent_usd is 913a's total at its end, for the plan when its ledger is not on this machine). The hours come from session-plan.json's time model (setup_hours_per_ramp_run plus minutes_per_journey per journey); in 913a the same journeys took 14 to 18 min each after a setup of about 18 min.",
+  "cap_usd": 22,
+  "stop_usd": 22,
+  "max_vcpu": 32,
+  "base_session": "913a",
+  "base_spent_usd": 20.05,
+  "login": {
+    "window_h": 11.5,
+    "margin_min": 15
+  },
+  "vcpu": {
+    "c7i.large": 2,
+    "c7i.xlarge": 4
+  },
+  "variants": {
+    "durable": {
+      "product": "keycloak",
+      "setting": "--spi-connections-jpa--quarkus--async-commit=false",
+      "file": "keycloak/variant-durable.yaml",
+      "journeys": ["login", "refresh", "mix"],
+      "why": "Keycloak commits the transactions that change only sessions or events with synchronous_commit = off by default (Keycloak database guide, 'Asynchronous commits'), so its login, refresh and mix do not wait for a WAL flush; Hearth's and Ory's writes do. With this option every commit waits for the flush"
+    },
+    "pool20": {
+      "product": "ory",
+      "setting": "max_conns=20&max_idle_conns=4",
+      "file": "ory/variant-pool20.yaml",
+      "journeys": ["introspect", "userinfo", "client_credentials"],
+      "why": "Hydra and Kratos run with the code default database pool (2 connections per CPU: 4 on size 1); Ory's deployment examples put max_conns=20&max_idle_conns=4 in the DSN. Set in both DSNs. Runs only if a local test finds the pool is the limit"
+    }
+  },
+  "parts": [
+    {
+      "id": "s1:keycloak@durable",
+      "name": "size 1 keycloak, variant durable (login refresh mix)",
+      "hours": 1.3,
+      "after": [],
+      "instances": {
+        "c7i.large": 1,
+        "c7i.xlarge": 2
+      },
+      "disk_gb": 50
+    },
+    {
+      "id": "s1:ory@pool20",
+      "name": "size 1 ory, variant pool20 (introspect userinfo client_credentials)",
+      "hours": 1.3,
+      "after": [],
+      "instances": {
+        "c7i.large": 1,
+        "c7i.xlarge": 2
+      },
+      "disk_gb": 50
+    },
+    {
+      "name": "results fetched to this machine (1 GB)",
+      "hours": 0,
+      "instances": {},
+      "data_out_gb": 1
+    }
+  ]
+}

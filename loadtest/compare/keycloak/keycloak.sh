@@ -29,6 +29,8 @@
 #   LOGIN_USERS         users with a password (default 1000, as in #647)
 #   IMPORT_BATCH, IMPORT_VUS   seed batch size and concurrency (prepare.js)
 #   KEYCLOAK_MEM_LIMIT  Keycloak's container memory limit (default 2g)
+#   COMPARE_VARIANT     a labelled variant: variant-<name>.yaml over compose.yaml
+#                       (durable: synchronous commits for sessions too)
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -45,7 +47,16 @@ die() {
   log "FAILED: $*"
   exit 2
 }
-compose() { docker compose -f "$here/compose.yaml" --env-file "$BUNDLE/server.env" "$@"; }
+# COMPARE_VARIANT=<name>: the labelled variant, variant-<name>.yaml over
+# compose.yaml (#913; compare.sh VARIANT).
+compose() {
+  local files=(-f "$here/compose.yaml")
+  if [ -n "${COMPARE_VARIANT:-}" ]; then
+    [ -f "$here/variant-$COMPARE_VARIANT.yaml" ] || die "no variant $COMPARE_VARIANT ($here/variant-$COMPARE_VARIANT.yaml)"
+    files+=(-f "$here/variant-$COMPARE_VARIANT.yaml")
+  fi
+  docker compose "${files[@]}" --env-file "$BUNDLE/server.env" "$@"
+}
 password() { openssl rand -base64 24 | tr -d '/+=' | cut -c1-24; }
 
 make_bundle() {
