@@ -101,6 +101,15 @@ struct Applied {
     latest: Option<(u64, u64)>,
 }
 
+impl Applied {
+    /// Drops both waiting contacts (an install replaces the state they
+    /// described).
+    fn drop_waiting(&mut self) {
+        self.oldest = None;
+        self.latest = None;
+    }
+}
+
 impl ReadGate {
     /// A closed gate: no contact yet, no hold.
     pub(crate) fn new(threshold_ms: u64) -> Self {
@@ -248,13 +257,13 @@ impl ReadGate {
     }
 
     /// Closes the gate for a snapshot install, before its first delete
-    /// (`cluster-consistency` R3). Drops the contact waiting for its apply:
-    /// it described the state the install replaces. Until
+    /// (`cluster-consistency` R3). Drops the contacts waiting for their apply:
+    /// they described the state the install replaces. Until
     /// [`Self::end_install`], no contact opens the gate; a failed install
     /// never calls it, so the gate stays closed.
     pub(crate) fn begin_install(&self) {
         let mut applied = self.applied.lock().unwrap_or_else(PoisonError::into_inner);
-        applied.waiting = None;
+        applied.drop_waiting();
         // The hold first: from it on, every read is refused and no contact
         // moves the deadline, which is then cleared.
         self.word.fetch_or(INSTALL_HOLD, Ordering::AcqRel);
@@ -262,11 +271,11 @@ impl ReadGate {
     }
 
     /// Ends the install hold once the install and the cache rebuild have
-    /// finished. The gate stays closed: the next contact opens it. A contact
-    /// that waited for an index during the install is dropped too.
+    /// finished. The gate stays closed: the next contact opens it. Contacts
+    /// that waited for an index during the install are dropped too.
     pub(crate) fn end_install(&self) {
         let mut applied = self.applied.lock().unwrap_or_else(PoisonError::into_inner);
-        applied.waiting = None;
+        applied.drop_waiting();
         self.word
             .fetch_and(!(INSTALL_HOLD | DEADLINE), Ordering::AcqRel);
     }
@@ -650,5 +659,25 @@ mod tests {
         assert!(!gate.allows_at(1_000));
         gate.note_applied(10);
         assert!(!gate.allows_at(1_000), "the waiting contact is gone");
+    }
+
+    /// Task 3.2 with the two waiting slots: an install drops the oldest and
+    /// the latest waiting contact, and any contact that waits during it.
+    #[test]
+    fn an_install_drops_both_waiting_contacts() {
+        let gate = ReadGate::new(T);
+        gate.note_applied(3);
+        gate.record_contact_once_applied(1_000, Some(9));
+        gate.record_contact_once_applied(1_050, Some(12));
+        gate.begin_install();
+        gate.record_contact_once_applied(1_080, Some(14));
+        gate.note_applied(14);
+        gate.end_install();
+        assert!(!gate.allows_at(1_100));
+        gate.note_applied(20);
+        assert!(
+            !gate.allows_at(1_100),
+            "no contact from before or during the install is left waiting"
+        );
     }
 }
