@@ -342,6 +342,14 @@ impl FsFile for FaultFsFile {
         self.inner.read_to_end(buf)
     }
 
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.config.sleep_read();
+        if self.config.fail_next_read.swap(false, Ordering::SeqCst) {
+            return Err(io::Error::other("injected read fault"));
+        }
+        self.inner.read(buf)
+    }
+
     fn sync_all(&self) -> io::Result<()> {
         self.config.sleep_sync();
         if self.config.fail_next_sync.swap(false, Ordering::SeqCst) {

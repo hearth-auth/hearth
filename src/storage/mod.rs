@@ -27,6 +27,7 @@ pub(crate) mod key_registry;
 pub(crate) mod memtable;
 pub mod migrations;
 mod paging;
+mod sealed_file;
 mod snapshot;
 #[allow(dead_code)]
 pub(crate) mod sst;
@@ -40,6 +41,7 @@ pub use engine::{CompactionConfig, EmbeddedStorageEngine, StorageConfig};
 pub use error::{ClusterUnavailableCause, RetryClass, StorageError};
 pub use fs::{Fs, FsFile, RealFs};
 pub use key_merge::EntryVisitor;
+pub use sealed_file::{SealedFiles, SealedReader, SealedWriter, CHUNK_LEN as SEALED_CHUNK_LEN};
 
 use crate::core::RealmId;
 
