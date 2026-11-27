@@ -142,6 +142,10 @@ Each peer RPC SHALL carry the cluster's ID, the sender's node ID and the intende
 - **AND** its RPC claims to come from node `5`
 - **THEN** the receiver refuses the RPC
 
+#### Scenario: A refused RPC is no contact
+- **WHEN** a follower refuses an `AppendEntries` because of its identity checks
+- **THEN** the follower does not count that request as contact with a leader (`cluster-consistency` R2)
+
 ### Requirement: `cluster.peers` seeds the first membership only
 After a cluster is initialised, a node SHALL take the membership and every peer address from its Raft state, never from `cluster.peers`. A node whose `cluster.peers` differs from the Raft membership SHALL log a warning naming both sets. `/admin/cluster/status` and `GET /admin/cluster/members` SHALL report `peers_drift: true` on that node. A node SHALL start whether or not its `cluster.peers` is current.
 

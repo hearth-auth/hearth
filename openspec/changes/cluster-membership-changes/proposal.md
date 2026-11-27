@@ -39,4 +39,4 @@ Cluster membership is fixed when the cluster first starts (`docs/guides/clusteri
 - `src/audit/types.rs`: membership audit actions.
 - `jepsen/`: the membership nemesis and workload, `replace` rewritten, `expectations.edn`.
 - Docs: `docs/guides/clustering.md` (C-6, procedures, certificates), `docs/dev/CONSISTENCY.md` §6 and §9 (G5, G9), `docs/dev/ARCHITECTURE.md` §16, `docs/guides/configuration-reference.md`, `CHANGELOG.md`, and the capability table in `CLAUDE.md`.
-- Depends on the P-2 change (file-backed snapshots), not yet written. Touches the same files as the parked `cluster-read-fencing` (`server.rs`, `state_machine.rs` `install_snapshot`); design decision 12 says how the two fit.
+- Depends on the P-2 change `cluster-file-snapshots` (file-backed snapshots), merged in #943–#945. Touches the same files as `cluster-read-fencing` (`server.rs`, `state_machine.rs` `install_snapshot`), merged in #947–#951; design decision 12 says how the two fit.

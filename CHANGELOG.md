@@ -7,6 +7,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 ## [Unreleased]
 
 ### Changed
+- **Breaking (cluster mode): peers prove their node ID and cluster ID** (OpenSpec change
+  `cluster-membership-changes`, phase 1; #652). Each peer certificate must name its node's
+  `cluster.node_id` in a URI SAN, `urn:hearth:node:<id>`, besides the address its peers dial.
+  **Re-issue every peer certificate before you upgrade**; the `openssl` recipe in
+  `docs/guides/clustering.md` shows the SAN. A node now refuses a peer whose certificate names
+  no node ID or another one (`CERTIFICATE_MISMATCH`, on both ends of the connection), an RPC
+  meant for another node ID (`WRONG_NODE`), from another cluster (`WRONG_CLUSTER`) or from a
+  node outside its membership (`NOT_A_MEMBER`). Before, any certificate the cluster CA signed
+  could claim to be any node, and a node restarted on an empty data directory could start its
+  own cluster and disturb the real one. The node that initialises a cluster generates a random
+  cluster ID and keeps it in `raft.db`, and every other node adopts it from its first leader.
+  Nodes of this release and older ones cannot form one cluster: upgrade every node together.
+  A cluster that an older release initialised has no cluster ID and keeps working without that
+  check; rebuild it from a backup to get one. Single-node mode is not affected.
 - **A cluster node out of contact with the leader refuses storage reads** (OpenSpec change
   `cluster-read-fencing`): a follower serves a read only within `cluster.read_lag_threshold_ms`
   of the last `AppendEntries` it accepted from a leader that a quorum acknowledged less than

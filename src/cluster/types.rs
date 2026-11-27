@@ -14,6 +14,41 @@ pub struct HearthNode {
     pub addr: String,
 }
 
+/// The identity of one cluster: a random UUID that the node which
+/// initialises the cluster generates, and that every other node adopts from
+/// its leader and keeps in `raft.db` (`cluster-membership-changes` design
+/// decision 5). A node refuses every peer RPC that names another one.
+///
+/// Not a secret: it only tells two clusters apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ClusterId(uuid::Uuid);
+
+impl ClusterId {
+    /// Wraps an existing UUID.
+    #[must_use]
+    pub const fn new(id: uuid::Uuid) -> Self {
+        Self(id)
+    }
+
+    /// A new random cluster ID (UUID v4).
+    #[must_use]
+    pub fn random() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+
+    /// The UUID inside.
+    #[must_use]
+    pub const fn as_uuid(&self) -> &uuid::Uuid {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ClusterId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// Commands replicated through Raft and applied to the storage engine.
 ///
 /// Every variant carries `leader_timestamp` — the wall-clock microseconds

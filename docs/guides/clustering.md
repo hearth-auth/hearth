@@ -14,8 +14,9 @@ Hearth includes a partial Raft consensus implementation (`src/cluster/` via `ope
 
 **State that is per node, not replicated** (GA audit 2026-09-28): the session-cookie secret and
 the DPoP nonce secret are generated per process when not configured, rate limiters and the KDF
-admission gate count per node, and MFA / IP attempt counters are node-local. Peer mTLS accepts any
-certificate issued by the cluster CA, with no pinning of which node ID a certificate may claim.
+admission gate count per node, and MFA / IP attempt counters are node-local. Peer mTLS accepts a
+certificate issued by the cluster CA only when it names the node ID its RPCs claim (URI SAN
+`urn:hearth:node:<id>`, see [Generating Certificates](#generating-certificates)).
 
 ---
 
@@ -341,24 +342,39 @@ openssl req -new -nodes \
   -subj "/CN=hearth-node-1" \
   -keyout node1.key -out node1.csr
 
-# 3 — Sign it. The SAN is REQUIRED: rustls verifies the peer against
-#     subjectAltName and ignores the Common Name, so a leaf signed without
-#     -extfile fails the handshake with no usable diagnostic.
-#     Use the address the peers will actually dial.
+# 3 — Sign it. The SAN is REQUIRED and names two things:
+#     - the address the peers will actually dial (rustls verifies the peer
+#       against subjectAltName and ignores the Common Name);
+#     - the node's cluster.node_id, as the URI urn:hearth:node:<id>.
+#     A leaf without either fails every peer RPC.
 openssl x509 -req -days 3650 \
-  -extfile <(printf "subjectAltName=IP:10.0.0.1") \
+  -extfile <(printf "subjectAltName=IP:10.0.0.1,URI:urn:hearth:node:1") \
   -CA ca.crt -CAkey ca.key -CAcreateserial \
   -in node1.csr -out node1.crt
 ```
 
-Use `subjectAltName=DNS:node1.example.com` instead when `peers[].address` names
-a hostname rather than an IP. Verify before deploying:
+Use `DNS:node1.example.com` instead of the `IP:` entry when `peers[].address`
+names a hostname rather than an IP. Verify before deploying:
 
 ```bash
-openssl x509 -in node1.crt -noout -text | grep -A1 "Subject Alternative Name"
+openssl x509 -in node1.crt -noout -ext subjectAltName
+# X509v3 Subject Alternative Name:
+#     IP Address:10.0.0.1, URI:urn:hearth:node:1
 ```
 
-An empty result means the certificate will not work.
+A certificate without the address fails the TLS handshake. A certificate
+without `URI:urn:hearth:node:<id>`, or with another node's ID, fails every
+peer RPC: the node it dials refuses it with `CERTIFICATE_MISMATCH`, and a node
+dialling it refuses the handshake ("the peer certificate names no node ID").
+Each node needs its own certificate; nodes cannot share one.
+
+Every peer RPC also carries the cluster's ID and the sender's and receiver's
+node IDs. A node refuses an RPC meant for another node ID (`WRONG_NODE`), from
+another cluster (`WRONG_CLUSTER`) or from a node outside its membership
+(`NOT_A_MEMBER`), and logs the refusal at `WARN` at most every 30 seconds. The
+cluster ID is a random UUID: the node that initialises the cluster generates
+it, and every other node adopts it from the first leader that reaches it. Each
+node keeps it in `raft.db`.
 
 ---
 

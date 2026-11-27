@@ -142,14 +142,27 @@ fn write_certs(dir: &Path) -> String {
     ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
     let ca_key = rcgen::KeyPair::generate().expect("ca key");
     let ca = ca_params.self_signed(&ca_key).expect("ca cert");
-    let leaf_key = rcgen::KeyPair::generate().expect("leaf key");
-    let leaf = rcgen::CertificateParams::new(vec!["localhost".into(), "127.0.0.1".into()])
-        .expect("leaf params")
-        .signed_by(&leaf_key, &ca, &ca_key)
-        .expect("leaf cert");
+    let leaf = |name: &str, node: Option<u64>| {
+        let mut params =
+            rcgen::CertificateParams::new(vec!["localhost".into(), "127.0.0.1".into()])
+                .expect("leaf params");
+        // A peer certificate names its node ID (cluster-membership-changes 1.3).
+        if let Some(node) = node {
+            params.subject_alt_names.push(rcgen::SanType::URI(
+                rcgen::Ia5String::try_from(format!("urn:hearth:node:{node}")).expect("node uri"),
+            ));
+        }
+        let key = rcgen::KeyPair::generate().expect("leaf key");
+        let cert = params.signed_by(&key, &ca, &ca_key).expect("leaf cert");
+        std::fs::write(dir.join(format!("{name}.crt")), cert.pem()).expect("write leaf");
+        std::fs::write(dir.join(format!("{name}.key")), key.serialize_pem()).expect("write key");
+    };
+    // The HTTPS listener's certificate, shared by every node.
+    leaf("node", None);
+    for id in 1..=3 {
+        leaf(&format!("peer{id}"), Some(id));
+    }
     std::fs::write(dir.join("ca.crt"), ca.pem()).expect("write ca");
-    std::fs::write(dir.join("node.crt"), leaf.pem()).expect("write leaf");
-    std::fs::write(dir.join("node.key"), leaf_key.serialize_pem()).expect("write key");
     ca.pem()
 }
 
@@ -258,7 +271,7 @@ fn write_config(dir: &Path, node: &NodeSpec, cluster: &[NodeSpec]) -> PathBuf {
              cluster:\n  node_id: {id}\n  experimental_opt_in: true\n\
              \x20 peer_address: \"127.0.0.1:{peer_port}\"\n\
              \x20 peers:\n{peers}\
-             \x20 tls_cert_path: \"{d}/node.crt\"\n  tls_key_path: \"{d}/node.key\"\n\
+             \x20 tls_cert_path: \"{d}/peer{id}.crt\"\n  tls_key_path: \"{d}/peer{id}.key\"\n\
              \x20 tls_ca_cert_path: \"{d}/ca.crt\"\n",
             port = node.port,
             peer_port = node.peer_port,

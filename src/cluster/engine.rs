@@ -44,13 +44,14 @@ use openraft::{Config as RaftConfig, EntryPayload, RaftMetrics, ServerState};
 use tokio::task::spawn_blocking;
 use tracing::{info, warn};
 
-use crate::cluster::log_store::HearthLogStore;
+use crate::cluster::log_store::{ClusterIdentity, HearthLogStore};
 use crate::cluster::network::{ForwardFailure, HearthNetworkFactory, LeaderForwarder, PeerFaults};
+use crate::cluster::peer_identity::PeerStanding;
 use crate::cluster::read_gate::{leader_contact, LeaderContact, ReadGate, Refusal};
 use crate::cluster::server::IncomingRpcDispatch;
 use crate::cluster::state_machine::HearthStateMachine;
 use crate::cluster::types::{
-    ForwardedWriteOutcome, HearthLogResponse, HearthNode, HearthRaftConfig, RaftCommand,
+    ClusterId, ForwardedWriteOutcome, HearthLogResponse, HearthNode, HearthRaftConfig, RaftCommand,
 };
 use crate::cluster::wire::{self, MAX_COMMAND_BYTES, SNAPSHOT_CHUNK_BYTES};
 use crate::cluster::ReplicatedWriteObserver;
@@ -306,6 +307,8 @@ pub struct ClusterEngine {
     /// Estimates this node's clock offset from the leader (C4). Unused in
     /// single-node mode, which receives no entries.
     clock_offset: ClockOffsetMonitor,
+    /// This node's cluster ID, kept in `raft.db`. `None` in single-node mode.
+    cluster_identity: Option<Arc<ClusterIdentity>>,
 }
 
 impl ClusterEngine {
@@ -334,6 +337,7 @@ impl ClusterEngine {
             observer_slot: None,
             forwarding: None,
             clock_offset: ClockOffsetMonitor::default(),
+            cluster_identity: None,
         }
     }
 
@@ -458,11 +462,22 @@ impl ClusterEngine {
             refuse_restart_without_applied_state(log_state.last_purged_log_id)?;
         }
 
+        // Taken before `Raft::new` consumes the store; shares its database.
+        let cluster_identity = log_store
+            .cluster_identity()
+            .map_err(|e| ClusterBuildError::LogStore(e.to_string()))?;
+
         let cert_pem = tokio::fs::read(&config.tls_cert_path).await?;
         let key_pem = tokio::fs::read(&config.tls_key_path).await?;
         let ca_pem = tokio::fs::read(&config.tls_ca_cert_path).await?;
-        let network_factory = HearthNetworkFactory::new(cert_pem, key_pem, ca_pem)
-            .with_read_gate(Arc::clone(&read_gate));
+        let network_factory = HearthNetworkFactory::new(
+            config.node_id,
+            Arc::clone(&cluster_identity),
+            cert_pem,
+            key_pem,
+            ca_pem,
+        )
+        .with_read_gate(Arc::clone(&read_gate));
         let network_factory = match faults {
             Some(f) => network_factory.with_peer_faults(f),
             None => network_factory,
@@ -502,7 +517,8 @@ impl ClusterEngine {
         tokio::spawn(watch_leadership(raft.clone(), Arc::clone(&observer_slot)));
 
         let initial_members = initial_members_of(config);
-        Self::self_initialise_if_designated(&raft, config, &initial_members).await;
+        Self::self_initialise_if_designated(&raft, &cluster_identity, config, &initial_members)
+            .await;
 
         info!(
             node_id = config.node_id,
@@ -523,6 +539,7 @@ impl ClusterEngine {
             observer_slot: Some(observer_slot),
             forwarding: Some(forwarding),
             clock_offset: ClockOffsetMonitor::default(),
+            cluster_identity: Some(cluster_identity),
         })
     }
 
@@ -533,6 +550,7 @@ impl ClusterEngine {
     /// are unchanged.
     async fn self_initialise_if_designated(
         raft: &openraft::Raft<HearthRaftConfig>,
+        cluster_identity: &ClusterIdentity,
         config: &ClusterConfig,
         initial_members: &BTreeMap<u64, HearthNode>,
     ) {
@@ -579,10 +597,17 @@ impl ClusterEngine {
         let designated_initialiser = initial_members.keys().copied().min();
         if !config.peers.is_empty() && designated_initialiser == Some(config.node_id) {
             match raft.is_initialized().await {
-                Ok(false) => match raft.initialize(initial_members.clone()).await {
-                    Ok(()) => info!(
+                Ok(false) => match initialize_with_cluster_id(
+                    raft,
+                    cluster_identity,
+                    initial_members.clone(),
+                )
+                .await
+                {
+                    Ok(cluster_id) => info!(
                         node_id = config.node_id,
                         members = initial_members.len(),
+                        %cluster_id,
                         "cold cluster: Raft membership initialised from cluster.peers"
                     ),
                     Err(e) => warn!(
@@ -611,15 +636,21 @@ impl ClusterEngine {
         &self,
         members: BTreeMap<u64, HearthNode>,
     ) -> Result<(), ClusterError> {
-        let raft = self.raft.as_ref().ok_or_else(|| {
-            ClusterError::Raft("cannot initialise cluster on a single-node engine".to_string())
-        })?;
-        raft.initialize(members).await.map_err(|e| match e {
-            RaftError::APIError(openraft::error::InitializeError::NotAllowed(not_allowed)) => {
-                ClusterError::AlreadyInitialized(not_allowed.to_string())
-            }
-            other => ClusterError::Raft(other.to_string()),
-        })
+        let (Some(raft), Some(identity)) = (self.raft.as_ref(), self.cluster_identity.as_ref())
+        else {
+            return Err(ClusterError::Raft(
+                "cannot initialise cluster on a single-node engine".to_string(),
+            ));
+        };
+        initialize_with_cluster_id(raft, identity, members)
+            .await
+            .map(|_| ())
+    }
+
+    /// This node's cluster ID: `None` in single-node mode and on a cluster
+    /// node that has not yet initialised or joined a cluster.
+    pub fn cluster_id(&self) -> Option<ClusterId> {
+        self.cluster_identity.as_ref().and_then(|c| c.get())
     }
 
     // ── Metrics ───────────────────────────────────────────────────────────────
@@ -1618,6 +1649,36 @@ impl ClusterEngine {
 // ── IncomingRpcDispatch ───────────────────────────────────────────────────────
 
 impl IncomingRpcDispatch for ClusterEngine {
+    fn cluster_id(&self) -> Option<ClusterId> {
+        ClusterEngine::cluster_id(self)
+    }
+
+    fn peer_standing(&self, node: u64) -> PeerStanding {
+        let Some(raft) = self.raft.as_ref() else {
+            return PeerStanding::Pristine;
+        };
+        let metrics = raft.metrics();
+        let metrics = metrics.borrow();
+        let membership = metrics.membership_config.membership();
+        if membership.nodes().next().is_none() {
+            PeerStanding::Pristine
+        } else if membership.get_node(&node).is_some() {
+            PeerStanding::Member
+        } else {
+            // Retired IDs (`PeerStanding::Retired`) arrive with the
+            // replicated retired-ID set (cluster-membership-changes 2.3).
+            PeerStanding::NotAMember
+        }
+    }
+
+    async fn adopt_cluster_id(&self, id: ClusterId) -> Result<ClusterId, String> {
+        let identity = self
+            .cluster_identity
+            .as_ref()
+            .ok_or("Raft not initialised")?;
+        identity.adopt(id).await.map_err(|e| e.to_string())
+    }
+
     async fn append_entries(
         &self,
         payload: &[u8],
@@ -1658,6 +1719,28 @@ impl IncomingRpcDispatch for ClusterEngine {
         let outcome = self.serve_forwarded_write(payload).await;
         wire::encode(&outcome)
     }
+}
+
+/// Initialises a cluster with `members` under this node's cluster ID. A node
+/// without one generates it and writes it to `raft.db` first, so no node
+/// ever leads a cluster whose ID it could lose in a crash
+/// (`cluster-membership-changes` design decision 5). Returns the ID.
+async fn initialize_with_cluster_id(
+    raft: &openraft::Raft<HearthRaftConfig>,
+    identity: &ClusterIdentity,
+    members: BTreeMap<u64, HearthNode>,
+) -> Result<ClusterId, ClusterError> {
+    let cluster_id = identity
+        .adopt(ClusterId::random())
+        .await
+        .map_err(|e| ClusterError::Raft(format!("cannot persist the cluster ID: {e}")))?;
+    raft.initialize(members).await.map_err(|e| match e {
+        RaftError::APIError(openraft::error::InitializeError::NotAllowed(not_allowed)) => {
+            ClusterError::AlreadyInitialized(not_allowed.to_string())
+        }
+        other => ClusterError::Raft(other.to_string()),
+    })?;
+    Ok(cluster_id)
 }
 
 // ── Background lag monitor ────────────────────────────────────────────────────

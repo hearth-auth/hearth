@@ -25,6 +25,7 @@
 //!  ┌──────────────────────────────────────────────────────┐
 //!  │  RaftRpcHandler / serve() (incoming RPCs)            │
 //!  │    • tonic Server with ServerTlsConfig (mTLS)        │
+//!  │    • peer identity checks (peer_identity)            │
 //!  │    • delegates to IncomingRpcDispatch                │
 //!  │      (Raft RPCs + ForwardWrite from followers)       │
 //!  └──────────────────────────────────────────────────────┘
@@ -34,6 +35,7 @@ pub mod engine;
 pub(crate) mod error;
 pub mod log_store;
 pub mod network;
+pub mod peer_identity;
 pub(crate) mod read_gate;
 pub(crate) mod rpc;
 pub mod server;
@@ -95,15 +97,15 @@ pub use engine::{
     is_not_leader, ClusterBuildError, ClusterEngine, ClusterError, ClusterStorageAdapter,
     StartUpReads, DEFAULT_MAX_WRITES_IN_FLIGHT,
 };
-pub use log_store::{HearthLogReader, HearthLogStore};
+pub use log_store::{ClusterIdentity, HearthLogReader, HearthLogStore};
 pub use network::{HearthNetworkFactory, PeerFaults};
 pub use server::{
     serve, serve_with_shutdown, IncomingRpcDispatch, NoopDispatch, PeerServer, RaftRpcHandler,
 };
 pub use state_machine::HearthStateMachine;
 pub use types::{
-    ForwardedWriteOutcome, HearthLogData, HearthLogResponse, HearthNode, HearthRaftConfig,
-    RaftCommand,
+    ClusterId, ForwardedWriteOutcome, HearthLogData, HearthLogResponse, HearthNode,
+    HearthRaftConfig, RaftCommand,
 };
 pub use wire::{
     APPEND_BATCH_BYTES, MAX_COMMAND_BYTES, MAX_PEER_MESSAGE_BYTES, SNAPSHOT_CHUNK_BYTES,
