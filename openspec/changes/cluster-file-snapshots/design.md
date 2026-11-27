@@ -104,7 +104,7 @@ This fixes #818. The W5 sidecar logic stays: it also covers the case where a nod
 
 ### 8. The last chunk's timeout covers an install
 
-openraft applies `install_snapshot_timeout` to every chunk and to the last one, whose RPC includes the check and the install. At the default 200 ms a large install always times out on the leader, which then sends the whole snapshot a second time (the second install is a no-op, because the snapshot is no longer newer). Hearth sets it to 15 minutes. A non-last chunk to a peer that does not answer then waits up to 15 minutes, but only that peer's snapshot task waits: heartbeats and other peers continue. Task 3.8 checks the value against the measured 1M-user install time.
+openraft applies `install_snapshot_timeout` to every chunk and to the last one, whose RPC includes the check and the install. At the default 200 ms a large install always times out on the leader, which then sends the whole snapshot a second time (the second install is a no-op, because the snapshot is no longer newer). Hearth sets it to 15 minutes. So that a non-last chunk to a peer that does not answer does not wait that long, Hearth's network client bounds every non-last chunk RPC by its own 60-second timeout (`SNAPSHOT_CHUNK_TIMEOUT` in `src/cluster/network.rs`); on that timeout it drops the peer's channel and reports a transport timeout, and openraft retries the snapshot later. Only the last chunk's RPC, which carries the check and the install, has the full 15 minutes. In either case only that peer's snapshot task waits: heartbeats and other peers continue. Measured (task 3.8): a 1M-user install takes 16.5 s, well under a third of 15 minutes.
 
 ### 9. Chunk and batch sizes
 
