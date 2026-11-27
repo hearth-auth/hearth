@@ -291,7 +291,11 @@ realm admin's token was refused `401` or `403` mid-install, because the session,
 behind it was gone; the test counts that as missing data. A read answered `503` is a failed
 operation, which the checker does not count.
 
-JEPSEN_RUN_PLACEHOLDER
+Last full run: 2026-11-27, `make jepsen` with a 300 s fault phase per test, on the
+`cluster-read-fencing` branch: 9 pass, 0 fail, 2 xfail (`audit` G4, `replace` G9), 0 xpass.
+In that run the staleness writer was found to record a write as failed when its first
+attempt timed out and the others were refused. The server still held that write (W3) and
+committed it after the heal, so the checker now treats such a write as indeterminate.
 
 C1 has no test. Docker containers share one kernel clock, so a node cannot be given its own
 skew; C1 needs VMs.

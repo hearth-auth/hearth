@@ -31,12 +31,12 @@
 ## 5. Jepsen
 
 - [x] 5.1 Flip `staleness`, `revocation-isolated` and `snapshot` to `:pass` in `jepsen/expectations.edn`
-- [ ] 5.2 Proof: `make jepsen` reports every test `pass` or its remaining expected `xfail`, with `0 fail` and `0 xpass`. Record the run date in `docs/dev/CONSISTENCY.md` §9
-- [ ] 5.3 If a flipped test fails, find the cause before any change to its checker. A checker change needs a new planted-violation test first
+- [x] 5.2 Proof: `make jepsen` reports every test `pass` or its remaining expected `xfail`, with `0 fail` and `0 xpass`. Record the run date in `docs/dev/CONSISTENCY.md` §9
+- [x] 5.3 If a flipped test fails, find the cause before any change to its checker. A checker change needs a new planted-violation test first
 
 ## 6. Docs
 
-- [ ] 6.1 `docs/dev/CONSISTENCY.md`: R2, R3, R4 and V2 become Implemented, G1 and G2 move to a closed list, and §9 marks the three tests `pass`
+- [x] 6.1 `docs/dev/CONSISTENCY.md`: R2, R3, R4 and V2 become Implemented, G1 and G2 move to a closed list, and §9 marks the three tests `pass`
 - [x] 6.2 `docs/guides/clustering.md`: replace the stale-read and revocation warnings with the new `503` behaviour, and tell operators to retry `503` on another node
 - [x] 6.3 `docs/guides/configuration-reference.md`: `read_lag_threshold_ms` describes the contact check and its `500 ms` floor
 - [x] 6.4 `CHANGELOG.md` under `### Changed`: a cluster node out of contact, or installing a snapshot, now answers `503` to reads and token validation
