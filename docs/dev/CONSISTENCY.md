@@ -295,7 +295,11 @@ Last full run: 2026-11-27, `make jepsen` with a 300 s fault phase per test, on t
 `cluster-read-fencing` branch: 9 pass, 0 fail, 2 xfail (`audit` G4, `replace` G9), 0 xpass.
 In that run the staleness writer was found to record a write as failed when its first
 attempt timed out and the others were refused. The server still held that write (W3) and
-committed it after the heal, so the checker now treats such a write as indeterminate.
+committed it after the heal, so the checker now treats such a write as indeterminate. A read
+of its value is excused only until a later acknowledged write is shown to have landed after
+it: either a read showed the value before that write was invoked, or a node showed the value
+and later showed that write. `staleness` passed again with this checker on 2026-11-27
+(300 s fault phase, 4058 reads checked).
 
 C1 has no test. Docker containers share one kernel clock, so a node cannot be given its own
 skew; C1 needs VMs.

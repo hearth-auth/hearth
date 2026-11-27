@@ -41,38 +41,97 @@
                [(sorted-map) nil])
        first))
 
-(defn- indeterminate-values
-  "The values of the :info writes: their outcome is unknown, so each may
-  land at any time after its invocation, also after a later acknowledged
-  write (a write that timed out on a cut-off leader is forwarded to the new
-  leader once the partition heals)."
-  [history]
-  (into #{}
-        (comp (filter #(and (= :write (:f %)) (= :info (:type %))))
-              (map :value))
-        history))
+(defn- min-or-nil [xs] (when (seq xs) (reduce min xs)))
+
+(defn- overwritten-by
+  "value -> the lowest acknowledged value proven to have landed after it,
+  for each :info write's value, or nil when none is proven. The outcome of
+  an :info write is unknown: it may land at any time after its invocation,
+  also after a later acknowledged write (a write that timed out on a cut-off
+  leader is forwarded to the new leader once the partition heals), so a read
+  of its value below the floor is not stale by itself. It is once a later
+  acknowledged write `u` is known to have landed after it, because the
+  register then held `u` or a later value:
+
+  - a read showed the value before `u` was invoked, or
+  - a node showed the value, and a read on that node invoked after that one
+    ended showed `u` (a node applies the log in order).
+
+  An acknowledged value `u` landed before any higher one, so a floor at or
+  above `u` has overwritten the :info value too.
+
+  A write with more than one attempt of unknown outcome (its
+  :unknown-attempts) may land once per attempt, so a landing seen before
+  `u` does not rule out another after it: such a value maps to nil."
+  [history reads]
+  (let [oks    (for [op    history
+                     :when (and (= :write (:f op)) (= :ok (:type op)))]
+                 {:value (:value op) :start (:time (h/invocation history op))})
+        ok?    (into #{} (map :value) oks)
+        infos  (filter #(and (= :write (:f %)) (= :info (:type %))) history)
+        many?  (into #{}
+                     (comp (filter #(< 1 (:unknown-attempts % 1))) (map :value))
+                     infos)
+        infos  (into #{} (map :value) infos)
+        seen-v (->> reads
+                    (filter (comp infos :value))
+                    (group-by :value))
+        on     (group-by :node reads)]
+    (into {}
+          (for [v infos]
+            [v (when-not (many? v)
+                 (let [seen       (get seen-v v)
+                       first-seen (min-or-nil (map :end seen))
+                       by-time    (when first-seen
+                                    (min-or-nil (for [w     oks
+                                                      :when (and (< first-seen (:start w))
+                                                                 (< v (:value w)))]
+                                                  (:value w))))
+                       ; Per node, the first read of v that ended there.
+                       first-on   (reduce (fn [m {:keys [node end]}]
+                                            (update m node #(if % (min % end) end)))
+                                          {} seen)
+                       by-node    (min-or-nil
+                                    (for [[node end] first-on
+                                          r          (get on node)
+                                          :when      (and (< end (:start r))
+                                                          (ok? (:value r))
+                                                          (< v (:value r)))]
+                                      (:value r)))]
+                   (min-or-nil (remove nil? [by-time by-node]))))]))))
 
 (defn checker
   "Valid when no :ok read invoked more than the test map's :read-lag-ms
   (default `read-lag-ms`) after a write was acknowledged returned a lower
-  value (other than one an indeterminate write wrote), and at least one read had such a write to check against (a run with
-  none proves nothing). Each read carries the :node it ran on."
+  value, and at least one read had such a write to check against (a run
+  with none proves nothing). A lower value from an :info write is excused
+  until a write at or below the floor is proven to have overwritten it (see
+  `overwritten-by`). Each read carries the :node it ran on."
   []
   (reify checker/Checker
     (check [_ test history _opts]
       (let [lag     (* ns-per-ms (:read-lag-ms test read-lag-ms))
             floor   (floors history)
-            late-ok (indeterminate-values history)
-            checked (for [op    (filter #(and (= :read (:f %)) (= :ok (:type %))) history)
-                          :let  [start (:time (h/invocation history op))
-                                 [_ [v at]] (first (rsubseq floor <= (- start lag)))]
+            reads   (vec (for [op    history
+                               :when (and (= :read (:f op)) (= :ok (:type op)))]
+                           {:node  (:node op)
+                            :value (:value op)
+                            :start (:time (h/invocation history op))
+                            :end   (:time op)}))
+            late    (overwritten-by history reads)
+            checked (for [{:keys [node value start]} reads
+                          :let  [[_ [v at]] (first (rsubseq floor <= (- start lag)))]
                           :when v]
-                      {:node              (:node op)
-                       :read              (:value op)
+                      {:node              node
+                       :read              value
                        :expected-at-least v
                        :after-ms          (quot (- start at) ns-per-ms)})
+            excused (fn [{:keys [read expected-at-least]}]
+                      (and (contains? late read)
+                           (let [u (get late read)]
+                             (or (nil? u) (< expected-at-least u)))))
             stale   (vec (filter #(and (< (or (:read %) -1) (:expected-at-least %))
-                                       (not (late-ok (:read %))))
+                                       (not (excused %)))
                                  checked))]
         (cond
           (empty? checked)
@@ -94,14 +153,15 @@
   "The completion of a write from its attempts' HTTP results, in order. A
   write any attempt of which has an unknown outcome is :info unless a later
   attempt succeeded: the earlier attempt may still land, after the refusals
-  that followed it."
+  that followed it. An :info completion carries :unknown-attempts, how many
+  attempts may still land."
   [results]
   (let [last-result (peek (vec results))
         completion  (http/outcome :write last-result)]
-    (if (and (not= :ok (:type completion))
-             (some #(= :info (:type (http/outcome :write %))) results))
-      (assoc completion :type :info)
-      completion)))
+    (let [unknown (count (filter #(= :info (:type (http/outcome :write %))) results))]
+      (if (and (not= :ok (:type completion)) (pos? unknown))
+        (assoc completion :type :info :unknown-attempts unknown)
+        completion))))
 
 (defrecord Client [db state node]
   client/Client
