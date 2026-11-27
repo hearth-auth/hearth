@@ -39,8 +39,8 @@
 //!
 //! A follower's contact waits until it has applied the leader's commit index
 //! of the request ([`ReadGate::record_contact_once_applied`]), then counts
-//! from the request's arrival. The applied index and the waiting contact sit
-//! under a mutex that only the writers take, never a read.
+//! from the request's arrival. The applied index and the waiting contacts
+//! (at most two) sit under a mutex that only the writers take, never a read.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
@@ -92,8 +92,13 @@ pub(crate) struct ReadGate {
 struct Applied {
     /// The last index the state machine applied, if any.
     index: Option<u64>,
-    /// A contact waiting for its leader's commit index: `(at_ms, commit)`.
-    waiting: Option<(u64, u64)>,
+    /// The oldest contact waiting for its leader's commit index:
+    /// `(at_ms, commit)`. Kept until it completes, so that later contacts,
+    /// each needing a later commit, cannot starve it.
+    oldest: Option<(u64, u64)>,
+    /// The latest contact waiting behind [`Self::oldest`]; a later one
+    /// replaces it.
+    latest: Option<(u64, u64)>,
 }
 
 impl ReadGate {
@@ -122,28 +127,39 @@ impl ReadGate {
     /// A follower that holds the committed entries but has not applied them
     /// serves state older than the contact claims, and the lag hold does
     /// not cover a gap under the threshold. Until the apply, the contact
-    /// waits; a later one replaces it (it reaches at least as far). It then
-    /// counts from `at_ms`, not from the apply.
+    /// waits. It then counts from `at_ms`, not from the apply.
+    ///
+    /// Two contacts wait at most: the oldest, kept until its commit is
+    /// applied, and the latest, which a later one replaces. Under sustained
+    /// writes each request can arrive before the previous commit is applied;
+    /// a single slot replaced by every request would then never complete.
     pub(crate) fn record_contact_once_applied(&self, at_ms: u64, leader_commit: Option<u64>) {
         let mut applied = self.applied.lock().unwrap_or_else(PoisonError::into_inner);
         match leader_commit {
             Some(commit) if applied.index.is_none_or(|index| index < commit) => {
-                applied.waiting = Some((at_ms, commit));
+                if applied.oldest.is_none() {
+                    applied.oldest = Some((at_ms, commit));
+                } else {
+                    applied.latest = Some((at_ms, commit));
+                }
             }
             _ => self.record_contact_at(at_ms),
         }
     }
 
     /// Records that the state machine applied through `index`, which may
-    /// complete the waiting contact.
+    /// complete the waiting contacts.
     pub(crate) fn note_applied(&self, index: u64) {
-        let mut applied = self.applied.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut guard = self.applied.lock().unwrap_or_else(PoisonError::into_inner);
+        let applied = &mut *guard;
         applied.index = applied.index.max(Some(index));
-        if let Some((at_ms, commit)) = applied.waiting {
-            if index >= commit {
-                applied.waiting = None;
+        for slot in [&mut applied.oldest, &mut applied.latest] {
+            if let Some((at_ms, _)) = slot.take_if(|&mut (_, commit)| index >= commit) {
                 self.record_contact_at(at_ms);
             }
+        }
+        if applied.oldest.is_none() {
+            applied.oldest = applied.latest.take();
         }
     }
 
@@ -499,17 +515,62 @@ mod tests {
     }
 
     #[test]
-    fn a_later_contact_replaces_a_waiting_one() {
+    fn a_later_contact_does_not_replace_the_oldest_waiting_one() {
         let gate = ReadGate::new(T);
         gate.record_contact_once_applied(1_000, Some(12));
+        gate.record_contact_once_applied(1_100, Some(13));
         gate.record_contact_once_applied(1_200, Some(14));
         gate.note_applied(12);
-        assert!(!gate.allows_at(1_000), "the waiting contact needs 14 now");
+        assert!(gate.allows_at(1_000 + T - 1), "the oldest contact counts");
+        assert!(!gate.allows_at(1_000 + T), "dated from its own arrival");
+        gate.note_applied(13);
+        assert!(
+            !gate.allows_at(1_000 + T),
+            "the contact needing 13 was replaced by the latest"
+        );
         gate.note_applied(14);
         assert!(
             gate.allows_at(1_200 + T - 1),
-            "dated from the later arrival"
+            "dated from the latest arrival"
         );
+    }
+
+    #[test]
+    fn one_apply_completes_both_waiting_contacts() {
+        let gate = ReadGate::new(T);
+        gate.record_contact_once_applied(1_000, Some(12));
+        gate.record_contact_once_applied(1_200, Some(14));
+        gate.note_applied(14);
+        assert!(gate.allows_at(1_200 + T - 1), "the later deadline wins");
+        gate.record_contact_once_applied(2_000, Some(16));
+        gate.note_applied(16);
+        assert!(gate.allows_at(2_000 + T - 1), "no contact was left waiting");
+    }
+
+    /// Review finding 3 on #947: under sustained writes each `AppendEntries`
+    /// arrives before the previous one's `leader_commit` is applied. Every
+    /// apply then reaches the commit of a contact that a later one already
+    /// replaced, so no contact may ever complete.
+    #[test]
+    fn contacts_that_always_arrive_before_the_previous_commit_is_applied_still_count() {
+        let gate = ReadGate::new(T);
+        gate.note_applied(10);
+        // Every 50 ms an AppendEntries arrives with a commit index one
+        // ahead; the apply of the previous commit lands just after it.
+        for round in 0..100_u64 {
+            let at_ms = 1_000 + round * 50;
+            gate.record_contact_once_applied(at_ms, Some(12 + round));
+            gate.note_applied(11 + round);
+            if round == 0 {
+                assert!(!gate.allows_at(at_ms + 1), "index 12 is not applied yet");
+                continue;
+            }
+            assert!(
+                gate.allows_at(at_ms + 1),
+                "round {round}: applies keep up within one request, so the \
+                 follower is in contact"
+            );
+        }
     }
 
     #[test]
