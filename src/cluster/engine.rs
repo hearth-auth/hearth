@@ -679,7 +679,8 @@ impl ClusterEngine {
     ///   within [`ELECTION_TIMEOUT_MAX_MS`]. openraft 0.9 never steps such a
     ///   leader down (docs/dev/CONSISTENCY.md G1), and a node restarted on a
     ///   store whose last vote was its own resumes as leader with no quorum.
-    ///
+    /// - `"installing_snapshot"`: a snapshot install runs (or failed); reads
+    ///   answer `503` until a contact after it.
     /// - `"not_in_contact"`: the read gate is closed: no contact with a
     ///   leader within `cluster.read_lag_threshold_ms`, so reads answer `503`.
     /// - `"replication_lag"`: the read gate's lag hold is set.
@@ -703,6 +704,7 @@ impl ClusterEngine {
             gate.refusal_at(gate.now_ms()).map(|refusal| match refusal {
                 Refusal::NotInContact => "not_in_contact",
                 Refusal::ReplicationLag => "replication_lag",
+                Refusal::InstallingSnapshot => "installing_snapshot",
             })
         })
     }
@@ -943,6 +945,7 @@ impl ClusterEngine {
             .and_then(|gate| gate.refusal_at(gate.now_ms()));
         let cause = match refusal {
             Some(Refusal::ReplicationLag) => ClusterUnavailableCause::ReplicationLag,
+            Some(Refusal::InstallingSnapshot) => ClusterUnavailableCause::InstallingSnapshot,
             // `None`: the gate opened after the read was refused.
             Some(Refusal::NotInContact) | None => ClusterUnavailableCause::NotInContact,
         };
@@ -2865,6 +2868,8 @@ mod tests {
         assert_eq!(engine.not_ready_reason(), None);
         gate.set_lag_hold(true);
         assert_eq!(engine.not_ready_reason(), Some("replication_lag"));
+        gate.begin_install();
+        assert_eq!(engine.not_ready_reason(), Some("installing_snapshot"));
     }
 
     /// A node whose gate is closed refuses a read with `NotInContact`, and a
@@ -2902,6 +2907,15 @@ mod tests {
             e,
             crate::storage::StorageError::ClusterUnavailable {
                 cause: ClusterUnavailableCause::NotInContact,
+                ..
+            }
+        )));
+
+        gate.begin_install();
+        assert!(adapter.get(&realm, b"k").is_err_and(|e| matches!(
+            e,
+            crate::storage::StorageError::ClusterUnavailable {
+                cause: ClusterUnavailableCause::InstallingSnapshot,
                 ..
             }
         )));

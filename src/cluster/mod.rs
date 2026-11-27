@@ -66,8 +66,22 @@ pub trait ReplicatedWriteObserver: Send + Sync {
     /// A `delete` was applied for `realm_id`.
     fn on_replicated_delete(&self, realm_id: &crate::core::RealmId, key: &[u8]);
     /// The whole key-space was replaced (snapshot install). Implementors
-    /// MUST rebuild their projections from storage.
-    fn on_replicated_reset(&self);
+    /// MUST rebuild their projections from `store`, this node's own storage.
+    ///
+    /// The read gate refuses every read for the whole install, so a read
+    /// through the node's gated storage fails here: read `store`, which is
+    /// not gated. Unlike the other callbacks this one runs on the blocking
+    /// pool and may fail. The gate stays closed until it returns `Ok`
+    /// (`cluster-consistency` R4); on `Err` the install fails, and the node
+    /// refuses reads and credentials until it restarts.
+    ///
+    /// # Errors
+    ///
+    /// A projection could not be rebuilt.
+    fn on_replicated_reset(
+        &self,
+        store: &dyn crate::storage::StorageEngine,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
     /// This node has just become the Raft leader (once per term it wins).
     ///
     /// Called from the cluster engine's leadership watch, and when the

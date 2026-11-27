@@ -12,14 +12,18 @@
 //! cannot reach a quorum still starts, and then answers `503`. See
 //! [`ReadGate::begin_start_up`].
 //!
+//! A snapshot install closes the gate before it deletes any key and holds it
+//! closed until a contact after the install ([`ReadGate::begin_install`]).
+//!
 //! The whole state is one [`AtomicU64`], so the read side is one `Acquire`
 //! load and two compares: no allocation, no lock, no yield. Every writer runs
-//! off the hot path (the peer server, the lag monitor).
+//! off the hot path (the peer server, the lag monitor, the state machine).
 //!
 //! Word layout:
 //!
 //! | Bits | Meaning |
 //! |---|---|
+//! | 63 | Install hold: a snapshot install is running, or failed. |
 //! | 62 | Lag hold: applied entries lag received ones beyond the threshold. |
 //! | 61 | Start-up: the contact check is skipped. |
 //! | 0–60 | Deadline, in milliseconds since the gate was made. |
@@ -42,8 +46,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
+/// Bit set while a snapshot install runs (and after one fails).
+const INSTALL_HOLD: u64 = 1 << 63;
 /// Bit set while the apply-lag check fails.
 const LAG_HOLD: u64 = 1 << 62;
+/// The bits that close the gate whatever the contact.
+const HOLDS: u64 = INSTALL_HOLD | LAG_HOLD;
 /// Bit set while `serve` starts: the contact check is skipped.
 const START_UP: u64 = 1 << 61;
 /// The deadline bits.
@@ -59,6 +67,8 @@ pub(crate) enum Refusal {
     /// No contact with the leader (or, on a leader, with a quorum) within
     /// the threshold.
     NotInContact,
+    /// This node is installing a snapshot.
+    InstallingSnapshot,
 }
 
 /// Whether this node may serve a read now. See the module docs.
@@ -89,6 +99,15 @@ struct Applied {
     /// The latest contact waiting behind [`Self::oldest`]; a later one
     /// replaces it.
     latest: Option<(u64, u64)>,
+}
+
+impl Applied {
+    /// Drops both waiting contacts (an install replaces the state they
+    /// described).
+    fn drop_waiting(&mut self) {
+        self.oldest = None;
+        self.latest = None;
+    }
 }
 
 impl ReadGate {
@@ -194,14 +213,16 @@ impl ReadGate {
     /// Whether a read may be served at `now_ms`.
     pub(crate) fn allows_at(&self, now_ms: u64) -> bool {
         let word = self.word.load(Ordering::Acquire);
-        word & LAG_HOLD == 0 && (word & START_UP != 0 || now_ms < word & DEADLINE)
+        word & HOLDS == 0 && (word & START_UP != 0 || now_ms < word & DEADLINE)
     }
 
     /// Why a read at `now_ms` is refused, or `None` when it is allowed.
     /// Off the hot path: called only to describe a refusal.
     pub(crate) fn refusal_at(&self, now_ms: u64) -> Option<Refusal> {
         let word = self.word.load(Ordering::Acquire);
-        if word & LAG_HOLD != 0 {
+        if word & INSTALL_HOLD != 0 {
+            Some(Refusal::InstallingSnapshot)
+        } else if word & LAG_HOLD != 0 {
             Some(Refusal::ReplicationLag)
         } else if word & START_UP == 0 && now_ms >= word & DEADLINE {
             Some(Refusal::NotInContact)
@@ -211,7 +232,8 @@ impl ReadGate {
     }
 
     /// Records a contact at `at_ms`: the gate stays open until
-    /// `at_ms + threshold`. Never moves the deadline back.
+    /// `at_ms + threshold`. Never moves the deadline back. Ignored while a
+    /// snapshot install runs: only a contact after it counts.
     pub(crate) fn record_contact_at(&self, at_ms: u64) {
         let deadline_ms = at_ms.saturating_add(self.threshold_ms).min(DEADLINE);
         // The closure returns `None` only when the deadline is already
@@ -222,16 +244,40 @@ impl ReadGate {
         let _ = self
             .word
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |word| {
-                (deadline_ms > word & DEADLINE).then_some((word & !DEADLINE) | deadline_ms)
+                (word & INSTALL_HOLD == 0 && deadline_ms > word & DEADLINE)
+                    .then_some((word & !DEADLINE) | deadline_ms)
             });
     }
 
     /// Closes the gate at once: forgets the last contact. The next contact
-    /// opens it again. Test-only until the snapshot install fence (task 3.1)
-    /// calls it.
+    /// opens it again. Test-only.
     #[cfg(test)]
     pub(crate) fn close(&self) {
         self.word.fetch_and(!DEADLINE, Ordering::AcqRel);
+    }
+
+    /// Closes the gate for a snapshot install, before its first delete
+    /// (`cluster-consistency` R3). Drops the contacts waiting for their apply:
+    /// they described the state the install replaces. Until
+    /// [`Self::end_install`], no contact opens the gate; a failed install
+    /// never calls it, so the gate stays closed.
+    pub(crate) fn begin_install(&self) {
+        let mut applied = self.applied.lock().unwrap_or_else(PoisonError::into_inner);
+        applied.drop_waiting();
+        // The hold first: from it on, every read is refused and no contact
+        // moves the deadline, which is then cleared.
+        self.word.fetch_or(INSTALL_HOLD, Ordering::AcqRel);
+        self.word.fetch_and(!DEADLINE, Ordering::AcqRel);
+    }
+
+    /// Ends the install hold once the install and the cache rebuild have
+    /// finished. The gate stays closed: the next contact opens it. Contacts
+    /// that waited for an index during the install are dropped too.
+    pub(crate) fn end_install(&self) {
+        let mut applied = self.applied.lock().unwrap_or_else(PoisonError::into_inner);
+        applied.drop_waiting();
+        self.word
+            .fetch_and(!(INSTALL_HOLD | DEADLINE), Ordering::AcqRel);
     }
 
     /// Sets or clears the lag hold. The deadline is kept: when the lag
@@ -563,5 +609,75 @@ mod tests {
         assert!(gate.allows_at(1_000), "still starting up");
         gate.end_start_up();
         assert!(!gate.allows_at(1_000));
+    }
+
+    /// Task 3.1: an install closes the gate at once, whatever the contact,
+    /// and even while `serve` starts up.
+    #[test]
+    fn an_install_closes_the_gate_and_refuses_with_its_own_reason() {
+        let gate = ReadGate::new(T);
+        gate.record_contact_at(1_000);
+        gate.begin_install();
+        assert!(!gate.allows_at(1_000));
+        assert_eq!(gate.refusal_at(1_000), Some(Refusal::InstallingSnapshot));
+        gate.begin_start_up();
+        assert!(
+            !gate.allows_at(1_000),
+            "start-up skips contact, not the install"
+        );
+    }
+
+    /// Task 3.2: no contact opens the gate while the install runs, and the
+    /// end of the install does not open it either: the next contact does.
+    #[test]
+    fn only_a_contact_after_the_install_reopens_the_gate() {
+        let gate = ReadGate::new(T);
+        gate.begin_install();
+        gate.record_contact_at(1_000);
+        gate.record_contact_once_applied(1_000, None);
+        assert!(!gate.allows_at(1_000));
+        gate.end_install();
+        assert!(
+            !gate.allows_at(1_000),
+            "a contact during the install does not count"
+        );
+        assert_eq!(gate.refusal_at(1_000), Some(Refusal::NotInContact));
+        gate.record_contact_at(1_100);
+        assert!(gate.allows_at(1_100));
+    }
+
+    /// Task 3.2: an install drops the contact waiting for its apply (1.7),
+    /// even when the installed snapshot reaches that commit index.
+    #[test]
+    fn an_install_drops_the_contact_waiting_for_its_apply() {
+        let gate = ReadGate::new(T);
+        gate.note_applied(3);
+        gate.record_contact_once_applied(1_000, Some(9));
+        gate.begin_install();
+        gate.note_applied(9);
+        gate.end_install();
+        assert!(!gate.allows_at(1_000));
+        gate.note_applied(10);
+        assert!(!gate.allows_at(1_000), "the waiting contact is gone");
+    }
+
+    /// Task 3.2 with the two waiting slots: an install drops the oldest and
+    /// the latest waiting contact, and any contact that waits during it.
+    #[test]
+    fn an_install_drops_both_waiting_contacts() {
+        let gate = ReadGate::new(T);
+        gate.note_applied(3);
+        gate.record_contact_once_applied(1_000, Some(9));
+        gate.record_contact_once_applied(1_050, Some(12));
+        gate.begin_install();
+        gate.record_contact_once_applied(1_080, Some(14));
+        gate.note_applied(14);
+        gate.end_install();
+        assert!(!gate.allows_at(1_100));
+        gate.note_applied(20);
+        assert!(
+            !gate.allows_at(1_100),
+            "no contact from before or during the install is left waiting"
+        );
     }
 }

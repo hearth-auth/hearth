@@ -499,6 +499,11 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
         // removes it after Phase 2.  A crash between the two phases leaves the
         // marker on disk; the engine refuses to start on next open rather than
         // silently serving mixed data (HEA-2132).
+        // No read until a contact after the install (`cluster-consistency`
+        // R3): an error below leaves the gate closed.
+        if let Some(gate) = &self.read_gate {
+            gate.begin_install();
+        }
         let files = self.store.files().clone();
         let restore_from = part.clone();
         spawn_blocking(move || {
@@ -522,17 +527,24 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
         // The whole key-space was replaced — node-local projections derived
         // from it (revoked-JTI blocklist, …) must be rebuilt from storage
         // (audit 2026-08-28 §4.16#5). The rebuild scans storage, so it runs
-        // on the blocking pool like the restore itself.
+        // on the blocking pool like the restore itself, and reads the local
+        // engine: the gate refuses every read until the install ends. A
+        // failed rebuild fails the install, so the gate stays closed (R4).
         if let Some(obs) = self.observer.get() {
             let obs = Arc::clone(obs);
-            spawn_blocking(move || obs.on_replicated_reset())
+            let engine = Arc::clone(&self.engine);
+            spawn_blocking(move || obs.on_replicated_reset(engine.as_ref()))
                 .await
-                .map_err(join_err)?;
+                .map_err(join_err)?
+                .map_err(|e| io_write_err(std::io::Error::other(e)))?;
         }
 
         self.last_applied = meta.last_log_id;
         self.last_membership = meta.last_membership.clone();
         self.note_applied();
+        if let Some(gate) = &self.read_gate {
+            gate.end_install();
+        }
 
         snapshot_slot_offer(&self.current_snapshot, stored);
 
@@ -1157,6 +1169,10 @@ fn restore_snapshot_in_place<R: Read>(
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[path = "state_machine_install_fence.rs"]
+mod install_fence_tests;
 
 #[cfg(test)]
 mod tests {

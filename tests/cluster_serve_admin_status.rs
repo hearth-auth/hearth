@@ -599,3 +599,97 @@ async fn readyz_is_not_ready_while_the_node_cannot_commit_a_write() {
         .collect();
     await_ready(&cluster[0]).await;
 }
+
+/// `/readyz` on a follower cut off from its leader (cluster-read-fencing
+/// 4.1). Until its election timeout passes (at least 1.5 s), the follower
+/// still knows a leader, so `/readyz` checked nothing more and answered
+/// `200` while the node served state it could no longer confirm. Its read
+/// gate closes once no `AppendEntries` arrived within the threshold
+/// (500 ms), and `/readyz` names that reason.
+#[tokio::test(flavor = "multi_thread")]
+async fn readyz_is_not_in_contact_on_a_follower_cut_off_from_its_leader() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ca_pem = write_certs(dir.path());
+    let cluster: Vec<NodeSpec> = (1..=3)
+        .map(|id| NodeSpec {
+            id,
+            port: free_port_pair(),
+            peer_port: free_port(),
+        })
+        .collect();
+    let configs: Vec<PathBuf> = cluster
+        .iter()
+        .map(|n| write_config(dir.path(), n, &cluster))
+        .collect();
+    let seed = dir.path().join("seed");
+    seed_operator(&seed);
+    let token = mint_token(&seed, &configs[0]);
+    let (mut servers, logs) = start_nodes(dir.path(), &seed, &cluster, &configs);
+    let server_logs = || {
+        logs.iter()
+            .map(|p| std::fs::read_to_string(p).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n----\n")
+    };
+    let client = reqwest::Client::builder()
+        .add_root_certificate(reqwest::Certificate::from_pem(ca_pem.as_bytes()).expect("ca"))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("client");
+    let readyz = |node: &NodeSpec| {
+        let req = client.get(format!("https://localhost:{}/readyz", node.port));
+        async move {
+            let resp = req.send().await.ok()?;
+            let status = resp.status().as_u16();
+            Some((status, resp.text().await.unwrap_or_default()))
+        }
+    };
+
+    // Every node ready; then find the leader.
+    let deadline = Instant::now() + Duration::from_secs(40);
+    let mut leader = None;
+    for (i, node) in cluster.iter().enumerate() {
+        while !matches!(readyz(node).await, Some((200, _))) {
+            assert!(
+                Instant::now() < deadline,
+                "node {} was not ready in 40 s:\n{}",
+                node.id,
+                server_logs()
+            );
+            // AUDIT: justified-sleep: poll interval for /readyz on a child process, bounded by the 40 s deadline
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        let url = format!("https://localhost:{}/admin/cluster/status", node.port);
+        let (status, body) = cluster_admin(&client, reqwest::Method::GET, &url, &token).await;
+        assert_eq!(status, 200, "node {}: cluster status: {body}", node.id);
+        let status: serde_json::Value = serde_json::from_str(&body).expect("status JSON");
+        if status["role"] == "leader" {
+            leader = Some(i);
+        }
+    }
+    let leader = leader.expect("one node leads");
+    let follower = &cluster[(leader + 1) % cluster.len()];
+
+    // Kill the leader. The follower keeps it as its leader until its own
+    // election timeout (at least 1.5 s); before that, `/readyz` must name
+    // the lost contact.
+    let killed_at = Instant::now();
+    drop(servers.remove(leader));
+    let mut answers = Vec::new();
+    while killed_at.elapsed() < Duration::from_millis(1_400) {
+        if let Some((status, body)) = readyz(follower).await {
+            if status == 503 && body.contains("not_in_contact") {
+                return;
+            }
+            answers.push(format!("{:?} {status} {body}", killed_at.elapsed()));
+        }
+        // AUDIT: justified-sleep: probe interval while the follower's read gate closes, bounded by the 1.4 s window
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!(
+        "node {} never answered /readyz 503 not_in_contact within 1.4 s of losing its leader:\n{}\n{}",
+        follower.id,
+        answers.join("\n"),
+        server_logs()
+    );
+}

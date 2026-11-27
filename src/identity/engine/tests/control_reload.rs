@@ -34,9 +34,9 @@ const CONVERGE: Duration = Duration::from_secs(10);
 struct FaultStorage {
     inner: Arc<dyn StorageEngine>,
     fail_scans: AtomicBool,
-    /// Refuse scans with the error a cluster node's read gate returns while
-    /// the node is out of contact with its leader.
-    fence_scans: AtomicBool,
+    /// Refuse scans with the error a cluster node's read gate returns, for
+    /// this cause, while set.
+    fence_scans: std::sync::Mutex<Option<crate::storage::ClusterUnavailableCause>>,
     /// Refuse `increment_u64` (a control-epoch bump) while set.
     fail_increments: AtomicBool,
     /// Refuse `increment_u64` with the error cluster storage returns on a
@@ -66,7 +66,7 @@ impl FaultStorage {
         Arc::new(Self {
             inner,
             fail_scans: AtomicBool::new(false),
-            fence_scans: AtomicBool::new(false),
+            fence_scans: std::sync::Mutex::new(None),
             fail_increments: AtomicBool::new(false),
             not_leader_increments: AtomicBool::new(false),
             hold_increments: AtomicBool::new(false),
@@ -110,10 +110,14 @@ impl StorageEngine for FaultStorage {
                 "injected scan failure",
             )));
         }
-        if self.fence_scans.load(Ordering::SeqCst) {
+        let fence = *self
+            .fence_scans
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(cause) = fence {
             self.failed_scans.fetch_add(1, Ordering::SeqCst);
             return Err(StorageError::ClusterUnavailable {
-                cause: crate::storage::ClusterUnavailableCause::NotInContact,
+                cause,
                 reason: "injected read fence".to_string(),
             });
         }
@@ -398,13 +402,21 @@ fn a_failed_reload_does_not_consume_the_epoch() {
 }
 
 /// A reload refused by the read gate (the node is out of contact with its
-/// leader) is retried at the shortest delay, never backed off: the gate
-/// reopens as soon as contact resumes, and every control applied meanwhile
-/// must bind within the revocation bound. Backed off like a storage fault,
-/// the retry slept up to 5 s after the gate reopened, and Jepsen
-/// `revocation-isolated` saw a node accept a revoked session for 3.7 s.
+/// leader, or installing a snapshot) is retried at the shortest delay, never
+/// backed off: the gate reopens as soon as contact resumes, and every
+/// control applied meanwhile must bind within the revocation bound. Backed
+/// off like a storage fault, the retry slept up to 5 s after the gate
+/// reopened, and Jepsen `revocation-isolated` saw a node accept a revoked
+/// session for 3.7 s.
 #[test]
 fn a_reload_refused_by_the_read_gate_is_retried_without_backoff() {
+    use crate::storage::ClusterUnavailableCause as Cause;
+    for cause in [Cause::NotInContact, Cause::InstallingSnapshot] {
+        reload_after_a_read_fence(cause);
+    }
+}
+
+fn reload_after_a_read_fence(cause: crate::storage::ClusterUnavailableCause) {
     let dir = tempfile::tempdir().expect("tempdir");
     let shared = open_storage(&dir);
     let fault = FaultStorage::over(Arc::clone(&shared));
@@ -416,7 +428,10 @@ fn a_reload_refused_by_the_read_gate_is_retried_without_backoff() {
     let validator = engine_over(&validator_storage, &clock);
     validator.validate_token(&realm, &token).expect("warm");
 
-    fault.fence_scans.store(true, Ordering::SeqCst);
+    *fault
+        .fence_scans
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(cause);
     suspend(&other_node, &realm);
     clock.advance(EPOCH_SYNC_INTERVAL_MICROS + 1);
     let _ = validator.validate_token(&realm, &token);
@@ -427,10 +442,13 @@ fn a_reload_refused_by_the_read_gate_is_retried_without_backoff() {
     }
     assert!(
         fault.failed_scans.load(Ordering::SeqCst) >= 6,
-        "the reloader stopped retrying while the read gate refused it"
+        "the reloader stopped retrying while the read gate refused it ({cause:?})"
     );
 
-    fault.fence_scans.store(false, Ordering::SeqCst);
+    *fault
+        .fence_scans
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     let reopened = Instant::now();
     assert!(
         binds_suspension(&validator, &realm, &token),
@@ -440,7 +458,68 @@ fn a_reload_refused_by_the_read_gate_is_retried_without_backoff() {
     assert!(
         waited < Duration::from_millis(1_500),
         "the suspension bound {waited:?} after the read gate reopened: the reloader backed off \
-         while the gate refused it"
+         while the gate refused it ({cause:?})"
+    );
+}
+
+/// `cluster-consistency` R4 and V2: a snapshot install rebuilds the control
+/// caches before the read gate reopens, so the first credential check after
+/// the install already sees what the snapshot carries. The rebuild read
+/// through the gated storage, which refuses every read for the whole
+/// install, so it always failed and was left to the background reloader:
+/// for 100-300 ms after the next heartbeat the node accepted a token of a
+/// realm the snapshot had suspended.
+///
+/// The snapshot's suspension is one this node never applied as a log entry,
+/// and the snapshot's control epoch is no higher than this node's, so the
+/// epoch sync does not catch it either. The background reloader is stopped:
+/// the install must rebuild the caches by itself.
+#[test]
+fn a_snapshot_install_rebuilds_the_control_caches_before_the_gate_reopens() {
+    use crate::storage::ClusterUnavailableCause as Cause;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shared = open_storage(&dir);
+    let fault = FaultStorage::over(Arc::clone(&shared));
+    let validator_storage = Arc::clone(&fault) as Arc<dyn StorageEngine>;
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+
+    let other_node = engine_over(&shared, &clock);
+    let (realm, token) = seed_token(&other_node);
+    let mut validator = engine_over(&validator_storage, &clock);
+    stop_background_reloader(&mut validator);
+    validator.validate_token(&realm, &token).expect("warm");
+
+    // The install: the gate refuses every read while the snapshot, which
+    // carries the suspension and this node's own epoch, replaces the store.
+    *fault
+        .fence_scans
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Cause::InstallingSnapshot);
+    suspend(&other_node, &realm);
+    shared
+        .put(
+            &keys::system_realm_id(),
+            &keys::encode_control_epoch(),
+            &validator.control.applied_epoch().to_le_bytes(),
+        )
+        .expect("snapshot-installed epoch");
+    validator
+        .on_replicated_reset(shared.as_ref())
+        .expect("rebuild from the local engine");
+
+    // The gate reopens: the very first check refuses the token.
+    *fault
+        .fence_scans
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    clock.advance(EPOCH_SYNC_INTERVAL_MICROS + 1);
+    let first = validator.validate_token(&realm, &token);
+    assert!(
+        matches!(first, Err(IdentityError::RealmSuspended)),
+        "the first check after the install accepted a token of a realm the snapshot suspended: \
+         {:?}",
+        first.map(|_| "accepted")
     );
 }
 
@@ -702,7 +781,8 @@ fn a_control_after_a_snapshot_lowered_the_epoch_still_binds() {
     storage
         .put(&sys, &epoch_key, &(high - 5).to_le_bytes())
         .expect("snapshot-installed epoch");
-    node.on_replicated_reset();
+    node.on_replicated_reset(storage.as_ref())
+        .expect("rebuild after the reset");
 
     // Another node suspends the realm: one bump above the snapshot's epoch,
     // still below the old high-water mark.
@@ -879,7 +959,7 @@ fn a_failed_epoch_reread_after_a_reset_requeues_the_reset() {
         corrupting.put(&sys_h, &key_h, b"bad").expect("corrupt");
     })));
     assert!(!node.control.reset_reload_queued_for_test());
-    let _ = node.control.reload_after_reset();
+    let _ = node.control.reload_after_reset(storage.as_ref());
     node.control.set_scan_hook(None);
     assert!(
         node.control.reset_reload_queued_for_test(),
