@@ -664,18 +664,31 @@ impl ClusterEngine {
     ///   leader down (docs/dev/CONSISTENCY.md G1), and a node restarted on a
     ///   store whose last vote was its own resumes as leader with no quorum.
     ///
+    /// - `"not_in_contact"`: the read gate is closed: no contact with a
+    ///   leader within `cluster.read_lag_threshold_ms`, so reads answer `503`.
+    /// - `"replication_lag"`: the read gate's lag hold is set.
+    ///
     /// Local knowledge only: a follower whose leader is gone keeps it as
-    /// leader until its own election timeout (1.5–3 s) passes.
+    /// leader until its own election timeout (1.5–3 s) passes, but its read
+    /// gate closes within the threshold.
     pub fn not_ready_reason(&self) -> Option<&'static str> {
-        let raft = self.raft.as_ref()?;
-        let metrics = raft.metrics();
-        let m = metrics.borrow();
-        leader_gap(
-            m.id,
-            m.current_leader,
-            m.millis_since_quorum_ack,
-            m.membership_config.membership().voter_ids().count(),
-        )
+        let leader = self.raft.as_ref().and_then(|raft| {
+            let metrics = raft.metrics();
+            let m = metrics.borrow();
+            leader_gap(
+                m.id,
+                m.current_leader,
+                m.millis_since_quorum_ack,
+                m.membership_config.membership().voter_ids().count(),
+            )
+        });
+        leader.or_else(|| {
+            let gate = self.read_gate.as_ref()?;
+            gate.refusal_at(gate.now_ms()).map(|refusal| match refusal {
+                Refusal::NotInContact => "not_in_contact",
+                Refusal::ReplicationLag => "replication_lag",
+            })
+        })
     }
 
     /// Initial cluster membership map built from config at startup.
@@ -2766,6 +2779,21 @@ mod tests {
     }
 
     // ── The read gate (cluster-read-fencing 1.1) ──────────────────────────────
+
+    /// `/readyz` reports a node whose read gate is closed as not ready, with
+    /// the gate's reason (task 4.1).
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_closed_read_gate_makes_the_node_not_ready() {
+        let dir = tempdir().unwrap();
+        let gate = Arc::new(ReadGate::new(60_000));
+        let engine = ClusterEngine::with_read_gate(open_engine(dir.path()), Arc::clone(&gate));
+        assert_eq!(engine.not_ready_reason(), Some("not_in_contact"));
+        gate.record_contact_at(gate.now_ms());
+        assert_eq!(engine.not_ready_reason(), None);
+        gate.set_lag_hold(true);
+        assert_eq!(engine.not_ready_reason(), Some("replication_lag"));
+    }
 
     /// A node whose gate is closed refuses a read with `NotInContact`, and a
     /// contact opens it again. The refusal reaches the storage facade as

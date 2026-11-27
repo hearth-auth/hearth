@@ -38,6 +38,6 @@
 
 - [ ] 6.1 `docs/dev/CONSISTENCY.md`: R2, R3, R4 and V2 become Implemented, G1 and G2 move to a closed list, and §9 marks the three tests `pass`
 - [ ] 6.2 `docs/guides/clustering.md`: replace the stale-read and revocation warnings with the new `503` behaviour, and tell operators to retry `503` on another node
-- [ ] 6.3 `docs/guides/configuration-reference.md`: `read_lag_threshold_ms` describes the contact check and its `200 ms` floor
+- [x] 6.3 `docs/guides/configuration-reference.md`: `read_lag_threshold_ms` describes the contact check and its `500 ms` floor
 - [ ] 6.4 `CHANGELOG.md` under `### Changed`: a cluster node out of contact, or installing a snapshot, now answers `503` to reads and token validation
 - [ ] 6.5 `make check` and `make ci-local-fast` pass; `openspec validate cluster-read-fencing --strict` passes

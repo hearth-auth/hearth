@@ -293,6 +293,7 @@ impl LeaderOnly {
         engines[0].initialize_cluster(members).await.unwrap();
 
         let leader_id = wait_for_leader(&engines, Duration::from_secs(20)).await;
+        wait_ready(&engines, Duration::from_secs(20)).await;
 
         // Build the leader's app stack FIRST. `EmbeddedIdentityEngine`'s
         // constructor persists the global signing key on first start; run on
@@ -433,6 +434,27 @@ async fn wait_converged(engines: &[Arc<ClusterEngine>], timeout: Duration) {
             "replication did not converge within {timeout:?}"
         );
         // AUDIT: justified-sleep: poll interval inside replication-convergence loop; log commit is async with no notification hook
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Blocks until every node reports ready (`not_ready_reason` is `None`): it
+/// has a leader with a quorum, and its read gate is open. `serve` builds the
+/// application stack under the start-up read exemption; this fixture has
+/// none. A new leader's first heartbeats carry no quorum acknowledgement, so
+/// its followers are out of contact for a moment after the election.
+async fn wait_ready(engines: &[Arc<ClusterEngine>], timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let reasons: Vec<_> = engines.iter().map(|e| e.not_ready_reason()).collect();
+        if reasons.iter().all(Option::is_none) {
+            return;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "not every node was ready within {timeout:?}: {reasons:?}"
+        );
+        // AUDIT: justified-sleep: poll interval for the nodes' read gates; a gate opens on a heartbeat, with no notification hook
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
