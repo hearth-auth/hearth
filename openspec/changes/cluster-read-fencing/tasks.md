@@ -8,7 +8,9 @@
 - [x] 1.2 Test first: a unit test shows that the apply-lag check above `read_lag_threshold_ms` closes the gate. Then move `reads_allowed_for_lag` onto the deadline
 - [x] 1.3 Test first: a unit test shows a leader whose `millis_since_quorum_ack` exceeds the threshold is out of contact, and a sole voter never is. Then set the leader's deadline from the lag monitor
 - [x] 1.4 Test first: a unit test in `src/cluster/engine.rs` shows an accepted `AppendEntries` from the current leader moves the deadline forward, and a refused one does not. Then record contact in `ClusterEngine`'s `IncomingRpcDispatch::append_entries`, which the peer server calls (`src/cluster/server.rs` only routes the RPC). An accepted request whose log ends before its `leader_commit` (a heartbeat to a follower that is behind, one catch-up batch) is no contact either: the `2026-10-07` branch's Jepsen `staleness` run found that gap
-- [ ] 1.5 Test first: `tests/cli_config.rs` shows `hearth config validate` refuses `read_lag_threshold_ms: 150` and accepts `200`. Then add the floor and lower the heartbeat to `100 ms`
+- [x] 1.5 Test first: `tests/cli_config.rs` shows `hearth config validate` refuses `read_lag_threshold_ms: 450` and accepts `500`. Then add the floor and lower the heartbeat to `250 ms` (owner decision 2026-11-27)
+- [ ] 1.6 Test first: a unit test in `src/cluster/engine.rs` shows an accepted `AppendEntries` whose `leader_quorum_ack_age_ms` is `2000` or more, or missing, is no contact, and one below `2000` is. Then send the leader's quorum-acknowledgement age with each peer `AppendEntries` and count contact only below `2000 ms` (design decision 1, owner decision 2026-11-27)
+- [ ] 1.7 Test first: unit tests in `src/cluster/read_gate.rs` show a follower's contact waits until its `leader_commit` is applied, then counts from the request's arrival. Then make the contact wait for the apply (design decision 1)
 
 ## 2. Token validation obeys the gate (V2)
 
@@ -20,7 +22,7 @@
 ## 3. The snapshot install fence (R3, R4)
 
 - [ ] 3.1 Test first: a test in `src/cluster/state_machine.rs` shows a read during `restore_snapshot_in_place` is refused, with a storage stub that pauses between Phase 1 and Phase 2. Then close the gate in `install_snapshot` before Phase 1
-- [ ] 3.2 Test first: the same test shows the gate stays closed until `on_replicated_reset` returns, and stays closed after a failed install. Then reopen it only through a fresh heartbeat
+- [ ] 3.2 Test first: the same test shows the gate stays closed until `on_replicated_reset` returns, and stays closed after a failed install, and that an install drops a contact waiting for its apply (1.7). Then reopen it only through a fresh heartbeat
 
 ## 4. Readiness
 

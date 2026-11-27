@@ -41,12 +41,18 @@ The chosen check matches the "In contact" term the spec already defines. A follo
 
 A leader in contact is safe. A follower that acknowledged the leader in the last `read_lag_threshold_ms` will not vote for a new leader until its lease (`3000 ms`) runs out. So while a quorum acknowledged the leader recently, no other leader can commit a write. This holds only when `read_lag_threshold_ms` stays below the lease. Larger thresholds stay legal: they weaken R2 to the threshold the operator chose, which the spec allows.
 
+Three refinements (owner decision 2026-11-27, from the Jepsen runs of the 2026-10-07 branch):
+
+- **A deposed leader is no contact.** A leader and one follower cut off from the majority keep their term: the leader sends heartbeats, and the follower accepts them, while the majority elects a new leader and acknowledges writes. So each peer `AppendEntries` carries `leader_quorum_ack_age_ms`: the time since a quorum last acknowledged the sender, on the sender's clock. A follower counts the request only when the age is below `MAX_LEADER_ACK_AGE_MS` = lease − 1 s = `2000 ms`. A request without the age is no contact. No other leader can acknowledge a write before the sender's last quorum acknowledgement plus the lease, so a follower that receives the request within 1 s of its sending misses no write acknowledged before it received it. This changes the peer wire format; there are no deployed clusters, and mixed-version clusters are unsupported. Alternative: count only an age below `read_lag_threshold_ms`. Rejected: a healthy leader's age reaches one heartbeat plus one round trip, so the floor would have to rise to about 3 × the heartbeat.
+- **A matching log is not the leader's whole log.** A heartbeat to a follower that is behind, or one catch-up batch, ends before the leader's commit index. So a request counts as contact only when its last log id (its last entry, or `prev_log_id`) is at or after its `leader_commit`. In steady state every request ends at the leader's last log, so this costs nothing.
+- **A held commit index is not an applied one.** After a catch-up, a 12-entry apply took 366 ms while the 5 ms-per-entry lag estimate read 60 ms, and the follower served the older state. So a contact waits until the state machine has applied the request's `leader_commit`, then counts from the request's arrival. The gate keeps the applied index and one waiting contact under a mutex; the peer server and the apply path take it, the hot path does not. A snapshot install drops the waiting contact.
+
 ### 2. One deadline word, set off the hot path
 
 The gate is an `AtomicU64` that holds a deadline in coarse monotonic milliseconds. A read is allowed while `now < deadline`. Two writers move the deadline forward:
 
-- The peer server, after each accepted `AppendEntries` from the current leader: `deadline = now + read_lag_threshold_ms`.
-- The lag monitor on a leader, from `millis_since_quorum_ack`.
+- The peer server, after each accepted `AppendEntries` from the current leader whose quorum-acknowledgement age is below `2000 ms`, once its `leader_commit` is applied: `deadline = arrival + read_lag_threshold_ms`.
+- The lag monitor on a leader, from `millis_since_quorum_ack`. It also records that acknowledgement, where the leader's peer clients read its age for each `AppendEntries`. A node that does not lead clears it.
 
 The lag check and the install fence set the deadline to `0`, which closes the gate at once. The lag monitor keeps its 50 ms tick for the apply-lag check only.
 
@@ -62,14 +68,18 @@ Alternative: keep the boolean flag and let the 50 ms monitor compute contact. Re
 
 `install_snapshot` closes the gate before it calls `restore_snapshot_in_place`. It opens it again only after `on_replicated_reset` finishes, and only through a fresh heartbeat. A failed install leaves the gate closed. The fence does not depend on `read_lag_threshold_ms`, so the `snapshot` Jepsen test passes even with its raised threshold.
 
-### 5. Heartbeat interval `100 ms`, threshold floor `2 ×` heartbeat
+### 5. Heartbeat interval `250 ms`, threshold floor `2 ×` heartbeat (owner decision 2026-11-27)
 
-With a `500 ms` heartbeat and the default `500 ms` threshold, a healthy follower would fall out of contact between heartbeats. The heartbeat drops to `100 ms`. `hearth config validate` refuses a threshold below `200 ms`. The election timeouts stay as they are.
+With a `500 ms` heartbeat and the default `500 ms` threshold, a healthy follower would fall out of contact between heartbeats. The heartbeat drops to `250 ms`. `hearth config validate` refuses a threshold below `500 ms`, which is the default. The election timeouts stay as they are.
+
+Alternative: `100 ms`, floor `200 ms` (this design's first choice). Rejected: openraft 0.9.25 also uses the heartbeat interval as the timeout of every `AppendEntries` call (`RPCOption::new(heartbeat_interval)`), catch-up batches and first mTLS handshakes included. At `100 ms`, the 2026-10-07 branch's Jepsen runs logged timed-out calls on healthy links. Alternative: keep `500 ms` and raise the default threshold and the floor to `1000 ms`. Rejected: a weaker default staleness bound.
 
 ## Risks / Trade-offs
 
 - [Minority partitions answer `503` instead of stale data] → This is the promise. Docs tell operators to retry `503` on another node behind a load balancer.
-- [5× more heartbeat traffic] → Heartbeats are empty `AppendEntries`, five per second per peer. The load test gate (`make bench-gate`) checks for regressions.
+- [2× more heartbeat traffic] → Heartbeats are empty `AppendEntries`, four per second per peer. The load test gate (`make bench-gate`) checks for regressions.
+- [Reads refused just after an election] → A new leader's first heartbeats carry no acknowledgement age, so its followers are out of contact for about one heartbeat plus one round trip. `/readyz` reports `not_in_contact` meanwhile.
+- [Mixed builds] → A follower on an older build ignores the new field, and a follower on this build counts an older leader's heartbeats as no contact. Mixed-version clusters are unsupported.
 - [Clock steps on one node] → The deadline uses a monotonic clock, so a wall-clock jump cannot extend it (C1).
 - [A GC-like pause on a leader after its last quorum ack] → The leader may serve reads for up to `read_lag_threshold_ms` after it was deposed. This is within R2's bound by definition.
 - [Token validation now fails during partitions] → Users on a cut-off node must sign in again elsewhere. This is the V2 promise: refuse what cannot be proven live.
@@ -82,6 +92,4 @@ Cluster mode is experimental, and there are no deployed clusters to migrate (gre
 
 - Should the refresh-token grant on a node out of contact also forward to the leader, rather than answer `503`? This proposal answers `503`; forwarding can follow later.
 - Should `/readyz` report `not_in_contact` as a third reason, next to `no_leader` and `no_quorum`? This proposal says yes, as a small task, so load balancers drain cut-off nodes.
-- **Decision 5 does not fit openraft 0.9.25 (open, 2026-11-26; blocks task 1.5).** openraft uses `heartbeat_interval` as the hard timeout of every `AppendEntries` call (`replication/mod.rs`, `RPCOption::new(heartbeat_interval)`), catch-up batches and first mTLS handshakes included. The 2026-10-07 branch ran `100 ms` and its Jepsen runs logged timed-out calls on healthy links; it moved to `250 ms` with a `500 ms` floor. The heartbeat and the floor are both visible to operators, so the owner chooses: (a) `100 ms` / floor `200 ms` as designed; (b) `250 ms` / floor `500 ms`; (c) keep `500 ms`, raise the default threshold and the floor to `1000 ms` or more.
-- **Decision 1 misses a deposed leader (open, 2026-11-26).** A leader cut off with one follower keeps its term, and the follower keeps accepting its heartbeats while the majority elects a new leader and acknowledges writes (Jepsen `staleness`, 2026-10-07 branch). The fix the branch used sends the leader's quorum-acknowledgement age with each `AppendEntries` and counts contact only below lease − 1 s. That changes the peer wire format (mixed builds get no contact) and refuses follower reads for about one heartbeat plus one round trip after each election.
-- **A held commit index is not an applied one (2026-10-07 branch, Jepsen `staleness`).** A 12-entry apply took 366 ms while the 5 ms-per-entry lag estimate read 60 ms. Contact should wait until the request's `leader_commit` is applied. Not operator-visible; a task follows the decision on decision 1.
+- Decision 5 (heartbeat) and the deposed-leader gap in decision 1 were open on 2026-11-26; the owner decided both on 2026-11-27 (see decisions 1 and 5).

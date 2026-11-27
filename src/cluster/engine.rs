@@ -303,7 +303,7 @@ impl ClusterEngine {
             inner,
             raft: None,
             read_gate: None,
-            read_lag_threshold_ms: 500,
+            read_lag_threshold_ms: ClusterConfig::DEFAULT_READ_LAG_THRESHOLD_MS,
             write_timeout: Duration::from_millis(ClusterConfig::DEFAULT_WRITE_TIMEOUT_MS),
             self_node_id: None,
             initial_members: None,
@@ -442,7 +442,7 @@ impl ClusterEngine {
 
         let raft_config = Arc::new(
             RaftConfig {
-                heartbeat_interval: 500,
+                heartbeat_interval: ClusterConfig::RAFT_HEARTBEAT_INTERVAL_MS,
                 election_timeout_min: 1500,
                 election_timeout_max: ELECTION_TIMEOUT_MAX_MS,
                 // Chunks well under the peer message limit (see
@@ -464,7 +464,9 @@ impl ClusterEngine {
         .await
         .map_err(|e| ClusterBuildError::RaftInit(e.to_string()))?;
 
-        let threshold = config.read_lag_threshold_ms.unwrap_or(500);
+        let threshold = config
+            .read_lag_threshold_ms
+            .unwrap_or(ClusterConfig::DEFAULT_READ_LAG_THRESHOLD_MS);
         let write_timeout = Duration::from_millis(
             config
                 .write_timeout_ms
