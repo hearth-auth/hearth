@@ -325,6 +325,23 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Whether `err` is a cluster node's read gate refusing the read: the node is
+/// out of contact with its leader, still applying a backlog, or installing a
+/// snapshot (OpenSpec change `cluster-read-fencing`).
+pub(super) fn is_read_fence(err: &IdentityError) -> bool {
+    use crate::storage::{ClusterUnavailableCause as Cause, StorageError};
+    let IdentityError::Storage(source) = err else {
+        return false;
+    };
+    matches!(
+        source.downcast_ref::<StorageError>(),
+        Some(StorageError::ClusterUnavailable {
+            cause: Cause::NotInContact | Cause::ReplicationLag | Cause::InstallingSnapshot,
+            ..
+        })
+    )
+}
+
 impl ControlPlane {
     /// A control plane over `caches`. Call [`Self::start`] to run the
     /// background reloader.
@@ -1047,16 +1064,32 @@ impl ControlPlane {
                         }
                         self.force.store(true, Ordering::Release);
                     }
-                    tracing::warn!(
-                        error = %err,
-                        retry_in_ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX),
-                        "control-cache reload failed; controls asserted on other nodes are \
-                         not yet enforced here"
-                    );
+                    // A cluster node out of contact refuses the scan until
+                    // contact resumes, and then serves at once: backing off
+                    // would leave every control applied meanwhile unbound for
+                    // up to RETRY_MAX after the node serves again. Validation
+                    // is refused while the gate is closed, so nothing is
+                    // served from the stale caches until then.
+                    if is_read_fence(&err) {
+                        tracing::debug!(
+                            error = %err,
+                            "control-cache reload refused by the read gate; retrying"
+                        );
+                        backoff = RETRY_MIN;
+                    } else {
+                        tracing::warn!(
+                            error = %err,
+                            retry_in_ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX),
+                            "control-cache reload failed; controls asserted on other nodes are \
+                             not yet enforced here"
+                        );
+                    }
                     if !self.pause_until(Instant::now() + backoff) {
                         return;
                     }
-                    backoff = (backoff * 2).min(RETRY_MAX);
+                    if !is_read_fence(&err) {
+                        backoff = (backoff * 2).min(RETRY_MAX);
+                    }
                 }
             }
         }

@@ -224,6 +224,30 @@ const MAX_ROUTING_ROUNDS: usize = 4;
 /// a majority elsewhere can elect a new leader after one election timeout.
 const ELECTION_TIMEOUT_MAX_MS: u64 = 3000;
 
+/// How long the leader waits for a follower to answer a snapshot chunk, in
+/// milliseconds. openraft applies it to every chunk, and the answer to the
+/// last one comes after the follower has checked the whole file and
+/// restored it into its store: minutes at a million users
+/// (`cluster-file-snapshots`, design decision 8). openraft's 200 ms default
+/// timed out every large install, so the leader sent it again and again.
+/// The other chunks are bounded more tightly by the peer client
+/// ([`crate::cluster::network`]).
+const INSTALL_SNAPSHOT_TIMEOUT_MS: u64 = 15 * 60 * 1000;
+
+/// The Raft configuration of every clustered node (before validation).
+fn raft_config() -> RaftConfig {
+    RaftConfig {
+        heartbeat_interval: ClusterConfig::RAFT_HEARTBEAT_INTERVAL_MS,
+        election_timeout_min: 1500,
+        election_timeout_max: ELECTION_TIMEOUT_MAX_MS,
+        // Chunks well under the peer message limit (see `cluster::wire`);
+        // openraft's default is 3 MiB.
+        snapshot_max_chunk_size: SNAPSHOT_CHUNK_BYTES,
+        install_snapshot_timeout: INSTALL_SNAPSHOT_TIMEOUT_MS,
+        ..RaftConfig::default()
+    }
+}
+
 /// Error produced when building a [`ClusterEngine`].
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
@@ -404,7 +428,7 @@ impl ClusterEngine {
         let mut log_store = HearthLogStore::open(&raft_db_path)
             .map_err(|e| ClusterBuildError::LogStore(e.to_string()))?;
 
-        let sm_engine: Arc<dyn StorageEngine> = Arc::clone(&inner) as Arc<dyn StorageEngine>;
+        let sm_engine = Arc::clone(&inner);
         // Shared observer slot: the state machine is consumed by `Raft::new`
         // below, but the projection observer (the identity engine) is built
         // later — the composition root fills the slot via
@@ -449,17 +473,9 @@ impl ClusterEngine {
         };
 
         let raft_config = Arc::new(
-            RaftConfig {
-                heartbeat_interval: ClusterConfig::RAFT_HEARTBEAT_INTERVAL_MS,
-                election_timeout_min: 1500,
-                election_timeout_max: ELECTION_TIMEOUT_MAX_MS,
-                // Chunks well under the peer message limit (see
-                // `cluster::wire`); openraft's default is 3 MiB.
-                snapshot_max_chunk_size: SNAPSHOT_CHUNK_BYTES,
-                ..RaftConfig::default()
-            }
-            .validate()
-            .map_err(|e| ClusterBuildError::RaftInit(e.to_string()))?,
+            raft_config()
+                .validate()
+                .map_err(|e| ClusterBuildError::RaftInit(e.to_string()))?,
         );
 
         let raft = openraft::Raft::<HearthRaftConfig>::new(
@@ -2675,6 +2691,19 @@ impl StorageEngine for ClusterStorageAdapter {
 
 #[cfg(test)]
 mod tests {
+    /// openraft's 200 ms default bounds the answer to a snapshot's last
+    /// chunk, which comes after the follower checked and restored it, so a
+    /// large install always timed out (`cluster-file-snapshots`).
+    #[test]
+    fn a_snapshot_install_may_take_minutes() {
+        let config = super::raft_config().validate().expect("valid config");
+        assert_eq!(
+            config.install_snapshot_timeout(),
+            std::time::Duration::from_secs(15 * 60)
+        );
+        assert_eq!(config.snapshot_max_chunk_size, super::SNAPSHOT_CHUNK_BYTES);
+    }
+
     use super::*;
 
     use openraft::{CommittedLeaderId, LogId, ServerState, StoredMembership, Vote};

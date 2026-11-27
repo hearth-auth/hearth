@@ -82,6 +82,29 @@ Evidence:
   [ARCHITECTURE.md §16.3](./ARCHITECTURE.md#163-cluster-read-consistency).
 - **W5.** The counter keeps a sidecar row with the index of the last entry that moved it
   (`increment_once`, `state_machine.rs:807`).
+  Until #818 was fixed, a snapshot could hold the effects of entries after the index its META
+  declared, and an installing node then re-applied those entries. The sidecar kept counters
+  right, but a re-applied `PutIfAbsent` answered `false` where the leader had answered `true`.
+  S1 below closes this for every command.
+
+### Snapshot promises
+
+| ID | Promise | Status |
+|---|---|---|
+| **S1** | A snapshot that declares index N holds the effects of every entry up to N and of none after N, while the node keeps applying. | Implemented |
+| **S2** | A build and an install each raise a node's anonymous memory by less than 512 MiB at 1,000,000 users. | Implemented (build 8.1 MiB; install 51.9 MiB into an empty store, 346 MiB over a full one; [snapshot-memory.md](../perf/snapshot-memory.md)) |
+| **S3** | Snapshot files, partial ones included, are encrypted under a per-file key wrapped by the node's system KEK. | Implemented |
+| **S4** | A received snapshot is checked whole before it changes the store; a failed check leaves the store and the Raft core untouched, and the leader can send it again. | Implemented |
+| **S5** | A built or installed snapshot is durable before it is reported, and is served again after a restart; partial files are removed at start-up. | Implemented |
+
+Evidence (`cluster-file-snapshots`): the builder reads the point-in-time view taken in
+`get_snapshot_builder` (`a_snapshot_holds_the_state_at_its_index_only`,
+`a_conditional_write_after_the_snapshot_point_answers_alike`); files are sealed by
+`storage::sealed_file` (`snapshot_files_hold_no_plaintext`); `SnapshotFile::shutdown` checks a
+received file (`a_corrupted_transfer_is_refused_and_can_be_sent_again`); `SnapshotStore::keep`
+renames after fsync and syncs the directory, and `SnapshotStore::recover` runs at open
+(`a_snapshot_survives_a_restart`, `recovery_keeps_the_newest_good_snapshot_at_or_below_applied`).
+Memory: `examples/snapshot_memory.rs`.
 
 ---
 
@@ -210,7 +233,7 @@ These are **not** replicated. A client MUST NOT expect them to agree between nod
 | Rate limiters and the KDF admission gate | in memory | Limits are per node. |
 | Session-cookie and DPoP nonce secrets, when not configured | generated per process | A cookie or nonce from one node fails on another. Configure them for a cluster. |
 | Session, claims, RBAC, realm-status and blocklist caches | in memory | Kept coherent by the observer and the control epoch (V1). |
-| Raft applied-state rows (`\0raft:sm:applied`, `\0raft:sm:membership`) | `state_machine.rs:683-701` | Excluded from snapshots. |
+| Raft applied-state rows (`\0raft:sm:applied`, `\0raft:sm:membership`) | `state_machine.rs:766-780` | Excluded from snapshots. |
 
 Attempt-tracker rows are node-local by design, but snapshots still carry them (G3).
 
@@ -223,7 +246,7 @@ are build steps for finishing cluster mode, not regressions.
 
 | ID | Blocks | Today | To build |
 |---|---|---|---|
-| **G3** | Section 7 | The snapshot builder skips only the two applied-state rows (`state_machine.rs:155`). Tracker rows travel to the installing node and replace its own. | Exclude node-local key families from snapshot build and from the install's delete phase. |
+| **G3** | Section 7 | The snapshot builder skips only the two applied-state rows (`state_machine.rs:204`). Tracker rows travel to the installing node and replace its own. | Exclude node-local key families from snapshot build and from the install's delete phase. |
 | **G4** | W7 | The audit chain head is read and written under a per-node mutex, then written with a plain `write_batch` (`src/audit/engine.rs:682`, `850`, `1166-1199`). Nothing stops two nodes from chaining from the same head. | Make the head advance a conditional Raft command, or append on the leader only. |
 | **G5** | Section 6 | No `add_learner` / `change_membership`. | Online membership changes (joint consensus) with an admin API. |
 | **G6** | [ARCHITECTURE.md §12.5](./ARCHITECTURE.md#125-graceful-shutdown) | Shutdown calls only `raft.shutdown()` (`src/main.rs:3155` → `engine.rs:546-552`). | Step down before the drain when the node is leader. |

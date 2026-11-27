@@ -1107,6 +1107,23 @@ impl EmbeddedStorageEngine {
         Arc::clone(&self.compaction_notify)
     }
 
+    /// The data directory this engine was opened on.
+    #[must_use]
+    pub fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
+    }
+
+    /// Encrypted node-local files under this engine's system KEK, on its
+    /// filesystem (cluster snapshots, `cluster-file-snapshots`).
+    #[must_use]
+    pub fn sealed_files(&self) -> crate::storage::SealedFiles {
+        crate::storage::SealedFiles::new(
+            Arc::clone(&self.fs),
+            Arc::clone(&self.key_registry),
+            self.system_realm.clone(),
+        )
+    }
+
     /// Cumulative number of records written out by compaction merges since the
     /// engine opened — the numerator of write amplification (HEA-1881 lever 1).
     ///

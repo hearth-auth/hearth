@@ -34,6 +34,9 @@ const CONVERGE: Duration = Duration::from_secs(10);
 struct FaultStorage {
     inner: Arc<dyn StorageEngine>,
     fail_scans: AtomicBool,
+    /// Refuse scans with the error a cluster node's read gate returns, for
+    /// this cause, while set.
+    fence_scans: std::sync::Mutex<Option<crate::storage::ClusterUnavailableCause>>,
     /// Refuse `increment_u64` (a control-epoch bump) while set.
     fail_increments: AtomicBool,
     /// Refuse `increment_u64` with the error cluster storage returns on a
@@ -63,6 +66,7 @@ impl FaultStorage {
         Arc::new(Self {
             inner,
             fail_scans: AtomicBool::new(false),
+            fence_scans: std::sync::Mutex::new(None),
             fail_increments: AtomicBool::new(false),
             not_leader_increments: AtomicBool::new(false),
             hold_increments: AtomicBool::new(false),
@@ -105,6 +109,17 @@ impl StorageEngine for FaultStorage {
             return Err(StorageError::Io(std::io::Error::other(
                 "injected scan failure",
             )));
+        }
+        let fence = *self
+            .fence_scans
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(cause) = fence {
+            self.failed_scans.fetch_add(1, Ordering::SeqCst);
+            return Err(StorageError::ClusterUnavailable {
+                cause,
+                reason: "injected read fence".to_string(),
+            });
         }
         self.inner.scan(realm_id, start, end)
     }
@@ -383,6 +398,67 @@ fn a_failed_reload_does_not_consume_the_epoch() {
         binds_suspension(&validator, &realm, &token),
         "after one failed reload the validator never enforced a suspension asserted on another \
          node: the failed reload consumed the epoch"
+    );
+}
+
+/// A reload refused by the read gate (the node is out of contact with its
+/// leader, or installing a snapshot) is retried at the shortest delay, never
+/// backed off: the gate reopens as soon as contact resumes, and every
+/// control applied meanwhile must bind within the revocation bound. Backed
+/// off like a storage fault, the retry slept up to 5 s after the gate
+/// reopened, and Jepsen `revocation-isolated` saw a node accept a revoked
+/// session for 3.7 s.
+#[test]
+fn a_reload_refused_by_the_read_gate_is_retried_without_backoff() {
+    use crate::storage::ClusterUnavailableCause as Cause;
+    for cause in [Cause::NotInContact, Cause::InstallingSnapshot] {
+        reload_after_a_read_fence(cause);
+    }
+}
+
+fn reload_after_a_read_fence(cause: crate::storage::ClusterUnavailableCause) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shared = open_storage(&dir);
+    let fault = FaultStorage::over(Arc::clone(&shared));
+    let validator_storage = Arc::clone(&fault) as Arc<dyn StorageEngine>;
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+
+    let other_node = engine_over(&shared, &clock);
+    let (realm, token) = seed_token(&other_node);
+    let validator = engine_over(&validator_storage, &clock);
+    validator.validate_token(&realm, &token).expect("warm");
+
+    *fault
+        .fence_scans
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(cause);
+    suspend(&other_node, &realm);
+    clock.advance(EPOCH_SYNC_INTERVAL_MICROS + 1);
+    let _ = validator.validate_token(&realm, &token);
+    // Six refusals: backed off from 100 ms, the next retry would wait 3.2 s.
+    let deadline = Instant::now() + CONVERGE;
+    while fault.failed_scans.load(Ordering::SeqCst) < 6 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        fault.failed_scans.load(Ordering::SeqCst) >= 6,
+        "the reloader stopped retrying while the read gate refused it ({cause:?})"
+    );
+
+    *fault
+        .fence_scans
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    let reopened = Instant::now();
+    assert!(
+        binds_suspension(&validator, &realm, &token),
+        "the suspension never bound after the read gate reopened"
+    );
+    let waited = reopened.elapsed();
+    assert!(
+        waited < Duration::from_millis(1_500),
+        "the suspension bound {waited:?} after the read gate reopened: the reloader backed off \
+         while the gate refused it ({cause:?})"
     );
 }
 
