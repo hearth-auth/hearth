@@ -37,7 +37,12 @@ pub mod network;
 pub(crate) mod read_gate;
 pub(crate) mod rpc;
 pub mod server;
+pub mod snapshot_file;
+pub(crate) mod snapshot_store;
+pub(crate) mod snapshot_stream;
 pub mod state_machine;
+#[cfg(test)]
+mod test_fs;
 pub mod types;
 pub mod wire;
 

@@ -252,8 +252,7 @@ impl TestCluster {
             let storage_config = StorageConfig::dev(data_dir.clone());
             let storage =
                 Arc::new(EmbeddedStorageEngine::open(storage_config).expect("storage engine"));
-            let sm = HearthStateMachine::new(Arc::clone(&storage) as Arc<dyn StorageEngine>)
-                .expect("state machine");
+            let sm = HearthStateMachine::new(Arc::clone(&storage)).expect("state machine");
             let factory =
                 InMemoryNetworkFactory::new(id, Arc::clone(&registry), Arc::clone(&partitioned));
             let raft = openraft::Raft::<HearthRaftConfig>::new(
@@ -847,8 +846,7 @@ async fn simulation_rolling_restart_zero_errors() {
         let storage_config = StorageConfig::dev(cluster.nodes[restart_pos].data_dir.clone());
         let storage =
             Arc::new(EmbeddedStorageEngine::open(storage_config).expect("reopen storage"));
-        let sm = HearthStateMachine::new(Arc::clone(&storage) as Arc<dyn StorageEngine>)
-            .expect("state machine");
+        let sm = HearthStateMachine::new(Arc::clone(&storage)).expect("state machine");
         let factory = InMemoryNetworkFactory::new(
             restart_id,
             Arc::clone(&cluster.registry),
@@ -1054,8 +1052,7 @@ async fn simulation_restart_after_log_purge() {
         EmbeddedStorageEngine::open(StorageConfig::dev(cluster.nodes[follower].data_dir.clone()))
             .expect("reopen storage"),
     );
-    let sm = HearthStateMachine::new(Arc::clone(&storage) as Arc<dyn StorageEngine>)
-        .expect("state machine");
+    let sm = HearthStateMachine::new(Arc::clone(&storage)).expect("state machine");
     let factory = InMemoryNetworkFactory::new(
         restart_id,
         Arc::clone(&cluster.registry),
