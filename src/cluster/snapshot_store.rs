@@ -22,6 +22,7 @@ use std::sync::Arc;
 use openraft::LogId;
 use tracing::{info, warn};
 
+use crate::cluster::snapshot_file::remove_file_off_runtime;
 use crate::cluster::snapshot_stream::{self, Meta, StreamReader};
 use crate::storage::{SealedFiles, SEALED_CHUNK_LEN};
 
@@ -75,20 +76,24 @@ impl Drop for StoredSnapshot {
     fn drop(&mut self) {
         if self.retired.load(Ordering::Acquire) {
             // One unlink: a sender that opened the file keeps reading it.
-            self.store.discard(&self.path);
+            remove_file_off_runtime(self.store.files.fs(), self.path.clone());
         }
     }
 }
 
 impl SnapshotStore {
-    /// The snapshot directory under `data_dir`, created if missing.
+    /// The snapshot directory under `data_dir`, created if missing. The
+    /// data directory is synced, so the new directory's entry survives a
+    /// power loss (a snapshot kept in it may be all a node with a purged log
+    /// has).
     ///
     /// # Errors
     ///
-    /// Any error creating the directory.
+    /// Any error creating the directory or syncing the data directory.
     pub(crate) fn open(files: SealedFiles, data_dir: &Path) -> io::Result<Self> {
         let dir = data_dir.join(DIR_NAME);
         files.fs().create_dir_all(&dir)?;
+        files.fs().sync_dir(data_dir)?;
         Ok(Self { files, dir })
     }
 
@@ -228,6 +233,8 @@ impl SnapshotStore {
 mod tests {
     use super::*;
     use crate::cluster::snapshot_stream::StreamWriter;
+    use crate::cluster::test_fs::{eventually, TestFs};
+    use crate::storage::Fs;
     use openraft::{CommittedLeaderId, SnapshotMeta, StoredMembership};
     use std::io::Write as _;
 
@@ -325,6 +332,44 @@ mod tests {
         assert!(path.exists(), "a holder keeps the file");
         drop(holder);
         assert!(!path.exists(), "the last holder's drop removes it");
+    }
+
+    /// Power loss after the first start must not lose the directory: its
+    /// entry in the data directory is synced.
+    #[test]
+    fn opening_the_store_syncs_its_directory_into_the_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = TestFs::new();
+        let files = SealedFiles::for_tests_with(dir.path(), Arc::clone(&fs) as Arc<dyn Fs>);
+        let data = dir.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        SnapshotStore::open(files, &data).unwrap();
+        assert!(
+            fs.synced_dirs.lock().unwrap().contains(&data),
+            "the data directory is synced after creating {DIR_NAME}/"
+        );
+    }
+
+    /// Unlinking a large file is blocking I/O: the last holder's drop on a
+    /// runtime thread hands the removal to the blocking pool.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_retired_snapshot_is_removed_off_the_runtime_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = TestFs::new();
+        let files = SealedFiles::for_tests_with(dir.path(), Arc::clone(&fs) as Arc<dyn Fs>);
+        let s = SnapshotStore::open(files, dir.path()).unwrap();
+        let snap = write_snap(&s, 1);
+        let path = snap.path().to_path_buf();
+        snap.retire();
+        drop(snap);
+        assert!(eventually(|| !path.exists()).await, "the file is removed");
+        let me = std::thread::current().id();
+        let removers = fs.removers_of(&path);
+        assert_ne!(removers.len(), 0, "the file was removed through the fs");
+        assert!(
+            removers.iter().all(|t| *t != me),
+            "removed on the runtime thread"
+        );
     }
 
     #[test]

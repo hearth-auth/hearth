@@ -7,7 +7,9 @@
 //! 1. builds a snapshot of it through the state machine (as a leader does);
 //! 2. sends it to a second, empty node's state machine the way openraft does
 //!    (4 MiB chunks into the file `begin_receiving_snapshot` returns, then
-//!    `shutdown`, which checks it), and installs it.
+//!    `shutdown`, which checks it), and installs it;
+//! 3. sends and installs it again, over the store the first install filled,
+//!    so the restore's delete phase removes every key first.
 //!
 //! A sampler thread reads `RssAnon` and `VmRSS` from `/proc/self/status`
 //! every 5 ms. Each phase reports, for both, its start value, its peak and the
@@ -35,10 +37,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use hearth::cluster::snapshot_file::SnapshotFile;
 use hearth::cluster::state_machine::HearthStateMachine;
+use hearth::cluster::types::HearthNode;
 use hearth::core::RealmId;
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
 use openraft::storage::{RaftSnapshotBuilder, RaftStateMachine};
+use openraft::SnapshotMeta;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 /// openraft's transfer chunk in Hearth (`cluster::wire::SNAPSHOT_CHUNK_BYTES`).
@@ -231,34 +236,17 @@ async fn main() {
             .expect("follower state machine")
     };
     let meta = snapshot.meta.clone();
-    let ((), install_mib) = measure("install", async {
-        let mut received = follower_sm
-            .begin_receiving_snapshot()
-            .await
-            .expect("begin receiving");
-        sent.seek(std::io::SeekFrom::Start(0)).await.expect("seek");
-        let mut buf = Vec::with_capacity(CHUNK);
-        loop {
-            buf.clear();
-            while buf.len() < CHUNK {
-                if sent.read_buf(&mut buf).await.expect("read") == 0 {
-                    break;
-                }
-            }
-            if buf.is_empty() {
-                break;
-            }
-            received.write_all(&buf).await.expect("write");
-        }
-        received
-            .shutdown()
-            .await
-            .expect("the received snapshot checks");
-        follower_sm
-            .install_snapshot(&meta, received)
-            .await
-            .expect("install");
-    })
+    let ((), install_mib) = measure(
+        "install",
+        send_and_install(&mut sent, &mut follower_sm, &meta),
+    )
+    .await;
+    // Again, over the store the first install filled: the restore first
+    // deletes every key the follower holds.
+    let ((), reinstall_mib) = measure(
+        "reinstall",
+        send_and_install(&mut sent, &mut follower_sm, &meta),
+    )
     .await;
 
     let probe = format!("user:{:016x}", users - 1);
@@ -269,8 +257,46 @@ async fn main() {
     );
     let verdict = |mib: f64| if mib < BUDGET_MIB { "within" } else { "OVER" };
     println!(
-        "RssAnon budget {BUDGET_MIB} MiB: build {} ({build_mib:.1} MiB), install {} ({install_mib:.1} MiB)",
+        "RssAnon budget {BUDGET_MIB} MiB: build {} ({build_mib:.1} MiB), install {} ({install_mib:.1} MiB), \
+         reinstall {} ({reinstall_mib:.1} MiB)",
         verdict(build_mib),
-        verdict(install_mib)
+        verdict(install_mib),
+        verdict(reinstall_mib)
     );
+}
+
+/// Sends `sent` to `follower` the way openraft does (4 MiB chunks into the
+/// file `begin_receiving_snapshot` returns, then `shutdown`, which checks
+/// it) and installs it.
+async fn send_and_install(
+    sent: &mut SnapshotFile,
+    follower: &mut HearthStateMachine,
+    meta: &SnapshotMeta<u64, HearthNode>,
+) {
+    let mut received = follower
+        .begin_receiving_snapshot()
+        .await
+        .expect("begin receiving");
+    sent.seek(std::io::SeekFrom::Start(0)).await.expect("seek");
+    let mut buf = Vec::with_capacity(CHUNK);
+    loop {
+        buf.clear();
+        while buf.len() < CHUNK {
+            if sent.read_buf(&mut buf).await.expect("read") == 0 {
+                break;
+            }
+        }
+        if buf.is_empty() {
+            break;
+        }
+        received.write_all(&buf).await.expect("write");
+    }
+    received
+        .shutdown()
+        .await
+        .expect("the received snapshot checks");
+    follower
+        .install_snapshot(meta, received)
+        .await
+        .expect("install");
 }

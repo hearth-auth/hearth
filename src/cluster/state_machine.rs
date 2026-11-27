@@ -16,7 +16,7 @@
 
 use std::io::{BufReader, Read};
 use std::ops::ControlFlow;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
@@ -29,7 +29,7 @@ use serde::Serialize;
 use tokio::task::spawn_blocking;
 use tracing::{debug, info, instrument};
 
-use crate::cluster::snapshot_file::SnapshotFile;
+use crate::cluster::snapshot_file::{remove_file_off_runtime, SnapshotFile};
 use crate::cluster::snapshot_store::{Part, SnapshotStore, StoredSnapshot};
 use crate::cluster::snapshot_stream::{Record, StreamReader, StreamWriter};
 use crate::cluster::types::{HearthLogResponse, HearthNode, HearthRaftConfig, RaftCommand};
@@ -444,8 +444,10 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
         // checked it (cluster-file-snapshots, design decision 5): a bad
         // transfer failed there and was sent again.
         let (part, summary) = snapshot.take_received().map_err(io_read_err)?;
+        // Until it is kept, a file the install fails on is removed: it must
+        // not hold the disk until the next start-up.
+        let mut unkept = UnkeptFile::new(&self.store, &part);
         if summary.meta != *meta {
-            self.store.discard(&part);
             return Err(io_read_err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "the received snapshot's META does not match the install request",
@@ -490,6 +492,7 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
             .await
             .map_err(join_err)?
             .map_err(io_write_err)?;
+        unkept.kept();
 
         // The whole key-space was replaced — node-local projections derived
         // from it (revoked-JTI blocklist, …) must be rebuilt from storage
@@ -532,6 +535,35 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
+
+/// A received file the install has not kept yet: removed (off the runtime
+/// thread) when dropped before [`UnkeptFile::kept`].
+struct UnkeptFile {
+    store: SnapshotStore,
+    path: Option<PathBuf>,
+}
+
+impl UnkeptFile {
+    fn new(store: &SnapshotStore, path: &Path) -> Self {
+        Self {
+            store: store.clone(),
+            path: Some(path.to_path_buf()),
+        }
+    }
+
+    /// The file is the node's snapshot now: keep it.
+    fn kept(&mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for UnkeptFile {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            remove_file_off_runtime(self.store.files().fs(), path);
+        }
+    }
+}
 
 impl HearthStateMachine {
     /// Writes applied-state rows that belong to no data realm (a blank or a
@@ -1217,6 +1249,13 @@ mod tests {
     }
 
     /// Sends `snap` to `to` and installs it there.
+    async fn install_received(
+        to: &mut HearthStateMachine,
+        snap: Snapshot<HearthRaftConfig>,
+    ) -> Result<(), openraft::StorageError<u64>> {
+        to.install_snapshot(&snap.meta, snap.snapshot).await
+    }
+
     pub(super) async fn install(
         to: &mut HearthStateMachine,
         snap: Snapshot<HearthRaftConfig>,
@@ -1956,13 +1995,61 @@ mod tests {
         );
         drop(received);
         assert_eq!(keys_of(&follower, &realm), vec![b"old".to_vec()]);
-        let left = std::fs::read_dir(follower_dir.join(super::super::snapshot_store::DIR_NAME))
-            .unwrap()
-            .count();
-        assert_eq!(left, 0, "the refused file is removed");
+        let snaps = follower_dir.join(super::super::snapshot_store::DIR_NAME);
+        assert!(
+            crate::cluster::test_fs::eventually(|| std::fs::read_dir(&snaps).unwrap().count() == 0)
+                .await,
+            "the refused file is removed"
+        );
 
         install(&mut follower, snap).await.unwrap();
         assert_eq!(keys_of(&follower, &realm), vec![b"new".to_vec()]);
+    }
+
+    /// A received file the install cannot use is removed, not left to hold
+    /// the disk until the next restart.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn a_failed_install_leaves_no_received_file() {
+        let dir = tempdir().unwrap();
+        let mut sm = open_sm(&dir.path().join("a"));
+        let realm = make_realm();
+        sm.apply([make_put_entry(
+            1,
+            realm.clone(),
+            b"new".to_vec(),
+            b"v".to_vec(),
+        )])
+        .await
+        .unwrap();
+        let snap = sm
+            .get_snapshot_builder()
+            .await
+            .build_snapshot()
+            .await
+            .unwrap();
+
+        let follower = dir.path().join("b");
+        let snaps = follower.join(super::super::snapshot_store::DIR_NAME);
+        let mut sm_b = open_sm(&follower);
+        let snap = transfer(&mut sm_b, snap).await;
+        // The checked file changes on disk before the install reads it.
+        let recv: Vec<_> = std::fs::read_dir(&snaps)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(recv.len(), 1);
+        let mut raw = std::fs::read(&recv[0]).unwrap();
+        raw[100] ^= 1;
+        std::fs::write(&recv[0], raw).unwrap();
+
+        assert!(install_received(&mut sm_b, snap).await.is_err());
+        assert_eq!(keys_of(&sm_b, &realm), Vec::<Vec<u8>>::new());
+        assert!(
+            crate::cluster::test_fs::eventually(|| std::fs::read_dir(&snaps).unwrap().count() == 0)
+                .await,
+            "the received file is removed"
+        );
     }
 
     #[tokio::test]

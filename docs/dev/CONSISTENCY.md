@@ -90,7 +90,7 @@ Evidence:
 | ID | Promise | Status |
 |---|---|---|
 | **S1** | A snapshot that declares index N holds the effects of every entry up to N and of none after N, while the node keeps applying. | Implemented |
-| **S2** | A build and an install each raise a node's anonymous memory by less than 512 MiB at 1,000,000 users. | Implemented (8.1 / 51.9 MiB, [snapshot-memory.md](../perf/snapshot-memory.md)) |
+| **S2** | A build and an install each raise a node's anonymous memory by less than 512 MiB at 1,000,000 users. | Implemented (build 8.1 MiB; install 51.9 MiB into an empty store, 346 MiB over a full one; [snapshot-memory.md](../perf/snapshot-memory.md)) |
 | **S3** | Snapshot files, partial ones included, are encrypted under a per-file key wrapped by the node's system KEK. | Implemented |
 | **S4** | A received snapshot is checked whole before it changes the store; a failed check leaves the store and the Raft core untouched, and the leader can send it again. | Implemented |
 | **S5** | A built or installed snapshot is durable before it is reported, and is served again after a restart; partial files are removed at start-up. | Implemented |
