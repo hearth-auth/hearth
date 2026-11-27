@@ -13,7 +13,7 @@
 //!  │    • leader write routing via client_write           │
 //!  │    • follower writes forwarded to the leader, then   │
 //!  │      awaited locally (read-your-writes)              │
-//!  │    • follower read staleness via reads_allowed flag  │
+//!  │    • reads only while in contact (ReadGate)          │
 //!  └──────────────────────────────────────────────────────┘
 //!  ┌──────────────────────────────────────────────────────┐
 //!  │  HearthNetworkFactory (outgoing RPCs)                │
@@ -34,6 +34,7 @@ pub mod engine;
 pub(crate) mod error;
 pub mod log_store;
 pub mod network;
+pub(crate) mod read_gate;
 pub(crate) mod rpc;
 pub mod server;
 pub mod snapshot_file;
@@ -78,7 +79,7 @@ pub trait ReplicatedWriteObserver: Send + Sync {
 
 pub use engine::{
     is_not_leader, ClusterBuildError, ClusterEngine, ClusterError, ClusterStorageAdapter,
-    DEFAULT_MAX_WRITES_IN_FLIGHT,
+    StartUpReads, DEFAULT_MAX_WRITES_IN_FLIGHT,
 };
 pub use log_store::{HearthLogReader, HearthLogStore};
 pub use network::{HearthNetworkFactory, PeerFaults};

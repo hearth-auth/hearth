@@ -21,12 +21,18 @@
 //! no leader could be reached at all.
 //!
 //! ## Read path (cluster mode)
-//! A background task updates [`ClusterEngine::reads_allowed`] every 50 ms by
-//! comparing `last_log_index` vs `last_applied` log indices. Reads check the
-//! flag; if `false` the caller receives [`ClusterError::ReplicationLagExceeded`].
+//! Reads are local, behind the read gate ([`ReadGate`]): a node serves a read
+//! only while it is in contact (`cluster-consistency` R2). A follower is in
+//! contact for `cluster.read_lag_threshold_ms` after each `AppendEntries` it
+//! accepts from the current leader; a leader, for that long after a quorum
+//! acknowledged it. A background task checks every 50 ms that applied entries do not lag
+//! received ones beyond the threshold, holds the gate closed while they do,
+//! and refreshes a leader's contact.
+//! A refused read returns
+//! [`ClusterError::ReadsFenced`].
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 
@@ -40,6 +46,7 @@ use tracing::{info, warn};
 
 use crate::cluster::log_store::HearthLogStore;
 use crate::cluster::network::{ForwardFailure, HearthNetworkFactory, LeaderForwarder, PeerFaults};
+use crate::cluster::read_gate::{leader_contact, LeaderContact, ReadGate, Refusal};
 use crate::cluster::server::IncomingRpcDispatch;
 use crate::cluster::state_machine::HearthStateMachine;
 use crate::cluster::types::{
@@ -50,7 +57,9 @@ use crate::cluster::ReplicatedWriteObserver;
 use crate::config::ClusterConfig;
 use crate::core::RealmId;
 use crate::metrics::ForwardedWriteOutcomeLabel;
-use crate::storage::{EmbeddedStorageEngine, ScanEntry, StorageConfig, StorageEngine};
+use crate::storage::{
+    ClusterUnavailableCause, EmbeddedStorageEngine, ScanEntry, StorageConfig, StorageEngine,
+};
 
 // ── Error types ───────────────────────────────────────────────────────────────
 
@@ -62,9 +71,13 @@ pub enum ClusterError {
     #[error("not the leader; redirect to {leader_addr}")]
     NotLeader { leader_addr: String },
 
-    /// Follower replication lag exceeds the configured threshold.
-    #[error("replication lag exceeded; redirect to {leader_addr}")]
-    ReplicationLagExceeded { leader_addr: String },
+    /// This node's reads are fenced: it is out of contact, or it lags the
+    /// leader (see [`ReadGate`]).
+    #[error("reads fenced ({cause}); redirect to {leader_addr}")]
+    ReadsFenced {
+        cause: ClusterUnavailableCause,
+        leader_addr: String,
+    },
 
     /// Underlying storage returned an error.
     #[error("storage: {0}")]
@@ -224,7 +237,7 @@ const INSTALL_SNAPSHOT_TIMEOUT_MS: u64 = 15 * 60 * 1000;
 /// The Raft configuration of every clustered node (before validation).
 fn raft_config() -> RaftConfig {
     RaftConfig {
-        heartbeat_interval: 500,
+        heartbeat_interval: ClusterConfig::RAFT_HEARTBEAT_INTERVAL_MS,
         election_timeout_min: 1500,
         election_timeout_max: ELECTION_TIMEOUT_MAX_MS,
         // Chunks well under the peer message limit (see `cluster::wire`);
@@ -249,15 +262,29 @@ pub enum ClusterBuildError {
 
 // ── ClusterEngine ─────────────────────────────────────────────────────────────
 
+/// While alive, a node's reads skip the contact check (see
+/// [`ClusterEngine::start_up_reads`]).
+pub struct StartUpReads {
+    gate: Option<Arc<ReadGate>>,
+}
+
+impl Drop for StartUpReads {
+    fn drop(&mut self) {
+        if let Some(gate) = &self.gate {
+            gate.end_start_up();
+        }
+    }
+}
+
 /// Public-facing storage wrapper that makes the cluster layer invisible in
 /// single-node mode and routes traffic correctly in cluster mode.
 pub struct ClusterEngine {
     inner: Arc<EmbeddedStorageEngine>,
     /// `None` in single-node mode — no Raft overhead, no port allocation.
     raft: Option<openraft::Raft<HearthRaftConfig>>,
-    /// Follower reads are allowed when `true`. Updated every 50 ms by the
-    /// background lag-monitor task in cluster mode.
-    reads_allowed: Arc<AtomicBool>,
+    /// Whether this node is in contact (see [`ReadGate`]). `None` in
+    /// single-node mode, which always serves reads.
+    read_gate: Option<Arc<ReadGate>>,
     /// Maximum acceptable replication lag in milliseconds (default 500).
     read_lag_threshold_ms: u64,
     /// Upper bound on a single `client_write` (default 10 s). See
@@ -299,14 +326,41 @@ impl ClusterEngine {
         Self {
             inner,
             raft: None,
-            reads_allowed: Arc::new(AtomicBool::new(true)),
-            read_lag_threshold_ms: 500,
+            read_gate: None,
+            read_lag_threshold_ms: ClusterConfig::DEFAULT_READ_LAG_THRESHOLD_MS,
             write_timeout: Duration::from_millis(ClusterConfig::DEFAULT_WRITE_TIMEOUT_MS),
             self_node_id: None,
             initial_members: None,
             observer_slot: None,
             forwarding: None,
             clock_offset: ClockOffsetMonitor::default(),
+        }
+    }
+
+    /// A single-node engine with a read gate: reads behave as on a cluster
+    /// node, with `gate` driven by the test. Test-only.
+    #[cfg(test)]
+    pub(crate) fn with_read_gate(inner: Arc<EmbeddedStorageEngine>, gate: Arc<ReadGate>) -> Self {
+        Self {
+            read_gate: Some(gate),
+            ..Self::single_node(inner)
+        }
+    }
+
+    /// Lets this node's reads skip the contact check while `serve` starts,
+    /// until the returned guard drops. A no-op in single-node mode.
+    ///
+    /// Start-up reads build caches and serve no client, so a node that
+    /// cannot reach a quorum still starts and reports why on `/readyz`.
+    /// `serve` drops the guard just before its listeners start: from then
+    /// on, every read needs contact (`cluster-consistency` R2).
+    #[must_use = "the exemption ends when the guard drops"]
+    pub fn start_up_reads(&self) -> StartUpReads {
+        if let Some(gate) = &self.read_gate {
+            gate.begin_start_up();
+        }
+        StartUpReads {
+            gate: self.read_gate.clone(),
         }
     }
 
@@ -383,13 +437,20 @@ impl ClusterEngine {
             Arc::new(OnceLock::new());
         // The state machine loads its persisted applied state (storage reads:
         // on the blocking pool).
+        let threshold = config
+            .read_lag_threshold_ms
+            .unwrap_or(ClusterConfig::DEFAULT_READ_LAG_THRESHOLD_MS);
+        // Closed until the first contact: a node that has just started has
+        // not yet heard from any leader.
+        let read_gate = Arc::new(ReadGate::new(threshold));
         let slot = Arc::clone(&observer_slot);
         let state_machine = tokio::task::spawn_blocking(move || {
             HearthStateMachine::with_observer_slot(sm_engine, slot)
         })
         .await
         .map_err(|e| ClusterBuildError::RaftInit(e.to_string()))?
-        .map_err(|e| ClusterBuildError::RaftInit(e.to_string()))?;
+        .map_err(|e| ClusterBuildError::RaftInit(e.to_string()))?
+        .with_read_gate(Arc::clone(&read_gate));
         if state_machine.has_no_applied_state() {
             let log_state = openraft::storage::RaftLogStorage::get_log_state(&mut log_store)
                 .await
@@ -400,7 +461,8 @@ impl ClusterEngine {
         let cert_pem = tokio::fs::read(&config.tls_cert_path).await?;
         let key_pem = tokio::fs::read(&config.tls_key_path).await?;
         let ca_pem = tokio::fs::read(&config.tls_ca_cert_path).await?;
-        let network_factory = HearthNetworkFactory::new(cert_pem, key_pem, ca_pem);
+        let network_factory = HearthNetworkFactory::new(cert_pem, key_pem, ca_pem)
+            .with_read_gate(Arc::clone(&read_gate));
         let network_factory = match faults {
             Some(f) => network_factory.with_peer_faults(f),
             None => network_factory,
@@ -426,19 +488,17 @@ impl ClusterEngine {
         .await
         .map_err(|e| ClusterBuildError::RaftInit(e.to_string()))?;
 
-        let threshold = config.read_lag_threshold_ms.unwrap_or(500);
         let write_timeout = Duration::from_millis(
             config
                 .write_timeout_ms
                 .unwrap_or(ClusterConfig::DEFAULT_WRITE_TIMEOUT_MS),
         );
-        let reads_allowed = Arc::new(AtomicBool::new(true));
-        let reads_flag = Arc::clone(&reads_allowed);
-        let raft_for_monitor = raft.clone();
 
-        tokio::spawn(async move {
-            run_lag_monitor(raft_for_monitor, reads_flag, threshold).await;
-        });
+        tokio::spawn(run_lag_monitor(
+            raft.clone(),
+            Arc::clone(&read_gate),
+            threshold,
+        ));
         tokio::spawn(watch_leadership(raft.clone(), Arc::clone(&observer_slot)));
 
         let initial_members = initial_members_of(config);
@@ -455,7 +515,7 @@ impl ClusterEngine {
         Ok(Self {
             inner,
             raft: Some(raft),
-            reads_allowed,
+            read_gate: Some(read_gate),
             read_lag_threshold_ms: threshold,
             write_timeout,
             self_node_id: Some(config.node_id),
@@ -620,18 +680,31 @@ impl ClusterEngine {
     ///   leader down (docs/dev/CONSISTENCY.md G1), and a node restarted on a
     ///   store whose last vote was its own resumes as leader with no quorum.
     ///
+    /// - `"not_in_contact"`: the read gate is closed: no contact with a
+    ///   leader within `cluster.read_lag_threshold_ms`, so reads answer `503`.
+    /// - `"replication_lag"`: the read gate's lag hold is set.
+    ///
     /// Local knowledge only: a follower whose leader is gone keeps it as
-    /// leader until its own election timeout (1.5–3 s) passes.
+    /// leader until its own election timeout (1.5–3 s) passes, but its read
+    /// gate closes within the threshold.
     pub fn not_ready_reason(&self) -> Option<&'static str> {
-        let raft = self.raft.as_ref()?;
-        let metrics = raft.metrics();
-        let m = metrics.borrow();
-        leader_gap(
-            m.id,
-            m.current_leader,
-            m.millis_since_quorum_ack,
-            m.membership_config.membership().voter_ids().count(),
-        )
+        let leader = self.raft.as_ref().and_then(|raft| {
+            let metrics = raft.metrics();
+            let m = metrics.borrow();
+            leader_gap(
+                m.id,
+                m.current_leader,
+                m.millis_since_quorum_ack,
+                m.membership_config.membership().voter_ids().count(),
+            )
+        });
+        leader.or_else(|| {
+            let gate = self.read_gate.as_ref()?;
+            gate.refusal_at(gate.now_ms()).map(|refusal| match refusal {
+                Refusal::NotInContact => "not_in_contact",
+                Refusal::ReplicationLag => "replication_lag",
+            })
+        })
     }
 
     /// Initial cluster membership map built from config at startup.
@@ -855,9 +928,28 @@ impl ClusterEngine {
 
     /// Returns `true` if reads should be served.
     ///
-    /// Single-node: always true. Cluster: gated by the lag-monitor flag.
-    fn reads_ok(&self) -> bool {
-        self.raft.is_none() || self.reads_allowed.load(Ordering::Relaxed)
+    /// Single-node: always true. Cluster: the read gate. Hot path: one
+    /// atomic load and a monotonic clock read, no allocation, no lock.
+    pub(crate) fn reads_ok(&self) -> bool {
+        self.read_gate.as_ref().is_none_or(|gate| gate.allows())
+    }
+
+    /// The error for a read that [`Self::reads_ok`] refused. Off the hot
+    /// path.
+    fn reads_fenced(&self) -> ClusterError {
+        let refusal = self
+            .read_gate
+            .as_ref()
+            .and_then(|gate| gate.refusal_at(gate.now_ms()));
+        let cause = match refusal {
+            Some(Refusal::ReplicationLag) => ClusterUnavailableCause::ReplicationLag,
+            // `None`: the gate opened after the read was refused.
+            Some(Refusal::NotInContact) | None => ClusterUnavailableCause::NotInContact,
+        };
+        ClusterError::ReadsFenced {
+            cause,
+            leader_addr: self.current_leader_addr(),
+        }
     }
 
     /// Runs `read` against the local engine on the calling thread, behind the
@@ -877,9 +969,7 @@ impl ClusterEngine {
         read: impl FnOnce(&EmbeddedStorageEngine) -> Result<T, crate::storage::StorageError>,
     ) -> Result<T, ClusterError> {
         if !self.reads_ok() {
-            return Err(ClusterError::ReplicationLagExceeded {
-                leader_addr: self.current_leader_addr(),
-            });
+            return Err(self.reads_fenced());
         }
         read(&self.inner).map_err(ClusterError::Storage)
     }
@@ -1259,9 +1349,7 @@ impl ClusterEngine {
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, ClusterError> {
         if !self.reads_ok() {
-            return Err(ClusterError::ReplicationLagExceeded {
-                leader_addr: self.current_leader_addr(),
-            });
+            return Err(self.reads_fenced());
         }
         let inner = Arc::clone(&self.inner);
         let realm_id = realm_id.clone();
@@ -1330,9 +1418,7 @@ impl ClusterEngine {
         end: &[u8],
     ) -> Result<Vec<ScanEntry>, ClusterError> {
         if !self.reads_ok() {
-            return Err(ClusterError::ReplicationLagExceeded {
-                leader_addr: self.current_leader_addr(),
-            });
+            return Err(self.reads_fenced());
         }
         let inner = Arc::clone(&self.inner);
         let realm_id = realm_id.clone();
@@ -1529,11 +1615,21 @@ impl ClusterEngine {
 // ── IncomingRpcDispatch ───────────────────────────────────────────────────────
 
 impl IncomingRpcDispatch for ClusterEngine {
-    async fn append_entries(&self, payload: &[u8]) -> Result<Vec<u8>, String> {
+    async fn append_entries(
+        &self,
+        payload: &[u8],
+        leader_quorum_ack_age_ms: Option<u64>,
+    ) -> Result<Vec<u8>, String> {
         let raft = self.raft.as_ref().ok_or("Raft not initialised")?;
         let req: AppendEntriesRequest<HearthRaftConfig> = wire::decode(payload)?;
         self.note_clock_offset(&req);
+        // Dated from its arrival, before Raft handles it: the contact cannot
+        // be later than the leader's state the request carries.
+        let gate = self.read_gate.as_ref().ok_or("Raft not initialised")?;
+        let received_ms = gate.now_ms();
+        let reach = LogReach::of(&req);
         let resp = raft.append_entries(req).await.map_err(|e| e.to_string())?;
+        note_append_entries(gate, received_ms, leader_quorum_ack_age_ms, reach, &resp);
         wire::encode(&resp)
     }
 
@@ -1595,25 +1691,194 @@ fn refuse_restart_without_applied_state(
     }
 }
 
+/// Every 50 ms: sets the read gate's lag hold, and refreshes a leader's
+/// contact, from the Raft metrics. Exits when the Raft instance shuts down.
 async fn run_lag_monitor(
     raft: openraft::Raft<HearthRaftConfig>,
-    reads_allowed: Arc<AtomicBool>,
+    gate: Arc<ReadGate>,
     threshold_ms: u64,
 ) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(50));
+    let mut metrics = raft.metrics();
+    // When the previous poll began. Every report seen as new now was made
+    // after it.
+    let mut previous_poll_ms: Option<u64> = None;
+    let mut was_lagging = false;
     loop {
         interval.tick().await;
-        let metrics = raft.metrics().borrow().clone();
-        let lag = compute_lag_ms(&metrics);
-        let ok = reads_allowed_for_lag(lag, threshold_ms);
-        reads_allowed.store(ok, Ordering::Relaxed);
-        if !ok {
+        // Read before the metrics, so it is a lower bound for any report the
+        // next poll sees as new.
+        let poll_ms = gate.now_ms();
+        let Ok(fresh) = metrics.has_changed() else {
+            return;
+        };
+        let (tick, lagging) = {
+            let m = metrics.borrow_and_update();
+            let tick = MonitorTick {
+                lag_ms: compute_lag_ms(&m),
+                contact: leader_contact(
+                    m.id,
+                    m.current_leader,
+                    m.millis_since_quorum_ack,
+                    m.membership_config.membership().voter_ids().count(),
+                    threshold_ms,
+                ),
+                quorum_ack_ago_ms: m.millis_since_quorum_ack,
+                reported_after_ms: previous_poll_ms.filter(|_| fresh),
+                now_ms: poll_ms,
+            };
+            let lagging = apply_monitor_tick(&gate, &tick, threshold_ms);
+            (tick, lagging)
+        };
+        previous_poll_ms = Some(poll_ms);
+        if lagging && !was_lagging {
             warn!(
-                lag_ms = lag,
-                threshold_ms, "replication lag exceeds threshold — follower reads disabled"
+                lag_ms = tick.lag_ms,
+                threshold_ms, "replication lag exceeds threshold — reads refused on this node"
             );
         }
+        was_lagging = lagging;
     }
+}
+
+/// The oldest leader quorum acknowledgement for which a follower still counts
+/// an `AppendEntries` as contact (see [`note_append_entries`]): the leader
+/// lease (openraft's `leader_lease`, equal to [`ELECTION_TIMEOUT_MAX_MS`])
+/// less 1 s for the network delay between the leader's clock and this node's.
+///
+/// A voter that acknowledged a leader refuses to vote for another until the
+/// lease runs out, so no other leader can acknowledge a write before the
+/// deposed one's last quorum acknowledgement plus the lease. A follower that
+/// stops counting it earlier serves no state older than that.
+const MAX_LEADER_ACK_AGE_MS: u64 = ELECTION_TIMEOUT_MAX_MS - 1_000;
+
+/// Records a follower's contact when it accepted an `AppendEntries` that
+/// arrived at `received_ms` ([`accepted_through_commit`]), from a leader a
+/// quorum acknowledged `leader_quorum_ack_age_ms` before it sent the request.
+///
+/// The highest term this node knows can be stale: a leader cut off from its
+/// quorum together with this node goes on sending heartbeats while the
+/// majority elects another leader and acknowledges writes. So a request
+/// counts only when its leader had a quorum acknowledgement less than
+/// [`MAX_LEADER_ACK_AGE_MS`] before it sent it. A request with no age (no
+/// acknowledgement on record, or an older build) is no contact.
+fn note_append_entries(
+    gate: &ReadGate,
+    received_ms: u64,
+    leader_quorum_ack_age_ms: Option<u64>,
+    reach: LogReach,
+    resp: &openraft::raft::AppendEntriesResponse<u64>,
+) {
+    let leader_acked = leader_quorum_ack_age_ms.is_some_and(|age| age < MAX_LEADER_ACK_AGE_MS);
+    if leader_acked && accepted_through_commit(reach, resp) {
+        gate.record_contact_once_applied(received_ms, reach.leader_commit);
+    }
+}
+
+/// How far an `AppendEntries` request reaches, by log index.
+#[derive(Debug, Clone, Copy)]
+struct LogReach {
+    /// The leader's commit index when it sent the request.
+    leader_commit: Option<u64>,
+    /// The request's last log id: its last entry, or `prev_log_id` when it
+    /// carries none.
+    last: Option<u64>,
+}
+
+impl LogReach {
+    fn of(req: &AppendEntriesRequest<HearthRaftConfig>) -> Self {
+        Self {
+            leader_commit: req.leader_commit.map(|id| id.index),
+            last: req
+                .entries
+                .last()
+                .map(|entry| entry.log_id.index)
+                .or(req.prev_log_id.map(|id| id.index)),
+        }
+    }
+}
+
+/// Whether a follower that answered `resp` to a request of `reach` now holds
+/// every entry the leader had committed when it sent it.
+///
+/// openraft answers `Success` or `PartialSuccess` only to the leader of the
+/// highest term this node knows, and only when the request's log matched. A
+/// `Conflict` (log mismatch) or a `HigherVote` (a stale leader) is no
+/// contact. A matching log is not the leader's whole log either: a heartbeat
+/// to a follower that is behind, or one catch-up batch, ends before the
+/// leader's commit index, so it is no contact. In steady state every request
+/// ends at the leader's last log, so this costs nothing.
+fn accepted_through_commit(
+    reach: LogReach,
+    resp: &openraft::raft::AppendEntriesResponse<u64>,
+) -> bool {
+    use openraft::raft::AppendEntriesResponse as R;
+    let accepted_last = match resp {
+        R::Success => reach.last,
+        R::PartialSuccess(matching) => matching.map(|id| id.index),
+        R::Conflict | R::HigherVote(_) => return false,
+    };
+    match (reach.leader_commit, accepted_last) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(commit), Some(last)) => last >= commit,
+    }
+}
+
+/// What one lag-monitor poll read from the Raft metrics.
+#[derive(Debug, Clone, Copy)]
+struct MonitorTick {
+    /// [`compute_lag_ms`] of the metrics.
+    lag_ms: u64,
+    /// The node's contact as a leader.
+    contact: LeaderContact,
+    /// `millis_since_quorum_ack` of the metrics, threshold or not.
+    quorum_ack_ago_ms: Option<u64>,
+    /// A time before the metrics were reported, in read-gate milliseconds,
+    /// or `None` when that is not known (the metrics did not change since
+    /// the previous poll, or this is the first). openraft computes
+    /// `millis_since_quorum_ack` when it reports, so the age is measured
+    /// from the report, not from the poll.
+    reported_after_ms: Option<u64>,
+    /// When the poll began, in read-gate milliseconds.
+    now_ms: u64,
+}
+
+/// Applies one lag-monitor poll to the read gate. Returns whether the apply
+/// lag holds reads.
+///
+/// A leader's quorum acknowledgement is dated from `reported_after_ms`, which
+/// is never later than the report, so the deadline is never later than the
+/// acknowledgement plus the threshold. A poll that cannot date the report
+/// leaves the deadline as it is. The same date is recorded as the leader's
+/// quorum acknowledgement, which its heartbeats carry to its followers; a
+/// node that does not lead has none.
+fn apply_monitor_tick(gate: &ReadGate, tick: &MonitorTick, threshold_ms: u64) -> bool {
+    let lagging = !reads_allowed_for_lag(tick.lag_ms, threshold_ms);
+    gate.set_lag_hold(lagging);
+    match tick.contact {
+        LeaderContact::SoleVoter => {
+            gate.record_contact_at(tick.now_ms);
+            gate.record_quorum_ack_at(tick.now_ms);
+        }
+        LeaderContact::AckedAgo { ms } => {
+            if let Some(reported_after) = tick.reported_after_ms {
+                gate.record_contact_at(reported_after.saturating_sub(ms));
+            }
+        }
+        LeaderContact::NotLeader => gate.clear_quorum_ack(),
+        LeaderContact::OutOfContact => {}
+    }
+    if matches!(
+        tick.contact,
+        LeaderContact::AckedAgo { .. } | LeaderContact::OutOfContact
+    ) {
+        if let (Some(ago), Some(reported_after)) = (tick.quorum_ack_ago_ms, tick.reported_after_ms)
+        {
+            gate.record_quorum_ack_at(reported_after.saturating_sub(ago));
+        }
+    }
+    lagging
 }
 
 /// Read-fencing decision: follower reads are served only while replication lag
@@ -2028,7 +2293,7 @@ pub(crate) fn cluster_to_storage_err(e: ClusterError) -> crate::storage::Storage
         ClusterError::Storage(se) => se,
         ClusterError::NotLeader { .. } => unavailable(Cause::NoLeader, &e),
         ClusterError::LeaderBusy { .. } => unavailable(Cause::LeaderBusy, &e),
-        ClusterError::ReplicationLagExceeded { .. } => unavailable(Cause::ReplicationLag, &e),
+        ClusterError::ReadsFenced { cause, .. } => unavailable(cause, &e),
         ClusterError::WriteTimeout { .. }
         | ClusterError::ForwardOutcomeUnknown { .. }
         | ClusterError::NotAppliedLocally { .. } => StorageError::ClusterWriteOutcomeUnknown {
@@ -2540,6 +2805,366 @@ mod tests {
             membership_config: Arc::new(StoredMembership::default()),
             replication: None,
         }
+    }
+
+    // ── The read gate (cluster-read-fencing 1.1) ──────────────────────────────
+
+    /// `/readyz` reports a node whose read gate is closed as not ready, with
+    /// the gate's reason (task 4.1).
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_closed_read_gate_makes_the_node_not_ready() {
+        let dir = tempdir().unwrap();
+        let gate = Arc::new(ReadGate::new(60_000));
+        let engine = ClusterEngine::with_read_gate(open_engine(dir.path()), Arc::clone(&gate));
+        assert_eq!(engine.not_ready_reason(), Some("not_in_contact"));
+        gate.record_contact_at(gate.now_ms());
+        assert_eq!(engine.not_ready_reason(), None);
+        gate.set_lag_hold(true);
+        assert_eq!(engine.not_ready_reason(), Some("replication_lag"));
+    }
+
+    /// A node whose gate is closed refuses a read with `NotInContact`, and a
+    /// contact opens it again. The refusal reaches the storage facade as
+    /// `ClusterUnavailable`, which the protocol layer answers `503`.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_closed_read_gate_refuses_reads_as_not_in_contact() {
+        let dir = tempdir().unwrap();
+        let gate = Arc::new(ReadGate::new(60_000));
+        let engine = Arc::new(ClusterEngine::with_read_gate(
+            open_engine(dir.path()),
+            Arc::clone(&gate),
+        ));
+        let adapter = ClusterStorageAdapter::new(Arc::clone(&engine));
+        let realm = make_realm();
+
+        let refused = adapter.get(&realm, b"k").unwrap_err();
+        assert!(
+            matches!(
+                refused,
+                crate::storage::StorageError::ClusterUnavailable {
+                    cause: ClusterUnavailableCause::NotInContact,
+                    ..
+                }
+            ),
+            "{refused:?}"
+        );
+
+        gate.record_contact_at(gate.now_ms());
+        assert_eq!(adapter.get(&realm, b"k").unwrap(), None);
+
+        gate.close();
+        assert!(adapter.get(&realm, b"k").is_err_and(|e| matches!(
+            e,
+            crate::storage::StorageError::ClusterUnavailable {
+                cause: ClusterUnavailableCause::NotInContact,
+                ..
+            }
+        )));
+    }
+
+    /// Task 1.2: an apply lag above `read_lag_threshold_ms` closes the gate
+    /// at once, although the node is in contact; a lag at or below it
+    /// leaves the gate to the contact.
+    #[test]
+    fn an_apply_lag_above_the_threshold_closes_the_gate() {
+        let gate = ReadGate::new(500);
+        gate.record_contact_at(1_000);
+
+        let tick = |lag_ms| MonitorTick {
+            lag_ms,
+            contact: LeaderContact::NotLeader,
+            quorum_ack_ago_ms: None,
+            reported_after_ms: None,
+            now_ms: 1_001,
+        };
+
+        // 101 unapplied entries × 5 ms = 505 ms > 500 ms.
+        let lagging = compute_lag_ms(&make_metrics(Some(101), Some(0)));
+        assert!(apply_monitor_tick(&gate, &tick(lagging), 500), "lagging");
+        assert!(!gate.allows_at(1_001));
+
+        // 100 × 5 ms = 500 ms: at the threshold, not above it.
+        let caught_up = compute_lag_ms(&make_metrics(Some(100), Some(0)));
+        assert!(
+            !apply_monitor_tick(&gate, &tick(caught_up), 500),
+            "not lagging"
+        );
+        assert!(gate.allows_at(1_001), "the contact was kept");
+    }
+
+    /// Task 1.3: a leader's quorum acknowledgement keeps the gate open for
+    /// the threshold, dated no later than the metrics report that carried it.
+    #[test]
+    fn a_leader_acked_within_the_threshold_extends_the_deadline() {
+        let gate = ReadGate::new(500);
+        let tick = MonitorTick {
+            lag_ms: 0,
+            contact: LeaderContact::AckedAgo { ms: 100 },
+            quorum_ack_ago_ms: Some(100),
+            reported_after_ms: Some(1_000),
+            now_ms: 1_050,
+        };
+        assert!(!apply_monitor_tick(&gate, &tick, 500));
+        // Acknowledged at or after 1_000 - 100 = 900: open until 1_400.
+        assert!(gate.allows_at(1_399));
+        assert!(!gate.allows_at(1_400));
+    }
+
+    /// A report the monitor cannot date (unchanged since the previous poll,
+    /// or the first poll) leaves the deadline as it is: openraft computes
+    /// `millis_since_quorum_ack` when it reports, so an old report's age
+    /// understates the real one.
+    #[test]
+    fn an_undated_leader_report_moves_no_deadline() {
+        let gate = ReadGate::new(500);
+        let tick = MonitorTick {
+            lag_ms: 0,
+            contact: LeaderContact::AckedAgo { ms: 0 },
+            quorum_ack_ago_ms: Some(0),
+            reported_after_ms: None,
+            now_ms: 1_000,
+        };
+        apply_monitor_tick(&gate, &tick, 500);
+        assert!(!gate.allows_at(1_000));
+    }
+
+    /// A leader no quorum acknowledged within the threshold is out of
+    /// contact: its deadline runs out. A sole voter is always in contact.
+    #[test]
+    fn a_leader_out_of_contact_lets_its_deadline_run_out_and_a_sole_voter_never_does() {
+        let gate = ReadGate::new(500);
+        gate.record_contact_at(1_000);
+        let out = MonitorTick {
+            lag_ms: 0,
+            contact: LeaderContact::OutOfContact,
+            quorum_ack_ago_ms: None,
+            reported_after_ms: Some(1_400),
+            now_ms: 1_450,
+        };
+        apply_monitor_tick(&gate, &out, 500);
+        assert!(!gate.allows_at(1_500));
+
+        let sole = MonitorTick {
+            lag_ms: 0,
+            contact: LeaderContact::SoleVoter,
+            quorum_ack_ago_ms: None,
+            reported_after_ms: None,
+            now_ms: 2_000,
+        };
+        apply_monitor_tick(&gate, &sole, 500);
+        assert!(gate.allows_at(2_000));
+    }
+
+    /// Task 1.4: an `AppendEntries` that openraft accepted (`Success`, or
+    /// `PartialSuccess`) came from the leader of the highest term this node
+    /// knows, and its log matched: contact from its arrival. A refused one
+    /// (`Conflict`: log mismatch; `HigherVote`: a stale leader) is none.
+    #[test]
+    fn an_accepted_append_entries_is_contact_and_a_refused_one_is_not() {
+        use openraft::raft::AppendEntriesResponse as R;
+
+        let gate = ReadGate::new(500);
+        gate.note_applied(7);
+        let reach = LogReach::of(&append_request(Some(7), &[], Some(7)));
+        let age = Some(100);
+        note_append_entries(&gate, 1_000, age, reach, &R::Conflict);
+        note_append_entries(&gate, 1_000, age, reach, &R::HigherVote(Vote::new(9, 9)));
+        assert!(!gate.allows_at(1_000), "refused requests are no contact");
+
+        note_append_entries(&gate, 1_000, age, reach, &R::Success);
+        assert!(gate.allows_at(1_499));
+        assert!(!gate.allows_at(1_500), "dated from its arrival");
+
+        note_append_entries(
+            &gate,
+            2_000,
+            age,
+            reach,
+            &R::PartialSuccess(Some(log_id(7))),
+        );
+        assert!(gate.allows_at(2_499));
+    }
+
+    fn log_id(index: u64) -> LogId<u64> {
+        LogId::new(CommittedLeaderId::new(1, 1), index)
+    }
+
+    fn append_request(
+        prev: Option<u64>,
+        entries: &[u64],
+        commit: Option<u64>,
+    ) -> AppendEntriesRequest<HearthRaftConfig> {
+        AppendEntriesRequest {
+            vote: Vote::new_committed(1, 1),
+            prev_log_id: prev.map(log_id),
+            entries: entries
+                .iter()
+                .map(|&i| openraft::Entry {
+                    log_id: log_id(i),
+                    payload: EntryPayload::Blank,
+                })
+                .collect(),
+            leader_commit: commit.map(log_id),
+        }
+    }
+
+    /// Task 1.4: a follower that accepts a heartbeat or a catch-up batch
+    /// that ends before the leader's commit index holds only a prefix of
+    /// what the leader committed (Jepsen `staleness` on the 2026-10-07
+    /// branch): that is no contact, whatever its apply lag.
+    #[test]
+    fn an_accepted_append_entries_counts_only_when_it_reaches_the_leader_commit() {
+        use openraft::raft::AppendEntriesResponse as R;
+        let ok = |prev, entries: &[u64], commit, resp: &R<u64>| {
+            accepted_through_commit(LogReach::of(&append_request(prev, entries, commit)), resp)
+        };
+        assert!(
+            ok(Some(10), &[], Some(10), &R::Success),
+            "a heartbeat at the commit"
+        );
+        assert!(ok(Some(10), &[11, 12], Some(11), &R::Success));
+        assert!(ok(None, &[], None, &R::Success), "nothing committed yet");
+        assert!(
+            !ok(Some(10), &[], Some(11), &R::Success),
+            "a heartbeat behind the commit"
+        );
+        assert!(
+            !ok(Some(10), &[11, 12], Some(20), &R::Success),
+            "a batch short of the commit"
+        );
+        assert!(!ok(None, &[], Some(1), &R::Success));
+        assert!(
+            ok(
+                Some(10),
+                &[11, 12],
+                Some(11),
+                &R::PartialSuccess(Some(log_id(11)))
+            ),
+            "accepted through the commit"
+        );
+        assert!(
+            !ok(
+                Some(10),
+                &[11, 12],
+                Some(12),
+                &R::PartialSuccess(Some(log_id(11)))
+            ),
+            "accepted short of the commit"
+        );
+        assert!(!ok(Some(10), &[], Some(10), &R::Conflict));
+        assert!(!ok(
+            Some(10),
+            &[],
+            Some(10),
+            &R::HigherVote(Vote::new(9, 9))
+        ));
+    }
+
+    /// Task 1.7: an accepted `AppendEntries` counts only once this node has
+    /// applied the leader's commit index, dated from its arrival.
+    #[test]
+    fn an_append_entries_counts_once_its_commit_index_is_applied() {
+        use openraft::raft::AppendEntriesResponse as R;
+        let gate = ReadGate::new(500);
+        gate.note_applied(5);
+        let reach = LogReach::of(&append_request(Some(7), &[], Some(7)));
+        note_append_entries(&gate, 1_000, Some(100), reach, &R::Success);
+        assert!(!gate.allows_at(1_000), "index 7 is not applied yet");
+        gate.note_applied(7);
+        assert!(gate.allows_at(1_000));
+        assert!(!gate.allows_at(1_500), "dated from the arrival");
+    }
+
+    /// Task 1.6: a deposed leader cut off with this follower. Its heartbeats
+    /// are accepted (the follower knows no higher term), but no quorum has
+    /// acknowledged it for longer than the lease allows.
+    #[test]
+    fn an_append_entries_from_a_leader_without_a_recent_quorum_is_no_contact() {
+        use openraft::raft::AppendEntriesResponse as R;
+        let gate = ReadGate::new(500);
+        gate.note_applied(7);
+        let reach = LogReach::of(&append_request(Some(7), &[], Some(7)));
+        note_append_entries(
+            &gate,
+            1_000,
+            Some(MAX_LEADER_ACK_AGE_MS),
+            reach,
+            &R::Success,
+        );
+        assert!(!gate.allows_at(1_000), "an acknowledgement too old");
+        note_append_entries(&gate, 1_000, None, reach, &R::Success);
+        assert!(!gate.allows_at(1_000), "no acknowledgement on record");
+        note_append_entries(
+            &gate,
+            1_000,
+            Some(MAX_LEADER_ACK_AGE_MS - 1),
+            reach,
+            &R::Success,
+        );
+        assert!(gate.allows_at(1_000), "an acknowledgement within the lease");
+        assert_eq!(MAX_LEADER_ACK_AGE_MS, 2_000);
+    }
+
+    /// A leader records its quorum acknowledgement for its heartbeats to
+    /// carry, also above the read threshold; a node that does not lead
+    /// forgets it.
+    #[test]
+    fn a_leader_records_its_quorum_ack_and_a_follower_forgets_it() {
+        let gate = ReadGate::new(500);
+        let tick = |contact, quorum_ack_ago_ms, reported_after| MonitorTick {
+            lag_ms: 0,
+            contact,
+            quorum_ack_ago_ms,
+            reported_after_ms: Some(reported_after),
+            now_ms: reported_after + 50,
+        };
+        apply_monitor_tick(
+            &gate,
+            &tick(LeaderContact::AckedAgo { ms: 100 }, Some(100), 9_950),
+            500,
+        );
+        assert_eq!(gate.quorum_ack_age_at(10_000), Some(150));
+        apply_monitor_tick(
+            &gate,
+            &tick(LeaderContact::OutOfContact, Some(900), 10_950),
+            500,
+        );
+        assert_eq!(gate.quorum_ack_age_at(11_000), Some(950));
+        apply_monitor_tick(&gate, &tick(LeaderContact::NotLeader, None, 11_950), 500);
+        assert_eq!(gate.quorum_ack_age_at(12_000), None);
+    }
+
+    /// While `serve` starts, reads skip the contact check; once the guard
+    /// drops, a read needs contact again.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn start_up_reads_skip_the_contact_check_until_the_guard_drops() {
+        let dir = tempdir().unwrap();
+        let gate = Arc::new(ReadGate::new(60_000));
+        let engine = Arc::new(ClusterEngine::with_read_gate(
+            open_engine(dir.path()),
+            Arc::clone(&gate),
+        ));
+        let adapter = ClusterStorageAdapter::new(Arc::clone(&engine));
+        let realm = make_realm();
+
+        let guard = engine.start_up_reads();
+        assert_eq!(adapter.get(&realm, b"k").unwrap(), None);
+        drop(guard);
+        assert!(adapter.get(&realm, b"k").is_err());
+    }
+
+    /// Single-node mode has no gate: reads never need contact.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_single_node_engine_always_serves_reads() {
+        let dir = tempdir().unwrap();
+        let engine = Arc::new(ClusterEngine::single_node(open_engine(dir.path())));
+        assert!(engine.reads_ok());
+        let _guard = engine.start_up_reads();
+        assert!(engine.reads_ok());
     }
 
     // ── §4.9#4: the app-layer storage handle ──────────────────────────────────

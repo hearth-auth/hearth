@@ -1205,6 +1205,20 @@ fn validate_cluster_all(cluster: Option<&ClusterConfig>, issues: &mut Vec<Valida
                 .to_string(),
         });
     }
+    if let Some(threshold) = cluster.read_lag_threshold_ms {
+        if threshold < ClusterConfig::MIN_READ_LAG_THRESHOLD_MS {
+            issues.push(ValidationIssue {
+                field: "cluster.read_lag_threshold_ms".to_string(),
+                reason: format!(
+                    "{threshold} ms is below the minimum of {} ms (2 x the {} ms Raft \
+                     heartbeat): a healthy follower would fall out of contact and refuse \
+                     reads whenever one heartbeat is late",
+                    ClusterConfig::MIN_READ_LAG_THRESHOLD_MS,
+                    ClusterConfig::RAFT_HEARTBEAT_INTERVAL_MS
+                ),
+            });
+        }
+    }
     if cluster
         .peer_address
         .parse::<std::net::SocketAddr>()

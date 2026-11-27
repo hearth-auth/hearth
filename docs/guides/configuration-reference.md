@@ -281,7 +281,7 @@ When present, Hearth starts a Raft engine and participates in peer-to-peer log r
 | `tls_cert_path` | path | — | **Required.** Path to this node's PEM certificate (presented to peers during mTLS). |
 | `tls_key_path` | path | — | **Required.** Path to this node's PEM private key. |
 | `tls_ca_cert_path` | path | — | **Required.** Path to the CA certificate used to verify peer certificates. All nodes must share the same CA. |
-| `read_lag_threshold_ms` | integer | `500` | Read gate. Every 50 ms the node estimates its lag as 5 ms per received-but-unapplied Raft entry; above this value it refuses reads with `503` / `HEARTH_CLUSTER_UNAVAILABLE`. It does **not** yet detect a node that has lost contact with the leader — see [CONSISTENCY.md](../dev/CONSISTENCY.md) G1. |
+| `read_lag_threshold_ms` | integer | `500` | Read gate. A follower serves reads only within this many milliseconds of the last `AppendEntries` it accepted from a leader with a recent quorum acknowledgement (once it applied that leader's commit index); a leader only within this many milliseconds of its last quorum acknowledgement. Every 50 ms the node also estimates its lag as 5 ms per received-but-unapplied Raft entry, and refuses reads above this value. Refused reads answer `503` / `HEARTH_CLUSTER_UNAVAILABLE`. Minimum `500` (twice the 250 ms Raft heartbeat); `config validate` refuses less. |
 | `write_timeout_ms` | integer | `10000` | Upper bound on how long a single replicated write waits for quorum commit before the caller is told the outcome is **unknown**. See the write-bound note below. |
 
 ```yaml

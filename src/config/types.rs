@@ -3959,8 +3959,13 @@ pub struct ClusterConfig {
     pub tls_key_path: PathBuf,
     /// Path to the CA certificate PEM file used to verify peer certificates.
     pub tls_ca_cert_path: PathBuf,
-    /// Maximum follower read-lag in milliseconds before reads are refused
-    /// and the caller is redirected to the leader (default: 500).
+    /// How long, in milliseconds, one contact with the leader (on a
+    /// follower) or one quorum acknowledgement (on a leader) lets this node
+    /// serve reads and validate credentials; also the apply-lag bound
+    /// (default: [`ClusterConfig::DEFAULT_READ_LAG_THRESHOLD_MS`]). Without
+    /// contact the node answers `503` (`cluster-consistency` R2, V2).
+    /// Validation refuses a value below
+    /// [`ClusterConfig::MIN_READ_LAG_THRESHOLD_MS`].
     #[serde(default)]
     pub read_lag_threshold_ms: Option<u64>,
     /// Upper bound, in milliseconds, on how long a single replicated write
@@ -3988,6 +3993,19 @@ pub struct ClusterConfig {
 impl ClusterConfig {
     /// Default for [`ClusterConfig::write_timeout_ms`], in milliseconds.
     pub const DEFAULT_WRITE_TIMEOUT_MS: u64 = 10_000;
+
+    /// The Raft heartbeat interval, in milliseconds. openraft 0.9 also uses
+    /// it as the timeout of every `AppendEntries` call, so it cannot be much
+    /// shorter (cluster-read-fencing design decision 5).
+    pub const RAFT_HEARTBEAT_INTERVAL_MS: u64 = 250;
+
+    /// Default for [`ClusterConfig::read_lag_threshold_ms`], in milliseconds.
+    pub const DEFAULT_READ_LAG_THRESHOLD_MS: u64 = 500;
+
+    /// The lowest valid [`ClusterConfig::read_lag_threshold_ms`]: two
+    /// heartbeats, so a healthy follower stays in contact when one
+    /// heartbeat is late.
+    pub const MIN_READ_LAG_THRESHOLD_MS: u64 = 2 * Self::RAFT_HEARTBEAT_INTERVAL_MS;
 
     fn default_peer_address() -> String {
         "127.0.0.1:8421".to_string()

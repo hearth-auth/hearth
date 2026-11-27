@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: R2 Bounded staleness
-A node SHALL serve a read only while it is in contact. A node that is not in contact SHALL answer the read with `503` and `HEARTH_CLUSTER_UNAVAILABLE`. A read that a node in contact serves SHALL show every write acknowledged more than `read_lag_threshold_ms` before the read began. A leader SHALL count as in contact only while a quorum of voters acknowledged it within `read_lag_threshold_ms`. `hearth config validate` SHALL refuse a `cluster.read_lag_threshold_ms` below `2 ×` the Raft heartbeat interval.
+A node SHALL serve a read only while it is in contact. A node that is not in contact SHALL answer the read with `503` and `HEARTH_CLUSTER_UNAVAILABLE`. A read served in contact SHALL show every write acknowledged over `read_lag_threshold_ms` before it began. A leader SHALL count as in contact only while a quorum acknowledged it within the threshold. A follower SHALL count a leader message as contact only if a quorum acknowledged that leader under `2000 ms` before it was sent.
 
 #### Scenario: A follower is cut off from the leader
 - **WHEN** a follower has not heard from the leader for longer than `read_lag_threshold_ms`
@@ -11,13 +11,18 @@ A node SHALL serve a read only while it is in contact. A node that is not in con
 - **WHEN** a leader has had no quorum acknowledgement for longer than `read_lag_threshold_ms`
 - **THEN** every read on that leader answers `503` with `HEARTH_CLUSTER_UNAVAILABLE`
 
+#### Scenario: A follower of a deposed leader
+- **WHEN** a leader and one follower are cut off from the other voters
+- **AND** the other voters elect a new leader and acknowledge a write
+- **THEN** a read on that follower answers `503` with `HEARTH_CLUSTER_UNAVAILABLE`, or shows the write
+
 #### Scenario: A follower in contact
 - **WHEN** a write is acknowledged on the leader
 - **AND** a read begins on a follower in contact more than `read_lag_threshold_ms` later
 - **THEN** the read shows the write
 
 #### Scenario: A threshold below the heartbeat floor
-- **WHEN** `cluster.read_lag_threshold_ms` is less than `2 ×` the heartbeat interval
+- **WHEN** `cluster.read_lag_threshold_ms` is less than `2 ×` the Raft heartbeat interval of `250 ms`, that is less than `500 ms`
 - **THEN** `hearth config validate` exits with `1` and names `cluster.read_lag_threshold_ms`
 
 ### Requirement: R3 Monotonic reads on one node

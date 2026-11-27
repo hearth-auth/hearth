@@ -5,6 +5,14 @@
 pub struct AppendEntriesRequest {
     #[prost(bytes = "vec", tag = "1")]
     pub payload: ::prost::alloc::vec::Vec<u8>,
+    /// Milliseconds since a quorum of voters last acknowledged the sending
+    /// leader, on the leader's clock when it sent this request. Unset when the
+    /// leader has no quorum acknowledgement on record. A follower counts the
+    /// request as contact (its read gate) only when this is set and below the
+    /// leader lease less 1 s, so a deposed leader cut off with it cannot keep it
+    /// serving reads.
+    #[prost(uint64, optional, tag = "2")]
+    pub leader_quorum_ack_age_ms: ::core::option::Option<u64>,
 }
 /// AppendEntries RPC response.
 /// Payload is CBOR-encoded openraft::AppendEntriesResponse<u64>.

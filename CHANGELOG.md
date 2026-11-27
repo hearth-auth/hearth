@@ -7,6 +7,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 ## [Unreleased]
 
 ### Changed
+- **A cluster node out of contact with the leader refuses storage reads** (OpenSpec change
+  `cluster-read-fencing`): a follower serves a read only within `cluster.read_lag_threshold_ms`
+  of the last `AppendEntries` it accepted from a leader that a quorum acknowledged less than
+  2 s earlier, once it has applied that leader's commit index; a leader only within that
+  threshold of its last quorum acknowledgement. Otherwise reads answer `503` with
+  `HEARTH_CLUSTER_UNAVAILABLE`, where they used to return data that could be stale. Token
+  validation is not fenced yet. A single node is not affected. `/readyz` on such a node answers
+  `503` with `"cluster": "not_in_contact"` (or `"replication_lag"` while it applies a backlog).
+- **Raft heartbeat 250 ms, `cluster.read_lag_threshold_ms` at least 500 ms**: the heartbeat
+  goes from 500 ms to 250 ms (openraft also uses it as the `AppendEntries` timeout), and
+  `hearth config validate` and `serve` refuse a threshold below twice the heartbeat. The
+  default stays 500 ms.
+- **Peer wire format**: the cluster `AppendEntries` message gains the field
+  `leader_quorum_ack_age_ms`. A node of this release counts no contact from an older-build
+  leader, so upgrade every node together. There are no deployed clusters to migrate.
 - **Raft snapshots are files, streamed, not held in memory** (P-2, `cluster-file-snapshots`):
   a clustered node keeps its snapshot in `{data_dir}/raft-snapshots/`, encrypted at rest under
   its system KEK, and serves it again after a restart. A build and an install each need well

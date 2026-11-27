@@ -46,7 +46,8 @@ async fn healthz() -> impl IntoResponse {
 /// leader, or a leader no quorum has acknowledged, cannot commit a write; and
 /// a node started on a store that needs no start-up writes serves HTTP before
 /// any quorum exists. It reported ready then. The body names the reason:
-/// `"cluster": "no_leader"` or `"no_quorum"` (see
+/// `"cluster": "no_leader"`, `"no_quorum"`, `"not_in_contact"` or
+/// `"replication_lag"` (see
 /// [`ClusterEngine::not_ready_reason`](crate::cluster::ClusterEngine::not_ready_reason)).
 async fn readyz(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let identity = Arc::clone(&state.identity);
@@ -65,19 +66,22 @@ async fn readyz(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         );
     }
 
+    // Before the storage verdict: a cluster node out of contact refuses the
+    // storage probe's read too, and the cluster reason says why.
+    if let Some(reason) = state.cluster.as_ref().and_then(|c| c.not_ready_reason()) {
+        let storage = if healthy { "ok" } else { "unavailable" };
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "not_ready", "storage": storage, "cluster": reason
+            })),
+        );
+    }
+
     if !healthy {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({"status": "not_ready", "storage": "unavailable"})),
-        );
-    }
-
-    if let Some(reason) = state.cluster.as_ref().and_then(|c| c.not_ready_reason()) {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({
-                "status": "not_ready", "storage": "ok", "cluster": reason
-            })),
         );
     }
 

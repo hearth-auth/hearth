@@ -380,6 +380,41 @@ fn validate_accepts_an_ip_peer_address() {
     );
 }
 
+/// `VALID_CONFIG` with a valid cluster section and
+/// `read_lag_threshold_ms: threshold_ms`.
+fn config_with_read_lag_threshold(threshold_ms: u64) -> String {
+    format!(
+        "{}  read_lag_threshold_ms: {threshold_ms}\n",
+        config_with_peer_address("10.0.0.1:8421")
+    )
+}
+
+/// cluster-read-fencing 1.5 (R2): a follower is in contact for
+/// `read_lag_threshold_ms` after each heartbeat, and the heartbeat is
+/// 250 ms. A threshold below 2 x 250 ms lets a healthy follower fall out of
+/// contact when one heartbeat is late, so validation refuses it.
+#[test]
+fn validate_returns_1_for_a_read_lag_threshold_below_twice_the_heartbeat() {
+    let output = run_validate(&config_with_read_lag_threshold(450));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
+    assert!(
+        stderr.contains("cluster.read_lag_threshold_ms") && stderr.contains("500"),
+        "the report must name the field and the floor: {stderr}"
+    );
+}
+
+/// Control: the floor itself (the default) validates.
+#[test]
+fn validate_accepts_a_read_lag_threshold_at_the_floor() {
+    let output = run_validate(&config_with_read_lag_threshold(500));
+    assert!(
+        output.status.success(),
+        "a 500 ms threshold must validate; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 // === hearth config example ===
 
 #[test]
