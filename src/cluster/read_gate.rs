@@ -26,6 +26,12 @@
 //!
 //! The deadline uses a monotonic clock, so a wall-clock step cannot extend it
 //! (C1).
+//!
+//! On a leader the gate also records when a quorum last acknowledged it.
+//! Each `AppendEntries` it sends carries the age of that acknowledgement, and
+//! a follower counts the request as contact only while the age is below the
+//! leader lease less 1 s: a deposed leader cut off with a follower would
+//! otherwise keep it serving the deposed leader's frozen state.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -36,6 +42,8 @@ const LAG_HOLD: u64 = 1 << 62;
 const START_UP: u64 = 1 << 61;
 /// The deadline bits.
 const DEADLINE: u64 = START_UP - 1;
+/// `quorum_ack_ms` value: no quorum acknowledgement on record.
+const NO_ACK: u64 = u64::MAX;
 
 /// Why the gate refuses a read now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +63,9 @@ pub(crate) struct ReadGate {
     threshold_ms: u64,
     /// The zero of the deadline clock.
     origin: Instant,
+    /// When a quorum last acknowledged this node as leader, in deadline-clock
+    /// milliseconds, or [`NO_ACK`]. Off the hot path.
+    quorum_ack_ms: AtomicU64,
 }
 
 impl ReadGate {
@@ -64,6 +75,7 @@ impl ReadGate {
             word: AtomicU64::new(0),
             threshold_ms,
             origin: Instant::now(),
+            quorum_ack_ms: AtomicU64::new(NO_ACK),
         }
     }
 
@@ -72,6 +84,39 @@ impl ReadGate {
         u64::try_from(self.origin.elapsed().as_millis())
             .unwrap_or(DEADLINE)
             .min(DEADLINE)
+    }
+
+    /// Records that a quorum acknowledged this node as leader at `at_ms`.
+    /// Never moves the record back.
+    pub(crate) fn record_quorum_ack_at(&self, at_ms: u64) {
+        let at_ms = at_ms.min(DEADLINE);
+        // Rust 1.99 renamed `fetch_update` to `try_update`; the MSRV (1.88)
+        // has only the old name.
+        #[allow(deprecated)]
+        let _ = self
+            .quorum_ack_ms
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                (current == NO_ACK || at_ms > current).then_some(at_ms)
+            });
+    }
+
+    /// Forgets the quorum acknowledgement: this node is not the leader. A
+    /// node that leads again starts with none, so its first heartbeats of a
+    /// new term carry no age from an old one.
+    pub(crate) fn clear_quorum_ack(&self) {
+        self.quorum_ack_ms.store(NO_ACK, Ordering::Release);
+    }
+
+    /// Milliseconds since a quorum last acknowledged this node as leader, or
+    /// `None` with none on record. Sent with every `AppendEntries`.
+    pub(crate) fn quorum_ack_age_ms(&self) -> Option<u64> {
+        self.quorum_ack_age_at(self.now_ms())
+    }
+
+    /// [`Self::quorum_ack_age_ms`] at `now_ms`.
+    pub(crate) fn quorum_ack_age_at(&self, now_ms: u64) -> Option<u64> {
+        let at = self.quorum_ack_ms.load(Ordering::Acquire);
+        (at != NO_ACK).then(|| now_ms.saturating_sub(at))
     }
 
     /// Whether a read may be served now. The hot-path check.
@@ -331,6 +376,25 @@ mod tests {
             leader_contact(2, None, None, 3, T),
             LeaderContact::NotLeader
         );
+    }
+
+    #[test]
+    fn a_new_gate_has_no_quorum_ack() {
+        assert_eq!(ReadGate::new(T).quorum_ack_age_ms(), None);
+    }
+
+    #[test]
+    fn the_quorum_ack_age_counts_from_the_latest_ack() {
+        let gate = ReadGate::new(T);
+        gate.record_quorum_ack_at(700);
+        gate.record_quorum_ack_at(100);
+        assert_eq!(
+            gate.quorum_ack_age_at(1_000),
+            Some(300),
+            "the older ack is ignored"
+        );
+        gate.clear_quorum_ack();
+        assert_eq!(gate.quorum_ack_age_at(1_000), None);
     }
 
     #[test]

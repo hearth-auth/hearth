@@ -23,6 +23,7 @@ use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 use tracing::{debug, warn};
 
 use crate::cluster::error::TransportError;
+use crate::cluster::read_gate::ReadGate;
 use crate::cluster::rpc::{
     raft_service_client::RaftServiceClient, AppendEntriesRequest as GrpcAer,
     ForwardWriteRequest as GrpcFwr, InstallSnapshotRequest as GrpcIsr, VoteRequest as GrpcVr,
@@ -208,6 +209,10 @@ pub struct HearthNetworkFactory {
     /// `ClusterEngine::build_clustered`, which is the only constructor
     /// `serve` reaches.
     faults: Option<Arc<PeerFaults>>,
+    /// This node's read gate: the source of the quorum-acknowledgement age
+    /// every `AppendEntries` carries. `None` sends no age, which a follower
+    /// counts as no contact.
+    read_gate: Option<Arc<ReadGate>>,
 }
 
 impl HearthNetworkFactory {
@@ -223,6 +228,7 @@ impl HearthNetworkFactory {
                 ca_pem,
             }),
             faults: None,
+            read_gate: None,
         }
     }
 
@@ -234,6 +240,13 @@ impl HearthNetworkFactory {
         self.faults = Some(faults);
         self
     }
+    /// Sends `gate`'s quorum-acknowledgement age with every `AppendEntries`.
+    #[must_use]
+    pub(crate) fn with_read_gate(mut self, gate: Arc<ReadGate>) -> Self {
+        self.read_gate = Some(gate);
+        self
+    }
+
     /// A client for forwarding this node's writes to the leader, over the
     /// same mTLS identity (and, in tests, the same fault injector) as the
     /// Raft peer RPCs.
@@ -257,6 +270,7 @@ impl RaftNetworkFactory<HearthRaftConfig> for HearthNetworkFactory {
             creds: Arc::clone(&self.creds),
             channel: Mutex::new(None),
             faults: self.faults.clone(),
+            read_gate: self.read_gate.clone(),
             reported_older_build: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -282,6 +296,8 @@ pub struct HearthPeerNetwork {
     channel: Mutex<Option<Channel>>,
     /// Test-only fault injector; `None` in production. See [`PeerFaults`].
     faults: Option<Arc<PeerFaults>>,
+    /// See [`HearthNetworkFactory`]'s field of the same name.
+    read_gate: Option<Arc<ReadGate>>,
     /// Set once this peer has been reported as unable to decode our log.
     reported_older_build: std::sync::atomic::AtomicBool,
 }
@@ -375,8 +391,16 @@ impl RaftNetwork<HearthRaftConfig> for HearthPeerNetwork {
             .max_decoding_message_size(MAX_PEER_MESSAGE_BYTES)
             .max_encoding_message_size(MAX_PEER_MESSAGE_BYTES);
 
+        // Read last, just before sending: the age is never younger than it is.
+        let leader_quorum_ack_age_ms = self
+            .read_gate
+            .as_ref()
+            .and_then(|gate| gate.quorum_ack_age_ms());
         let resp = client
-            .append_entries(GrpcAer { payload })
+            .append_entries(GrpcAer {
+                payload,
+                leader_quorum_ack_age_ms,
+            })
             .await
             .map_err(|e| {
                 self.invalidate_channel();

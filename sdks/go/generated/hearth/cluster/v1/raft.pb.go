@@ -24,10 +24,17 @@ const (
 // AppendEntries RPC request.
 // Payload is CBOR-encoded openraft::AppendEntriesRequest<HearthRaftConfig>.
 type AppendEntriesRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Payload       []byte                 `protobuf:"bytes,1,opt,name=payload,proto3" json:"payload,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Payload []byte                 `protobuf:"bytes,1,opt,name=payload,proto3" json:"payload,omitempty"`
+	// Milliseconds since a quorum of voters last acknowledged the sending
+	// leader, on the leader's clock when it sent this request. Unset when the
+	// leader has no quorum acknowledgement on record. A follower counts the
+	// request as contact (its read gate) only when this is set and below the
+	// leader lease less 1 s, so a deposed leader cut off with it cannot keep it
+	// serving reads.
+	LeaderQuorumAckAgeMs *uint64 `protobuf:"varint,2,opt,name=leader_quorum_ack_age_ms,json=leaderQuorumAckAgeMs,proto3,oneof" json:"leader_quorum_ack_age_ms,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *AppendEntriesRequest) Reset() {
@@ -65,6 +72,13 @@ func (x *AppendEntriesRequest) GetPayload() []byte {
 		return x.Payload
 	}
 	return nil
+}
+
+func (x *AppendEntriesRequest) GetLeaderQuorumAckAgeMs() uint64 {
+	if x != nil && x.LeaderQuorumAckAgeMs != nil {
+		return *x.LeaderQuorumAckAgeMs
+	}
+	return 0
 }
 
 // AppendEntries RPC response.
@@ -393,9 +407,11 @@ var File_hearth_cluster_v1_raft_proto protoreflect.FileDescriptor
 
 const file_hearth_cluster_v1_raft_proto_rawDesc = "" +
 	"\n" +
-	"\x1chearth/cluster/v1/raft.proto\x12\x11hearth.cluster.v1\"0\n" +
+	"\x1chearth/cluster/v1/raft.proto\x12\x11hearth.cluster.v1\"\x8a\x01\n" +
 	"\x14AppendEntriesRequest\x12\x18\n" +
-	"\apayload\x18\x01 \x01(\fR\apayload\"1\n" +
+	"\apayload\x18\x01 \x01(\fR\apayload\x12;\n" +
+	"\x18leader_quorum_ack_age_ms\x18\x02 \x01(\x04H\x00R\x14leaderQuorumAckAgeMs\x88\x01\x01B\x1b\n" +
+	"\x19_leader_quorum_ack_age_ms\"1\n" +
 	"\x15AppendEntriesResponse\x12\x18\n" +
 	"\apayload\x18\x01 \x01(\fR\apayload\"'\n" +
 	"\vVoteRequest\x12\x18\n" +
@@ -460,6 +476,7 @@ func file_hearth_cluster_v1_raft_proto_init() {
 	if File_hearth_cluster_v1_raft_proto != nil {
 		return
 	}
+	file_hearth_cluster_v1_raft_proto_msgTypes[0].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{

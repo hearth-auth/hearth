@@ -427,10 +427,17 @@ impl ClusterEngine {
             refuse_restart_without_applied_state(log_state.last_purged_log_id)?;
         }
 
+        let threshold = config
+            .read_lag_threshold_ms
+            .unwrap_or(ClusterConfig::DEFAULT_READ_LAG_THRESHOLD_MS);
+        // Closed until the first contact: a node that has just started has
+        // not yet heard from any leader.
+        let read_gate = Arc::new(ReadGate::new(threshold));
         let cert_pem = tokio::fs::read(&config.tls_cert_path).await?;
         let key_pem = tokio::fs::read(&config.tls_key_path).await?;
         let ca_pem = tokio::fs::read(&config.tls_ca_cert_path).await?;
-        let network_factory = HearthNetworkFactory::new(cert_pem, key_pem, ca_pem);
+        let network_factory = HearthNetworkFactory::new(cert_pem, key_pem, ca_pem)
+            .with_read_gate(Arc::clone(&read_gate));
         let network_factory = match faults {
             Some(f) => network_factory.with_peer_faults(f),
             None => network_factory,
@@ -464,17 +471,12 @@ impl ClusterEngine {
         .await
         .map_err(|e| ClusterBuildError::RaftInit(e.to_string()))?;
 
-        let threshold = config
-            .read_lag_threshold_ms
-            .unwrap_or(ClusterConfig::DEFAULT_READ_LAG_THRESHOLD_MS);
         let write_timeout = Duration::from_millis(
             config
                 .write_timeout_ms
                 .unwrap_or(ClusterConfig::DEFAULT_WRITE_TIMEOUT_MS),
         );
-        // Closed until the first contact: a node that has just started has
-        // not yet heard from any leader.
-        let read_gate = Arc::new(ReadGate::new(threshold));
+
         tokio::spawn(run_lag_monitor(
             raft.clone(),
             Arc::clone(&read_gate),
@@ -1583,7 +1585,11 @@ impl ClusterEngine {
 // ── IncomingRpcDispatch ───────────────────────────────────────────────────────
 
 impl IncomingRpcDispatch for ClusterEngine {
-    async fn append_entries(&self, payload: &[u8]) -> Result<Vec<u8>, String> {
+    async fn append_entries(
+        &self,
+        payload: &[u8],
+        leader_quorum_ack_age_ms: Option<u64>,
+    ) -> Result<Vec<u8>, String> {
         let raft = self.raft.as_ref().ok_or("Raft not initialised")?;
         let req: AppendEntriesRequest<HearthRaftConfig> = wire::decode(payload)?;
         self.note_clock_offset(&req);
@@ -1593,7 +1599,7 @@ impl IncomingRpcDispatch for ClusterEngine {
         let received_ms = gate.now_ms();
         let reach = LogReach::of(&req);
         let resp = raft.append_entries(req).await.map_err(|e| e.to_string())?;
-        note_append_entries(gate, received_ms, reach, &resp);
+        note_append_entries(gate, received_ms, leader_quorum_ack_age_ms, reach, &resp);
         wire::encode(&resp)
     }
 
@@ -1687,6 +1693,7 @@ async fn run_lag_monitor(
                     m.membership_config.membership().voter_ids().count(),
                     threshold_ms,
                 ),
+                quorum_ack_ago_ms: m.millis_since_quorum_ack,
                 reported_after_ms: previous_poll_ms.filter(|_| fresh),
                 now_ms: poll_ms,
             };
@@ -1704,15 +1711,36 @@ async fn run_lag_monitor(
     }
 }
 
+/// The oldest leader quorum acknowledgement for which a follower still counts
+/// an `AppendEntries` as contact (see [`note_append_entries`]): the leader
+/// lease (openraft's `leader_lease`, equal to [`ELECTION_TIMEOUT_MAX_MS`])
+/// less 1 s for the network delay between the leader's clock and this node's.
+///
+/// A voter that acknowledged a leader refuses to vote for another until the
+/// lease runs out, so no other leader can acknowledge a write before the
+/// deposed one's last quorum acknowledgement plus the lease. A follower that
+/// stops counting it earlier serves no state older than that.
+const MAX_LEADER_ACK_AGE_MS: u64 = ELECTION_TIMEOUT_MAX_MS - 1_000;
+
 /// Records a follower's contact when it accepted an `AppendEntries` that
-/// arrived at `received_ms` ([`accepted_through_commit`]).
+/// arrived at `received_ms` ([`accepted_through_commit`]), from a leader a
+/// quorum acknowledged `leader_quorum_ack_age_ms` before it sent the request.
+///
+/// The highest term this node knows can be stale: a leader cut off from its
+/// quorum together with this node goes on sending heartbeats while the
+/// majority elects another leader and acknowledges writes. So a request
+/// counts only when its leader had a quorum acknowledgement less than
+/// [`MAX_LEADER_ACK_AGE_MS`] before it sent it. A request with no age (no
+/// acknowledgement on record, or an older build) is no contact.
 fn note_append_entries(
     gate: &ReadGate,
     received_ms: u64,
+    leader_quorum_ack_age_ms: Option<u64>,
     reach: LogReach,
     resp: &openraft::raft::AppendEntriesResponse<u64>,
 ) {
-    if accepted_through_commit(reach, resp) {
+    let leader_acked = leader_quorum_ack_age_ms.is_some_and(|age| age < MAX_LEADER_ACK_AGE_MS);
+    if leader_acked && accepted_through_commit(reach, resp) {
         gate.record_contact_at(received_ms);
     }
 }
@@ -1774,6 +1802,8 @@ struct MonitorTick {
     lag_ms: u64,
     /// The node's contact as a leader.
     contact: LeaderContact,
+    /// `millis_since_quorum_ack` of the metrics, threshold or not.
+    quorum_ack_ago_ms: Option<u64>,
     /// A time before the metrics were reported, in read-gate milliseconds,
     /// or `None` when that is not known (the metrics did not change since
     /// the previous poll, or this is the first). openraft computes
@@ -1790,18 +1820,33 @@ struct MonitorTick {
 /// A leader's quorum acknowledgement is dated from `reported_after_ms`, which
 /// is never later than the report, so the deadline is never later than the
 /// acknowledgement plus the threshold. A poll that cannot date the report
-/// leaves the deadline as it is.
+/// leaves the deadline as it is. The same date is recorded as the leader's
+/// quorum acknowledgement, which its heartbeats carry to its followers; a
+/// node that does not lead has none.
 fn apply_monitor_tick(gate: &ReadGate, tick: &MonitorTick, threshold_ms: u64) -> bool {
     let lagging = !reads_allowed_for_lag(tick.lag_ms, threshold_ms);
     gate.set_lag_hold(lagging);
     match tick.contact {
-        LeaderContact::SoleVoter => gate.record_contact_at(tick.now_ms),
+        LeaderContact::SoleVoter => {
+            gate.record_contact_at(tick.now_ms);
+            gate.record_quorum_ack_at(tick.now_ms);
+        }
         LeaderContact::AckedAgo { ms } => {
             if let Some(reported_after) = tick.reported_after_ms {
                 gate.record_contact_at(reported_after.saturating_sub(ms));
             }
         }
-        LeaderContact::NotLeader | LeaderContact::OutOfContact => {}
+        LeaderContact::NotLeader => gate.clear_quorum_ack(),
+        LeaderContact::OutOfContact => {}
+    }
+    if matches!(
+        tick.contact,
+        LeaderContact::AckedAgo { .. } | LeaderContact::OutOfContact
+    ) {
+        if let (Some(ago), Some(reported_after)) = (tick.quorum_ack_ago_ms, tick.reported_after_ms)
+        {
+            gate.record_quorum_ack_at(reported_after.saturating_sub(ago));
+        }
     }
     lagging
 }
@@ -2772,6 +2817,7 @@ mod tests {
         let tick = |lag_ms| MonitorTick {
             lag_ms,
             contact: LeaderContact::NotLeader,
+            quorum_ack_ago_ms: None,
             reported_after_ms: None,
             now_ms: 1_001,
         };
@@ -2798,6 +2844,7 @@ mod tests {
         let tick = MonitorTick {
             lag_ms: 0,
             contact: LeaderContact::AckedAgo { ms: 100 },
+            quorum_ack_ago_ms: Some(100),
             reported_after_ms: Some(1_000),
             now_ms: 1_050,
         };
@@ -2817,6 +2864,7 @@ mod tests {
         let tick = MonitorTick {
             lag_ms: 0,
             contact: LeaderContact::AckedAgo { ms: 0 },
+            quorum_ack_ago_ms: Some(0),
             reported_after_ms: None,
             now_ms: 1_000,
         };
@@ -2833,6 +2881,7 @@ mod tests {
         let out = MonitorTick {
             lag_ms: 0,
             contact: LeaderContact::OutOfContact,
+            quorum_ack_ago_ms: None,
             reported_after_ms: Some(1_400),
             now_ms: 1_450,
         };
@@ -2842,6 +2891,7 @@ mod tests {
         let sole = MonitorTick {
             lag_ms: 0,
             contact: LeaderContact::SoleVoter,
+            quorum_ack_ago_ms: None,
             reported_after_ms: None,
             now_ms: 2_000,
         };
@@ -2859,15 +2909,22 @@ mod tests {
 
         let gate = ReadGate::new(500);
         let reach = LogReach::of(&append_request(Some(7), &[], Some(7)));
-        note_append_entries(&gate, 1_000, reach, &R::Conflict);
-        note_append_entries(&gate, 1_000, reach, &R::HigherVote(Vote::new(9, 9)));
+        let age = Some(100);
+        note_append_entries(&gate, 1_000, age, reach, &R::Conflict);
+        note_append_entries(&gate, 1_000, age, reach, &R::HigherVote(Vote::new(9, 9)));
         assert!(!gate.allows_at(1_000), "refused requests are no contact");
 
-        note_append_entries(&gate, 1_000, reach, &R::Success);
+        note_append_entries(&gate, 1_000, age, reach, &R::Success);
         assert!(gate.allows_at(1_499));
         assert!(!gate.allows_at(1_500), "dated from its arrival");
 
-        note_append_entries(&gate, 2_000, reach, &R::PartialSuccess(Some(log_id(7))));
+        note_append_entries(
+            &gate,
+            2_000,
+            age,
+            reach,
+            &R::PartialSuccess(Some(log_id(7))),
+        );
         assert!(gate.allows_at(2_499));
     }
 
@@ -2944,6 +3001,64 @@ mod tests {
             Some(10),
             &R::HigherVote(Vote::new(9, 9))
         ));
+    }
+
+    /// Task 1.6: a deposed leader cut off with this follower. Its heartbeats
+    /// are accepted (the follower knows no higher term), but no quorum has
+    /// acknowledged it for longer than the lease allows.
+    #[test]
+    fn an_append_entries_from_a_leader_without_a_recent_quorum_is_no_contact() {
+        use openraft::raft::AppendEntriesResponse as R;
+        let gate = ReadGate::new(500);
+        let reach = LogReach::of(&append_request(Some(7), &[], Some(7)));
+        note_append_entries(
+            &gate,
+            1_000,
+            Some(MAX_LEADER_ACK_AGE_MS),
+            reach,
+            &R::Success,
+        );
+        assert!(!gate.allows_at(1_000), "an acknowledgement too old");
+        note_append_entries(&gate, 1_000, None, reach, &R::Success);
+        assert!(!gate.allows_at(1_000), "no acknowledgement on record");
+        note_append_entries(
+            &gate,
+            1_000,
+            Some(MAX_LEADER_ACK_AGE_MS - 1),
+            reach,
+            &R::Success,
+        );
+        assert!(gate.allows_at(1_000), "an acknowledgement within the lease");
+        assert_eq!(MAX_LEADER_ACK_AGE_MS, 2_000);
+    }
+
+    /// A leader records its quorum acknowledgement for its heartbeats to
+    /// carry, also above the read threshold; a node that does not lead
+    /// forgets it.
+    #[test]
+    fn a_leader_records_its_quorum_ack_and_a_follower_forgets_it() {
+        let gate = ReadGate::new(500);
+        let tick = |contact, quorum_ack_ago_ms, reported_after| MonitorTick {
+            lag_ms: 0,
+            contact,
+            quorum_ack_ago_ms,
+            reported_after_ms: Some(reported_after),
+            now_ms: reported_after + 50,
+        };
+        apply_monitor_tick(
+            &gate,
+            &tick(LeaderContact::AckedAgo { ms: 100 }, Some(100), 9_950),
+            500,
+        );
+        assert_eq!(gate.quorum_ack_age_at(10_000), Some(150));
+        apply_monitor_tick(
+            &gate,
+            &tick(LeaderContact::OutOfContact, Some(900), 10_950),
+            500,
+        );
+        assert_eq!(gate.quorum_ack_age_at(11_000), Some(950));
+        apply_monitor_tick(&gate, &tick(LeaderContact::NotLeader, None, 11_950), 500);
+        assert_eq!(gate.quorum_ack_age_at(12_000), None);
     }
 
     /// While `serve` starts, reads skip the contact check; once the guard

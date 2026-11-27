@@ -29,9 +29,15 @@ use crate::config::ClusterConfig;
 /// is available. Until then, the server returns `UNAVAILABLE`.
 pub trait IncomingRpcDispatch: Send + Sync + 'static {
     /// Handle an `AppendEntries` RPC from the cluster leader.
+    ///
+    /// `leader_quorum_ack_age_ms` is the request's field of that name: how
+    /// long before sending it a quorum last acknowledged the leader (see
+    /// the read gate). `None` from a leader with none on record, or from an
+    /// older build.
     fn append_entries(
         &self,
         payload: &[u8],
+        leader_quorum_ack_age_ms: Option<u64>,
     ) -> impl std::future::Future<Output = Result<Vec<u8>, String>> + Send;
 
     /// Handle a `Vote` RPC from a cluster candidate.
@@ -82,11 +88,11 @@ impl<D: IncomingRpcDispatch> RaftService for RaftRpcHandler<D> {
         &self,
         request: Request<AppendEntriesRequest>,
     ) -> Result<Response<AppendEntriesResponse>, Status> {
-        let payload = request.into_inner().payload;
+        let request = request.into_inner();
         debug!("received AppendEntries from peer");
 
         self.dispatch
-            .append_entries(&payload)
+            .append_entries(&request.payload, request.leader_quorum_ack_age_ms)
             .await
             .map(|resp| Response::new(AppendEntriesResponse { payload: resp }))
             .map_err(|e| {
@@ -291,7 +297,7 @@ impl PeerServer {
 pub struct NoopDispatch;
 
 impl IncomingRpcDispatch for NoopDispatch {
-    async fn append_entries(&self, _payload: &[u8]) -> Result<Vec<u8>, String> {
+    async fn append_entries(&self, _payload: &[u8], _age: Option<u64>) -> Result<Vec<u8>, String> {
         Err("Raft engine not initialised".to_string())
     }
 
@@ -325,7 +331,7 @@ mod tests {
     #[tokio::test]
     async fn noop_dispatch_returns_error() {
         let d = NoopDispatch;
-        let result = d.append_entries(b"{}").await;
+        let result = d.append_entries(b"{}", None).await;
         assert!(result.is_err());
     }
 }

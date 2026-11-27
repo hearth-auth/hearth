@@ -37,6 +37,13 @@ service RaftService {
 // Payload is CBOR-encoded openraft::AppendEntriesRequest<HearthRaftConfig>.
 message AppendEntriesRequest {
   bytes payload = 1;
+  // Milliseconds since a quorum of voters last acknowledged the sending
+  // leader, on the leader's clock when it sent this request. Unset when the
+  // leader has no quorum acknowledgement on record. A follower counts the
+  // request as contact (its read gate) only when this is set and below the
+  // leader lease less 1 s, so a deposed leader cut off with it cannot keep it
+  // serving reads.
+  optional uint64 leader_quorum_ack_age_ms = 2;
 }
 
 // AppendEntries RPC response.
