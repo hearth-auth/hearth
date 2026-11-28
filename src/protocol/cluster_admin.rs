@@ -31,9 +31,10 @@ use crate::protocol::http::{extract_cluster_admin_auth, AppState};
 /// `POST /admin/cluster/bootstrap`
 ///
 /// Initializes Raft membership from the node's configured `cluster.peers`.
-/// Must be called exactly once on one designated bootstrap node after all
-/// cluster nodes are running. Subsequent calls are idempotent (openraft
-/// rejects double-initialization with an error, surfaced as HTTP 409).
+/// Only the designated initialiser, the lowest node ID in that membership,
+/// may call it (it also initialises itself at start-up); any other node
+/// answers 409 and writes nothing. On an initialised node it writes nothing
+/// either, no cluster ID included, and answers 409.
 ///
 /// Returns 503 when the server is running in single-node mode.
 pub(crate) async fn admin_cluster_bootstrap(
@@ -55,7 +56,10 @@ pub(crate) async fn admin_cluster_bootstrap(
     let members = cluster.initial_members().cloned().unwrap_or_default();
 
     if let Err(e) = cluster.initialize_cluster(members).await {
-        let status = if matches!(e, crate::cluster::ClusterError::AlreadyInitialized(_)) {
+        let status = if matches!(
+            e,
+            ClusterError::AlreadyInitialized(_) | ClusterError::NotTheInitialiser { .. }
+        ) {
             StatusCode::CONFLICT
         } else {
             StatusCode::INTERNAL_SERVER_ERROR

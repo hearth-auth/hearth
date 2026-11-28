@@ -19,10 +19,12 @@ use openraft::{
     },
 };
 use serde::Serialize;
-use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
+use tonic::transport::{Channel, ClientTlsConfig, Identity};
 use tracing::{debug, warn};
 
 use crate::cluster::error::TransportError;
+use crate::cluster::log_store::ClusterIdentity;
+use crate::cluster::peer_identity::{NodeIdServerVerifier, PeerClaim, PeerRefusal};
 use crate::cluster::read_gate::ReadGate;
 use crate::cluster::rpc::{
     raft_service_client::RaftServiceClient, AppendEntriesRequest as GrpcAer,
@@ -202,6 +204,57 @@ impl PeerFaults {
     }
 }
 
+// ── LocalIdentity ────────────────────────────────────────────────────────────
+
+/// This node's side of every peer RPC's identity metadata.
+struct LocalIdentity {
+    node_id: u64,
+    cluster_identity: Arc<ClusterIdentity>,
+}
+
+impl LocalIdentity {
+    /// `body` as a request to `target`, carrying this node's claim.
+    fn request<T>(&self, target: u64, body: T) -> tonic::Request<T> {
+        let mut request = tonic::Request::new(body);
+        PeerClaim {
+            cluster_id: self.cluster_identity.get(),
+            source: self.node_id,
+            target,
+        }
+        .stamp(request.metadata_mut());
+        request
+    }
+}
+
+/// Logs a peer's refusal of this node's RPCs at `WARN` when its code differs
+/// from the last one logged for that peer, so a peer that refuses every
+/// heartbeat logs once, not every 250 ms.
+#[derive(Default)]
+struct RefusalReporter {
+    last: Mutex<Option<PeerRefusal>>,
+}
+
+impl RefusalReporter {
+    fn report(&self, target: u64, addr: &str, status: &tonic::Status) {
+        let Some(refusal) = PeerRefusal::from_status(status) else {
+            return;
+        };
+        let Ok(mut last) = self.last.lock() else {
+            return;
+        };
+        if *last != Some(refusal) {
+            *last = Some(refusal);
+            warn!(
+                node_id = target,
+                addr = %addr,
+                refusal = refusal.code(),
+                message = status.message(),
+                "peer refused this node's RPC (logged once per code)"
+            );
+        }
+    }
+}
+
 // ── HearthNetworkFactory ─────────────────────────────────────────────────────
 
 /// Creates per-peer gRPC connections on demand.
@@ -210,6 +263,8 @@ impl PeerFaults {
 /// `new_client(target, node)` whenever it needs a connection to a peer.
 pub struct HearthNetworkFactory {
     creds: Arc<TlsCredentials>,
+    /// Who this node is: every RPC carries its node ID and cluster ID.
+    local: Arc<LocalIdentity>,
     /// Test-only outbound-RPC fault injector. `None` on every node built by
     /// `ClusterEngine::build_clustered`, which is the only constructor
     /// `serve` reaches.
@@ -221,16 +276,30 @@ pub struct HearthNetworkFactory {
 }
 
 impl HearthNetworkFactory {
-    /// Creates a new factory from PEM-encoded certificate material.
+    /// Creates a new factory for node `node_id` from PEM-encoded certificate
+    /// material.
     ///
-    /// `cert_pem` and `key_pem` are this node's identity presented to peers.
-    /// `ca_pem` is the CA used to verify peer certificates.
-    pub fn new(cert_pem: Vec<u8>, key_pem: Vec<u8>, ca_pem: Vec<u8>) -> Self {
+    /// `cert_pem` and `key_pem` are this node's identity presented to peers;
+    /// the certificate must name `node_id` (URI SAN `urn:hearth:node:<id>`).
+    /// `ca_pem` is the CA used to verify peer certificates. Every RPC carries
+    /// `node_id`, the target's node ID and `cluster_identity`'s cluster ID
+    /// (`cluster-membership-changes` design decision 5).
+    pub fn new(
+        node_id: u64,
+        cluster_identity: Arc<ClusterIdentity>,
+        cert_pem: Vec<u8>,
+        key_pem: Vec<u8>,
+        ca_pem: Vec<u8>,
+    ) -> Self {
         Self {
             creds: Arc::new(TlsCredentials {
                 cert_pem,
                 key_pem,
                 ca_pem,
+            }),
+            local: Arc::new(LocalIdentity {
+                node_id,
+                cluster_identity,
             }),
             faults: None,
             read_gate: None,
@@ -258,8 +327,10 @@ impl HearthNetworkFactory {
     pub(crate) fn leader_forwarder(&self) -> LeaderForwarder {
         LeaderForwarder {
             creds: Arc::clone(&self.creds),
+            local: Arc::clone(&self.local),
             faults: self.faults.clone(),
             channel: Mutex::new(None),
+            refusals: RefusalReporter::default(),
         }
     }
 }
@@ -273,10 +344,12 @@ impl RaftNetworkFactory<HearthRaftConfig> for HearthNetworkFactory {
             target,
             addr: node.addr.clone(),
             creds: Arc::clone(&self.creds),
+            local: Arc::clone(&self.local),
             channel: Mutex::new(None),
             faults: self.faults.clone(),
             read_gate: self.read_gate.clone(),
             reported_older_build: std::sync::atomic::AtomicBool::new(false),
+            refusals: RefusalReporter::default(),
         }
     }
 }
@@ -294,6 +367,8 @@ pub struct HearthPeerNetwork {
     target: u64,
     addr: String,
     creds: Arc<TlsCredentials>,
+    /// See [`HearthNetworkFactory`]'s field of the same name.
+    local: Arc<LocalIdentity>,
     /// Cached tonic `Channel`.
     ///
     /// Lock is held only long enough to clone the channel value — NEVER across
@@ -305,6 +380,8 @@ pub struct HearthPeerNetwork {
     read_gate: Option<Arc<ReadGate>>,
     /// Set once this peer has been reported as unable to decode our log.
     reported_older_build: std::sync::atomic::AtomicBool,
+    /// The last refusal code this peer answered with that was logged.
+    refusals: RefusalReporter,
 }
 
 impl HearthPeerNetwork {
@@ -401,17 +478,19 @@ impl RaftNetwork<HearthRaftConfig> for HearthPeerNetwork {
             .read_gate
             .as_ref()
             .and_then(|gate| gate.quorum_ack_age_ms());
-        let resp = client
-            .append_entries(GrpcAer {
+        let request = self.local.request(
+            self.target,
+            GrpcAer {
                 payload,
                 leader_quorum_ack_age_ms,
-            })
-            .await
-            .map_err(|e| {
-                self.invalidate_channel();
-                self.report_older_build(&e);
-                net_err(TransportError::Rpc(e))
-            })?;
+            },
+        );
+        let resp = client.append_entries(request).await.map_err(|e| {
+            self.invalidate_channel();
+            self.report_older_build(&e);
+            self.refusals.report(self.target, &self.addr, &e);
+            net_err(TransportError::Rpc(e))
+        })?;
 
         let resp: AppendEntriesResponse<u64> = wire::decode(&resp.into_inner().payload)
             .map_err(|e| net_err(TransportError::Deserialize(e)))?;
@@ -443,7 +522,7 @@ impl RaftNetwork<HearthRaftConfig> for HearthPeerNetwork {
         // for the last chunk, whose answer waits for the follower's check
         // and restore. Any other chunk is one write: a follower that does not
         // answer it within `SNAPSHOT_CHUNK_TIMEOUT` is not waited for.
-        let call = client.install_snapshot(GrpcIsr { payload });
+        let call = client.install_snapshot(self.local.request(self.target, GrpcIsr { payload }));
         let answer = if last_chunk {
             call.await
         } else {
@@ -457,6 +536,7 @@ impl RaftNetwork<HearthRaftConfig> for HearthPeerNetwork {
         };
         let resp = answer.map_err(|e| {
             self.invalidate_channel();
+            self.refusals.report(self.target, &self.addr, &e);
             net_err_ise(TransportError::Rpc(e))
         })?;
 
@@ -476,8 +556,10 @@ impl RaftNetwork<HearthRaftConfig> for HearthPeerNetwork {
             .max_decoding_message_size(MAX_PEER_MESSAGE_BYTES)
             .max_encoding_message_size(MAX_PEER_MESSAGE_BYTES);
 
-        let resp = client.vote(GrpcVr { payload }).await.map_err(|e| {
+        let request = self.local.request(self.target, GrpcVr { payload });
+        let resp = client.vote(request).await.map_err(|e| {
             self.invalidate_channel();
+            self.refusals.report(self.target, &self.addr, &e);
             net_err(TransportError::Rpc(e))
         })?;
 
@@ -546,10 +628,14 @@ pub(crate) enum ForwardFailure {
 /// leader against the cluster CA, and the leader's, verified against it here.
 pub(crate) struct LeaderForwarder {
     creds: Arc<TlsCredentials>,
+    /// See [`HearthNetworkFactory`]'s field of the same name.
+    local: Arc<LocalIdentity>,
     faults: Option<Arc<PeerFaults>>,
     /// `(leader node id, address, channel)`. Lock held only to clone or
     /// replace the value — never across an `.await`.
     channel: Mutex<Option<(u64, String, Channel)>>,
+    /// The last refusal code a leader answered with that was logged.
+    refusals: RefusalReporter,
 }
 
 impl LeaderForwarder {
@@ -584,7 +670,8 @@ impl LeaderForwarder {
         let mut client = RaftServiceClient::new(channel)
             .max_decoding_message_size(MAX_PEER_MESSAGE_BYTES)
             .max_encoding_message_size(MAX_PEER_MESSAGE_BYTES);
-        let answer = tokio::time::timeout(timeout, client.forward_write(GrpcFwr { payload })).await;
+        let request = self.local.request(leader_id, GrpcFwr { payload });
+        let answer = tokio::time::timeout(timeout, client.forward_write(request)).await;
         let reply = match answer {
             Ok(Ok(resp)) => resp.into_inner().payload,
             Ok(Err(status)) if status.code() == tonic::Code::Unimplemented => {
@@ -592,6 +679,7 @@ impl LeaderForwarder {
             }
             Ok(Err(status)) => {
                 self.invalidate(leader_id);
+                self.refusals.report(leader_id, addr, &status);
                 return Err(ForwardFailure::Unknown(TransportError::Rpc(status)));
             }
             Err(_) => {
@@ -644,25 +732,47 @@ async fn connect_mtls(
     addr: &str,
 ) -> Result<Channel, TransportError> {
     let identity = Identity::from_pem(&creds.cert_pem, &creds.key_pem);
-    let ca = Certificate::from_pem(&creds.ca_pem);
-    let tls = ClientTlsConfig::new().ca_certificate(ca).identity(identity);
+    // Verifies the chain to the cluster CA and the dialled address as
+    // tonic's default does, and also that the certificate names `target`
+    // (URI SAN `urn:hearth:node:<id>`): a node now listening at a dead
+    // node's address is not taken for it.
+    let verifier = NodeIdServerVerifier::new(&creds.ca_pem, target).map_err(TransportError::Tls)?;
+    let tls = ClientTlsConfig::new().identity(identity);
 
     let endpoint = format!("https://{addr}");
     debug!(node_id = target, addr = %endpoint, "connecting to peer over mTLS");
 
     Channel::from_shared(endpoint.clone())
         .map_err(|e| TransportError::Connect(Box::new(e)))?
-        .tls_config(tls)
+        .tls_config_with_verifier(tls, Arc::new(verifier))
         .map_err(|e| TransportError::Tls(e.to_string()))?
         .connect()
         .await
         .map_err(|e| {
-            warn!(node_id = target, addr = %endpoint, error = %e, "peer connection failed");
-            TransportError::Connect(Box::new(e))
+            // tonic's error says only "transport error"; the cause (here a
+            // refused certificate) is in its source chain.
+            let error = error_chain(&e);
+            warn!(node_id = target, addr = %endpoint, %error, "peer connection failed");
+            TransportError::Connect(error.into())
         })
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// `e` and each of its sources, joined by `": "`.
+fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut text = e.to_string();
+    let mut source = e.source();
+    while let Some(cause) = source {
+        let cause_text = cause.to_string();
+        if !text.ends_with(&cause_text) {
+            text.push_str(": ");
+            text.push_str(&cause_text);
+        }
+        source = cause.source();
+    }
+    text
+}
 
 /// Whether `status` is a peer refusing an entry because it does not know one of
 /// its [`RaftCommand`](crate::cluster::types::RaftCommand) variants — the peer
@@ -692,6 +802,150 @@ fn net_err_ise(
 mod tests {
     use super::*;
     use openraft::LogId;
+
+    /// What a recording peer saw of each RPC's identity metadata.
+    #[allow(clippy::expect_used)]
+    mod recording_peer {
+        use std::sync::Mutex;
+
+        use tonic::{Request, Response, Status};
+
+        use crate::cluster::peer_identity::PeerClaim;
+        use crate::cluster::rpc::{
+            raft_service_server::RaftService, AppendEntriesRequest, AppendEntriesResponse,
+            ForwardWriteRequest, ForwardWriteResponse, InstallSnapshotRequest,
+            InstallSnapshotResponse, VoteRequest, VoteResponse,
+        };
+
+        /// A peer that records each RPC's claim and refuses it.
+        #[derive(Default)]
+        pub(super) struct RecordingPeer {
+            pub(super) seen: Mutex<Vec<(&'static str, Result<PeerClaim, String>)>>,
+        }
+
+        impl RecordingPeer {
+            fn record<T>(&self, rpc: &'static str, request: &Request<T>) -> Status {
+                let claim = PeerClaim::read(request.metadata()).map_err(|r| r.to_string());
+                self.seen.lock().expect("recording lock").push((rpc, claim));
+                Status::unavailable("recorded")
+            }
+        }
+
+        #[tonic::async_trait]
+        impl RaftService for RecordingPeer {
+            async fn append_entries(
+                &self,
+                request: Request<AppendEntriesRequest>,
+            ) -> Result<Response<AppendEntriesResponse>, Status> {
+                Err(self.record("append_entries", &request))
+            }
+            async fn vote(
+                &self,
+                request: Request<VoteRequest>,
+            ) -> Result<Response<VoteResponse>, Status> {
+                Err(self.record("vote", &request))
+            }
+            async fn install_snapshot(
+                &self,
+                request: Request<InstallSnapshotRequest>,
+            ) -> Result<Response<InstallSnapshotResponse>, Status> {
+                Err(self.record("install_snapshot", &request))
+            }
+            async fn forward_write(
+                &self,
+                request: Request<ForwardWriteRequest>,
+            ) -> Result<Response<ForwardWriteResponse>, Status> {
+                Err(self.record("forward_write", &request))
+            }
+        }
+    }
+
+    /// Task 1.4: every outgoing RPC (the three Raft RPCs and `ForwardWrite`)
+    /// carries this node's cluster ID, its node ID and the target's node ID.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    async fn every_outgoing_rpc_carries_the_identity_metadata() {
+        use crate::cluster::peer_identity::test_pki::TestCa;
+        use crate::cluster::rpc::raft_service_server::RaftServiceServer;
+        use crate::cluster::types::ClusterId;
+        use openraft::network::RaftNetworkFactory;
+        use tonic::transport::{Certificate, Server, ServerTlsConfig};
+
+        let ca = TestCa::new();
+        let server_leaf = ca.leaf_for_node(2);
+        let client_leaf = ca.leaf_for_node(1);
+        let peer = Arc::new(recording_peer::RecordingPeer::default());
+        let incoming =
+            tonic::transport::server::TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = incoming.local_addr().unwrap().to_string();
+        let tls = ServerTlsConfig::new()
+            .identity(Identity::from_pem(
+                &server_leaf.cert_pem,
+                &server_leaf.key_pem,
+            ))
+            .client_ca_root(Certificate::from_pem(ca.pem()));
+        let server = Server::builder()
+            .tls_config(tls)
+            .unwrap()
+            .add_service(RaftServiceServer::from_arc(Arc::clone(&peer)))
+            .serve_with_incoming(incoming);
+        let server = tokio::spawn(server);
+
+        let cluster_id = ClusterId::new(uuid::Uuid::from_u128(0xC1));
+        let mut factory = HearthNetworkFactory::new(
+            1,
+            ClusterIdentity::in_memory(Some(cluster_id)),
+            client_leaf.cert_pem.into_bytes(),
+            client_leaf.key_pem.into_bytes(),
+            ca.pem().into_bytes(),
+        );
+        let node = HearthNode { addr: addr.clone() };
+        let mut client = factory.new_client(2, &node).await;
+        let option = || RPCOption::new(Duration::from_secs(5));
+        let vote = openraft::Vote::new(1, 1);
+        let aer = AppendEntriesRequest {
+            vote,
+            prev_log_id: None,
+            entries: vec![],
+            leader_commit: None,
+        };
+        let _ = client.append_entries(aer, option()).await;
+        let _ = client.vote(VoteRequest::new(vote, None), option()).await;
+        let isr = InstallSnapshotRequest {
+            vote,
+            meta: openraft::SnapshotMeta::default(),
+            offset: 0,
+            data: vec![],
+            done: true,
+        };
+        let _ = client.install_snapshot(isr, option()).await;
+        let _ = factory
+            .leader_forwarder()
+            .forward(2, &addr, vec![], Duration::from_secs(5))
+            .await;
+        server.abort();
+
+        let expected = Ok(PeerClaim {
+            cluster_id: Some(cluster_id),
+            source: 1,
+            target: 2,
+        });
+        let seen = peer.seen.lock().unwrap().clone();
+        let rpcs: Vec<_> = seen.iter().map(|(rpc, _)| *rpc).collect();
+        assert_eq!(
+            rpcs,
+            [
+                "append_entries",
+                "vote",
+                "install_snapshot",
+                "forward_write"
+            ],
+            "every RPC reached the peer"
+        );
+        for (rpc, claim) in seen {
+            assert_eq!(claim, expected, "{rpc}");
+        }
+    }
 
     /// A peer on an older build refuses an entry it cannot decode with serde's
     /// "unknown variant" message; that is recognised so the operator is told
@@ -772,8 +1026,13 @@ mod tests {
     /// Verifies factory produces a peer network with the expected address.
     #[tokio::test]
     async fn factory_creates_peer_with_correct_addr() {
-        let mut factory =
-            HearthNetworkFactory::new(b"cert".to_vec(), b"key".to_vec(), b"ca".to_vec());
+        let mut factory = HearthNetworkFactory::new(
+            1,
+            ClusterIdentity::in_memory(None),
+            b"cert".to_vec(),
+            b"key".to_vec(),
+            b"ca".to_vec(),
+        );
         let node = HearthNode {
             addr: "127.0.0.1:8421".to_string(),
         };
@@ -787,8 +1046,13 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::unwrap_used)]
     async fn append_entries_returns_network_error_on_connection_failure() {
-        let mut factory =
-            HearthNetworkFactory::new(b"bad".to_vec(), b"bad".to_vec(), b"bad".to_vec());
+        let mut factory = HearthNetworkFactory::new(
+            1,
+            ClusterIdentity::in_memory(None),
+            b"bad".to_vec(),
+            b"bad".to_vec(),
+            b"bad".to_vec(),
+        );
         let node = HearthNode {
             addr: "127.0.0.1:19999".to_string(),
         };
@@ -818,8 +1082,13 @@ mod tests {
     /// Same guarantee for Vote.
     #[tokio::test]
     async fn vote_returns_network_error_on_connection_failure() {
-        let mut factory =
-            HearthNetworkFactory::new(b"bad".to_vec(), b"bad".to_vec(), b"bad".to_vec());
+        let mut factory = HearthNetworkFactory::new(
+            1,
+            ClusterIdentity::in_memory(None),
+            b"bad".to_vec(),
+            b"bad".to_vec(),
+            b"bad".to_vec(),
+        );
         let node = HearthNode {
             addr: "127.0.0.1:19999".to_string(),
         };

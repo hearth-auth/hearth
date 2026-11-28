@@ -6,19 +6,19 @@
 //! - `raft_log` — key: `u64` log index, value: JSON-serialised
 //!   `Entry<HearthRaftConfig>`.
 //! - `raft_meta` — key: `&str`, value: `Vec<u8>` for vote, last-purged pointer,
-//!   and the optional committed pointer.
+//!   the optional committed pointer, and the cluster ID ([`ClusterIdentity`]).
 
 use std::fmt::Debug;
 use std::ops::RangeBounds;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use openraft::storage::{LogFlushed, LogState, RaftLogReader, RaftLogStorage};
 use openraft::{Entry, LogId, StorageError, StorageIOError, Vote};
 use redb::{Database, ReadableTable, TableDefinition};
 use tracing::{debug, trace};
 
-use crate::cluster::types::HearthRaftConfig;
+use crate::cluster::types::{ClusterId, HearthRaftConfig};
 
 // ── Table definitions ─────────────────────────────────────────────────────────
 
@@ -28,6 +28,7 @@ const META_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("raft_meta
 const KEY_VOTE: &str = "vote";
 const KEY_LAST_PURGED: &str = "last_purged";
 const KEY_COMMITTED: &str = "committed";
+const KEY_CLUSTER_ID: &str = "cluster_id";
 
 // ── Error helpers ─────────────────────────────────────────────────────────────
 
@@ -216,6 +217,113 @@ impl HearthLogStore {
         }
         txn.commit().unwrap();
     }
+
+    /// This node's cluster ID, as `raft.db` holds it (see [`ClusterIdentity`]).
+    /// The handle shares the store's database, so take it before the store
+    /// moves into `Raft::new`.
+    ///
+    /// # Errors
+    ///
+    /// The stored cluster ID cannot be read.
+    pub fn cluster_identity(&self) -> Result<Arc<ClusterIdentity>, StorageError<u64>> {
+        let identity = ClusterIdentity {
+            slot: OnceLock::new(),
+            store: Some(Arc::clone(&self.inner)),
+        };
+        if let Some(id) = identity.persisted()? {
+            let _ = identity.slot.set(id);
+        }
+        Ok(Arc::new(identity))
+    }
+}
+
+// ── ClusterIdentity ───────────────────────────────────────────────────────────
+
+/// This node's cluster ID (`cluster-membership-changes` design decision 5).
+///
+/// Set once, never changed: the node that initialises a cluster generates
+/// it before `initialize()`, and every other node adopts the first one a
+/// leader sends it. Both write it to `raft.db` (meta key `cluster_id`)
+/// before they act on it, so a restart keeps it.
+pub struct ClusterIdentity {
+    slot: OnceLock<ClusterId>,
+    /// `None` for [`Self::in_memory`], which persists nothing.
+    store: Option<Arc<Mutex<Inner>>>,
+}
+
+impl ClusterIdentity {
+    /// An identity that holds `id` (or none yet) and is not backed by
+    /// `raft.db`: [`Self::adopt`] keeps an ID in memory only. For tests and
+    /// tools that speak to peers without being a node.
+    #[must_use]
+    pub fn in_memory(id: Option<ClusterId>) -> Arc<Self> {
+        let slot = OnceLock::new();
+        if let Some(id) = id {
+            let _ = slot.set(id);
+        }
+        Arc::new(Self { slot, store: None })
+    }
+
+    /// The cluster ID, or `None` while this node has none.
+    #[must_use]
+    pub fn get(&self) -> Option<ClusterId> {
+        self.slot.get().copied()
+    }
+
+    /// The cluster ID `raft.db` holds now, read from disk.
+    ///
+    /// # Errors
+    ///
+    /// `raft.db` cannot be read, or holds a value that is not a UUID.
+    pub fn persisted(&self) -> Result<Option<ClusterId>, StorageError<u64>> {
+        let Some(store) = &self.store else {
+            return Ok(self.get());
+        };
+        let inner = store
+            .lock()
+            .map_err(|e| read_err(std::io::Error::other(e.to_string())))?;
+        inner
+            .read_meta(KEY_CLUSTER_ID)?
+            .map(decode_cluster_id)
+            .transpose()
+    }
+
+    /// Makes `id` this node's cluster ID unless it has one already, and
+    /// returns the one it holds afterwards. The write is durable (redb
+    /// commits with an fsync) before this returns.
+    ///
+    /// # Errors
+    ///
+    /// `raft.db` cannot be read or written.
+    pub async fn adopt(&self, id: ClusterId) -> Result<ClusterId, StorageError<u64>> {
+        if let Some(current) = self.get() {
+            return Ok(current);
+        }
+        let Some(store) = self.store.clone() else {
+            return Ok(*self.slot.get_or_init(|| id));
+        };
+        let held = tokio::task::spawn_blocking(move || -> Result<ClusterId, StorageError<u64>> {
+            let inner = store
+                .lock()
+                .map_err(|e| io_err(std::io::Error::other(e.to_string())))?;
+            // Read and write under one lock: two RPCs racing to adopt
+            // different IDs keep the first.
+            if let Some(held) = inner.read_meta(KEY_CLUSTER_ID)? {
+                return decode_cluster_id(held);
+            }
+            inner.write_meta(KEY_CLUSTER_ID, id.as_uuid().as_bytes())?;
+            Ok(id)
+        })
+        .await
+        .map_err(|e| io_err(std::io::Error::other(e.to_string())))??;
+        Ok(*self.slot.get_or_init(|| held))
+    }
+}
+
+fn decode_cluster_id(bytes: Vec<u8>) -> Result<ClusterId, StorageError<u64>> {
+    uuid::Uuid::from_slice(&bytes)
+        .map(ClusterId::new)
+        .map_err(|e| read_err(e))
 }
 
 // ── HearthLogReader ───────────────────────────────────────────────────────────

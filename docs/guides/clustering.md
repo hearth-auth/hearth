@@ -14,8 +14,9 @@ Hearth includes a partial Raft consensus implementation (`src/cluster/` via `ope
 
 **State that is per node, not replicated** (GA audit 2026-09-28): the session-cookie secret and
 the DPoP nonce secret are generated per process when not configured, rate limiters and the KDF
-admission gate count per node, and MFA / IP attempt counters are node-local. Peer mTLS accepts any
-certificate issued by the cluster CA, with no pinning of which node ID a certificate may claim.
+admission gate count per node, and MFA / IP attempt counters are node-local. Peer mTLS accepts a
+certificate issued by the cluster CA only when it names the node ID its RPCs claim (URI SAN
+`urn:hearth:node:<id>`, see [Generating Certificates](#generating-certificates)).
 
 ---
 
@@ -341,24 +342,40 @@ openssl req -new -nodes \
   -subj "/CN=hearth-node-1" \
   -keyout node1.key -out node1.csr
 
-# 3 — Sign it. The SAN is REQUIRED: rustls verifies the peer against
-#     subjectAltName and ignores the Common Name, so a leaf signed without
-#     -extfile fails the handshake with no usable diagnostic.
-#     Use the address the peers will actually dial.
+# 3 — Sign it. The SAN is REQUIRED and names two things:
+#     - the address the peers will actually dial (rustls verifies the peer
+#       against subjectAltName and ignores the Common Name);
+#     - the node's cluster.node_id, as the URI urn:hearth:node:<id>.
+#     A leaf without either fails every peer RPC.
 openssl x509 -req -days 3650 \
-  -extfile <(printf "subjectAltName=IP:10.0.0.1") \
+  -extfile <(printf "subjectAltName=IP:10.0.0.1,URI:urn:hearth:node:1") \
   -CA ca.crt -CAkey ca.key -CAcreateserial \
   -in node1.csr -out node1.crt
 ```
 
-Use `subjectAltName=DNS:node1.example.com` instead when `peers[].address` names
-a hostname rather than an IP. Verify before deploying:
+Use `DNS:node1.example.com` instead of the `IP:` entry when `peers[].address`
+names a hostname rather than an IP. Verify before deploying:
 
 ```bash
-openssl x509 -in node1.crt -noout -text | grep -A1 "Subject Alternative Name"
+openssl x509 -in node1.crt -noout -ext subjectAltName
+# X509v3 Subject Alternative Name:
+#     IP Address:10.0.0.1, URI:urn:hearth:node:1
 ```
 
-An empty result means the certificate will not work.
+A certificate without the address fails the TLS handshake. A certificate
+without `URI:urn:hearth:node:<id>`, or with another node's ID, fails every
+peer RPC: the node it dials refuses it with `CERTIFICATE_MISMATCH`, and a node
+dialling it refuses the handshake ("the peer certificate names no node ID").
+Each node needs its own certificate; nodes cannot share one.
+
+Every peer RPC also carries the cluster's ID and the sender's and receiver's
+node IDs. A node refuses an RPC meant for another node ID (`WRONG_NODE`), from
+another cluster (`WRONG_CLUSTER`) or from a node outside its membership
+(`NOT_A_MEMBER`), and logs the refusal at `WARN` at most every 30 seconds. The
+cluster ID is a random UUID: the node that initialises the cluster generates
+it, and every other node, while it holds no membership yet, adopts it from the
+first leader whose `AppendEntries` or snapshot chunk its Raft accepts. Each node
+keeps it in `raft.db`, written before it answers that leader.
 
 ---
 
@@ -473,13 +490,13 @@ first-boot setup at `/ui/setup`, verify the operator's email, stop the node, min
 > with no leader, so the endpoint is reachable; see the bullets under G-1 above.
 > On a formed cluster it answers `409` (`tests/cluster_serve_admin_status.rs`).
 
-Bootstrapping initializes the cluster's initial membership. Do this **once** — running bootstrap on an already-initialized cluster is a no-op (Raft rejects double-initialization).
+Bootstrapping initializes the cluster's initial membership and generates its cluster ID. Only the **designated initialiser**, the lowest node ID in `cluster.peers`, may do it: on any other node the endpoint answers `409` and writes nothing, because two initialisers would each generate their own cluster ID and refuse each other's RPCs for ever. On an initialised node it answers `409` and writes nothing either. If the lowest-ID node cannot start on a cold cluster, remove it from `cluster.peers` on every node before any node is initialised; the next-lowest node then initialises.
 
 > **Membership is fixed at bootstrap.** The peers list set here cannot be changed: membership lives in the Raft log, so editing `peers` and restarting, even every node at once, does not change it. There is no online membership change API (see C-6 above).
 
 1. Start all nodes: `hearth serve -c hearth-N.yaml`
 2. Wait until all nodes are listening (check logs for `"Raft peer gRPC server starting (mTLS)"`).
-3. Call the bootstrap endpoint on **one** designated bootstrap node:
+3. Call the bootstrap endpoint on the lowest-ID node:
 
 > **System-realm token required.** Cluster admin endpoints are gated to the system realm
 > (the nil UUID). Your admin token must carry `X-Realm-ID: 00000000-0000-0000-0000-000000000000`.
@@ -504,7 +521,7 @@ curl -s -X POST http://10.0.0.1:8420/admin/cluster/bootstrap \
 ```
 
 **Error responses:**
-- `409 Conflict` — cluster already initialized (safe to ignore on retry)
+- `409 Conflict` — this node is initialised already (safe to ignore on retry), or it is not the lowest node ID in `cluster.peers` (the body names the node that is)
 - `503 Service Unavailable` — server is running in single-node mode (no `cluster:` config)
 
 ---

@@ -11,6 +11,8 @@
 # EXTRA_SAN to add entries to every leaf, e.g. EXTRA_SAN=DNS:localhost,IP:127.0.0.1
 # when the nodes run on one host. Set NODE_IP_PREFIX (e.g. 10.77.0) to add
 # IP:<prefix>.<10+id> to node n<id>'s leaves: peers dial each other by IP.
+# Node n<id>'s peer leaf also names its Raft node ID, URI:urn:hearth:node:<id>:
+# peers refuse a certificate that names another node.
 #
 # Usage: gen-material.sh <out-dir> <node>...
 set -euo pipefail
@@ -57,7 +59,13 @@ for node in "$@"; do
     san+=",IP:$NODE_IP_PREFIX.$((10 + ${node#n}))"
   fi
   san+="${EXTRA_SAN:+,$EXTRA_SAN}"
-  leaf "$node-peer" "hearth-peer-$node" "$san"
+  case "${node#n}" in
+    '' | *[!0-9]*)
+      echo "$0: node name '$node' is not n<id>" >&2
+      exit 2
+      ;;
+  esac
+  leaf "$node-peer" "hearth-peer-$node" "$san,URI:urn:hearth:node:${node#n}"
   leaf "$node-https" "hearth-https-$node" "$san"
 done
 

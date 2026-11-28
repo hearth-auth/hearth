@@ -42,7 +42,9 @@
 
 ## Decisions
 
-Each decision lists the options, their pros and cons, and a recommendation. **The owner decides.**
+Each decision lists the options, their pros and cons, and a recommendation.
+
+**Owner answer (2026-11-26, PR #942 comment):** "all recommendations of this proposal are approved, decisions 1 to 10 as written". So every recommendation below is approved as written, including the three choices inside decision 7's table (a minimum of 3 voters, refuse to remove the leader, any node takes the call). Decisions 11 and 12 offer no options: they state rules that follow from the approved recommendations. The Open Questions at the end are answered there.
 
 ### 1. Operator surface
 
@@ -154,7 +156,7 @@ All rules live in one pure function, `plan_membership_change(current membership,
 | Promote or replace with a learner that is not caught up, or fails preflight | `409` `HEARTH_CLUSTER_LEARNER_NOT_READY` with the reason |
 | Remove or replace the current leader | `409` `HEARTH_CLUSTER_TARGET_IS_LEADER`; step it down first |
 
-Owner choices inside this table:
+Owner choices inside this table (each recommendation approved 2026-11-26):
 
 - **Minimum of 3 voters.** Pro: a cluster never shrinks into a size with no fault tolerance by accident. Con: a 3-node cluster cannot drop to 2 on purpose. The alternative is no minimum. **Recommendation: minimum 3.** An operator who wants one node uses single-node mode.
 - **Removing the leader.** openraft allows it: the leader commits the change and steps down. Pro of allowing: one call. Con: the change's outcome depends on an election, which adds failure paths to test. **Recommendation: refuse**, and point to `POST /admin/cluster/transfer-leadership`.
@@ -262,5 +264,8 @@ Cluster mode only, no production users. A cluster on the old release is rebuilt:
 ## Open Questions
 
 1. **A wiped node under a live ID.** A node restarted by hand under its old, still-member ID with an empty data directory has forgotten its vote, and none of the checks above detect it (it has the right certificate and adopts the cluster ID). A fix: each node generates an incarnation UUID on first start; the leader records it in the member's Raft node record when it first hears from it; a peer with a different incarnation is refused. It adds a field to every RPC and a learn-on-first-contact step at bootstrap. Is it in this change, or a follow-up?
+   **Owner answer (2026-11-26, PR #942):** a later change, not this one. This change keeps it as a non-goal and documents the procedure as forbidden.
 2. **A permanent learner** as a read replica or a backup source. Out of scope here; worth its own change?
+   **Answer:** out of scope for this change, as the proposal and the non-goals say. The owner approved the proposal with all its recommendations (2026-11-26); this is that text, not a separate owner answer. A permanent learner would need its own change.
 3. **Catch-up threshold.** 100 entries on two reports in a row is a guess; phase 2's tests should set it.
+   **Answer:** phase 2's tests set it, as this design says (task 2.8). The owner approved the design with all its recommendations (2026-11-26); this is that text, not a separate owner answer.

@@ -43,9 +43,13 @@ fn generate_cluster_certs(dir: &Path, n_nodes: usize) -> (PathBuf, Vec<(PathBuf,
 
     let mut leafs = Vec::with_capacity(n_nodes);
     for i in 1..=n_nodes {
-        let leaf_params =
+        let mut leaf_params =
             rcgen::CertificateParams::new(vec!["localhost".to_string(), "127.0.0.1".to_string()])
                 .expect("leaf params");
+        // Each peer certificate names its node ID (cluster-membership-changes 1.3).
+        leaf_params.subject_alt_names.push(rcgen::SanType::URI(
+            rcgen::Ia5String::try_from(format!("urn:hearth:node:{i}")).expect("node uri"),
+        ));
         let leaf_key = rcgen::KeyPair::generate().expect("leaf keygen");
         let leaf_cert = leaf_params
             .signed_by(&leaf_key, &ca_cert, &ca_key)
@@ -88,7 +92,7 @@ struct TestCluster {
     faults: Vec<Arc<PeerFaults>>,
     server_handles: Vec<tokio::task::JoinHandle<()>>,
     // Held to keep cert + data files alive for the lifetime of the test.
-    _tempdir: TempDir,
+    tempdir: TempDir,
 }
 
 impl TestCluster {
@@ -185,7 +189,7 @@ impl TestCluster {
             engines,
             faults,
             server_handles,
-            _tempdir: tempdir,
+            tempdir,
         }
     }
 
@@ -741,5 +745,128 @@ async fn transfer_leadership_moves_leadership_off_this_node() {
         "STEP-DOWN FAIL: the post-step-down write did not converge on all three nodes"
     );
 
+    cluster.shutdown();
+}
+
+// ── Test: peer identity (cluster-membership-changes 1.3) ─────────────────────
+
+/// The PEM files of node `node_id`'s peer certificate and key, and the CA.
+fn peer_material(cluster: &TestCluster, node_id: u64) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let dir = cluster.tempdir.path();
+    let read = |name: String| std::fs::read(dir.join(name)).expect("read test PKI");
+    (
+        read(format!("node-{node_id}.crt.pem")),
+        read(format!("node-{node_id}.key.pem")),
+        read("ca.pem".to_string()),
+    )
+}
+
+/// A Raft client to `target` at `addr`, speaking as node `source` with
+/// node `cert_of`'s certificate.
+async fn peer_client(
+    cluster: &TestCluster,
+    source: u64,
+    cert_of: u64,
+    target: u64,
+    addr: &str,
+) -> hearth::cluster::network::HearthPeerNetwork {
+    use openraft::network::RaftNetworkFactory;
+    let (cert, key, ca) = peer_material(cluster, cert_of);
+    let cluster_id = cluster.engines[0].cluster_id();
+    let identity = hearth::cluster::ClusterIdentity::in_memory(cluster_id);
+    let mut factory = hearth::cluster::HearthNetworkFactory::new(source, identity, cert, key, ca);
+    factory
+        .new_client(
+            target,
+            &HearthNode {
+                addr: addr.to_string(),
+            },
+        )
+        .await
+}
+
+/// A vote request of term 0: every node answers it without granting it, so
+/// it cannot disturb the cluster.
+async fn stale_vote(
+    client: &mut hearth::cluster::network::HearthPeerNetwork,
+    candidate: u64,
+) -> Result<(), String> {
+    use openraft::network::{RPCOption, RaftNetwork};
+    let request = openraft::raft::VoteRequest::new(openraft::Vote::new(0, candidate), None);
+    client
+        .vote(request, RPCOption::new(Duration::from_secs(5)))
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Task 1.3: a peer whose certificate names node 2 and whose RPCs claim node
+/// 5 is refused by the node it dials, and a node that dials node 5 refuses a
+/// server whose certificate names node 2. Every node holds the cluster ID
+/// node 1 generated when it initialised the cluster.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn a_certificate_that_names_another_node_is_refused_on_both_sides() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let _ = tracing_subscriber::fmt::try_init();
+    let cluster = TestCluster::build(3).await;
+    cluster.wait_for_leader(Duration::from_secs(15)).await;
+
+    let cluster_id = cluster.engines[0]
+        .cluster_id()
+        .expect("node 1 initialised the cluster under a cluster ID");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while cluster
+        .engines
+        .iter()
+        .any(|e| e.cluster_id() != Some(cluster_id))
+    {
+        assert!(
+            Instant::now() < deadline,
+            "a follower did not adopt the cluster ID"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await; // AUDIT: justified-sleep: poll interval; a follower adopts the cluster ID on its first AppendEntries, which has no notification hook
+    }
+
+    let addr = |node: u64| {
+        cluster.engines[0]
+            .raft_metrics()
+            .expect("metrics")
+            .membership_config
+            .membership()
+            .get_node(&node)
+            .expect("member")
+            .addr
+            .clone()
+    };
+    let term_before = cluster.current_term(1);
+
+    // Server side: node 2's certificate, claiming to be node 5.
+    let mut impostor = peer_client(&cluster, 5, 2, 1, &addr(1)).await;
+    let refused = stale_vote(&mut impostor, 5)
+        .await
+        .expect_err("node 1 served an impostor");
+    assert!(refused.contains("CERTIFICATE_MISMATCH"), "{refused}");
+    // The same certificate under its own node ID is served.
+    let mut honest = peer_client(&cluster, 2, 2, 1, &addr(1)).await;
+    stale_vote(&mut honest, 2)
+        .await
+        .expect("node 1 refused node 2");
+
+    // Client side: node 1 dials node 5 at node 2's address.
+    let mut misdialled = peer_client(&cluster, 1, 1, 5, &addr(2)).await;
+    let refused = stale_vote(&mut misdialled, 1)
+        .await
+        .expect_err("node 1 accepted node 2's certificate as node 5's");
+    assert!(refused.contains("names node 2, not node 5"), "{refused}");
+    let mut dialled = peer_client(&cluster, 1, 1, 2, &addr(2)).await;
+    stale_vote(&mut dialled, 1)
+        .await
+        .expect("node 1 could not reach node 2");
+
+    assert_eq!(
+        cluster.current_term(1),
+        term_before,
+        "a refused RPC moved the term"
+    );
     cluster.shutdown();
 }

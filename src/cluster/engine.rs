@@ -44,13 +44,14 @@ use openraft::{Config as RaftConfig, EntryPayload, RaftMetrics, ServerState};
 use tokio::task::spawn_blocking;
 use tracing::{info, warn};
 
-use crate::cluster::log_store::HearthLogStore;
+use crate::cluster::log_store::{ClusterIdentity, HearthLogStore};
 use crate::cluster::network::{ForwardFailure, HearthNetworkFactory, LeaderForwarder, PeerFaults};
+use crate::cluster::peer_identity::PeerStanding;
 use crate::cluster::read_gate::{leader_contact, LeaderContact, ReadGate, Refusal};
-use crate::cluster::server::IncomingRpcDispatch;
+use crate::cluster::server::{IncomingRpcDispatch, LeaderRpcAnswer};
 use crate::cluster::state_machine::HearthStateMachine;
 use crate::cluster::types::{
-    ForwardedWriteOutcome, HearthLogResponse, HearthNode, HearthRaftConfig, RaftCommand,
+    ClusterId, ForwardedWriteOutcome, HearthLogResponse, HearthNode, HearthRaftConfig, RaftCommand,
 };
 use crate::cluster::wire::{self, MAX_COMMAND_BYTES, SNAPSHOT_CHUNK_BYTES};
 use crate::cluster::ReplicatedWriteObserver;
@@ -144,6 +145,20 @@ pub enum ClusterError {
     /// the leader that replicated to it.
     #[error("the cluster is already initialised: {0}")]
     AlreadyInitialized(String),
+
+    /// This node is not the one that may initialise the cluster: only the
+    /// lowest node ID of the membership does (it does so at start-up). Each
+    /// initialiser generates its own cluster ID, so two of them would form
+    /// two clusters that refuse each other.
+    #[error(
+        "only node {designated}, the lowest node ID in cluster.peers, may initialise the \
+         cluster; it does so itself at start-up. If it cannot start, remove it from \
+         cluster.peers on every node before any node is initialised"
+    )]
+    NotTheInitialiser {
+        /// The lowest node ID of the membership.
+        designated: u64,
+    },
 
     /// Raft or runtime error.
     #[error("raft: {0}")]
@@ -306,6 +321,8 @@ pub struct ClusterEngine {
     /// Estimates this node's clock offset from the leader (C4). Unused in
     /// single-node mode, which receives no entries.
     clock_offset: ClockOffsetMonitor,
+    /// This node's cluster ID, kept in `raft.db`. `None` in single-node mode.
+    cluster_identity: Option<Arc<ClusterIdentity>>,
 }
 
 impl ClusterEngine {
@@ -334,6 +351,7 @@ impl ClusterEngine {
             observer_slot: None,
             forwarding: None,
             clock_offset: ClockOffsetMonitor::default(),
+            cluster_identity: None,
         }
     }
 
@@ -458,11 +476,22 @@ impl ClusterEngine {
             refuse_restart_without_applied_state(log_state.last_purged_log_id)?;
         }
 
+        // Taken before `Raft::new` consumes the store; shares its database.
+        let cluster_identity = log_store
+            .cluster_identity()
+            .map_err(|e| ClusterBuildError::LogStore(e.to_string()))?;
+
         let cert_pem = tokio::fs::read(&config.tls_cert_path).await?;
         let key_pem = tokio::fs::read(&config.tls_key_path).await?;
         let ca_pem = tokio::fs::read(&config.tls_ca_cert_path).await?;
-        let network_factory = HearthNetworkFactory::new(cert_pem, key_pem, ca_pem)
-            .with_read_gate(Arc::clone(&read_gate));
+        let network_factory = HearthNetworkFactory::new(
+            config.node_id,
+            Arc::clone(&cluster_identity),
+            cert_pem,
+            key_pem,
+            ca_pem,
+        )
+        .with_read_gate(Arc::clone(&read_gate));
         let network_factory = match faults {
             Some(f) => network_factory.with_peer_faults(f),
             None => network_factory,
@@ -502,7 +531,8 @@ impl ClusterEngine {
         tokio::spawn(watch_leadership(raft.clone(), Arc::clone(&observer_slot)));
 
         let initial_members = initial_members_of(config);
-        Self::self_initialise_if_designated(&raft, config, &initial_members).await;
+        Self::self_initialise_if_designated(&raft, &cluster_identity, config, &initial_members)
+            .await;
 
         info!(
             node_id = config.node_id,
@@ -523,6 +553,7 @@ impl ClusterEngine {
             observer_slot: Some(observer_slot),
             forwarding: Some(forwarding),
             clock_offset: ClockOffsetMonitor::default(),
+            cluster_identity: Some(cluster_identity),
         })
     }
 
@@ -533,6 +564,7 @@ impl ClusterEngine {
     /// are unchanged.
     async fn self_initialise_if_designated(
         raft: &openraft::Raft<HearthRaftConfig>,
+        cluster_identity: &ClusterIdentity,
         config: &ClusterConfig,
         initial_members: &BTreeMap<u64, HearthNode>,
     ) {
@@ -569,9 +601,11 @@ impl ClusterEngine {
         // membership, the peer addresses and the mTLS material all come from
         // this node's own configuration file, and no network surface is
         // exposed to do it. `initialize_cluster` — and the
-        // `POST /admin/cluster/bootstrap` handler over it — still works, and
-        // is the escape hatch when the designated node is the one that is
-        // down.
+        // `POST /admin/cluster/bootstrap` handler over it — accepts the same
+        // node only: each initialiser generates its own cluster ID, so two
+        // would refuse each other (design decision 5). When the designated
+        // node is down on a cold cluster, the operator removes it from
+        // `cluster.peers` on every node.
         //
         // Skipped when `peers` is empty: that is a degenerate cluster-mode
         // configuration with nothing to replicate to, and
@@ -579,10 +613,18 @@ impl ClusterEngine {
         let designated_initialiser = initial_members.keys().copied().min();
         if !config.peers.is_empty() && designated_initialiser == Some(config.node_id) {
             match raft.is_initialized().await {
-                Ok(false) => match raft.initialize(initial_members.clone()).await {
-                    Ok(()) => info!(
+                Ok(false) => match initialize_with_cluster_id(
+                    raft,
+                    cluster_identity,
+                    config.node_id,
+                    initial_members.clone(),
+                )
+                .await
+                {
+                    Ok(cluster_id) => info!(
                         node_id = config.node_id,
                         members = initial_members.len(),
+                        %cluster_id,
                         "cold cluster: Raft membership initialised from cluster.peers"
                     ),
                     Err(e) => warn!(
@@ -605,21 +647,36 @@ impl ClusterEngine {
 
     /// Bootstrap a brand-new cluster with the given membership.
     ///
-    /// Call only on the designated bootstrap node. Other nodes join via the
-    /// normal Raft membership protocol after the cluster is formed.
+    /// Only the designated initialiser, the lowest node ID in `members`, may
+    /// call it; other nodes join when the leader first reaches them. On an
+    /// initialised node it writes nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`ClusterError::AlreadyInitialized`] on an initialised node,
+    /// [`ClusterError::NotTheInitialiser`] on any node but the lowest ID.
     pub async fn initialize_cluster(
         &self,
         members: BTreeMap<u64, HearthNode>,
     ) -> Result<(), ClusterError> {
-        let raft = self.raft.as_ref().ok_or_else(|| {
-            ClusterError::Raft("cannot initialise cluster on a single-node engine".to_string())
-        })?;
-        raft.initialize(members).await.map_err(|e| match e {
-            RaftError::APIError(openraft::error::InitializeError::NotAllowed(not_allowed)) => {
-                ClusterError::AlreadyInitialized(not_allowed.to_string())
-            }
-            other => ClusterError::Raft(other.to_string()),
-        })
+        let (Some(raft), Some(identity), Some(node_id)) = (
+            self.raft.as_ref(),
+            self.cluster_identity.as_ref(),
+            self.self_node_id,
+        ) else {
+            return Err(ClusterError::Raft(
+                "cannot initialise cluster on a single-node engine".to_string(),
+            ));
+        };
+        initialize_with_cluster_id(raft, identity, node_id, members)
+            .await
+            .map(|_| ())
+    }
+
+    /// This node's cluster ID: `None` in single-node mode and on a cluster
+    /// node that has not yet initialised or joined a cluster.
+    pub fn cluster_id(&self) -> Option<ClusterId> {
+        self.cluster_identity.as_ref().and_then(|c| c.get())
     }
 
     // ── Metrics ───────────────────────────────────────────────────────────────
@@ -1618,22 +1675,62 @@ impl ClusterEngine {
 // ── IncomingRpcDispatch ───────────────────────────────────────────────────────
 
 impl IncomingRpcDispatch for ClusterEngine {
+    fn cluster_id(&self) -> Option<ClusterId> {
+        ClusterEngine::cluster_id(self)
+    }
+
+    fn peer_standing(&self, node: u64) -> PeerStanding {
+        let Some(raft) = self.raft.as_ref() else {
+            return PeerStanding::Pristine;
+        };
+        let metrics = raft.metrics();
+        let metrics = metrics.borrow();
+        let membership = metrics.membership_config.membership();
+        if membership.nodes().next().is_none() {
+            PeerStanding::Pristine
+        } else if membership.get_node(&node).is_some() {
+            PeerStanding::Member
+        } else {
+            // Retired IDs (`PeerStanding::Retired`) arrive with the
+            // replicated retired-ID set (cluster-membership-changes 2.3).
+            PeerStanding::NotAMember
+        }
+    }
+
+    async fn adopt_cluster_id(&self, id: ClusterId) -> Result<ClusterId, String> {
+        let identity = self
+            .cluster_identity
+            .as_ref()
+            .ok_or("Raft not initialised")?;
+        identity.adopt(id).await.map_err(|e| e.to_string())
+    }
+
     async fn append_entries(
         &self,
         payload: &[u8],
         leader_quorum_ack_age_ms: Option<u64>,
-    ) -> Result<Vec<u8>, String> {
+        arrived: std::time::Instant,
+    ) -> Result<LeaderRpcAnswer, String> {
         let raft = self.raft.as_ref().ok_or("Raft not initialised")?;
         let req: AppendEntriesRequest<HearthRaftConfig> = wire::decode(payload)?;
         self.note_clock_offset(&req);
-        // Dated from its arrival, before Raft handles it: the contact cannot
-        // be later than the leader's state the request carries.
+        // Dated from its arrival at the peer server, before its identity
+        // check and before Raft handles it: the contact cannot be later than
+        // the leader's state the request carries.
         let gate = self.read_gate.as_ref().ok_or("Raft not initialised")?;
-        let received_ms = gate.now_ms();
+        let received_ms = gate.ms_at(arrived);
         let reach = LogReach::of(&req);
         let resp = raft.append_entries(req).await.map_err(|e| e.to_string())?;
         note_append_entries(gate, received_ms, leader_quorum_ack_age_ms, reach, &resp);
-        wire::encode(&resp)
+        let accepted = matches!(
+            resp,
+            openraft::raft::AppendEntriesResponse::Success
+                | openraft::raft::AppendEntriesResponse::PartialSuccess(_)
+        );
+        Ok(LeaderRpcAnswer {
+            payload: wire::encode(&resp)?,
+            accepted,
+        })
     }
 
     async fn vote(&self, payload: &[u8]) -> Result<Vec<u8>, String> {
@@ -1643,21 +1740,72 @@ impl IncomingRpcDispatch for ClusterEngine {
         wire::encode(&resp)
     }
 
-    async fn install_snapshot(&self, payload: &[u8]) -> Result<Vec<u8>, String> {
+    async fn install_snapshot(&self, payload: &[u8]) -> Result<LeaderRpcAnswer, String> {
         let raft = self.raft.as_ref().ok_or("Raft not initialised")?;
         let req: InstallSnapshotRequest<HearthRaftConfig> =
             wire::decode::<wire::WireInstallSnapshot>(payload)?.into();
+        let sender_vote = req.vote;
         let resp = raft
             .install_snapshot(req)
             .await
             .map_err(|e| e.to_string())?;
-        wire::encode(&resp)
+        // openraft answers a chunk with its own vote, and refuses one whose
+        // sender's vote is below it.
+        let accepted = sender_vote >= resp.vote;
+        Ok(LeaderRpcAnswer {
+            payload: wire::encode(&resp)?,
+            accepted,
+        })
     }
 
     async fn forward_write(&self, payload: &[u8]) -> Result<Vec<u8>, String> {
         let outcome = self.serve_forwarded_write(payload).await;
         wire::encode(&outcome)
     }
+}
+
+/// Initialises a cluster with `members` under this node's cluster ID. A node
+/// without one generates it and writes it to `raft.db` first, so no node
+/// ever leads a cluster whose ID it could lose in a crash
+/// (`cluster-membership-changes` design decision 5). Returns the ID.
+///
+/// Writes nothing on a node that is initialised already (a node of a
+/// cluster an older release formed holds no cluster ID, and its leader sends
+/// none: an ID written now would make it refuse its leader), nor on a node
+/// other than `members`' lowest ID. openraft lets several nodes initialise
+/// the same membership, and they used to converge; under cluster IDs each
+/// would hold its own and refuse the others for ever.
+async fn initialize_with_cluster_id(
+    raft: &openraft::Raft<HearthRaftConfig>,
+    identity: &ClusterIdentity,
+    node_id: u64,
+    members: BTreeMap<u64, HearthNode>,
+) -> Result<ClusterId, ClusterError> {
+    let initialised = raft
+        .is_initialized()
+        .await
+        .map_err(|e| ClusterError::Raft(e.to_string()))?;
+    if initialised {
+        return Err(ClusterError::AlreadyInitialized(
+            "this node already holds a Raft log or vote".to_string(),
+        ));
+    }
+    if let Some(&designated) = members.keys().next() {
+        if designated != node_id {
+            return Err(ClusterError::NotTheInitialiser { designated });
+        }
+    }
+    let cluster_id = identity
+        .adopt(ClusterId::random())
+        .await
+        .map_err(|e| ClusterError::Raft(format!("cannot persist the cluster ID: {e}")))?;
+    raft.initialize(members).await.map_err(|e| match e {
+        RaftError::APIError(openraft::error::InitializeError::NotAllowed(not_allowed)) => {
+            ClusterError::AlreadyInitialized(not_allowed.to_string())
+        }
+        other => ClusterError::Raft(other.to_string()),
+    })?;
+    Ok(cluster_id)
 }
 
 // ── Background lag monitor ────────────────────────────────────────────────────
@@ -2304,7 +2452,8 @@ pub(crate) fn cluster_to_storage_err(e: ClusterError) -> crate::storage::Storage
         },
         e @ (ClusterError::CommandTooLarge { .. }
         | ClusterError::ForwardRejected { .. }
-        | ClusterError::AlreadyInitialized(_)) => {
+        | ClusterError::AlreadyInitialized(_)
+        | ClusterError::NotTheInitialiser { .. }) => {
             StorageError::Io(std::io::Error::other(format!("raft: {e}")))
         }
         ClusterError::Raft(msg) => StorageError::Io(std::io::Error::other(format!("raft: {msg}"))),
@@ -4034,5 +4183,208 @@ mod tests {
 
         EmbeddedStorageEngine::open(StorageConfig::dev(data_dir))
             .expect("engine must open cleanly after complete_snapshot_restore via adapter");
+    }
+
+    // ── Bootstrap and the cluster ID (design decision 5) ─────────────────────
+
+    use crate::cluster::peer_identity::test_pki::TestCa;
+
+    /// A cluster node `node_id` whose `cluster.peers` names `peers` (nobody
+    /// listens at their addresses). Its gRPC server is not started.
+    #[allow(clippy::unwrap_used)]
+    async fn clustered_node(dir: &std::path::Path, node_id: u64, peers: &[u64]) -> ClusterEngine {
+        clustered_node_of(&TestCa::new(), dir, node_id, peers).await
+    }
+
+    /// [`clustered_node`] with a certificate `ca` signed.
+    #[allow(clippy::unwrap_used)]
+    async fn clustered_node_of(
+        ca: &TestCa,
+        dir: &std::path::Path,
+        node_id: u64,
+        peers: &[u64],
+    ) -> ClusterEngine {
+        use crate::config::PeerConfig;
+
+        let leaf = ca.leaf_for_node(node_id);
+        let ca_path = dir.join("ca.pem");
+        let cert_path = dir.join("node.pem");
+        let key_path = dir.join("node.key");
+        std::fs::write(&ca_path, ca.pem()).unwrap();
+        std::fs::write(&cert_path, &leaf.cert_pem).unwrap();
+        std::fs::write(&key_path, &leaf.key_pem).unwrap();
+        let data_dir = dir.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let storage_cfg = StorageConfig::dev(data_dir);
+        let inner = Arc::new(EmbeddedStorageEngine::open(storage_cfg.clone()).unwrap());
+        let config = ClusterConfig {
+            node_id,
+            peer_address: format!("127.0.0.1:{}", 40_000 + node_id),
+            peers: peers
+                .iter()
+                .map(|&id| PeerConfig {
+                    id,
+                    address: format!("127.0.0.1:{}", 40_000 + id),
+                })
+                .collect(),
+            tls_cert_path: cert_path,
+            tls_key_path: key_path,
+            tls_ca_cert_path: ca_path,
+            read_lag_threshold_ms: None,
+            write_timeout_ms: None,
+            experimental_opt_in: true,
+        };
+        ClusterEngine::build_clustered(inner, &config, &storage_cfg)
+            .await
+            .unwrap()
+    }
+
+    #[allow(clippy::unwrap_used)]
+    fn persisted_cluster_id(engine: &ClusterEngine) -> Option<ClusterId> {
+        engine
+            .cluster_identity
+            .as_ref()
+            .unwrap()
+            .persisted()
+            .unwrap()
+    }
+
+    /// Finding 1, scenario A: a node of a cluster formed by an older release
+    /// (initialised, no cluster ID) answers a repeated bootstrap with
+    /// `AlreadyInitialized` and writes no cluster ID, so it keeps accepting
+    /// its leader's RPCs, which carry none.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn bootstrap_on_an_initialised_node_writes_no_cluster_id() {
+        let dir = tempdir().unwrap();
+        let engine = clustered_node(dir.path(), 1, &[]).await;
+        let members = engine.initial_members().cloned().unwrap();
+        // What an older release did: initialise with no cluster ID.
+        engine
+            .raft
+            .as_ref()
+            .unwrap()
+            .initialize(members.clone())
+            .await
+            .unwrap();
+
+        let refused = engine.initialize_cluster(members).await;
+
+        assert!(
+            matches!(refused, Err(ClusterError::AlreadyInitialized(_))),
+            "{refused:?}"
+        );
+        assert_eq!(engine.cluster_id(), None);
+        assert_eq!(persisted_cluster_id(&engine), None);
+    }
+
+    /// Finding 1, scenario B: only the designated initialiser (the lowest
+    /// node ID of the membership) may initialise. Two nodes that both
+    /// initialised the same membership would each hold their own random
+    /// cluster ID and refuse each other for ever; before cluster IDs they
+    /// converged.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn bootstrap_on_a_node_that_is_not_the_designated_initialiser_is_refused() {
+        let dir = tempdir().unwrap();
+        let engine = clustered_node(dir.path(), 2, &[1, 3]).await;
+        let members = engine.initial_members().cloned().unwrap();
+
+        let refused = engine.initialize_cluster(members).await;
+
+        assert!(
+            matches!(
+                refused,
+                Err(ClusterError::NotTheInitialiser { designated: 1 })
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(engine.cluster_id(), None);
+        assert_eq!(persisted_cluster_id(&engine), None);
+        assert!(!engine
+            .raft
+            .as_ref()
+            .unwrap()
+            .is_initialized()
+            .await
+            .unwrap());
+    }
+
+    /// Finding 2 on #955: a pristine node adopts a leader's cluster ID only
+    /// once Raft has accepted the `AppendEntries`. An undecodable request or
+    /// one Raft rejects, even from a peer the cluster CA signed, leaves it
+    /// pristine, so a node of another cluster sharing the CA cannot claim a
+    /// replacement node with one bad RPC.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn a_pristine_node_adopts_a_cluster_id_only_from_an_append_entries_raft_accepts() {
+        use crate::cluster::peer_identity::PeerClaim;
+        use crate::cluster::rpc::AppendEntriesRequest as WireAppendEntries;
+        use crate::cluster::server::RaftRpcHandler;
+        use openraft::raft::AppendEntriesRequest;
+        use tokio_rustls::rustls::pki_types::CertificateDer;
+        use tonic::metadata::MetadataMap;
+
+        const A: ClusterId = ClusterId::new(Uuid::from_u128(0xA));
+        let ca = TestCa::new();
+        let dir = tempdir().unwrap();
+        let engine = Arc::new(clustered_node_of(&ca, dir.path(), 2, &[1, 3]).await);
+        let handler = RaftRpcHandler::new(2, Arc::clone(&engine));
+        let mut md = MetadataMap::new();
+        PeerClaim {
+            cluster_id: Some(A),
+            source: 1,
+            target: 2,
+        }
+        .stamp(&mut md);
+        let certs = vec![CertificateDer::from(ca.leaf_for_node(1).der)];
+        let aer = |prev_log_id: Option<LogId<u64>>| {
+            let req: AppendEntriesRequest<HearthRaftConfig> = AppendEntriesRequest {
+                vote: Vote::new_committed(1, 1),
+                prev_log_id,
+                entries: vec![],
+                leader_commit: None,
+            };
+            WireAppendEntries {
+                payload: wire::encode(&req).unwrap(),
+                leader_quorum_ack_age_ms: Some(1),
+            }
+        };
+
+        let garbage = WireAppendEntries {
+            payload: b"not an AppendEntries".to_vec(),
+            leader_quorum_ack_age_ms: Some(1),
+        };
+        let undecodable = handler
+            .serve_append_entries(&md, Some(&certs), garbage)
+            .await;
+        assert!(
+            undecodable.is_err(),
+            "garbage was answered: {undecodable:?}"
+        );
+        assert_eq!(engine.cluster_id(), None, "adopted from an undecodable RPC");
+        assert_eq!(persisted_cluster_id(&engine), None);
+
+        // Raft answers Conflict: this node holds no entry at index 5.
+        let unknown_prev = Some(LogId::new(CommittedLeaderId::new(1, 1), 5));
+        let conflict = handler
+            .serve_append_entries(&md, Some(&certs), aer(unknown_prev))
+            .await
+            .expect("answered");
+        let conflict: openraft::raft::AppendEntriesResponse<u64> =
+            wire::decode(&conflict.payload).unwrap();
+        assert!(conflict.is_conflict(), "{conflict:?}");
+        assert_eq!(engine.cluster_id(), None, "adopted from a rejected RPC");
+        assert_eq!(persisted_cluster_id(&engine), None);
+
+        let accepted = handler
+            .serve_append_entries(&md, Some(&certs), aer(None))
+            .await
+            .expect("answered");
+        let accepted: openraft::raft::AppendEntriesResponse<u64> =
+            wire::decode(&accepted.payload).unwrap();
+        assert!(accepted.is_success(), "{accepted:?}");
+        assert_eq!(engine.cluster_id(), Some(A));
+        assert_eq!(persisted_cluster_id(&engine), Some(A));
     }
 }

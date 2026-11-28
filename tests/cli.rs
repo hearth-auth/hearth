@@ -323,8 +323,13 @@ fn write_peer_tls(dir: &std::path::Path) {
     let ca_key = rcgen::KeyPair::generate().expect("ca key");
     let ca = ca_params.self_signed(&ca_key).expect("ca cert");
     let leaf_key = rcgen::KeyPair::generate().expect("leaf key");
-    let leaf = rcgen::CertificateParams::new(vec!["127.0.0.1".into()])
-        .expect("leaf params")
+    let mut leaf_params =
+        rcgen::CertificateParams::new(vec!["127.0.0.1".into()]).expect("leaf params");
+    // Node 1's certificate names its node ID (URI SAN).
+    leaf_params.subject_alt_names.push(rcgen::SanType::URI(
+        rcgen::Ia5String::try_from("urn:hearth:node:1").expect("node uri"),
+    ));
+    let leaf = leaf_params
         .signed_by(&leaf_key, &ca, &ca_key)
         .expect("leaf cert");
     std::fs::write(dir.join("ca.crt"), ca.pem()).expect("write ca");

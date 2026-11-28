@@ -31,9 +31,13 @@ pub fn generate_cluster_certs(dir: &Path, n_nodes: usize) -> (PathBuf, Vec<(Path
 
     let mut leafs = Vec::with_capacity(n_nodes);
     for i in 1..=n_nodes {
-        let leaf_params =
+        let mut leaf_params =
             rcgen::CertificateParams::new(vec!["localhost".to_string(), "127.0.0.1".to_string()])
                 .unwrap();
+        // Each peer certificate names its node ID (cluster-membership-changes 1.3).
+        leaf_params.subject_alt_names.push(rcgen::SanType::URI(
+            rcgen::Ia5String::try_from(format!("urn:hearth:node:{i}")).unwrap(),
+        ));
         let leaf_key = rcgen::KeyPair::generate().unwrap();
         let leaf_cert = leaf_params.signed_by(&leaf_key, &ca_cert, &ca_key).unwrap();
         let cert_path = dir.join(format!("node-{i}.crt.pem"));
