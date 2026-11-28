@@ -21,6 +21,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
   Nodes of this release and older ones cannot form one cluster: upgrade every node together.
   A cluster that an older release initialised has no cluster ID and keeps working without that
   check; rebuild it from a backup to get one. Single-node mode is not affected.
+  `POST /admin/cluster/bootstrap` is now accepted only on the lowest node ID in `cluster.peers`
+  (the node that initialises a cold cluster itself); any other node answers `409` and writes
+  nothing, since two initialisers would hold two cluster IDs. If that node cannot start on a
+  cold cluster, remove it from `cluster.peers` on every node first.
 - **A cluster node out of contact with the leader refuses storage reads** (OpenSpec change
   `cluster-read-fencing`): a follower serves a read only within `cluster.read_lag_threshold_ms`
   of the last `AppendEntries` it accepted from a leader that a quorum acknowledged less than

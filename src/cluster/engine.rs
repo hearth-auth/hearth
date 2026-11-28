@@ -146,6 +146,20 @@ pub enum ClusterError {
     #[error("the cluster is already initialised: {0}")]
     AlreadyInitialized(String),
 
+    /// This node is not the one that may initialise the cluster: only the
+    /// lowest node ID of the membership does (it does so at start-up). Each
+    /// initialiser generates its own cluster ID, so two of them would form
+    /// two clusters that refuse each other.
+    #[error(
+        "only node {designated}, the lowest node ID in cluster.peers, may initialise the \
+         cluster; it does so itself at start-up. If it cannot start, remove it from \
+         cluster.peers on every node before any node is initialised"
+    )]
+    NotTheInitialiser {
+        /// The lowest node ID of the membership.
+        designated: u64,
+    },
+
     /// Raft or runtime error.
     #[error("raft: {0}")]
     Raft(String),
@@ -587,9 +601,11 @@ impl ClusterEngine {
         // membership, the peer addresses and the mTLS material all come from
         // this node's own configuration file, and no network surface is
         // exposed to do it. `initialize_cluster` — and the
-        // `POST /admin/cluster/bootstrap` handler over it — still works, and
-        // is the escape hatch when the designated node is the one that is
-        // down.
+        // `POST /admin/cluster/bootstrap` handler over it — accepts the same
+        // node only: each initialiser generates its own cluster ID, so two
+        // would refuse each other (design decision 5). When the designated
+        // node is down on a cold cluster, the operator removes it from
+        // `cluster.peers` on every node.
         //
         // Skipped when `peers` is empty: that is a degenerate cluster-mode
         // configuration with nothing to replicate to, and
@@ -600,6 +616,7 @@ impl ClusterEngine {
                 Ok(false) => match initialize_with_cluster_id(
                     raft,
                     cluster_identity,
+                    config.node_id,
                     initial_members.clone(),
                 )
                 .await
@@ -630,19 +647,28 @@ impl ClusterEngine {
 
     /// Bootstrap a brand-new cluster with the given membership.
     ///
-    /// Call only on the designated bootstrap node. Other nodes join via the
-    /// normal Raft membership protocol after the cluster is formed.
+    /// Only the designated initialiser, the lowest node ID in `members`, may
+    /// call it; other nodes join when the leader first reaches them. On an
+    /// initialised node it writes nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`ClusterError::AlreadyInitialized`] on an initialised node,
+    /// [`ClusterError::NotTheInitialiser`] on any node but the lowest ID.
     pub async fn initialize_cluster(
         &self,
         members: BTreeMap<u64, HearthNode>,
     ) -> Result<(), ClusterError> {
-        let (Some(raft), Some(identity)) = (self.raft.as_ref(), self.cluster_identity.as_ref())
-        else {
+        let (Some(raft), Some(identity), Some(node_id)) = (
+            self.raft.as_ref(),
+            self.cluster_identity.as_ref(),
+            self.self_node_id,
+        ) else {
             return Err(ClusterError::Raft(
                 "cannot initialise cluster on a single-node engine".to_string(),
             ));
         };
-        initialize_with_cluster_id(raft, identity, members)
+        initialize_with_cluster_id(raft, identity, node_id, members)
             .await
             .map(|_| ())
     }
@@ -1725,11 +1751,33 @@ impl IncomingRpcDispatch for ClusterEngine {
 /// without one generates it and writes it to `raft.db` first, so no node
 /// ever leads a cluster whose ID it could lose in a crash
 /// (`cluster-membership-changes` design decision 5). Returns the ID.
+///
+/// Writes nothing on a node that is initialised already (a node of a
+/// cluster an older release formed holds no cluster ID, and its leader sends
+/// none: an ID written now would make it refuse its leader), nor on a node
+/// other than `members`' lowest ID. openraft lets several nodes initialise
+/// the same membership, and they used to converge; under cluster IDs each
+/// would hold its own and refuse the others for ever.
 async fn initialize_with_cluster_id(
     raft: &openraft::Raft<HearthRaftConfig>,
     identity: &ClusterIdentity,
+    node_id: u64,
     members: BTreeMap<u64, HearthNode>,
 ) -> Result<ClusterId, ClusterError> {
+    let initialised = raft
+        .is_initialized()
+        .await
+        .map_err(|e| ClusterError::Raft(e.to_string()))?;
+    if initialised {
+        return Err(ClusterError::AlreadyInitialized(
+            "this node already holds a Raft log or vote".to_string(),
+        ));
+    }
+    if let Some(&designated) = members.keys().next() {
+        if designated != node_id {
+            return Err(ClusterError::NotTheInitialiser { designated });
+        }
+    }
     let cluster_id = identity
         .adopt(ClusterId::random())
         .await
@@ -2387,7 +2435,8 @@ pub(crate) fn cluster_to_storage_err(e: ClusterError) -> crate::storage::Storage
         },
         e @ (ClusterError::CommandTooLarge { .. }
         | ClusterError::ForwardRejected { .. }
-        | ClusterError::AlreadyInitialized(_)) => {
+        | ClusterError::AlreadyInitialized(_)
+        | ClusterError::NotTheInitialiser { .. }) => {
             StorageError::Io(std::io::Error::other(format!("raft: {e}")))
         }
         ClusterError::Raft(msg) => StorageError::Io(std::io::Error::other(format!("raft: {msg}"))),
@@ -4117,5 +4166,119 @@ mod tests {
 
         EmbeddedStorageEngine::open(StorageConfig::dev(data_dir))
             .expect("engine must open cleanly after complete_snapshot_restore via adapter");
+    }
+
+    // ── Bootstrap and the cluster ID (design decision 5) ─────────────────────
+
+    /// A cluster node `node_id` whose `cluster.peers` names `peers` (nobody
+    /// listens at their addresses). Its gRPC server is not started.
+    #[allow(clippy::unwrap_used)]
+    async fn clustered_node(dir: &std::path::Path, node_id: u64, peers: &[u64]) -> ClusterEngine {
+        use crate::cluster::peer_identity::test_pki::TestCa;
+        use crate::config::PeerConfig;
+
+        let ca = TestCa::new();
+        let leaf = ca.leaf_for_node(node_id);
+        let ca_path = dir.join("ca.pem");
+        let cert_path = dir.join("node.pem");
+        let key_path = dir.join("node.key");
+        std::fs::write(&ca_path, ca.pem()).unwrap();
+        std::fs::write(&cert_path, &leaf.cert_pem).unwrap();
+        std::fs::write(&key_path, &leaf.key_pem).unwrap();
+        let data_dir = dir.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let storage_cfg = StorageConfig::dev(data_dir);
+        let inner = Arc::new(EmbeddedStorageEngine::open(storage_cfg.clone()).unwrap());
+        let config = ClusterConfig {
+            node_id,
+            peer_address: format!("127.0.0.1:{}", 40_000 + node_id),
+            peers: peers
+                .iter()
+                .map(|&id| PeerConfig {
+                    id,
+                    address: format!("127.0.0.1:{}", 40_000 + id),
+                })
+                .collect(),
+            tls_cert_path: cert_path,
+            tls_key_path: key_path,
+            tls_ca_cert_path: ca_path,
+            read_lag_threshold_ms: None,
+            write_timeout_ms: None,
+            experimental_opt_in: true,
+        };
+        ClusterEngine::build_clustered(inner, &config, &storage_cfg)
+            .await
+            .unwrap()
+    }
+
+    #[allow(clippy::unwrap_used)]
+    fn persisted_cluster_id(engine: &ClusterEngine) -> Option<ClusterId> {
+        engine
+            .cluster_identity
+            .as_ref()
+            .unwrap()
+            .persisted()
+            .unwrap()
+    }
+
+    /// Finding 1, scenario A: a node of a cluster formed by an older release
+    /// (initialised, no cluster ID) answers a repeated bootstrap with
+    /// `AlreadyInitialized` and writes no cluster ID, so it keeps accepting
+    /// its leader's RPCs, which carry none.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn bootstrap_on_an_initialised_node_writes_no_cluster_id() {
+        let dir = tempdir().unwrap();
+        let engine = clustered_node(dir.path(), 1, &[]).await;
+        let members = engine.initial_members().cloned().unwrap();
+        // What an older release did: initialise with no cluster ID.
+        engine
+            .raft
+            .as_ref()
+            .unwrap()
+            .initialize(members.clone())
+            .await
+            .unwrap();
+
+        let refused = engine.initialize_cluster(members).await;
+
+        assert!(
+            matches!(refused, Err(ClusterError::AlreadyInitialized(_))),
+            "{refused:?}"
+        );
+        assert_eq!(engine.cluster_id(), None);
+        assert_eq!(persisted_cluster_id(&engine), None);
+    }
+
+    /// Finding 1, scenario B: only the designated initialiser (the lowest
+    /// node ID of the membership) may initialise. Two nodes that both
+    /// initialised the same membership would each hold their own random
+    /// cluster ID and refuse each other for ever; before cluster IDs they
+    /// converged.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn bootstrap_on_a_node_that_is_not_the_designated_initialiser_is_refused() {
+        let dir = tempdir().unwrap();
+        let engine = clustered_node(dir.path(), 2, &[1, 3]).await;
+        let members = engine.initial_members().cloned().unwrap();
+
+        let refused = engine.initialize_cluster(members).await;
+
+        assert!(
+            matches!(
+                refused,
+                Err(ClusterError::NotTheInitialiser { designated: 1 })
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(engine.cluster_id(), None);
+        assert_eq!(persisted_cluster_id(&engine), None);
+        assert!(!engine
+            .raft
+            .as_ref()
+            .unwrap()
+            .is_initialized()
+            .await
+            .unwrap());
     }
 }

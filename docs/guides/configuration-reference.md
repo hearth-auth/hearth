@@ -311,7 +311,7 @@ cluster:
 
 **Exclusive `data_dir` lock:** Hearth holds an OS advisory flock on `data_dir/LOCK` for the lifetime of the process. Each cluster node must use a separate `data_dir` on separate storage. Sharing a directory or network mount between nodes will cause startup failure.
 
-**Bootstrap:** On first cluster startup, call the bootstrap API on the designated bootstrap node once all peers are reachable. See the [Clustering guide](../guides/clustering.md) for the step-by-step sequence.
+**Bootstrap:** On first cluster startup, the lowest node ID in `cluster.peers` initialises the cluster itself; the bootstrap API is accepted on that node only. See the [Clustering guide](../guides/clustering.md) for the step-by-step sequence.
 
 **NTP requirement:** **NTP-synchronized clocks are a hard operational requirement for cluster mode.** Each Raft log entry carries a `leader_timestamp`, but records are not yet stamped from it ([CONSISTENCY.md](../dev/CONSISTENCY.md) G8): timestamps inside records come from the node that handled the request, and expiry checks use each node's clock with 60 s tolerance. Clock skew above 1 second causes a warning. Replication safety does not depend on clocks.
 

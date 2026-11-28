@@ -489,13 +489,13 @@ first-boot setup at `/ui/setup`, verify the operator's email, stop the node, min
 > with no leader, so the endpoint is reachable; see the bullets under G-1 above.
 > On a formed cluster it answers `409` (`tests/cluster_serve_admin_status.rs`).
 
-Bootstrapping initializes the cluster's initial membership. Do this **once** — running bootstrap on an already-initialized cluster is a no-op (Raft rejects double-initialization).
+Bootstrapping initializes the cluster's initial membership and generates its cluster ID. Only the **designated initialiser**, the lowest node ID in `cluster.peers`, may do it: on any other node the endpoint answers `409` and writes nothing, because two initialisers would each generate their own cluster ID and refuse each other's RPCs for ever. On an initialised node it answers `409` and writes nothing either. If the lowest-ID node cannot start on a cold cluster, remove it from `cluster.peers` on every node before any node is initialised; the next-lowest node then initialises.
 
 > **Membership is fixed at bootstrap.** The peers list set here cannot be changed: membership lives in the Raft log, so editing `peers` and restarting, even every node at once, does not change it. There is no online membership change API (see C-6 above).
 
 1. Start all nodes: `hearth serve -c hearth-N.yaml`
 2. Wait until all nodes are listening (check logs for `"Raft peer gRPC server starting (mTLS)"`).
-3. Call the bootstrap endpoint on **one** designated bootstrap node:
+3. Call the bootstrap endpoint on the lowest-ID node:
 
 > **System-realm token required.** Cluster admin endpoints are gated to the system realm
 > (the nil UUID). Your admin token must carry `X-Realm-ID: 00000000-0000-0000-0000-000000000000`.
@@ -520,7 +520,7 @@ curl -s -X POST http://10.0.0.1:8420/admin/cluster/bootstrap \
 ```
 
 **Error responses:**
-- `409 Conflict` — cluster already initialized (safe to ignore on retry)
+- `409 Conflict` — this node is initialised already (safe to ignore on retry), or it is not the lowest node ID in `cluster.peers` (the body names the node that is)
 - `503 Service Unavailable` — server is running in single-node mode (no `cluster:` config)
 
 ---
