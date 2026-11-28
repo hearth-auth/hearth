@@ -226,8 +226,8 @@ impl PeerRpc {
 pub enum Admission {
     /// Serve it.
     Serve,
-    /// This node has no cluster ID yet: adopt this one and persist it, then
-    /// serve the RPC.
+    /// This node is pristine (no cluster ID, no membership): adopt this
+    /// leader's cluster ID and persist it, then serve the RPC.
     AdoptClusterId(ClusterId),
 }
 
@@ -263,16 +263,20 @@ pub fn admit(
     if claim.target != local.node_id {
         return Err(PeerRefusal::WrongNode);
     }
-    let admission = match (local.cluster_id, claim.cluster_id) {
-        (Some(ours), Some(theirs)) if ours == theirs => Admission::Serve,
+    let offered = match (local.cluster_id, claim.cluster_id) {
+        (Some(ours), Some(theirs)) if ours == theirs => None,
         (Some(_), _) => return Err(PeerRefusal::WrongCluster),
-        (None, Some(theirs)) if rpc.is_from_leader() => Admission::AdoptClusterId(theirs),
-        (None, _) => Admission::Serve,
+        (None, Some(theirs)) if rpc.is_from_leader() => Some(theirs),
+        (None, _) => None,
     };
     match standing(claim.source) {
         PeerStanding::Retired => Err(PeerRefusal::Removed),
         PeerStanding::NotAMember => Err(PeerRefusal::NotAMember),
-        PeerStanding::Member | PeerStanding::Pristine => Ok(admission),
+        // Only a pristine node adopts. A node that holds a membership but no
+        // cluster ID was formed by an older release: its leader sends none,
+        // so an ID adopted from any member would make it refuse its leader.
+        PeerStanding::Member => Ok(Admission::Serve),
+        PeerStanding::Pristine => Ok(offered.map_or(Admission::Serve, Admission::AdoptClusterId)),
     }
 }
 
@@ -612,6 +616,20 @@ mod tests {
             pristine,
         );
         assert_eq!(got, Ok(Admission::Serve));
+    }
+
+    /// Finding 3 on #955: a node that holds a membership but no cluster ID
+    /// (a cluster an older release formed) adopts none, so no member can
+    /// hand it an ID its leader does not send; it serves its members'
+    /// RPCs with or without one.
+    #[test]
+    fn a_node_with_a_membership_but_no_cluster_id_adopts_none() {
+        for rpc in [PeerRpc::AppendEntries, PeerRpc::InstallSnapshot] {
+            for sent in [Some(A), None] {
+                let got = admit(local(None), &claim(sent, 1, 2), Some(1), rpc, member);
+                assert_eq!(got, Ok(Admission::Serve), "{rpc:?} {sent:?}");
+            }
+        }
     }
 
     #[test]

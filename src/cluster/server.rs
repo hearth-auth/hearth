@@ -753,6 +753,30 @@ mod tests {
         assert_eq!(dispatch.served.load(Ordering::SeqCst), 0);
     }
 
+    /// Finding 3 on #955: a node of a cluster an older release formed holds
+    /// a membership but no cluster ID. A member's `AppendEntries` that
+    /// carries an ID writes none to `raft.db`, and the node keeps serving
+    /// its leader's RPCs, which carry none.
+    #[tokio::test]
+    async fn a_member_node_without_a_cluster_id_adopts_none_and_keeps_serving() {
+        let ca = TestCa::new();
+        let dir = tempfile::tempdir().unwrap();
+        let store = HearthLogStore::open(&dir.path().join("raft.db")).unwrap();
+        let dispatch = FakeDispatch::new(store.cluster_identity().unwrap(), false);
+        let handler = RaftRpcHandler::new(2, Arc::clone(&dispatch));
+
+        send(&handler, &ca, (Some(A), 1, 2), 1)
+            .await
+            .expect("served");
+        assert_eq!(dispatch.cluster_id(), None);
+        assert_eq!(dispatch.identity.persisted().unwrap(), None);
+
+        send(&handler, &ca, (None, 1, 2), 1)
+            .await
+            .expect("an RPC without a cluster ID is served");
+        assert_eq!(dispatch.served.load(Ordering::SeqCst), 2);
+    }
+
     /// Verifies the handler can be created and cloned (tonic requires Clone).
     #[test]
     fn handler_is_clone() {
