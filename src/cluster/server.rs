@@ -45,9 +45,9 @@ pub trait IncomingRpcDispatch: Send + Sync + 'static {
     fn peer_standing(&self, node: u64) -> PeerStanding;
 
     /// Makes `id` this node's cluster ID unless it has one, durably, and
-    /// returns the one it holds afterwards. Called before the RPC that
-    /// carried `id` is served, so the node never answers a leader before its
-    /// cluster ID is on disk.
+    /// returns the one it holds afterwards. Called once Raft has accepted
+    /// the leader RPC that carried `id`, and before it is answered, so the
+    /// node never answers a leader before its cluster ID is on disk.
     fn adopt_cluster_id(
         &self,
         id: ClusterId,
@@ -63,7 +63,7 @@ pub trait IncomingRpcDispatch: Send + Sync + 'static {
         &self,
         payload: &[u8],
         leader_quorum_ack_age_ms: Option<u64>,
-    ) -> impl std::future::Future<Output = Result<Vec<u8>, String>> + Send;
+    ) -> impl std::future::Future<Output = Result<LeaderRpcAnswer, String>> + Send;
 
     /// Handle a `Vote` RPC from a cluster candidate.
     fn vote(
@@ -76,7 +76,7 @@ pub trait IncomingRpcDispatch: Send + Sync + 'static {
     fn install_snapshot(
         &self,
         payload: &[u8],
-    ) -> impl std::future::Future<Output = Result<Vec<u8>, String>> + Send;
+    ) -> impl std::future::Future<Output = Result<LeaderRpcAnswer, String>> + Send;
 
     /// Handle a write a follower forwarded to this node (see
     /// [`ClusterEngine`](crate::cluster::ClusterEngine)'s write path).
@@ -90,6 +90,19 @@ pub trait IncomingRpcDispatch: Send + Sync + 'static {
         &self,
         payload: &[u8],
     ) -> impl std::future::Future<Output = Result<Vec<u8>, String>> + Send;
+}
+
+/// Raft's answer to an RPC only a leader sends (`AppendEntries`,
+/// `InstallSnapshot`).
+#[derive(Debug)]
+pub struct LeaderRpcAnswer {
+    /// The encoded answer.
+    pub payload: Vec<u8>,
+    /// Whether Raft accepted the RPC: an `AppendEntries` it answered with
+    /// success, or a snapshot chunk from a leader whose vote is not below
+    /// this node's. Only an accepted RPC makes a pristine node adopt the
+    /// cluster ID it carried.
+    pub accepted: bool,
 }
 
 // ── RaftRpcHandler ────────────────────────────────────────────────────────────
@@ -126,9 +139,9 @@ impl<D: IncomingRpcDispatch> RaftRpcHandler<D> {
     /// Checks a peer RPC's identity before it is served
     /// (`cluster-membership-changes` design decision 5): the sender's
     /// certificate, its claimed node ID, the target node ID, the cluster ID
-    /// and the sender's standing in this node's membership. A pristine node
-    /// adopts, and persists, the cluster ID of the first leader RPC it is
-    /// sent.
+    /// and the sender's standing in this node's membership. Returns the
+    /// cluster ID a pristine node adopts if Raft accepts the RPC
+    /// ([`Self::adopt_if_accepted`]).
     ///
     /// Runs before the dispatcher sees the RPC, so a refused RPC never
     /// reaches Raft and never counts as contact for the read gate (design
@@ -136,14 +149,13 @@ impl<D: IncomingRpcDispatch> RaftRpcHandler<D> {
     ///
     /// # Errors
     ///
-    /// The refusal as the gRPC status the sender gets, or `UNAVAILABLE` when
-    /// the cluster ID could not be persisted.
-    pub(crate) async fn admit(
+    /// The refusal as the gRPC status the sender gets.
+    pub(crate) fn admit(
         &self,
         metadata: &MetadataMap,
         peer_certs: Option<&[CertificateDer<'static>]>,
         rpc: PeerRpc,
-    ) -> Result<(), Status> {
+    ) -> Result<Admitted, Status> {
         let claim = PeerClaim::read(metadata).map_err(|r| self.refuse(r, None, rpc))?;
         let cert_node = peer_certs
             .and_then(<[CertificateDer<'static>]>::first)
@@ -156,21 +168,46 @@ impl<D: IncomingRpcDispatch> RaftRpcHandler<D> {
             self.dispatch.peer_standing(node)
         })
         .map_err(|r| self.refuse(r, Some(&claim), rpc))?;
-        if let Admission::AdoptClusterId(id) = admission {
-            let held = self.dispatch.adopt_cluster_id(id).await.map_err(|e| {
-                warn!(error = %e, "could not persist the cluster ID a leader sent");
-                Status::unavailable(format!("could not persist the cluster ID: {e}"))
-            })?;
-            if held != id {
-                return Err(self.refuse(PeerRefusal::WrongCluster, Some(&claim), rpc));
-            }
-            info!(
-                node_id = self.node_id,
-                cluster_id = %id,
-                leader = claim.source,
-                "joined cluster: adopted the cluster ID of the first leader that reached this node"
-            );
+        let offered = match admission {
+            Admission::AdoptClusterId(id) => Some(id),
+            Admission::Serve => None,
+        };
+        Ok(Admitted { claim, offered })
+    }
+
+    /// Adopts, and persists, the cluster ID a pristine node was offered
+    /// ([`Self::admit`]) once Raft has accepted the leader RPC that carried
+    /// it, before the RPC is answered (design decision 5: the ID comes from
+    /// a leader). An RPC that does not decode, or that Raft rejects, leaves
+    /// the node pristine: one bad RPC from any peer the cluster CA signed
+    /// cannot tie it to another cluster.
+    ///
+    /// # Errors
+    ///
+    /// `UNAVAILABLE` when the cluster ID could not be persisted, and
+    /// `WRONG_CLUSTER` when another leader's ID was adopted first.
+    async fn adopt_if_accepted(
+        &self,
+        admitted: &Admitted,
+        accepted: bool,
+        rpc: PeerRpc,
+    ) -> Result<(), Status> {
+        let Some(id) = admitted.offered.filter(|_| accepted) else {
+            return Ok(());
+        };
+        let held = self.dispatch.adopt_cluster_id(id).await.map_err(|e| {
+            warn!(error = %e, "could not persist the cluster ID a leader sent");
+            Status::unavailable(format!("could not persist the cluster ID: {e}"))
+        })?;
+        if held != id {
+            return Err(self.refuse(PeerRefusal::WrongCluster, Some(&admitted.claim), rpc));
         }
+        info!(
+            node_id = self.node_id,
+            cluster_id = %id,
+            leader = admitted.claim.source,
+            "joined cluster: adopted the cluster ID of the first leader whose RPC Raft accepted"
+        );
         Ok(())
     }
 
@@ -210,6 +247,15 @@ impl<D: IncomingRpcDispatch> RaftRpcHandler<D> {
     }
 }
 
+/// A peer RPC that passed [`RaftRpcHandler::admit`].
+#[derive(Debug)]
+pub(crate) struct Admitted {
+    /// Who sent it, to whom, in which cluster.
+    claim: PeerClaim,
+    /// The cluster ID a pristine node adopts if Raft accepts the RPC.
+    offered: Option<ClusterId>,
+}
+
 impl<D: IncomingRpcDispatch> RaftRpcHandler<D> {
     /// Serves an `AppendEntries` whose metadata and client certificates are
     /// given apart from its body (tests have no TLS connection to take them
@@ -220,17 +266,22 @@ impl<D: IncomingRpcDispatch> RaftRpcHandler<D> {
         peer_certs: Option<&[CertificateDer<'static>]>,
         request: AppendEntriesRequest,
     ) -> Result<AppendEntriesResponse, Status> {
-        self.admit(metadata, peer_certs, PeerRpc::AppendEntries)
-            .await?;
+        let rpc = PeerRpc::AppendEntries;
+        let admitted = self.admit(metadata, peer_certs, rpc)?;
         debug!("received AppendEntries from peer");
-        self.dispatch
+        let answer = self
+            .dispatch
             .append_entries(&request.payload, request.leader_quorum_ack_age_ms)
             .await
-            .map(|payload| AppendEntriesResponse { payload })
             .map_err(|e| {
                 warn!(error = %e, "AppendEntries dispatch error");
                 Status::internal(e)
-            })
+            })?;
+        self.adopt_if_accepted(&admitted, answer.accepted, rpc)
+            .await?;
+        Ok(AppendEntriesResponse {
+            payload: answer.payload,
+        })
     }
 
     /// Serves a `Vote` (see [`Self::serve_append_entries`]).
@@ -240,7 +291,7 @@ impl<D: IncomingRpcDispatch> RaftRpcHandler<D> {
         peer_certs: Option<&[CertificateDer<'static>]>,
         request: VoteRequest,
     ) -> Result<VoteResponse, Status> {
-        self.admit(metadata, peer_certs, PeerRpc::Vote).await?;
+        self.admit(metadata, peer_certs, PeerRpc::Vote)?;
         debug!("received Vote from peer");
         self.dispatch
             .vote(&request.payload)
@@ -259,17 +310,22 @@ impl<D: IncomingRpcDispatch> RaftRpcHandler<D> {
         peer_certs: Option<&[CertificateDer<'static>]>,
         request: InstallSnapshotRequest,
     ) -> Result<InstallSnapshotResponse, Status> {
-        self.admit(metadata, peer_certs, PeerRpc::InstallSnapshot)
-            .await?;
+        let rpc = PeerRpc::InstallSnapshot;
+        let admitted = self.admit(metadata, peer_certs, rpc)?;
         debug!("received InstallSnapshot chunk from peer");
-        self.dispatch
+        let answer = self
+            .dispatch
             .install_snapshot(&request.payload)
             .await
-            .map(|payload| InstallSnapshotResponse { payload })
             .map_err(|e| {
                 warn!(error = %e, "InstallSnapshot dispatch error");
                 Status::internal(e)
-            })
+            })?;
+        self.adopt_if_accepted(&admitted, answer.accepted, rpc)
+            .await?;
+        Ok(InstallSnapshotResponse {
+            payload: answer.payload,
+        })
     }
 
     /// Serves a `ForwardWrite` (see [`Self::serve_append_entries`]).
@@ -279,8 +335,7 @@ impl<D: IncomingRpcDispatch> RaftRpcHandler<D> {
         peer_certs: Option<&[CertificateDer<'static>]>,
         request: ForwardWriteRequest,
     ) -> Result<ForwardWriteResponse, Status> {
-        self.admit(metadata, peer_certs, PeerRpc::ForwardWrite)
-            .await?;
+        self.admit(metadata, peer_certs, PeerRpc::ForwardWrite)?;
         debug!("received ForwardWrite from peer");
         self.dispatch
             .forward_write(&request.payload)
@@ -496,7 +551,11 @@ impl IncomingRpcDispatch for NoopDispatch {
         Err("Raft engine not initialised".to_string())
     }
 
-    async fn append_entries(&self, _payload: &[u8], _age: Option<u64>) -> Result<Vec<u8>, String> {
+    async fn append_entries(
+        &self,
+        _payload: &[u8],
+        _age: Option<u64>,
+    ) -> Result<LeaderRpcAnswer, String> {
         Err("Raft engine not initialised".to_string())
     }
 
@@ -504,7 +563,7 @@ impl IncomingRpcDispatch for NoopDispatch {
         Err("Raft engine not initialised".to_string())
     }
 
-    async fn install_snapshot(&self, _payload: &[u8]) -> Result<Vec<u8>, String> {
+    async fn install_snapshot(&self, _payload: &[u8]) -> Result<LeaderRpcAnswer, String> {
         Err("Raft engine not initialised".to_string())
     }
 
@@ -526,6 +585,8 @@ mod tests {
 
     const A: ClusterId = ClusterId::new(uuid::Uuid::from_u128(0xA));
     const B: ClusterId = ClusterId::new(uuid::Uuid::from_u128(0xB));
+    const GARBAGE: &[u8] = b"garbage";
+    const REJECTED: &[u8] = b"rejected";
 
     /// A dispatcher that records what reaches it. Node 1 and 2 are members,
     /// node 3 is retired, every other ID is not a member.
@@ -553,6 +614,18 @@ mod tests {
             self.persisted_when_served.lock().unwrap().push(persisted);
             Ok(b"ok".to_vec())
         }
+
+        /// A leader RPC: `garbage` does not decode, `rejected` is one Raft
+        /// refuses, anything else Raft accepts.
+        fn serve_leader_rpc(&self, payload: &[u8]) -> Result<LeaderRpcAnswer, String> {
+            if payload == GARBAGE {
+                return Err("undecodable".to_string());
+            }
+            Ok(LeaderRpcAnswer {
+                payload: self.serve()?,
+                accepted: payload != REJECTED,
+            })
+        }
     }
 
     impl IncomingRpcDispatch for FakeDispatch {
@@ -573,16 +646,20 @@ mod tests {
             self.identity.adopt(id).await.map_err(|e| e.to_string())
         }
 
-        async fn append_entries(&self, _: &[u8], _: Option<u64>) -> Result<Vec<u8>, String> {
-            self.serve()
+        async fn append_entries(
+            &self,
+            payload: &[u8],
+            _: Option<u64>,
+        ) -> Result<LeaderRpcAnswer, String> {
+            self.serve_leader_rpc(payload)
         }
 
         async fn vote(&self, _: &[u8]) -> Result<Vec<u8>, String> {
             self.serve()
         }
 
-        async fn install_snapshot(&self, _: &[u8]) -> Result<Vec<u8>, String> {
-            self.serve()
+        async fn install_snapshot(&self, payload: &[u8]) -> Result<LeaderRpcAnswer, String> {
+            self.serve_leader_rpc(payload)
         }
 
         async fn forward_write(&self, _: &[u8]) -> Result<Vec<u8>, String> {
@@ -702,8 +779,8 @@ mod tests {
     }
 
     /// Task 1.2: a pristine node adopts the first cluster ID a leader sends
-    /// it, has it in `raft.db` before the RPC is served, and refuses another
-    /// one after a restart.
+    /// it once Raft has accepted the RPC, has it in `raft.db` before the RPC
+    /// is answered, and refuses another one after a restart.
     #[tokio::test]
     async fn a_pristine_node_persists_the_first_cluster_id_before_it_answers() {
         let ca = TestCa::new();
@@ -733,9 +810,14 @@ mod tests {
                 .expect("served");
             assert_eq!(dispatch.cluster_id(), Some(A));
             assert_eq!(
+                dispatch.identity.persisted().unwrap(),
+                Some(A),
+                "the cluster ID was not in raft.db when the RPC was answered"
+            );
+            assert_eq!(
                 *dispatch.persisted_when_served.lock().unwrap(),
-                vec![None, Some(A)],
-                "the cluster ID was not in raft.db when the RPC was served"
+                vec![None, None],
+                "the cluster ID was adopted before Raft accepted the RPC"
             );
         }
 
@@ -751,6 +833,46 @@ mod tests {
         let other = send(&handler, &ca, (Some(B), 1, 2), 1).await;
         assert_eq!(refusal(other), PeerRefusal::WrongCluster);
         assert_eq!(dispatch.served.load(Ordering::SeqCst), 0);
+    }
+
+    /// Finding 2 on #955: an `AppendEntries` or `InstallSnapshot` that does
+    /// not decode, or that Raft rejects, leaves a pristine node pristine,
+    /// although its sender's certificate passed.
+    #[tokio::test]
+    async fn a_pristine_node_adopts_nothing_from_a_leader_rpc_raft_does_not_accept() {
+        let ca = TestCa::new();
+        let dir = tempfile::tempdir().unwrap();
+        let store = HearthLogStore::open(&dir.path().join("raft.db")).unwrap();
+        let dispatch = FakeDispatch::new(store.cluster_identity().unwrap(), true);
+        let handler = RaftRpcHandler::new(2, Arc::clone(&dispatch));
+        let md = metadata(Some(A), 1, 2);
+        let certs = cert_of(&ca, 1);
+        for payload in [GARBAGE, REJECTED] {
+            let entries = AppendEntriesRequest {
+                payload: payload.to_vec(),
+                leader_quorum_ack_age_ms: Some(1),
+            };
+            let _ = handler
+                .serve_append_entries(&md, Some(&certs), entries)
+                .await;
+            let chunk = InstallSnapshotRequest {
+                payload: payload.to_vec(),
+            };
+            let _ = handler
+                .serve_install_snapshot(&md, Some(&certs), chunk)
+                .await;
+        }
+        assert_eq!(dispatch.cluster_id(), None);
+        assert_eq!(dispatch.identity.persisted().unwrap(), None);
+
+        let chunk = InstallSnapshotRequest {
+            payload: b"chunk".to_vec(),
+        };
+        handler
+            .serve_install_snapshot(&md, Some(&certs), chunk)
+            .await
+            .expect("served");
+        assert_eq!(dispatch.identity.persisted().unwrap(), Some(A));
     }
 
     /// Finding 3 on #955: a node of a cluster an older release formed holds

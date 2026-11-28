@@ -100,7 +100,8 @@ pub use engine::{
 pub use log_store::{ClusterIdentity, HearthLogReader, HearthLogStore};
 pub use network::{HearthNetworkFactory, PeerFaults};
 pub use server::{
-    serve, serve_with_shutdown, IncomingRpcDispatch, NoopDispatch, PeerServer, RaftRpcHandler,
+    serve, serve_with_shutdown, IncomingRpcDispatch, LeaderRpcAnswer, NoopDispatch, PeerServer,
+    RaftRpcHandler,
 };
 pub use state_machine::HearthStateMachine;
 pub use types::{

@@ -48,7 +48,7 @@ use crate::cluster::log_store::{ClusterIdentity, HearthLogStore};
 use crate::cluster::network::{ForwardFailure, HearthNetworkFactory, LeaderForwarder, PeerFaults};
 use crate::cluster::peer_identity::PeerStanding;
 use crate::cluster::read_gate::{leader_contact, LeaderContact, ReadGate, Refusal};
-use crate::cluster::server::IncomingRpcDispatch;
+use crate::cluster::server::{IncomingRpcDispatch, LeaderRpcAnswer};
 use crate::cluster::state_machine::HearthStateMachine;
 use crate::cluster::types::{
     ClusterId, ForwardedWriteOutcome, HearthLogResponse, HearthNode, HearthRaftConfig, RaftCommand,
@@ -1709,7 +1709,7 @@ impl IncomingRpcDispatch for ClusterEngine {
         &self,
         payload: &[u8],
         leader_quorum_ack_age_ms: Option<u64>,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<LeaderRpcAnswer, String> {
         let raft = self.raft.as_ref().ok_or("Raft not initialised")?;
         let req: AppendEntriesRequest<HearthRaftConfig> = wire::decode(payload)?;
         self.note_clock_offset(&req);
@@ -1720,7 +1720,15 @@ impl IncomingRpcDispatch for ClusterEngine {
         let reach = LogReach::of(&req);
         let resp = raft.append_entries(req).await.map_err(|e| e.to_string())?;
         note_append_entries(gate, received_ms, leader_quorum_ack_age_ms, reach, &resp);
-        wire::encode(&resp)
+        let accepted = matches!(
+            resp,
+            openraft::raft::AppendEntriesResponse::Success
+                | openraft::raft::AppendEntriesResponse::PartialSuccess(_)
+        );
+        Ok(LeaderRpcAnswer {
+            payload: wire::encode(&resp)?,
+            accepted,
+        })
     }
 
     async fn vote(&self, payload: &[u8]) -> Result<Vec<u8>, String> {
@@ -1730,15 +1738,22 @@ impl IncomingRpcDispatch for ClusterEngine {
         wire::encode(&resp)
     }
 
-    async fn install_snapshot(&self, payload: &[u8]) -> Result<Vec<u8>, String> {
+    async fn install_snapshot(&self, payload: &[u8]) -> Result<LeaderRpcAnswer, String> {
         let raft = self.raft.as_ref().ok_or("Raft not initialised")?;
         let req: InstallSnapshotRequest<HearthRaftConfig> =
             wire::decode::<wire::WireInstallSnapshot>(payload)?.into();
+        let sender_vote = req.vote;
         let resp = raft
             .install_snapshot(req)
             .await
             .map_err(|e| e.to_string())?;
-        wire::encode(&resp)
+        // openraft answers a chunk with its own vote, and refuses one whose
+        // sender's vote is below it.
+        let accepted = sender_vote >= resp.vote;
+        Ok(LeaderRpcAnswer {
+            payload: wire::encode(&resp)?,
+            accepted,
+        })
     }
 
     async fn forward_write(&self, payload: &[u8]) -> Result<Vec<u8>, String> {
@@ -4170,14 +4185,25 @@ mod tests {
 
     // ── Bootstrap and the cluster ID (design decision 5) ─────────────────────
 
+    use crate::cluster::peer_identity::test_pki::TestCa;
+
     /// A cluster node `node_id` whose `cluster.peers` names `peers` (nobody
     /// listens at their addresses). Its gRPC server is not started.
     #[allow(clippy::unwrap_used)]
     async fn clustered_node(dir: &std::path::Path, node_id: u64, peers: &[u64]) -> ClusterEngine {
-        use crate::cluster::peer_identity::test_pki::TestCa;
+        clustered_node_of(&TestCa::new(), dir, node_id, peers).await
+    }
+
+    /// [`clustered_node`] with a certificate `ca` signed.
+    #[allow(clippy::unwrap_used)]
+    async fn clustered_node_of(
+        ca: &TestCa,
+        dir: &std::path::Path,
+        node_id: u64,
+        peers: &[u64],
+    ) -> ClusterEngine {
         use crate::config::PeerConfig;
 
-        let ca = TestCa::new();
         let leaf = ca.leaf_for_node(node_id);
         let ca_path = dir.join("ca.pem");
         let cert_path = dir.join("node.pem");
@@ -4280,5 +4306,83 @@ mod tests {
             .is_initialized()
             .await
             .unwrap());
+    }
+
+    /// Finding 2 on #955: a pristine node adopts a leader's cluster ID only
+    /// once Raft has accepted the `AppendEntries`. An undecodable request or
+    /// one Raft rejects, even from a peer the cluster CA signed, leaves it
+    /// pristine, so a node of another cluster sharing the CA cannot claim a
+    /// replacement node with one bad RPC.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn a_pristine_node_adopts_a_cluster_id_only_from_an_append_entries_raft_accepts() {
+        use crate::cluster::peer_identity::PeerClaim;
+        use crate::cluster::rpc::AppendEntriesRequest as WireAppendEntries;
+        use crate::cluster::server::RaftRpcHandler;
+        use openraft::raft::AppendEntriesRequest;
+        use tokio_rustls::rustls::pki_types::CertificateDer;
+        use tonic::metadata::MetadataMap;
+
+        const A: ClusterId = ClusterId::new(Uuid::from_u128(0xA));
+        let ca = TestCa::new();
+        let dir = tempdir().unwrap();
+        let engine = Arc::new(clustered_node_of(&ca, dir.path(), 2, &[1, 3]).await);
+        let handler = RaftRpcHandler::new(2, Arc::clone(&engine));
+        let mut md = MetadataMap::new();
+        PeerClaim {
+            cluster_id: Some(A),
+            source: 1,
+            target: 2,
+        }
+        .stamp(&mut md);
+        let certs = vec![CertificateDer::from(ca.leaf_for_node(1).der)];
+        let aer = |prev_log_id: Option<LogId<u64>>| {
+            let req: AppendEntriesRequest<HearthRaftConfig> = AppendEntriesRequest {
+                vote: Vote::new_committed(1, 1),
+                prev_log_id,
+                entries: vec![],
+                leader_commit: None,
+            };
+            WireAppendEntries {
+                payload: wire::encode(&req).unwrap(),
+                leader_quorum_ack_age_ms: Some(1),
+            }
+        };
+
+        let garbage = WireAppendEntries {
+            payload: b"not an AppendEntries".to_vec(),
+            leader_quorum_ack_age_ms: Some(1),
+        };
+        let undecodable = handler
+            .serve_append_entries(&md, Some(&certs), garbage)
+            .await;
+        assert!(
+            undecodable.is_err(),
+            "garbage was answered: {undecodable:?}"
+        );
+        assert_eq!(engine.cluster_id(), None, "adopted from an undecodable RPC");
+        assert_eq!(persisted_cluster_id(&engine), None);
+
+        // Raft answers Conflict: this node holds no entry at index 5.
+        let unknown_prev = Some(LogId::new(CommittedLeaderId::new(1, 1), 5));
+        let conflict = handler
+            .serve_append_entries(&md, Some(&certs), aer(unknown_prev))
+            .await
+            .expect("answered");
+        let conflict: openraft::raft::AppendEntriesResponse<u64> =
+            wire::decode(&conflict.payload).unwrap();
+        assert!(conflict.is_conflict(), "{conflict:?}");
+        assert_eq!(engine.cluster_id(), None, "adopted from a rejected RPC");
+        assert_eq!(persisted_cluster_id(&engine), None);
+
+        let accepted = handler
+            .serve_append_entries(&md, Some(&certs), aer(None))
+            .await
+            .expect("answered");
+        let accepted: openraft::raft::AppendEntriesResponse<u64> =
+            wire::decode(&accepted.payload).unwrap();
+        assert!(accepted.is_success(), "{accepted:?}");
+        assert_eq!(engine.cluster_id(), Some(A));
+        assert_eq!(persisted_cluster_id(&engine), Some(A));
     }
 }

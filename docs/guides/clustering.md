@@ -373,8 +373,9 @@ node IDs. A node refuses an RPC meant for another node ID (`WRONG_NODE`), from
 another cluster (`WRONG_CLUSTER`) or from a node outside its membership
 (`NOT_A_MEMBER`), and logs the refusal at `WARN` at most every 30 seconds. The
 cluster ID is a random UUID: the node that initialises the cluster generates
-it, and every other node adopts it from the first leader that reaches it. Each
-node keeps it in `raft.db`.
+it, and every other node, while it holds no membership yet, adopts it from the
+first leader whose `AppendEntries` or snapshot chunk its Raft accepts. Each node
+keeps it in `raft.db`, written before it answers that leader.
 
 ---
 
