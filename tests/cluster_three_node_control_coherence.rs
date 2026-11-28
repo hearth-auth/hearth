@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
-use hearth::cluster::{serve, ClusterEngine, ClusterStorageAdapter, HearthNode};
+use hearth::cluster::{serve, ClusterEngine, ClusterStorageAdapter, HearthNode, PeerFaults};
 use hearth::config::{ClusterConfig, PeerConfig};
 use hearth::core::{Clock, FakeClock, RealmId, SessionId, Timestamp, UserId};
 use hearth::identity::{
@@ -970,17 +970,24 @@ async fn assert_realm_suspension_binds(
 /// leader happening to be constructed first.
 /// Builds `n` cold cluster-mode nodes, each naming the same membership in its
 /// own `cluster.peers`, and starts each one's Raft peer server. Nothing
-/// bootstraps them.
+/// bootstraps them. Each node's outbound peer RPCs go through its own
+/// [`PeerFaults`], returned in node order.
 async fn cold_cluster_nodes(
     tempdir: &TempDir,
     n: usize,
-) -> (Vec<Arc<ClusterEngine>>, Vec<tokio::task::JoinHandle<()>>) {
+    read_lag_threshold_ms: u64,
+) -> (
+    Vec<Arc<ClusterEngine>>,
+    Vec<tokio::task::JoinHandle<()>>,
+    Vec<Arc<PeerFaults>>,
+) {
     let (ca_path, leaf_certs) = generate_cluster_certs(tempdir.path(), n);
     let ports = pick_free_loopback_ports(n);
     let addrs: Vec<String> = ports.iter().map(|p| format!("127.0.0.1:{p}")).collect();
 
     let mut engines: Vec<Arc<ClusterEngine>> = Vec::with_capacity(n);
     let mut handles = Vec::with_capacity(n);
+    let mut faults = Vec::with_capacity(n);
     for i in 0..n {
         let node_id = (i + 1) as u64;
         let data_dir = tempdir.path().join(format!("node-{node_id}-data"));
@@ -1003,14 +1010,20 @@ async fn cold_cluster_nodes(
             tls_cert_path: leaf_certs[i].0.clone(),
             tls_key_path: leaf_certs[i].1.clone(),
             tls_ca_cert_path: ca_path.clone(),
-            read_lag_threshold_ms: Some(30_000),
+            read_lag_threshold_ms: Some(read_lag_threshold_ms),
             write_timeout_ms: None,
             experimental_opt_in: true,
         };
+        let node_faults = PeerFaults::new();
         let engine = Arc::new(
-            ClusterEngine::build_clustered(inner, &cluster_cfg, &storage_cfg)
-                .await
-                .unwrap(),
+            ClusterEngine::build_clustered_with_peer_faults(
+                inner,
+                &cluster_cfg,
+                &storage_cfg,
+                Arc::clone(&node_faults),
+            )
+            .await
+            .unwrap(),
         );
         let serve_engine = Arc::clone(&engine);
         let serve_cfg = cluster_cfg.clone();
@@ -1018,18 +1031,24 @@ async fn cold_cluster_nodes(
             let _ = serve(&serve_cfg, serve_engine).await;
         }));
         engines.push(engine);
+        faults.push(node_faults);
     }
-    (engines, handles)
+    (engines, handles, faults)
 }
 
 /// The start-up sequence `serve` performs on one node: wait until the cluster
 /// can accept this node's start-up writes, then build the app stack over the
 /// cluster adapter. Returns the global signing key's ID.
+///
+/// Like `serve`, it holds the read gate's start-up exemption throughout: a
+/// leader accepts writes as soon as it is elected, but its gate opens only
+/// once the lag monitor has seen a quorum acknowledgement (#953).
 async fn serve_start_sequence(
     node_id: usize,
     engine: &Arc<ClusterEngine>,
     clock: &Arc<FakeClock>,
 ) -> Result<String, String> {
+    let _start_up_reads = engine.start_up_reads();
     let storage: Arc<dyn StorageEngine> = Arc::new(ClusterStorageAdapter::new(Arc::clone(engine)));
     EmbeddedIdentityEngine::await_cold_start_window(&storage, Duration::from_secs(25))
         .await
@@ -1053,7 +1072,14 @@ async fn serve_start_sequence(
         rbac as Arc<dyn RbacEngine>,
         audit,
     )
-    .map_err(|e| format!("node {node_id}: identity engine construction failed: {e}"))?;
+    .map_err(|e| {
+        format!(
+            "node {node_id}: identity engine construction failed: {e} \
+             (accepts writes: {}, not ready: {:?})",
+            engine.accepts_writes(),
+            engine.not_ready_reason()
+        )
+    })?;
     Ok(identity.signing_key().key_id().to_string())
 }
 
@@ -1061,7 +1087,7 @@ async fn serve_start_sequence(
 async fn a_cold_three_node_cluster_starts_every_node_without_a_manual_bootstrap() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let tempdir = tempfile::tempdir().unwrap();
-    let (engines, handles) = cold_cluster_nodes(&tempdir, 3).await;
+    let (engines, handles, _faults) = cold_cluster_nodes(&tempdir, 3, 30_000).await;
 
     // Deliberately absent: the guide's step 3. Nothing calls
     // `initialize_cluster` or `POST /admin/cluster/bootstrap`.
@@ -1104,6 +1130,96 @@ async fn a_cold_three_node_cluster_starts_every_node_without_a_manual_bootstrap(
             .len(),
         1,
         "the three nodes disagree on the global signing key: {key_ids:?}"
+    );
+
+    for h in handles {
+        h.abort();
+    }
+}
+
+/// `serve` holds the read gate's start-up exemption
+/// ([`ClusterEngine::start_up_reads`]) from before the cold-start window until
+/// its listeners start, so its own start-up reads need no contact
+/// (`cluster-consistency` R2). [`serve_start_sequence`] must hold it too. It
+/// did not, and the cold test above failed in CI (#953) on the node that had
+/// just won the election: `await_cold_start_window` let it through as soon as
+/// its metrics said leader, and the identity engine's first read reached the
+/// gate before the lag monitor had recorded a quorum acknowledgement.
+///
+/// That window is tens of milliseconds wide. This test holds it open: after a
+/// cold start, the leader is cut off from both followers in both directions.
+/// openraft 0.9 keeps it leader (docs/dev/CONSISTENCY.md G1), so it still
+/// accepts writes by its own metrics, but its read gate closes. Its start-up
+/// write set is already applied, so the start-up sequence of a restart only
+/// reads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn the_start_up_sequence_completes_on_a_leader_whose_read_gate_is_closed() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let tempdir = tempfile::tempdir().unwrap();
+    // The default threshold, so the gate closes 500 ms after the last quorum
+    // acknowledgement.
+    let (engines, handles, faults) = cold_cluster_nodes(&tempdir, 3, 500).await;
+    // The cold test above covers the cold start; here every gate is open
+    // before it, so only the start-up after the cut depends on the exemption.
+    wait_for_leader(&engines, Duration::from_secs(20)).await;
+    wait_ready(&engines, Duration::from_secs(20)).await;
+    let clock = Arc::new(FakeClock::new(Timestamp::from_micros(
+        1_700_000_000_000_000,
+    )));
+
+    let mut starts = Vec::with_capacity(3);
+    for (i, engine) in engines.iter().enumerate() {
+        let engine = Arc::clone(engine);
+        let clock = Arc::clone(&clock);
+        starts.push(tokio::spawn(async move {
+            serve_start_sequence(i + 1, &engine, &clock).await
+        }));
+    }
+    let mut key_ids = Vec::with_capacity(3);
+    for start in starts {
+        key_ids.push(
+            start
+                .await
+                .expect("start-up task panicked")
+                .unwrap_or_else(|e| panic!("cold start-up failed: {e}")),
+        );
+    }
+
+    let leader_id = wait_for_leader(&engines, Duration::from_secs(20)).await;
+    let leader = &engines[usize::try_from(leader_id).unwrap() - 1];
+    for other in (1..=3u64).filter(|id| *id != leader_id) {
+        faults[usize::try_from(leader_id).unwrap() - 1].isolate(other);
+        faults[usize::try_from(other).unwrap() - 1].isolate(leader_id);
+    }
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while leader.not_ready_reason() != Some("no_quorum") {
+        assert!(
+            Instant::now() <= deadline,
+            "the cut-off leader never reported no_quorum: {:?}",
+            leader.not_ready_reason()
+        );
+        // AUDIT: justified-sleep: poll interval for the leader's quorum-ack age; openraft reports it in metrics only
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        leader.accepts_writes(),
+        "openraft 0.9 keeps a cut-off leader leader"
+    );
+    let probe = ClusterStorageAdapter::new(Arc::clone(leader));
+    let refused = probe
+        .get(&RealmId::new(uuid::Uuid::nil()), b"probe")
+        .expect_err("the cut-off leader's read gate is closed");
+    assert!(
+        refused.to_string().contains("not in contact"),
+        "the gate refuses for want of contact: {refused}"
+    );
+
+    let restarted = serve_start_sequence(usize::try_from(leader_id).unwrap(), leader, &clock)
+        .await
+        .unwrap_or_else(|e| panic!("start-up failed on a node out of contact: {e}"));
+    assert_eq!(
+        restarted, key_ids[0],
+        "the restart read another signing key"
     );
 
     for h in handles {
