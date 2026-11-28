@@ -284,7 +284,7 @@ pub fn admit(
 
 /// The node ID a DER certificate names in its URI SAN
 /// (`urn:hearth:node:<id>`), or `None` when it names none, several different
-/// ones, or one that does not parse.
+/// ones, or one that is not a `u64` in canonical decimal form.
 #[must_use]
 pub fn certificate_node_id(der: &[u8]) -> Option<u64> {
     let (_, cert) = x509_parser::parse_x509_certificate(der).ok()?;
@@ -300,7 +300,7 @@ pub fn certificate_node_id(der: &[u8]) -> Option<u64> {
             let Some(id) = uri.strip_prefix(NODE_URI_PREFIX) else {
                 continue;
             };
-            let id: u64 = id.parse().ok()?;
+            let id = canonical_node_id(id)?;
             match found {
                 Some(other) if other != id => return None,
                 _ => found = Some(id),
@@ -308,6 +308,15 @@ pub fn certificate_node_id(der: &[u8]) -> Option<u64> {
         }
     }
     found
+}
+
+/// `text` as a node ID when it is one in canonical decimal form: digits
+/// only, no sign, no leading zero (but `0` itself). `u64::from_str` also
+/// reads `+5` and `005` as 5, so one node would have several spellings.
+fn canonical_node_id(text: &str) -> Option<u64> {
+    let canonical =
+        text.bytes().all(|b| b.is_ascii_digit()) && (text == "0" || !text.starts_with('0'));
+    canonical.then(|| text.parse().ok()).flatten()
 }
 
 /// The certificate of the node at the other end does not name the node ID
@@ -691,5 +700,23 @@ mod tests {
         let bad = [format!("{NODE_URI_PREFIX}x")];
         assert_eq!(certificate_node_id(&ca.leaf_with_uris(&bad).der), None);
         assert_eq!(certificate_node_id(b"not a certificate"), None);
+    }
+
+    /// Finding 5 on #955: a node ID in the URI SAN is in canonical decimal
+    /// form; `+5` or `005` names no node, although `u64::from_str` reads
+    /// both as 5.
+    #[test]
+    fn certificate_node_id_refuses_a_non_canonical_node_id() {
+        let ca = TestCa::new();
+        for id in ["+5", "05", "005", "", " 5", "5 "] {
+            let uri = [format!("{NODE_URI_PREFIX}{id}")];
+            assert_eq!(
+                certificate_node_id(&ca.leaf_with_uris(&uri).der),
+                None,
+                "{id:?}"
+            );
+        }
+        assert_eq!(certificate_node_id(&ca.leaf_for_node(0).der), Some(0));
+        assert_eq!(certificate_node_id(&ca.leaf_for_node(50).der), Some(50));
     }
 }

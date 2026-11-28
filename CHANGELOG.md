@@ -9,7 +9,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). See
 ### Changed
 - **Breaking (cluster mode): peers prove their node ID and cluster ID** (OpenSpec change
   `cluster-membership-changes`, phase 1; #652). Each peer certificate must name its node's
-  `cluster.node_id` in a URI SAN, `urn:hearth:node:<id>`, besides the address its peers dial.
+  `cluster.node_id` in a URI SAN, `urn:hearth:node:<id>` (decimal, no sign or leading zero),
+  besides the address its peers dial.
   **Re-issue every peer certificate before you upgrade**; the `openssl` recipe in
   `docs/guides/clustering.md` shows the SAN. A node now refuses a peer whose certificate names
   no node ID or another one (`CERTIFICATE_MISMATCH`, on both ends of the connection), an RPC
