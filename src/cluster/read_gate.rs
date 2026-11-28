@@ -124,7 +124,13 @@ impl ReadGate {
 
     /// Milliseconds since the gate was made, on the monotonic clock.
     pub(crate) fn now_ms(&self) -> u64 {
-        u64::try_from(self.origin.elapsed().as_millis())
+        self.ms_at(Instant::now())
+    }
+
+    /// `at` in the gate's milliseconds: 0 for an instant before the gate
+    /// was made.
+    pub(crate) fn ms_at(&self, at: Instant) -> u64 {
+        u64::try_from(at.saturating_duration_since(self.origin).as_millis())
             .unwrap_or(DEADLINE)
             .min(DEADLINE)
     }
@@ -341,6 +347,19 @@ mod tests {
     use super::*;
 
     const T: u64 = 500;
+
+    /// Finding 4 on #955: the peer server dates an `AppendEntries` from its
+    /// arrival, an instant taken before the gate converts it.
+    #[test]
+    fn an_instant_converts_to_deadline_clock_milliseconds() {
+        let gate = ReadGate::new(T);
+        let at = gate.origin + std::time::Duration::from_millis(1_250);
+        assert_eq!(gate.ms_at(at), 1_250);
+        let before_the_gate = gate.origin.checked_sub(std::time::Duration::from_millis(5));
+        if let Some(before) = before_the_gate {
+            assert_eq!(gate.ms_at(before), 0);
+        }
+    }
 
     #[test]
     fn a_new_gate_is_closed() {

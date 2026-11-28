@@ -1709,14 +1709,16 @@ impl IncomingRpcDispatch for ClusterEngine {
         &self,
         payload: &[u8],
         leader_quorum_ack_age_ms: Option<u64>,
+        arrived: std::time::Instant,
     ) -> Result<LeaderRpcAnswer, String> {
         let raft = self.raft.as_ref().ok_or("Raft not initialised")?;
         let req: AppendEntriesRequest<HearthRaftConfig> = wire::decode(payload)?;
         self.note_clock_offset(&req);
-        // Dated from its arrival, before Raft handles it: the contact cannot
-        // be later than the leader's state the request carries.
+        // Dated from its arrival at the peer server, before its identity
+        // check and before Raft handles it: the contact cannot be later than
+        // the leader's state the request carries.
         let gate = self.read_gate.as_ref().ok_or("Raft not initialised")?;
-        let received_ms = gate.now_ms();
+        let received_ms = gate.ms_at(arrived);
         let reach = LogReach::of(&req);
         let resp = raft.append_entries(req).await.map_err(|e| e.to_string())?;
         note_append_entries(gate, received_ms, leader_quorum_ack_age_ms, reach, &resp);

@@ -58,11 +58,13 @@ pub trait IncomingRpcDispatch: Send + Sync + 'static {
     /// `leader_quorum_ack_age_ms` is the request's field of that name: how
     /// long before sending it a quorum last acknowledged the leader (see
     /// the read gate). `None` from a leader with none on record, or from an
-    /// older build.
+    /// older build. `arrived` is when the request arrived, before its
+    /// identity check: the read gate dates the contact from it.
     fn append_entries(
         &self,
         payload: &[u8],
         leader_quorum_ack_age_ms: Option<u64>,
+        arrived: Instant,
     ) -> impl std::future::Future<Output = Result<LeaderRpcAnswer, String>> + Send;
 
     /// Handle a `Vote` RPC from a cluster candidate.
@@ -266,12 +268,15 @@ impl<D: IncomingRpcDispatch> RaftRpcHandler<D> {
         peer_certs: Option<&[CertificateDer<'static>]>,
         request: AppendEntriesRequest,
     ) -> Result<AppendEntriesResponse, Status> {
+        // Dated before the identity check: the contact cannot be later than
+        // the leader's state the request carries.
+        let arrived = Instant::now();
         let rpc = PeerRpc::AppendEntries;
         let admitted = self.admit(metadata, peer_certs, rpc)?;
         debug!("received AppendEntries from peer");
         let answer = self
             .dispatch
-            .append_entries(&request.payload, request.leader_quorum_ack_age_ms)
+            .append_entries(&request.payload, request.leader_quorum_ack_age_ms, arrived)
             .await
             .map_err(|e| {
                 warn!(error = %e, "AppendEntries dispatch error");
@@ -555,6 +560,7 @@ impl IncomingRpcDispatch for NoopDispatch {
         &self,
         _payload: &[u8],
         _age: Option<u64>,
+        _arrived: Instant,
     ) -> Result<LeaderRpcAnswer, String> {
         Err("Raft engine not initialised".to_string())
     }
@@ -596,6 +602,10 @@ mod tests {
         served: AtomicUsize,
         /// The cluster ID `raft.db` held when an RPC reached the dispatcher.
         persisted_when_served: Mutex<Vec<Option<ClusterId>>>,
+        /// When the identity check looked up a sender's standing.
+        standing_looked_up: Mutex<Vec<Instant>>,
+        /// The arrival time each `AppendEntries` was dated from.
+        arrivals: Mutex<Vec<Instant>>,
     }
 
     impl FakeDispatch {
@@ -605,6 +615,8 @@ mod tests {
                 pristine,
                 served: AtomicUsize::new(0),
                 persisted_when_served: Mutex::new(Vec::new()),
+                standing_looked_up: Mutex::new(Vec::new()),
+                arrivals: Mutex::new(Vec::new()),
             })
         }
 
@@ -634,6 +646,7 @@ mod tests {
         }
 
         fn peer_standing(&self, node: u64) -> PeerStanding {
+            self.standing_looked_up.lock().unwrap().push(Instant::now());
             match node {
                 _ if self.pristine => PeerStanding::Pristine,
                 1 | 2 => PeerStanding::Member,
@@ -650,7 +663,9 @@ mod tests {
             &self,
             payload: &[u8],
             _: Option<u64>,
+            arrived: Instant,
         ) -> Result<LeaderRpcAnswer, String> {
+            self.arrivals.lock().unwrap().push(arrived);
             self.serve_leader_rpc(payload)
         }
 
@@ -835,6 +850,27 @@ mod tests {
         assert_eq!(dispatch.served.load(Ordering::SeqCst), 0);
     }
 
+    /// Finding 4 on #955: an `AppendEntries` is dated from its arrival,
+    /// taken before the identity check, so the check's work (a pristine
+    /// node's first contact also waits for a cluster-ID fsync) never makes
+    /// a contact look fresher than it is.
+    #[tokio::test]
+    async fn an_append_entries_is_dated_before_its_identity_check() {
+        let ca = TestCa::new();
+        let dispatch = FakeDispatch::new(ClusterIdentity::in_memory(Some(A)), false);
+        let handler = RaftRpcHandler::new(2, Arc::clone(&dispatch));
+        send(&handler, &ca, (Some(A), 1, 2), 1)
+            .await
+            .expect("served");
+        let arrived = dispatch.arrivals.lock().unwrap().clone();
+        let checked = dispatch.standing_looked_up.lock().unwrap().clone();
+        assert_eq!((arrived.len(), checked.len()), (1, 1));
+        assert!(
+            arrived[0] <= checked[0],
+            "dated after its identity check began"
+        );
+    }
+
     /// Finding 2 on #955: an `AppendEntries` or `InstallSnapshot` that does
     /// not decode, or that Raft rejects, leaves a pristine node pristine,
     /// although its sender's certificate passed.
@@ -910,7 +946,7 @@ mod tests {
     #[tokio::test]
     async fn noop_dispatch_returns_error() {
         let d = NoopDispatch;
-        let result = d.append_entries(b"{}", None).await;
+        let result = d.append_entries(b"{}", None, Instant::now()).await;
         assert!(result.is_err());
     }
 }
